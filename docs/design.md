@@ -31,18 +31,37 @@ DataCollector/controller already documents its query→sketch translation as a 5
 
 | # | Layer | What it does | Today's locations |
 |---|-------|--------------|-------------------|
-| 1 | **Query Language** | Parse raw strings (PromQL, SQL, DataFusion, ElasticDSL, …) into a language-specific AST | DC `controller/src/query_parser/{promql,sql,mod}.rs`; asap-planner-rs pulls `promql-parser` + `sqlparser` directly |
-| 2 | **Language Logical Plan** | Per-language algebra tree (`Aggregate` / `Window` / `Filter` / `Sort` / `Limit`) preserving language semantics, no sketch names | DC `controller/src/algebra/lower.rs` (the 1→2→3 pipeline) |
-| 3 | **Sketch Logical Plan** (sketch algebra) | Language- and deployment-independent IR: `QueryExpr` + `AggIntent` (~25 operator variants) — *what* to compute, not *how* | DC `controller/src/algebra/{expr,directory}.rs` |
-| 4 | **Sketch Optimizer** | ~12 cost-aware algebraic rewrite rules (push-down, fusion, elimination, budget-driven deferral) applied to fixed-point under deployment constraints | DC `controller/src/algebra/optimizer.rs`; asap-fusion `src/optimizer/rules/` (DataFusion-flavoured) |
-| 5 | **Physical Execution Plan** | Commit to concrete `SketchType` + `SketchParams`; assign ops to pipeline stages (edge / gateway / backend / object store) | DC `controller/src/algebra/{physical,allocator,plan}.rs`; asap-planner-rs emits as `streaming_config.yaml` + `inference_config.yaml`; asap-fusion emits as rewritten DataFusion `LogicalPlan` |
+| 1 | **Query Language** | Parse raw strings (PromQL, SQL, DataFusion, ElasticDSL, …) into a language-specific AST | DC `controller/src/query_parser/{promql,sql,mod}.rs`; asap-planner-rs pulls `promql-parser` + `sqlparser` directly; asap-fusion consumes a pre-built DataFusion `LogicalPlan` (its L1 happens upstream) |
+| 2 | **Language Logical Plan** | Per-language algebra tree (`Aggregate` / `Window` / `Filter` / `Sort` / `Limit`) preserving language semantics, **no sketch names, no sketch binding** | DC `controller/src/algebra/lower.rs`; asap-fusion inherits DataFusion's `LogicalPlan` as its L2; asap-planner-rs has no L2 today (uses a template-pattern catalogue) — **Phase 4 builds one** |
+| 3 | **Sketch Logical Plan** (sketch algebra) | Language- and deployment-independent IR: `QueryExpr` + `AggIntent` (~25 intent variants). Describes **intent only** — *what* to compute, with accuracy target. **No sketch type, no sketch parameters.** | DC `controller/src/algebra/{expr,directory}.rs`; asap-fusion's 3-variant `SubPopulationAnalyticsType` maps to a subset; asap-planner-rs's 9-variant `Statistic` maps to a subset — **Phase 4 splits sketch binding out of planner's current fused L3+L4** |
+| 4 | **Sketch Optimizer** | Cost-aware algebraic rewrite rules under deployment constraints. **This is where sketch binding happens** — L4 rules take intent-only L3 and emit sketch-bound L3+. ~12 rules in DC; a smaller targeted subset in planner; `SketchConfigRule` + `HashModeRule` in fusion. | DC `controller/src/algebra/optimizer.rs`; fusion `src/optimizer/rules/`; planner's `map_statistic_to_precompute_operator` belongs here once its sketch-binding step is split out |
+| 5 | **Physical Execution Plan** | Assign ops to pipeline stages (edge / gateway / backend / object store); produce the deployment-specific artefact (OpAMP YAML, `streaming_config.yaml`, rewritten DataFusion `LogicalPlan`). **Sketch binding is already committed by L4**; L5 is about stage allocation + emission. | DC `controller/src/algebra/{physical,allocator,plan}.rs`; asap-planner-rs `output/generator.rs`; asap-fusion `src/executor/` |
 
-**The doc's key claim: layers 1–3 are query-language-independent and workload-independent.** That makes them the natural **common core**. Every scenario — full-lifecycle planning, analytics-query-only planning, operator fusion, and any future scenario — reads PromQL (or SQL, or …) the same way, lowers it to the same language-independent algebra, and lowers THAT to the same sketch-algebra IR. Only layers 4 and 5 differ by scenario.
+**The doc's key claim: layers 1–3 are query-language-independent and workload-independent.** That makes them the natural **common core**. Every scenario reads PromQL (or SQL, or …) the same way, lowers it to the same per-language algebra, and lowers THAT to the same sketch-algebra IR (intent only, no sketch binding). Layers 4 and 5 differ by scenario.
+
+### Sketch binding lives in L4, not L3
+
+A key clarification after cross-checking the three source repos: **L3 is intent-only**. DC's `AggIntent` names *what* to compute (`Quantile(0.99, ε=0.01)`, `Cardinality(δ=0.001)`, …) without committing to a sketch type. Picking KLL vs DDSketch, CMS vs CMS-with-heap, parameter sizes — all of that is L4's job, driven by deployment constraints.
+
+Today:
+- DC: correctly separated (L3 has `AggIntent`, L4 picks sketch via cost model).
+- asap-fusion: correctly separated — `SketchConfigRule` at L4 fills `SketchConfig::NULL` with concrete `CountMinSketch{5,4096}` / `KLL{k=200,m=8}`.
+- asap-planner-rs: **L3+L4 fused today**. `map_statistic_to_precompute_operator` jumps from `Statistic` straight to `AggregationType::DatasketchesKLL{k=200}` in one call. **Phase 4 splits this** — `Statistic → AggIntent` at L3, `AggIntent + DeploymentConstraints → AggregationType + SketchParams` at L4.
+
+### Intent vocabulary: DC's `AggIntent` is a superset; scenarios use subsets
+
+DC has ~25 variants. Planner uses 9 (`Count, Sum, Cardinality, Increase, Rate, Min, Max, Quantile, Topk`). Fusion uses 3 (`Count, Sum, Quantile`). A scenario's L4+L5 only has to handle its own subset — but it reads and writes the **same `AggIntent` enum**. Adding a new intent (e.g. stddev) is a core change that scenarios can then opt in to.
+
+### L2 is mandatory; the tree shape is an evolvable contract
+
+Every scenario must produce an L2 tree, even when the source language didn't originally come as one. asap-planner-rs's current approach (PromQL pattern catalogue → `IntermediateAggConfig`) skips L2; Phase 4 will reverse-engineer the five PromQL pattern shapes into a `PromqlLogicalPlan` tree so the L1→L2→L3 pipeline is uniform.
+
+A future scenario whose source semantics genuinely don't fit a tree (e.g. a constraint-based query language) would motivate revisiting the L2 contract at that time. Until then, L2 = per-language tree, mandatory, no elision.
 
 This drives the core/scenario split:
 
-- **`crates/core/`** owns layers 1–3 verbatim. It's the parsers + the two lowering passes + the sketch-algebra IR. Real code with real algorithms — not just types and traits.
-- **Each scenario owns its own L4 + L5.** Scenarios contribute optimizer rules (L4) and physical-plan emitters (L5). The driver that runs L1→L2→L3→L4→L5 lives in core as a small orchestration layer, parameterised on the scenario's rule set + emitter.
+- **`crates/core/`** owns layers 1–3 verbatim (parsers, L1→L2→L3 lowering, `QueryExpr` + `AggIntent` intent-only IR). Real code with real algorithms — not just types and traits.
+- **Each scenario owns its own L4 + L5.** Scenarios contribute optimizer rules (which includes **sketch binding** as one L4 rule) and physical-plan emitters. The driver that runs L1→L2→L3→L4→L5 lives in core as a small orchestration layer, parameterised on the scenario's rule set + emitter.
 
 ## 4. Principles
 
@@ -342,18 +361,26 @@ Each scenario crate is a library with:
 
 ### `scenario-query`
 
-- **L4 rules**: smaller rule set targeting the precompute engine specifically (fewer stage-aware rewrites; the deployment is just "backend only").
-- **L5 physical**: per-aggregation physical plan matching the `StreamingConfig`/`InferenceConfig` YAML schema.
-- **L5 emitters**: `StreamingConfigEmitter` + `InferenceConfigEmitter` (YAML bytes). These are the authoritative emitters for these two formats — `scenario-lifecycle` calls them when it needs to POST to ASAPQuery-backend.
+- **Inherited L1**: uses `core::query_language::promql` and `core::query_language::sql`.
+- **NEW L2 tree** (Phase 4 work): defines `PromqlLogicalPlan` in `core::logical_plan::promql` that expresses the five pattern shapes asap-planner-rs currently template-matches (`OnlyTemporal`×2, `OnlySpatial`, `OneTemporalOneSpatial`×2) as first-class L2 nodes. Replaces the pattern-catalogue approach with a proper L1→L2 tree rewrite. SQL side gets a matching `SqlLogicalPlan`.
+- **L3 intent**: maps `Statistic` enum (9 variants) onto `core::sketch_algebra::AggIntent` (25-variant superset); only uses the subset planner needs.
+- **L4 rules**: includes the **sketch-binding rule** split out from `map_statistic_to_precompute_operator` — `AggIntent + DeploymentConstraints → AggregationType + SketchParams`. Plus a smaller targeted rule set for the precompute-engine deployment (fewer stage-aware rewrites; deployment is "backend only").
+- **L5 physical**: per-aggregation physical plan matching the `StreamingConfig`/`InferenceConfig` YAML schema; label routing (`rollup_labels` / `grouping_labels` / `aggregated_labels`) and auto-injection of `DeltaSetAggregator` before `CountMinSketch`/`HydraKLL` happen here.
+- **L5 emitters**: `StreamingConfigEmitter` + `InferenceConfigEmitter` (YAML bytes). Authoritative emitters for these two formats — `scenario-lifecycle` calls them when it needs to POST to ASAPQuery-backend.
 - **Extra L1 inputs**: `query_log/` for Prometheus-query-log replay (unique to this scenario); `schema/` for PromQLSchema discovery from a live Prometheus URL.
 - **HTTP route**: `POST /plan/query` (JSON `QuerySpec` in, YAML stream out). Also serves as the backend for `bin/asap-plan` one-shot CLI.
+- **Conformance cost**: the L2 tree construction + the L3/L4 sketch-binding split are both net-new work vs. what `asap-planner-rs` does today. Justified by architectural uniformity; see `docs/migration-plan.md` Phase 4.
 
 ### `scenario-fusion`
 
-- **L4 rules**: `PlanRewriteRule` trait + `rules/` subdirectory from `asap-fusion/src/optimizer/`. Sketch-aware DataFusion rewrites (e.g. "replace `approx_percentile_cont` with a KLL scan"). These rules operate on a DataFusion `LogicalPlan`, not on `core::sketch_algebra::QueryExpr` — so this scenario's L4 is a slightly different shape, which is fine: it still implements `Optimizer`, just over a different plan type.
-- **L5 physical**: rewritten `datafusion::LogicalPlan`. Not a wire format — this scenario is library-mode.
-- **Executor**: `ASAPExecutor` wraps a DataFusion `SessionContext`. Users construct `scenario-fusion` in-process from their own code.
+- **L1 opt-out**: fusion consumes a pre-built DataFusion `LogicalPlan` from its caller. `core::query_language` is not invoked. This is fine — L1 is opt-in for library-mode scenarios.
+- **L2 inherited from DataFusion**: DataFusion's `LogicalPlan` *is* fusion's L2 tree. We don't redefine it. `core::logical_plan::datafusion` is a thin re-export of `datafusion::logical_expr::LogicalPlan` so scenarios that want to take a DataFusion plan as input have a canonical name for it.
+- **L3 intent**: `SubPopulationAnalyticsType` (3 variants: `Count`, `Sum`, `Quantile`) maps to `core::sketch_algebra::AggIntent`'s corresponding subset. Fusion's intent layer is *embedded inside* DataFusion `LogicalPlan::Extension` nodes, not a separate tree — that's fine, the `AggIntent` enum is the contract, the carrier is up to the scenario.
+- **L4 rules**: `PlanRewriteRule` trait + `rules/` subdirectory from `asap-fusion/src/optimizer/`. Includes `SketchConfigRule` (already correctly at L4: `SketchConfig::NULL` → `CountMinSketch{5,4096}` / `KLL{k=200,m=8}`) and `HashModeRule`. Operates on DataFusion `LogicalPlan`, not on a standalone `QueryExpr` tree — fusion keeps this so DataFusion's own optimizer passes (`context.state().optimize`) can run *after* fusion's rewrites.
+- **L5 physical**: rewritten `datafusion::LogicalPlan`. Not a wire format — library-mode scenario.
+- **Executor**: `ASAPExecutor` wraps a DataFusion `SessionContext`. Users construct `scenario-fusion` in-process.
 - **HTTP route**: none by default.
+- **Conformance cost**: zero. Fusion already separates intent from sketch binding (`SketchConfigRule` at L4); its L3 vocabulary is a strict subset of DC's; its L2 is DataFusion's native tree. The only design decision is declaring `core::logical_plan::datafusion` as the canonical name for "L2 = DataFusion tree."
 
 The sketch microbenchmarks (KLL/CMS) move with the crate and keep running. The TODO items from `asap-fusion/TODO.md` (batch/multi-query execution, time semantics, distributed model) remain open but are now filed against `scenario-fusion/TODO.md` in-repo.
 
@@ -453,6 +480,8 @@ This matters: a user who only wants `scenario-fusion` (e.g., an offline benchmar
 6. **What happens to ASAPQuery-backend's `asap-planner-rs` directory post-migration?** Deleted. ASAPQuery-backend's docker-compose drops the `asap-planner-rs` init container; the controller's `scenario-query` now runs in-process (service mode) or as the `asap-plan` CLI (one-shot mode). The ASAPQuery-backend repo shrinks by two directories.
 
 7. **Versioning?** Start at `0.1.0` on the workspace. Scenarios can rev independently later via per-crate versions, but initially lockstep.
+
+8. **What if a future scenario can't fit a tree L2?** L2 is currently a per-language tree, mandatory for every scenario. asap-planner-rs's Phase 4 conformance cost (reverse-engineering PromQL pattern templates into a `PromqlLogicalPlan` tree) was taken deliberately to keep the architecture uniform. If a future scenario's source language doesn't map naturally onto a tree (e.g. a constraint-based or dataflow-graph query language), that's the moment to re-examine the L2 contract — the `core::logical_plan` module is a single Rust trait + per-language types, not a deep assumption baked across the codebase. Until then, L2 = tree.
 
 ## 13. Success criteria
 

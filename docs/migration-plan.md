@@ -105,23 +105,47 @@ Per design §3, these three layers are "query-language-independent and workload-
 
 ### Phase 4 — `scenario-query`: migrate asap-planner-rs's newer copy
 
-**Scope:** Move `ASAPQuery-backend/asap-planner-rs/` (the newer copy) into `crates/scenario-query/`. Delete the older copy in `ASAPQuery/`.
+**Scope:** Move `ASAPQuery-backend/asap-planner-rs/` (the newer copy) into `crates/scenario-query/`, **and refactor it to fit the 5-layer model**: reverse-engineer PromQL pattern templates into an L2 tree, and split L3 intent from L4 sketch binding. Delete the older copy in `ASAPQuery/`.
 
-**Work:**
-- Diff the two `asap-planner-rs` copies (ASAPQuery vs ASAPQuery-backend). Reconcile — the newer copy (backend) has the `rustls-tls` change and richer `lib.rs` re-exports; the older copy has nothing the newer lacks. **Decision: port only the newer copy; discard the older.**
+This phase is larger than a straight lift because two structural conformance changes are bundled in.
+
+**Work — the lift:**
+- Diff the two `asap-planner-rs` copies. Newer (backend) copy wins. **Port only the newer; discard the older.**
 - Copy `ASAPQuery-backend/asap-planner-rs/src/{lib,main}.rs` + `src/{planner,output,query_log,prometheus_client}/` → `crates/scenario-query/src/`.
-- `impl Scenario for QueryScenario` — registers the YAML emitter (`StreamingConfigEmitter` + `InferenceConfigEmitter`) and an HTTP route `POST /plan/query`.
-- Port the CLI: `bin/asap-plan/main.rs` gains clap flags mirroring `asap-planner-rs`'s current CLI (`--input_config`, `--query-log`, `--prometheus-url`, `--output_dir`, `--streaming_engine`, `--query-language`). Implementation is a thin shell that builds a `QueryWorkload`, hands to `QueryScenario`, writes emitter output to disk.
-- **Golden-file test**: capture a corpus of today's `asap-planner-rs` inputs → outputs. The new CLI must produce byte-identical output. Put this under `bin/asap-plan/tests/golden/`.
+- `impl Scenario for QueryScenario` — registers YAML emitters (`StreamingConfigEmitter` + `InferenceConfigEmitter`) and HTTP route `POST /plan/query`.
+- Port the CLI: `bin/asap-plan/main.rs` with clap flags mirroring `asap-planner-rs`'s current CLI.
 
-**Risk:** medium. `asap-planner-rs` has subtle edge cases (YAML emission formatting, label ordering) that the golden-file test catches.
+**Work — L2 tree conformance (NEW):**
+- Define `PromqlLogicalPlan` in `core::logical_plan::promql` that expresses the five pattern shapes planner currently template-matches (`OnlyTemporal`×2, `OnlySpatial`, `OneTemporalOneSpatial`×2) as first-class L2 tree nodes (`Aggregate` / `Window` / `Filter` / `Sort` / `Limit`).
+- Write L1→L2 lowering in `core::lower::promql` that takes a `promql_parser::parser::Expr` and produces a `PromqlLogicalPlan`. The five existing pattern shapes become five recognised L2 tree shapes plus a generic fall-through.
+- Retire planner's `PromQLPattern` / `PromQLPatternBuilder` / `QueryPatternType` — replaced by tree-shape inspection at L3 lowering.
+- Do the same for SQL (retire `SQLPatternMatcher`, produce `SqlLogicalPlan`).
+- **This is the conformance cost the user explicitly accepted for architectural uniformity.** Budget accordingly.
 
-**Parallel work** (can land in parallel with this PR, not dependent):
-- Update ASAPQuery-backend's docker-compose-precompute.yml to swap the `asap-planner-rs` init container image for an `asap-controller:latest` invocation — `asap-controller plan --workload /config/controller-config.yaml --output-dir /asap-planner-output`. Ship as a separate PR on the ASAPQuery-backend repo **after** ASAPController publishes its first binary release.
+**Work — L3 / L4 split (NEW):**
+- In `core::lower::promql_to_sketch_algebra`: `PromqlLogicalPlan → QueryExpr` producing **intent-only** L3 (no sketch names).
+- `Statistic` enum → `AggIntent` subset (9 of DC's 25 variants). No sketch type, no sketch params at L3.
+- In `scenario-query/src/optimizer/sketch_binding.rs`: new L4 rule that takes `AggIntent + DeploymentConstraints` and produces `AggregationType + SketchParams`. This absorbs the work `map_statistic_to_precompute_operator` does today.
+- Update `build_agg_configs_for_statistics` to call the L4 rule instead of doing the binding inline.
+- `IntermediateAggConfig` loses its inline sketch binding; it's now an L4 output type.
 
-**Exit criteria:** `asap-plan` CLI produces byte-identical YAML to `asap-planner-rs` on the golden-file corpus; HTTP route `POST /plan/query` returns the same YAML over HTTP.
+**Testing:**
+- **Golden-file test**: capture a corpus of today's `asap-planner-rs` inputs → outputs. The new CLI must produce byte-identical output. Put under `bin/asap-plan/tests/golden/`. This is the non-negotiable safety net for the refactor.
+- **L2 round-trip test**: `parse → build PromqlLogicalPlan → pretty-print back → parse` stays stable across tree rewrites.
+- **L3 intent-only test**: after L3 lowering, assert `AggIntent` carries no sketch-type information (type-system-enforced, not runtime-enforced — `AggIntent::Quantile` carries `AccuracyTarget`, not `SketchType`).
 
-**PR size:** ~4000 LOC (asap-planner-rs is ~3–4k lines + new CLI shell + golden tests).
+**Risk:** medium-high. Two refactors on top of a lift. Golden-file corpus is the gate.
+
+**Parallel work** (separate PR, not dependent):
+- Update ASAPQuery-backend's `docker-compose-precompute.yml` to swap the `asap-planner-rs` init container for `asap-controller plan --workload /config/controller-config.yaml --output-dir /asap-planner-output`. Ship **after** ASAPController publishes its first binary release.
+
+**Exit criteria:**
+- `asap-plan` CLI produces byte-identical YAML to `asap-planner-rs` on the golden-file corpus.
+- HTTP `POST /plan/query` returns the same YAML over HTTP.
+- `AggIntent` post-L3 contains zero `AggregationType` / sketch params (type-enforced).
+- Planner's `PromQLPattern*` / `SQLPatternMatcher` files are deleted.
+
+**PR size:** ~6000 LOC (the straight lift is ~4000; L2-tree work + L3/L4 split adds ~2000).
 
 ---
 
@@ -199,12 +223,12 @@ Per design §3, these three layers are "query-language-independent and workload-
 | 1. Core — L1-3 + traits | 1 | ~4200 | 1 week |
 | 2. Runtime HTTP+store | 1 | ~5700 | 3 days |
 | 3. scenario-fusion (L4+L5 over DF) | 1 | ~8700 | 1 week |
-| 4. scenario-query (L4+L5 → YAML) + asap-plan CLI | 1 | ~12700 | 1.5 weeks |
-| 5. scenario-lifecycle (L4+L5 + OpAMP + replanner) | 2 | ~17700 | 1.5 weeks |
-| 6. Cutover (delete in source repos) | 3–4 | ~18200 | 1 week |
-| 7. Core refactor | 1 | ~18700 | 3 days |
+| 4. scenario-query (L2 tree + L3/L4 split + YAML + CLI) | 1 | ~14700 | 2.5 weeks |
+| 5. scenario-lifecycle (L4+L5 + OpAMP + replanner) | 2 | ~19700 | 1.5 weeks |
+| 6. Cutover (delete in source repos) | 3–4 | ~20200 | 1 week |
+| 7. Core refactor | 1 | ~20700 | 3 days |
 
-**Total**: ~6 weeks for one engineer. Phase 1 grew (L1-3 is more than trait stubs) and Phase 5 shrank (L1-3 was already done), netting roughly the same total. Parallelizable if two people: one on lifecycle (Phase 5, still the long tail) while another does Phases 2–4.
+**Total**: ~7 weeks for one engineer. Phase 4 grew by a week — it now bundles the asap-planner-rs lift + two structural refactors (L2 tree construction, L3/L4 sketch-binding split). The alternative — making L2 optional to skip the planner refactor — was explicitly rejected in favour of architectural uniformity (see design doc §12 Q8). Parallelizable if two people: lifecycle (Phase 5) can start as soon as Phase 4's L2 tree lands; they share no files after that.
 
 ## Risk register
 
@@ -217,6 +241,9 @@ Per design §3, these three layers are "query-language-independent and workload-
 | ASAPQuery-backend deploys break during cutover | Low | Production outage | Phase 6 only after Phase 5 fully validates; staged rollout of docker-compose change |
 | Scope creep — "while we're at it, redesign the cost model" | High | Doubles timeline | Explicit non-goal list in design doc §2; defer all rewrites to post-migration phases |
 | Core traits are wrong; need to rev after scenarios land | Medium | Phase 7 PR larger than expected | Accept; Phase 7 is planned for exactly this. Don't over-design Phase 1. |
+| PromQL L2 tree reverse-engineering loses a pattern-match case planner relied on | Medium | Generated YAML diverges from legacy | Golden-file corpus covers all 5 pattern shapes + generic fallthrough; tree-shape inspection at L3 lowering is a direct 1:1 translation of today's pattern-match logic, not a reinterpretation |
+| L3/L4 split misses a case in `map_statistic_to_precompute_operator` | Medium | Wrong sketch selected for some `(Statistic, Treatment)` combos | Every branch of the current function must round-trip via the new L3→L4 path on the golden-file corpus; add table-driven unit tests enumerating every `Statistic × Treatment` combination |
+| `AggIntent` as a 25-variant superset grows unbounded as scenarios add needs | Low | Core churn | Variants added only for intent shapes used by ≥1 shipped scenario; never speculative. |
 
 ## Decision log (during migration)
 
@@ -228,6 +255,9 @@ These are the questions that will come up mid-migration. Pre-decide as many as p
 4. **Does `asap-controller` have feature flags to disable scenarios at build time?** Yes, one `--features lifecycle,query,fusion` with all three enabled by default. A minimal CLI binary (`asap-plan`) disables lifecycle and fusion.
 5. **Who owns the Cargo.lock?** ASAPController. Downstream repos (ASAPQuery-backend, DataCollector) do NOT depend on ASAPController as a Cargo path dep — they pull the published binary via Docker or pin a git SHA.
 6. **Does `ControllerClient` on the ASAPQuery-backend side need changes?** No. It keeps POSTing to `/api/v1/plan`; the controller's routing layer dispatches to `scenario-lifecycle` (same as DC controller does today).
+7. **L2 tree for asap-planner-rs — mandatory or optional?** Mandatory. planner's current template-catalogue approach is replaced with a proper `PromqlLogicalPlan` tree in Phase 4. The extra conformance work is taken to keep the 5-layer model uniform. See design doc §12 Q8 for the escape hatch if a future scenario genuinely can't fit a tree.
+8. **Sketch binding — L3 or L4?** L4. DC and fusion already do this correctly; planner's `map_statistic_to_precompute_operator` conflates L3+L4 and is split during Phase 4. `AggIntent` at L3 carries intent + accuracy only; concrete `AggregationType` / `SketchParams` are produced by an L4 rule.
+9. **Intent vocabulary when scenarios disagree in width?** Core's `AggIntent` is the superset (DC's ~25 variants). Each scenario only uses / produces / accepts the subset it needs (planner 9, fusion 3). Adding a new intent variant is a core change that scenarios opt into.
 
 ## What a new scenario looks like post-migration
 
