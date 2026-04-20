@@ -43,8 +43,8 @@ Per design §3, these five layers' infrastructure is query-language-independent 
 **Work — L1-3 (straight lift from DC):**
 - **`core::query_language`** (L1): lift `DataCollector/controller/src/query_parser/{promql,sql,mod}.rs` → `core/src/query_language/`. One module per language.
 - **`core::logical_plan`** (L2): lift per-language algebra tree definitions → `core/src/logical_plan/`. One `enum LogicalPlan` per language. Add `core::logical_plan::datafusion` as a thin re-export of `datafusion::logical_expr::LogicalPlan` for fusion's L2.
-- **`core::sketch_algebra`** (L3): lift `algebra/{expr,directory}.rs` → `core/src/sketch_algebra/`. Enforce **intent-only** — `AggIntent` carries accuracy target, never sketch type.
-- **`core::lower`**: lift `algebra/lower.rs` (L1→L2→L3 passes) → `core/src/lower/`. One `lower_<lang>` entry point per language.
+- **`core::sketch_algebra`** (L3): lift `algebra/{expr,directory}.rs` → `core/src/sketch_algebra/`. Enforce **intent-only** — `AggIntent` carries accuracy target, never sketch type. **Generalize `QueryExpr::Scan` over data model**: introduce a `Source` sum (`TimeSeries` / `Table` / `Join` variants) inside `Scan`, and a `DataModel` enum (`TimeSeries` / `Tabular` / `Any`). DC's current scan logic becomes `Source::TimeSeries`; `Source::Table` is new (stub impl fine for Phase 1 — scenario-fusion fills it in Phase 3). Add `AggIntent::requires() -> DataModel` so L4 rules can skip non-applicable intents. See design §3 "Data-model support" and §6 `core::sketch_algebra`. ~300 LOC on top of the DC lift.
+- **`core::lower`**: lift `algebra/lower.rs` (L1→L2→L3 passes) → `core/src/lower/`. One `lower_<lang>` entry point per language. Each lowering produces the appropriate `Source` variant (PromQL / SQL → `Source::TimeSeries`; DataFusion → `Source::Table`).
 
 **Work — L4 framework (NEW):**
 - **`core::optimizer::engine`**: rule driver — fixed-point iteration, cycle detection, priority ordering. Generic over `OptimizerRule`.
@@ -61,9 +61,9 @@ Per design §3, these five layers' infrastructure is query-language-independent 
 - **`core::plan`**: `DeploymentConstraints` trait — memory budgets, network topology descriptor, available sketch backends.
 
 **Work — L5 framework (NEW):**
-- **`core::physical::planner_trait`**: `PhysicalPlanner` trait parameterised on `Topology` + `Output`.
+- **`core::physical::planner_trait`**: `PhysicalPlanner` trait parameterized on `Topology` + `Output`.
 - **`core::physical::topology`**: `TopologyDescriptor` trait + pre-baked impls — `ThreeStage` (edge/gateway/backend), `SingleStage` (backend-only), `ZeroStage` (in-process).
-- **`core::physical::stage_allocator`**: generic topology-driven allocator. Lift DC's `SketchAllocator` from `algebra/allocator.rs`, parameterise the hardcoded 3-stage assumption over `TopologyDescriptor`.
+- **`core::physical::stage_allocator`**: generic topology-driven allocator. Lift DC's `SketchAllocator` from `algebra/allocator.rs`, parameterize the hardcoded 3-stage assumption over `TopologyDescriptor`.
 - **`core::physical::sketch_catalog`**: candidate sketch types + parameter constraints. Lift from DC's `algebra/directory.rs`.
 
 **Work — other core pieces:**
@@ -75,10 +75,10 @@ Per design §3, these five layers' infrastructure is query-language-independent 
 **Testing:**
 - Port DC's existing `query_parser/` + `algebra/` unit tests verbatim. All pass after the move.
 - Golden-file round-trip test for L1→L2→L3 (parse → lower → JSON of `QueryExpr`).
-- Golden-file test for L4 shared rule library: each rule has a "before → after" `QueryExpr` fixture demonstrating its behaviour.
+- Golden-file test for L4 shared rule library: each rule has a "before → after" `QueryExpr` fixture demonstrating its behavior.
 - Unit tests for `StageAllocator` under each pre-baked topology.
 
-**Risk:** medium-high. This phase does more than a straight lift — it generalises DC's hardcoded `SketchAllocator` over topology + lifts a subset of optimizer rules into a shared library. Keep changes mechanical; any semantic revision is deferred to Phase 5/7.
+**Risk:** medium-high. This phase does more than a straight lift — it generalizes DC's hardcoded `SketchAllocator` over topology + lifts a subset of optimizer rules into a shared library. Keep changes mechanical; any semantic revision is deferred to Phase 5/7.
 
 **Decision points:**
 1. `asap_types` — publish to a private git tag in Phase 0.
@@ -87,7 +87,7 @@ Per design §3, these five layers' infrastructure is query-language-independent 
 
 **Exit criteria:** `cargo build` green; DC's parser + algebra + subset of optimizer unit tests pass from `core/`; `StageAllocator` unit-tested against all pre-baked topologies; golden-file corpus locked in.
 
-**PR size:** ~6000 LOC (L1-3 lift ~4000 + L4/L5 framework ~2000). Could split into (a) L1-3 lift + traits, (b) L4/L5 framework — prefer this if the PR review would otherwise be unwieldy.
+**PR size:** ~6300 LOC (L1-3 lift ~4000 + L4/L5 framework ~2000 + `Source` sum / `DataModel` generalization ~300). Could split into (a) L1-3 lift + traits + `Source` sum, (b) L4/L5 framework — prefer this if the PR review would otherwise be unwieldy.
 
 ---
 
@@ -96,7 +96,7 @@ Per design §3, these five layers' infrastructure is query-language-independent 
 **Scope:** Lift DC controller's HTTP server + in-memory stores into `crates/runtime/`. OpAMP + replanner + monitor wait till later phases (they can pull behind a `feature` flag for now).
 
 **Work:**
-- `runtime/http/` — copy `DataCollector/controller/src/main.rs`'s axum routes verbatim, split into modules by route. Keep all behaviour.
+- `runtime/http/` — copy `DataCollector/controller/src/main.rs`'s axum routes verbatim, split into modules by route. Keep all behavior.
 - `runtime/store/` — lift `store/PlanStore` and `store/WorkloadStore` as-is.
 - `runtime/backend_client/` — lift `backend_client.rs` as-is.
 - The HTTP handlers still reference DC's planner concretely at this point. That's OK; we'll abstract in Phase 4.
@@ -119,8 +119,9 @@ This plan assumes the in-repo-at-asap-fusion placement. If in-workspace is chose
 
 **Work:**
 - In `asap-fusion/`: add new crate `asap-fusion-scenario/` that depends on `asap-control-core`. Move the translator + optimizer + executor here.
+- **Fill in `Source::Table` lowering**: Phase 1 stubbed this; now implement the L2 (DataFusion `LogicalPlan`) → L3 (`QueryExpr` with `Source::Table`) lowering pass in `core::lower::datafusion` — or, if fusion prefers, keep the lowering inside the scenario crate and use the `Source::Table` type directly. Either way, Phase 1's stub becomes concrete.
 - `impl Scenario for FusionScenario`:
-    - `rules()` picks `BindKllOnQuantile`, `BindCmsOnCount`, `BindHllOnCardinality` from `core::optimizer::rules::*` (drops asap-fusion's `SketchConfigRule` in favour of core's rules).
+    - `rules()` picks `BindKllOnQuantile`, `BindCmsOnCount`, `BindHllOnCardinality` from `core::optimizer::rules::*` (drops asap-fusion's `SketchConfigRule` in favor of core's rules).
     - Adds scenario-specific `HashModeRule` (stays local — depends on DataFusion-specific types).
     - `topology()` returns `core::physical::topology::ZeroStage`.
     - `emitter()` returns the DataFusion `LogicalPlan` rewriter.
@@ -149,7 +150,7 @@ This phase is larger than a straight lift because two structural conformance cha
 
 **Work — L2 tree conformance (NEW):**
 - Define `PromqlLogicalPlan` in `core::logical_plan::promql` that expresses the five pattern shapes planner currently template-matches (`OnlyTemporal`×2, `OnlySpatial`, `OneTemporalOneSpatial`×2) as first-class L2 tree nodes (`Aggregate` / `Window` / `Filter` / `Sort` / `Limit`).
-- Write L1→L2 lowering in `core::lower::promql` that takes a `promql_parser::parser::Expr` and produces a `PromqlLogicalPlan`. The five existing pattern shapes become five recognised L2 tree shapes plus a generic fall-through.
+- Write L1→L2 lowering in `core::lower::promql` that takes a `promql_parser::parser::Expr` and produces a `PromqlLogicalPlan`. The five existing pattern shapes become five recognized L2 tree shapes plus a generic fall-through.
 - Retire planner's `PromQLPattern` / `PromQLPatternBuilder` / `QueryPatternType` — replaced by tree-shape inspection at L3 lowering.
 - Do the same for SQL (retire `SQLPatternMatcher`, produce `SqlLogicalPlan`).
 - **This is the conformance cost the user explicitly accepted for architectural uniformity.** Budget accordingly.
@@ -157,7 +158,7 @@ This phase is larger than a straight lift because two structural conformance cha
 **Work — L3 / L4 split (NEW):**
 - In `core::lower::promql_to_sketch_algebra`: `PromqlLogicalPlan → QueryExpr` producing **intent-only** L3 (no sketch names).
 - `Statistic` enum → `AggIntent` subset (9 of DC's 25 variants). No sketch type, no sketch params at L3.
-- In `scenario-query/src/rules.rs`: picks core's `BindKllOnQuantile`, `BindCmsOnCount`, etc. from Phase 1's shared rule library + adds a scenario-specific `PrecomputeEngineBindRule` (handles the precompute-engine-specific flavour: which sketches are available in ASAPQuery-backend's accumulator set, what params match the engine's config schema, `DeltaSetAggregator` auto-injection before CMS/HydraKLL).
+- In `scenario-query/src/rules.rs`: picks core's `BindKllOnQuantile`, `BindCmsOnCount`, etc. from Phase 1's shared rule library + adds a scenario-specific `PrecomputeEngineBindRule` (handles the precompute-engine-specific flavor: which sketches are available in ASAPQuery-backend's accumulator set, what params match the engine's config schema, `DeltaSetAggregator` auto-injection before CMS/HydraKLL).
 - Update `build_agg_configs_for_statistics` to call `core::optimizer::engine::RuleEngine::run()` with the scenario's rule set instead of the inline `map_statistic_to_precompute_operator` fusion.
 - `IntermediateAggConfig` loses its inline sketch binding; it's now an L4 output type produced by `PrecomputeEngineBindRule`.
 
@@ -263,7 +264,7 @@ This phase is larger than a straight lift because two structural conformance cha
 | Phase | PRs | Cumulative LOC | Est. wall time (1 engineer) |
 |---|---|---|---|
 | 0. Skeleton | 1 | ~200 | 1 day |
-| 1. Core — L1-3 + L4/L5 framework + shared rules | 1–2 | ~6200 | 1.5 weeks |
+| 1. Core — L1-3 + L4/L5 framework + shared rules + `Source`/`DataModel` | 1–2 | ~6500 | 1.5 weeks |
 | 2. Runtime HTTP+store | 1 | ~7700 | 3 days |
 | 3. scenario-fusion (thin; rules fold into core library) | 1 | ~9500 | 1 week |
 | 4. scenario-query (L2 tree + L3/L4 split + YAML + CLI) | 1 | ~14000 | 2 weeks |
@@ -303,6 +304,7 @@ These are the questions that will come up mid-migration. Pre-decide as many as p
 7. **L2 tree for asap-planner-rs — mandatory or optional?** Mandatory. planner's current template-catalogue approach is replaced with a proper `PromqlLogicalPlan` tree in Phase 4. The extra conformance work is taken to keep the 5-layer model uniform. See design doc §12 Q8 for the escape hatch if a future scenario genuinely can't fit a tree.
 8. **Sketch binding — L3 or L4?** L4. DC and fusion already do this correctly; planner's `map_statistic_to_precompute_operator` conflates L3+L4 and is split during Phase 4. `AggIntent` at L3 carries intent + accuracy only; concrete `AggregationType` / `SketchParams` are produced by an L4 rule.
 9. **Intent vocabulary when scenarios disagree in width?** Core's `AggIntent` is the superset (DC's ~25 variants). Each scenario only uses / produces / accepts the subset it needs (planner 9, fusion 3). Adding a new intent variant is a core change that scenarios opt into.
+10. **Tabular vs time-series data models?** Handled in core from Phase 1 via the `Source` sum (`TimeSeries` / `Table` / `Join`) inside `QueryExpr::Scan` and the `DataModel` tag on `AggIntent`. ASAPQuery produces `Source::TimeSeries`, asap-fusion produces `Source::Table`. `Source::Table` is stubbed in Phase 1 and filled in by Phase 3 (fusion). Sketches themselves are data-model-agnostic; the generalization is purely at the IR leaf.
 
 ## What a new scenario looks like post-migration
 

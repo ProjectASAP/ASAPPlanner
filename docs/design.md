@@ -25,7 +25,7 @@ Merges three existing codebases into one:
 - **Not** unifying DataFusion's `LogicalPlan` with DC's custom algebra at the type level. Those are different universes. Scenarios own their IR; core owns the *staged dispatch contract*.
 - **Not** in-scope: changing the existing wire protocol between controller and backend. ASAPQuery-backend keeps consuming `streaming_config.yaml` and keeps responding on `/api/v1/plan`.
 
-## 3. The organising spine: DC controller's 5-layer pipeline
+## 3. The organizing spine: DC controller's 5-layer pipeline
 
 DataCollector/controller already documents its query→sketch translation as a 5-layer pipeline (`DataCollector/controller/docs/query-to-sketch-translation.md`). That's the spine of this merger:
 
@@ -33,7 +33,7 @@ DataCollector/controller already documents its query→sketch translation as a 5
 |---|-------|--------------|-------------------|
 | 1 | **Query Language** | Parse raw strings (PromQL, SQL, DataFusion, ElasticDSL, …) into a language-specific AST | DC `controller/src/query_parser/{promql,sql,mod}.rs`; asap-planner-rs pulls `promql-parser` + `sqlparser` directly; asap-fusion consumes a pre-built DataFusion `LogicalPlan` (its L1 happens upstream) |
 | 2 | **Language Logical Plan** | Per-language algebra tree (`Aggregate` / `Window` / `Filter` / `Sort` / `Limit`) preserving language semantics, **no sketch names, no sketch binding** | DC `controller/src/algebra/lower.rs`; asap-fusion inherits DataFusion's `LogicalPlan` as its L2; asap-planner-rs has no L2 today (uses a template-pattern catalogue) — **Phase 4 builds one** |
-| 3 | **Sketch Logical Plan** (sketch algebra) | Language- and deployment-independent IR: `QueryExpr` + `AggIntent` (~25 intent variants). Describes **intent only** — *what* to compute, with accuracy target. **No sketch type, no sketch parameters.** | DC `controller/src/algebra/{expr,directory}.rs`; asap-fusion's 3-variant `SubPopulationAnalyticsType` maps to a subset; asap-planner-rs's 9-variant `Statistic` maps to a subset — **Phase 4 splits sketch binding out of planner's current fused L3+L4** |
+| 3 | **Sketch Logical Plan** (sketch algebra) | Language- and deployment-independent IR: `QueryExpr` + `AggIntent` (~25 intent variants). Describes **intent only** — *what* to compute, with accuracy target. **No sketch type, no sketch parameters.** Data-model-agnostic — `QueryExpr::Scan` wraps a `Source` sum with `TimeSeries` / `Table` / `Join` variants so the same L3 IR covers ASAPQuery's time-series queries and asap-fusion's tabular queries. | DC `controller/src/algebra/{expr,directory}.rs`; asap-fusion's 3-variant `SubPopulationAnalyticsType` maps to a subset; asap-planner-rs's 9-variant `Statistic` maps to a subset — **Phase 4 splits sketch binding out of planner's current fused L3+L4** |
 | 4 | **Sketch Optimizer** | Cost-aware algebraic rewrite rules under deployment constraints. **This is where sketch binding happens** — L4 rules take intent-only L3 and emit sketch-bound L3+. ~12 rules in DC; a smaller targeted subset in planner; `SketchConfigRule` + `HashModeRule` in fusion. | Core provides the **rule engine driver** + `OptimizerRule` trait + a shared rule library; scenarios **pick** which rules to enable + supply their own deployment constraints. DC `controller/src/algebra/optimizer.rs` (rules); fusion `src/optimizer/rules/`; planner's `map_statistic_to_precompute_operator` |
 | 5 | **Physical Execution Plan** | Assign ops to pipeline stages (edge / gateway / backend / object store); produce the deployment-specific artefact (OpAMP YAML, `streaming_config.yaml`, rewritten DataFusion `LogicalPlan`). **Sketch binding is already committed by L4**; L5 is about stage allocation + emission. | Core provides the **stage allocator framework** + `PhysicalPlanner` trait + the sketch catalogue; scenarios supply their own **topology** (3-stage / 1-stage / 0-stage) + their own **emitter** for the output format. DC `controller/src/algebra/{physical,allocator,plan}.rs`; asap-planner-rs `output/generator.rs`; asap-fusion `src/executor/` |
 
@@ -53,6 +53,22 @@ Today:
 ### Intent vocabulary: DC's `AggIntent` is a superset; scenarios use subsets
 
 DC has ~25 variants. Planner uses 9 (`Count, Sum, Cardinality, Increase, Rate, Min, Max, Quantile, Topk`). Fusion uses 3 (`Count, Sum, Quantile`). A scenario's L4+L5 only has to handle its own subset — but it reads and writes the **same `AggIntent` enum**. Adding a new intent (e.g. stddev) is a core change that scenarios can then opt in to.
+
+### Data-model support: both time-series and tabular
+
+ASAPQuery-backend / DC controller operate on time-series data (metrics + labels + timestamp); asap-fusion operates on tabular data (DataFusion `LogicalPlan` over relations) that may or may not be time-indexed. These two data models differ fundamentally in their leaf shape (`metric + labels + time` vs. `table + columns`), but they share everything above the leaf — filter semantics, aggregation semantics, sketches themselves.
+
+Core handles this with:
+- **`QueryExpr::Scan { source: Source, ... }`** where `Source` is a sum type (`TimeSeries`, `Table`, `Join`, …). Scenarios' L1→L2→L3 lowering produces the appropriate variant; L4 rules that care about the data model gate on `source.data_model()`.
+- **`AggIntent::requires() -> DataModel`** — each intent variant tags whether it's data-model-agnostic (`Count`, `Sum`, `Quantile`, `Cardinality`), time-series-only (`Rate`, `Increase`, `QuantileOverTime`), or tabular-only (future additions for joins, correlated subqueries).
+- **Sketches are data-model-agnostic by construction.** KLL / CMS / HLL / DDSketch ingest a stream of values; that stream can come from a time-series window or a table column, the sketch does not know or care. So `BindKllOnQuantile` and siblings work uniformly across both.
+
+Practically, this means:
+- `scenario-query` + `scenario-lifecycle` lower into `QueryExpr` with `Source::TimeSeries` leaves.
+- `scenario-fusion` lowers into `QueryExpr` with `Source::Table` leaves (and, in future, `Source::Join` when it extends to multi-table queries).
+- A hypothetical OLAP scenario that runs approximate queries over tabular data reuses `Source::Table` + the same `AggIntent` subset fusion uses, plus any OLAP-specific intents it adds.
+
+See §6 `core::sketch_algebra` for the concrete type sketches.
 
 ### L2 is mandatory; the tree shape is an evolvable contract
 
@@ -81,7 +97,7 @@ The `asap-controller` binary is assembled from: runtime (HTTP/OpAMP/replanner/st
 
 ### P4. One input boundary, one output boundary
 
-**Input**: everything that enters the controller (HTTP `QuerySpec`, Prometheus query log replay, YAML workload, capability-miss callback) normalises into a single `QueryWorkload` type in core — a collection of `QuerySpec`s each feeding L1→L2→L3.
+**Input**: everything that enters the controller (HTTP `QuerySpec`, Prometheus query log replay, YAML workload, capability-miss callback) normalizes into a single `QueryWorkload` type in core — a collection of `QuerySpec`s each feeding L1→L2→L3.
 
 **Output**: L5 emitters (OpAMP `RemoteConfig`, backend `StreamingConfig` POST, one-shot YAML file, rewritten DataFusion `LogicalPlan`) all implement a `PlanEmitter` trait. Scenarios supply emitter implementations; core doesn't know which emitters exist.
 
@@ -121,7 +137,7 @@ ASAPController/
 │   │   │   ├── stage_allocator/ # generic topology-driven allocator
 │   │   │   ├── topology/      #   Topology descriptor types (edge/gateway/backend, single, zero)
 │   │   │   └── sketch_catalog/ # candidate sketch types + parameter constraints
-│   │   ├── pipeline/          # orchestrates L1→L2→L3→L4→L5, parameterised on scenario
+│   │   ├── pipeline/          # orchestrates L1→L2→L3→L4→L5, parameterized on scenario
 │   │   ├── workload/          # QueryWorkload wrapper around QuerySpecs
 │   │   ├── emit/              # PlanEmitter trait — implemented by scenario L5
 │   │   ├── registry/          # ScenarioRegistry, ScenarioId
@@ -144,7 +160,7 @@ ASAPController/
 │   │   ├── emit/              # StreamingConfig.yaml + InferenceConfig.yaml
 │   │   ├── query_log/         # extra L1 input: Prometheus query-log replay
 │   │   └── schema/            # PromQLSchema discovery from Prometheus (feeds L1)
-│   ├── scenario-fusion/       # thin — DF-flavoured rules, 0-stage, in-process emit
+│   ├── scenario-fusion/       # thin — DF-flavored rules, 0-stage, in-process emit
 │   │   ├── rules.rs           # L4 rules for DataFusion LogicalPlan (sketch-aware rewrites)
 │   │   ├── topology.rs        # 0-stage: in-process
 │   │   ├── emit/              # rewritten DataFusion LogicalPlan
@@ -192,7 +208,7 @@ Per-language parsers, one module each:
 - `datafusion/` — wraps DataFusion's own parser. Output: `DfAst`.
 - `elasticdsl/` — wraps `elastic_dsl_utilities`. Output: `EsAst`.
 
-Each returns a language-flavoured AST type. No sketch awareness.
+Each returns a language-flavored AST type. No sketch awareness.
 
 ### `core::logical_plan` — Layer 2
 
@@ -200,26 +216,96 @@ A **per-language** algebra tree — one `enum LogicalPlan` per language. Preserv
 
 ### `core::sketch_algebra` — Layer 3
 
-The language- and deployment-independent IR. This is the sketch-algebra layer documented in DC's `controller/src/algebra/expr.rs`:
+The language- and deployment-independent IR. Data-model-agnostic: supports both **time-series** inputs (ASAPQuery-backend, DC lifecycle) and **tabular** inputs (asap-fusion, future OLAP scenarios) via a `Source` sum type inside `QueryExpr::Scan`.
 
 ```rust
 pub enum QueryExpr {
-    Scan { metric: MetricRef, time: TimeRange, labels: LabelFilter },
+    Scan { source: Source, predicates: Vec<Predicate> },
     Filter { child: Box<QueryExpr>, pred: Predicate },
-    Aggregate { child: Box<QueryExpr>, by: Vec<Label>, intent: AggIntent },
+    Aggregate { child: Box<QueryExpr>, by: Vec<GroupKey>, intent: AggIntent },
     // ...
 }
 
+pub enum Source {
+    /// Time-series input — scenario-query / scenario-lifecycle shape.
+    /// `metric` identifies a metric family; `time` bounds the window;
+    /// `labels` constrains label-value combinations.
+    TimeSeries {
+        metric: MetricRef,
+        time: TimeRange,
+        labels: LabelFilter,
+    },
+    /// Tabular input — scenario-fusion / future-OLAP shape.
+    /// `table_ref` identifies the table; `columns` projects the subset
+    /// in use. Join / subquery composition nests `Source` values.
+    Table {
+        table_ref: TableRef,
+        columns: Vec<ColumnRef>,
+    },
+    Join {
+        left: Box<Source>,
+        right: Box<Source>,
+        on: JoinKey,
+    },
+    // Future: WindowedStream, Subquery — added by scenarios that need them.
+}
+
+pub enum DataModel {
+    TimeSeries,
+    Tabular,
+    Any,
+}
+
+impl Source {
+    pub fn data_model(&self) -> DataModel {
+        match self {
+            Self::TimeSeries { .. } => DataModel::TimeSeries,
+            Self::Table { .. } | Self::Join { .. } => DataModel::Tabular,
+        }
+    }
+}
+
 pub enum AggIntent {
-    Count, Sum, Min, Max,
-    Quantile(f64, AccuracyTarget),
-    TopK(usize, AccuracyTarget),
-    Cardinality(AccuracyTarget),
+    // Data-model-agnostic — work on TimeSeries AND Tabular
+    Count { accuracy: AccuracyTarget },
+    Sum,
+    Min, Max,
+    Quantile { q: f64, accuracy: AccuracyTarget },
+    TopK { k: usize, accuracy: AccuracyTarget },
+    Cardinality { accuracy: AccuracyTarget },
+
+    // Time-series only
+    Rate { window: Duration },
+    Increase { window: Duration },
+    QuantileOverTime { q: f64, window: Duration, accuracy: AccuracyTarget },
+
+    // Tabular / OLAP only — added as scenarios demand
+    // CorrelatedSubqueryCount { ... },
+    // ApproxJoinCardinality { ... },
     // ~25 variants total
+}
+
+impl AggIntent {
+    /// Which data-model this intent semantically requires. L4 rules
+    /// consult this to skip non-applicable intents (e.g. `Rate` over
+    /// a `Source::Table` is nonsense).
+    pub fn requires(&self) -> DataModel {
+        match self {
+            Self::Count{..} | Self::Sum | Self::Min | Self::Max
+                | Self::Quantile{..} | Self::TopK{..} | Self::Cardinality{..}
+                => DataModel::Any,
+            Self::Rate{..} | Self::Increase{..} | Self::QuantileOverTime{..}
+                => DataModel::TimeSeries,
+        }
+    }
 }
 ```
 
-`AggIntent` describes **what** to compute (a quantile, a topk, a count) + what accuracy to hit — not **how** (KLL vs DDSketch vs CMS). That binding happens in L5.
+`AggIntent` describes **what** to compute (a quantile, a topk, a count) + what accuracy to hit — not **how** (KLL vs DDSketch vs CMS). Sketch binding happens at L4.
+
+**Why a `Source` sum instead of two parallel `QueryExpr` trees:** most `QueryExpr` nodes (`Filter`, `Aggregate`) are data-model-agnostic — filter semantics are the same whether the input is a time-series window or a table scan. Only the leaf `Scan` differs. Keeping one tree with a polymorphic leaf means L4 rules like `BindKllOnQuantile` work uniformly across both data models; rules that care about data-model specifics (stage-aware push-down for TS; join-selectivity for tabular) gate on `source.data_model()` + `intent.requires()`.
+
+**Sketches are data-model-agnostic by construction.** KLL / CMS / HLL / DDSketch ingest a stream of values. That stream can come from a time-series window (`Source::TimeSeries`) or a table column (`Source::Table`); the sketch doesn't know or care. So `BindKllOnQuantile` works identically regardless of `Source`.
 
 ### `core::lower` — L1 → L2 → L3 passes
 
@@ -468,6 +554,7 @@ Each scenario crate is a library with:
 
 ### `scenario-lifecycle` (thin)
 
+- **Data model**: time-series. L2→L3 lowering produces `QueryExpr` with `Source::TimeSeries` leaves.
 - **L4 rules**: picks from `core::optimizer::rules::*` (Bind*, Fusion*, Elim*) + adds DC-specific rules that require stage awareness (`StageAwarePushDown`, `TransmissionCostRewrite`). Adding a stage-specific rule = a new file in `scenario-lifecycle/src/rules.rs`, impl `OptimizerRule`. Unchanged rules come from core.
 - **L5 topology**: `core::physical::topology::ThreeStage` (edge → gateway → backend). No scenario-specific allocator logic — `StageAllocator` handles the tree walk; lifecycle only declares what the topology looks like.
 - **Cost models**: `delta / online-EMA / Pareto / TCO` — these live in `scenario-lifecycle/src/cost.rs` because they're specific to the DC deployment's network/compute assumptions. Implement `core::optimizer::cost::CostModel`.
@@ -477,10 +564,11 @@ Each scenario crate is a library with:
 
 ### `scenario-query` (thin)
 
+- **Data model**: time-series. L2→L3 lowering produces `QueryExpr` with `Source::TimeSeries` leaves.
 - **Inherited L1**: uses `core::query_language::promql` and `core::query_language::sql`.
 - **NEW L2 tree** (Phase 4 work): defines `PromqlLogicalPlan` in `core::logical_plan::promql` that expresses the five pattern shapes asap-planner-rs currently template-matches as first-class L2 nodes. Replaces the pattern-catalogue approach with a proper L1→L2 tree rewrite. SQL side gets a matching `SqlLogicalPlan`.
 - **L3 intent**: maps `Statistic` enum (9 variants) onto `core::sketch_algebra::AggIntent` subset.
-- **L4 rules**: picks from `core::optimizer::rules::*` (all `Bind*` rules are relevant since this scenario covers most sketch types) + a scenario-specific sketch-binding rule for the precompute engine's flavour (which sketches are available, what params, `DeltaSetAggregator` auto-injection before CMS/HydraKLL). This rule absorbs `map_statistic_to_precompute_operator`'s sketch-binding half.
+- **L4 rules**: picks from `core::optimizer::rules::*` (all `Bind*` rules are relevant since this scenario covers most sketch types) + a scenario-specific sketch-binding rule for the precompute engine's flavor (which sketches are available, what params, `DeltaSetAggregator` auto-injection before CMS/HydraKLL). This rule absorbs `map_statistic_to_precompute_operator`'s sketch-binding half.
 - **L5 topology**: `core::physical::topology::SingleStage` (backend-only). No stage-split; `StageAllocator` returns everything on one stage trivially.
 - **L5 emitters**: `StreamingConfigEmitter` + `InferenceConfigEmitter` (YAML bytes). **Authoritative** for these two formats — `scenario-lifecycle` calls them when it needs to POST to ASAPQuery-backend.
 - **Extra L1 inputs**: `query_log/` for Prometheus-query-log replay (unique to this scenario); `schema/` for `PromQLSchema` discovery from a live Prometheus URL.
@@ -489,6 +577,7 @@ Each scenario crate is a library with:
 
 ### `scenario-fusion` (thin)
 
+- **Data model**: tabular. L2→L3 lowering produces `QueryExpr` with `Source::Table` leaves (and, in future, `Source::Join` when fusion extends to multi-table). Crucially **not time-indexed** — fusion works on arbitrary DataFusion relations; time is just another column if present.
 - **L1 opt-out**: fusion consumes a pre-built DataFusion `LogicalPlan` from its caller. `core::query_language` is not invoked. Library-mode scenario.
 - **L2 inherited from DataFusion**: DataFusion's `LogicalPlan` *is* fusion's L2 tree. `core::logical_plan::datafusion` is a thin re-export of `datafusion::logical_expr::LogicalPlan` so scenarios that want to take a DataFusion plan as input have a canonical name for it.
 - **L3 intent**: `SubPopulationAnalyticsType` (3 variants: `Count`, `Sum`, `Quantile`) maps to `core::sketch_algebra::AggIntent` subset.
@@ -583,7 +672,7 @@ Cargo builds this with its own minimal dep tree — no `datafusion`, no `promql-
 - `GET /status` — runtime + scenario health
 
 **New** (internal-only, proto):
-- `proto/asap_control.proto` defines `Plan`, `PlanNode`, `Expr` for persistence + store-internal serialisation. Not on the wire between services. Optional; initial migration skips this and persists via `serde_json`.
+- `proto/asap_control.proto` defines `Plan`, `PlanNode`, `Expr` for persistence + store-internal serialization. Not on the wire between services. Optional; initial migration skips this and persists via `serde_json`.
 
 ## 11. Dependencies and Cargo surface
 
@@ -633,7 +722,7 @@ This matters: a user who only wants `scenario-fusion` (e.g., an offline benchmar
 
 3. **Which scenario owns `StreamingConfig` YAML emission?** Both `scenario-lifecycle` and `scenario-query` emit it today (DC's `config/generate_streaming_config_yaml` and `output/generator.rs` in `asap-planner-rs`). Plan: **one emitter in `scenario-query`**, called from both. This is why `scenario-lifecycle` depends on `scenario-query` in the dependency graph (asymmetric — query does not depend on lifecycle).
 
-4. **Do we vendor DataFusion's IR into core?** No. `scenario-fusion` owns its DataFusion-flavoured plan; `core::plan::Plan` stays an enum with a variant that wraps a `datafusion::LogicalPlan` behind a feature flag. Core itself never reaches into DataFusion types.
+4. **Do we vendor DataFusion's IR into core?** No. `scenario-fusion` owns its DataFusion-flavored plan; `core::plan::Plan` stays an enum with a variant that wraps a `datafusion::LogicalPlan` behind a feature flag. Core itself never reaches into DataFusion types.
 
 5. **OpAMP proto: vendored, or from crates.io?** Today DC vendors. Recommend: keep vendored in `proto/opamp.proto`, generate via `prost-build` in `crates/control-proto`. Same thing DC does today, just moved.
 
@@ -645,7 +734,9 @@ This matters: a user who only wants `scenario-fusion` (e.g., an offline benchmar
 
 9. **Scenario placement — in ASAPController workspace, or in own repo?** Both supported, same architecture either way (see §8 "Scenario placement"). Default: `scenario-lifecycle` and `scenario-query` in ASAPController (easy cross-scenario changes, shared YAML emitter); `scenario-fusion` in the `asap-fusion` repo (research cadence). A new scenario picks based on team ownership and release cadence preferences.
 
-10. **How far do shared L4/L5 rules live in core before they become scenario-specific?** The rule of thumb: if ≥2 current scenarios would use it, it lives in `core::optimizer::rules::*`. If only 1 scenario uses it *and* it depends on scenario-specific types (DataFusion's `LogicalPlan`, OTel YAML shape), it lives in the scenario crate. `SketchConfigRule`-style "bind intent to concrete sketch" rules belong in core (shared). `StageAwarePushDown` (which needs DC's stage graph) belongs in `scenario-lifecycle`. When a rule straddles — e.g. a fusion rewrite that *could* be generalised to any L4-compatible plan — start it in the scenario; lift to core once a second scenario wants it. Don't pre-emptively generalise.
+10. **How far do shared L4/L5 rules live in core before they become scenario-specific?** The rule of thumb: if ≥2 current scenarios would use it, it lives in `core::optimizer::rules::*`. If only 1 scenario uses it *and* it depends on scenario-specific types (DataFusion's `LogicalPlan`, OTel YAML shape), it lives in the scenario crate. `SketchConfigRule`-style "bind intent to concrete sketch" rules belong in core (shared). `StageAwarePushDown` (which needs DC's stage graph) belongs in `scenario-lifecycle`. When a rule straddles — e.g. a fusion rewrite that *could* be generalized to any L4-compatible plan — start it in the scenario; lift to core once a second scenario wants it. Don't pre-emptively generalize.
+
+11. **How does the design support non-time-series data (asap-fusion's tabular queries, future OLAP scenarios)?** Already handled — see §3 "Data-model support" and §6 `core::sketch_algebra`. `QueryExpr::Scan` wraps a `Source` sum (`TimeSeries` / `Table` / `Join`); `AggIntent::requires() -> DataModel` tags which intents apply to which data models; sketches themselves are data-model-agnostic. asap-fusion uses `Source::Table` exclusively; ASAPQuery uses `Source::TimeSeries`; a future OLAP scenario picks whichever fits. The only implementation cost is that L4 rules which genuinely don't apply across data models (e.g. "merge overlapping time windows") must gate on `source.data_model()`; data-model-agnostic rules (the `Bind*` family) need no changes.
 
 ## 13. Success criteria
 

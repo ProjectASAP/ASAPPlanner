@@ -23,7 +23,7 @@ This repo merges three previously-separate projects into a single workspace with
 |---|---|---|
 | 1 | Query-language parsing (PromQL, SQL, DataFusion, ElasticDSL) | `core::query_language` |
 | 2 | Per-language logical plan (relational algebra tree) | `core::logical_plan` |
-| 3 | Sketch algebra — language- and deployment-independent IR (`QueryExpr` + `AggIntent`, intent only, no sketch binding) | `core::sketch_algebra` |
+| 3 | Sketch algebra — language-, deployment-, AND data-model-independent IR (`QueryExpr` + `AggIntent`, intent only). Supports both time-series and tabular data via a `Source` sum inside `Scan`. | `core::sketch_algebra` |
 | 4 | Cost-aware optimizer — rule engine + shared rule library; scenarios pick rules | **framework in `core::optimizer`**; choices in each scenario |
 | 5 | Physical plan — stage allocation + emit to wire format | **framework in `core::physical`**; topology + emitter in each scenario |
 
@@ -38,7 +38,7 @@ crates/
     lower/              # L1→L2→L3 passes
     optimizer/          # L4 framework — rule engine + shared rule library + cost traits
     physical/           # L5 framework — PhysicalPlanner + stage allocator + topology + sketch catalogue
-    pipeline/           # L1→…→L5 driver, parameterised on scenario
+    pipeline/           # L1→…→L5 driver, parameterized on scenario
   runtime/              # HTTP / OpAMP / replanner / store — service skeleton
   scenario-lifecycle    # DC-specific rules + 3-stage topology + OTel/backend emitters
   scenario-query        # precompute-engine rules + 1-stage + StreamingConfig/InferenceConfig YAML emitters
