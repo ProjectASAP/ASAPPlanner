@@ -34,10 +34,12 @@ DataCollector/controller already documents its query→sketch translation as a 5
 | 1 | **Query Language** | Parse raw strings (PromQL, SQL, DataFusion, ElasticDSL, …) into a language-specific AST | DC `controller/src/query_parser/{promql,sql,mod}.rs`; asap-planner-rs pulls `promql-parser` + `sqlparser` directly; asap-fusion consumes a pre-built DataFusion `LogicalPlan` (its L1 happens upstream) |
 | 2 | **Language Logical Plan** | Per-language algebra tree (`Aggregate` / `Window` / `Filter` / `Sort` / `Limit`) preserving language semantics, **no sketch names, no sketch binding** | DC `controller/src/algebra/lower.rs`; asap-fusion inherits DataFusion's `LogicalPlan` as its L2; asap-planner-rs has no L2 today (uses a template-pattern catalogue) — **Phase 4 builds one** |
 | 3 | **Sketch Logical Plan** (sketch algebra) | Language- and deployment-independent IR: `QueryExpr` + `AggIntent` (~25 intent variants). Describes **intent only** — *what* to compute, with accuracy target. **No sketch type, no sketch parameters.** | DC `controller/src/algebra/{expr,directory}.rs`; asap-fusion's 3-variant `SubPopulationAnalyticsType` maps to a subset; asap-planner-rs's 9-variant `Statistic` maps to a subset — **Phase 4 splits sketch binding out of planner's current fused L3+L4** |
-| 4 | **Sketch Optimizer** | Cost-aware algebraic rewrite rules under deployment constraints. **This is where sketch binding happens** — L4 rules take intent-only L3 and emit sketch-bound L3+. ~12 rules in DC; a smaller targeted subset in planner; `SketchConfigRule` + `HashModeRule` in fusion. | DC `controller/src/algebra/optimizer.rs`; fusion `src/optimizer/rules/`; planner's `map_statistic_to_precompute_operator` belongs here once its sketch-binding step is split out |
-| 5 | **Physical Execution Plan** | Assign ops to pipeline stages (edge / gateway / backend / object store); produce the deployment-specific artefact (OpAMP YAML, `streaming_config.yaml`, rewritten DataFusion `LogicalPlan`). **Sketch binding is already committed by L4**; L5 is about stage allocation + emission. | DC `controller/src/algebra/{physical,allocator,plan}.rs`; asap-planner-rs `output/generator.rs`; asap-fusion `src/executor/` |
+| 4 | **Sketch Optimizer** | Cost-aware algebraic rewrite rules under deployment constraints. **This is where sketch binding happens** — L4 rules take intent-only L3 and emit sketch-bound L3+. ~12 rules in DC; a smaller targeted subset in planner; `SketchConfigRule` + `HashModeRule` in fusion. | Core provides the **rule engine driver** + `OptimizerRule` trait + a shared rule library; scenarios **pick** which rules to enable + supply their own deployment constraints. DC `controller/src/algebra/optimizer.rs` (rules); fusion `src/optimizer/rules/`; planner's `map_statistic_to_precompute_operator` |
+| 5 | **Physical Execution Plan** | Assign ops to pipeline stages (edge / gateway / backend / object store); produce the deployment-specific artefact (OpAMP YAML, `streaming_config.yaml`, rewritten DataFusion `LogicalPlan`). **Sketch binding is already committed by L4**; L5 is about stage allocation + emission. | Core provides the **stage allocator framework** + `PhysicalPlanner` trait + the sketch catalogue; scenarios supply their own **topology** (3-stage / 1-stage / 0-stage) + their own **emitter** for the output format. DC `controller/src/algebra/{physical,allocator,plan}.rs`; asap-planner-rs `output/generator.rs`; asap-fusion `src/executor/` |
 
-**The doc's key claim: layers 1–3 are query-language-independent and workload-independent.** That makes them the natural **common core**. Every scenario reads PromQL (or SQL, or …) the same way, lowers it to the same per-language algebra, and lowers THAT to the same sketch-algebra IR (intent only, no sketch binding). Layers 4 and 5 differ by scenario.
+**The doc's key claim: layers 1–3 are query-language-independent and workload-independent.** That makes them the natural **common core**. Every scenario reads PromQL (or SQL, or …) the same way, lowers it to the same per-language algebra, and lowers THAT to the same sketch-algebra IR (intent only, no sketch binding).
+
+**L4 and L5 also have substantial common infrastructure.** Initially we assumed scenarios owned L4/L5 wholesale; on closer inspection what's actually scenario-specific is *which rules fire* (L4) and *what topology + output format* (L5) — not the rule engine, not the allocator, not the sketch catalogue. Those frameworks belong in core. This makes scenarios significantly thinner: each becomes a small crate that picks rules from a shared library, declares a deployment topology, and writes an emitter.
 
 ### Sketch binding lives in L4, not L3
 
@@ -60,14 +62,14 @@ A future scenario whose source semantics genuinely don't fit a tree (e.g. a cons
 
 This drives the core/scenario split:
 
-- **`crates/core/`** owns layers 1–3 verbatim (parsers, L1→L2→L3 lowering, `QueryExpr` + `AggIntent` intent-only IR). Real code with real algorithms — not just types and traits.
-- **Each scenario owns its own L4 + L5.** Scenarios contribute optimizer rules (which includes **sketch binding** as one L4 rule) and physical-plan emitters. The driver that runs L1→L2→L3→L4→L5 lives in core as a small orchestration layer, parameterised on the scenario's rule set + emitter.
+- **`crates/core/`** owns all 5 layers of **shared infrastructure**: L1-3 end-to-end (parsers + lowering + intent-only IR), plus L4's rule engine driver + rule library + cost-model traits, plus L5's stage-allocator framework + `PhysicalPlanner` trait + sketch catalogue.
+- **Each scenario is a thin crate** that: (1) picks which of core's L4 rules to enable + adds any scenario-specific rules, (2) declares its deployment topology (how many stages, where data flows), (3) provides an emitter for its output format. That's usually a few hundred lines, not thousands.
 
 ## 4. Principles
 
-### P1. Core owns L1–3; scenarios own L4–5
+### P1. Core owns shared infrastructure across all 5 layers; scenarios own choices
 
-See §3. Core is NOT just types + trait stubs — it ships working parsers + lowering passes. What scenarios plug in is the optimizer rule set (L4) and the physical-plan + emitter (L5). A new scenario that only redefines L4 or only redefines L5 is a valid minimal extension.
+See §3. Core is NOT just types + trait stubs — it ships working parsers + lowering passes (L1-3), a rule engine + rule library + cost-model traits (L4 framework), and a stage allocator + physical-plan framework + sketch catalogue (L5 framework). What scenarios plug in is **which rules fire** (picking from core's library + adding their own), **deployment topology** (how many stages; DC=3, query=1, fusion=0), and an **emitter** for the output format. A scenario that accepts all core's default L4 rules and uses `core::physical::single_stage_topology` is maybe 200 lines of code.
 
 ### P2. Core has no I/O
 
@@ -104,14 +106,23 @@ ASAPController/
 │   ├── asap_control.proto     # Plan IR + QueryWorkload on the wire
 │   └── opamp.proto            # vendored from DataCollector
 ├── crates/
-│   ├── core/                  # Layers 1-3 + traits; no I/O
+│   ├── core/                  # Shared infrastructure across all 5 layers; no I/O
 │   │   ├── query_language/    # L1: per-language parsers — promql/, sql/, datafusion/, elasticdsl/
 │   │   ├── logical_plan/      # L2: per-language algebra tree (Aggregate/Window/Filter/…)
-│   │   ├── sketch_algebra/    # L3: QueryExpr + AggIntent (~25 variants) + directory
+│   │   ├── sketch_algebra/    # L3: QueryExpr + AggIntent (~25 variants) + sketch directory
 │   │   ├── lower/             # L1→L2→L3 lowering passes (one entry per language)
+│   │   ├── optimizer/         # L4 framework:
+│   │   │   ├── engine/        #   rule driver — fixed-point iteration, cycle detection, priority
+│   │   │   ├── trait/         #   OptimizerRule + RuleCategory (PushDown / Fusion / Elim / Bind)
+│   │   │   ├── rules/         #   shared rule library (e.g. sketch-binding rules; stream-vs-batch picker)
+│   │   │   └── cost/          #   CostModel trait + generic impls (memory budget, accuracy degradation)
+│   │   ├── physical/          # L5 framework:
+│   │   │   ├── planner_trait/ #   PhysicalPlanner trait
+│   │   │   ├── stage_allocator/ # generic topology-driven allocator
+│   │   │   ├── topology/      #   Topology descriptor types (edge/gateway/backend, single, zero)
+│   │   │   └── sketch_catalog/ # candidate sketch types + parameter constraints
 │   │   ├── pipeline/          # orchestrates L1→L2→L3→L4→L5, parameterised on scenario
 │   │   ├── workload/          # QueryWorkload wrapper around QuerySpecs
-│   │   ├── cost/              # CostModel trait — consumed by scenario L4 rules
 │   │   ├── emit/              # PlanEmitter trait — implemented by scenario L5
 │   │   ├── registry/          # ScenarioRegistry, ScenarioId
 │   │   └── telemetry/         # tracing macros, metric names (no exporter)
@@ -122,30 +133,37 @@ ASAPController/
 │   │   ├── replan/            # Replanner — SLA + expiry triggers
 │   │   ├── store/             # PlanStore, WorkloadStore
 │   │   └── backend_client/    # HTTP client (pushes to ASAPQuery-backend, etc.)
-│   ├── scenario-lifecycle/    # DC's end-to-end scenario — its own L4 + L5
-│   │   ├── optimizer/         # L4: the ~12 cost-aware rules from DC algebra/optimizer.rs
-│   │   ├── physical/          # L5: stage_split, delta_cost, pareto, tco, allocator
-│   │   ├── emit/              # L5: OpAmpRemoteConfig + AsapqueryBackendConfig emitters
-│   │   └── cost/              # scenario-specific cost-model impls (online / delta / pareto / tco)
-│   ├── scenario-query/        # analytics-query planning — own L4 + L5 (+ query-log input)
-│   │   ├── optimizer/         # L4: precompute-engine-targeted rules (smaller rule set than lifecycle)
-│   │   ├── physical/          # L5: per-aggregation physical plan
-│   │   ├── emit/              # L5: StreamingConfig.yaml + InferenceConfig.yaml emitters
+│   ├── scenario-lifecycle/    # thin — picks rules, 3-stage topology, OTel/backend emitters
+│   │   ├── rules.rs           # L4 rule selection + DC-specific rules (stage-aware push-down)
+│   │   ├── topology.rs        # 3-stage: edge / gateway / backend
+│   │   ├── cost.rs            # scenario-specific cost impls — delta / online / pareto / tco
+│   │   └── emit/              # OpAmpRemoteConfig + AsapqueryBackendConfig emitters
+│   ├── scenario-query/        # thin — rules, 1-stage topology, YAML emitters + query-log input
+│   │   ├── rules.rs           # L4 rule selection + sketch-binding rule (split from map_statistic_*)
+│   │   ├── topology.rs        # 1-stage: backend-only
+│   │   ├── emit/              # StreamingConfig.yaml + InferenceConfig.yaml
 │   │   ├── query_log/         # extra L1 input: Prometheus query-log replay
 │   │   └── schema/            # PromQLSchema discovery from Prometheus (feeds L1)
-│   ├── scenario-fusion/       # DataFusion operator-level fusion — own L4 + L5
-│   │   ├── optimizer/         # L4: PlanRewriteRule + rules/ (sketch-aware DF rewrites)
-│   │   ├── physical/          # L5: rewritten DataFusion LogicalPlan
-│   │   ├── executor/          # DataFusion SessionContext wrapper (in-process execution)
+│   ├── scenario-fusion/       # thin — DF-flavoured rules, 0-stage, in-process emit
+│   │   ├── rules.rs           # L4 rules for DataFusion LogicalPlan (sketch-aware rewrites)
+│   │   ├── topology.rs        # 0-stage: in-process
+│   │   ├── emit/              # rewritten DataFusion LogicalPlan
+│   │   ├── executor/          # DataFusion SessionContext wrapper (library-mode execution)
 │   │   └── sketch_support/    # asap_sketchlib-backed rewrites
 │   ├── control-proto/         # generated from proto/ (tonic/prost)
 │   └── testing/               # test fixtures + harness shared across scenarios
 └── bin/
-    ├── asap-controller/       # long-running service
-    │   └── main.rs            # axum + OpAMP + replanner + scenarios
-    └── asap-plan/             # one-shot CLI (what asap-planner-rs is today)
-        └── main.rs            # clap — read workload YAML, run scenario-query, emit two YAMLs
+    ├── asap-controller/       # long-running service with all scenarios
+    │   └── main.rs            # axum + OpAMP + replanner + registered scenarios
+    ├── asap-plan/             # one-shot CLI for scenario-query (what asap-planner-rs is today)
+    │   └── main.rs            # clap — read workload YAML, emit two YAMLs
+    ├── asap-lifecycle/        # OPTIONAL: standalone service with only scenario-lifecycle
+    │   └── main.rs            # slimmer image — no DataFusion, no query YAML emitters
+    └── asap-fusion-bench/     # OPTIONAL: benchmark harness over scenario-fusion
+        └── main.rs            # criterion entry; used by researchers
 ```
+
+**Per-scenario standalone binaries** are first-class. Each `bin/<name>/` is a thin shell that `use`s only the scenario crates it needs — so `bin/asap-lifecycle/` doesn't pull `datafusion` into its dep tree, and `bin/asap-fusion-bench/` doesn't pull `axum`/`opamp`. Feature flags on the workspace root let you `cargo build -p asap-lifecycle` and get a minimal binary.
 
 ### Why three scenario crates today, not one monolithic `scenarios/`
 
@@ -240,26 +258,123 @@ impl<S: Scenario> Pipeline<S> {
 
 Core owns the driver. Scenarios own what goes into each scenario-specific seam.
 
-### `core::plan` — shared IR pieces used across layers
+### `core::optimizer` — Layer 4 framework
+
+Core ships the **rule engine + trait surface + a shared rule library**. Scenarios pick which rules to enable.
 
 ```rust
-pub trait Optimizer {
-    fn rules(&self) -> &[Box<dyn OptimizerRule>];
-    fn optimize(&self, l3: Vec<QueryExpr>) -> Result<OptimizedL3, PlanError>;
-}
-
-pub trait OptimizerRule {
+// trait (in core)
+pub trait OptimizerRule: Send + Sync {
     fn name(&self) -> &'static str;
-    fn apply(&self, expr: &QueryExpr, constraints: &DeploymentConstraints) -> Option<QueryExpr>;
+    fn category(&self) -> RuleCategory;   // PushDown | Fusion | Elim | Bind | ...
+    fn priority(&self) -> u16;
+    fn apply(&self, expr: &QueryExpr, c: &DeploymentConstraints) -> Option<QueryExpr>;
 }
 
-pub trait PhysicalPlanner {
-    type Output;
-    fn lower(&self, l4: OptimizedL3) -> Result<Self::Output, PlanError>;
+// engine (in core) — fixed-point iteration, cycle detection, priority ordering
+pub struct RuleEngine { /* ... */ }
+impl RuleEngine {
+    pub fn new(rules: Vec<Box<dyn OptimizerRule>>) -> Self { /* ... */ }
+    pub fn run(&self, exprs: Vec<QueryExpr>, c: &DeploymentConstraints)
+        -> Result<Vec<QueryExpr>, OptError>;
+}
+
+// shared rule library (in core::optimizer::rules) — opt-in from scenarios
+pub mod rules {
+    pub struct BindKllOnQuantile;       // AggIntent::Quantile → bind KLL(k by accuracy)
+    pub struct BindCmsOnCount;          // AggIntent::Count → bind CMS(w, d)
+    pub struct BindHllOnCardinality;    // AggIntent::Cardinality → bind HLL(p)
+    pub struct FusionPassthrough;       // Aggregate over Filter → push Filter under Aggregate
+    pub struct ElimNoopFilter;          // Filter(true) → child
+    // ... etc
+    impl OptimizerRule for BindKllOnQuantile { /* ... */ }
 }
 ```
 
-`OptimizerRule::apply` takes a `DeploymentConstraints` reference — memory budgets, network topology, available sketch backends. Scenarios pass their own constraints; core provides the rule-driver that runs rules to fixed-point.
+Scenarios compose rule sets by picking from the shared library + adding their own:
+
+```rust
+// in scenario-lifecycle
+use asap_control_core::optimizer::{RuleEngine, rules::*};
+fn rule_set() -> Vec<Box<dyn OptimizerRule>> {
+    vec![
+        Box::new(BindKllOnQuantile),
+        Box::new(BindCmsOnCount),
+        Box::new(FusionPassthrough),
+        // DC-specific additions:
+        Box::new(StageAwarePushDown),      // pushes ops to edge when possible
+        Box::new(TransmissionCostRewrite), // uses TCO model to defer aggregation
+    ]
+}
+```
+
+Core also ships `DeploymentConstraints` as a trait object; each scenario supplies a concrete impl with its deployment's memory budgets, network topology, available sketch backends.
+
+### `core::physical` — Layer 5 framework
+
+```rust
+pub trait PhysicalPlanner {
+    type Topology: TopologyDescriptor;
+    type Output;
+    fn lower(&self, l4: Vec<QueryExpr>, t: &Self::Topology) -> Result<Self::Output, PlanError>;
+}
+
+pub trait TopologyDescriptor {
+    fn stages(&self) -> &[StageDescriptor];
+    fn edges(&self) -> &[StageEdge];
+}
+
+// pre-baked topologies in core
+pub mod topology {
+    pub struct ThreeStage { /* edge → gateway → backend */ }
+    pub struct SingleStage { /* backend-only */ }
+    pub struct ZeroStage;   /* in-process */
+}
+
+// generic stage allocator — given a QueryExpr tree + a topology, decide which
+// ops land on which stage subject to constraints
+pub struct StageAllocator;
+impl StageAllocator {
+    pub fn allocate<T: TopologyDescriptor>(
+        &self, exprs: &[QueryExpr], topology: &T, c: &DeploymentConstraints,
+    ) -> Result<Vec<StageAssignment>, PlanError>;
+}
+
+// sketch catalogue — what sketches exist, what params they accept
+pub struct SketchCatalog { /* built at startup; queried by L4 binding rules + L5 */ }
+```
+
+Scenarios use these pieces:
+
+```rust
+// in scenario-lifecycle
+use asap_control_core::physical::{StageAllocator, topology::ThreeStage};
+
+impl PhysicalPlanner for LifecyclePlanner {
+    type Topology = ThreeStage;
+    type Output = (StagedExprs, SketchBindings);
+    fn lower(&self, l4: Vec<QueryExpr>, t: &ThreeStage) -> Result<_, _> {
+        let assignments = StageAllocator.allocate(&l4, t, &self.constraints)?;
+        // scenario-specific post-processing: DC's delta_cost logic,
+        // backend_client push preparation, etc.
+        Ok(/* ... */)
+    }
+}
+```
+
+### `core::plan` — shared traits bridging layers
+
+```rust
+pub trait Scenario {
+    type Topology: TopologyDescriptor;
+    type EmitterOutput;
+    fn rules(&self) -> Vec<Box<dyn OptimizerRule>>;
+    fn topology(&self) -> &Self::Topology;
+    fn physical(&self) -> &dyn PhysicalPlanner<Topology = Self::Topology, Output = _>;
+    fn emitter(&self) -> &dyn PlanEmitter<Output = Self::EmitterOutput>;
+    fn constraints(&self) -> &dyn DeploymentConstraints;
+}
+```
 
 ### `core::workload`
 
@@ -351,63 +466,108 @@ Each scenario crate is a library with:
 - Its own cost model — maybe using `core::cost` primitives, maybe not.
 - Its own integration tests.
 
-### `scenario-lifecycle`
+### `scenario-lifecycle` (thin)
 
-- **L4 rules**: the ~12 cost-aware rewrite rules from DC's `controller/src/algebra/optimizer.rs` — push-down, fusion, elimination, budget-driven deferral, aware of agent/gateway/backend stage boundaries.
-- **L5 physical**: `stage_split` + `SketchAllocator` from DC's `controller/src/algebra/{physical,allocator,plan}.rs`. Commits to concrete `SketchType` + `SketchParams` per op; assigns ops to pipeline stages.
-- **L5 emitters**: `OpAmpRemoteConfigEmitter` (per-role OTel YAML), `AsapqueryBackendConfigEmitter` (`StreamingConfig` YAML POSTed to backend — delegates to `scenario-query`'s emitter for the YAML bytes themselves).
-- **Cost model**: delta / online (EMA) / Pareto / TCO, lifted from DC's `controller/src/planner/*`.
-- **HTTP route**: registers `POST /plan` for full-lifecycle planning.
+- **L4 rules**: picks from `core::optimizer::rules::*` (Bind*, Fusion*, Elim*) + adds DC-specific rules that require stage awareness (`StageAwarePushDown`, `TransmissionCostRewrite`). Adding a stage-specific rule = a new file in `scenario-lifecycle/src/rules.rs`, impl `OptimizerRule`. Unchanged rules come from core.
+- **L5 topology**: `core::physical::topology::ThreeStage` (edge → gateway → backend). No scenario-specific allocator logic — `StageAllocator` handles the tree walk; lifecycle only declares what the topology looks like.
+- **Cost models**: `delta / online-EMA / Pareto / TCO` — these live in `scenario-lifecycle/src/cost.rs` because they're specific to the DC deployment's network/compute assumptions. Implement `core::optimizer::cost::CostModel`.
+- **L5 emitters**: `OpAmpRemoteConfigEmitter` (per-role OTel YAML over OpAMP WebSocket) and `AsapqueryBackendConfigEmitter` (calls `scenario-query`'s `StreamingConfigEmitter` for the YAML bytes, then POSTs to backend).
+- **HTTP route**: `POST /plan` for full-lifecycle planning, `POST /replan` for SLA-triggered.
+- **Size estimate**: ~1500 LOC (was ~5000 pre-refactor). Cost models are the bulk; rule selection + topology + emitter are each a few hundred lines.
 
-### `scenario-query`
+### `scenario-query` (thin)
 
 - **Inherited L1**: uses `core::query_language::promql` and `core::query_language::sql`.
-- **NEW L2 tree** (Phase 4 work): defines `PromqlLogicalPlan` in `core::logical_plan::promql` that expresses the five pattern shapes asap-planner-rs currently template-matches (`OnlyTemporal`×2, `OnlySpatial`, `OneTemporalOneSpatial`×2) as first-class L2 nodes. Replaces the pattern-catalogue approach with a proper L1→L2 tree rewrite. SQL side gets a matching `SqlLogicalPlan`.
-- **L3 intent**: maps `Statistic` enum (9 variants) onto `core::sketch_algebra::AggIntent` (25-variant superset); only uses the subset planner needs.
-- **L4 rules**: includes the **sketch-binding rule** split out from `map_statistic_to_precompute_operator` — `AggIntent + DeploymentConstraints → AggregationType + SketchParams`. Plus a smaller targeted rule set for the precompute-engine deployment (fewer stage-aware rewrites; deployment is "backend only").
-- **L5 physical**: per-aggregation physical plan matching the `StreamingConfig`/`InferenceConfig` YAML schema; label routing (`rollup_labels` / `grouping_labels` / `aggregated_labels`) and auto-injection of `DeltaSetAggregator` before `CountMinSketch`/`HydraKLL` happen here.
-- **L5 emitters**: `StreamingConfigEmitter` + `InferenceConfigEmitter` (YAML bytes). Authoritative emitters for these two formats — `scenario-lifecycle` calls them when it needs to POST to ASAPQuery-backend.
-- **Extra L1 inputs**: `query_log/` for Prometheus-query-log replay (unique to this scenario); `schema/` for PromQLSchema discovery from a live Prometheus URL.
-- **HTTP route**: `POST /plan/query` (JSON `QuerySpec` in, YAML stream out). Also serves as the backend for `bin/asap-plan` one-shot CLI.
-- **Conformance cost**: the L2 tree construction + the L3/L4 sketch-binding split are both net-new work vs. what `asap-planner-rs` does today. Justified by architectural uniformity; see `docs/migration-plan.md` Phase 4.
+- **NEW L2 tree** (Phase 4 work): defines `PromqlLogicalPlan` in `core::logical_plan::promql` that expresses the five pattern shapes asap-planner-rs currently template-matches as first-class L2 nodes. Replaces the pattern-catalogue approach with a proper L1→L2 tree rewrite. SQL side gets a matching `SqlLogicalPlan`.
+- **L3 intent**: maps `Statistic` enum (9 variants) onto `core::sketch_algebra::AggIntent` subset.
+- **L4 rules**: picks from `core::optimizer::rules::*` (all `Bind*` rules are relevant since this scenario covers most sketch types) + a scenario-specific sketch-binding rule for the precompute engine's flavour (which sketches are available, what params, `DeltaSetAggregator` auto-injection before CMS/HydraKLL). This rule absorbs `map_statistic_to_precompute_operator`'s sketch-binding half.
+- **L5 topology**: `core::physical::topology::SingleStage` (backend-only). No stage-split; `StageAllocator` returns everything on one stage trivially.
+- **L5 emitters**: `StreamingConfigEmitter` + `InferenceConfigEmitter` (YAML bytes). **Authoritative** for these two formats — `scenario-lifecycle` calls them when it needs to POST to ASAPQuery-backend.
+- **Extra L1 inputs**: `query_log/` for Prometheus-query-log replay (unique to this scenario); `schema/` for `PromQLSchema` discovery from a live Prometheus URL.
+- **HTTP route**: `POST /plan/query` (JSON `QuerySpec` in, YAML stream out). Also backs the `bin/asap-plan` one-shot CLI.
+- **Size estimate**: ~2500 LOC (was ~6000 pre-refactor — saved by picking from shared rule library; still pays the L2 tree + L3/L4 split refactor cost, which is one-time).
 
-### `scenario-fusion`
+### `scenario-fusion` (thin)
 
-- **L1 opt-out**: fusion consumes a pre-built DataFusion `LogicalPlan` from its caller. `core::query_language` is not invoked. This is fine — L1 is opt-in for library-mode scenarios.
-- **L2 inherited from DataFusion**: DataFusion's `LogicalPlan` *is* fusion's L2 tree. We don't redefine it. `core::logical_plan::datafusion` is a thin re-export of `datafusion::logical_expr::LogicalPlan` so scenarios that want to take a DataFusion plan as input have a canonical name for it.
-- **L3 intent**: `SubPopulationAnalyticsType` (3 variants: `Count`, `Sum`, `Quantile`) maps to `core::sketch_algebra::AggIntent`'s corresponding subset. Fusion's intent layer is *embedded inside* DataFusion `LogicalPlan::Extension` nodes, not a separate tree — that's fine, the `AggIntent` enum is the contract, the carrier is up to the scenario.
-- **L4 rules**: `PlanRewriteRule` trait + `rules/` subdirectory from `asap-fusion/src/optimizer/`. Includes `SketchConfigRule` (already correctly at L4: `SketchConfig::NULL` → `CountMinSketch{5,4096}` / `KLL{k=200,m=8}`) and `HashModeRule`. Operates on DataFusion `LogicalPlan`, not on a standalone `QueryExpr` tree — fusion keeps this so DataFusion's own optimizer passes (`context.state().optimize`) can run *after* fusion's rewrites.
-- **L5 physical**: rewritten `datafusion::LogicalPlan`. Not a wire format — library-mode scenario.
+- **L1 opt-out**: fusion consumes a pre-built DataFusion `LogicalPlan` from its caller. `core::query_language` is not invoked. Library-mode scenario.
+- **L2 inherited from DataFusion**: DataFusion's `LogicalPlan` *is* fusion's L2 tree. `core::logical_plan::datafusion` is a thin re-export of `datafusion::logical_expr::LogicalPlan` so scenarios that want to take a DataFusion plan as input have a canonical name for it.
+- **L3 intent**: `SubPopulationAnalyticsType` (3 variants: `Count`, `Sum`, `Quantile`) maps to `core::sketch_algebra::AggIntent` subset.
+- **L4 rules**: picks `BindCmsOnCount` and `BindKllOnQuantile` from `core::optimizer::rules::*` (which already cover fusion's `SketchConfigRule` semantics) + scenario-specific `HashModeRule`. Rules operate on DataFusion `LogicalPlan` (via Extension wrapping), not on `QueryExpr` trees — this lets DataFusion's `context.state().optimize` run *after* fusion's rewrites, keeping free reuse of DF's standard optimizer passes.
+- **L5 topology**: `core::physical::topology::ZeroStage` (in-process).
+- **L5 emitter**: rewritten `datafusion::LogicalPlan`. Not a wire format — this scenario is library-mode.
 - **Executor**: `ASAPExecutor` wraps a DataFusion `SessionContext`. Users construct `scenario-fusion` in-process.
 - **HTTP route**: none by default.
-- **Conformance cost**: zero. Fusion already separates intent from sketch binding (`SketchConfigRule` at L4); its L3 vocabulary is a strict subset of DC's; its L2 is DataFusion's native tree. The only design decision is declaring `core::logical_plan::datafusion` as the canonical name for "L2 = DataFusion tree."
+- **Conformance cost**: near zero. Fusion's `SketchConfigRule` logic is replaced with picks from `core::optimizer::rules::*`; its `HashModeRule` stays scenario-specific.
+- **Size estimate**: ~1800 LOC (was ~3000 pre-refactor; the `SketchConfigRule` code folds into core's shared rule library).
 
 The sketch microbenchmarks (KLL/CMS) move with the crate and keep running. The TODO items from `asap-fusion/TODO.md` (batch/multi-query execution, time semantics, distributed model) remain open but are now filed against `scenario-fusion/TODO.md` in-repo.
 
+### Data plane communication
+
+Control plane (ASAPController) and data plane (OTel agents / ASAPQuery-backend / DataFusion runtimes) always talk **over wire**, never via in-process calls. This is unchanged from today:
+
+| Scenario | Data plane lives in | Wire protocol |
+|---|---|---|
+| lifecycle | DataCollector (OTel collectors, agent + backend roles) | OpAMP WebSocket (config push) + HTTP POST (`StreamingConfig` → ASAPQuery-backend) + Prometheus scrape (metrics in) |
+| query | ASAPQuery-backend (query engine, SimpleMapStore) | HTTP POST `/api/v1/streaming-config` + `/api/v1/plan` (capability-miss callback in) + YAML file on disk (init-container mode) |
+| fusion | Caller's DataFusion `SessionContext` | in-process library call (no wire) |
+
+**Data plane code stays in its original repo.** ASAPController only owns the control plane. The merger doesn't move OTel collectors out of DataCollector, doesn't move the query engine out of ASAPQuery-backend, and doesn't move DataFusion out of asap-fusion's users. Each data plane keeps its own release cadence.
+
+### Scenario placement: in-repo or out-of-repo
+
+Because core owns the L4/L5 infrastructure (not just L1-3), a scenario crate is small and largely self-contained. That means scenarios can live either:
+
+- **Inside ASAPController workspace** — `crates/scenario-<name>/`, lockstep release with core, cross-scenario changes are one PR.
+- **In their own downstream repo** — declares `asap-control-core` as a git-tagged dep, releases independently, owns its own CI.
+
+Both produce functionally identical artefacts because they pick from the same `core::optimizer::rules` library and use the same traits. The placement is a **deployment / team-ownership decision**, not an architectural fork.
+
+Default recommendation:
+- **scenario-lifecycle** and **scenario-query** in ASAPController (they share `scenario-query`'s YAML emitter via a workspace `path = "../scenario-query"` dep — trivial in-workspace).
+- **scenario-fusion** out-of-tree in `asap-fusion` repo (research project with independent benchmark cadence; depends on `asap-control-core` + `asap-control-optimizer` as published git tags).
+
+Future scenarios choose whichever placement fits the team that owns them.
+
 ### Asymmetric dependency
 
-`scenario-lifecycle` depends on `scenario-query` because the YAML emitters live there. No other cross-scenario deps.
+`scenario-lifecycle` depends on `scenario-query` because the `StreamingConfig` YAML emitter is authoritative there. When both live in ASAPController workspace this is a trivial `path =` dep. If one is ever moved out-of-tree, we lift the emitter into core to avoid a cross-repo Cargo dep.
 
 ## 9. Extension point — a 4th scenario
 
-A hypothetical "edge caching" scenario that decides which queries to cache at the edge vs. backend would land as:
+With the L4/L5 framework in core, adding a new scenario is mostly picking + a bit of glue. A hypothetical "edge caching" scenario that decides which queries to cache at the edge vs. backend would land as:
 
 ```
-crates/scenario-edge-cache/
-├── Cargo.toml               # depends on core only
+crates/scenario-edge-cache/                   # or your own repo
+├── Cargo.toml                                 # depends on asap-control-core
 ├── src/
-│   ├── lib.rs              # impl Scenario for EdgeCacheScenario
-│   ├── planner.rs          # impl Planner — takes QueryWorkload, outputs CachePlan
-│   ├── emit/
-│   │   └── edge_config.rs  # impl PlanEmitter — emits edge-agent YAML
-│   └── cost.rs             # impl CostModel — hit ratio × bandwidth
+│   ├── lib.rs                                 # impl Scenario for EdgeCacheScenario
+│   ├── rules.rs                               # pick core rules + add EdgeCacheBindRule
+│   ├── topology.rs                            # TwoStage { edge, backend } TopologyDescriptor
+│   ├── cost.rs                                # impl CostModel — hit ratio × bandwidth
+│   └── emit/
+│       └── edge_agent_config.rs               # impl PlanEmitter — emits edge-agent YAML
 └── tests/
 ```
 
 Total touch outside the new crate:
-- 1 line in `bin/asap-controller/main.rs` to register
-- 1 line in workspace `Cargo.toml`
+- 1 line in `bin/asap-controller/main.rs` to register (if in-workspace) OR a published binary in your own repo
+- 1 line in workspace `Cargo.toml` (if in-workspace)
 - optional: add `ScenarioId::EdgeCache` to `core::registry`
+
+Typical size: ~500-2000 LOC depending on how scenario-specific the rules / cost model / emitter are. If the scenario accepts core's defaults everywhere, ~300 LOC is realistic.
+
+### Standalone binary for one scenario
+
+If you want a slim binary that runs only one scenario:
+
+```
+bin/asap-edge-cache/
+├── Cargo.toml     # depends only on runtime + scenario-edge-cache, not other scenarios
+└── src/main.rs    # registers only EdgeCacheScenario; no DataFusion, no query YAML
+```
+
+Cargo builds this with its own minimal dep tree — no `datafusion`, no `promql-parser` unless this scenario needs it. Useful when a deployment is dedicated to one scenario (e.g. an edge-caching-only service).
 
 ## 10. Wire protocols — what changes, what doesn't
 
@@ -482,6 +642,10 @@ This matters: a user who only wants `scenario-fusion` (e.g., an offline benchmar
 7. **Versioning?** Start at `0.1.0` on the workspace. Scenarios can rev independently later via per-crate versions, but initially lockstep.
 
 8. **What if a future scenario can't fit a tree L2?** L2 is currently a per-language tree, mandatory for every scenario. asap-planner-rs's Phase 4 conformance cost (reverse-engineering PromQL pattern templates into a `PromqlLogicalPlan` tree) was taken deliberately to keep the architecture uniform. If a future scenario's source language doesn't map naturally onto a tree (e.g. a constraint-based or dataflow-graph query language), that's the moment to re-examine the L2 contract — the `core::logical_plan` module is a single Rust trait + per-language types, not a deep assumption baked across the codebase. Until then, L2 = tree.
+
+9. **Scenario placement — in ASAPController workspace, or in own repo?** Both supported, same architecture either way (see §8 "Scenario placement"). Default: `scenario-lifecycle` and `scenario-query` in ASAPController (easy cross-scenario changes, shared YAML emitter); `scenario-fusion` in the `asap-fusion` repo (research cadence). A new scenario picks based on team ownership and release cadence preferences.
+
+10. **How far do shared L4/L5 rules live in core before they become scenario-specific?** The rule of thumb: if ≥2 current scenarios would use it, it lives in `core::optimizer::rules::*`. If only 1 scenario uses it *and* it depends on scenario-specific types (DataFusion's `LogicalPlan`, OTel YAML shape), it lives in the scenario crate. `SketchConfigRule`-style "bind intent to concrete sketch" rules belong in core (shared). `StageAwarePushDown` (which needs DC's stage graph) belongs in `scenario-lifecycle`. When a rule straddles — e.g. a fusion rewrite that *could* be generalised to any L4-compatible plan — start it in the scenario; lift to core once a second scenario wants it. Don't pre-emptively generalise.
 
 ## 13. Success criteria
 
