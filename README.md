@@ -47,7 +47,7 @@ crates/
   testing               # shared fixtures
 bin/
   asap-controller       # long-running service, all scenarios
-  asap-plan             # one-shot CLI (scenario-query only)
+  asap-query             # one-shot CLI (scenario-query only)
   asap-lifecycle        # OPTIONAL: standalone service with only scenario-lifecycle
   asap-fusion-bench     # OPTIONAL: benchmark harness over scenario-fusion
 ```
@@ -62,7 +62,7 @@ Three ways downstream can use ASAPController — mix as needed:
 |---|---|---|
 | **Rust library** | In-process use of the IR or a specific scenario (e.g. asap-fusion benchmarks) | `Cargo.toml`: `asap-control-core = { git = "...", tag = "v0.1.0" }` or any individual `scenario-*` crate. Per-crate dep isolation keeps dep trees small (scenario-fusion pulls DataFusion; scenario-query pulls PromQL/SQL parsers; neither pulls axum/OpAMP). |
 | **HTTP service sidecar** | Production control plane — e.g. ASAPQuery-backend POSTing QuerySpec on capability-miss | Run `asap-controller` binary, POST to `/api/v1/plan`. Same contract DC controller speaks today. |
-| **CLI / Docker image** | One-shot init container (e.g. docker-compose init job that writes `streaming_config.yaml`) | `asap-controller plan --workload ... --output-dir ...` or the dedicated `asap-plan` binary |
+| **CLI / Docker image** | One-shot init container (e.g. docker-compose init job that writes `streaming_config.yaml`) | `asap-controller plan --workload ... --output-dir ...` or the dedicated `asap-query` binary |
 
 ## Data plane lives elsewhere
 

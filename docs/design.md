@@ -155,7 +155,7 @@ ASAPController/
 └── bin/
     ├── asap-controller/       # long-running service with all scenarios
     │   └── main.rs            # axum + OpAMP + replanner + registered scenarios
-    ├── asap-plan/             # one-shot CLI for scenario-query (what asap-planner-rs is today)
+    ├── asap-query/             # one-shot CLI for scenario-query (what asap-planner-rs is today)
     │   └── main.rs            # clap — read workload YAML, emit two YAMLs
     ├── asap-lifecycle/        # OPTIONAL: standalone service with only scenario-lifecycle
     │   └── main.rs            # slimmer image — no DataFusion, no query YAML emitters
@@ -484,7 +484,7 @@ Each scenario crate is a library with:
 - **L5 topology**: `core::physical::topology::SingleStage` (backend-only). No stage-split; `StageAllocator` returns everything on one stage trivially.
 - **L5 emitters**: `StreamingConfigEmitter` + `InferenceConfigEmitter` (YAML bytes). **Authoritative** for these two formats — `scenario-lifecycle` calls them when it needs to POST to ASAPQuery-backend.
 - **Extra L1 inputs**: `query_log/` for Prometheus-query-log replay (unique to this scenario); `schema/` for `PromQLSchema` discovery from a live Prometheus URL.
-- **HTTP route**: `POST /plan/query` (JSON `QuerySpec` in, YAML stream out). Also backs the `bin/asap-plan` one-shot CLI.
+- **HTTP route**: `POST /plan/query` (JSON `QuerySpec` in, YAML stream out). Also backs the `bin/asap-query` one-shot CLI.
 - **Size estimate**: ~2500 LOC (was ~6000 pre-refactor — saved by picking from shared rule library; still pays the L2 tree + L3/L4 split refactor cost, which is one-time).
 
 ### `scenario-fusion` (thin)
@@ -601,7 +601,7 @@ members = [
     "crates/control-proto",
     "crates/testing",
     "bin/asap-controller",
-    "bin/asap-plan",
+    "bin/asap-query",
 ]
 
 [workspace.dependencies]
@@ -637,7 +637,7 @@ This matters: a user who only wants `scenario-fusion` (e.g., an offline benchmar
 
 5. **OpAMP proto: vendored, or from crates.io?** Today DC vendors. Recommend: keep vendored in `proto/opamp.proto`, generate via `prost-build` in `crates/control-proto`. Same thing DC does today, just moved.
 
-6. **What happens to ASAPQuery-backend's `asap-planner-rs` directory post-migration?** Deleted. ASAPQuery-backend's docker-compose drops the `asap-planner-rs` init container; the controller's `scenario-query` now runs in-process (service mode) or as the `asap-plan` CLI (one-shot mode). The ASAPQuery-backend repo shrinks by two directories.
+6. **What happens to ASAPQuery-backend's `asap-planner-rs` directory post-migration?** Deleted. ASAPQuery-backend's docker-compose drops the `asap-planner-rs` init container; the controller's `scenario-query` now runs in-process (service mode) or as the `asap-query` CLI (one-shot mode). The ASAPQuery-backend repo shrinks by two directories.
 
 7. **Versioning?** Start at `0.1.0` on the workspace. Scenarios can rev independently later via per-crate versions, but initially lockstep.
 
@@ -652,7 +652,7 @@ This matters: a user who only wants `scenario-fusion` (e.g., an offline benchmar
 The migration is done when:
 
 1. `asap-controller` binary runs and passes DC controller's existing integration tests (OpAMP push, backend config POST, SLA replan).
-2. `asap-plan` binary takes the same YAML input asap-planner-rs does today and produces byte-identical `streaming_config.yaml` + `inference_config.yaml` (fuzz-test against a corpus of fixtures).
+2. `asap-query` binary takes the same YAML input asap-planner-rs does today and produces byte-identical `streaming_config.yaml` + `inference_config.yaml` (fuzz-test against a corpus of fixtures).
 3. ASAPQuery-backend's docker-compose no longer starts `asap-planner-rs`; the controller handles both shapes.
 4. `asap-fusion`'s microbenchmarks still run under `scenario-fusion` with identical numbers.
 5. The `DataCollector/controller/`, `ASAPQuery/asap-planner-rs/`, `ASAPQuery-backend/asap-planner-rs/`, and `asap-fusion/` directories are deletable (or already deleted) without breaking any currently-running deployment.

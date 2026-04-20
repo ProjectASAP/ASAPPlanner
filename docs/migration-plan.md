@@ -145,7 +145,7 @@ This phase is larger than a straight lift because two structural conformance cha
 - Diff the two `asap-planner-rs` copies. Newer (backend) copy wins. **Port only the newer; discard the older.**
 - Copy `ASAPQuery-backend/asap-planner-rs/src/{lib,main}.rs` + `src/{planner,output,query_log,prometheus_client}/` → `crates/scenario-query/src/`.
 - `impl Scenario for QueryScenario` — registers YAML emitters (`StreamingConfigEmitter` + `InferenceConfigEmitter`) and HTTP route `POST /plan/query`.
-- Port the CLI: `bin/asap-plan/main.rs` with clap flags mirroring `asap-planner-rs`'s current CLI.
+- Port the CLI: `bin/asap-query/main.rs` with clap flags mirroring `asap-planner-rs`'s current CLI.
 
 **Work — L2 tree conformance (NEW):**
 - Define `PromqlLogicalPlan` in `core::logical_plan::promql` that expresses the five pattern shapes planner currently template-matches (`OnlyTemporal`×2, `OnlySpatial`, `OneTemporalOneSpatial`×2) as first-class L2 tree nodes (`Aggregate` / `Window` / `Filter` / `Sort` / `Limit`).
@@ -166,7 +166,7 @@ This phase is larger than a straight lift because two structural conformance cha
 - `scenario-query/src/emit/`: `StreamingConfigEmitter` + `InferenceConfigEmitter`. Lift from asap-planner-rs's `output/generator.rs`. These are the authoritative YAML emitters (scenario-lifecycle calls them).
 
 **Testing:**
-- **Golden-file test**: capture a corpus of today's `asap-planner-rs` inputs → outputs. The new CLI must produce byte-identical output. Put under `bin/asap-plan/tests/golden/`. This is the non-negotiable safety net for the refactor.
+- **Golden-file test**: capture a corpus of today's `asap-planner-rs` inputs → outputs. The new CLI must produce byte-identical output. Put under `bin/asap-query/tests/golden/`. This is the non-negotiable safety net for the refactor.
 - **L2 round-trip test**: `parse → build PromqlLogicalPlan → pretty-print back → parse` stays stable across tree rewrites.
 - **L3 intent-only test**: after L3 lowering, assert `AggIntent` carries no sketch-type information (type-system-enforced, not runtime-enforced — `AggIntent::Quantile` carries `AccuracyTarget`, not `SketchType`).
 
@@ -176,7 +176,7 @@ This phase is larger than a straight lift because two structural conformance cha
 - Update ASAPQuery-backend's `docker-compose-precompute.yml` to swap the `asap-planner-rs` init container for `asap-controller plan --workload /config/controller-config.yaml --output-dir /asap-planner-output`. Ship **after** ASAPController publishes its first binary release.
 
 **Exit criteria:**
-- `asap-plan` CLI produces byte-identical YAML to `asap-planner-rs` on the golden-file corpus.
+- `asap-query` CLI produces byte-identical YAML to `asap-planner-rs` on the golden-file corpus.
 - HTTP `POST /plan/query` returns the same YAML over HTTP.
 - `AggIntent` post-L3 contains zero `AggregationType` / sketch params (type-enforced).
 - Planner's `PromQLPattern*` / `SQLPatternMatcher` files are deleted.
@@ -227,7 +227,7 @@ This phase is larger than a straight lift because two structural conformance cha
     - Update `asap-quickstart/docker-compose-precompute.yml` to replace the `asap-planner-rs` init container with an `asap-controller plan` invocation.
     - Update `asap-quickstart/Dockerfile.queryengine-local` if it ever references asap-planner-rs (likely it doesn't).
     - Capability-miss callback in `SimpleEngine` continues to `POST /api/v1/plan` on the controller — no code change, same endpoint.
-- **ASAPQuery PR**: delete `asap-planner-rs/` (the older copy). Any downstream refs in ASAPQuery update to point at ASAPController's `asap-plan` binary.
+- **ASAPQuery PR**: delete `asap-planner-rs/` (the older copy). Any downstream refs in ASAPQuery update to point at ASAPController's `asap-query` binary.
 - **DataCollector PR**: delete `controller/` directory. Anyone who ran `cargo build -p controller` now runs `cargo build -p asap-controller` against the new repo. Update DC's README to redirect.
 - **asap-fusion PR**: convert the repo to a thin shim that re-exports `scenario-fusion` OR archive the repo outright if no external user depends on it. Recommendation: **archive**.
 
@@ -297,7 +297,7 @@ These are the questions that will come up mid-migration. Pre-decide as many as p
 1. **Which version of `asap_types`?** ASAPQuery-backend's current one, pinned to a git SHA.
 2. **Which `promql-parser` + `sqlparser` versions?** DC controller's (newer). ASAPQuery-backend's planner uses older versions; port it to the newer ones during Phase 4.
 3. **How is `scenario-lifecycle`'s `StreamingConfig` YAML emitter related to `scenario-query`'s?** One emitter in `scenario-query`, called from `scenario-lifecycle`. Asymmetric dependency.
-4. **Does `asap-controller` have feature flags to disable scenarios at build time?** Yes, one `--features lifecycle,query,fusion` with all three enabled by default. A minimal CLI binary (`asap-plan`) disables lifecycle and fusion.
+4. **Does `asap-controller` have feature flags to disable scenarios at build time?** Yes, one `--features lifecycle,query,fusion` with all three enabled by default. A minimal CLI binary (`asap-query`) disables lifecycle and fusion.
 5. **Who owns the Cargo.lock?** ASAPController. Downstream repos (ASAPQuery-backend, DataCollector) do NOT depend on ASAPController as a Cargo path dep — they pull the published binary via Docker or pin a git SHA.
 6. **Does `ControllerClient` on the ASAPQuery-backend side need changes?** No. It keeps POSTing to `/api/v1/plan`; the controller's routing layer dispatches to `scenario-lifecycle` (same as DC controller does today).
 7. **L2 tree for asap-planner-rs — mandatory or optional?** Mandatory. planner's current template-catalogue approach is replaced with a proper `PromqlLogicalPlan` tree in Phase 4. The extra conformance work is taken to keep the 5-layer model uniform. See design doc §12 Q8 for the escape hatch if a future scenario genuinely can't fit a tree.
