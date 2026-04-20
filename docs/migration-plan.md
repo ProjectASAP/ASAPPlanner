@@ -34,24 +34,36 @@ Ordered by risk, lowest first. Each phase is a single PR unless noted.
 
 ---
 
-### Phase 1 — Core extraction: types only
+### Phase 1 — Core extraction: layers 1–3 + traits
 
-**Scope:** Move the types that all three scenarios will need into `crates/core/`. Pure types + trait definitions. No algorithms.
+**Scope:** Lift the DC controller's **layers 1–3** (query parsing + per-language algebra + sketch-algebra IR) into `crates/core/` verbatim. Add trait seams for the L4/L5 plugin points scenarios will implement later. This is real code — parsers, lowering passes, `QueryExpr`/`AggIntent` — not just trait stubs.
+
+Per design §3, these three layers are "query-language-independent and workload-independent" (per DC's own `query-to-sketch-translation.md`), so they belong in core, not in a scenario.
 
 **Work:**
-- `core::workload`: lift `QuerySpec` from `DataCollector/controller/src/analyzer.rs` and `QueryWorkload` as the new sum type. Vendor the bits of `asap_types::AggregationConfig` / `QueryConfig` / `StreamingConfig` / `InferenceConfig` / `AggregationReference` that will be needed — either by re-exporting `asap_types` as a path dep OR (preferred) by publishing `asap_types` to crates.io/a git dep so ASAPController can depend on it without vendoring ASAPQuery-backend's whole workspace.
-- `core::plan`: define `Plan`, `PlanNode`, `Expr` trait stubs + the `Planner`, `Optimizer`, `PlanRewriteRule`, `PlanEmitter` traits. No concrete impls.
-- `core::cost`: `CostModel` trait + `Accuracy`/`Latency`/`Dollars` value types.
-- `core::emit`: `PlanEmitter` trait + `EmitError`.
-- `core::registry`: `ScenarioRegistry`, `Scenario` trait, `ScenarioId` enum with the 3 known variants.
+- **`core::query_language`** (L1): lift `DataCollector/controller/src/query_parser/{promql,sql,mod}.rs` into `core/src/query_language/`. One module per language. Keep wrappers over `promql-parser` + `sqlparser` as-is.
+- **`core::logical_plan`** (L2): lift the per-language algebra tree definitions from DC's lowering code into `core/src/logical_plan/`. One `enum LogicalPlan` per language.
+- **`core::sketch_algebra`** (L3): lift `DataCollector/controller/src/algebra/{expr,directory}.rs` (the `QueryExpr` + `AggIntent` IR + candidate sketch type directory) into `core/src/sketch_algebra/`.
+- **`core::lower`**: lift `DataCollector/controller/src/algebra/lower.rs` (L1→L2→L3 passes) into `core/src/lower/`. One `lower_<lang>` entry point per language.
+- **`core::pipeline`**: the L1→…→L5 driver. Parameterised on `Scenario` trait. Small new code (~200 LOC).
+- **`core::workload`**: lift `QuerySpec` from `DataCollector/controller/src/analyzer.rs` + add `QueryWorkload` sum type. Pull in `asap_types::{AggregationConfig, QueryConfig, StreamingConfig, InferenceConfig, AggregationReference}` as a git-pinned dep (see Decision Point).
+- **`core::plan`**: define the trait seams — `Optimizer`, `OptimizerRule`, `PhysicalPlanner`, `PlanEmitter`, `Scenario`, `DeploymentConstraints`. Traits only; concrete impls live in scenarios.
+- **`core::cost`**: `CostModel` trait + `Accuracy`/`Latency`/`Dollars` value types. Concrete models stay in scenario crates.
+- **`core::registry`**: `ScenarioRegistry`, `ScenarioId` enum with the 3 known variants.
 
-**Risk:** low — no runtime behaviour yet; the traits may need to be revised as scenarios land. Plan for a second "core refactor" PR mid-migration once 2 of 3 scenarios have landed.
+**Testing:**
+- Port DC's existing `query_parser/` + `algebra/` unit tests verbatim. They must all pass after the move.
+- Add a golden-file round-trip test: `parse_promql("sum by (host)(rate(requests[5m]))") → lower → QueryExpr` produces a stable JSON representation. This pins L1-3 behaviour so Phase 4/5 refactors don't drift it.
 
-**Decision point:** `asap_types` — vendor or publish? **Recommendation: publish to a private git tag.** Pinning a git SHA avoids the churn of path deps across repos. Do this early so Phase 2+ can depend on a stable `asap_types` version.
+**Risk:** medium. L1-3 are real code with real behaviour, not trait stubs. The DC controller's existing tests are the safety net — they must pass unchanged after the lift.
 
-**Exit criteria:** `cargo build` green; `core` compiles with zero `todo!()`s (trait stubs are fine).
+**Decision points:**
+1. `asap_types` — vendor or publish? **Recommendation: publish to a private git tag.** Pinning a git SHA avoids path-dep churn across repos. Do this in Phase 0 so Phase 1+ can depend on a stable version.
+2. `promql-parser` / `sqlparser` versions — DC uses newer (0.8 / 0.61) than asap-planner-rs (0.5 / 0.59). **Adopt DC's newer versions in core.** asap-planner-rs's query patterns will be re-verified against them in Phase 4.
 
-**PR size:** ~800 LOC.
+**Exit criteria:** `cargo build` green; DC's parser + algebra unit tests all pass from `core/`; golden-file round-trip test locked in.
+
+**PR size:** ~4000 LOC (L1-3 is the substantial half of DC controller by line count).
 
 ---
 
@@ -113,25 +125,27 @@ Ordered by risk, lowest first. Each phase is a single PR unless noted.
 
 ---
 
-### Phase 5 — `scenario-lifecycle`: DC controller's planner
+### Phase 5 — `scenario-lifecycle`: DC controller's L4 + L5
 
-**Scope:** Move DC controller's planning logic into `crates/scenario-lifecycle/`. This is the largest and highest-risk scenario.
+**Scope:** Move DC controller's **L4 optimizer + L5 physical plan + emitters** into `crates/scenario-lifecycle/`. Note L1-3 are already in core from Phase 1 — only L4/L5 remain. This is still the largest scenario because DC's cost-model code (planner/) is big.
 
 **Work:**
-- Copy `DataCollector/controller/src/{planner,algebra,config,query_parser}/` → `crates/scenario-lifecycle/src/`.
-- `impl Scenario for LifecycleScenario` — registers:
-    - HTTP routes: `POST /plan` (full-lifecycle planner), `POST /replan` (SLA-driven).
-    - Emitters: `OpAmpRemoteConfigEmitter`, `StreamingConfigEmitter` (delegates to `scenario-query`'s emitter), `AsapqueryBackendConfigEmitter`.
-- Wire OpAMP server — copy `DataCollector/controller/src/opamp/` to `runtime/opamp/` (yes, runtime not scenario — OpAMP is a transport, not a plan-type).
-- Wire replanner — copy `DataCollector/controller/src/{replan,monitor}.rs` to `runtime/{replan,monitor}/`.
-- Update `runtime/http/` to dispatch `POST /plan` through the `ScenarioRegistry` instead of calling DC's planner directly.
-- Integration test: send a `QuerySpec` over HTTP, assert the correct OTel config is pushed via OpAMP and the correct `StreamingConfig` is POSTed to a fake backend. DC controller already has tests of this shape; port them.
+- **L4**: copy `DataCollector/controller/src/algebra/optimizer.rs` + its rule modules into `crates/scenario-lifecycle/src/optimizer/`. Each rule implements `core::plan::OptimizerRule`.
+- **L5 physical**: copy `DataCollector/controller/src/algebra/{physical,allocator,plan}.rs` into `crates/scenario-lifecycle/src/physical/`. `impl core::plan::PhysicalPlanner`.
+- **Cost models**: copy `DataCollector/controller/src/planner/{delta_cost_model,online_cost_model,pareto,tco,rules,baseline,cost_model}.rs` into `crates/scenario-lifecycle/src/cost/`. Each implements `core::cost::CostModel`.
+- **Stage-split**: `DataCollector/controller/src/planner/stage_split.rs` → `crates/scenario-lifecycle/src/physical/stage_split.rs` (scenario-specific — this is what makes lifecycle different from query).
+- **Emitters**: `DataCollector/controller/src/config/generate_{agent,backend}_config*.rs` → `crates/scenario-lifecycle/src/emit/`. `OpAmpRemoteConfigEmitter` + `AsapqueryBackendConfigEmitter` (the latter calls `scenario-query`'s YAML emitter).
+- `impl Scenario for LifecycleScenario` — registers HTTP routes: `POST /plan` (full-lifecycle planner), `POST /replan` (SLA-driven).
+- **Wire OpAMP server**: copy `DataCollector/controller/src/opamp/` → `runtime/opamp/`. OpAMP is a transport, not a plan-type, so it lives in runtime, not in the scenario crate.
+- **Wire replanner**: copy `DataCollector/controller/src/{replan,monitor}.rs` → `runtime/{replan,monitor}/`.
+- Update `runtime/http/` to dispatch `POST /plan` through `ScenarioRegistry` instead of calling DC's planner directly.
+- **Integration test**: send a `QuerySpec` over HTTP → L1-3 in core → L4 rules fire → L5 produces OTel YAML + backend `StreamingConfig` → fake backend asserts the POST body matches golden file. DC already has this test shape; port it.
 
-**Risk:** high. DC controller's planner is 60K lines (src/main.rs + planner/ + algebra/ = most of the repo). Staged plan generation, delta cost modelling, stage-split — all subtle. Port *without* touching the logic; only adjust imports + trait impls.
+**Risk:** high. DC's cost-model + stage-split code is ~40KB of subtle logic. Port **without** touching the logic; only adjust imports + trait impls. Any refactoring is out of scope for Phase 5 — file it against a follow-up.
 
 **Exit criteria:** DC controller's existing integration tests pass against `asap-controller` binary. SLA-driven replan fires on violation. OpAMP push to agents works byte-identically.
 
-**PR size:** ~8000 LOC (this is the big one). Consider splitting: (a) lift algebra+planner as-is; (b) wire through registry in a separate PR.
+**PR size:** ~5000 LOC (smaller than the original plan because L1-3 already moved in Phase 1). Consider splitting: (a) lift optimizer+physical+cost as-is behind trait impls; (b) wire through registry + runtime in a separate PR.
 
 ---
 
@@ -182,15 +196,15 @@ Ordered by risk, lowest first. Each phase is a single PR unless noted.
 | Phase | PRs | Cumulative LOC | Est. wall time (1 engineer) |
 |---|---|---|---|
 | 0. Skeleton | 1 | ~200 | 1 day |
-| 1. Core types | 1 | ~1000 | 3 days |
-| 2. Runtime HTTP+store | 1 | ~2500 | 3 days |
-| 3. scenario-fusion | 1 | ~5500 | 1 week |
-| 4. scenario-query + asap-plan CLI | 1 | ~9500 | 1.5 weeks |
-| 5. scenario-lifecycle | 2 | ~17500 | 2 weeks |
-| 6. Cutover (delete) | 3–4 | ~18000 | 1 week |
-| 7. Core refactor | 1 | ~18500 | 3 days |
+| 1. Core — L1-3 + traits | 1 | ~4200 | 1 week |
+| 2. Runtime HTTP+store | 1 | ~5700 | 3 days |
+| 3. scenario-fusion (L4+L5 over DF) | 1 | ~8700 | 1 week |
+| 4. scenario-query (L4+L5 → YAML) + asap-plan CLI | 1 | ~12700 | 1.5 weeks |
+| 5. scenario-lifecycle (L4+L5 + OpAMP + replanner) | 2 | ~17700 | 1.5 weeks |
+| 6. Cutover (delete in source repos) | 3–4 | ~18200 | 1 week |
+| 7. Core refactor | 1 | ~18700 | 3 days |
 
-**Total**: ~6 weeks for one engineer. Parallelizable if two people: one on lifecycle (Phase 5, the long tail) while another does Phases 2–4.
+**Total**: ~6 weeks for one engineer. Phase 1 grew (L1-3 is more than trait stubs) and Phase 5 shrank (L1-3 was already done), netting roughly the same total. Parallelizable if two people: one on lifecycle (Phase 5, still the long tail) while another does Phases 2–4.
 
 ## Risk register
 
