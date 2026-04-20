@@ -17,7 +17,7 @@ This repo merges three previously-separate projects into a single workspace with
 
 ## Architecture (summary)
 
-Organised around DC controller's documented **5-layer query→sketch pipeline**:
+**5-layer query→sketch pipeline**:
 
 | Layer | What | Where it lives |
 |---|---|---|
