@@ -220,10 +220,79 @@ The language- and deployment-independent IR. Data-model-agnostic: supports both 
 
 ```rust
 pub enum QueryExpr {
+    // ── Base relations ────────────────────────────────────────────────────
+    /// A metric stream / table / join. Outermost leaf.
     Scan { source: Source, predicates: Vec<Predicate> },
-    Filter { child: Box<QueryExpr>, pred: Predicate },
-    Aggregate { child: Box<QueryExpr>, by: Vec<GroupKey>, intent: AggIntent },
-    // ...
+    /// Reference to a CTE / let-binding by name; resolved at plan time.
+    Ref(String),
+
+    // ── Filtering & projection ────────────────────────────────────────────
+    /// σ — row-level filter (WHERE / PromQL label matchers).
+    Filter    { child: Box<QueryExpr>, pred: Predicate },
+    /// π — column projection (SELECT list).
+    Project   { child: Box<QueryExpr>, cols: Vec<ProjectItem> },
+
+    // ── Aggregation ───────────────────────────────────────────────────────
+    /// γ + α — GROUP BY + aggregates, with optional HAVING. Exact-agg path.
+    Aggregate { child: Box<QueryExpr>, by: Vec<GroupKey>, aggs: Vec<AggItem>,
+                having: Option<Predicate> },
+    /// γ + α specialised for a single sketch aggregation (one sketch per node).
+    /// Kept separate from `Aggregate` so the L4 allocator can bind a sketch
+    /// without re-parsing `AggFunc` variants.
+    SketchAgg    { child: Box<QueryExpr>, intent: AggIntent, col: ColumnRef },
+    /// Windowed sketch aggregation. Bundles window + intent because the window
+    /// defines the sketch lifecycle (flush / reset boundaries).
+    WindowedAgg  { child: Box<QueryExpr>, intent: AggIntent, window: WindowSpec,
+                   col: ColumnRef },
+
+    // ── Time / streaming ──────────────────────────────────────────────────
+    /// ψ — tumbling / sliding window (PromQL `[5m]`, SQL windowed aggregation).
+    Window { child: Box<QueryExpr>, duration: Duration, slide: Option<Duration> },
+
+    // ── Distributed / multi-stage operators ──────────────────────────────
+    /// Partition the stream by key tuple (`GROUP BY` / PromQL `by (dims)`).
+    Partition { child: Box<QueryExpr>, keys: PartitionKeys },
+    /// δ — deduplicate on `col` before sketch ingestion.
+    Dedup     { child: Box<QueryExpr>, col: String },
+    /// τ — retain only top-K heavy hitters.
+    TopK      { child: Box<QueryExpr>, k: u64, by: Vec<GroupKey> },
+    /// ⊕ — merge sketches from independent branches (distributed union).
+    Merge     { children: Vec<QueryExpr> },
+
+    // ── Joins ─────────────────────────────────────────────────────────────
+    Join       { kind: JoinKind, left: Box<QueryExpr>, right: Box<QueryExpr>,
+                 pred: Option<Predicate> },
+    /// Sketch-aware join push-down: pre-aggregate on inner side, then merge.
+    JoinSketch { outer: Box<QueryExpr>, inner: Box<QueryExpr>, join_key: String },
+
+    // ── Set operators ─────────────────────────────────────────────────────
+    /// UNION / INTERSECT / EXCEPT, with or without ALL.
+    SetOp { kind: SetOpKind, all: bool, left: Box<QueryExpr>, right: Box<QueryExpr> },
+
+    // ── Ordering & limiting ───────────────────────────────────────────────
+    Sort  { child: Box<QueryExpr>, keys: Vec<SortKey> },
+    Limit { child: Box<QueryExpr>, n: u64, offset: u64 },
+
+    // ── Subquery / CTE ────────────────────────────────────────────────────
+    Subquery   { child: Box<QueryExpr>, alias: String },
+    /// SQL `WITH name AS (expr) IN body`, PromQL recording-rule binding.
+    LetBinding { name: String, expr: Box<QueryExpr>, body: Box<QueryExpr> },
+
+    // ── Analytic (OVER) window functions ──────────────────────────────────
+    WindowFunc { child: Box<QueryExpr>, func: WindowFuncKind,
+                 partition_by: Vec<GroupKey>, order_by: Vec<SortKey>,
+                 frame: Option<WindowFrame> },
+
+    // ── PromQL-specific ───────────────────────────────────────────────────
+    /// `histogram_quantile(φ, <buckets>)` — HLL / histogram sketch → quantile.
+    HistogramQuantile { child: Box<QueryExpr>, phi: f64 },
+    /// PromQL sub-query: `<expr>[range:resolution]`.
+    PromQLSubquery    { child: Box<QueryExpr>, range: Duration,
+                        resolution: Option<Duration> },
+    /// PromQL / SQL binary op between two relational sub-expressions
+    /// (arithmetic, comparison, `and`/`or`/`unless`).
+    BinaryOp { op: BinaryOpKind, lhs: Box<QueryExpr>, rhs: Box<QueryExpr>,
+               vector_match: Option<VectorMatch> },
 }
 
 pub enum Source {
