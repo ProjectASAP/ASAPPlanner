@@ -18,6 +18,7 @@ Merges three existing codebases into one:
     - **CLI**: one-shot "read workload YAML → emit `streaming_config.yaml` + `inference_config.yaml`". (`asap-planner-rs` today.)
     Both should be thin shells over the same core.
 5. **No regression in today's wire contracts.** `POST /api/v1/streaming-config` to ASAPQuery-backend and OpAMP push to agents must keep working byte-for-byte through the migration. The backend's capability-miss callback `ControllerClient.create_plan` must keep working.
+6. **Sketch is a primitive, not a mandate.** The optimizer selects among physical alternatives for each logical operator — e.g. `HashJoin` / `SortMergeJoin` / `SketchJoin`, or `SortAgg` / `HashAgg` / `SketchAgg` — the same way a traditional DB optimizer picks a join algorithm. A plan may come back with zero sketch operators when an exact path Pareto-dominates for the query's accuracy target. Sketches are one primitive class the optimizer can reach for; the framework does not privilege them.
 
 ## 2. Non-goals
 
@@ -45,6 +46,8 @@ DataCollector/controller already documents its query→sketch translation as a 5
 
 A key clarification after cross-checking the three source repos: **L3 is intent-only**. DC's `AggIntent` names *what* to compute (`Quantile(0.99, ε=0.01)`, `Cardinality(δ=0.001)`, …) without committing to a sketch type. Picking KLL vs DDSketch, CMS vs CMS-with-heap, parameter sizes — all of that is L4's job, driven by deployment constraints.
 
+More generally: **L1–L3 lower into a logical representation + `AggIntent`; L4 and L5 choose the concrete execution plan.** That choice is a standard physical-operator selection — `HashJoin` vs `SortMergeJoin` vs `SketchJoin`; `SortAgg` vs `HashAgg` vs `SketchAgg`. "Use a sketch" is one option among several; the same L4 rule framework that picks sketch parameters also picks between sketch and non-sketch operators when a rule is registered for the intent. This keeps the existing 5-layer split intact: nothing about the layering presupposes the output contains a sketch.
+
 Today:
 - DC: correctly separated (L3 has `AggIntent`, L4 picks sketch via cost model).
 - asap-fusion: correctly separated — `SketchConfigRule` at L4 fills `SketchConfig::NULL` with concrete `CountMinSketch{5,4096}` / `KLL{k=200,m=8}`.
@@ -69,6 +72,12 @@ Practically, this means:
 - A hypothetical OLAP scenario that runs approximate queries over tabular data reuses `Source::Table` + the same `AggIntent` subset fusion uses, plus any OLAP-specific intents it adds.
 
 See §6 `core::sketch_algebra` for the concrete type sketches.
+
+### Scope: start single-query, grow into workload-aware
+
+The initial implementation can operate on **one query at a time** — L4 picks physical operators per query against per-query constraints, and `CostModel::workload_cost` degenerates to a sum of per-plan costs. This matches today's three source repos (all single-query planners) and is the minimum bar for parity during the migration.
+
+**Workload-awareness is an extension, not a rewrite.** When ≥2 queries are planned together, `workload_cost` credits shared sub-expressions (sketches, precomputed aggregates) so the planner can pick a plan for `q1` that lets `q2` read its output for free. Nothing in the L1–L5 spine changes — only the cost objective widens and the rule engine gains cross-plan visibility. See §6 `core::cost` and §13 future work.
 
 ### L2 is mandatory; the tree shape is an evolvable contract
 
@@ -559,8 +568,30 @@ pub trait CostModel {
     fn accuracy(&self, plan: &Plan) -> Accuracy;
     fn latency(&self, plan: &Plan) -> Duration;
     fn dollars(&self, plan: &Plan) -> Dollars;
+
+    /// Workload-level total cost. A straight sum of per-plan costs
+    /// under-estimates how good a plan is when multiple queries share
+    /// computation — a sketch or a precomputed aggregate built for
+    /// one query serves the others for free. Implementations must
+    /// identify reusable sub-expressions across `plans` and credit
+    /// their build cost once, so the planner prefers plans that
+    /// maximise reuse when the total-cost objective allows.
+    fn workload_cost(&self, plans: &[Plan]) -> WorkloadCost;
+}
+
+pub struct WorkloadCost {
+    pub total_latency: Duration,
+    pub total_dollars: Dollars,
+    /// Per-plan contribution, for EXPLAIN / observability.
+    pub per_plan:      Vec<Contribution>,
+    /// Sub-expressions built once, consumed by ≥2 plans. Drives
+    /// decisions like "build a KLL for p99 that q1 and q2 both read"
+    /// vs "run exact select-n per query".
+    pub reused:        Vec<ReusedComponent>,
 }
 ```
+
+The reuse model is not sketch-specific: any primitive that is costly to build once and cheap to query (sketches, materialized aggregates, cached scan results, future wavelet summaries) plugs into the same `ReusedComponent` accounting.
 
 ### `core::emit`
 
@@ -807,7 +838,21 @@ This matters: a user who only wants `scenario-fusion` (e.g., an offline benchmar
 
 11. **How does the design support non-time-series data (asap-fusion's tabular queries, future OLAP scenarios)?** Already handled — see §3 "Data-model support" and §6 `core::sketch_algebra`. `QueryExpr::Scan` wraps a `Source` sum (`TimeSeries` / `Table` / `Join`); `AggIntent::requires() -> DataModel` tags which intents apply to which data models; sketches themselves are data-model-agnostic. asap-fusion uses `Source::Table` exclusively; ASAPQuery uses `Source::TimeSeries`; a future OLAP scenario picks whichever fits. The only implementation cost is that L4 rules which genuinely don't apply across data models (e.g. "merge overlapping time windows") must gate on `source.data_model()`; data-model-agnostic rules (the `Bind*` family) need no changes.
 
-## 13. Success criteria
+## 13. Future work
+
+### Extending the primitive set beyond sketches
+
+The L4 rule engine + `OptimizerRule` trait are **primitive-agnostic** — nothing in the framework is sketch-specific above the rule library. Future primitive classes land as additional rules against the same trait + additional entries in `CostModel`, not as new translation phases or parallel IRs. Candidates we explicitly anticipate:
+
+1. **Wavelets** — a sibling approximation family (Haar / DWT + coefficient thresholding). Strong on smooth, low-entropy signals where thresholded coefficient sets dramatically out-compress randomized sketches. Slots in as a new physical alternative for the same `AggIntent` variants sketches serve today (range-sum, heavy-hitter, quantile). No change to L3.
+
+2. **Reuse / precomputation as first-class primitives.** Materialized views, cached scan results, shared sub-expressions. The cost-model hook already exists (`CostModel::workload_cost` + `ReusedComponent`); the missing piece is rules that *introduce* a reuse node — e.g. "build this aggregate once for `q1`, rewrite `q2` to read from it". Orthogonal to approximation: you can reuse an exact aggregate or an approximate one.
+
+3. **Other approximation algorithms** — sampling, coresets, online PCA / linear-regression normal equations, naive-Bayes-with-conjugate-priors. Anything with a monoid-shaped build + bounded error fits the same contract a sketch does.
+
+The guiding principle: **same framework, different rule.** A new primitive class is never a translation-layer change — only a new rule, a new cost-model entry, and (if it introduces a new runtime op) a new physical operator in L5.
+
+## 14. Success criteria
 
 The migration is done when:
 
