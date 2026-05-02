@@ -547,6 +547,36 @@ pub enum SketchExpr {
 
 The optimizer's job is to selectively replace logical aggregates / joins with their sketch-bound variants when a binding rule fires; everything else stays inside `SketchExpr::Logical(…)`.
 
+##### Per-node input/output spec for `SketchExpr`
+
+L4 introduces a new field type into `Schema`:
+
+```rust
+pub enum DataType {
+    // … the L3 types (Int64, Float64, Utf8, Map<…>, …) …
+    /// Sketch state. Carries the sketch family + params so the type system
+    /// rejects merges of incompatible sketches at plan time.
+    Sketch(SketchKind, SketchParams),
+}
+```
+
+A "sketch-state schema" is a regular `Schema` whose value-bearing field has a `DataType::Sketch(...)` dtype. Reading rules:
+
+| Node | Input schemas | Output schema |
+|---|---|---|
+| `Logical(qe)` | whatever the inner L3 node `qe` consumes (per the L3 table above) | whatever `qe` produces — straight pass-through |
+| `SketchAgg { child, sketch, params, col, by }` | one input schema; must contain `col` (the column being summarised) and every field referenced in `by` (group keys) | the `by` columns carried over verbatim, followed by one synthetic field of dtype `Sketch(sketch, params)` carrying the partial sketch state per group; `unique_keys = [by]` |
+| `SketchJoin { outer, inner, key, sketch, params }` | two input schemas (outer + inner); both must contain `key` with compatible types | one field of dtype `Sketch(sketch, params)` carrying the join-cardinality / join-sample state — read out by a downstream `SketchEstimate` |
+| `SketchSubtract { left, right }` | two input schemas, each with exactly one `Sketch(s, p)` field; **`s` and `p` must match** between the two inputs (catalog rejects mismatches at plan time); the `s` family must have `subtractable = true` in the catalog | one `Sketch(s, p)` field carrying the subtracted state (same family + params as inputs) |
+| `SketchDelete { sketch_input, key }` | one input schema with a `Sketch(s, p)` field whose catalog entry has `deletable = true`; plus the `key` column to delete | the input schema unchanged in type — sketch state is mutated logically (the key's contribution removed) but the field's `(sketch, params)` signature is preserved |
+| `SketchEstimate { sketch_input, query }` | one input schema with a `Sketch(s, p)` field; `query` (e.g. `Quantile(φ)`, `PointCount(k)`, `Cardinality`) must appear in the catalog entry's `supported_intents` for `s` | a regular row-shaped schema carrying the answer — `Float64` for quantile, `Int64` for count / cardinality, an array of `(key, count)` for top-k. The `Sketch(...)` field type does *not* propagate downstream of an Estimate |
+| `SketchMerge { children }` | N input schemas, each with a `Sketch(s, p)` field; **all N must agree on `(s, p)`**; the `s` family must have `mergeable = true` in the catalog | one `Sketch(s, p)` field carrying the unioned state (same family + params as inputs) |
+
+Two type-system invariants make L4 robust:
+
+1. **Sketch-family mismatch is a plan-time error.** `SketchSubtract` over `Sketch(KLL, …)` and `Sketch(CMS, …)` fails type-checking before L5 ever sees it.
+2. **Catalog capability flags gate which nodes can fire.** `SketchSubtract` requires `subtractable`, `SketchDelete` requires `deletable`, `SketchMerge` requires `mergeable`. The catalog (see §6 `core::physical::sketch_catalog`) is the single source of truth for these flags; binding rules consult it before producing the node.
+
 **Why a `Source` sum instead of two parallel `QueryExpr` trees:** most `QueryExpr` nodes (`Filter`, `Aggregate`) are data-model-agnostic — filter semantics are the same whether the input is a time-series window or a table scan. Only the leaf `Scan` differs. Keeping one tree with a polymorphic leaf means L4 rules like `BindKllOnQuantile` work uniformly across both data models; rules that care about data-model specifics (stage-aware push-down for TS; join-selectivity for tabular) gate on `source.data_model()` + `intent.requires()`.
 
 **Sketches are data-model-agnostic by construction.** KLL / CMS / HLL / DDSketch ingest a stream of values. That stream can come from a time-series window (`Source::TimeSeries`) or a table column (`Source::Table`); the sketch doesn't know or care. So `BindKllOnQuantile` works identically regardless of `Source`.
