@@ -75,7 +75,7 @@ Because core now owns the L4/L5 infrastructure (not just L1-3), scenario crates 
 - **Inside ASAPController workspace** (lockstep release with core, one-PR cross-scenario changes)
 - **In its own downstream repo** (independent release cadence, depends on published `asap-control-core`)
 
-Both produce functionally identical artefacts. The placement is a deployment/team-ownership decision, not an architectural fork. Default:
+Both produce functionally identical artifacts. The placement is a deployment/team-ownership decision, not an architectural fork. Default:
 - `scenario-lifecycle` + `scenario-query` in ASAPController workspace (share a YAML emitter).
 - `scenario-fusion` in the `asap-fusion` repo (research cadence, independent release).
 
