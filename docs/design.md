@@ -410,26 +410,27 @@ pub trait HasSchema {
 }
 ```
 
-Per-node input/output spec — the stable contract for L3 nodes (full implementation in `core/src/sketch_algebra/schema.rs`):
+Per-node input/output spec — the stable contract for L3 nodes (full implementation in `core/src/sketch_algebra/schema.rs`). Each row reads independently: every column position, type, and constraint is named explicitly rather than carried by a shorthand like `S` or `L` / `R`.
 
-| Node | Inputs | Output |
+| Node | Input schemas | Output schema |
 |---|---|---|
-| `Scan { source }` | — | `source.schema(catalog)` |
-| `Ref(name)` | — | resolved from `LetBinding` named `name` |
-| `Filter { pred }` | one `S` | `S` (predicate is a refinement; no schema change) |
-| `Project { cols }` | one `S` | projection of `S` to `cols` |
-| `Aggregate { by, aggs }` | one `S` | `by` columns + one column per `agg` (named & typed by `AggIntent::output_type(input_field)`) |
-| `Window { kind, size, slide }` | one `S` (must have `time_index`) | `S` extended with window-id / window-bounds metadata fields |
-| `Partition { keys }` | one `S` | `S` (logical-only; physical sharding hint for L5) |
-| `Distinct { cols }` | one `S` | `S` with `unique_keys` tightened to include `cols` |
-| `Merge` | N (all `S_i`); rule: schemas must be union-compatible | `S_0` (representative) |
-| `Join { kind, pred }` | two `L`, `R` | union of `L` + `R` columns minus duplicates removed by USING/NATURAL |
-| `SetOp { kind, all }` | two (must be union-compatible) | left's schema |
-| `Sort { keys }` / `Limit` | one `S` | `S` |
-| `Subquery { alias }` | one `S` | `S` with table alias |
-| `LetBinding { name, expr, body }` | `body` consumes; `expr` bound by name | body's output schema |
-| `WindowFunc { func, partition_by, order_by, frame }` | one `S` | `S` extended with the analytic-function output column |
-| `BinaryOp { op, vector_match }` | two `L`, `R` (PromQL vector-match constraints apply) | element-wise op → schema with op-typed value column; boolean → boolean column |
+| `Scan { source }` | none — leaf node | `source.schema(catalog)` — derived from the source's catalog metadata (TimeSeries metric labels + value + timestamp; or Table columns from `information_schema`; or recursive `Source::Join`) |
+| `Ref(name)` | none — pointer node | the output schema of the `LetBinding` whose `name` matches; resolved at plan time |
+| `Filter { pred }` | one input schema (the child's output) | the child's input schema unchanged — `Filter` is a row-level refinement; no columns added, removed, or re-typed |
+| `Project { cols }` | one input schema | the input schema projected to `cols` — fields filtered and reordered to match `cols`; `time_index` and `unique_keys` carried over for retained columns |
+| `Aggregate { by, aggs }` | one input schema | the `by` columns (carried verbatim from input) followed by one new column per entry in `aggs`, each named and typed by `AggIntent::output_type(input_field)`; `unique_keys = [by]` |
+| `Window { kind, size, slide }` | one input schema, **must** contain a `time_index` field | the input schema extended with synthetic `window_id` and `window_start` / `window_end` metadata fields |
+| `Partition { keys }` | one input schema | the input schema unchanged — logical-only marker; carries a sharding hint for L5's stage allocator |
+| `Distinct { cols }` | one input schema | the input schema with `unique_keys` tightened to include `cols`; field types unchanged |
+| `Merge` | N input schemas, all union-compatible (same field names, same types, same nullability, same `time_index` position if any) | the first input's schema (representative; checked union-compatible with the rest) |
+| `Join { kind, pred }` | two input schemas — left and right children | the concatenation of left's fields and right's fields, minus columns that USING / NATURAL deduplicates; nullability widened on the OUTER side for outer joins |
+| `SetOp { kind, all }` | two input schemas, must be union-compatible (as for `Merge`) | the left input's schema |
+| `Sort { keys }` | one input schema; every field referenced in `keys` must be present in it | the input schema unchanged |
+| `Limit { n, offset }` | one input schema | the input schema unchanged |
+| `Subquery { alias }` | one input schema | the input schema with `alias` applied as the table alias to all field names |
+| `LetBinding { name, expr, body }` | `expr` produces an intermediate schema bound to `name`; `body` consumes it (and any other in-scope bindings) | the `body`'s output schema |
+| `WindowFunc { func, partition_by, order_by, frame }` | one input schema; every field in `partition_by` / `order_by` must be present | the input schema extended with one new column carrying the analytic-function output (named after `func`, typed per `func`) |
+| `BinaryOp { op, vector_match }` | two input schemas — left and right operands. PromQL vector-match constraints (`on`/`ignoring` + `group_left`/`group_right`) govern label-set compatibility | for arithmetic/comparison `op`: the left input's schema with the value column re-typed to the result of `op`; for boolean `op` (`and`, `or`, `unless`): the left input's schema with a boolean value column |
 
 #### Three distinct schemas — DAG vs DB vs sketch catalog
 
