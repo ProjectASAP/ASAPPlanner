@@ -34,7 +34,7 @@ DataCollector/controller already documents its query→sketch translation as a 5
 |---|-------|--------------|-------------------|
 | 1 | **Query Language** | Parse raw strings (PromQL, SQL, DataFusion, ElasticDSL, …) into a language-specific AST | DC `controller/src/query_parser/{promql,sql,mod}.rs`; asap-planner-rs pulls `promql-parser` + `sqlparser` directly; asap-fusion consumes a pre-built DataFusion `LogicalPlan` (its L1 happens upstream) |
 | 2 | **Language Logical Plan** | Per-language algebra tree (`Aggregate` / `Window` / `Filter` / `Sort` / `Limit`) preserving language semantics, **no sketch names, no sketch binding** | DC `controller/src/algebra/lower.rs`; asap-fusion inherits DataFusion's `LogicalPlan` as its L2; asap-planner-rs has no L2 today (uses a template-pattern catalogue) — **Phase 4 builds one** |
-| 3 | **Sketch Logical Plan** (sketch algebra) | Language- and deployment-independent IR: `QueryExpr` + `AggIntent` (~25 intent variants). Describes **intent only** — *what* to compute, with accuracy target. **No sketch type, no sketch parameters.** Data-model-agnostic — `QueryExpr::Scan` wraps a `Source` sum with `TimeSeries` / `Table` / `Join` variants so the same L3 IR covers ASAPQuery's time-series queries and asap-fusion's tabular queries. | DC `controller/src/algebra/{expr,directory}.rs`; asap-fusion's 3-variant `SubPopulationAnalyticsType` maps to a subset; asap-planner-rs's 9-variant `Statistic` maps to a subset — **Phase 4 splits sketch binding out of planner's current fused L3+L4** |
+| 3 | **Sketch Logical Plan** (sketch algebra) | Language- and deployment-independent IR: `QueryExpr` + `AggIntent`. Describes **intent only** — *what* to compute, with accuracy target. **No sketch type, no sketch parameters, no sketch-bound nodes** (`SketchAgg` / `SketchJoin` / `SketchSubtract` etc. live in the L4 IR `SketchExpr`). **No language-shaped operators** (no `HistogramQuantile`, no `PromQLSubquery` — those are PromQL L2 nodes that lower to data-model-agnostic shapes here). **One canonical form per plan** — no `TopK` (use `Sort + Limit`), no `WindowedAgg` (use `Window` over `Aggregate`). Every edge carries a typed `Schema`. Data-model-agnostic — `QueryExpr::Scan` wraps a `Source` sum with `TimeSeries` / `Table` / `Join` variants so the same L3 IR covers ASAPQuery's time-series queries and asap-fusion's tabular queries. | DC `controller/src/algebra/{expr,directory}.rs`; asap-fusion's 3-variant `SubPopulationAnalyticsType` maps to a subset; asap-planner-rs's 9-variant `Statistic` maps to a subset — **Phase 4 splits sketch binding out of planner's current fused L3+L4** |
 | 4 | **Sketch Optimizer** | Cost-aware algebraic rewrite rules under deployment constraints. **This is where sketch binding happens** — L4 rules take intent-only L3 and emit sketch-bound L3+. ~12 rules in DC; a smaller targeted subset in planner; `SketchConfigRule` + `HashModeRule` in fusion. | Core provides the **rule engine driver** + `OptimizerRule` trait + a shared rule library; scenarios **pick** which rules to enable + supply their own deployment constraints. DC `controller/src/algebra/optimizer.rs` (rules); fusion `src/optimizer/rules/`; planner's `map_statistic_to_precompute_operator` |
 | 5 | **Physical Execution Plan** | Assign ops to pipeline stages (edge / gateway / backend / object store); produce the deployment-specific artefact (OpAMP YAML, `streaming_config.yaml`, rewritten DataFusion `LogicalPlan`). **Sketch binding is already committed by L4**; L5 is about stage allocation + emission. | Core provides the **stage allocator framework** + `PhysicalPlanner` trait + the sketch catalogue; scenarios supply their own **topology** (3-stage / 1-stage / 0-stage) + their own **emitter** for the output format. DC `controller/src/algebra/{physical,allocator,plan}.rs`; asap-planner-rs `output/generator.rs`; asap-fusion `src/executor/` |
 
@@ -55,7 +55,7 @@ Today:
 
 ### Intent vocabulary: DC's `AggIntent` is a superset; scenarios use subsets
 
-DC has ~25 variants. Planner uses 9 (`Count, Sum, Cardinality, Increase, Rate, Min, Max, Quantile, Topk`). Fusion uses 3 (`Count, Sum, Quantile`). A scenario's L4+L5 only has to handle its own subset — but it reads and writes the **same `AggIntent` enum**. Adding a new intent (e.g. stddev) is a core change that scenarios can then opt in to.
+DC's pre-cleanup superset had ~25 variants; after L3 normalisation (see §6) it's smaller because shapes that decompose into other operators (`TopK → Sort + Limit`; `QuantileOverTime → Window + Quantile`) no longer earn their own intent. The post-cleanup core today is ~7 (`Count, Sum, Min, Max, Quantile, Cardinality, Rate, Increase`); the long-term ceiling is bounded by genuinely-distinct operations (stddev, variance, approximate-join-cardinality, …), not by language-flavored synonyms. Planner's 9-variant `Statistic` maps onto this set: `TopK` is no longer an intent — it lowers to `Sort + Limit` over `Aggregate{Count}` (or whatever ranking key), and the heavy-hitter sketch binds at L4 by matching that shape. Fusion's 3 variants (`Count, Sum, Quantile`) map directly. Adding a new intent (e.g. stddev) is a core change that scenarios opt into.
 
 ### Data-model support: both time-series and tabular
 
@@ -63,7 +63,7 @@ ASAPQuery-backend / DC controller operate on time-series data (metrics + labels 
 
 Core handles this with:
 - **`QueryExpr::Scan { source: Source, ... }`** where `Source` is a sum type (`TimeSeries`, `Table`, `Join`, …). Scenarios' L1→L2→L3 lowering produces the appropriate variant; L4 rules that care about the data model gate on `source.data_model()`.
-- **`AggIntent::requires() -> DataModel`** — each intent variant tags whether it's data-model-agnostic (`Count`, `Sum`, `Quantile`, `Cardinality`), time-series-only (`Rate`, `Increase`, `QuantileOverTime`), or tabular-only (future additions for joins, correlated subqueries).
+- **`AggIntent::requires() -> DataModel`** — each intent variant tags whether it's data-model-agnostic (`Count`, `Sum`, `Min`, `Max`, `Quantile`, `Cardinality`), time-series-only (`Rate`, `Increase` — both carry PromQL counter-reset semantics), or tabular-only (future additions for joins, correlated subqueries).
 - **Sketches are data-model-agnostic by construction.** KLL / CMS / HLL / DDSketch ingest a stream of values; that stream can come from a time-series window or a table column, the sketch does not know or care. So `BindKllOnQuantile` and siblings work uniformly across both.
 
 Practically, this means:
@@ -84,6 +84,31 @@ The initial implementation can operate on **one query at a time** — L4 picks p
 Every scenario must produce an L2 tree, even when the source language didn't originally come as one. asap-planner-rs's current approach (PromQL pattern catalogue → `IntermediateAggConfig`) skips L2; Phase 4 will reverse-engineer the five PromQL pattern shapes into a `PromqlLogicalPlan` tree so the L1→L2→L3 pipeline is uniform.
 
 A future scenario whose source semantics genuinely don't fit a tree (e.g. a constraint-based query language) would motivate revisiting the L2 contract at that time. Until then, L2 = per-language tree, mandatory, no elision.
+
+### System I/O contract — what the controller takes in, what it emits
+
+The controller is a **planner**, not an executor. It does not run queries; it decides where each piece of a query runs. The data plane (OTel collectors / ASAPQuery-backend / DataFusion `SessionContext`) runs them.
+
+**System input — what the controller takes in.** A `QueryWorkload` (one or more `QuerySpec`s) plus deployment context (available executors, their capabilities, current SLA targets, telemetry of recent violations). The `QuerySpec` carries the raw query string in its source language (PromQL / SQL / DataFusion / ElasticDSL) and the accuracy / latency / cost target. Workloads can arrive via four entry points (HTTP `POST /plan`, OpAMP capability-miss callback, YAML file for the CLI shell, query-log replay); they all normalise to `QueryWorkload` before L1.
+
+**Workload features that the controller cares about, beyond the queries themselves:**
+- Execution model: **batch** (one-shot YAML, query-log replay) vs **streaming** (live pipeline that must keep producing results as data arrives).
+- Data input source: time-series scrape, tabular relation, query log replay, etc. Drives `Source` variant choice in L3.
+- Reuse opportunity: ≥2 queries planned together → `CostModel::workload_cost` credits shared sub-expressions.
+
+**System output — what the controller emits.** For each registered executor in the deployment, a sub-DAG of the optimized plan plus the configuration that lets that executor run it. Concretely:
+
+| Output | Consumer | Wire shape |
+|---|---|---|
+| Per-executor sub-DAG assignment | The executor (edge agent / gateway / backend / DataFusion session) | OpAMP `RemoteConfig` (OTel YAML) / `streaming_config.yaml` POST / rewritten `LogicalPlan` |
+| Cut-edges between executors | The transport between executors (OTel pipeline, HTTP, sketch-merge over Kafka, …) | Implied by the per-executor configs; not a separate artefact |
+| Plan ID + provenance metadata | The controller's own `PlanStore` for replan / EXPLAIN / observability | JSON / proto |
+
+**Premise behind the per-executor split.** Every executor (edge collector, gateway, backend, DataFusion runtime) is in principle capable of running the entire query tree — they all speak the same physical operators. The controller's job is to decide *which* executor runs *which sub-tree* under the deployment's constraints (memory budget per stage, network bandwidth between stages, sketch backends available at each stage). A "stage assignment" is a colouring of the L4-bound `SketchExpr` DAG by executor, with sketch-merge / data-shipping nodes inserted on the cut edges. L5's `StageAllocator` does the colouring; the `PhysicalPlanner` per scenario emits the per-executor configs.
+
+This is what makes the topology a *parameter* rather than an axis of code: the same `SketchExpr` plus a different `TopologyDescriptor` produces edge-only / 1-stage / 3-stage / 0-stage placements without rewriting the plan.
+
+**Symbolic plan vs concrete plan.** L3 `QueryExpr` and L4 `SketchExpr` are symbolic — they describe operations and bindings without committing to *where* anything runs. L5 produces the concrete plan: stage-assigned, executor-targeted, ready to serialise into the executor's configuration format. The split is what lets the controller swap topologies (single-stage backend → three-stage edge/gateway/backend) without re-running L1-L4.
 
 This drives the core/scenario split:
 
@@ -134,7 +159,7 @@ ASAPController/
 │   ├── core/                  # Shared infrastructure across all 5 layers; no I/O
 │   │   ├── query_language/    # L1: per-language parsers — promql/, sql/, datafusion/, elasticdsl/
 │   │   ├── logical_plan/      # L2: per-language algebra tree (Aggregate/Window/Filter/…)
-│   │   ├── sketch_algebra/    # L3: QueryExpr + AggIntent (~25 variants) + sketch directory
+│   │   ├── sketch_algebra/    # L3: QueryExpr + AggIntent + Schema/HasSchema + sketch directory
 │   │   ├── lower/             # L1→L2→L3 lowering passes (one entry per language)
 │   │   ├── optimizer/         # L4 framework:
 │   │   │   ├── engine/        #   rule driver — fixed-point iteration, cycle detection, priority
@@ -225,7 +250,15 @@ A **per-language** algebra tree — one `enum LogicalPlan` per language. Preserv
 
 ### `core::sketch_algebra` — Layer 3
 
-The language- and deployment-independent IR. Data-model-agnostic: supports both **time-series** inputs (ASAPQuery-backend, DC lifecycle) and **tabular** inputs (asap-fusion, future OLAP scenarios) via a `Source` sum type inside `QueryExpr::Scan`.
+The language- and deployment-independent IR. **Pure intent at this layer**: no language-specific operators (no `HistogramQuantile`, no `PromQLSubquery` — those are L2 PromQL nodes), no sketch types, no sketch parameters, no physical operator choice. Data-model-agnostic: supports both **time-series** inputs (ASAPQuery-backend, DC lifecycle) and **tabular** inputs (asap-fusion, future OLAP scenarios) via a `Source` sum type inside `QueryExpr::Scan`.
+
+#### Design rules for L3
+
+1. **One canonical form per plan.** No redundant variants whose semantics decompose into other variants. `Sort + Limit` is the canonical top-k shape; there is no separate `TopK`. `Window` over `Aggregate` is the canonical windowed-aggregate shape; there is no separate `WindowedAgg`. This keeps L4 rule matching unambiguous (a rule fires on one shape, not on N synonyms).
+2. **Language-orthogonal.** No PromQL-shaped or SQL-shaped operators leak into L3. `HistogramQuantile` is a PromQL artefact (it consumes Prometheus's specific bucketed-histogram exposition format and produces a quantile from buckets) — it lives in `core::logical_plan::promql` (L2) and lowers to bucket reads + a regular `Quantile` intent over those bucket counts. `PromQLSubquery` (`<expr>[range:resolution]`) is a *driver* construct — it asks the engine to evaluate the inner expression at N timestamps — and is expanded by the PromQL L1→L2 lowering into a set of independent queries, not preserved as an L3 DAG node.
+3. **Intent at L3, sketch at L4.** L3 carries `AggIntent` ("compute a quantile to ε=0.01 accuracy"). The choice between `HashAgg` / `SortAgg` / `SketchAgg(KLL{k=200})` is made by L4 cost-aware rules, not encoded in L3.
+4. **One physical-choice node per logical operator.** L3 has `Aggregate` (logical) and `Join` (logical). L4 produces the sketch-bound physical alternatives (`SketchAgg`, `SketchJoin`, `SketchSubtract`, `SketchDelete`, `SketchEstimate`, `SketchMerge`) into an extended IR — see "L4 sketch-bound IR" below. Mixing logical and physical at L3 (the previous draft did this with `SketchAgg` / `JoinSketch` at L3) creates ambiguity about which layer owns which decision.
+5. **DAG, not tree.** Edges between nodes carry typed schemas (see "Schema flow" below). A node's output schema is a function of its inputs and parameters and is verifiable independently of the surrounding tree. CTEs / let-bindings produce reuse edges (multiple consumers).
 
 ```rust
 pub enum QueryExpr {
@@ -237,149 +270,267 @@ pub enum QueryExpr {
 
     // ── Filtering & projection ────────────────────────────────────────────
     /// σ — row-level filter (WHERE / PromQL label matchers).
-    Filter    { child: Box<QueryExpr>, pred: Predicate },
+    Filter  { child: Box<QueryExpr>, pred: Predicate },
     /// π — column projection (SELECT list).
-    Project   { child: Box<QueryExpr>, cols: Vec<ProjectItem> },
+    Project { child: Box<QueryExpr>, cols: Vec<ProjectItem> },
 
-    // ── Aggregation ───────────────────────────────────────────────────────
-    /// γ + α — GROUP BY + aggregates, with optional HAVING. Exact-agg path.
-    Aggregate { child: Box<QueryExpr>, by: Vec<GroupKey>, aggs: Vec<AggItem>,
-                having: Option<Predicate> },
-    /// γ + α specialised for a single sketch aggregation (one sketch per node).
-    /// Kept separate from `Aggregate` so the L4 allocator can bind a sketch
-    /// without re-parsing `AggFunc` variants.
-    SketchAgg    { child: Box<QueryExpr>, intent: AggIntent, col: ColumnRef },
-    /// Windowed sketch aggregation. Bundles window + intent because the window
-    /// defines the sketch lifecycle (flush / reset boundaries).
-    WindowedAgg  { child: Box<QueryExpr>, intent: AggIntent, window: WindowSpec,
-                   col: ColumnRef },
+    // ── Aggregation (logical, intent-only) ────────────────────────────────
+    /// γ + α — GROUP BY + aggregate intents, with optional HAVING.
+    /// `aggs` carry `AggIntent`; concrete sketch / non-sketch operator
+    /// is chosen by L4 and lives in the L4-extended IR (`SketchExpr`).
+    Aggregate { child: Box<QueryExpr>, by: Vec<GroupKey>,
+                aggs: Vec<AggIntent>, having: Option<Predicate> },
 
-    // ── Time / streaming ──────────────────────────────────────────────────
-    /// ψ — tumbling / sliding window (PromQL `[5m]`, SQL windowed aggregation).
-    Window { child: Box<QueryExpr>, duration: Duration, slide: Option<Duration> },
+    // ── Time / streaming windows ──────────────────────────────────────────
+    /// ψ — tumbling / sliding / session window over the time axis. Defines
+    /// the lifecycle (flush / reset bounds) of any aggregate in its subtree.
+    /// PromQL `[5m]` and streaming windows lower here. SQL `OVER (...)`
+    /// analytic frames are a different node — see `WindowFunc` below.
+    Window { child: Box<QueryExpr>, kind: WindowKind,
+             size: Duration, slide: Option<Duration> },
 
-    // ── Distributed / multi-stage operators ──────────────────────────────
+    // ── Distributed-execution structure ───────────────────────────────────
     /// Partition the stream by key tuple (`GROUP BY` / PromQL `by (dims)`).
     Partition { child: Box<QueryExpr>, keys: PartitionKeys },
-    /// δ — deduplicate on `col` before sketch ingestion.
-    Dedup     { child: Box<QueryExpr>, col: String },
-    /// τ — retain only top-K heavy hitters.
-    TopK      { child: Box<QueryExpr>, k: u64, by: Vec<GroupKey> },
-    /// ⊕ — merge sketches from independent branches (distributed union).
+    /// δ — SQL `DISTINCT` / row deduplication on `cols`.
+    Distinct  { child: Box<QueryExpr>, cols: Vec<ColumnRef> },
+    /// ⊕ — union of sub-results from independent stages or shards (the
+    /// exact-merge case). Sketch unions are a separate node in `SketchExpr`
+    /// because they carry sketch-family / params type constraints.
     Merge     { children: Vec<QueryExpr> },
 
-    // ── Joins ─────────────────────────────────────────────────────────────
-    Join       { kind: JoinKind, left: Box<QueryExpr>, right: Box<QueryExpr>,
-                 pred: Option<Predicate> },
-    /// Sketch-aware join push-down: pre-aggregate on inner side, then merge.
-    JoinSketch { outer: Box<QueryExpr>, inner: Box<QueryExpr>, join_key: String },
+    // ── Joins (logical) ───────────────────────────────────────────────────
+    /// Logical join. L4 picks the physical alternative — `HashJoin` /
+    /// `SortMergeJoin` / `SketchJoin` (e.g. KMV / theta-sketch / join-sample)
+    /// — based on selectivity, memory budget, and accuracy target. The
+    /// sketch-aware variant lives in `SketchExpr::SketchJoin`.
+    Join { kind: JoinKind, left: Box<QueryExpr>, right: Box<QueryExpr>,
+           pred: Option<Predicate> },
 
     // ── Set operators ─────────────────────────────────────────────────────
     /// UNION / INTERSECT / EXCEPT, with or without ALL.
-    SetOp { kind: SetOpKind, all: bool, left: Box<QueryExpr>, right: Box<QueryExpr> },
+    SetOp { kind: SetOpKind, all: bool,
+            left: Box<QueryExpr>, right: Box<QueryExpr> },
 
     // ── Ordering & limiting ───────────────────────────────────────────────
     Sort  { child: Box<QueryExpr>, keys: Vec<SortKey> },
+    /// `LIMIT n OFFSET k`. `Sort` followed by `Limit` is the canonical
+    /// top-k / heavy-hitters shape — no separate `TopK` node, since one
+    /// canonical representation per plan keeps L4 rule matching unambiguous.
+    /// Heavy-hitter sketches (CMS-with-heap, SpaceSaving) bind at L4 by
+    /// pattern-matching `Sort + Limit` on top of `Aggregate`.
     Limit { child: Box<QueryExpr>, n: u64, offset: u64 },
 
     // ── Subquery / CTE ────────────────────────────────────────────────────
     Subquery   { child: Box<QueryExpr>, alias: String },
-    /// SQL `WITH name AS (expr) IN body`, PromQL recording-rule binding.
+    /// SQL `WITH name AS (expr) IN body`; lowering target for PromQL
+    /// recording-rule bindings.
     LetBinding { name: String, expr: Box<QueryExpr>, body: Box<QueryExpr> },
 
     // ── Analytic (OVER) window functions ──────────────────────────────────
+    /// SQL `OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN ...)`.
+    /// Distinct from `Window` above — that is a streaming/tumbling window
+    /// over the time axis; this is an analytic frame over already-grouped rows.
     WindowFunc { child: Box<QueryExpr>, func: WindowFuncKind,
                  partition_by: Vec<GroupKey>, order_by: Vec<SortKey>,
                  frame: Option<WindowFrame> },
 
-    // ── PromQL-specific ───────────────────────────────────────────────────
-    /// `histogram_quantile(φ, <buckets>)` — HLL / histogram sketch → quantile.
-    HistogramQuantile { child: Box<QueryExpr>, phi: f64 },
-    /// PromQL sub-query: `<expr>[range:resolution]`.
-    PromQLSubquery    { child: Box<QueryExpr>, range: Duration,
-                        resolution: Option<Duration> },
-    /// PromQL / SQL binary op between two relational sub-expressions
-    /// (arithmetic, comparison, `and`/`or`/`unless`).
+    // ── Binary composition ────────────────────────────────────────────────
+    /// Arithmetic / comparison / boolean composition between two relational
+    /// sub-expressions (PromQL binary ops including `and`/`or`/`unless`,
+    /// SQL boolean composition).
     BinaryOp { op: BinaryOpKind, lhs: Box<QueryExpr>, rhs: Box<QueryExpr>,
                vector_match: Option<VectorMatch> },
 }
 
+pub enum WindowKind { Tumbling, Sliding, Session }
+
 pub enum Source {
     /// Time-series input — scenario-query / scenario-lifecycle shape.
-    /// `metric` identifies a metric family; `time` bounds the window;
-    /// `labels` constrains label-value combinations.
-    TimeSeries {
-        metric: MetricRef,
-        time: TimeRange,
-        labels: LabelFilter,
-    },
+    TimeSeries { metric: MetricRef, time: TimeRange, labels: LabelFilter },
     /// Tabular input — scenario-fusion / future-OLAP shape.
-    /// `table_ref` identifies the table; `columns` projects the subset
-    /// in use. Join / subquery composition nests `Source` values.
-    Table {
-        table_ref: TableRef,
-        columns: Vec<ColumnRef>,
-    },
-    Join {
-        left: Box<Source>,
-        right: Box<Source>,
-        on: JoinKey,
-    },
+    Table      { table_ref: TableRef, columns: Vec<ColumnRef> },
+    /// Join over Sources composes leaf shapes recursively.
+    Join       { left: Box<Source>, right: Box<Source>, on: JoinKey },
     // Future: WindowedStream, Subquery — added by scenarios that need them.
 }
 
-pub enum DataModel {
-    TimeSeries,
-    Tabular,
-    Any,
-}
+pub enum DataModel { TimeSeries, Tabular, Any }
 
 impl Source {
-    pub fn data_model(&self) -> DataModel {
-        match self {
-            Self::TimeSeries { .. } => DataModel::TimeSeries,
-            Self::Table { .. } | Self::Join { .. } => DataModel::Tabular,
-        }
-    }
+    pub fn data_model(&self) -> DataModel { /* … */ }
+    /// Output schema produced by this leaf (see "Schema flow").
+    pub fn schema(&self, catalog: &SchemaCatalog) -> Schema { /* … */ }
+}
+```
+
+#### What was removed during cleanup, and why
+
+| Removed | Reason | Replacement |
+|---|---|---|
+| `TopK { k, by }` | Decomposes into `Sort + Limit`; two ways to spell the same plan break canonical-form invariant | `Sort { keys: by } → Limit { n: k }` |
+| `WindowedAgg { intent, window }` | Equivalent to `Window` over `Aggregate`; redundant. Tumbling/sliding kind moves onto `Window::kind` | `Window { kind: …, … } → Aggregate { aggs: [intent] }` |
+| `SketchAgg { intent, col }` | Sketch-bound; L3 must be intent-only | `Aggregate { aggs: [intent] }` at L3; L4 emits `SketchExpr::SketchAgg` |
+| `JoinSketch { outer, inner, key }` | Sketch-bound physical alternative; L3 must be intent-only. Several papers describe sketch-of-join (KMV, theta, join-sample) — picking one is an L4 cost decision, not an L3 surface choice | `Join { … }` at L3; L4 emits `SketchExpr::SketchJoin` when a `Bind*OnJoin` rule fires |
+| `HistogramQuantile { phi }` | PromQL artefact — consumes Prometheus's specific bucketed-histogram format. Language-specific | Lowers in PromQL L1→L2 to bucket reads + `Aggregate { aggs: [Quantile{q: phi, …}] }` over the bucket counts |
+| `PromQLSubquery { range, resolution }` | Driver construct — asks the engine to evaluate the inner expression at N timestamps; not a single DAG node | Expanded by PromQL L1→L2 lowering into a set of independent `QueryExpr` instances, not preserved at L3 |
+| `Dedup { col }` | Single-column-only spelling of SQL `DISTINCT` | Renamed to `Distinct { cols }`, generalised to N columns |
+
+#### Schema flow — every L3 edge carries a typed schema
+
+Every node has a derivable output schema given its input schemas and parameters. The DAG is type-checked: a `Filter` whose predicate references a column not in its child's output schema fails at plan time.
+
+```rust
+pub struct Schema {
+    pub fields:      Vec<Field>,
+    /// Index into `fields` for the time axis, if any. PromQL leaves carry one;
+    /// SQL leaves may or may not.
+    pub time_index:  Option<usize>,
+    /// Functional dependencies / unique-key sets. L4 reuses these to recognise
+    /// when two sub-expressions produce identical streams (sketch-reuse driver).
+    pub unique_keys: Vec<Vec<usize>>,
 }
 
+pub struct Field {
+    pub name:     String,
+    pub dtype:    DataType,    // Int64 / Float64 / Utf8 / Map<Utf8,Utf8> / …
+    pub nullable: bool,
+}
+
+pub trait HasSchema {
+    fn input_schemas(&self) -> Vec<&Schema>;
+    fn output_schema(&self, inputs: &[&Schema], cat: &SchemaCatalog) -> Schema;
+}
+```
+
+Per-node input/output spec — the stable contract for L3 nodes (full implementation in `core/src/sketch_algebra/schema.rs`):
+
+| Node | Inputs | Output |
+|---|---|---|
+| `Scan { source }` | — | `source.schema(catalog)` |
+| `Ref(name)` | — | resolved from `LetBinding` named `name` |
+| `Filter { pred }` | one `S` | `S` (predicate is a refinement; no schema change) |
+| `Project { cols }` | one `S` | projection of `S` to `cols` |
+| `Aggregate { by, aggs }` | one `S` | `by` columns + one column per `agg` (named & typed by `AggIntent::output_type(input_field)`) |
+| `Window { kind, size, slide }` | one `S` (must have `time_index`) | `S` extended with window-id / window-bounds metadata fields |
+| `Partition { keys }` | one `S` | `S` (logical-only; physical sharding hint for L5) |
+| `Distinct { cols }` | one `S` | `S` with `unique_keys` tightened to include `cols` |
+| `Merge` | N (all `S_i`); rule: schemas must be union-compatible | `S_0` (representative) |
+| `Join { kind, pred }` | two `L`, `R` | union of `L` + `R` columns minus duplicates removed by USING/NATURAL |
+| `SetOp { kind, all }` | two (must be union-compatible) | left's schema |
+| `Sort { keys }` / `Limit` | one `S` | `S` |
+| `Subquery { alias }` | one `S` | `S` with table alias |
+| `LetBinding { name, expr, body }` | `body` consumes; `expr` bound by name | body's output schema |
+| `WindowFunc { func, partition_by, order_by, frame }` | one `S` | `S` extended with the analytic-function output column |
+| `BinaryOp { op, vector_match }` | two `L`, `R` (PromQL vector-match constraints apply) | element-wise op → schema with op-typed value column; boolean → boolean column |
+
+#### Three distinct schemas — DAG vs DB vs sketch catalog
+
+These three are sometimes conflated and shouldn't be:
+
+| Schema | Where it lives | What it describes | Who reads it |
+|---|---|---|---|
+| **DAG schema** | On every edge of the L3 / L4 / L5 DAG (`Schema` above) | Columns + types flowing between operators | L4 rules (selectivity estimation, push-down legality), L5 emitter |
+| **DB / source schema** | The query target (Prometheus TSDB metric metadata, SQL `information_schema`, DataFusion catalog) | What metrics / tables / columns exist in the data plane, with their types and indexing | `core::lower::*` to resolve names during L1→L2; exposed through a `SchemaCatalog` interface |
+| **Sketch catalog metadata** | `core::physical::sketch_catalog` (built at startup; static) | What sketches the runtime can build; what intents each one serves; mergeability, accuracy / confidence guarantees, supported aggregation keys, parameter ranges | L4 binding rules to choose a sketch for an `AggIntent`; L5 to instantiate the sketch |
+
+L1→L2 lowering reads the **DB schema** to resolve symbols. L3 onward, every edge carries a **DAG schema** that is type-checked locally. L4 binding rules consult the **sketch catalog** to map an intent to a concrete sketch under the deployment's constraints. They are three separate inputs to three distinct decisions.
+
+#### `AggIntent` — what to compute, not how
+
+```rust
 pub enum AggIntent {
-    // Data-model-agnostic — work on TimeSeries AND Tabular
-    Count { accuracy: AccuracyTarget },
+    // Data-model-agnostic
+    Count       { accuracy: AccuracyTarget },
     Sum,
     Min, Max,
-    Quantile { q: f64, accuracy: AccuracyTarget },
-    TopK { k: usize, accuracy: AccuracyTarget },
+    Quantile    { q: f64, accuracy: AccuracyTarget },
     Cardinality { accuracy: AccuracyTarget },
 
-    // Time-series only
-    Rate { window: Duration },
+    // Time-series streaming derivatives — specific operations, not just
+    // "Sum / Count over a Window". `Rate` is the per-second average derivative
+    // computed with PromQL's counter-reset adjustment, not a generic windowed
+    // mean. Kept distinct because (a) they have counter-reset semantics that
+    // exact `Sum` does not, and (b) sketch backends specialised for
+    // derivatives (e.g. delta-set aggregator) bind on these intents directly.
+    Rate     { window: Duration },
     Increase { window: Duration },
-    QuantileOverTime { q: f64, window: Duration, accuracy: AccuracyTarget },
 
-    // Tabular / OLAP only — added as scenarios demand
-    // CorrelatedSubqueryCount { ... },
-    // ApproxJoinCardinality { ... },
-    // ~25 variants total
+    // Tabular / OLAP — added as scenarios demand
+    // CorrelatedSubqueryCount { … }, ApproxJoinCardinality { … },
 }
 
 impl AggIntent {
     /// Which data-model this intent semantically requires. L4 rules
     /// consult this to skip non-applicable intents (e.g. `Rate` over
     /// a `Source::Table` is nonsense).
-    pub fn requires(&self) -> DataModel {
-        match self {
-            Self::Count{..} | Self::Sum | Self::Min | Self::Max
-                | Self::Quantile{..} | Self::TopK{..} | Self::Cardinality{..}
-                => DataModel::Any,
-            Self::Rate{..} | Self::Increase{..} | Self::QuantileOverTime{..}
-                => DataModel::TimeSeries,
-        }
-    }
+    pub fn requires(&self) -> DataModel { /* … */ }
+    /// Output column type — used by L3 schema derivation for `Aggregate`.
+    pub fn output_type(&self, input: &Field) -> DataType { /* … */ }
+    /// Which sketch families in the catalog can serve this intent.
+    /// Read by L4 binding rules.
+    pub fn candidate_sketches(&self) -> &'static [SketchKind] { /* … */ }
 }
 ```
 
-`AggIntent` describes **what** to compute (a quantile, a topk, a count) + what accuracy to hit — not **how** (KLL vs DDSketch vs CMS). Sketch binding happens at L4.
+**Why no `TopK` intent?** `Sort + Limit` over `Aggregate { aggs: [Count] }` (or any ranking key) is the canonical heavy-hitters shape. Heavy-hitter sketches (CMS-with-heap, SpaceSaving) bind at L4 by pattern-matching that shape, not on a dedicated intent. Same canonical-form argument as the L3 enum cleanup.
+
+**Why no `QuantileOverTime` intent?** It duplicated `Quantile` over a `Window`. The window — its kind, its size, its slide — is fully captured by the surrounding `Window { … }` node; the quantile *operation* is the same regardless of whether the input was a windowed time-series or a row-grouped table. PromQL's `quantile_over_time(0.99, m[5m])` lowers cleanly to `Window{size=5m} → Aggregate{aggs:[Quantile{q=0.99}]}`. One intent halves the L4 rule surface (one bind rule per operation, not per language-flavor of an operation).
+
+**Why `Rate` and `Increase` survive that argument.** They are not "Sum / Count over a Window with a different name" — they include PromQL's counter-reset adjustment, which is a non-trivial transformation an exact `Sum` does not perform. They earn distinct intent variants because they parameterise different physical operators (delta-set aggregators bind on these intents directly). If a non-PromQL streaming language has the same notion (e.g. SQL `RATE() OVER (RANGE)`), it lowers to the same intent — the intent vocabulary names the operation, not the language.
+
+#### L4 sketch-bound IR — `SketchExpr`
+
+L4 binding rules consume L3 `QueryExpr` and produce `SketchExpr`. This is the IR L5 emitters consume. The two-IR split — pure-logical L3 (`QueryExpr`) and sketch-bound L4 (`SketchExpr`) — gives L4 rule application a clean type signature: `fn apply(&QueryExpr, &Constraints) -> Option<SketchExpr>`, and the boundary cannot be silently violated.
+
+```rust
+pub enum SketchExpr {
+    /// Any logical L3 node passes through unchanged when no L4 rule rewrote
+    /// it — a `Filter` doesn't need a sketch counterpart.
+    Logical(QueryExpr),
+
+    /// Sketch aggregation. L4 picked the sketch type and parameters from the
+    /// catalog given the `AggIntent` and `DeploymentConstraints`.
+    SketchAgg {
+        child:  Box<SketchExpr>,
+        sketch: SketchKind,         // Kll, Cms, Hll, DDSketch, CmsWithHeap, …
+        params: SketchParams,       // catalog-validated
+        col:    ColumnRef,
+        by:     Vec<GroupKey>,
+    },
+
+    /// Sketch-aware join (KMV / theta-sketch for join cardinality;
+    /// join-sample for join sampling). Emitted only when a `Bind*OnJoin`
+    /// rule fires — L3 always presents the logical `Join` for L4 to choose.
+    SketchJoin {
+        outer:  Box<SketchExpr>,
+        inner:  Box<SketchExpr>,
+        key:    ColumnRef,
+        sketch: SketchKind,
+        params: SketchParams,
+    },
+
+    /// Subtract one sketch from another. Valid only for sketches with a
+    /// linear-inverse property (CMS, theta, count-based). Lets the planner
+    /// compute "all-A minus all-B" cardinality / count without re-scanning.
+    SketchSubtract { left: Box<SketchExpr>, right: Box<SketchExpr> },
+
+    /// Delete a key from a sketch (CMS update with -1, deletable Bloom
+    /// filter, …). Valid only for deletion-supporting sketches.
+    SketchDelete { sketch_input: Box<SketchExpr>, key: ColumnRef },
+
+    /// Read out a query result from a built sketch. Inverse of `SketchAgg`.
+    /// `query` says what to extract — quantile φ, count for key k, cardinality.
+    SketchEstimate { sketch_input: Box<SketchExpr>, query: SketchQuery },
+
+    /// ⊕ — union of sketches across stages / shards. Distinct from L3
+    /// `Merge` because sketch union has type constraints (same family,
+    /// same params). L5 stage allocator emits this when distributing.
+    SketchMerge { children: Vec<SketchExpr> },
+}
+```
+
+The optimizer's job is to selectively replace logical aggregates / joins with their sketch-bound variants when a binding rule fires; everything else stays inside `SketchExpr::Logical(…)`.
 
 **Why a `Source` sum instead of two parallel `QueryExpr` trees:** most `QueryExpr` nodes (`Filter`, `Aggregate`) are data-model-agnostic — filter semantics are the same whether the input is a time-series window or a table scan. Only the leaf `Scan` differs. Keeping one tree with a polymorphic leaf means L4 rules like `BindKllOnQuantile` work uniformly across both data models; rules that care about data-model specifics (stage-aware push-down for TS; join-selectivity for tabular) gate on `source.data_model()` + `intent.requires()`.
 
@@ -504,8 +655,40 @@ impl StageAllocator {
     ) -> Result<Vec<StageAssignment>, PlanError>;
 }
 
-// sketch catalogue — what sketches exist, what params they accept
-pub struct SketchCatalog { /* built at startup; queried by L4 binding rules + L5 */ }
+// sketch catalogue — what sketches exist, what they support, what params they
+// accept. Built at startup from the registered sketch backends; queried by L4
+// binding rules to map an `AggIntent` → `SketchKind` + `SketchParams`, and by
+// L5 to instantiate the chosen sketch.
+pub struct SketchCatalog {
+    pub entries: Vec<SketchEntry>,
+}
+
+pub struct SketchEntry {
+    pub kind:                 SketchKind,            // Kll, Cms, Hll, DDSketch, KMV, Theta, …
+    /// Which `AggIntent` variants this sketch can serve.
+    pub supported_intents:    &'static [IntentTag],  // Quantile, Count, Cardinality, JoinCardinality, …
+    /// Mergeability — sketches built on disjoint inputs combine without re-scan.
+    /// (CMS / HLL / KLL / theta = mergeable; SpaceSaving = approximately;
+    /// some heavy-hitter variants = no.)
+    pub mergeable:            Mergeability,
+    /// Whether the sketch supports point deletion (CMS update with -1,
+    /// deletable Bloom filter) — gates `SketchExpr::SketchDelete`.
+    pub deletable:            bool,
+    /// Whether the sketch admits a linear inverse (CMS, theta, count-based)
+    /// — gates `SketchExpr::SketchSubtract`.
+    pub subtractable:         bool,
+    /// Accuracy / confidence model: error bounds as a function of params.
+    /// `(eps, delta)` for randomised sketches; absolute error for KLL; etc.
+    pub accuracy:             AccuracyModel,
+    /// Aggregation keys this sketch supports natively. Some sketches are
+    /// keyed (CMS over (label, value)); others are unkeyed (HLL).
+    pub aggregated_keys:      KeyShape,              // Unkeyed | KeyedScalar | KeyedTuple
+    /// Parameter ranges + defaults. Catalog rejects out-of-range params at
+    /// L4 bind time so L5 never sees an unsupported configuration.
+    pub param_ranges:         ParamRanges,
+    /// Memory + CPU model used by `CostModel`. Function of params.
+    pub cost_model:           SketchCostModel,
+}
 ```
 
 Scenarios use these pieces:
@@ -667,7 +850,7 @@ Each scenario crate is a library with:
 - **Data model**: time-series. L2→L3 lowering produces `QueryExpr` with `Source::TimeSeries` leaves.
 - **Inherited L1**: uses `core::query_language::promql` and `core::query_language::sql`.
 - **NEW L2 tree** (Phase 4 work): defines `PromqlLogicalPlan` in `core::logical_plan::promql` that expresses the five pattern shapes asap-planner-rs currently template-matches as first-class L2 nodes. Replaces the pattern-catalogue approach with a proper L1→L2 tree rewrite. SQL side gets a matching `SqlLogicalPlan`.
-- **L3 intent**: maps `Statistic` enum (9 variants) onto `core::sketch_algebra::AggIntent` subset.
+- **L3 intent**: maps `Statistic` enum (9 variants) onto `core::sketch_algebra::AggIntent` subset. The mapping is not 1:1 — planner's `Topk` lowers to `Sort + Limit` over `Aggregate{aggs:[Count]}`, not to a dedicated intent (see §6 cleanup notes).
 - **L4 rules**: picks from `core::optimizer::rules::*` (all `Bind*` rules are relevant since this scenario covers most sketch types) + a scenario-specific sketch-binding rule for the precompute engine's flavor (which sketches are available, what params, `DeltaSetAggregator` auto-injection before CMS/HydraKLL). This rule absorbs `map_statistic_to_precompute_operator`'s sketch-binding half.
 - **L5 topology**: `core::physical::topology::SingleStage` (backend-only). No stage-split; `StageAllocator` returns everything on one stage trivially.
 - **L5 emitters**: `StreamingConfigEmitter` + `InferenceConfigEmitter` (YAML bytes). **Authoritative** for these two formats — `scenario-lifecycle` calls them when it needs to POST to ASAPQuery-backend.
@@ -837,6 +1020,20 @@ This matters: a user who only wants `scenario-fusion` (e.g., an offline benchmar
 10. **How far do shared L4/L5 rules live in core before they become scenario-specific?** The rule of thumb: if ≥2 current scenarios would use it, it lives in `core::optimizer::rules::*`. If only 1 scenario uses it *and* it depends on scenario-specific types (DataFusion's `LogicalPlan`, OTel YAML shape), it lives in the scenario crate. `SketchConfigRule`-style "bind intent to concrete sketch" rules belong in core (shared). `StageAwarePushDown` (which needs DC's stage graph) belongs in `scenario-lifecycle`. When a rule straddles — e.g. a fusion rewrite that *could* be generalized to any L4-compatible plan — start it in the scenario; lift to core once a second scenario wants it. Don't pre-emptively generalize.
 
 11. **How does the design support non-time-series data (asap-fusion's tabular queries, future OLAP scenarios)?** Already handled — see §3 "Data-model support" and §6 `core::sketch_algebra`. `QueryExpr::Scan` wraps a `Source` sum (`TimeSeries` / `Table` / `Join`); `AggIntent::requires() -> DataModel` tags which intents apply to which data models; sketches themselves are data-model-agnostic. asap-fusion uses `Source::Table` exclusively; ASAPQuery uses `Source::TimeSeries`; a future OLAP scenario picks whichever fits. The only implementation cost is that L4 rules which genuinely don't apply across data models (e.g. "merge overlapping time windows") must gate on `source.data_model()`; data-model-agnostic rules (the `Bind*` family) need no changes.
+
+### Resolved during the L3 IR cleanup (see §6 `core::sketch_algebra`)
+
+The following questions came up during review of the previous `QueryExpr` draft and are now settled. Listed here so the trail is visible:
+
+- **Output of `SketchAgg` vs `WindowedAgg`?** Neither node exists at L3 anymore. `SketchAgg` is an L4 sketch-bound node (`SketchExpr::SketchAgg`) emitted by binding rules; `WindowedAgg` was redundant with `Window` over `Aggregate` and removed. Output of `SketchAgg` is a sketch-typed column carrying the partial state; `SketchEstimate` reads it out into a scalar / vector.
+- **Is `TopK` different from `Sort + Limit`?** No — same plan, two spellings. Removed; `Sort + Limit` is canonical, and heavy-hitter sketches bind on that shape at L4.
+- **What is `JoinSketch`?** A sketch-aware join (KMV / theta / join-sample). Moved to L4 (`SketchExpr::SketchJoin`) so the choice "exact join vs sketch join" is an L4 cost decision against `Join`, not a competing L3 surface.
+- **`HistogramQuantile` and `PromQLSubquery` feel out of place** — they were. Both removed from L3. `histogram_quantile` lowers in PromQL L1→L2 to bucket reads + a `Quantile` intent. `<expr>[range:resolution]` is a driver that expands into multiple queries during PromQL L1→L2 lowering, not a DAG node.
+- **Sketch subtract / delete / estimate operators?** Added: `SketchExpr::SketchSubtract`, `SketchDelete`, `SketchEstimate`. Catalog flags (`subtractable`, `deletable`) gate which sketch families admit them.
+- **What's `Dedup` exactly?** SQL `DISTINCT`. Renamed to `Distinct { cols }` and generalised from one column to N.
+- **Why differentiate `Quantile` and `QuantileOverTime`?** No reason — the surrounding `Window` already encodes the temporal axis. `QuantileOverTime` removed from `AggIntent`.
+- **`WindowedAgg` vs `Window` + `Agg`?** Equivalent; `WindowedAgg` removed. `WindowKind::{Tumbling, Sliding, Session}` lives on the `Window` node so the streaming-window kind is explicit; SQL analytic `OVER (...)` stays on the separate `WindowFunc` node.
+- **Need input/output specs more fine-grained than `QueryExpr`?** Done: every L3 edge carries a typed `Schema` (fields + time index + unique-key sets), and §6 lists per-node input/output schemas.
 
 ## 13. Future work
 
