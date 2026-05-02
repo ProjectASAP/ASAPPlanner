@@ -34,7 +34,7 @@ DataCollector/controller already documents its query→sketch translation as a 5
 |---|-------|--------------|-------------------|
 | 1 | **Query Language** | Parse raw strings (PromQL, SQL, DataFusion, ElasticDSL, …) into a language-specific AST | DC `controller/src/query_parser/{promql,sql,mod}.rs`; asap-planner-rs pulls `promql-parser` + `sqlparser` directly; asap-fusion consumes a pre-built DataFusion `LogicalPlan` (its L1 happens upstream) |
 | 2 | **Language Logical Plan** | Per-language algebra tree (`Aggregate` / `Window` / `Filter` / `Sort` / `Limit`) preserving language semantics, **no sketch names, no sketch binding** | DC `controller/src/algebra/lower.rs`; asap-fusion inherits DataFusion's `LogicalPlan` as its L2; asap-planner-rs has no L2 today (uses a template-pattern catalogue) — **Phase 4 builds one** |
-| 3 | **Sketch Logical Plan** (sketch algebra) | Language- and deployment-independent IR: `QueryExpr` + `AggIntent`. Describes **intent only** — *what* to compute, with accuracy target. **No sketch type, no sketch parameters, no sketch-bound nodes** (`SketchAgg` / `SketchJoin` / `SketchSubtract` etc. live in the L4 IR `SketchExpr`). **No language-shaped operators** (no `HistogramQuantile`, no `PromQLSubquery` — those are PromQL L2 nodes that lower to data-model-agnostic shapes here). **One canonical form per plan** — no `TopK` (use `Sort + Limit`), no `WindowedAgg` (use `Window` over `Aggregate`). Every edge carries a typed `Schema`. Data-model-agnostic — `QueryExpr::Scan` wraps a `Source` sum with `TimeSeries` / `Table` / `Join` variants so the same L3 IR covers ASAPQuery's time-series queries and asap-fusion's tabular queries. | DC `controller/src/algebra/{expr,directory}.rs`; asap-fusion's 3-variant `SubPopulationAnalyticsType` maps to a subset; asap-planner-rs's 9-variant `Statistic` maps to a subset — **Phase 4 splits sketch binding out of planner's current fused L3+L4** |
+| 3 | **Sketch Logical Plan** (sketch algebra) | Language- and deployment-independent IR: `QueryExpr` + `AggIntent`. Describes **intent only** — *what* to compute, with accuracy target. **No sketch type, no sketch parameters, no sketch-bound nodes** (`SketchAgg` / `SketchJoin` / `SketchSubtract` etc. live in the L4 IR `SketchExpr`). **No language-shaped operators** (no `HistogramQuantile`, no `PromQLSubquery` — those are PromQL L2 nodes that lower to data-model-agnostic shapes here). **One canonical form per plan** — no `WindowedAgg` (use `Window` over `Aggregate`). Heavy-hitter intents are first-class (`AggIntent::TopK`) so heavy-hitter sketches bind directly on the intent rather than on a generic `Sort + Limit` shape; generic `Sort + Limit` survives in `QueryExpr` for non-heavy-hitter cases (e.g. `ORDER BY name LIMIT 10`). Every edge carries a typed `Schema`. Data-model-agnostic — `QueryExpr::Scan` wraps a `Source` sum with `TimeSeries` / `Table` / `Join` variants so the same L3 IR covers ASAPQuery's time-series queries and asap-fusion's tabular queries. | DC `controller/src/algebra/{expr,directory}.rs`; asap-fusion's 3-variant `SubPopulationAnalyticsType` maps to a subset; asap-planner-rs's 9-variant `Statistic` maps to a subset — **Phase 4 splits sketch binding out of planner's current fused L3+L4** |
 | 4 | **Sketch Optimizer** | Cost-aware algebraic rewrite rules under deployment constraints. **This is where sketch binding happens** — L4 rules take intent-only L3 and emit sketch-bound L3+. ~12 rules in DC; a smaller targeted subset in planner; `SketchConfigRule` + `HashModeRule` in fusion. | Core provides the **rule engine driver** + `OptimizerRule` trait + a shared rule library; scenarios **pick** which rules to enable + supply their own deployment constraints. DC `controller/src/algebra/optimizer.rs` (rules); fusion `src/optimizer/rules/`; planner's `map_statistic_to_precompute_operator` |
 | 5 | **Physical Execution Plan** | Assign ops to pipeline stages (edge / gateway / backend / object store); produce the deployment-specific artifact (OpAMP YAML, `streaming_config.yaml`, rewritten DataFusion `LogicalPlan`). **Sketch binding is already committed by L4**; L5 is about stage allocation + emission. | Core provides the **stage allocator framework** + `PhysicalPlanner` trait + the sketch catalogue; scenarios supply their own **topology** (3-stage / 1-stage / 0-stage) + their own **emitter** for the output format. DC `controller/src/algebra/{physical,allocator,plan}.rs`; asap-planner-rs `output/generator.rs`; asap-fusion `src/executor/` |
 
@@ -55,7 +55,7 @@ Today:
 
 ### Intent vocabulary: DC's `AggIntent` is a superset; scenarios use subsets
 
-DC's pre-cleanup superset had ~25 variants; after L3 normalisation (see §6) it's smaller because shapes that decompose into other operators (`TopK → Sort + Limit`; `QuantileOverTime → Window + Quantile`) no longer earn their own intent. The post-cleanup core today is ~7 (`Count, Sum, Min, Max, Quantile, Cardinality, Rate, Increase`); the long-term ceiling is bounded by genuinely-distinct operations (stddev, variance, approximate-join-cardinality, …), not by language-flavored synonyms. Planner's 9-variant `Statistic` maps onto this set: `TopK` is no longer an intent — it lowers to `Sort + Limit` over `Aggregate{Count}` (or whatever ranking key), and the heavy-hitter sketch binds at L4 by matching that shape. Fusion's 3 variants (`Count, Sum, Quantile`) map directly. Adding a new intent (e.g. stddev) is a core change that scenarios opt into.
+DC's pre-cleanup superset had ~25 variants; after L3 normalisation (see §6) it's smaller because language-flavored synonyms (`QuantileOverTime → Window + Quantile`) no longer earn their own intent. The post-cleanup core is 9 (`Count, Sum, Min, Max, Quantile, TopK, Cardinality, Rate, Increase`); the long-term ceiling is bounded by genuinely-distinct operations (stddev, variance, approximate-join-cardinality, …), not by language-flavored synonyms. Planner's 9-variant `Statistic` maps directly: `Topk` keeps its own intent (heavy-hitter sketches like SpaceSaving / CMS-with-heap compute it as a single primitive, so the intent earns L3 visibility). Fusion's 3 variants (`Count, Sum, Quantile`) map directly. Adding a new intent (e.g. stddev) is a core change that scenarios opt into.
 
 ### Data-model support: both time-series and tabular
 
@@ -101,14 +101,14 @@ The controller is a **planner**, not an executor. It does not run queries; it de
 | Output | Consumer | Wire shape |
 |---|---|---|
 | Per-executor sub-DAG assignment | The executor (edge agent / gateway / backend / DataFusion session) | OpAMP `RemoteConfig` (OTel YAML) / `streaming_config.yaml` POST / rewritten `LogicalPlan` |
-| Cut-edges between executors | The transport between executors (OTel pipeline, HTTP, sketch-merge over Kafka, …) | Implied by the per-executor configs; not a separate artifact |
+| Cut-edges between executors | The transport between executors (OTel pipeline, HTTP, sketch-merge / compute-from-raw over the precompute engine, …) | Implied by the per-executor configs; not a separate artifact |
 | Plan ID + provenance metadata | The controller's own `PlanStore` for replan / EXPLAIN / observability | JSON / proto |
 
-**Premise behind the per-executor split.** Every executor (edge collector, gateway, backend, DataFusion runtime) is in principle capable of running the entire query tree — they all speak the same physical operators. The controller's job is to decide *which* executor runs *which sub-tree* under the deployment's constraints (memory budget per stage, network bandwidth between stages, sketch backends available at each stage). A "stage assignment" is a colouring of the L4-bound `SketchExpr` DAG by executor, with sketch-merge / data-shipping nodes inserted on the cut edges. L5's `StageAllocator` does the colouring; the `PhysicalPlanner` per scenario emits the per-executor configs.
+**Premise behind the per-executor split.** Every executor (edge collector, gateway, backend, DataFusion runtime) is in principle capable of running the entire query tree — they all speak the same physical operators. The controller's job is to decide *which* executor runs *which sub-tree / sub-DAG* under the deployment's constraints (memory budget per stage, network bandwidth between stages, sketch backends available at each stage). A "stage assignment" is a colouring of the L4-bound `SketchExpr` DAG by executor, with sketch-merge / data-shipping nodes inserted on the cut edges. L5's `StageAllocator` does the colouring; the `PhysicalPlanner` per scenario emits the per-executor configs.
 
 This is what makes the topology a *parameter* rather than an axis of code: the same `SketchExpr` plus a different `TopologyDescriptor` produces edge-only / 1-stage / 3-stage / 0-stage placements without rewriting the plan.
 
-**Symbolic plan vs concrete plan.** L3 `QueryExpr` and L4 `SketchExpr` are symbolic — they describe operations and bindings without committing to *where* anything runs. L5 produces the concrete plan: stage-assigned, executor-targeted, ready to serialise into the executor's configuration format. The split is what lets the controller swap topologies (single-stage backend → three-stage edge/gateway/backend) without re-running L1-L4.
+**Symbolic plan vs concrete plan.** L3 `QueryExpr` and L4 `SketchExpr` are symbolic — they describe operations and bindings without committing to *where* anything runs. L5 produces the concrete plan: stage-assigned, executor-targeted, ready to serialize into the executor's configuration format. The split is what lets the controller swap topologies (single-stage backend → three-stage edge/gateway/backend) without re-running L1-L4.
 
 This drives the core/scenario split:
 
@@ -254,11 +254,11 @@ The language- and deployment-independent IR. **Pure intent at this layer**: no l
 
 #### Design rules for L3
 
-1. **One canonical form per plan.** No redundant variants whose semantics decompose into other variants. `Sort + Limit` is the canonical top-k shape; there is no separate `TopK`. `Window` over `Aggregate` is the canonical windowed-aggregate shape; there is no separate `WindowedAgg`. This keeps L4 rule matching unambiguous (a rule fires on one shape, not on N synonyms).
+1. **One canonical form per plan.** No redundant variants whose semantics decompose into other variants. `Window` over `Aggregate` is the canonical windowed-aggregate shape; there is no separate `WindowedAgg`. This keeps L4 rule matching unambiguous (a rule fires on one shape, not on N synonyms). The exception is when an "intent" is its own physical primitive: heavy-hitter top-k is served by sketches (SpaceSaving, CMS-with-heap) as a single operation, so `AggIntent::TopK` is a first-class intent at L3 — distinct from the generic `Sort + Limit` operator pair, which still appears in `QueryExpr` for non-heavy-hitter cases (e.g. `ORDER BY name LIMIT 10`).
 2. **Language-orthogonal.** No PromQL-shaped or SQL-shaped operators leak into L3. `HistogramQuantile` is a PromQL artifact (it consumes Prometheus's specific bucketed-histogram exposition format and produces a quantile from buckets) — it lives in `core::logical_plan::promql` (L2) and lowers to bucket reads + a regular `Quantile` intent over those bucket counts. `PromQLSubquery` (`<expr>[range:resolution]`) is a *driver* construct — it asks the engine to evaluate the inner expression at N timestamps — and is expanded by the PromQL L1→L2 lowering into a set of independent queries, not preserved as an L3 DAG node.
 3. **Intent at L3, sketch at L4.** L3 carries `AggIntent` ("compute a quantile to ε=0.01 accuracy"). The choice between `HashAgg` / `SortAgg` / `SketchAgg(KLL{k=200})` is made by L4 cost-aware rules, not encoded in L3.
 4. **One physical-choice node per logical operator.** L3 has `Aggregate` (logical) and `Join` (logical). L4 produces the sketch-bound physical alternatives (`SketchAgg`, `SketchJoin`, `SketchSubtract`, `SketchDelete`, `SketchEstimate`, `SketchMerge`) into an extended IR — see "L4 sketch-bound IR" below. Mixing logical and physical at L3 (the previous draft did this with `SketchAgg` / `JoinSketch` at L3) creates ambiguity about which layer owns which decision.
-5. **DAG, not tree.** Edges between nodes carry typed schemas (see "Schema flow" below). A node's output schema is a function of its inputs and parameters and is verifiable independently of the surrounding tree. CTEs / let-bindings produce reuse edges (multiple consumers).
+5. **DAG, not tree.** Edges between nodes carry typed schemas (see "Schema flow" below). A node's output schema is a function of its inputs and parameters and is verifiable independently of the surrounding tree. SQL CTEs (`WITH name AS (expr) SELECT ... FROM name JOIN name AS n2 ...`) and PromQL recording rules let a single named sub-expression be referenced from N downstream operators; the L3 representation is one producer node with N `QueryExpr::Ref(name)` consumer edges pointing back at it. That fan-out — multiple consumers of one producer — is what makes the IR a DAG rather than a tree. L4 reuse rules and `CostModel::workload_cost` use it to credit the producer's build cost once across all consumers.
 
 ```rust
 pub enum QueryExpr {
@@ -283,7 +283,7 @@ pub enum QueryExpr {
 
     // ── Time / streaming windows ──────────────────────────────────────────
     /// ψ — tumbling / sliding / session window over the time axis. Defines
-    /// the lifecycle (flush / reset bounds) of any aggregate in its subtree.
+    /// the lifecycle (flush / reset bounds) of any aggregate in its sub-tree / sub-DAG.
     /// PromQL `[5m]` and streaming windows lower here. SQL `OVER (...)`
     /// analytic frames are a different node — see `WindowFunc` below.
     Window { child: Box<QueryExpr>, kind: WindowKind,
@@ -313,12 +313,14 @@ pub enum QueryExpr {
             left: Box<QueryExpr>, right: Box<QueryExpr> },
 
     // ── Ordering & limiting ───────────────────────────────────────────────
+    /// Generic order-by — survives L3 for non-heavy-hitter cases
+    /// (`ORDER BY name LIMIT 10`, `ORDER BY ts DESC LIMIT 1`).
     Sort  { child: Box<QueryExpr>, keys: Vec<SortKey> },
-    /// `LIMIT n OFFSET k`. `Sort` followed by `Limit` is the canonical
-    /// top-k / heavy-hitters shape — no separate `TopK` node, since one
-    /// canonical representation per plan keeps L4 rule matching unambiguous.
-    /// Heavy-hitter sketches (CMS-with-heap, SpaceSaving) bind at L4 by
-    /// pattern-matching `Sort + Limit` on top of `Aggregate`.
+    /// `LIMIT n OFFSET k`. The heavy-hitter shape (`ORDER BY count DESC
+    /// LIMIT k`, PromQL `topk(k, …)`) is recognised at L1→L2→L3 lowering
+    /// and produces `AggIntent::TopK` rather than generic `Sort + Limit`,
+    /// so heavy-hitter sketches (SpaceSaving, CMS-with-heap) bind on the
+    /// intent. Generic `Sort + Limit` flows through unchanged.
     Limit { child: Box<QueryExpr>, n: u64, offset: u64 },
 
     // ── Subquery / CTE ────────────────────────────────────────────────────
@@ -368,7 +370,7 @@ impl Source {
 
 | Removed | Reason | Replacement |
 |---|---|---|
-| `TopK { k, by }` | Decomposes into `Sort + Limit`; two ways to spell the same plan break canonical-form invariant | `Sort { keys: by } → Limit { n: k }` |
+| `TopK { k, by }` *as a `QueryExpr` node* | A `QueryExpr`-level top-k operator collapses two distinct concepts: (a) the *intent* of "compute heavy hitters", which has its own sketch primitive, and (b) the generic operator pair `Sort + Limit`, which doesn't. Splitting them puts heavy-hitter logic at the right level | Heavy-hitter intent → `AggIntent::TopK` (L3, recognised by L1→L2→L3 lowering of `ORDER BY count DESC LIMIT k`, PromQL `topk(k, …)`); generic ordering+limit → `Sort + Limit` `QueryExpr` nodes (unchanged). Both retained — they describe different things |
 | `WindowedAgg { intent, window }` | Equivalent to `Window` over `Aggregate`; redundant. Tumbling/sliding kind moves onto `Window::kind` | `Window { kind: …, … } → Aggregate { aggs: [intent] }` |
 | `SketchAgg { intent, col }` | Sketch-bound; L3 must be intent-only | `Aggregate { aggs: [intent] }` at L3; L4 emits `SketchExpr::SketchAgg` |
 | `JoinSketch { outer, inner, key }` | Sketch-bound physical alternative; L3 must be intent-only. Several papers describe sketch-of-join (KMV, theta, join-sample) — picking one is an L4 cost decision, not an L3 surface choice | `Join { … }` at L3; L4 emits `SketchExpr::SketchJoin` when a `Bind*OnJoin` rule fires |
@@ -445,6 +447,13 @@ pub enum AggIntent {
     Sum,
     Min, Max,
     Quantile    { q: f64, accuracy: AccuracyTarget },
+    /// Heavy-hitter top-k. Distinct from generic `Sort + Limit` because a
+    /// dedicated sketch primitive (SpaceSaving, CMS-with-heap, Misra-Gries)
+    /// computes it as a single operation. L1→L2→L3 lowering produces this
+    /// when it recognises a heavy-hitter shape (`ORDER BY count DESC LIMIT k`,
+    /// PromQL `topk(k, …)`); other ordering+limit cases stay as
+    /// `QueryExpr::Sort + QueryExpr::Limit`.
+    TopK        { k: usize, by: Vec<ColumnRef>, accuracy: AccuracyTarget },
     Cardinality { accuracy: AccuracyTarget },
 
     // Time-series streaming derivatives — specific operations, not just
@@ -473,7 +482,7 @@ impl AggIntent {
 }
 ```
 
-**Why no `TopK` intent?** `Sort + Limit` over `Aggregate { aggs: [Count] }` (or any ranking key) is the canonical heavy-hitters shape. Heavy-hitter sketches (CMS-with-heap, SpaceSaving) bind at L4 by pattern-matching that shape, not on a dedicated intent. Same canonical-form argument as the L3 enum cleanup.
+**Why `TopK` *is* an intent (and `Sort + Limit` is not collapsed into it).** Heavy-hitter top-k has a dedicated sketch primitive — SpaceSaving / CMS-with-heap / Misra-Gries compute it in a single pass with sub-linear memory. L4 binding rules want to fire on the *intent* "give me the top-k frequent items" rather than on a syntactic shape, the same argument that makes `Quantile` an intent rather than a `Sort` + "pick the φ-th element" pattern. So `AggIntent::TopK` lives at L3. Generic `QueryExpr::Sort + QueryExpr::Limit` *also* survives, because not every order-by-limit query is heavy-hitter (`ORDER BY name LIMIT 10`, `ORDER BY ts DESC LIMIT 1`); these have no sketch alternative and stay as generic operators. The canonical-form invariant is preserved because L1→L2→L3 lowering picks one or the other deterministically based on whether it recognises a heavy-hitter pattern.
 
 **Why no `QuantileOverTime` intent?** It duplicated `Quantile` over a `Window`. The window — its kind, its size, its slide — is fully captured by the surrounding `Window { … }` node; the quantile *operation* is the same regardless of whether the input was a windowed time-series or a row-grouped table. PromQL's `quantile_over_time(0.99, m[5m])` lowers cleanly to `Window{size=5m} → Aggregate{aggs:[Quantile{q=0.99}]}`. One intent halves the L4 rule surface (one bind rule per operation, not per language-flavor of an operation).
 
@@ -850,7 +859,7 @@ Each scenario crate is a library with:
 - **Data model**: time-series. L2→L3 lowering produces `QueryExpr` with `Source::TimeSeries` leaves.
 - **Inherited L1**: uses `core::query_language::promql` and `core::query_language::sql`.
 - **NEW L2 tree** (Phase 4 work): defines `PromqlLogicalPlan` in `core::logical_plan::promql` that expresses the five pattern shapes asap-planner-rs currently template-matches as first-class L2 nodes. Replaces the pattern-catalogue approach with a proper L1→L2 tree rewrite. SQL side gets a matching `SqlLogicalPlan`.
-- **L3 intent**: maps `Statistic` enum (9 variants) onto `core::sketch_algebra::AggIntent` subset. The mapping is not 1:1 — planner's `Topk` lowers to `Sort + Limit` over `Aggregate{aggs:[Count]}`, not to a dedicated intent (see §6 cleanup notes).
+- **L3 intent**: maps `Statistic` enum (9 variants) onto `core::sketch_algebra::AggIntent` subset. Planner's `Topk` maps directly to `AggIntent::TopK` (heavy-hitter intent, served by SpaceSaving / CMS-with-heap at L4).
 - **L4 rules**: picks from `core::optimizer::rules::*` (all `Bind*` rules are relevant since this scenario covers most sketch types) + a scenario-specific sketch-binding rule for the precompute engine's flavor (which sketches are available, what params, `DeltaSetAggregator` auto-injection before CMS/HydraKLL). This rule absorbs `map_statistic_to_precompute_operator`'s sketch-binding half.
 - **L5 topology**: `core::physical::topology::SingleStage` (backend-only). No stage-split; `StageAllocator` returns everything on one stage trivially.
 - **L5 emitters**: `StreamingConfigEmitter` + `InferenceConfigEmitter` (YAML bytes). **Authoritative** for these two formats — `scenario-lifecycle` calls them when it needs to POST to ASAPQuery-backend.
@@ -1026,7 +1035,7 @@ This matters: a user who only wants `scenario-fusion` (e.g., an offline benchmar
 The following questions came up during review of the previous `QueryExpr` draft and are now settled. Listed here so the trail is visible:
 
 - **Output of `SketchAgg` vs `WindowedAgg`?** Neither node exists at L3 anymore. `SketchAgg` is an L4 sketch-bound node (`SketchExpr::SketchAgg`) emitted by binding rules; `WindowedAgg` was redundant with `Window` over `Aggregate` and removed. Output of `SketchAgg` is a sketch-typed column carrying the partial state; `SketchEstimate` reads it out into a scalar / vector.
-- **Is `TopK` different from `Sort + Limit`?** No — same plan, two spellings. Removed; `Sort + Limit` is canonical, and heavy-hitter sketches bind on that shape at L4.
+- **Is `TopK` different from `Sort + Limit`?** They overlap on heavy-hitter queries but are different concepts. `TopK` is now an `AggIntent` at L3 (heavy-hitter intent — SpaceSaving / CMS-with-heap / Misra-Gries serve it as a single primitive), while generic `Sort + Limit` survives as `QueryExpr` operators for non-heavy-hitter cases (`ORDER BY name LIMIT 10`). L1→L2→L3 lowering picks the intent form when it recognises a heavy-hitter pattern (`ORDER BY count DESC LIMIT k`, PromQL `topk(k, …)`) and the operator form otherwise.
 - **What is `JoinSketch`?** A sketch-aware join (KMV / theta / join-sample). Moved to L4 (`SketchExpr::SketchJoin`) so the choice "exact join vs sketch join" is an L4 cost decision against `Join`, not a competing L3 surface.
 - **`HistogramQuantile` and `PromQLSubquery` feel out of place** — they were. Both removed from L3. `histogram_quantile` lowers in PromQL L1→L2 to bucket reads + a `Quantile` intent. `<expr>[range:resolution]` is a driver that expands into multiple queries during PromQL L1→L2 lowering, not a DAG node.
 - **Sketch subtract / delete / estimate operators?** Added: `SketchExpr::SketchSubtract`, `SketchDelete`, `SketchEstimate`. Catalog flags (`subtractable`, `deletable`) gate which sketch families admit them.
