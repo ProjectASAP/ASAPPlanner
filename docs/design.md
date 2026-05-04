@@ -34,11 +34,11 @@ DataCollector/controller already documents its query→sketch translation as a 5
 |---|-------|--------------|-------------------|
 | 1 | **Query Language** | Parse raw strings (PromQL, SQL, DataFusion, ElasticDSL, …) into a language-specific AST | DC `controller/src/query_parser/{promql,sql,mod}.rs`; asap-planner-rs pulls `promql-parser` + `sqlparser` directly; asap-fusion consumes a pre-built DataFusion `LogicalPlan` (its L1 happens upstream) |
 | 2 | **Language Logical Plan** | Per-language algebra tree (`Aggregate` / `Window` / `Filter` / `Sort` / `Limit`) preserving language semantics, **no sketch names, no sketch binding** | DC `controller/src/algebra/lower.rs`; asap-fusion inherits DataFusion's `LogicalPlan` as its L2; asap-planner-rs has no L2 today (uses a template-pattern catalogue) — **Phase 4 builds one** |
-| 3 | **Sketch Logical Plan** (sketch algebra) | Language- and deployment-independent IR: `QueryExpr` + `AggIntent`. Describes **intent only** — *what* to compute, with accuracy target. **No sketch type, no sketch parameters, no sketch-bound nodes** (`SketchAgg` / `SketchJoin` / `SketchSubtract` etc. live in the L4 IR `SketchExpr`). **No language-shaped operators** (no `HistogramQuantile`, no `PromQLSubquery` — those are PromQL L2 nodes that lower to data-model-agnostic shapes here). **One canonical form per plan** — no `WindowedAgg` (use `Window` over `Aggregate`). Heavy-hitter intents are first-class (`AggIntent::TopK`) so heavy-hitter sketches bind directly on the intent rather than on a generic `Sort + Limit` shape; generic `Sort + Limit` survives in `QueryExpr` for non-heavy-hitter cases (e.g. `ORDER BY name LIMIT 10`). Every edge carries a typed `Schema`. Data-model-agnostic — `QueryExpr::Scan` wraps a `Source` sum with `TimeSeries` / `Table` / `Join` variants so the same L3 IR covers ASAPQuery's time-series queries and asap-fusion's tabular queries. | DC `controller/src/algebra/{expr,directory}.rs`; asap-fusion's 3-variant `SubPopulationAnalyticsType` maps to a subset; asap-planner-rs's 9-variant `Statistic` maps to a subset — **Phase 4 splits sketch binding out of planner's current fused L3+L4** |
-| 4 | **Sketch Optimizer** | Cost-aware algebraic rewrite rules under deployment constraints. **This is where sketch binding happens** — L4 rules take intent-only L3 and emit sketch-bound L3+. ~12 rules in DC; a smaller targeted subset in planner; `SketchConfigRule` + `HashModeRule` in fusion. | Core provides the **rule engine driver** + `OptimizerRule` trait + a shared rule library; deployment models **pick** which rules to enable + supply their own deployment constraints. DC `controller/src/algebra/optimizer.rs` (rules); fusion `src/optimizer/rules/`; planner's `map_statistic_to_precompute_operator` |
+| 3 | **Intent algebra** | Language- and deployment-independent IR: `QueryExpr` + `AggIntent`. Describes **intent only** — *what* to compute, with accuracy target. **No sketch type, no sketch parameters, no sketch-bound nodes** (`SketchAgg` / `SketchJoin` / `SketchSubtract` etc. live in the L4 IR `SketchExpr`). **No language-shaped operators** (no `HistogramQuantile`, no `PromQLSubquery` — those are PromQL L2 nodes that lower to data-model-agnostic shapes here). **One canonical form per plan** — no `WindowedAgg` (use `Window` over `Aggregate`). Heavy-hitter intents are first-class (`AggIntent::TopK`) so heavy-hitter sketches bind directly on the intent rather than on a generic `Sort + Limit` shape; generic `Sort + Limit` survives in `QueryExpr` for non-heavy-hitter cases (e.g. `ORDER BY name LIMIT 10`). Every edge carries a typed `Schema`. Data-model-agnostic — `QueryExpr::Scan` wraps a `Source` sum with `TimeSeries` / `Table` / `Join` variants so the same L3 IR covers ASAPQuery's time-series queries and asap-fusion's tabular queries. | DC `controller/src/algebra/{expr,directory}.rs`; asap-fusion's 3-variant `SubPopulationAnalyticsType` maps to a subset; asap-planner-rs's 9-variant `Statistic` maps to a subset — **Phase 4 splits sketch binding out of planner's current fused L3+L4** |
+| 4 | **Sketch algebra + optimizer** | Cost-aware algebraic rewrite rules under deployment constraints. **This is where sketch binding happens** — L4 rules take intent-only L3 (`QueryExpr`) and emit the sketch-bound IR (`SketchExpr`). ~12 rules in DC; a smaller targeted subset in planner; `SketchConfigRule` + `HashModeRule` in fusion. | Core provides the **rule engine driver** + `OptimizerRule` trait + a shared rule library + the sketch-bound IR `core::sketch_algebra::SketchExpr`; deployment models **pick** which rules to enable + supply their own deployment constraints. DC `controller/src/algebra/optimizer.rs` (rules); fusion `src/optimizer/rules/`; planner's `map_statistic_to_precompute_operator` |
 | 5 | **Physical Execution Plan** | Assign ops to pipeline stages (edge / gateway / backend / object store); produce the deployment-specific artifact (OpAMP YAML, `streaming_config.yaml`, rewritten DataFusion `LogicalPlan`). **Sketch binding is already committed by L4**; L5 is about stage allocation + emission. | Core provides the **stage allocator framework** + `PhysicalPlanner` trait + the sketch catalogue; deployment models supply their own **topology** (3-stage / 1-stage / 0-stage) + their own **emitter** for the output format. DC `controller/src/algebra/{physical,allocator,plan}.rs`; asap-planner-rs `output/generator.rs`; asap-fusion `src/executor/` |
 
-**The doc's key claim: layers 1–3 are query-language-independent and workload-independent.** That makes them the natural **common core**. Every deployment model reads PromQL (or SQL, or …) the same way, lowers it to the same per-language algebra, and lowers THAT to the same sketch-algebra IR (intent only, no sketch binding).
+**The doc's key claim: layers 1–3 are query-language-independent and workload-independent.** That makes them the natural **common core**. Every deployment model reads PromQL (or SQL, or …) the same way, lowers it to the same per-language algebra, and lowers THAT to the same intent-algebra IR (intent only, no sketch binding).
 
 **L4 and L5 also have substantial common infrastructure.** Initially we assumed deployment models owned L4/L5 wholesale; on closer inspection what's actually deployment-model-specific is *which rules fire* (L4) and *what topology + output format* (L5) — not the rule engine, not the allocator, not the sketch catalogue. Those frameworks belong in core. This makes deployment models significantly thinner: each becomes a small crate that picks rules from a shared library, declares a deployment topology, and writes an emitter.
 
@@ -71,7 +71,7 @@ Practically, this means:
 - `deployment-model-asapfusion` lowers into `QueryExpr` with `Source::Table` leaves (and, in future, `Source::Join` when it extends to multi-table queries).
 - A hypothetical OLAP deployment model that runs approximate queries over tabular data reuses `Source::Table` + the same `AggIntent` subset fusion uses, plus any OLAP-specific intents it adds.
 
-See §6 `core::sketch_algebra` for the concrete type sketches.
+See §6 `core::intent_algebra` for the concrete type sketches.
 
 ### Scope: start single-query, grow into workload-aware
 
@@ -164,9 +164,10 @@ ASAPController/
 │   ├── core/                  # Shared infrastructure across all 5 layers; no I/O
 │   │   ├── query_language/    # L1: per-language parsers — promql/, sql/, datafusion/, elasticdsl/
 │   │   ├── logical_plan/      # L2: per-language algebra tree (Aggregate/Window/Filter/…)
-│   │   ├── sketch_algebra/    # L3: QueryExpr + AggIntent + Schema/HasSchema + sketch directory
+│   │   ├── intent_algebra/    # L3 IR: QueryExpr + AggIntent + Schema/HasSchema (intent only)
+│   │   ├── sketch_algebra/    # L4 IR: SketchExpr (sketch-bound — kind + params committed)
 │   │   ├── lower/             # L1→L2→L3 lowering passes (one entry per language)
-│   │   ├── optimizer/         # L4 framework:
+│   │   ├── optimizer/         # L4 framework — produces SketchExpr from QueryExpr:
 │   │   │   ├── engine/        #   rule driver — fixed-point iteration, cycle detection, priority
 │   │   │   ├── trait/         #   OptimizerRule + RuleCategory (PushDown / Fusion / Elim / Bind)
 │   │   │   ├── rules/         #   shared rule library (e.g. sketch-binding rules; stream-vs-batch picker)
@@ -254,7 +255,7 @@ Each returns a language-flavored AST type. No sketch awareness.
 
 A **per-language** algebra tree — one `enum LogicalPlan` per language. Preserves language-specific semantics (PromQL instant vs range vector, SQL window frames, Elastic buckets) that would be lossy to collapse this early. Types are symmetric: `Aggregate { AggFunc }`, `Window`, `Filter`, `Sort`, `Limit`. No sketch names yet.
 
-### `core::sketch_algebra` — Layer 3
+### `core::intent_algebra` — Layer 3
 
 The language- and deployment-independent IR. **Pure intent at this layer**: no language-specific operators (no `HistogramQuantile`, no `PromQLSubquery` — those are L2 PromQL nodes), no sketch types, no sketch parameters, no physical operator choice. Data-model-agnostic: supports both **time-series** inputs (ASAPQuery-backend, DC lifecycle) and **tabular** inputs (asap-fusion, future OLAP deployment models) via a `Source` sum type inside `QueryExpr::Scan`.
 
@@ -416,7 +417,7 @@ pub trait HasSchema {
 }
 ```
 
-Per-node input/output spec — the stable contract for L3 nodes (full implementation in `core/src/sketch_algebra/schema.rs`). Each row reads independently: every column position, type, and constraint is named explicitly rather than carried by a shorthand like `S` or `L` / `R`.
+Per-node input/output spec — the stable contract for L3 nodes (full implementation in `core/src/intent_algebra/schema.rs`). Each row reads independently: every column position, type, and constraint is named explicitly rather than carried by a shorthand like `S` or `L` / `R`.
 
 | Node | Input schemas | Output schema |
 |---|---|---|
@@ -500,9 +501,9 @@ impl AggIntent {
 
 **Why `Rate` and `Increase` survive that argument.** They are not "Sum / Count over a Window with a different name" — they include PromQL's counter-reset adjustment, which is a non-trivial transformation an exact `Sum` does not perform. They earn distinct intent variants because they parameterise different physical operators (delta-set aggregators bind on these intents directly). If a non-PromQL streaming language has the same notion (e.g. SQL `RATE() OVER (RANGE)`), it lowers to the same intent — the intent vocabulary names the operation, not the language.
 
-#### L4 sketch-bound IR — `SketchExpr`
+### `core::sketch_algebra` — Layer 4 IR (`SketchExpr`)
 
-L4 binding rules consume L3 `QueryExpr` and produce `SketchExpr`. This is the IR L5 emitters consume. The two-IR split — pure-logical L3 (`QueryExpr`) and sketch-bound L4 (`SketchExpr`) — gives L4 rule application a clean type signature: `fn apply(&QueryExpr, &Constraints) -> Option<SketchExpr>`, and the boundary cannot be silently violated.
+L4 binding rules consume L3 `QueryExpr` (in `core::intent_algebra`) and produce `SketchExpr` (in `core::sketch_algebra`). This is the IR L5 emitters consume. The two-IR split — intent-only L3 (`QueryExpr`) and sketch-bound L4 (`SketchExpr`), in two separate modules — gives L4 rule application a clean type signature: `fn apply(&QueryExpr, &Constraints) -> Option<SketchExpr>`, and the boundary cannot be silently violated.
 
 ```rust
 pub enum SketchExpr {
@@ -553,7 +554,7 @@ pub enum SketchExpr {
 
 The optimizer's job is to selectively replace logical aggregates / joins with their sketch-bound variants when a binding rule fires; everything else stays inside `SketchExpr::Logical(…)`.
 
-##### Per-node input/output spec for `SketchExpr`
+#### Per-node input/output spec for `SketchExpr`
 
 L4 introduces a new field type into `Schema`:
 
@@ -589,7 +590,7 @@ Two type-system invariants make L4 robust:
 
 ### `core::lower` — L1 → L2 → L3 passes
 
-One pass per language, each producing the same `sketch_algebra::QueryExpr`:
+One pass per language, each producing the same `intent_algebra::QueryExpr`:
 
 ```rust
 pub fn lower_promql(ast: PromqlAst, schema: &MetricSchema) -> Result<QueryExpr>;
@@ -931,7 +932,7 @@ Each deployment model crate is a library with:
 - **Data model**: time-series. L2→L3 lowering produces `QueryExpr` with `Source::TimeSeries` leaves.
 - **Inherited L1**: uses `core::query_language::promql` and `core::query_language::sql`.
 - **NEW L2 tree** (Phase 4 work): defines `PromqlLogicalPlan` in `core::logical_plan::promql` that expresses the five pattern shapes asap-planner-rs currently template-matches as first-class L2 nodes. Replaces the pattern-catalogue approach with a proper L1→L2 tree rewrite. SQL side gets a matching `SqlLogicalPlan`.
-- **L3 intent**: maps `Statistic` enum (9 variants) onto `core::sketch_algebra::AggIntent` subset. Planner's `Topk` maps directly to `AggIntent::TopK` (heavy-hitter intent, served by SpaceSaving / CMS-with-heap at L4).
+- **L3 intent**: maps `Statistic` enum (9 variants) onto `core::intent_algebra::AggIntent` subset. Planner's `Topk` maps directly to `AggIntent::TopK` (heavy-hitter intent, served by SpaceSaving / CMS-with-heap at L4).
 - **L4 rules**: picks from `core::optimizer::rules::*` (all `Bind*` rules are relevant since this deployment model covers most sketch types) + a deployment-model-specific sketch-binding rule for the precompute engine's flavor (which sketches are available, what params, `DeltaSetAggregator` auto-injection before CMS/HydraKLL). This rule absorbs `map_statistic_to_precompute_operator`'s sketch-binding half.
 - **L5 topology**: `core::physical::topology::SingleStage` (backend-only). No stage-split; `StageAllocator` returns everything on one stage trivially.
 - **L5 emitters**: `StreamingConfigEmitter` + `InferenceConfigEmitter` (YAML bytes). **Authoritative** for these two formats — `deployment-model-asaplifecycle` calls them when it needs to POST to ASAPQuery-backend.
@@ -944,7 +945,7 @@ Each deployment model crate is a library with:
 - **Data model**: tabular. L2→L3 lowering produces `QueryExpr` with `Source::Table` leaves (and, in future, `Source::Join` when fusion extends to multi-table). Crucially **not time-indexed** — fusion works on arbitrary DataFusion relations; time is just another column if present.
 - **L1 opt-out**: fusion consumes a pre-built DataFusion `LogicalPlan` from its caller. `core::query_language` is not invoked. Library-mode deployment model.
 - **L2 inherited from DataFusion**: DataFusion's `LogicalPlan` *is* fusion's L2 tree. `core::logical_plan::datafusion` is a thin re-export of `datafusion::logical_expr::LogicalPlan` so deployment models that want to take a DataFusion plan as input have a canonical name for it.
-- **L3 intent**: `SubPopulationAnalyticsType` (3 variants: `Count`, `Sum`, `Quantile`) maps to `core::sketch_algebra::AggIntent` subset.
+- **L3 intent**: `SubPopulationAnalyticsType` (3 variants: `Count`, `Sum`, `Quantile`) maps to `core::intent_algebra::AggIntent` subset.
 - **L4 rules**: picks `BindCmsOnCount` and `BindKllOnQuantile` from `core::optimizer::rules::*` (which already cover fusion's `SketchConfigRule` semantics) + deployment-model-specific `HashModeRule`. Rules operate on DataFusion `LogicalPlan` (via Extension wrapping), not on `QueryExpr` trees — this lets DataFusion's `context.state().optimize` run *after* fusion's rewrites, keeping free reuse of DF's standard optimizer passes.
 - **L5 topology**: `core::physical::topology::ZeroStage` (in-process).
 - **L5 emitter**: rewritten `datafusion::LogicalPlan`. Not a wire format — this deployment model is library-mode.
@@ -1100,9 +1101,9 @@ This matters: a user who only wants `deployment-model-asapfusion` (e.g., an offl
 
 10. **How far do shared L4/L5 rules live in core before they become deployment-model-specific?** The rule of thumb: if ≥2 current deployment models would use it, it lives in `core::optimizer::rules::*`. If only 1 deployment model uses it *and* it depends on deployment-model-specific types (DataFusion's `LogicalPlan`, OTel YAML shape), it lives in the deployment model crate. `SketchConfigRule`-style "bind intent to concrete sketch" rules belong in core (shared). `StageAwarePushDown` (which needs DC's stage graph) belongs in `deployment-model-asaplifecycle`. When a rule straddles — e.g. a fusion rewrite that *could* be generalized to any L4-compatible plan — start it in the deployment model; lift to core once a second deployment model wants it. Don't pre-emptively generalize.
 
-11. **How does the design support non-time-series data (asap-fusion's tabular queries, future OLAP deployment models)?** Already handled — see §3 "Data-model support" and §6 `core::sketch_algebra`. `QueryExpr::Scan` wraps a `Source` sum (`TimeSeries` / `Table` / `Join`); `AggIntent::requires() -> DataModel` tags which intents apply to which data models; sketches themselves are data-model-agnostic. asap-fusion uses `Source::Table` exclusively; ASAPQuery uses `Source::TimeSeries`; a future OLAP deployment model picks whichever fits. The only implementation cost is that L4 rules which genuinely don't apply across data models (e.g. "merge overlapping time windows") must gate on `source.data_model()`; data-model-agnostic rules (the `Bind*` family) need no changes.
+11. **How does the design support non-time-series data (asap-fusion's tabular queries, future OLAP deployment models)?** Already handled — see §3 "Data-model support" and §6 `core::intent_algebra`. `QueryExpr::Scan` wraps a `Source` sum (`TimeSeries` / `Table` / `Join`); `AggIntent::requires() -> DataModel` tags which intents apply to which data models; sketches themselves are data-model-agnostic. asap-fusion uses `Source::Table` exclusively; ASAPQuery uses `Source::TimeSeries`; a future OLAP deployment model picks whichever fits. The only implementation cost is that L4 rules which genuinely don't apply across data models (e.g. "merge overlapping time windows") must gate on `source.data_model()`; data-model-agnostic rules (the `Bind*` family) need no changes.
 
-### Resolved during the L3 IR cleanup (see §6 `core::sketch_algebra`)
+### Resolved during the L3 IR cleanup (see §6 `core::intent_algebra`)
 
 The following questions came up during review of the previous `QueryExpr` draft and are now settled. Listed here so the trail is visible:
 
@@ -1155,8 +1156,8 @@ Terms that are project-specific or that get conflated. Where the term has a Rust
 
 - **L1 — query language** — Raw query string + parser (PromQL / SQL / DataFusion / ElasticDSL).
 - **L2 — logical plan** — Per-language relational algebra tree (`PromqlLogicalPlan`, `SqlLogicalPlan`, etc.).
-- **L3 — sketch algebra** (`QueryExpr`) — Symbolic, intent-only IR. No sketch type, no params. `AggIntent` carries accuracy targets only.
-- **L4 — sketch-bound IR** (`SketchExpr`) — Same DAG shape, sketches now committed (kind + params).
+- **L3 — intent algebra** (`QueryExpr`, `core::intent_algebra`) — Symbolic, intent-only IR. No sketch type, no params. `AggIntent` carries accuracy targets only. The "algebra" is the operator surface (`Scan`, `Filter`, `Aggregate`, `Window`, …); the algebra is *intent-only* because no sketches have been bound yet.
+- **L4 — sketch algebra** (`SketchExpr`, `core::sketch_algebra`) — Same DAG shape as L3, but sketches now committed (kind + params). Produced by L4 binding rules; consumed by L5 emitters. Note the naming inversion vs. earlier drafts: "sketch algebra" is L4 (where sketches actually live), not L3.
 - **L5 — physical plan** — Stage-assigned, executor-targeted, ready to serialize. Produced by `PhysicalPlanner`, written out by `PlanEmitter`.
 
 ### Metadata sources (see §6 "DAG schema, DB schema, sketch catalog")

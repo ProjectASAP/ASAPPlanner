@@ -36,14 +36,14 @@ Ordered by risk, lowest first. Each phase is a single PR unless noted.
 
 ### Phase 1 — Core extraction: all-5-layer shared infrastructure
 
-**Scope:** Lift the DC controller's **layers 1–3** (query parsing + per-language algebra + sketch-algebra IR) into `crates/core/` verbatim, AND lift L4 and L5 **shared infrastructure**: rule engine, shared rule library, cost-model traits, `PhysicalPlanner` trait, stage allocator framework, sketch catalogue. Deployment models in later phases pick from this common base and only add deployment-model-specific pieces.
+**Scope:** Lift the DC controller's **layers 1–3** (query parsing + per-language algebra + intent-algebra IR) into `crates/core/` verbatim, AND lift L4 and L5 **shared infrastructure**: rule engine, shared rule library, cost-model traits, `PhysicalPlanner` trait, stage allocator framework, sketch catalogue, sketch-bound L4 IR (`SketchExpr` in `core::sketch_algebra`). Deployment models in later phases pick from this common base and only add deployment-model-specific pieces.
 
 Per design §3, these five layers' infrastructure is query-language-independent AND deployment-model-independent; the concrete rule set, topology, and emitter are deployment-model-specific.
 
 **Work — L1-3 (straight lift from DC):**
 - **`core::query_language`** (L1): lift `DataCollector/controller/src/query_parser/{promql,sql,mod}.rs` → `core/src/query_language/`. One module per language.
 - **`core::logical_plan`** (L2): lift per-language algebra tree definitions → `core/src/logical_plan/`. One `enum LogicalPlan` per language. Add `core::logical_plan::datafusion` as a thin re-export of `datafusion::logical_expr::LogicalPlan` for fusion's L2.
-- **`core::sketch_algebra`** (L3): lift `algebra/{expr,directory}.rs` → `core/src/sketch_algebra/`. Enforce **intent-only** — `AggIntent` carries accuracy target, never sketch type. **Generalize `QueryExpr::Scan` over data model**: introduce a `Source` sum (`TimeSeries` / `Table` / `Join` variants) inside `Scan`, and a `DataModel` enum (`TimeSeries` / `Tabular` / `Any`). DC's current scan logic becomes `Source::TimeSeries`; `Source::Table` is new (stub impl fine for Phase 1 — deployment-model-asapfusion fills it in Phase 3). Add `AggIntent::requires() -> DataModel` so L4 rules can skip non-applicable intents. See design §3 "Data-model support" and §6 `core::sketch_algebra`. ~300 LOC on top of the DC lift.
+- **`core::intent_algebra`** (L3): lift `algebra/{expr,directory}.rs` → `core/src/intent_algebra/`. Enforce **intent-only** — `AggIntent` carries accuracy target, never sketch type. **Generalize `QueryExpr::Scan` over data model**: introduce a `Source` sum (`TimeSeries` / `Table` / `Join` variants) inside `Scan`, and a `DataModel` enum (`TimeSeries` / `Tabular` / `Any`). DC's current scan logic becomes `Source::TimeSeries`; `Source::Table` is new (stub impl fine for Phase 1 — deployment-model-asapfusion fills it in Phase 3). Add `AggIntent::requires() -> DataModel` so L4 rules can skip non-applicable intents. See design §3 "Data-model support" and §6 `core::intent_algebra`. ~300 LOC on top of the DC lift.
 - **`core::lower`**: lift `algebra/lower.rs` (L1→L2→L3 passes) → `core/src/lower/`. One `lower_<lang>` entry point per language. Each lowering produces the appropriate `Source` variant (PromQL / SQL → `Source::TimeSeries`; DataFusion → `Source::Table`).
 
 **Work — L4 framework (NEW):**
@@ -156,7 +156,7 @@ This phase is larger than a straight lift because two structural conformance cha
 - **This is the conformance cost the user explicitly accepted for architectural uniformity.** Budget accordingly.
 
 **Work — L3 / L4 split (NEW):**
-- In `core::lower::promql_to_sketch_algebra`: `PromqlLogicalPlan → QueryExpr` producing **intent-only** L3 (no sketch names).
+- In `core::lower::promql_to_intent_algebra`: `PromqlLogicalPlan → QueryExpr` producing **intent-only** L3 (no sketch names).
 - `Statistic` enum → `AggIntent` subset (9 of DC's 25 variants). No sketch type, no sketch params at L3.
 - In `deployment-model-asapquery/src/rules.rs`: picks core's `BindKllOnQuantile`, `BindCmsOnCount`, etc. from Phase 1's shared rule library + adds a deployment-model-specific `PrecomputeEngineBindRule` (handles the precompute-engine-specific flavor: which sketches are available in ASAPQuery-backend's accumulator set, what params match the engine's config schema, `DeltaSetAggregator` auto-injection before CMS/HydraKLL).
 - Update `build_agg_configs_for_statistics` to call `core::optimizer::engine::RuleEngine::run()` with the deployment model's rule set instead of the inline `map_statistic_to_precompute_operator` fusion.

@@ -23,8 +23,8 @@ This repo merges three previously-separate projects into a single workspace with
 |---|---|---|
 | 1 | Query-language parsing (PromQL, SQL, DataFusion, ElasticDSL) | `core::query_language` |
 | 2 | Per-language logical plan (relational algebra tree) | `core::logical_plan` |
-| 3 | Sketch algebra — language-, deployment-, AND data-model-independent IR (`QueryExpr` + `AggIntent`, intent only). Supports both time-series and tabular data via a `Source` sum inside `Scan`. | `core::sketch_algebra` |
-| 4 | Cost-aware optimizer — rule engine + shared rule library; deployment models pick rules | **framework in `core::optimizer`**; choices in each deployment model |
+| 3 | Intent algebra — language-, deployment-, AND data-model-independent IR (`QueryExpr` + `AggIntent`, intent only — no sketch type, no params). Supports both time-series and tabular data via a `Source` sum inside `Scan`. | `core::intent_algebra` |
+| 4 | Cost-aware optimizer — rule engine + shared rule library; deployment models pick rules. Produces the **sketch algebra** IR `SketchExpr` (sketch-bound: kind + params committed). | **framework in `core::optimizer`**; sketch-bound IR in `core::sketch_algebra`; rule choices in each deployment model |
 | 5 | Physical plan — stage allocation + emit to wire format | **framework in `core::physical`**; topology + emitter in each deployment model |
 
 **Core owns the shared infrastructure across all 5 layers**, not just L1-3. Deployment models are thin: they pick which rules fire (L4), declare their deployment topology (L5), and provide an emitter for their output format. Typical deployment model crate: **500-2500 LOC**.
@@ -34,9 +34,10 @@ crates/
   core/                 # all 5 layers of shared infrastructure; no I/O
     query_language/     # L1 — parsers
     logical_plan/       # L2 — per-language algebra trees
-    sketch_algebra/     # L3 — QueryExpr + AggIntent (intent only, ~25 variants superset)
+    intent_algebra/     # L3 IR — QueryExpr + AggIntent (intent only, ~25 variants superset)
+    sketch_algebra/     # L4 IR — SketchExpr (sketch-bound: kind + params committed)
     lower/              # L1→L2→L3 passes
-    optimizer/          # L4 framework — rule engine + shared rule library + cost traits
+    optimizer/          # L4 framework — rule engine + shared rule library + cost traits; produces SketchExpr
     physical/           # L5 framework — PhysicalPlanner + stage allocator + topology + sketch catalogue
     pipeline/           # L1→…→L5 driver, parameterized on deployment model
   runtime/              # HTTP / OpAMP / replanner / store — service skeleton
