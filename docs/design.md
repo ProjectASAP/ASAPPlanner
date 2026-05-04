@@ -400,8 +400,22 @@ pub struct Schema {
     /// Index into `fields` for the time axis, if any. PromQL leaves carry one;
     /// SQL leaves may or may not.
     pub time_index:  Option<usize>,
-    /// Functional dependencies / unique-key sets. L4 reuses these to recognise
-    /// when two sub-expressions produce identical streams (sketch-reuse driver).
+    /// Optional metadata for reuse-aware planning. Each inner `Vec<usize>` is
+    /// a set of column indices that together uniquely identify rows; the outer
+    /// `Vec` allows multiple unique-key sets (e.g. primary key + another unique
+    /// constraint).
+    ///
+    /// **Populated by**: the per-node input/output spec (e.g. `Aggregate { by, .. }`
+    /// emits `unique_keys = [by]`; `Distinct { cols }` adds `cols`; `Project`
+    /// carries forward the retained columns; most other nodes pass through).
+    ///
+    /// **Consumed by**: `CostModel::workload_cost` only — the reuse-aware path
+    /// that credits shared sub-expressions across multiple queries. Single-query
+    /// plans, the `Bind*` rules, push-down rules, and L5 emitters do not read
+    /// this field. If the reuse path is deferred (see §13 future work), this
+    /// field is dead weight; it lives here so the metadata is available the
+    /// moment workload-aware planning lands without requiring an L3-wide
+    /// schema change.
     pub unique_keys: Vec<Vec<usize>>,
 }
 
