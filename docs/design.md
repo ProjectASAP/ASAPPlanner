@@ -931,6 +931,14 @@ The `shape` × `data` cross-product isn't fully populated. Combinations the plan
 | `Streaming` | ✗ rejected at L1 (no stream over a static dataset) | ✓ canonical streaming case | ✗ rejected (no retraction support) | ✓ if streaming leaves dominate |
 | `Periodic { every }` | ✓ scheduled batch report | ✓ recording rules | ✓ via re-scan | ✓ |
 
+The `shape` × `data` cross-product isn't fully populated. Combinations the planner accepts and rejects:
+
+| `shape` \ `data` | `Batch` | `AppendOnlyStream` | `Mutable` | `Mixed` |
+|---|---|---|---|---|
+| `OneShot` | ✓ ad-hoc SQL, fusion | ✓ "evaluate now over latest window" | ✓ via re-scan, no sketch binding | ✓ per-leaf shape decides |
+| `Streaming` | ✗ rejected at L1 (no stream over a static dataset) | ✓ canonical streaming case | ✗ rejected (no retraction support) | ✓ if streaming leaves dominate |
+| `Periodic { every }` | ✓ scheduled batch report | ✓ recording rules | ✓ via re-scan | ✓ |
+
 ### `core::cost`
 
 Extracted from DC's `planner/*` (delta, online, pareto, tco). Deployment models pick the models they need.
