@@ -909,6 +909,194 @@ Registration is by-type; the runtime looks up by `DeploymentModelId` (either fro
 
 No core change.
 
+### End-to-end example — one query through all five layers
+
+A worked trace of a single PromQL query as it flows L1 → L5. The query is intentionally simple (one metric, one window, one aggregate) so the IR shapes stay readable; production workloads have larger DAGs but the per-layer transformation is the same.
+
+**Input.** A `QuerySpec` arrives at `POST /plan` carrying:
+
+```text
+quantile_over_time(0.99, http_request_duration_seconds{service="api"}[5m])
+```
+
+with `accuracy: AccuracyTarget::Epsilon(0.01)` and `language: PromQL`.
+
+#### L1 — query language (parse to `PromqlAst`)
+
+`core::query_language::promql::parse` wraps `promql-parser`. Output (sketch — actual fields come from the upstream crate):
+
+```rust
+PromqlAst::Call {
+    func: BuiltinFn::QuantileOverTime,
+    args: vec![
+        Expr::Number(0.99),
+        Expr::MatrixSelector {
+            name: "http_request_duration_seconds",
+            matchers: vec![LabelMatcher::Eq("service", "api")],
+            range: Duration::from_secs(300),
+        },
+    ],
+}
+```
+
+Pure language-level parse — no schema lookup, no sketch awareness. Same call returns the same AST regardless of deployment model.
+
+#### L2 — language logical plan (`PromqlLogicalPlan` tree)
+
+`core::lower::promql::lower_to_logical` walks the AST against a `MetricSchema` resolved from Prometheus's `/api/v1/labels`. The result preserves PromQL semantics — `quantile_over_time` is a range-vector aggregate, distinct from a generic `Aggregate { Quantile }` over a `Window`:
+
+```rust
+PromqlLogicalPlan::RangeAggregate {
+    func: PromqlRangeAggFunc::QuantileOverTime { q: 0.99 },
+    range: Duration::from_secs(300),
+    matrix: Box::new(PromqlLogicalPlan::MatrixSelector {
+        metric: "http_request_duration_seconds",
+        matchers: vec![("service", LabelOp::Eq, "api")],
+    }),
+}
+```
+
+Per language: the SQL form `SELECT approx_percentile(latency, 0.99) FROM events WHERE service='api' AND ts > now() - INTERVAL '5 min'` lands in `SqlLogicalPlan` with a different shape. L2 is per-language; the shapes converge at L3.
+
+#### L3 — intent algebra (`QueryExpr` + `AggIntent`)
+
+`core::lower::promql::lower_to_intent` strips PromQL-specific shapes. `quantile_over_time` does **not** survive — the canonical L3 form for a windowed quantile is `Window` over `Aggregate{Quantile}` (see §6 design rule 1, "no `WindowedAgg`"; see §6 "Why no `QuantileOverTime` intent?"). The accuracy target threads through from the `QuerySpec`:
+
+```rust
+QueryExpr::Aggregate {
+    by: vec![],
+    aggs: vec![AggIntent::Quantile {
+        q: 0.99,
+        accuracy: AccuracyTarget::Epsilon(0.01),
+    }],
+    having: None,
+    child: Box::new(QueryExpr::Window {
+        kind: WindowKind::Sliding,
+        size: Duration::from_secs(300),
+        slide: None,
+        child: Box::new(QueryExpr::Scan {
+            source: Source::TimeSeries {
+                metric: MetricRef::from("http_request_duration_seconds"),
+                time:   TimeRange::default(),     // supplied by QuerySpec at evaluation
+                labels: LabelFilter::eq("service", "api"),
+            },
+            predicates: vec![],
+        }),
+    }),
+}
+```
+
+Per-edge schemas (derived per the §6 input/output spec):
+
+| Edge | Schema |
+|---|---|
+| `Scan` → `Window` | `{value: Float64, ts: Int64@time_index, service: Utf8}` |
+| `Window` → `Aggregate` | the above + `{window_id: Int64, window_start: Int64, window_end: Int64}` |
+| `Aggregate` → root | `{p99_value: Float64}` (one column per `AggIntent::Quantile`, typed via `output_type`) |
+
+This IR is identical across deployment models — same DAG, same intent, same accuracy target. Below this point each deployment model picks its own L4 rules.
+
+#### L4 — sketch algebra (`SketchExpr`)
+
+The shared rule `core::optimizer::rules::BindKllOnQuantile` matches `Aggregate { aggs: [Quantile{q, accuracy}] }`, consults the sketch catalog (KLL has `supported_intents: [Quantile]`, is mergeable, satisfies `ε=0.01` at `k=200`), and rewrites the matched sub-DAG into a `SketchAgg` wrapped in a `SketchEstimate` (the readout). Everything not rewritten passes through in `SketchExpr::Logical(...)`:
+
+```rust
+SketchExpr::SketchEstimate {
+    sketch_input: Box::new(SketchExpr::SketchAgg {
+        child:  Box::new(SketchExpr::Logical(/* the L3 Window+Scan subtree */)),
+        sketch: SketchKind::Kll,
+        params: SketchParams::Kll(KllParams { k: 200 }),
+        col:    ColumnRef::value(),
+        by:     vec![],
+    }),
+    query: SketchQuery::Quantile { q: 0.99 },
+}
+```
+
+Catalog-derived edge schemas:
+
+| Edge | Schema |
+|---|---|
+| inner `Logical(Window)` → `SketchAgg` | as L3 above (logical pass-through) |
+| `SketchAgg` → `SketchEstimate` | `{kll: Sketch(Kll, KllParams{k:200})}` |
+| `SketchEstimate` → root | `{p99_value: Float64}` (the `Sketch(...)` field type does not propagate past `SketchEstimate`) |
+
+The `Sketch(Kll, KllParams{k:200})` field type is the L4 type-system invariant — a downstream `SketchMerge` over a mismatched `Sketch(Cms, …)` input would fail at plan time, before L5 ever sees it. `BindKllOnQuantile` lives once in core and fires for all three deployment models; deployment-model-specific rules (lifecycle's `StageAwarePushDown`, fusion's `HashModeRule`) chain before or after.
+
+#### L5 — physical plan (stage allocation + emission, per deployment model)
+
+L4 chose the sketch family + params. L5 colors the DAG by `StageId` and emits per-executor configs. Same `SketchExpr` input; topology and emitter differ per deployment model.
+
+##### deployment-model-asaplifecycle (3-stage, OpAMP + backend POST)
+
+`StageAllocator` colors against `topology::ThreeStage`:
+
+| Node | StageId | Why |
+|---|---|---|
+| `Scan` + `Window` + `SketchAgg` | `"edge"` | scrape happens on the agent host; KLL build is mergeable so it's safe to run early |
+| `SketchMerge` (inserted on cut edge) | `"gateway"` | catalog says `KLL.mergeable = true`; reduces N edge streams to 1 |
+| `SketchEstimate` | `"backend"` | readout where users query |
+
+`PhysicalPlanner` then fans out via `DeploymentConstraints::executors()`. Given a deployment with 3 edge agents + 1 gateway + 1 backend:
+
+```rust
+vec![
+    (ExecutorId("edge-001"),    OpAmpRemoteConfig { /* OTel YAML: scrape http_request_duration_seconds{service=api},
+                                                        sliding 5m window, KLL k=200, forward to gateway-001 */ }),
+    (ExecutorId("edge-002"),    OpAmpRemoteConfig { /* identical OTel YAML; differs only by agent_id */ }),
+    (ExecutorId("edge-003"),    OpAmpRemoteConfig { /* … */ }),
+    (ExecutorId("gateway-001"), OpAmpRemoteConfig { /* receive 3 KLL streams, SketchMerge, forward to backend */ }),
+    (ExecutorId("backend-001"), AsapqueryBackendConfig { /* read merged KLL, SketchEstimate q=0.99 */ }),
+]
+```
+
+The 3 edge configs are byte-identical except for `agent_id` — that's the §3 "one stage may have N executors all materialised from the same per-stage sub-DAG" property. The `AsapqueryBackendConfig` is produced by calling `deployment-model-asapquery::yaml::StreamingConfigEmitter` (see §8 asymmetric dep).
+
+##### deployment-model-asapquery (1-stage, YAML)
+
+`StageAllocator` against `topology::SingleStage` returns everything on `"backend"`. `PhysicalPlanner` produces one config per backend executor (typically one):
+
+```yaml
+# streaming_config.yaml — emitted by deployment-model-asapquery::yaml::StreamingConfigEmitter
+operators:
+  - name: kll_p99_request_duration
+    kind: DatasketchesKLL
+    params: { k: 200 }
+    input:
+      metric: http_request_duration_seconds
+      label_filter: { service: api }
+      window:  { kind: sliding, size: 5m }
+estimates:
+  - sketch: kll_p99_request_duration
+    query:  { kind: quantile, q: 0.99 }
+```
+
+This is the byte-for-byte format ASAPQuery-backend already consumes — `inference_config.yaml` is emitted alongside by `InferenceConfigEmitter` for the readout side. Both are wire invariants (see §10).
+
+##### deployment-model-asapfusion (0-stage, in-process `LogicalPlan`)
+
+`StageAllocator` against `topology::ZeroStage` returns the whole DAG in-process. `PhysicalPlanner` rewrites the caller's `datafusion::LogicalPlan`, replacing the original `Aggregate(quantile(0.99, ...))` node with an `Extension` wrapping the KLL sketch op:
+
+```rust
+LogicalPlan::Extension(Extension {
+    node: Arc::new(SketchAggExt {
+        kind:     SketchKind::Kll,
+        params:   KllParams { k: 200 },
+        input:    /* original Window+Filter+Scan subtree, unchanged */,
+        estimate: SketchQuery::Quantile { q: 0.99 },
+    }),
+})
+```
+
+Returned to the caller's `SessionContext` for execution by `asap-fusion`'s in-process operator. No wire format, no external executor; the data plane is the caller's process. Note also that `asap-fusion`'s entry point is `Source::Table` (not `Source::TimeSeries`) — this PromQL example is only illustrative for the fusion deployment model, which in practice consumes a pre-built DataFusion `LogicalPlan` and skips L1 (see §8).
+
+#### What this example demonstrates
+
+- **L1 → L3 are deployment-model-independent.** All three deployment models see the same `QueryExpr` for this query.
+- **L4 binding is a shared rule.** `BindKllOnQuantile` lives once in `core::optimizer::rules` and fires for all three.
+- **L5 is where deployment models diverge.** Same `SketchExpr` → three topologies → three emitter outputs. The topology is a parameter, not an axis of code (§3).
+- **The sketch path is selected, not mandated.** If the `QuerySpec` had `accuracy: AccuracyTarget::Exact`, no `Bind*` rule would fire; L4 would pass `SketchExpr::Logical(QueryExpr::Aggregate{…})` through, and L5 would target an exact `HashAgg` (§1 goal 6).
+
 ## 7. Runtime crate details
 
 Lifted from DC controller with zero semantic change:
