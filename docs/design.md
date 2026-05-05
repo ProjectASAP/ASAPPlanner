@@ -860,13 +860,76 @@ pub struct QuerySpec {
     /// unset, the runtime defaults to the deployment model bound to the
     /// inbound HTTP route (`POST /plan/lifecycle` vs `POST /plan/query`).
     pub deployment_model: Option<DeploymentModelId>,
+
+    /// How the query is *evaluated*: one-shot, continuous, or scheduled.
+    /// Distinct from `data` below — a one-shot query against a streaming
+    /// source is "evaluate now over the latest window"; a streaming query
+    /// against a batch source doesn't make sense and is rejected at L1.
+    /// Drives L4 binding (mergeable vs one-shot sketch family) and the
+    /// L5 wire format (`OneShot` emits config + result; `Streaming` and
+    /// `Periodic` emit a config that keeps running).
+    pub shape: QueryShape,
+
+    /// Shape of the *data* feeding the query. Workload-level summary —
+    /// per-leaf detail rides on `Source::data_shape` (§6 L3). For a join
+    /// over streaming + batch this is `Mixed`, and the planner reads the
+    /// per-leaf shape during L4. Drives binding choices: an
+    /// `AppendOnlyStream` unlocks incremental, mergeable sketches and
+    /// retraction-free aggregation; `Batch` lets the planner pick a
+    /// non-mergeable estimator (e.g. exact percentile over a sort) that
+    /// wouldn't survive a distributed streaming setting; `Mutable`
+    /// requires retraction-aware operators (out of scope today — the
+    /// planner refuses sketch binding and falls back to re-scan).
+    pub data: DataShape,
 }
 
 pub enum QueryLanguage   { PromQL, Sql, DataFusion, ElasticDsl }
 pub enum AccuracyTarget  { Exact, Epsilon(f64), EpsilonDelta { eps: f64, delta: f64 } }
+
+pub enum QueryShape {
+    /// Evaluate once. Plan, execute, return result, discard state.
+    /// SQL ad-hoc queries; one-off PromQL via `POST /plan`.
+    OneShot,
+    /// Continuous query — output stream that the executor keeps emitting
+    /// as new data arrives. No fixed cadence; the runtime emits whenever
+    /// the underlying state changes. Streaming dashboards, alerting
+    /// expressions evaluated by the agent rather than by a poller.
+    Streaming,
+    /// Re-evaluated at a fixed cadence — Prometheus recording rules,
+    /// scheduled dashboard panels, alerting evaluation cycles. The
+    /// planner amortises sketch / aggregate build cost across evaluations
+    /// within the cadence and reuses state between adjacent windows.
+    Periodic { every: Duration },
+}
+
+pub enum DataShape {
+    /// Bounded relation, fully materialised at plan time. SQL tables,
+    /// Parquet / CSV files, DataFusion in-process tables.
+    Batch,
+    /// Append-only stream — events arrive over time, never updated or
+    /// deleted. Metrics, logs, event streams. The common case for
+    /// asaplifecycle and asapquery.
+    AppendOnlyStream,
+    /// Mutable relation — inserts + updates + deletes. Operational
+    /// databases, CRUD-style tables. Sketch binding is currently refused
+    /// for this shape (no retraction-aware sketches in the catalog yet).
+    Mutable,
+    /// Join across sources of differing shape. The planner consults
+    /// `Source::data_shape` per leaf during L4; this variant exists so
+    /// callers don't have to flatten a workload-level summary.
+    Mixed,
+}
 ```
 
 All three deployment models take `&QueryWorkload`. Same type, different planners. Fields are deployment-model-agnostic — anything deployment-model-specific (DC's stage-budget overrides, fusion's `SessionContext` handle) rides on `DeploymentConstraints`, not on `QuerySpec`.
+
+The `shape` × `data` cross-product isn't fully populated. Combinations the planner accepts and rejects:
+
+| `shape` \ `data` | `Batch` | `AppendOnlyStream` | `Mutable` | `Mixed` |
+|---|---|---|---|---|
+| `OneShot` | ✓ ad-hoc SQL, fusion | ✓ "evaluate now over latest window" | ✓ via re-scan, no sketch binding | ✓ per-leaf shape decides |
+| `Streaming` | ✗ rejected at L1 (no stream over a static dataset) | ✓ canonical streaming case | ✗ rejected (no retraction support) | ✓ if streaming leaves dominate |
+| `Periodic { every }` | ✓ scheduled batch report | ✓ recording rules | ✓ via re-scan | ✓ |
 
 ### `core::cost`
 
