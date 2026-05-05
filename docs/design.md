@@ -833,10 +833,40 @@ pub enum QueryWorkload {
     QueryLog(QueryLogReplay),
 }
 
-pub struct QuerySpec { /* metric_name, aggregations, time_window, SLAs, ... */ }
+pub struct QuerySpec {
+    /// Stable identifier — preserved across `replan` cycles so the runtime
+    /// can correlate plan outputs with the originating spec, and L4 reuse
+    /// rules can name shared producers across consumers in the same workload.
+    pub id: QueryId,
+
+    /// Source-language query string + which language it's written in.
+    /// L1 parses `query` against `language`; no schema lookup yet.
+    pub query:    String,
+    pub language: QueryLanguage,            // PromQL | Sql | DataFusion | ElasticDsl
+
+    /// Evaluation time range. Some languages (PromQL) carry their own ranges
+    /// inside `query`; this field wins when both are set.
+    pub time_range: TimeRange,
+
+    /// Per-target SLA. Drives L4 binding (which sketch / which params) and
+    /// L5 stage placement (push down or not). The three are independent —
+    /// `accuracy: Exact` disables all `Bind*` rules; an unset latency /
+    /// dollars target lets the cost model pick freely.
+    pub accuracy: AccuracyTarget,           // Exact | Epsilon(f64) | EpsilonDelta { ε, δ }
+    pub latency:  Option<Duration>,         // p99 evaluation latency target
+    pub dollars:  Option<Dollars>,          // per-evaluation budget
+
+    /// Routing hint: which deployment model should plan this query. When
+    /// unset, the runtime defaults to the deployment model bound to the
+    /// inbound HTTP route (`POST /plan/lifecycle` vs `POST /plan/query`).
+    pub deployment_model: Option<DeploymentModelId>,
+}
+
+pub enum QueryLanguage   { PromQL, Sql, DataFusion, ElasticDsl }
+pub enum AccuracyTarget  { Exact, Epsilon(f64), EpsilonDelta { eps: f64, delta: f64 } }
 ```
 
-All three deployment models take `&QueryWorkload`. Same type, different planners.
+All three deployment models take `&QueryWorkload`. Same type, different planners. Fields are deployment-model-agnostic — anything deployment-model-specific (DC's stage-budget overrides, fusion's `SessionContext` handle) rides on `DeploymentConstraints`, not on `QuerySpec`.
 
 ### `core::cost`
 
@@ -1096,6 +1126,110 @@ Returned to the caller's `SessionContext` for execution by `asap-fusion`'s in-pr
 - **L4 binding is a shared rule.** `BindKllOnQuantile` lives once in `core::optimizer::rules` and fires for all three.
 - **L5 is where deployment models diverge.** Same `SketchExpr` → three topologies → three emitter outputs. The topology is a parameter, not an axis of code (§3).
 - **The sketch path is selected, not mandated.** If the `QuerySpec` had `accuracy: AccuracyTarget::Exact`, no `Bind*` rule would fire; L4 would pass `SketchExpr::Logical(QueryExpr::Aggregate{…})` through, and L5 would target an exact `HashAgg` (§1 goal 6).
+
+### End-to-end example — batched queries with shared sub-DAGs
+
+The single-query trace above shows one `QueryExpr` flowing through all five layers. This example shows what changes when the `QueryWorkload` is an `AuthoredSet` of related queries — the case `CostModel::workload_cost` and §6 design rule 5 (DAG fan-in) are designed for. The point is that reuse is expressed as **shared nodes in a single DAG**, not as side-channel caching.
+
+**Input.** A `QueryWorkload::AuthoredSet` arrives with three PromQL queries on the same metric:
+
+```text
+q1: quantile_over_time(0.99, http_request_duration_seconds{service="api"}[5m])
+q2: quantile_over_time(0.95, http_request_duration_seconds{service="api"}[5m])
+q3: max_over_time(http_request_duration_seconds{service="api"}[5m])
+```
+
+All three carry `accuracy: Epsilon(0.01)`. Planning them independently would scan + window the same metric three times. The DAG-shaped IR collapses the shared work.
+
+#### L3 — common sub-expression elimination produces fan-in
+
+After per-query L1→L2→L3 lowering, the three `QueryExpr` trees are identical below the `Aggregate` node. A workload-level CSE pass (`core::lower::workload::dedupe_subtrees`) hoists the shared sub-DAG behind a `LetBinding`, leaving three `Aggregate` nodes that fan in to one producer:
+
+```text
+                          Scan{http_request_duration_seconds, service="api"}
+                                              │
+                                  Window{Sliding, 5m}        ◄── shared producer
+                                ╱             │             ╲
+              Aggregate                  Aggregate              Aggregate
+          [Quantile{0.99,ε}]         [Quantile{0.95,ε}]            [Max]
+                  │                         │                        │
+                 q1                        q2                       q3
+```
+
+Multi-root DAGs live one level above `QueryExpr`. `QueryExpr` stays single-root (one query in, one root out) — the workload-level container holds N roots plus the hoisted bindings they share:
+
+```rust
+// core::workload — output of L1→L2→L3 lowering for a QueryWorkload
+pub struct WorkloadPlan {
+    /// Named shared producers, hoisted out of individual queries by the CSE
+    /// pass. Each binding is referenced by ≥2 roots via `QueryExpr::Ref`.
+    pub bindings: Vec<(BindingName, QueryExpr)>,
+    /// One root per QuerySpec in the workload, in input order.
+    pub roots:    Vec<(QueryId, QueryExpr)>,
+}
+```
+
+For the example above:
+
+```rust
+WorkloadPlan {
+    bindings: vec![
+        ("windowed_latency".into(), /* Scan → Window subtree */),
+    ],
+    roots: vec![
+        (q1_id, QueryExpr::Aggregate {
+            by:     vec![],
+            aggs:   vec![AggIntent::Quantile { q: 0.99, accuracy: Epsilon(0.01) }],
+            child:  Box::new(QueryExpr::Ref("windowed_latency".into())),
+            having: None,
+        }),
+        (q2_id, /* same shape, q=0.95, same Ref */),
+        (q3_id, /* Aggregate { aggs: [AggIntent::Max] } over the same Ref */),
+    ],
+}
+```
+
+Three `QueryExpr::Ref` nodes, one binding; the fan-in is explicit. `CostModel::workload_cost` credits the Scan + Window build cost once across {q1, q2, q3} via `WorkloadCost::reused`, which is what makes the bundled plan beat three independent plans on `total_dollars` (§6 `core::cost`). Within-query CTE fan-in (SQL `WITH`, PromQL recording rules) keeps using `QueryExpr::LetBinding`/`Ref` unchanged — `WorkloadPlan` only adds the cross-query layer.
+
+CSE legality leans on `Schema::unique_keys` (§6 Schema flow): two `QueryExpr::Ref` consumers can share a producer only when its output schema is provably stable across reads — the unique-key metadata is what lets the deduper assert that without re-running the producer's logic.
+
+#### L4 — sketch reuse across q1 and q2
+
+`BindKllOnQuantile` fires three times (once per `Quantile` intent in the workload), but a follow-on rule `MergeKllSketches` recognises that q1 and q2 read from the same input at the same accuracy. KLL state is independent of `q` — one sketch serves any quantile readout — so the two `SketchAgg{KLL}` nodes collapse into one, with two `SketchEstimate` parents reading `q=0.99` and `q=0.95`. q3 (`Max`) takes a separate path: KLL doesn't expose max, so the rule emits an exact `Aggregate{Max}` over the shared `Window`.
+
+```text
+                            Scan
+                              │
+                            Window
+                          ╱   │   ╲
+            SketchAgg{KLL,k=200}    Aggregate{Max}
+                  ╱       ╲                │
+       SketchEstimate  SketchEstimate      q3
+         q=0.99          q=0.95
+            │              │
+            q1             q2
+```
+
+`SketchExpr::LetBinding` carries the two-tier fan-in: the outer let names the `Window` output (read by all three branches), an inner let names the `SketchAgg{KLL}` output (read by both `SketchEstimate` parents). The L4 type system rejects mismatched merges before L5 sees them — both `SketchEstimate` parents must declare `Sketch(Kll, KllParams{k:200})` on their input edge, which is checked locally per the §6.4 sketch-state schema rules.
+
+#### L5 — colored DAG, one config per executor
+
+`StageAllocator` colors the bound DAG by `StageId` exactly as for the single query, but the shared nodes are colored once. Under `topology::ThreeStage`:
+
+| Node | StageId |
+|---|---|
+| `Scan` + `Window` + `SketchAgg{KLL}` + `Aggregate{Max}` | `"edge"` |
+| `SketchMerge` (over KLL streams), `Merge` (over Max streams) | `"gateway"` |
+| `SketchEstimate{q=0.99}`, `SketchEstimate{q=0.95}`, root of q3 | `"backend"` |
+
+The OpAMP config emitted to each edge agent describes one scrape, one window operator, one KLL builder, one max accumulator — feeding two output streams (KLL state, Max state) toward gateway. Per-edge memory drops from `3× scan + 3× window + 2× KLL + 1× Max` (independent plans) to `1× scan + 1× window + 1× KLL + 1× Max`; bandwidth across the edge→gateway cut drops correspondingly.
+
+#### What this example demonstrates
+
+- **Reuse is a DAG property, not a sketch property.** The Scan + Window collapse is L3 CSE; the KLL collapse is L4 sketch-aware; both expressed as fan-in in the same DAG. No new IR surface, no caching layer.
+- **`Schema::unique_keys` becomes load-bearing.** The CSE pass uses it to prove two `Ref`s read from a stable producer. Without it, the deduper has to be conservative and reuse drops on the floor — which is why §6 keeps the field on the `Schema` struct even though single-query plans don't read it (§6 Schema flow).
+- **`CostModel::workload_cost` decides whether to share.** Reuse isn't free — when q1 demands a tighter accuracy than q2, the smaller-budget sketch may not satisfy both, and keeping them separate can be cheaper. `MergeKllSketches` is gated by `workload_cost`, not unconditional.
+- **L5 is unchanged.** Same allocator, same emitter, same wire format — the only difference is that the DAG has multiple roots and shared interior nodes. The single-query path is the degenerate case where `outputs.len() == 1` and no fan-in fires.
 
 ## 7. Runtime crate details
 
