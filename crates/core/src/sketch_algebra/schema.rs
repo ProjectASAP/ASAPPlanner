@@ -1,5 +1,5 @@
 use crate::intent_algebra::L3DataType;
-use super::sketch::{SketchKind, SketchParams};
+use super::sketch::{SummaryKind, SummaryParams};
 
 // ── L4 data types ─────────────────────────────────────────────────────────────
 
@@ -14,9 +14,10 @@ use super::sketch::{SketchKind, SketchParams};
 pub enum L4DataType {
     /// Any base L3 column type — passed through unchanged from L3 edges.
     Primitive(L3DataType),
-    /// Opaque sketch state. The `(kind, params)` pair is the type identity:
-    /// two sketch columns are compatible only if both match exactly.
-    Sketch(SketchKind, SketchParams),
+    /// Opaque summary state (exact accumulator or approximate sketch).
+    /// The `(kind, params)` pair is the type identity: two summary columns
+    /// are compatible only if both match exactly.
+    Sketch(SummaryKind, SummaryParams),
 }
 
 // ── L4 schema ─────────────────────────────────────────────────────────────────
