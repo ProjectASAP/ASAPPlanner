@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::intent_algebra::{ColumnRef, GroupKey, L3Node};
 use super::schema::L4Schema;
-use super::sketch::{SketchKind, SketchParams, SketchQuery};
+use super::sketch::{SummaryKind, SummaryParams, SketchQuery};
 
 // ── L4 DAG node ───────────────────────────────────────────────────────────────
 
@@ -39,8 +39,8 @@ pub enum SummaryExpr {
     /// field carrying partial sketch state per group.
     SummaryAgg {
         child: Rc<L4Node>,
-        sketch: SketchKind,
-        params: SketchParams,
+        sketch: SummaryKind,
+        params: SummaryParams,
         /// The column being summarised (fed into the sketch).
         col: ColumnRef,
         /// GROUP BY keys carried through to the output schema.
@@ -55,8 +55,8 @@ pub enum SummaryExpr {
         outer: Rc<L4Node>,
         inner: Rc<L4Node>,
         key: ColumnRef,
-        sketch: SketchKind,
-        params: SketchParams,
+        sketch: SummaryKind,
+        params: SummaryParams,
     },
 
     /// Subtract one sketch from another. Valid only for sketches with a

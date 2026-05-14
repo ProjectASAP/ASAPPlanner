@@ -1,11 +1,24 @@
 use crate::intent_algebra::ColumnRef;
 
-// ── Sketch algorithm identifiers ──────────────────────────────────────────────
+// ── Summary kind identifiers ───────────────────────────────────────────────────
 
-/// Identifies a sketch algorithm family. Used as a type tag in `L4DataType`
-/// and as the binding choice recorded in `SummaryExpr` nodes.
+/// Identifies a precomputed aggregation family — either an exact accumulator
+/// or an approximate sketch. Used as a type tag in `L4DataType` and as the
+/// binding choice recorded in `SummaryExpr` nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SketchKind {
+pub enum SummaryKind {
+    // ── Exact accumulators (no approximation error) ──────────────────────────
+    /// Exact sum accumulator (mergeable by addition).
+    Sum,
+    /// Exact count accumulator (mergeable by addition).
+    Count,
+    /// Exact min/max accumulator (mergeable by comparison).
+    MinMax,
+    /// Exact increase accumulator (counter-reset-aware delta).
+    Increase,
+    /// Rate accumulator (increase / time window duration).
+    Rate,
+    // ── Approximate sketches ─────────────────────────────────────────────────
     /// KLL quantile sketch (mergeable, ε-accurate rank queries).
     Kll,
     /// Count-Min Sketch (mergeable, (ε,δ)-accurate frequency queries).
@@ -24,11 +37,19 @@ pub enum SketchKind {
 
 // ── Sketch parameters ─────────────────────────────────────────────────────────
 
-/// Concrete, catalog-validated parameters for a specific sketch instance.
-/// The variant must correspond to the associated `SketchKind`; mismatches
+/// Concrete, catalog-validated parameters for a specific summary instance.
+/// The variant must correspond to the associated `SummaryKind`; mismatches
 /// are caught at L4 bind time before L5 ever sees the plan.
+/// Exact-accumulator variants carry no parameters (their semantics are fixed).
 #[derive(Debug, Clone, PartialEq)]
-pub enum SketchParams {
+pub enum SummaryParams {
+    // Exact accumulators — no tuning parameters
+    Sum,
+    Count,
+    MinMax,
+    Increase,
+    Rate,
+    // Approximate sketches — algorithm-specific tuning parameters
     Kll { k: u32 },
     Cms { width: u32, depth: u32 },
     Hll { precision: u8 },
