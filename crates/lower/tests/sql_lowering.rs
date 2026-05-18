@@ -680,6 +680,133 @@ async fn test_datafusion_language_accepted() {
     assert!(results[0].is_ok(), "DataFusion language should be accepted");
 }
 
+// ── Tests: BETWEEN time extraction ───────────────────────────────────────────
+
+#[tokio::test]
+async fn test_time_between_extracted_to_source() {
+    // WHERE ts BETWEEN 1000 AND 2000 should set start_ms=1000, end_ms=2000.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT value FROM metrics WHERE ts BETWEEN 1000 AND 2000")
+        .await
+        .unwrap();
+
+    let source = find_source(&result).unwrap();
+    let Source::Table { time_range, .. } = source else {
+        panic!("expected Source::Table");
+    };
+    let tr = time_range.as_ref().expect("expected time_range from BETWEEN");
+    assert_eq!(tr.start_ms, Some(1000));
+    assert_eq!(tr.end_ms, Some(2000));
+}
+
+#[tokio::test]
+async fn test_time_between_leaves_no_filter_wrapper() {
+    // A BETWEEN-only predicate on the time column has no non-time residual,
+    // so no Filter node should appear.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT value FROM metrics WHERE ts BETWEEN 1000 AND 2000")
+        .await
+        .unwrap();
+
+    fn has_filter(e: &QueryExpr) -> bool {
+        match e {
+            QueryExpr::Filter { .. } => true,
+            QueryExpr::Project { child, .. } => has_filter(&child.expr),
+            _ => false,
+        }
+    }
+    assert!(!has_filter(&result), "BETWEEN on time col should leave no Filter wrapper");
+}
+
+#[tokio::test]
+async fn test_time_between_mixed_with_non_time_predicate() {
+    // WHERE ts BETWEEN 1000 AND 2000 AND region = 'us':
+    // time range should be extracted; Filter stays for the non-time conjunct.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT value FROM metrics WHERE ts BETWEEN 1000 AND 2000 AND region = 'us'")
+        .await
+        .unwrap();
+
+    let source = find_source(&result).unwrap();
+    let Source::Table { time_range, .. } = source else {
+        panic!("expected Source::Table");
+    };
+    let tr = time_range.as_ref().expect("expected time_range");
+    assert_eq!(tr.start_ms, Some(1000));
+    assert_eq!(tr.end_ms, Some(2000));
+
+    fn has_filter(e: &QueryExpr) -> bool {
+        match e {
+            QueryExpr::Filter { .. } => true,
+            QueryExpr::Project { child, .. } => has_filter(&child.expr),
+            _ => false,
+        }
+    }
+    assert!(has_filter(&result), "expected Filter for non-time predicate");
+}
+
+// ── Tests: multi-dialect SQL ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_clickhouse_dialect_returns_unsupported_dialect() {
+    let catalog = metrics_catalog();
+    let workload = QueryWorkload {
+        language: QueryLanguage::SQL(SqlDialect::ClickhouseSQL),
+        query_batch: Some(vec![
+            BatchEntry { query: Query("SELECT COUNT(*) FROM metrics".into()), requirements: None },
+        ]),
+        repeating_queries: None,
+        data_characteristics: None,
+    };
+    let results = lower_batch(&workload, &catalog).await;
+    assert_eq!(results.len(), 1);
+    assert!(
+        matches!(results[0], Err(LoweringError::UnsupportedDialect(_))),
+        "expected UnsupportedDialect, got: {:?}", results[0]
+    );
+}
+
+#[tokio::test]
+async fn test_elastic_sql_dialect_returns_unsupported_dialect() {
+    let catalog = metrics_catalog();
+    let workload = QueryWorkload {
+        language: QueryLanguage::SQL(SqlDialect::ElasticSQL),
+        query_batch: Some(vec![
+            BatchEntry { query: Query("{\"query\":{}}".into()), requirements: None },
+        ]),
+        repeating_queries: None,
+        data_characteristics: None,
+    };
+    let results = lower_batch(&workload, &catalog).await;
+    assert_eq!(results.len(), 1);
+    assert!(
+        matches!(results[0], Err(LoweringError::UnsupportedDialect(_))),
+        "expected UnsupportedDialect, got: {:?}", results[0]
+    );
+}
+
+#[tokio::test]
+async fn test_datafusion_sql_dialect_accepted() {
+    let catalog = metrics_catalog();
+    let workload = QueryWorkload {
+        language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+        query_batch: Some(vec![
+            BatchEntry { query: Query("SELECT COUNT(*) FROM metrics".into()), requirements: None },
+        ]),
+        repeating_queries: None,
+        data_characteristics: None,
+    };
+    let results = lower_batch(&workload, &catalog).await;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_ok(), "SQL(DataFusionSQL) should be accepted, got: {:?}", results[0]);
+}
+
 // ── Tests: Source::Table.columns ─────────────────────────────────────────────
 
 #[tokio::test]

@@ -476,6 +476,10 @@ pub(crate) fn extract_time_range<'a>(
             TimeClass::End(ms) => {
                 end_ms = Some(end_ms.map_or(ms, |e: i64| e.min(ms)));
             }
+            TimeClass::Both(lo, hi) => {
+                start_ms = Some(start_ms.map_or(lo, |s: i64| s.max(lo)));
+                end_ms = Some(end_ms.map_or(hi, |e: i64| e.min(hi)));
+            }
             TimeClass::NonTime => non_time.push(c),
         }
     }
@@ -640,30 +644,42 @@ fn split_disjuncts(expr: &Expr) -> Vec<&Expr> {
 enum TimeClass {
     Start(i64),
     End(i64),
+    /// BETWEEN low AND high on the time column — contributes both bounds at once.
+    Both(i64, i64),
     NonTime,
 }
 
 fn classify_time_pred(expr: &Expr, time_col: &str) -> TimeClass {
-    let Expr::BinaryExpr(BinaryExpr { left, op, right }) = expr else {
-        return TimeClass::NonTime;
-    };
-    let (col_is_left, val_expr): (bool, &Expr) = if is_time_col(left, time_col) {
-        (true, right)
-    } else if is_time_col(right, time_col) {
-        (false, left)
-    } else {
-        return TimeClass::NonTime;
-    };
-    let Some(ms) = expr_to_ms(val_expr) else {
-        return TimeClass::NonTime;
-    };
-    match (op, col_is_left) {
-        (Operator::Gt | Operator::GtEq, true) | (Operator::Lt | Operator::LtEq, false) => {
-            TimeClass::Start(ms)
+    match expr {
+        // `ts BETWEEN low AND high` — contributes both a start and end bound.
+        // `ts NOT BETWEEN …` cannot be expressed as a contiguous TimeRange; treat as non-time.
+        Expr::Between(b) if !b.negated && is_time_col(&b.expr, time_col) => {
+            match (expr_to_ms(&b.low), expr_to_ms(&b.high)) {
+                (Some(lo), Some(hi)) => TimeClass::Both(lo, hi),
+                _ => TimeClass::NonTime,
+            }
         }
-        (Operator::Lt | Operator::LtEq, true) | (Operator::Gt | Operator::GtEq, false) => {
-            TimeClass::End(ms)
+
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
+            let (col_is_left, val_expr): (bool, &Expr) = if is_time_col(left, time_col) {
+                (true, right)
+            } else if is_time_col(right, time_col) {
+                (false, left)
+            } else {
+                return TimeClass::NonTime;
+            };
+            let Some(ms) = expr_to_ms(val_expr) else {
+                return TimeClass::NonTime;
+            };
+            match (op, col_is_left) {
+                (Operator::Gt | Operator::GtEq, true)
+                | (Operator::Lt | Operator::LtEq, false) => TimeClass::Start(ms),
+                (Operator::Lt | Operator::LtEq, true)
+                | (Operator::Gt | Operator::GtEq, false) => TimeClass::End(ms),
+                _ => TimeClass::NonTime,
+            }
         }
+
         _ => TimeClass::NonTime,
     }
 }

@@ -4,7 +4,7 @@ pub mod sql;
 use asap_control_core::intent_algebra::expr::QueryExpr;
 use asap_control_core::intent_algebra::schema::SchemaCatalog;
 use asap_control_core::types::AccuracyTarget;
-use asap_control_core::workload::{QueryLanguage, QueryWorkload};
+use asap_control_core::workload::{QueryLanguage, QueryWorkload, SqlDialect};
 
 pub use error::LoweringError;
 pub use sql::SqlLowerer;
@@ -23,13 +23,25 @@ pub async fn lower_batch(
         _ => return vec![],
     };
 
-    // Guard: only SQL dialects are handled by this lowerer.
+    // Guard: only SQL languages are handled by this lowerer.
     if !matches!(workload.language, QueryLanguage::SQL(_) | QueryLanguage::DataFusion) {
         let lang = format!("{:?}", workload.language);
         return entries
             .iter()
             .map(|_| Err(LoweringError::WrongLanguage(lang.clone())))
             .collect();
+    }
+
+    // Guard: only DataFusionSQL is implemented; other SQL dialects need their
+    // own parser and plan-conversion layer before reaching SqlLowerer.
+    if let QueryLanguage::SQL(dialect) = &workload.language {
+        if !matches!(dialect, SqlDialect::DataFusionSQL) {
+            let d = format!("{dialect:?}");
+            return entries
+                .iter()
+                .map(|_| Err(LoweringError::UnsupportedDialect(d.clone())))
+                .collect();
+        }
     }
 
     let mut results = Vec::with_capacity(entries.len());

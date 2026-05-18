@@ -11,6 +11,8 @@ pub enum LoweringError {
     InvalidExpression(String),
     /// The workload's query language is not handled by this lowerer.
     WrongLanguage(String),
+    /// The SQL dialect is not supported (only DataFusionSQL is implemented).
+    UnsupportedDialect(String),
 }
 
 impl fmt::Display for LoweringError {
@@ -25,6 +27,7 @@ impl fmt::Display for LoweringError {
             Self::UnsupportedAggregate(name) => write!(f, "unsupported aggregate: {name}"),
             Self::InvalidExpression(msg) => write!(f, "invalid expression: {msg}"),
             Self::WrongLanguage(lang) => write!(f, "unsupported query language: {lang}"),
+            Self::UnsupportedDialect(d) => write!(f, "unsupported SQL dialect: {d}"),
         }
     }
 }
