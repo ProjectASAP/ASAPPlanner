@@ -266,6 +266,11 @@ impl<'a> SqlLowerer<'a> {
             .ok_or_else(|| LoweringError::InvalidExpression("empty window expressions".into()))?;
         if let Expr::WindowFunction(wf) = first {
             let func = lower_window_func_kind(&wf.fun)?;
+            let args = wf
+                .args
+                .iter()
+                .map(df_expr_to_l3)
+                .collect::<Result<Vec<_>, _>>()?;
             let partition_by = wf
                 .partition_by
                 .iter()
@@ -286,6 +291,7 @@ impl<'a> SqlLowerer<'a> {
             return Ok(QueryExpr::WindowFunc {
                 child: make_node(child),
                 func,
+                args,
                 partition_by,
                 order_by,
                 frame: None,

@@ -329,6 +329,9 @@ pub enum QueryExpr {
     WindowFunc {
         child: Rc<L3Node>,
         func: WindowFuncKind,
+        /// Expressions the function operates on (e.g. `LAG(value)` → `[Column("value")]`).
+        /// Empty for rank-only funcs (`ROW_NUMBER`, `RANK`, `DENSE_RANK`).
+        args: Vec<L3Expr>,
         partition_by: Vec<GroupKey>,
         order_by: Vec<SortKey>,
         frame: Option<WindowFrame>,
@@ -473,6 +476,49 @@ impl HasSchema for QueryExpr {
                     time_index: None,
                 }
             }
+
+            // ── WindowFunc: child schema + one new column ─────────────────────
+            QueryExpr::WindowFunc { func, args, .. } => {
+                use super::schema::{L3DataType, L3Field};
+                let cs = child();
+
+                // Resolve the first arg's type from the child schema.
+                // Falls back to Float64 for non-column exprs or unknown columns.
+                let arg_field = args.first().and_then(|a| match a {
+                    L3Expr::Column(col_ref) => cs.fields.iter().find(|f| f.name == col_ref.0),
+                    _ => None,
+                });
+                let arg_dtype =
+                    || arg_field.map_or(L3DataType::Float64, |f| f.dtype.clone());
+
+                let (win_name, win_dtype, win_nullable) = match func {
+                    WindowFuncKind::RowNumber => ("row_number", L3DataType::Int64, false),
+                    WindowFuncKind::Rank     => ("rank",        L3DataType::Int64, false),
+                    WindowFuncKind::DenseRank => ("dense_rank", L3DataType::Int64, false),
+                    WindowFuncKind::Count    => ("count",       L3DataType::Int64, false),
+                    WindowFuncKind::Sum      => ("sum",         L3DataType::Float64, true),
+                    WindowFuncKind::Avg      => ("avg",         L3DataType::Float64, true),
+                    // Navigation funcs: same type as arg, always nullable (boundary rows)
+                    WindowFuncKind::Lag       => ("lag",         arg_dtype(), true),
+                    WindowFuncKind::Lead      => ("lead",        arg_dtype(), true),
+                    WindowFuncKind::FirstValue => ("first_value", arg_dtype(), true),
+                    WindowFuncKind::LastValue  => ("last_value",  arg_dtype(), true),
+                    WindowFuncKind::NthValue(_) => ("nth_value",  arg_dtype(), true),
+                    // Min/Max: preserve input type and nullability
+                    WindowFuncKind::Min => ("min", arg_dtype(), arg_field.map_or(true, |f| f.nullable)),
+                    WindowFuncKind::Max => ("max", arg_dtype(), arg_field.map_or(true, |f| f.nullable)),
+                };
+
+                let mut fields = cs.fields.clone();
+                fields.push(L3Field { name: win_name.to_string(), dtype: win_dtype, nullable: win_nullable });
+                L3Schema { fields, time_index: cs.time_index }
+            }
+
+            // ── Merge: all shards have identical schemas; use first ────────────
+            QueryExpr::Merge { .. } => input_schemas[0].clone(),
+
+            // ── SetOp: output is left-shaped (SQL semantics) ──────────────────
+            QueryExpr::SetOp { .. } => input_schemas[0].clone(),
 
             // ── Everything else: not yet implemented ──────────────────────────
             _ => todo!(

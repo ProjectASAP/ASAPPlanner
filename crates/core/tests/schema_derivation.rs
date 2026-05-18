@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use asap_control_core::intent_algebra::{
     AggIntent, ColumnRef, DataModel, GroupKey, HasSchema, L3DataType, L3Expr, L3Field, L3Node,
-    L3Scalar, L3Schema, Predicate, ProjectItem, QueryExpr, SortKey, Source, TableRef, ColumnDef,
-    SchemaCatalog, TableSchema,
+    L3Scalar, L3Schema, Predicate, ProjectItem, QueryExpr, SetOpKind, SortKey, Source, TableRef,
+    ColumnDef, SchemaCatalog, TableSchema, WindowFuncKind,
 };
 use asap_control_core::types::AccuracyTarget;
 
@@ -579,6 +579,211 @@ fn project_drops_time_index_when_time_col_excluded() {
     };
     let out = node.output_schema(&[&cs], &empty_catalog());
     assert_eq!(out.time_index, None);
+}
+
+// ── HasSchema::output_schema() — WindowFunc ──────────────────────────────────
+
+fn timed_two_col_schema() -> L3Schema {
+    schema_with_time(
+        vec![field("ts", L3DataType::Int64), nullable_field("value", L3DataType::Float64)],
+        0,
+    )
+}
+
+#[test]
+fn window_func_row_number_appends_int64_column() {
+    let cs = timed_two_col_schema();
+    let node = QueryExpr::WindowFunc {
+        child: dummy_scan(cs.clone()),
+        func: WindowFuncKind::RowNumber,
+        args: vec![],
+        partition_by: vec![],
+        order_by: vec![],
+        frame: None,
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.fields.len(), 3);
+    let win = out.fields.last().unwrap();
+    assert_eq!(win.dtype, L3DataType::Int64);
+    assert!(!win.nullable);
+}
+
+#[test]
+fn window_func_rank_appends_int64_column() {
+    let cs = timed_two_col_schema();
+    let node = QueryExpr::WindowFunc {
+        child: dummy_scan(cs.clone()),
+        func: WindowFuncKind::Rank,
+        args: vec![],
+        partition_by: vec![],
+        order_by: vec![],
+        frame: None,
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    let win = out.fields.last().unwrap();
+    assert_eq!(win.dtype, L3DataType::Int64);
+    assert!(!win.nullable);
+}
+
+#[test]
+fn window_func_lag_uses_arg_column_type() {
+    // LAG(value) → output type matches value: Float64, nullable
+    let cs = timed_two_col_schema();
+    let node = QueryExpr::WindowFunc {
+        child: dummy_scan(cs.clone()),
+        func: WindowFuncKind::Lag,
+        args: vec![L3Expr::Column(ColumnRef("value".into()))],
+        partition_by: vec![],
+        order_by: vec![],
+        frame: None,
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    let win = out.fields.last().unwrap();
+    assert_eq!(win.dtype, L3DataType::Float64);
+    assert!(win.nullable);
+}
+
+#[test]
+fn window_func_lag_int_col_preserves_type() {
+    // LAG(ts) → Int64, nullable
+    let cs = timed_two_col_schema();
+    let node = QueryExpr::WindowFunc {
+        child: dummy_scan(cs.clone()),
+        func: WindowFuncKind::Lag,
+        args: vec![L3Expr::Column(ColumnRef("ts".into()))],
+        partition_by: vec![],
+        order_by: vec![],
+        frame: None,
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    let win = out.fields.last().unwrap();
+    assert_eq!(win.dtype, L3DataType::Int64);
+    assert!(win.nullable);
+}
+
+#[test]
+fn window_func_min_preserves_arg_type() {
+    // MIN(ts) OVER (...) → Int64 (same as ts)
+    let cs = timed_two_col_schema();
+    let node = QueryExpr::WindowFunc {
+        child: dummy_scan(cs.clone()),
+        func: WindowFuncKind::Min,
+        args: vec![L3Expr::Column(ColumnRef("ts".into()))],
+        partition_by: vec![],
+        order_by: vec![],
+        frame: None,
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    let win = out.fields.last().unwrap();
+    assert_eq!(win.dtype, L3DataType::Int64);
+}
+
+#[test]
+fn window_func_count_appends_int64_not_nullable() {
+    let cs = timed_two_col_schema();
+    let node = QueryExpr::WindowFunc {
+        child: dummy_scan(cs.clone()),
+        func: WindowFuncKind::Count,
+        args: vec![L3Expr::Column(ColumnRef("value".into()))],
+        partition_by: vec![],
+        order_by: vec![],
+        frame: None,
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    let win = out.fields.last().unwrap();
+    assert_eq!(win.dtype, L3DataType::Int64);
+    assert!(!win.nullable);
+}
+
+#[test]
+fn window_func_preserves_child_fields_and_time_index() {
+    let cs = timed_two_col_schema();
+    let node = QueryExpr::WindowFunc {
+        child: dummy_scan(cs.clone()),
+        func: WindowFuncKind::RowNumber,
+        args: vec![],
+        partition_by: vec![],
+        order_by: vec![],
+        frame: None,
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.fields[0].name, "ts");
+    assert_eq!(out.fields[1].name, "value");
+    assert_eq!(out.time_index, Some(0));
+}
+
+// ── HasSchema::output_schema() — Merge ───────────────────────────────────────
+
+#[test]
+fn merge_uses_first_child_schema() {
+    let cs = timed_two_col_schema();
+    let node = QueryExpr::Merge { children: vec![dummy_scan(cs.clone()), dummy_scan(cs.clone())] };
+    let out = node.output_schema(&[&cs, &cs], &empty_catalog());
+    assert_eq!(out.fields, cs.fields);
+    assert_eq!(out.time_index, cs.time_index);
+}
+
+// ── HasSchema::output_schema() — SetOp ───────────────────────────────────────
+
+fn right_schema() -> L3Schema {
+    schema(vec![field("a", L3DataType::Int64), field("b", L3DataType::Utf8)])
+}
+
+#[test]
+fn set_op_union_uses_left_schema() {
+    let left = timed_two_col_schema();
+    let right = right_schema();
+    let node = QueryExpr::SetOp {
+        kind: SetOpKind::Union,
+        all: false,
+        left: dummy_scan(left.clone()),
+        right: dummy_scan(right.clone()),
+    };
+    let out = node.output_schema(&[&left, &right], &empty_catalog());
+    assert_eq!(out.fields[0].name, "ts");
+    assert_eq!(out.fields[1].name, "value");
+}
+
+#[test]
+fn set_op_intersect_uses_left_schema() {
+    let left = timed_two_col_schema();
+    let right = right_schema();
+    let node = QueryExpr::SetOp {
+        kind: SetOpKind::Intersect,
+        all: false,
+        left: dummy_scan(left.clone()),
+        right: dummy_scan(right.clone()),
+    };
+    let out = node.output_schema(&[&left, &right], &empty_catalog());
+    assert_eq!(out.fields, left.fields);
+}
+
+#[test]
+fn set_op_except_uses_left_schema() {
+    let left = timed_two_col_schema();
+    let right = right_schema();
+    let node = QueryExpr::SetOp {
+        kind: SetOpKind::Except,
+        all: false,
+        left: dummy_scan(left.clone()),
+        right: dummy_scan(right.clone()),
+    };
+    let out = node.output_schema(&[&left, &right], &empty_catalog());
+    assert_eq!(out.fields, left.fields);
+}
+
+#[test]
+fn set_op_preserves_time_index_from_left() {
+    let left = timed_two_col_schema(); // time_index = Some(0)
+    let right = right_schema(); // time_index = None
+    let node = QueryExpr::SetOp {
+        kind: SetOpKind::Union,
+        all: true,
+        left: dummy_scan(left.clone()),
+        right: dummy_scan(right.clone()),
+    };
+    let out = node.output_schema(&[&left, &right], &empty_catalog());
+    assert_eq!(out.time_index, Some(0));
 }
 
 #[test]
