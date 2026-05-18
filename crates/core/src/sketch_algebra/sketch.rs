@@ -50,13 +50,30 @@ pub enum SummaryParams {
     Increase,
     Rate,
     // Approximate sketches — algorithm-specific tuning parameters
-    Kll { k: u32 },
-    Cms { width: u32, depth: u32 },
-    Hll { precision: u8 },
-    DDSketch { alpha: f64 },
-    CmsWithHeap { width: u32, depth: u32, heap_size: u32 },
-    Kmv { k: u32 },
-    Theta { k: u32 },
+    Kll {
+        k: u32,
+    },
+    Cms {
+        width: u32,
+        depth: u32,
+    },
+    Hll {
+        precision: u8,
+    },
+    DDSketch {
+        alpha: f64,
+    },
+    CmsWithHeap {
+        width: u32,
+        depth: u32,
+        heap_size: u32,
+    },
+    Kmv {
+        k: u32,
+    },
+    Theta {
+        k: u32,
+    },
 }
 
 // ── Sketch read-out queries ───────────────────────────────────────────────────
