@@ -94,15 +94,14 @@ impl<'a> SqlLowerer<'a> {
         scan: &logical_expr::TableScan,
     ) -> Result<QueryExpr, LoweringError> {
         let table_name = scan.table_name.to_string();
-        if !self.catalog.tables.contains_key(&table_name) {
-            return Err(LoweringError::TableNotFound(table_name));
-        }
+        let table_schema = self
+            .catalog
+            .tables
+            .get(&table_name)
+            .ok_or_else(|| LoweringError::TableNotFound(table_name.clone()))?;
+        let columns = projection_columns(scan, table_schema);
         Ok(QueryExpr::Scan {
-            source: Source::Table {
-                table_ref: TableRef(table_name),
-                columns: vec![],
-                time_range: None,
-            },
+            source: Source::Table { table_ref: TableRef(table_name), columns, time_range: None },
             predicates: vec![],
         })
     }
@@ -118,10 +117,11 @@ impl<'a> SqlLowerer<'a> {
                 if let Some(time_col) = &schema.time_column {
                     let (time_range, non_time) =
                         extract_time_range(&filter.predicate, time_col);
+                    let columns = projection_columns(scan, schema);
                     let scan_expr = QueryExpr::Scan {
                         source: Source::Table {
                             table_ref: TableRef(table_name),
-                            columns: vec![],
+                            columns,
                             time_range,
                         },
                         predicates: vec![],
@@ -148,6 +148,12 @@ impl<'a> SqlLowerer<'a> {
         &self,
         proj: &logical_expr::Projection,
     ) -> Result<QueryExpr, LoweringError> {
+        // SELECT * — all wildcards means "no column constraint". Pass through
+        // without a Project wrapper; an empty Scan.columns list means "all columns".
+        if proj.expr.iter().any(|e| matches!(e, Expr::Wildcard { .. })) {
+            return self.lower_plan(&proj.input);
+        }
+
         let child = self.lower_plan(&proj.input)?;
         let cols = proj
             .expr
@@ -160,6 +166,11 @@ impl<'a> SqlLowerer<'a> {
                 _ => df_expr_to_l3(e).map(|expr| ProjectItem { expr, alias: None }),
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        // DataFusion's unoptimized plan never sets TableScan.projection, so we
+        // derive the Scan's column list from the enclosing projection instead.
+        let child = push_columns_into_scan(child, &cols);
+
         Ok(QueryExpr::Project { child: make_node(child), cols })
     }
 
@@ -315,6 +326,54 @@ impl<'a> SqlLowerer<'a> {
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
+
+/// Map a DataFusion `TableScan.projection` (column index list) back to
+/// `ColumnRef` names from the catalog schema.
+/// Returns an empty `Vec` when the projection is absent (full scan / `SELECT *`).
+fn projection_columns(
+    scan: &logical_expr::TableScan,
+    schema: &TableSchema,
+) -> Vec<ColumnRef> {
+    match &scan.projection {
+        Some(indices) => indices
+            .iter()
+            .filter_map(|&i| schema.columns.get(i))
+            .map(|c| ColumnRef(c.name.clone()))
+            .collect(),
+        None => vec![],
+    }
+}
+
+/// If `child` is a `Scan` with an empty column list, populate it from the
+/// columns referenced in `cols`. DataFusion's unoptimized plan never sets
+/// `TableScan.projection`, so this compensates without requiring optimizer
+/// passes that could alter other plan-node shapes our lowerer depends on.
+fn push_columns_into_scan(child: QueryExpr, cols: &[ProjectItem]) -> QueryExpr {
+    let QueryExpr::Scan {
+        source: Source::Table { table_ref, columns, time_range },
+        predicates,
+    } = child
+    else {
+        return child;
+    };
+    if !columns.is_empty() {
+        return QueryExpr::Scan {
+            source: Source::Table { table_ref, columns, time_range },
+            predicates,
+        };
+    }
+    let mut seen = std::collections::HashSet::<String>::new();
+    let col_refs: Vec<ColumnRef> = cols
+        .iter()
+        .flat_map(|item| item.expr.columns_referenced())
+        .map(|c| c.clone())
+        .filter(|c| seen.insert(c.0.clone()))
+        .collect();
+    QueryExpr::Scan {
+        source: Source::Table { table_ref, columns: col_refs, time_range },
+        predicates,
+    }
+}
 
 fn make_node(expr: QueryExpr) -> Rc<L3Node> {
     Rc::new(L3Node { expr, schema: L3Schema { fields: vec![], time_index: None } })

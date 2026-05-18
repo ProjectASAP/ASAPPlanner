@@ -9,6 +9,8 @@ pub enum LoweringError {
     UnsupportedFeature(String),
     UnsupportedAggregate(String),
     InvalidExpression(String),
+    /// The workload's query language is not handled by this lowerer.
+    WrongLanguage(String),
 }
 
 impl fmt::Display for LoweringError {
@@ -22,6 +24,7 @@ impl fmt::Display for LoweringError {
             Self::UnsupportedFeature(msg) => write!(f, "unsupported SQL feature: {msg}"),
             Self::UnsupportedAggregate(name) => write!(f, "unsupported aggregate: {name}"),
             Self::InvalidExpression(msg) => write!(f, "invalid expression: {msg}"),
+            Self::WrongLanguage(lang) => write!(f, "unsupported query language: {lang}"),
         }
     }
 }

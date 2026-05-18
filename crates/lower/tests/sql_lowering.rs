@@ -626,3 +626,91 @@ async fn test_unknown_table_returns_error() {
         "unexpected error variant: {err}"
     );
 }
+
+// ── Tests: language guard ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_promql_workload_returns_wrong_language() {
+    let catalog = metrics_catalog();
+    let workload = QueryWorkload {
+        language: QueryLanguage::PromQL,
+        query_batch: Some(vec![
+            BatchEntry { query: Query("some_metric".into()), requirements: None },
+        ]),
+        repeating_queries: None,
+        data_characteristics: None,
+    };
+    let results = lower_batch(&workload, &catalog).await;
+    assert_eq!(results.len(), 1);
+    assert!(
+        matches!(results[0], Err(LoweringError::WrongLanguage(_))),
+        "expected WrongLanguage, got: {:?}", results[0]
+    );
+}
+
+#[tokio::test]
+async fn test_elastic_dsl_workload_returns_wrong_language() {
+    let catalog = metrics_catalog();
+    let workload = QueryWorkload {
+        language: QueryLanguage::ElasticDSL,
+        query_batch: Some(vec![
+            BatchEntry { query: Query("{\"query\":{}}".into()), requirements: None },
+        ]),
+        repeating_queries: None,
+        data_characteristics: None,
+    };
+    let results = lower_batch(&workload, &catalog).await;
+    assert_eq!(results.len(), 1);
+    assert!(matches!(results[0], Err(LoweringError::WrongLanguage(_))));
+}
+
+#[tokio::test]
+async fn test_datafusion_language_accepted() {
+    let catalog = metrics_catalog();
+    let workload = QueryWorkload {
+        language: QueryLanguage::DataFusion,
+        query_batch: Some(vec![
+            BatchEntry { query: Query("SELECT COUNT(*) FROM metrics".into()), requirements: None },
+        ]),
+        repeating_queries: None,
+        data_characteristics: None,
+    };
+    let results = lower_batch(&workload, &catalog).await;
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_ok(), "DataFusion language should be accepted");
+}
+
+// ── Tests: Source::Table.columns ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_scan_columns_populated_from_projection() {
+    // SELECT ts, value FROM metrics — DataFusion should push the projection
+    // into the TableScan; Source::Table.columns should name the two columns.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer.lower("SELECT ts, value FROM metrics").await.unwrap();
+
+    let source = find_source(&result).expect("expected a Scan");
+    let Source::Table { columns, .. } = source else {
+        panic!("expected Source::Table");
+    };
+    // At minimum, each named column should appear in the list.
+    let names: Vec<&str> = columns.iter().map(|c| c.0.as_str()).collect();
+    assert!(names.contains(&"ts"), "expected 'ts' in columns, got: {names:?}");
+    assert!(names.contains(&"value"), "expected 'value' in columns, got: {names:?}");
+}
+
+#[tokio::test]
+async fn test_scan_columns_empty_for_select_star() {
+    // SELECT * — no projection pushdown; Source::Table.columns stays empty
+    // (meaning "all columns"; cost estimator treats empty as unconstrained).
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer.lower("SELECT * FROM metrics").await.unwrap();
+
+    let source = find_source(&result).expect("expected a Scan");
+    let Source::Table { columns, .. } = source else {
+        panic!("expected Source::Table");
+    };
+    assert!(columns.is_empty(), "SELECT * should produce no column constraints, got: {columns:?}");
+}

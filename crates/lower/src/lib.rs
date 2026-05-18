@@ -4,7 +4,7 @@ pub mod sql;
 use asap_control_core::intent_algebra::expr::QueryExpr;
 use asap_control_core::intent_algebra::schema::SchemaCatalog;
 use asap_control_core::types::AccuracyTarget;
-use asap_control_core::workload::QueryWorkload;
+use asap_control_core::workload::{QueryLanguage, QueryWorkload};
 
 pub use error::LoweringError;
 pub use sql::SqlLowerer;
@@ -13,6 +13,7 @@ pub use sql::SqlLowerer;
 ///
 /// One `Result` per entry — errors are per-query, not fatal for the batch.
 /// Returns an empty `Vec` if `workload.query_batch` is absent or empty.
+/// Returns `WrongLanguage` for every entry if the workload language is not SQL.
 pub async fn lower_batch(
     workload: &QueryWorkload,
     catalog: &SchemaCatalog,
@@ -21,6 +22,16 @@ pub async fn lower_batch(
         Some(e) if !e.is_empty() => e,
         _ => return vec![],
     };
+
+    // Guard: only SQL dialects are handled by this lowerer.
+    if !matches!(workload.language, QueryLanguage::SQL(_) | QueryLanguage::DataFusion) {
+        let lang = format!("{:?}", workload.language);
+        return entries
+            .iter()
+            .map(|_| Err(LoweringError::WrongLanguage(lang.clone())))
+            .collect();
+    }
+
     let mut results = Vec::with_capacity(entries.len());
     for entry in entries {
         let accuracy = entry

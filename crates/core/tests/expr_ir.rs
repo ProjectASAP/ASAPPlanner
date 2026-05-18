@@ -10,7 +10,8 @@ fn l3scalar_int64_eq() {
 
 #[test]
 fn l3scalar_float64_eq() {
-    assert_eq!(L3Scalar::Float64(3.14), L3Scalar::Float64(3.14));
+    assert_eq!(L3Scalar::Float64(1.5), L3Scalar::Float64(1.5));
+    assert_ne!(L3Scalar::Float64(1.5), L3Scalar::Float64(2.5));
 }
 
 #[test]
