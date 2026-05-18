@@ -1,0 +1,54 @@
+repos:
+  # General hooks for all file types
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-executables-have-shebangs
+
+  # Shell script linting
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.9.0.5
+    hooks:
+      - id: shellcheck
+        files: \.(sh|bash)$
+
+  # Rust formatting, linting, and tests (workspace-level)
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        description: Format all Rust workspace crates with rustfmt.
+        entry: bash -c 'cargo fmt --all -- --check'
+        language: system
+        files: \.rs$
+        pass_filenames: false
+
+      - id: cargo-check
+        name: cargo check
+        description: Check the workspace for errors.
+        entry: bash -c 'cargo check --workspace'
+        language: system
+        files: \.rs$
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        description: Lint all Rust workspace crates.
+        entry: bash -c 'cargo clippy --workspace --all-targets --all-features -- -D warnings'
+        language: system
+        files: \.rs$
+        pass_filenames: false
+
+      - id: cargo-test
+        name: cargo test
+        description: Run all Rust workspace tests.
+        entry: bash -c 'cargo test --workspace'
+        language: system
+        files: \.rs$
+        pass_filenames: false
