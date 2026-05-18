@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use asap_control_core::intent_algebra::expr::{AggIntent, Predicate, ProjectItem, QueryExpr, SortKey, Source};
 use asap_control_core::intent_algebra::schema::{ColumnDef, L3DataType, SchemaCatalog, TableSchema};
-use asap_control_core::intent_algebra::{L3Expr};
+use asap_control_core::intent_algebra::{CompareOp, L3Expr};
 use asap_control_core::types::AccuracyTarget;
-use asap_control_lower::{LoweringError, SqlLowerer};
+use asap_control_core::workload::{BatchEntry, Query, QueryLanguage, QueryWorkload, SqlDialect};
+use asap_control_lower::{lower_batch, LoweringError, SqlLowerer};
 
 // ── Catalog helpers ───────────────────────────────────────────────────────────
 
@@ -511,6 +512,107 @@ async fn test_sort_key_descending_flag() {
     let keys = find_sort_keys(&result).expect("expected Sort node");
     assert_eq!(keys.len(), 1);
     assert!(!keys[0].ascending, "expected descending sort key");
+}
+
+// ── Tests: df_expr_to_l3 edge cases ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_filter_is_null_predicate() {
+    // WHERE value IS NULL → IsNull(Column("value"))
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer.lower("SELECT id FROM events WHERE value IS NULL").await.unwrap();
+
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    assert!(
+        matches!(pred, L3Expr::IsNull(inner) if matches!(inner.as_ref(), L3Expr::Column(c) if c.0 == "value")),
+        "expected IsNull(Column(\"value\")), got: {pred:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_filter_in_list_predicate() {
+    // WHERE id IN (1, 2, 3) → InList { expr: Column("id"), list: [..], negated: false }
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer.lower("SELECT id FROM events WHERE id IN (1, 2, 3)").await.unwrap();
+
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    let L3Expr::InList { expr, list, negated } = pred else {
+        panic!("expected InList, got: {pred:?}");
+    };
+    assert!(matches!(expr.as_ref(), L3Expr::Column(c) if c.0 == "id"));
+    assert_eq!(list.len(), 3);
+    assert!(!negated);
+}
+
+#[tokio::test]
+async fn test_filter_between_normalizes_to_bool_and() {
+    // WHERE value BETWEEN 0 AND 100 → BoolAnd([Compare(Ge, 0), Compare(Le, 100)])
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE value BETWEEN 0.0 AND 100.0")
+        .await
+        .unwrap();
+
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    let conjuncts = pred.conjuncts();
+    assert_eq!(conjuncts.len(), 2, "BETWEEN should produce 2 conjuncts, got: {pred:?}");
+    // First conjunct: value >= 0, second: value <= 100
+    assert!(matches!(&conjuncts[0], L3Expr::Compare { op: CompareOp::Ge, .. }));
+    assert!(matches!(&conjuncts[1], L3Expr::Compare { op: CompareOp::Le, .. }));
+}
+
+// ── Tests: lower_batch ────────────────────────────────────────────────────────
+
+fn make_workload(queries: Vec<&str>) -> QueryWorkload {
+    QueryWorkload {
+        language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+        query_batch: Some(
+            queries
+                .into_iter()
+                .map(|q| BatchEntry { query: Query(q.to_string()), requirements: None })
+                .collect(),
+        ),
+        repeating_queries: None,
+        data_characteristics: None,
+    }
+}
+
+#[tokio::test]
+async fn test_lower_batch_empty_returns_empty_vec() {
+    let catalog = metrics_catalog();
+    let workload = QueryWorkload {
+        language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+        query_batch: None,
+        repeating_queries: None,
+        data_characteristics: None,
+    };
+    let results = lower_batch(&workload, &catalog).await;
+    assert!(results.is_empty());
+}
+
+#[tokio::test]
+async fn test_lower_batch_two_valid_queries() {
+    let catalog = metrics_catalog();
+    let workload =
+        make_workload(vec!["SELECT COUNT(*) FROM metrics", "SELECT SUM(value) FROM metrics"]);
+    let results = lower_batch(&workload, &catalog).await;
+    assert_eq!(results.len(), 2);
+    assert!(results[0].is_ok(), "first query should succeed");
+    assert!(results[1].is_ok(), "second query should succeed");
+}
+
+#[tokio::test]
+async fn test_lower_batch_error_is_per_query() {
+    // A bad query in the batch should not prevent the good ones from being lowered.
+    let catalog = metrics_catalog();
+    let workload = make_workload(vec!["SELECT COUNT(*) FROM metrics", "NOT VALID SQL !!!"]);
+    let results = lower_batch(&workload, &catalog).await;
+    assert_eq!(results.len(), 2);
+    assert!(results[0].is_ok(), "first (valid) query should succeed");
+    assert!(results[1].is_err(), "second (invalid) query should fail");
 }
 
 #[tokio::test]

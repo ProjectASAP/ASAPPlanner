@@ -379,6 +379,43 @@ impl HasSchema for QueryExpr {
                 ),
             },
 
+            // ── Project: one output field per ProjectItem ─────────────────────
+            QueryExpr::Project { cols, .. } => {
+                let cs = child();
+                let time_col_src = cs.time_index.map(|ti| cs.fields[ti].name.clone());
+
+                // Build (field, is_time_col) pairs. Non-Column exprs are deferred
+                // until a type-inference pass exists.
+                let pairs: Vec<(L3Field, bool)> = cols
+                    .iter()
+                    .map(|item| match &item.expr {
+                        L3Expr::Column(col_ref) => {
+                            let child_f =
+                                cs.fields.iter().find(|f| f.name == col_ref.0);
+                            let (dtype, nullable) = child_f
+                                .map(|f| (f.dtype.clone(), f.nullable))
+                                .unwrap_or((super::schema::L3DataType::Float64, true));
+                            let out_name = item
+                                .alias
+                                .as_deref()
+                                .unwrap_or(&col_ref.0)
+                                .to_string();
+                            let is_time =
+                                time_col_src.as_deref() == Some(col_ref.0.as_str());
+                            (L3Field { name: out_name, dtype, nullable }, is_time)
+                        }
+                        _ => todo!(
+                            "Project schema derivation for non-column expressions \
+                             (type inference not yet implemented)"
+                        ),
+                    })
+                    .collect();
+
+                let time_index = pairs.iter().position(|(_, is_time)| *is_time);
+                let fields = pairs.into_iter().map(|(f, _)| f).collect();
+                L3Schema { fields, time_index }
+            }
+
             // ── Pass-through: output schema == child schema ───────────────────
             QueryExpr::Filter { .. }
             | QueryExpr::Sort { .. }

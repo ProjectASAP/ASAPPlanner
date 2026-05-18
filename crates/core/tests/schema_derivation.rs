@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use asap_control_core::intent_algebra::{
     AggIntent, ColumnRef, DataModel, GroupKey, HasSchema, L3DataType, L3Expr, L3Field, L3Node,
-    L3Scalar, L3Schema, Predicate, QueryExpr, SortKey, Source, TableRef, ColumnDef,
+    L3Scalar, L3Schema, Predicate, ProjectItem, QueryExpr, SortKey, Source, TableRef, ColumnDef,
     SchemaCatalog, TableSchema,
 };
 use asap_control_core::types::AccuracyTarget;
@@ -475,4 +475,129 @@ fn aggregate_time_index_not_propagated() {
     };
     let out = node.output_schema(&[&cs], &empty_catalog());
     assert_eq!(out.time_index, None);
+}
+
+// ── HasSchema::output_schema() — Project ──────────────────────────────────────
+
+#[test]
+fn project_column_items_derive_schema_from_child() {
+    // SELECT ts, value — both columns exist in the child schema.
+    let cs = child_schema(); // [ts(Int64), value(Float64)]
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![
+            ProjectItem { expr: L3Expr::Column(ColumnRef("ts".into())), alias: None },
+            ProjectItem { expr: L3Expr::Column(ColumnRef("value".into())), alias: None },
+        ],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.fields.len(), 2);
+    assert_eq!(out.fields[0].name, "ts");
+    assert_eq!(out.fields[0].dtype, L3DataType::Int64);
+    assert_eq!(out.fields[1].name, "value");
+    assert_eq!(out.fields[1].dtype, L3DataType::Float64);
+}
+
+#[test]
+fn project_alias_renames_output_field() {
+    // SELECT value AS v — output field is named "v", type preserved.
+    let cs = child_schema();
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![
+            ProjectItem {
+                expr: L3Expr::Column(ColumnRef("value".into())),
+                alias: Some("v".into()),
+            },
+        ],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.fields.len(), 1);
+    assert_eq!(out.fields[0].name, "v");
+    assert_eq!(out.fields[0].dtype, L3DataType::Float64);
+}
+
+#[test]
+fn project_subsets_columns() {
+    // SELECT value — only one of two child columns projected.
+    let cs = child_schema();
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![ProjectItem { expr: L3Expr::Column(ColumnRef("value".into())), alias: None }],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.fields.len(), 1);
+    assert_eq!(out.fields[0].name, "value");
+}
+
+#[test]
+fn project_preserves_time_index_when_time_col_included() {
+    // SELECT ts, value — ts is at index 0 in child (time_index=0); should be preserved.
+    let cs = schema_with_time(
+        vec![field("ts", L3DataType::Int64), nullable_field("value", L3DataType::Float64)],
+        0,
+    );
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![
+            ProjectItem { expr: L3Expr::Column(ColumnRef("ts".into())), alias: None },
+            ProjectItem { expr: L3Expr::Column(ColumnRef("value".into())), alias: None },
+        ],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.time_index, Some(0));
+}
+
+#[test]
+fn project_preserves_time_index_when_col_reordered() {
+    // SELECT value, ts — ts moves to index 1; time_index should update.
+    let cs = schema_with_time(
+        vec![field("ts", L3DataType::Int64), nullable_field("value", L3DataType::Float64)],
+        0,
+    );
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![
+            ProjectItem { expr: L3Expr::Column(ColumnRef("value".into())), alias: None },
+            ProjectItem { expr: L3Expr::Column(ColumnRef("ts".into())), alias: None },
+        ],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.time_index, Some(1));
+}
+
+#[test]
+fn project_drops_time_index_when_time_col_excluded() {
+    // SELECT value — ts not projected; time_index should be None.
+    let cs = schema_with_time(
+        vec![field("ts", L3DataType::Int64), nullable_field("value", L3DataType::Float64)],
+        0,
+    );
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![ProjectItem { expr: L3Expr::Column(ColumnRef("value".into())), alias: None }],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.time_index, None);
+}
+
+#[test]
+fn project_time_index_tracks_aliased_time_col() {
+    // SELECT ts AS t — aliased; time_index should still point at the right output position.
+    let cs = schema_with_time(
+        vec![field("ts", L3DataType::Int64), nullable_field("value", L3DataType::Float64)],
+        0,
+    );
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![
+            ProjectItem {
+                expr: L3Expr::Column(ColumnRef("ts".into())),
+                alias: Some("t".into()),
+            },
+        ],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.time_index, Some(0));
+    assert_eq!(out.fields[0].name, "t");
 }
