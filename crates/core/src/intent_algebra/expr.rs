@@ -2,23 +2,36 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use crate::types::AccuracyTarget;
+use super::expr_ir::L3Expr;
 use super::schema::{HasSchema, L3Schema, SchemaCatalog};
 
-// ── Stub leaf / supporting types ──────────────────────────────────────────────
-// Full definitions will be added as the respective layers are implemented.
+// ── Leaf / supporting types ───────────────────────────────────────────────────
 
 /// A row-level filter predicate (WHERE clause / PromQL label matcher).
-#[derive(Debug, Clone)] pub struct Predicate;
+#[derive(Debug, Clone)]
+pub struct Predicate(pub L3Expr);
+
 /// One item in a SELECT projection list.
-#[derive(Debug, Clone)] pub struct ProjectItem;
+#[derive(Debug, Clone)]
+pub struct ProjectItem {
+    pub expr: L3Expr,
+    pub alias: Option<String>,
+}
+
 /// A GROUP BY key reference (column name).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)] pub struct GroupKey(pub String);
 /// A reference to a column by name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)] pub struct ColumnRef(pub String);
 /// A set of partitioning keys (sharding hint for L5 stage allocator).
 #[derive(Debug, Clone)] pub struct PartitionKeys;
-/// One key in an ORDER BY clause.
-#[derive(Debug, Clone)] pub struct SortKey;
+
+/// One key in an ORDER BY or window OVER clause.
+#[derive(Debug, Clone)]
+pub struct SortKey {
+    pub expr: L3Expr,
+    pub ascending: bool,
+    pub nulls_first: bool,
+}
 /// An analytic window frame (ROWS / RANGE BETWEEN …).
 #[derive(Debug, Clone)] pub struct WindowFrame;
 /// PromQL vector-match modifiers (`on`/`ignoring` + `group_left`/`group_right`).

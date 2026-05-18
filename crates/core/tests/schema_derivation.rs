@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_control_core::intent_algebra::{
-    AggIntent, ColumnRef, DataModel, GroupKey, HasSchema, L3DataType, L3Field, L3Node, L3Schema,
-    Predicate, ProjectItem, QueryExpr, SortKey, Source, TableRef, TimeRange, ColumnDef,
+    AggIntent, ColumnRef, DataModel, GroupKey, HasSchema, L3DataType, L3Expr, L3Field, L3Node,
+    L3Scalar, L3Schema, Predicate, QueryExpr, SortKey, Source, TableRef, ColumnDef,
     SchemaCatalog, TableSchema,
 };
 use asap_control_core::types::AccuracyTarget;
@@ -314,7 +314,10 @@ fn dummy_scan(s: L3Schema) -> Rc<L3Node> {
 #[test]
 fn filter_passes_through_child_schema() {
     let cs = child_schema();
-    let node = QueryExpr::Filter { child: dummy_scan(cs.clone()), pred: Predicate };
+    let node = QueryExpr::Filter {
+        child: dummy_scan(cs.clone()),
+        pred: Predicate(L3Expr::Literal(L3Scalar::Boolean(true))),
+    };
     let out = node.output_schema(&[&cs], &empty_catalog());
     assert_eq!(out.fields, cs.fields);
     assert_eq!(out.time_index, cs.time_index);
@@ -323,7 +326,14 @@ fn filter_passes_through_child_schema() {
 #[test]
 fn sort_passes_through_child_schema() {
     let cs = child_schema();
-    let node = QueryExpr::Sort { child: dummy_scan(cs.clone()), keys: vec![SortKey] };
+    let node = QueryExpr::Sort {
+        child: dummy_scan(cs.clone()),
+        keys: vec![SortKey {
+            expr: L3Expr::Column(ColumnRef("ts".into())),
+            ascending: true,
+            nulls_first: false,
+        }],
+    };
     let out = node.output_schema(&[&cs], &empty_catalog());
     assert_eq!(out.fields, cs.fields);
 }

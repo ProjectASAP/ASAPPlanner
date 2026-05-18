@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use asap_control_core::intent_algebra::expr::{AggIntent, QueryExpr, Source};
+use asap_control_core::intent_algebra::expr::{AggIntent, Predicate, ProjectItem, QueryExpr, SortKey, Source};
 use asap_control_core::intent_algebra::schema::{ColumnDef, L3DataType, SchemaCatalog, TableSchema};
+use asap_control_core::intent_algebra::{L3Expr};
 use asap_control_core::types::AccuracyTarget;
 use asap_control_lower::{LoweringError, SqlLowerer};
 
@@ -65,6 +66,39 @@ fn find_aggregate(expr: &QueryExpr) -> Option<(&Vec<asap_control_core::intent_al
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. } => find_aggregate(&child.expr),
+        _ => None,
+    }
+}
+
+/// Walk through wrappers to find the predicate of the first Filter node.
+fn find_predicate(expr: &QueryExpr) -> Option<&L3Expr> {
+    match expr {
+        QueryExpr::Filter { pred: Predicate(e), .. } => Some(e),
+        QueryExpr::Project { child, .. }
+        | QueryExpr::Sort { child, .. }
+        | QueryExpr::Limit { child, .. } => find_predicate(&child.expr),
+        _ => None,
+    }
+}
+
+/// Walk through wrappers to find the cols of the first Project node.
+fn find_project_items(expr: &QueryExpr) -> Option<&[ProjectItem]> {
+    match expr {
+        QueryExpr::Project { cols, .. } => Some(cols),
+        QueryExpr::Sort { child, .. }
+        | QueryExpr::Filter { child, .. }
+        | QueryExpr::Limit { child, .. } => find_project_items(&child.expr),
+        _ => None,
+    }
+}
+
+/// Walk through wrappers to find the keys of the first Sort node.
+fn find_sort_keys(expr: &QueryExpr) -> Option<&[SortKey]> {
+    match expr {
+        QueryExpr::Sort { keys, .. } => Some(keys),
+        QueryExpr::Project { child, .. }
+        | QueryExpr::Filter { child, .. }
+        | QueryExpr::Limit { child, .. } => find_sort_keys(&child.expr),
         _ => None,
     }
 }
@@ -398,6 +432,85 @@ async fn test_subquery_returns_error() {
         matches!(err, LoweringError::UnsupportedFeature(ref msg) if msg.to_lowercase().contains("subquery")),
         "unexpected error: {err}"
     );
+}
+
+// ── Tests: Predicate / ProjectItem / SortKey content ─────────────────────────
+
+#[tokio::test]
+async fn test_filter_predicate_references_filtered_column() {
+    // WHERE value > 5.0 should produce a Predicate that references "value".
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT ts FROM metrics WHERE value > 5.0")
+        .await
+        .unwrap();
+
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    let refs = pred.columns_referenced();
+    assert!(refs.iter().any(|r| r.0 == "value"), "expected 'value' column ref in predicate");
+}
+
+#[tokio::test]
+async fn test_filter_two_non_time_predicates_is_bool_and() {
+    // WHERE value > 0 AND region = 'us' — both non-time → BoolAnd with 2 conjuncts.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT ts FROM metrics WHERE value > 0 AND region = 'us'")
+        .await
+        .unwrap();
+
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    assert_eq!(
+        pred.conjuncts().len(),
+        2,
+        "expected BoolAnd with 2 conjuncts, got: {pred:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_project_items_carry_column_refs() {
+    // SELECT id, value FROM events → two ProjectItems, each with a Column expr.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer.lower("SELECT id, value FROM events").await.unwrap();
+
+    let items = find_project_items(&result).expect("expected Project node");
+    assert_eq!(items.len(), 2, "expected 2 ProjectItems");
+
+    let col_names: Vec<&str> = items
+        .iter()
+        .filter_map(|pi| {
+            if let L3Expr::Column(c) = &pi.expr { Some(c.0.as_str()) } else { None }
+        })
+        .collect();
+    assert!(col_names.contains(&"id"), "expected 'id' in project items");
+    assert!(col_names.contains(&"value"), "expected 'value' in project items");
+}
+
+#[tokio::test]
+async fn test_sort_key_ascending_flag() {
+    // ORDER BY id ASC → SortKey with ascending = true.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer.lower("SELECT id FROM events ORDER BY id ASC").await.unwrap();
+
+    let keys = find_sort_keys(&result).expect("expected Sort node");
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].ascending, "expected ascending sort key");
+}
+
+#[tokio::test]
+async fn test_sort_key_descending_flag() {
+    // ORDER BY value DESC → SortKey with ascending = false.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer.lower("SELECT id FROM events ORDER BY value DESC").await.unwrap();
+
+    let keys = find_sort_keys(&result).expect("expected Sort node");
+    assert_eq!(keys.len(), 1);
+    assert!(!keys[0].ascending, "expected descending sort key");
 }
 
 #[tokio::test]

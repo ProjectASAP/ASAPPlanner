@@ -14,6 +14,7 @@ use asap_control_core::intent_algebra::expr::{
     TableRef, TimeRange, WindowFuncKind,
 };
 use asap_control_core::intent_algebra::schema::{L3DataType, L3Schema, SchemaCatalog, TableSchema};
+use asap_control_core::intent_algebra::{CompareOp, L3Expr, L3Scalar};
 use asap_control_core::types::AccuracyTarget;
 
 use crate::error::LoweringError;
@@ -109,13 +110,13 @@ impl<'a> SqlLowerer<'a> {
     fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<QueryExpr, LoweringError> {
         // When the direct child is a TableScan and the table has a time column,
         // split the predicate: time bounds go into Source::Table.time_range; the
-        // rest stays as a Filter node on top.
+        // remaining non-time conjuncts become the Filter predicate.
         let inner = strip_aliases(&filter.input);
         if let LogicalPlan::TableScan(scan) = inner {
             let table_name = scan.table_name.to_string();
             if let Some(schema) = self.catalog.tables.get(&table_name) {
                 if let Some(time_col) = &schema.time_column {
-                    let (time_range, has_non_time) =
+                    let (time_range, non_time) =
                         extract_time_range(&filter.predicate, time_col);
                     let scan_expr = QueryExpr::Scan {
                         source: Source::Table {
@@ -125,17 +126,22 @@ impl<'a> SqlLowerer<'a> {
                         },
                         predicates: vec![],
                     };
-                    return if has_non_time {
-                        Ok(QueryExpr::Filter { child: make_node(scan_expr), pred: Predicate })
-                    } else {
+                    return if non_time.is_empty() {
                         Ok(scan_expr)
+                    } else {
+                        let pred_expr = conjuncts_to_l3expr(non_time)?;
+                        Ok(QueryExpr::Filter {
+                            child: make_node(scan_expr),
+                            pred: Predicate(pred_expr),
+                        })
                     };
                 }
             }
         }
 
+        let pred_expr = df_expr_to_l3(&filter.predicate)?;
         let child = self.lower_plan(&filter.input)?;
-        Ok(QueryExpr::Filter { child: make_node(child), pred: Predicate })
+        Ok(QueryExpr::Filter { child: make_node(child), pred: Predicate(pred_expr) })
     }
 
     fn lower_projection(
@@ -143,7 +149,17 @@ impl<'a> SqlLowerer<'a> {
         proj: &logical_expr::Projection,
     ) -> Result<QueryExpr, LoweringError> {
         let child = self.lower_plan(&proj.input)?;
-        let cols = proj.expr.iter().map(|_| ProjectItem).collect();
+        let cols = proj
+            .expr
+            .iter()
+            .map(|e| match e {
+                Expr::Alias(a) => {
+                    df_expr_to_l3(&a.expr)
+                        .map(|expr| ProjectItem { expr, alias: Some(a.name.clone()) })
+                }
+                _ => df_expr_to_l3(e).map(|expr| ProjectItem { expr, alias: None }),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(QueryExpr::Project { child: make_node(child), cols })
     }
 
@@ -176,10 +192,18 @@ impl<'a> SqlLowerer<'a> {
             }
         }
         let child = self.lower_plan(&sort.input)?;
-        Ok(QueryExpr::Sort {
-            child: make_node(child),
-            keys: sort.expr.iter().map(|_| SortKey).collect(),
-        })
+        let keys = sort
+            .expr
+            .iter()
+            .map(|s| {
+                df_expr_to_l3(&s.expr).map(|expr| SortKey {
+                    expr,
+                    ascending: s.asc,
+                    nulls_first: s.nulls_first,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(QueryExpr::Sort { child: make_node(child), keys })
     }
 
     fn lower_limit(&self, limit: &logical_expr::Limit) -> Result<QueryExpr, LoweringError> {
@@ -236,11 +260,23 @@ impl<'a> SqlLowerer<'a> {
                 .iter()
                 .map(expr_to_group_key)
                 .collect::<Result<Vec<_>, _>>()?;
+            // In DataFusion 43, WindowFunction.order_by is Vec<SortExpr>.
+            let order_by = wf
+                .order_by
+                .iter()
+                .map(|s| {
+                    df_expr_to_l3(&s.expr).map(|expr| SortKey {
+                        expr,
+                        ascending: s.asc,
+                        nulls_first: s.nulls_first,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             return Ok(QueryExpr::WindowFunc {
                 child: make_node(child),
                 func,
                 partition_by,
-                order_by: wf.order_by.iter().map(|_| SortKey).collect(),
+                order_by,
                 frame: None,
             });
         }
@@ -361,12 +397,17 @@ fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// Returns `(time_range, has_non_time_predicates)`.
-pub(crate) fn extract_time_range(expr: &Expr, time_col: &str) -> (Option<TimeRange>, bool) {
+/// Split `expr` into `(time_range, non_time_conjuncts)`.
+/// Time-bound conjuncts are folded into the `TimeRange`; the rest are returned
+/// as a `Vec<&Expr>` so the caller can translate them with `df_expr_to_l3`.
+pub(crate) fn extract_time_range<'a>(
+    expr: &'a Expr,
+    time_col: &str,
+) -> (Option<TimeRange>, Vec<&'a Expr>) {
     let conjuncts = split_conjuncts(expr);
     let mut start_ms: Option<i64> = None;
     let mut end_ms: Option<i64> = None;
-    let mut has_non_time = false;
+    let mut non_time: Vec<&'a Expr> = vec![];
 
     for c in conjuncts {
         match classify_time_pred(c, time_col) {
@@ -376,7 +417,7 @@ pub(crate) fn extract_time_range(expr: &Expr, time_col: &str) -> (Option<TimeRan
             TimeClass::End(ms) => {
                 end_ms = Some(end_ms.map_or(ms, |e: i64| e.min(ms)));
             }
-            TimeClass::NonTime => has_non_time = true,
+            TimeClass::NonTime => non_time.push(c),
         }
     }
 
@@ -385,7 +426,156 @@ pub(crate) fn extract_time_range(expr: &Expr, time_col: &str) -> (Option<TimeRan
     } else {
         None
     };
-    (range, has_non_time)
+    (range, non_time)
+}
+
+/// Translate a slice of DataFusion `Expr`s (non-time conjuncts) into a single
+/// `L3Expr`. A single element is returned as-is; multiple elements are wrapped
+/// in `L3Expr::BoolAnd`.
+fn conjuncts_to_l3expr(conjuncts: Vec<&Expr>) -> Result<L3Expr, LoweringError> {
+    let parts: Result<Vec<_>, _> = conjuncts.iter().map(|e| df_expr_to_l3(e)).collect();
+    let mut parts = parts?;
+    if parts.len() == 1 {
+        Ok(parts.remove(0))
+    } else {
+        Ok(L3Expr::BoolAnd(parts))
+    }
+}
+
+/// Translate a DataFusion `Expr` to an `L3Expr`.
+/// Returns `UnsupportedFeature` for anything not needed in v1.
+fn df_expr_to_l3(expr: &Expr) -> Result<L3Expr, LoweringError> {
+    match expr {
+        Expr::Column(col) => Ok(L3Expr::Column(ColumnRef(col.name.clone()))),
+
+        Expr::Literal(sv) => scalar_value_to_l3(sv).map(L3Expr::Literal),
+
+        Expr::Alias(a) => df_expr_to_l3(&a.expr),
+
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
+            Operator::And => {
+                let parts = split_conjuncts(expr);
+                let l3_parts: Result<Vec<_>, _> = parts.iter().map(|e| df_expr_to_l3(e)).collect();
+                Ok(L3Expr::BoolAnd(l3_parts?))
+            }
+            Operator::Or => {
+                let parts = split_disjuncts(expr);
+                let l3_parts: Result<Vec<_>, _> = parts.iter().map(|e| df_expr_to_l3(e)).collect();
+                Ok(L3Expr::BoolOr(l3_parts?))
+            }
+            Operator::Eq => compare(left, CompareOp::Eq, right),
+            Operator::NotEq => compare(left, CompareOp::Ne, right),
+            Operator::Lt => compare(left, CompareOp::Lt, right),
+            Operator::LtEq => compare(left, CompareOp::Le, right),
+            Operator::Gt => compare(left, CompareOp::Gt, right),
+            Operator::GtEq => compare(left, CompareOp::Ge, right),
+            Operator::LikeMatch => compare(left, CompareOp::Like, right),
+            Operator::NotLikeMatch => compare(left, CompareOp::NotLike, right),
+            other => Err(LoweringError::UnsupportedFeature(format!("operator: {other:?}"))),
+        },
+
+        Expr::Not(inner) => Ok(L3Expr::Not(Box::new(df_expr_to_l3(inner)?))),
+
+        Expr::IsNull(inner) => Ok(L3Expr::IsNull(Box::new(df_expr_to_l3(inner)?))),
+
+        Expr::IsNotNull(inner) => Ok(L3Expr::IsNotNull(Box::new(df_expr_to_l3(inner)?))),
+
+        Expr::Cast(c) => {
+            let inner = df_expr_to_l3(&c.expr)?;
+            let to = arrow_to_l3(&c.data_type)?;
+            Ok(L3Expr::Cast { expr: Box::new(inner), to })
+        }
+
+        Expr::TryCast(c) => {
+            let inner = df_expr_to_l3(&c.expr)?;
+            let to = arrow_to_l3(&c.data_type)?;
+            Ok(L3Expr::Cast { expr: Box::new(inner), to })
+        }
+
+        Expr::InList(il) => {
+            let expr = df_expr_to_l3(&il.expr)?;
+            let list: Result<Vec<_>, _> = il.list.iter().map(df_expr_to_l3).collect();
+            Ok(L3Expr::InList { expr: Box::new(expr), list: list?, negated: il.negated })
+        }
+
+        Expr::Between(b) => {
+            // Normalize: `x BETWEEN low AND high` → `x >= low AND x <= high`.
+            // `x NOT BETWEEN low AND high` → `x < low OR x > high`.
+            let x_low = compare(&b.expr, CompareOp::Ge, &b.low)?;
+            let x_high = compare(&b.expr, CompareOp::Le, &b.high)?;
+            if b.negated {
+                // NOT BETWEEN: invert each side
+                let lt = compare(&b.expr, CompareOp::Lt, &b.low)?;
+                let gt = compare(&b.expr, CompareOp::Gt, &b.high)?;
+                Ok(L3Expr::BoolOr(vec![lt, gt]))
+            } else {
+                Ok(L3Expr::BoolAnd(vec![x_low, x_high]))
+            }
+        }
+
+        Expr::ScalarFunction(sf) => {
+            let args: Result<Vec<_>, _> = sf.args.iter().map(df_expr_to_l3).collect();
+            Ok(L3Expr::FunctionCall { name: sf.func.name().to_string(), args: args? })
+        }
+
+        other => Err(LoweringError::UnsupportedFeature(format!("expression: {}", other))),
+    }
+}
+
+fn compare(left: &Expr, op: CompareOp, right: &Expr) -> Result<L3Expr, LoweringError> {
+    Ok(L3Expr::Compare {
+        left: Box::new(df_expr_to_l3(left)?),
+        op,
+        right: Box::new(df_expr_to_l3(right)?),
+    })
+}
+
+fn scalar_value_to_l3(sv: &ScalarValue) -> Result<L3Scalar, LoweringError> {
+    match sv {
+        ScalarValue::Int64(Some(v)) => Ok(L3Scalar::Int64(*v)),
+        ScalarValue::Int32(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
+        ScalarValue::Int16(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
+        ScalarValue::Int8(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
+        ScalarValue::UInt64(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
+        ScalarValue::UInt32(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
+        ScalarValue::Float64(Some(v)) => Ok(L3Scalar::Float64(*v)),
+        ScalarValue::Float32(Some(v)) => Ok(L3Scalar::Float64(*v as f64)),
+        ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
+            Ok(L3Scalar::Utf8(s.clone()))
+        }
+        ScalarValue::Boolean(Some(b)) => Ok(L3Scalar::Boolean(*b)),
+        // Typed nulls and untyped null both become L3Scalar::Null
+        _ if sv.is_null() => Ok(L3Scalar::Null),
+        _ => Err(LoweringError::InvalidExpression(format!("unsupported scalar: {sv:?}"))),
+    }
+}
+
+fn arrow_to_l3(dt: &ArrowDataType) -> Result<L3DataType, LoweringError> {
+    match dt {
+        ArrowDataType::Int64
+        | ArrowDataType::Int32
+        | ArrowDataType::Int16
+        | ArrowDataType::Int8 => Ok(L3DataType::Int64),
+        ArrowDataType::Float64 | ArrowDataType::Float32 => Ok(L3DataType::Float64),
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Ok(L3DataType::Utf8),
+        ArrowDataType::Boolean => Ok(L3DataType::Boolean),
+        ArrowDataType::Timestamp(_, _) => Ok(L3DataType::Timestamp),
+        ArrowDataType::Duration(_) => Ok(L3DataType::Duration),
+        other => {
+            Err(LoweringError::UnsupportedFeature(format!("Arrow type in cast: {other:?}")))
+        }
+    }
+}
+
+fn split_disjuncts(expr: &Expr) -> Vec<&Expr> {
+    match expr {
+        Expr::BinaryExpr(BinaryExpr { left, op: Operator::Or, right }) => {
+            let mut v = split_disjuncts(left);
+            v.extend(split_disjuncts(right));
+            v
+        }
+        _ => vec![expr],
+    }
 }
 
 enum TimeClass {
