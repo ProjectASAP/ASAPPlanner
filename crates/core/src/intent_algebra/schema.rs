@@ -46,7 +46,7 @@ pub enum L3DataType {
 
 // ── Schema ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct L3Field {
     pub name: String,
     pub dtype: L3DataType,
@@ -57,7 +57,7 @@ pub struct L3Field {
 /// flowing between two operators. Type-checked at plan construction time:
 /// a node whose predicate references a column absent from its child's
 /// `L3Schema` is a plan-time error.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct L3Schema {
     pub fields: Vec<L3Field>,
     /// Index into `fields` for the time axis, if any.

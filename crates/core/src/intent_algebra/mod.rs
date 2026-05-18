@@ -7,4 +7,4 @@ pub use expr::{
     SortKey, Source, TableRef, TimeRange, TimeWindowKind, VectorMatch, WindowFrame,
     WindowFuncKind,
 };
-pub use schema::{HasSchema, L3DataType, L3Field, L3Schema, SchemaCatalog};
+pub use schema::{ColumnDef, HasSchema, L3DataType, L3Field, L3Schema, SchemaCatalog, TableSchema};

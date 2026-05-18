@@ -175,12 +175,35 @@ impl AggIntent {
     /// Which data model this intent semantically requires. L4 rules consult
     /// this to skip non-applicable intents (e.g. `Rate` over a `Source::Table`).
     pub fn requires(&self) -> DataModel {
-        todo!()
+        match self {
+            Self::Rate { .. } | Self::Increase { .. } => DataModel::TimeSeries,
+            _ => DataModel::Any,
+        }
     }
 
-    /// Output column type — used by L3 schema derivation for `Aggregate`.
-    pub fn output_type(&self, _input: &super::schema::L3Field) -> super::schema::L3DataType {
-        todo!()
+    /// Output column type for a single-column aggregate result.
+    ///
+    /// `input` is the field being aggregated; used by `Min` and `Max` to
+    /// preserve the input type. For all other variants the input type is
+    /// ignored.
+    ///
+    /// **Do not call this for `TopK`** — TopK produces multiple output
+    /// columns; its schema is derived directly in `QueryExpr::output_schema`.
+    pub fn output_type(&self, input: &super::schema::L3Field) -> super::schema::L3DataType {
+        use super::schema::L3DataType;
+        match self {
+            Self::Count { .. } | Self::Cardinality { .. } => L3DataType::Int64,
+            Self::Min | Self::Max => input.dtype.clone(),
+            Self::Sum
+            | Self::Avg
+            | Self::Stddev { .. }
+            | Self::Quantile { .. }
+            | Self::Rate { .. }
+            | Self::Increase { .. } => L3DataType::Float64,
+            Self::TopK { .. } => {
+                panic!("TopK is multi-column; derive schema via QueryExpr::output_schema")
+            }
+        }
     }
 }
 
@@ -310,7 +333,102 @@ pub enum QueryExpr {
 }
 
 impl HasSchema for QueryExpr {
-    fn output_schema(&self, _input_schemas: &[&L3Schema], _catalog: &SchemaCatalog) -> L3Schema {
-        todo!()
+    fn output_schema(&self, input_schemas: &[&L3Schema], catalog: &SchemaCatalog) -> L3Schema {
+        use super::schema::{L3Field, L3Schema};
+
+        // Shorthand: first child's schema (most nodes have exactly one child).
+        let child = || input_schemas[0];
+
+        match self {
+            // ── Leaf: Table scan — schema comes from the catalog ──────────────
+            QueryExpr::Scan { source, .. } => match source {
+                Source::Table { table_ref, .. } => {
+                    let table = catalog
+                        .tables
+                        .get(&table_ref.0)
+                        .unwrap_or_else(|| panic!("table '{}' not in catalog", table_ref.0));
+                    let fields: Vec<L3Field> = table
+                        .columns
+                        .iter()
+                        .map(|c| L3Field {
+                            name: c.name.clone(),
+                            dtype: c.data_type.clone(),
+                            nullable: c.nullable,
+                        })
+                        .collect();
+                    let time_index = table.time_column.as_ref().and_then(|tc| {
+                        fields.iter().position(|f| &f.name == tc)
+                    });
+                    L3Schema { fields, time_index }
+                }
+                Source::TimeSeries { .. } | Source::Join { .. } => todo!(
+                    "schema derivation for TimeSeries and Join sources (PromQL path)"
+                ),
+            },
+
+            // ── Pass-through: output schema == child schema ───────────────────
+            QueryExpr::Filter { .. }
+            | QueryExpr::Sort { .. }
+            | QueryExpr::Limit { .. }
+            | QueryExpr::Distinct { .. }
+            | QueryExpr::Partition { .. }
+            | QueryExpr::TimeWindow { .. } => child().clone(),
+
+            // ── Aggregate: GROUP BY cols + one output col per AggIntent ───────
+            QueryExpr::Aggregate { by, aggs, .. } => {
+                let cs = child();
+
+                // TopK is the only multi-column AggIntent: produces the TopK
+                // by-columns looked up from the child schema, followed by a
+                // synthetic "count" Int64 column.
+                if let [AggIntent::TopK { by: topk_by, .. }] = aggs.as_slice() {
+                    let mut fields: Vec<L3Field> = topk_by
+                        .iter()
+                        .filter_map(|col| {
+                            cs.fields.iter().find(|f| f.name == col.0).cloned()
+                        })
+                        .collect();
+                    fields.push(L3Field {
+                        name: "count".to_string(),
+                        dtype: super::schema::L3DataType::Int64,
+                        nullable: false,
+                    });
+                    return L3Schema { fields, time_index: None };
+                }
+
+                // General case: GROUP BY fields (preserving child type) followed
+                // by one output field per AggIntent. We use a Float64 dummy as
+                // the input field to output_type because L3 AggIntent does not
+                // track the aggregated column (known limitation; see TODO.md).
+                let dummy = L3Field {
+                    name: String::new(),
+                    dtype: super::schema::L3DataType::Float64,
+                    nullable: true,
+                };
+                let by_fields: Vec<L3Field> = by
+                    .iter()
+                    .filter_map(|key| cs.fields.iter().find(|f| f.name == key.0).cloned())
+                    .collect();
+                let agg_fields: Vec<L3Field> = aggs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, agg)| L3Field {
+                        name: format!("agg_{i}"),
+                        dtype: agg.output_type(&dummy),
+                        nullable: true,
+                    })
+                    .collect();
+                L3Schema {
+                    fields: by_fields.into_iter().chain(agg_fields).collect(),
+                    time_index: None,
+                }
+            }
+
+            // ── Everything else: not yet implemented ──────────────────────────
+            _ => todo!(
+                "output_schema not yet implemented for {:?}",
+                std::mem::discriminant(self)
+            ),
+        }
     }
 }
