@@ -11,10 +11,10 @@ use super::schema::{HasSchema, L3Schema, SchemaCatalog};
 #[derive(Debug, Clone)] pub struct Predicate;
 /// One item in a SELECT projection list.
 #[derive(Debug, Clone)] pub struct ProjectItem;
-/// A GROUP BY key reference.
-#[derive(Debug, Clone)] pub struct GroupKey;
+/// A GROUP BY key reference (column name).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)] pub struct GroupKey(pub String);
 /// A reference to a column by name.
-#[derive(Debug, Clone)] pub struct ColumnRef;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)] pub struct ColumnRef(pub String);
 /// A set of partitioning keys (sharding hint for L5 stage allocator).
 #[derive(Debug, Clone)] pub struct PartitionKeys;
 /// One key in an ORDER BY clause.
@@ -25,12 +25,17 @@ use super::schema::{HasSchema, L3Schema, SchemaCatalog};
 #[derive(Debug, Clone)] pub struct VectorMatch;
 /// Reference to a metric by name (PromQL / OTLP).
 #[derive(Debug, Clone)] pub struct MetricRef;
-/// Closed time interval for a time-series scan.
-#[derive(Debug, Clone)] pub struct TimeRange;
+/// Closed time interval [start_ms, end_ms] in milliseconds since Unix epoch.
+/// Either bound may be `None`, meaning unbounded on that side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeRange {
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+}
 /// Label matchers applied to a time-series scan.
 #[derive(Debug, Clone)] pub struct LabelFilter;
 /// Reference to a relational table by name.
-#[derive(Debug, Clone)] pub struct TableRef;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)] pub struct TableRef(pub String);
 /// Join key specification (USING / ON column reference).
 #[derive(Debug, Clone)] pub struct JoinKey;
 
@@ -112,6 +117,9 @@ pub enum Source {
     Table {
         table_ref: TableRef,
         columns: Vec<ColumnRef>,
+        /// Time range extracted from a WHERE predicate on the table's designated
+        /// time column. `None` means no time bound (full-history scan).
+        time_range: Option<TimeRange>,
     },
     /// Recursive join over sources (multi-table tabular queries).
     Join {
@@ -145,6 +153,9 @@ pub enum AggIntent {
     Sum,
     Min,
     Max,
+    Avg,
+    /// Sample stddev when `population == false`; population stddev otherwise.
+    Stddev { population: bool },
     Quantile { q: f64, accuracy: AccuracyTarget },
     /// Heavy-hitter top-k. Distinct from generic `Sort + Limit` — a
     /// dedicated sketch (SpaceSaving, CMS-with-heap) computes it as a single

@@ -1,8 +1,30 @@
-/// Opaque handle to the external data-source catalog (Prometheus metric
-/// metadata, SQL `information_schema`, DataFusion catalog). Used only by
-/// `Scan` schema derivation to resolve leaf column types; all other nodes
-/// derive their output schemas purely from their input schemas.
-pub struct SchemaCatalog;
+use std::collections::HashMap;
+
+/// Catalog of known relational tables and their column definitions.
+/// Passed to `lower_batch` so the SQL lowerer can resolve table and column
+/// types and identify each table's designated time column.
+#[derive(Debug, Clone, Default)]
+pub struct SchemaCatalog {
+    pub tables: HashMap<String, TableSchema>,
+}
+
+/// Schema for a single relational table.
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+    pub columns: Vec<ColumnDef>,
+    /// Name of the column that holds the row timestamp. When set, WHERE
+    /// predicates on this column are extracted into `Source::Table.time_range`
+    /// rather than left as opaque `Filter` predicates.
+    pub time_column: Option<String>,
+}
+
+/// One column in a `TableSchema`.
+#[derive(Debug, Clone)]
+pub struct ColumnDef {
+    pub name: String,
+    pub data_type: L3DataType,
+    pub nullable: bool,
+}
 
 // ── Data types ────────────────────────────────────────────────────────────────
 

@@ -1,0 +1,521 @@
+use std::rc::Rc;
+use std::sync::Arc;
+
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, Fields, Schema, TimeUnit};
+use datafusion::common::ScalarValue;
+use datafusion::datasource::MemTable;
+use datafusion::logical_expr::{
+    self, BinaryExpr, Distinct, Expr, LogicalPlan, Operator, WindowFunctionDefinition,
+};
+use datafusion::prelude::SessionContext;
+
+use asap_control_core::intent_algebra::expr::{
+    AggIntent, ColumnRef, GroupKey, L3Node, Predicate, ProjectItem, QueryExpr, SortKey, Source,
+    TableRef, TimeRange, WindowFuncKind,
+};
+use asap_control_core::intent_algebra::schema::{L3DataType, L3Schema, SchemaCatalog, TableSchema};
+use asap_control_core::types::AccuracyTarget;
+
+use crate::error::LoweringError;
+
+pub struct SqlLowerer<'a> {
+    catalog: &'a SchemaCatalog,
+    accuracy: AccuracyTarget,
+}
+
+impl<'a> SqlLowerer<'a> {
+    pub fn new(catalog: &'a SchemaCatalog, accuracy: AccuracyTarget) -> Self {
+        Self { catalog, accuracy }
+    }
+
+    pub async fn lower(&self, sql: &str) -> Result<QueryExpr, LoweringError> {
+        let ctx = self.build_context()?;
+        let df = ctx.sql(sql).await?;
+        let plan = df.into_unoptimized_plan();
+        self.lower_plan(&plan)
+    }
+
+    fn build_context(&self) -> Result<SessionContext, LoweringError> {
+        let ctx = SessionContext::new();
+        for (name, table_schema) in &self.catalog.tables {
+            let arrow_schema = Arc::new(table_schema_to_arrow(table_schema));
+            let mem_table = MemTable::try_new(arrow_schema, vec![])?;
+            ctx.register_table(name.as_str(), Arc::new(mem_table))?;
+        }
+        Ok(ctx)
+    }
+
+    fn lower_plan(&self, plan: &LogicalPlan) -> Result<QueryExpr, LoweringError> {
+        match plan {
+            LogicalPlan::TableScan(scan) => self.lower_table_scan(scan),
+            LogicalPlan::Filter(filter) => self.lower_filter(filter),
+            LogicalPlan::Projection(proj) => self.lower_projection(proj),
+            LogicalPlan::Aggregate(agg) => self.lower_aggregate(agg),
+            LogicalPlan::Sort(sort) => self.lower_sort(sort),
+            LogicalPlan::Limit(limit) => self.lower_limit(limit),
+            LogicalPlan::Window(window) => self.lower_window(window),
+            LogicalPlan::Distinct(d) => {
+                let input = match d {
+                    Distinct::All(input) => input.as_ref(),
+                    Distinct::On(on) => on.input.as_ref(),
+                };
+                let child = self.lower_plan(input)?;
+                Ok(QueryExpr::Distinct { child: make_node(child), cols: vec![] })
+            }
+            LogicalPlan::Join(_) => {
+                Err(LoweringError::UnsupportedFeature("JOIN".into()))
+            }
+            LogicalPlan::Subquery(_) => {
+                Err(LoweringError::UnsupportedFeature("subquery".into()))
+            }
+            LogicalPlan::SubqueryAlias(alias) => {
+                // Simple table alias (wraps only a TableScan or another alias) is
+                // transparent. A derived table (wraps Projection, Aggregate, etc.)
+                // is an inline-view subquery — unsupported in v1.
+                match alias.input.as_ref() {
+                    LogicalPlan::TableScan(_) | LogicalPlan::SubqueryAlias(_) => {
+                        self.lower_plan(&alias.input)
+                    }
+                    _ => Err(LoweringError::UnsupportedFeature(
+                        "subquery (inline view / derived table)".into(),
+                    )),
+                }
+            }
+            other => Err(LoweringError::UnsupportedFeature(format!(
+                "plan node: {}",
+                other.display()
+            ))),
+        }
+    }
+
+    fn lower_table_scan(
+        &self,
+        scan: &logical_expr::TableScan,
+    ) -> Result<QueryExpr, LoweringError> {
+        let table_name = scan.table_name.to_string();
+        if !self.catalog.tables.contains_key(&table_name) {
+            return Err(LoweringError::TableNotFound(table_name));
+        }
+        Ok(QueryExpr::Scan {
+            source: Source::Table {
+                table_ref: TableRef(table_name),
+                columns: vec![],
+                time_range: None,
+            },
+            predicates: vec![],
+        })
+    }
+
+    fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<QueryExpr, LoweringError> {
+        // When the direct child is a TableScan and the table has a time column,
+        // split the predicate: time bounds go into Source::Table.time_range; the
+        // rest stays as a Filter node on top.
+        let inner = strip_aliases(&filter.input);
+        if let LogicalPlan::TableScan(scan) = inner {
+            let table_name = scan.table_name.to_string();
+            if let Some(schema) = self.catalog.tables.get(&table_name) {
+                if let Some(time_col) = &schema.time_column {
+                    let (time_range, has_non_time) =
+                        extract_time_range(&filter.predicate, time_col);
+                    let scan_expr = QueryExpr::Scan {
+                        source: Source::Table {
+                            table_ref: TableRef(table_name),
+                            columns: vec![],
+                            time_range,
+                        },
+                        predicates: vec![],
+                    };
+                    return if has_non_time {
+                        Ok(QueryExpr::Filter { child: make_node(scan_expr), pred: Predicate })
+                    } else {
+                        Ok(scan_expr)
+                    };
+                }
+            }
+        }
+
+        let child = self.lower_plan(&filter.input)?;
+        Ok(QueryExpr::Filter { child: make_node(child), pred: Predicate })
+    }
+
+    fn lower_projection(
+        &self,
+        proj: &logical_expr::Projection,
+    ) -> Result<QueryExpr, LoweringError> {
+        let child = self.lower_plan(&proj.input)?;
+        let cols = proj.expr.iter().map(|_| ProjectItem).collect();
+        Ok(QueryExpr::Project { child: make_node(child), cols })
+    }
+
+    fn lower_aggregate(
+        &self,
+        agg: &logical_expr::Aggregate,
+    ) -> Result<QueryExpr, LoweringError> {
+        let child = self.lower_plan(&agg.input)?;
+        let by = agg
+            .group_expr
+            .iter()
+            .map(expr_to_group_key)
+            .collect::<Result<Vec<_>, _>>()?;
+        let aggs = agg
+            .aggr_expr
+            .iter()
+            .map(|e| self.lower_agg_expr(e))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(QueryExpr::Aggregate { child: make_node(child), by, aggs, having: None })
+    }
+
+    fn lower_sort(&self, sort: &logical_expr::Sort) -> Result<QueryExpr, LoweringError> {
+        // TopK: Sort with a constant LIMIT folded in, all keys descending, on an Aggregate.
+        // Note: Sort.fetch is Option<usize>; Limit.fetch is Option<Box<Expr>>.
+        if let Some(k) = sort.fetch {
+            if sort.expr.iter().all(|s| !s.asc) {
+                if let Some(agg) = find_aggregate(strip_projections_and_aliases(&sort.input)) {
+                    return self.lower_as_topk(agg, k);
+                }
+            }
+        }
+        let child = self.lower_plan(&sort.input)?;
+        Ok(QueryExpr::Sort {
+            child: make_node(child),
+            keys: sort.expr.iter().map(|_| SortKey).collect(),
+        })
+    }
+
+    fn lower_limit(&self, limit: &logical_expr::Limit) -> Result<QueryExpr, LoweringError> {
+        // TopK: Limit on top of Sort on top of Aggregate, all sort keys DESC.
+        if let Some(k) = eval_fetch(&limit.fetch) {
+            let inner = strip_aliases(&limit.input);
+            if let LogicalPlan::Sort(sort) = inner {
+                if sort.expr.iter().all(|s| !s.asc) {
+                    if let Some(agg) =
+                        find_aggregate(strip_projections_and_aliases(&sort.input))
+                    {
+                        return self.lower_as_topk(agg, k);
+                    }
+                }
+            }
+        }
+        let child = self.lower_plan(&limit.input)?;
+        Ok(QueryExpr::Limit {
+            child: make_node(child),
+            n: eval_fetch(&limit.fetch).unwrap_or(0) as u64,
+            offset: eval_fetch(&limit.skip).unwrap_or(0) as u64,
+        })
+    }
+
+    fn lower_as_topk(
+        &self,
+        agg: &logical_expr::Aggregate,
+        k: usize,
+    ) -> Result<QueryExpr, LoweringError> {
+        let child = self.lower_plan(&agg.input)?;
+        let by = agg
+            .group_expr
+            .iter()
+            .map(expr_to_col_ref)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(QueryExpr::Aggregate {
+            child: make_node(child),
+            by: vec![],
+            aggs: vec![AggIntent::TopK { k, by, accuracy: self.accuracy.clone() }],
+            having: None,
+        })
+    }
+
+    fn lower_window(&self, window: &logical_expr::Window) -> Result<QueryExpr, LoweringError> {
+        let child = self.lower_plan(&window.input)?;
+        let first = window
+            .window_expr
+            .first()
+            .ok_or_else(|| LoweringError::InvalidExpression("empty window expressions".into()))?;
+        if let Expr::WindowFunction(wf) = first {
+            let func = lower_window_func_kind(&wf.fun)?;
+            let partition_by = wf
+                .partition_by
+                .iter()
+                .map(expr_to_group_key)
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(QueryExpr::WindowFunc {
+                child: make_node(child),
+                func,
+                partition_by,
+                order_by: wf.order_by.iter().map(|_| SortKey).collect(),
+                frame: None,
+            });
+        }
+        Err(LoweringError::InvalidExpression("expected WindowFunction expr".into()))
+    }
+
+    fn lower_agg_expr(&self, expr: &Expr) -> Result<AggIntent, LoweringError> {
+        match expr {
+            Expr::AggregateFunction(agg_fn) => {
+                let name = agg_fn.func.name().to_lowercase();
+                match name.as_str() {
+                    "count" if agg_fn.distinct => {
+                        Ok(AggIntent::Cardinality { accuracy: self.accuracy.clone() })
+                    }
+                    "count" => Ok(AggIntent::Count { accuracy: self.accuracy.clone() }),
+                    "sum" => Ok(AggIntent::Sum),
+                    "min" => Ok(AggIntent::Min),
+                    "max" => Ok(AggIntent::Max),
+                    "avg" | "mean" => Ok(AggIntent::Avg),
+                    "stddev" | "stddev_samp" => Ok(AggIntent::Stddev { population: false }),
+                    "stddev_pop" => Ok(AggIntent::Stddev { population: true }),
+                    "approx_percentile_cont" | "percentile_cont" => {
+                        let q = extract_percentile_q(&agg_fn.args)?;
+                        Ok(AggIntent::Quantile { q, accuracy: self.accuracy.clone() })
+                    }
+                    "approx_distinct" => {
+                        Ok(AggIntent::Cardinality { accuracy: self.accuracy.clone() })
+                    }
+                    _ => Err(LoweringError::UnsupportedAggregate(name)),
+                }
+            }
+            Expr::Alias(alias) => self.lower_agg_expr(&alias.expr),
+            _ => Err(LoweringError::UnsupportedAggregate(format!("{expr:?}"))),
+        }
+    }
+}
+
+// ── Free helpers ──────────────────────────────────────────────────────────────
+
+fn make_node(expr: QueryExpr) -> Rc<L3Node> {
+    Rc::new(L3Node { expr, schema: L3Schema { fields: vec![], time_index: None } })
+}
+
+/// Evaluate a constant fetch/skip expression to a `usize`.
+/// Returns `None` for parametric (non-literal) fetch expressions.
+fn eval_fetch(expr_opt: &Option<Box<Expr>>) -> Option<usize> {
+    expr_opt.as_ref().and_then(|e| match e.as_ref() {
+        Expr::Literal(ScalarValue::Int64(Some(v))) => Some(*v as usize),
+        Expr::Literal(ScalarValue::UInt64(Some(v))) => Some(*v as usize),
+        Expr::Literal(ScalarValue::Int32(Some(v))) => Some(*v as usize),
+        _ => None,
+    })
+}
+
+fn strip_aliases(plan: &LogicalPlan) -> &LogicalPlan {
+    match plan {
+        LogicalPlan::SubqueryAlias(a) => strip_aliases(&a.input),
+        _ => plan,
+    }
+}
+
+/// Strip Projection and SubqueryAlias for TopK pattern-matching only.
+/// Do NOT use when building the output tree.
+fn strip_projections_and_aliases(plan: &LogicalPlan) -> &LogicalPlan {
+    match plan {
+        LogicalPlan::SubqueryAlias(a) => strip_projections_and_aliases(&a.input),
+        LogicalPlan::Projection(p) => strip_projections_and_aliases(&p.input),
+        _ => plan,
+    }
+}
+
+fn find_aggregate(plan: &LogicalPlan) -> Option<&logical_expr::Aggregate> {
+    match plan {
+        LogicalPlan::Aggregate(agg) => Some(agg),
+        LogicalPlan::Projection(p) => find_aggregate(&p.input),
+        LogicalPlan::SubqueryAlias(a) => find_aggregate(&a.input),
+        _ => None,
+    }
+}
+
+fn expr_to_group_key(expr: &Expr) -> Result<GroupKey, LoweringError> {
+    match expr {
+        Expr::Column(col) => Ok(GroupKey(col.name.clone())),
+        Expr::Alias(a) => expr_to_group_key(&a.expr),
+        _ => Ok(GroupKey(format!("{expr}"))),
+    }
+}
+
+fn expr_to_col_ref(expr: &Expr) -> Result<ColumnRef, LoweringError> {
+    match expr {
+        Expr::Column(col) => Ok(ColumnRef(col.name.clone())),
+        Expr::Alias(a) => expr_to_col_ref(&a.expr),
+        _ => Ok(ColumnRef(format!("{expr}"))),
+    }
+}
+
+fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
+    let val = args.get(1).ok_or_else(|| {
+        LoweringError::InvalidExpression("percentile requires 2 arguments".into())
+    })?;
+    match val {
+        Expr::Literal(ScalarValue::Float64(Some(q))) => Ok(*q),
+        Expr::Literal(ScalarValue::Float32(Some(q))) => Ok(*q as f64),
+        _ => Err(LoweringError::InvalidExpression(
+            "percentile value must be a float literal".into(),
+        )),
+    }
+}
+
+fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
+    match expr {
+        Expr::BinaryExpr(BinaryExpr { left, op: Operator::And, right }) => {
+            let mut v = split_conjuncts(left);
+            v.extend(split_conjuncts(right));
+            v
+        }
+        _ => vec![expr],
+    }
+}
+
+/// Returns `(time_range, has_non_time_predicates)`.
+pub(crate) fn extract_time_range(expr: &Expr, time_col: &str) -> (Option<TimeRange>, bool) {
+    let conjuncts = split_conjuncts(expr);
+    let mut start_ms: Option<i64> = None;
+    let mut end_ms: Option<i64> = None;
+    let mut has_non_time = false;
+
+    for c in conjuncts {
+        match classify_time_pred(c, time_col) {
+            TimeClass::Start(ms) => {
+                start_ms = Some(start_ms.map_or(ms, |s: i64| s.max(ms)));
+            }
+            TimeClass::End(ms) => {
+                end_ms = Some(end_ms.map_or(ms, |e: i64| e.min(ms)));
+            }
+            TimeClass::NonTime => has_non_time = true,
+        }
+    }
+
+    let range = if start_ms.is_some() || end_ms.is_some() {
+        Some(TimeRange { start_ms, end_ms })
+    } else {
+        None
+    };
+    (range, has_non_time)
+}
+
+enum TimeClass {
+    Start(i64),
+    End(i64),
+    NonTime,
+}
+
+fn classify_time_pred(expr: &Expr, time_col: &str) -> TimeClass {
+    let Expr::BinaryExpr(BinaryExpr { left, op, right }) = expr else {
+        return TimeClass::NonTime;
+    };
+    let (col_is_left, val_expr): (bool, &Expr) = if is_time_col(left, time_col) {
+        (true, right)
+    } else if is_time_col(right, time_col) {
+        (false, left)
+    } else {
+        return TimeClass::NonTime;
+    };
+    let Some(ms) = expr_to_ms(val_expr) else {
+        return TimeClass::NonTime;
+    };
+    match (op, col_is_left) {
+        (Operator::Gt | Operator::GtEq, true) | (Operator::Lt | Operator::LtEq, false) => {
+            TimeClass::Start(ms)
+        }
+        (Operator::Lt | Operator::LtEq, true) | (Operator::Gt | Operator::GtEq, false) => {
+            TimeClass::End(ms)
+        }
+        _ => TimeClass::NonTime,
+    }
+}
+
+fn is_time_col(expr: &Expr, time_col: &str) -> bool {
+    match expr {
+        Expr::Column(col) => col.name == time_col,
+        Expr::Cast(c) => is_time_col(&c.expr, time_col),
+        _ => false,
+    }
+}
+
+fn expr_to_ms(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Literal(sv) => scalar_to_ms(sv),
+        Expr::Cast(c) => expr_to_ms(&c.expr),
+        Expr::TryCast(c) => expr_to_ms(&c.expr),
+        _ => None,
+    }
+}
+
+fn scalar_to_ms(sv: &ScalarValue) -> Option<i64> {
+    match sv {
+        ScalarValue::Int64(Some(v)) => Some(*v),
+        ScalarValue::Int32(Some(v)) => Some(*v as i64),
+        ScalarValue::TimestampMillisecond(Some(ms), _) => Some(*ms),
+        ScalarValue::TimestampNanosecond(Some(ns), _) => Some(*ns / 1_000_000),
+        ScalarValue::TimestampMicrosecond(Some(us), _) => Some(*us / 1_000),
+        ScalarValue::TimestampSecond(Some(s), _) => Some(*s * 1_000),
+        _ => None,
+    }
+}
+
+fn table_schema_to_arrow(schema: &TableSchema) -> Schema {
+    let fields: Fields = schema
+        .columns
+        .iter()
+        .map(|c| Field::new(&c.name, l3_to_arrow(&c.data_type), c.nullable))
+        .collect();
+    Schema::new(fields)
+}
+
+fn l3_to_arrow(dt: &L3DataType) -> ArrowDataType {
+    match dt {
+        L3DataType::Int64 => ArrowDataType::Int64,
+        L3DataType::Float64 => ArrowDataType::Float64,
+        L3DataType::Utf8 => ArrowDataType::Utf8,
+        L3DataType::Boolean => ArrowDataType::Boolean,
+        L3DataType::Timestamp => ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+        L3DataType::Duration => ArrowDataType::Duration(TimeUnit::Millisecond),
+        L3DataType::Map(k, v) => ArrowDataType::Map(
+            Arc::new(Field::new(
+                "entries",
+                ArrowDataType::Struct(Fields::from(vec![
+                    Field::new("key", l3_to_arrow(k), false),
+                    Field::new("value", l3_to_arrow(v), true),
+                ])),
+                false,
+            )),
+            false,
+        ),
+        L3DataType::List(item) => {
+            ArrowDataType::List(Arc::new(Field::new("item", l3_to_arrow(item), true)))
+        }
+    }
+}
+
+fn lower_window_func_kind(
+    fun: &WindowFunctionDefinition,
+) -> Result<WindowFuncKind, LoweringError> {
+    match fun {
+        // In DataFusion 43 most ranking/nav window functions are WindowUDF.
+        WindowFunctionDefinition::WindowUDF(udf) => {
+            match udf.name().to_lowercase().as_str() {
+                "row_number" => Ok(WindowFuncKind::RowNumber),
+                "rank" => Ok(WindowFuncKind::Rank),
+                "dense_rank" => Ok(WindowFuncKind::DenseRank),
+                "lag" => Ok(WindowFuncKind::Lag),
+                "lead" => Ok(WindowFuncKind::Lead),
+                "first_value" => Ok(WindowFuncKind::FirstValue),
+                "last_value" => Ok(WindowFuncKind::LastValue),
+                "nth_value" => Ok(WindowFuncKind::NthValue(0)),
+                other => {
+                    Err(LoweringError::UnsupportedFeature(format!("window fn: {other}")))
+                }
+            }
+        }
+        WindowFunctionDefinition::AggregateUDF(udf) => {
+            match udf.name().to_lowercase().as_str() {
+                "sum" => Ok(WindowFuncKind::Sum),
+                "avg" | "mean" => Ok(WindowFuncKind::Avg),
+                "count" => Ok(WindowFuncKind::Count),
+                "min" => Ok(WindowFuncKind::Min),
+                "max" => Ok(WindowFuncKind::Max),
+                other => {
+                    Err(LoweringError::UnsupportedFeature(format!("window agg: {other}")))
+                }
+            }
+        }
+        WindowFunctionDefinition::BuiltInWindowFunction(biwf) => {
+            Err(LoweringError::UnsupportedFeature(format!("built-in window fn: {biwf:?}")))
+        }
+    }
+}
