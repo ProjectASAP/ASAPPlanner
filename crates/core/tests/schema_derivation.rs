@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_control_core::intent_algebra::{
-    AggIntent, ColumnRef, DataModel, GroupKey, HasSchema, L3DataType, L3Expr, L3Field, L3Node,
-    L3Scalar, L3Schema, Predicate, ProjectItem, QueryExpr, SetOpKind, SortKey, Source, TableRef,
-    ColumnDef, SchemaCatalog, TableSchema, WindowFuncKind,
+    AggIntent, ArithOp, ColumnRef, DataModel, GroupKey, HasSchema, L3DataType, L3Expr, L3Field,
+    L3Node, L3Scalar, L3Schema, Predicate, ProjectItem, QueryExpr, SetOpKind, SortKey, Source,
+    TableRef, ColumnDef, SchemaCatalog, TableSchema, WindowFuncKind,
 };
 use asap_control_core::types::AccuracyTarget;
 
@@ -784,6 +784,105 @@ fn set_op_preserves_time_index_from_left() {
     };
     let out = node.output_schema(&[&left, &right], &empty_catalog());
     assert_eq!(out.time_index, Some(0));
+}
+
+// ── HasSchema::output_schema() — Project, non-column items ───────────────────
+
+#[test]
+fn project_cast_item_uses_target_type() {
+    // SELECT CAST(ts AS FLOAT64) AS ts_f — output type is the cast target.
+    let cs = child_schema(); // [ts: Int64, value: Float64]
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![ProjectItem {
+            expr: L3Expr::Cast {
+                expr: Box::new(L3Expr::Column(ColumnRef("ts".into()))),
+                to: L3DataType::Float64,
+            },
+            alias: Some("ts_f".into()),
+        }],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.fields.len(), 1);
+    assert_eq!(out.fields[0].name, "ts_f");
+    assert_eq!(out.fields[0].dtype, L3DataType::Float64);
+}
+
+#[test]
+fn project_int_literal_item_uses_int64_type() {
+    // SELECT 42 AS n — output type is Int64.
+    let cs = child_schema();
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![ProjectItem {
+            expr: L3Expr::Literal(L3Scalar::Int64(42)),
+            alias: Some("n".into()),
+        }],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.fields[0].dtype, L3DataType::Int64);
+    assert_eq!(out.fields[0].name, "n");
+}
+
+#[test]
+fn project_float_literal_item_uses_float64_type() {
+    let cs = child_schema();
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![ProjectItem {
+            expr: L3Expr::Literal(L3Scalar::Float64(3.14)),
+            alias: Some("pi".into()),
+        }],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.fields[0].dtype, L3DataType::Float64);
+}
+
+#[test]
+fn project_arith_item_defaults_to_float64() {
+    // SELECT value * 2 AS doubled — arithmetic defaults to Float64.
+    let cs = child_schema();
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![ProjectItem {
+            expr: L3Expr::Arith {
+                op: ArithOp::Mul,
+                left: Box::new(L3Expr::Column(ColumnRef("value".into()))),
+                right: Box::new(L3Expr::Literal(L3Scalar::Int64(2))),
+            },
+            alias: Some("doubled".into()),
+        }],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.fields[0].dtype, L3DataType::Float64);
+    assert_eq!(out.fields[0].name, "doubled");
+}
+
+#[test]
+fn project_case_item_defaults_to_float64() {
+    // CASE WHEN value > 0 THEN 1 ELSE 0 END — defaults to Float64.
+    let cs = child_schema();
+    let node = QueryExpr::Project {
+        child: dummy_scan(cs.clone()),
+        cols: vec![ProjectItem {
+            expr: L3Expr::Case {
+                operand: None,
+                branches: vec![(
+                    L3Expr::Compare {
+                        left: Box::new(L3Expr::Column(ColumnRef("value".into()))),
+                        op: asap_control_core::intent_algebra::CompareOp::Gt,
+                        right: Box::new(L3Expr::Literal(L3Scalar::Float64(0.0))),
+                    },
+                    L3Expr::Literal(L3Scalar::Int64(1)),
+                )],
+                else_expr: Some(Box::new(L3Expr::Literal(L3Scalar::Int64(0)))),
+            },
+            alias: Some("tier".into()),
+        }],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    assert_eq!(out.fields[0].dtype, L3DataType::Float64);
+    assert_eq!(out.fields[0].name, "tier");
 }
 
 #[test]

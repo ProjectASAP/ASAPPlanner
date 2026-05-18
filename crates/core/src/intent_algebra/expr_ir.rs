@@ -26,6 +26,20 @@ pub enum CompareOp {
     Ge,
     Like,
     NotLike,
+    ILike,
+    NotILike,
+}
+
+// ── Arithmetic operators ──────────────────────────────────────────────────────
+
+/// Binary arithmetic operators for `L3Expr::Arith`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
 }
 
 // ── Expression IR ─────────────────────────────────────────────────────────────
@@ -58,6 +72,16 @@ pub enum L3Expr {
     InList { expr: Box<L3Expr>, list: Vec<L3Expr>, negated: bool },
     /// Scalar function call, e.g. `LOWER(col)`, `ABS(x)`.
     FunctionCall { name: String, args: Vec<L3Expr> },
+    /// Binary arithmetic: `left op right`.
+    Arith { op: ArithOp, left: Box<L3Expr>, right: Box<L3Expr> },
+    /// SQL `CASE` expression (both searched and simple forms).
+    /// `operand` is present for simple CASE (`CASE expr WHEN ...`),
+    /// absent for searched CASE (`CASE WHEN condition THEN ...`).
+    Case {
+        operand: Option<Box<L3Expr>>,
+        branches: Vec<(L3Expr, L3Expr)>,
+        else_expr: Option<Box<L3Expr>>,
+    },
 }
 
 impl L3Expr {
@@ -105,6 +129,25 @@ impl L3Expr {
             }
             L3Expr::FunctionCall { args, .. } => {
                 args.iter().flat_map(|e| e.columns_referenced()).collect()
+            }
+            L3Expr::Arith { left, right, .. } => {
+                let mut v = left.columns_referenced();
+                v.extend(right.columns_referenced());
+                v
+            }
+            L3Expr::Case { operand, branches, else_expr } => {
+                let mut v = vec![];
+                if let Some(op) = operand {
+                    v.extend(op.columns_referenced());
+                }
+                for (when, then) in branches {
+                    v.extend(when.columns_referenced());
+                    v.extend(then.columns_referenced());
+                }
+                if let Some(e) = else_expr {
+                    v.extend(e.columns_referenced());
+                }
+                v
             }
         }
     }

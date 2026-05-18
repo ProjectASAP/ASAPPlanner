@@ -1,4 +1,5 @@
 pub mod error;
+pub mod schema_pass;
 pub mod sql;
 
 use asap_control_core::intent_algebra::expr::QueryExpr;
@@ -7,6 +8,7 @@ use asap_control_core::types::AccuracyTarget;
 use asap_control_core::workload::{QueryLanguage, QueryWorkload, SqlDialect};
 
 pub use error::LoweringError;
+pub use schema_pass::populate_schemas;
 pub use sql::SqlLowerer;
 
 /// Lower every SQL batch entry in `workload` to a `QueryExpr`.

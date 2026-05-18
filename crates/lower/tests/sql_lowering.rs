@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use asap_control_core::intent_algebra::expr::{AggIntent, Predicate, ProjectItem, QueryExpr, SortKey, Source};
 use asap_control_core::intent_algebra::schema::{ColumnDef, L3DataType, SchemaCatalog, TableSchema};
-use asap_control_core::intent_algebra::{CompareOp, L3Expr};
+use asap_control_core::intent_algebra::{CompareOp, L3Expr, SetOpKind};
 use asap_control_core::types::AccuracyTarget;
 use asap_control_core::workload::{BatchEntry, Query, QueryLanguage, QueryWorkload, SqlDialect};
-use asap_control_lower::{lower_batch, LoweringError, SqlLowerer};
+use asap_control_lower::{lower_batch, populate_schemas, LoweringError, SqlLowerer};
 
 // ── Catalog helpers ───────────────────────────────────────────────────────────
 
@@ -48,6 +48,11 @@ fn no_time_catalog() -> SchemaCatalog {
                 ColumnDef {
                     name: "value".to_string(),
                     data_type: L3DataType::Float64,
+                    nullable: true,
+                },
+                ColumnDef {
+                    name: "name".to_string(),
+                    data_type: L3DataType::Utf8,
                     nullable: true,
                 },
             ],
@@ -840,4 +845,210 @@ async fn test_scan_columns_empty_for_select_star() {
         panic!("expected Source::Table");
     };
     assert!(columns.is_empty(), "SELECT * should produce no column constraints, got: {columns:?}");
+}
+
+// ── Tests: UNION / UNION ALL ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_union_all_produces_set_op_union_node() {
+    // UNION ALL — no dedup — maps to SetOp { kind: Union, all: true }.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events UNION ALL SELECT id FROM events")
+        .await
+        .unwrap();
+
+    fn find_set_op(e: &QueryExpr) -> Option<(&SetOpKind, bool)> {
+        match e {
+            QueryExpr::SetOp { kind, all, .. } => Some((kind, *all)),
+            QueryExpr::Project { child, .. } => find_set_op(&child.expr),
+            _ => None,
+        }
+    }
+    let (kind, all) = find_set_op(&result).expect("expected SetOp node");
+    assert!(matches!(kind, SetOpKind::Union));
+    assert!(all, "UNION ALL should set all=true");
+}
+
+#[tokio::test]
+async fn test_union_distinct_produces_distinct_over_set_op() {
+    // UNION (without ALL) = UNION DISTINCT = Distinct wrapping SetOp.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events UNION SELECT id FROM events")
+        .await
+        .unwrap();
+
+    fn has_distinct(e: &QueryExpr) -> bool {
+        match e {
+            QueryExpr::Distinct { .. } => true,
+            QueryExpr::Project { child, .. } => has_distinct(&child.expr),
+            _ => false,
+        }
+    }
+    assert!(has_distinct(&result), "UNION DISTINCT should produce a Distinct node");
+}
+
+// ── Tests: arithmetic / negative / LIKE / CASE in expressions ────────────────
+
+#[tokio::test]
+async fn test_arithmetic_in_projection_succeeds() {
+    // SELECT value * 2 FROM events — should not return UnsupportedFeature.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer.lower("SELECT value * 2.0 FROM events").await;
+    assert!(result.is_ok(), "arithmetic in projection should succeed, got: {result:?}");
+}
+
+#[tokio::test]
+async fn test_arithmetic_in_predicate_succeeds() {
+    // WHERE value * 0.9 > 5.0 — should not return UnsupportedFeature.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE value * 0.9 > 5.0")
+        .await;
+    assert!(result.is_ok(), "arithmetic in predicate should succeed, got: {result:?}");
+}
+
+#[tokio::test]
+async fn test_arithmetic_predicate_references_column() {
+    // Predicate from `value * 0.9 > 5` should still reference "value".
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE value * 0.9 > 5.0")
+        .await
+        .unwrap();
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    let refs = pred.columns_referenced();
+    assert!(refs.iter().any(|r| r.0 == "value"), "expected 'value' in predicate refs");
+}
+
+#[tokio::test]
+async fn test_negative_literal_in_predicate_succeeds() {
+    // WHERE value > -1 — unary minus should not return UnsupportedFeature.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE value > -1.0")
+        .await;
+    assert!(result.is_ok(), "unary minus in predicate should succeed, got: {result:?}");
+}
+
+#[tokio::test]
+async fn test_like_predicate_produces_compare_like() {
+    // WHERE name LIKE 'a%' → Compare { op: Like, .. }
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE name LIKE 'a%'")
+        .await
+        .unwrap();
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    assert!(
+        matches!(pred, L3Expr::Compare { op: CompareOp::Like, .. }),
+        "expected Compare(Like), got: {pred:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_ilike_predicate_produces_compare_ilike() {
+    // WHERE name ILIKE 'A%' → Compare { op: ILike, .. }
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE name ILIKE 'A%'")
+        .await
+        .unwrap();
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    assert!(
+        matches!(pred, L3Expr::Compare { op: CompareOp::ILike, .. }),
+        "expected Compare(ILike), got: {pred:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_case_in_projection_succeeds() {
+    // CASE WHEN value > 5 THEN 1 ELSE 0 END — should not return UnsupportedFeature.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT CASE WHEN value > 5.0 THEN 1 ELSE 0 END AS tier FROM events")
+        .await;
+    assert!(result.is_ok(), "CASE WHEN in projection should succeed, got: {result:?}");
+}
+
+#[tokio::test]
+async fn test_case_projection_item_is_case_expr() {
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT CASE WHEN value > 5.0 THEN 1 ELSE 0 END AS tier FROM events")
+        .await
+        .unwrap();
+    let items = find_project_items(&result).expect("expected Project node");
+    let has_case = items.iter().any(|pi| matches!(pi.expr, L3Expr::Case { .. }));
+    assert!(has_case, "expected a Case expr in project items, got: {items:?}");
+}
+
+// ── Tests: populate_schemas ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_populate_schemas_scan_gets_catalog_schema() {
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer.lower("SELECT * FROM metrics").await.unwrap();
+
+    let typed = populate_schemas(expr, &catalog);
+    assert_eq!(typed.schema.fields.len(), 4, "scan schema should have 4 fields from catalog");
+    assert_eq!(typed.schema.fields[0].name, "ts");
+    assert_eq!(typed.schema.time_index, Some(0));
+}
+
+#[tokio::test]
+async fn test_populate_schemas_project_gives_subset_schema() {
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer.lower("SELECT ts, value FROM metrics").await.unwrap();
+
+    let typed = populate_schemas(expr, &catalog);
+    assert_eq!(typed.schema.fields.len(), 2);
+    assert_eq!(typed.schema.fields[0].name, "ts");
+    assert_eq!(typed.schema.fields[1].name, "value");
+    assert_eq!(typed.schema.time_index, Some(0));
+}
+
+#[tokio::test]
+async fn test_populate_schemas_inner_nodes_are_typed() {
+    // The child of the root Project (a Scan) should also have a non-empty schema.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer.lower("SELECT ts, value FROM metrics").await.unwrap();
+
+    let typed = populate_schemas(expr, &catalog);
+    let QueryExpr::Project { child, .. } = &typed.expr else {
+        panic!("expected Project at root");
+    };
+    assert!(
+        !child.schema.fields.is_empty(),
+        "child Scan should have a populated schema after populate_schemas"
+    );
+}
+
+#[tokio::test]
+async fn test_populate_schemas_aggregate() {
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower("SELECT region, COUNT(*) FROM metrics GROUP BY region")
+        .await
+        .unwrap();
+
+    let typed = populate_schemas(expr, &catalog);
+    // Root is Project wrapping Aggregate; two fields: region + count col.
+    assert_eq!(typed.schema.fields.len(), 2);
+    assert_eq!(typed.schema.fields[0].name, "region");
 }

@@ -384,11 +384,12 @@ impl HasSchema for QueryExpr {
 
             // ── Project: one output field per ProjectItem ─────────────────────
             QueryExpr::Project { cols, .. } => {
+                use super::expr_ir::L3Scalar;
+                use super::schema::L3DataType;
+
                 let cs = child();
                 let time_col_src = cs.time_index.map(|ti| cs.fields[ti].name.clone());
 
-                // Build (field, is_time_col) pairs. Non-Column exprs are deferred
-                // until a type-inference pass exists.
                 let pairs: Vec<(L3Field, bool)> = cols
                     .iter()
                     .map(|item| match &item.expr {
@@ -397,7 +398,7 @@ impl HasSchema for QueryExpr {
                                 cs.fields.iter().find(|f| f.name == col_ref.0);
                             let (dtype, nullable) = child_f
                                 .map(|f| (f.dtype.clone(), f.nullable))
-                                .unwrap_or((super::schema::L3DataType::Float64, true));
+                                .unwrap_or((L3DataType::Float64, true));
                             let out_name = item
                                 .alias
                                 .as_deref()
@@ -407,10 +408,29 @@ impl HasSchema for QueryExpr {
                                 time_col_src.as_deref() == Some(col_ref.0.as_str());
                             (L3Field { name: out_name, dtype, nullable }, is_time)
                         }
-                        _ => todo!(
-                            "Project schema derivation for non-column expressions \
-                             (type inference not yet implemented)"
-                        ),
+                        // CAST: output type is the cast target.
+                        L3Expr::Cast { to, .. } => {
+                            let name = item.alias.as_deref().unwrap_or("cast").to_string();
+                            (L3Field { name, dtype: to.clone(), nullable: true }, false)
+                        }
+                        // Literal: infer type from the scalar variant.
+                        L3Expr::Literal(scalar) => {
+                            let (dtype, nullable) = match scalar {
+                                L3Scalar::Int64(_)   => (L3DataType::Int64,   false),
+                                L3Scalar::Float64(_) => (L3DataType::Float64, false),
+                                L3Scalar::Utf8(_)    => (L3DataType::Utf8,    false),
+                                L3Scalar::Boolean(_) => (L3DataType::Boolean, false),
+                                L3Scalar::Null       => (L3DataType::Float64, true),
+                            };
+                            let name = item.alias.as_deref().unwrap_or("literal").to_string();
+                            (L3Field { name, dtype, nullable }, false)
+                        }
+                        // Arithmetic, CASE, function calls, boolean exprs:
+                        // default to Float64 (full type inference is future work).
+                        _ => {
+                            let name = item.alias.as_deref().unwrap_or("expr").to_string();
+                            (L3Field { name, dtype: L3DataType::Float64, nullable: true }, false)
+                        }
                     })
                     .collect();
 

@@ -1,4 +1,4 @@
-use asap_control_core::intent_algebra::{ColumnRef, CompareOp, L3Expr, L3Scalar};
+use asap_control_core::intent_algebra::{ArithOp, ColumnRef, CompareOp, L3Expr, L3Scalar};
 
 // ── L3Scalar ──────────────────────────────────────────────────────────────────
 
@@ -205,4 +205,95 @@ fn columns_referenced_from_function_call() {
     let refs = expr.columns_referenced();
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].0, "host");
+}
+
+// ── ArithOp / L3Expr::Arith ───────────────────────────────────────────────────
+
+#[test]
+fn arith_eq() {
+    let make = || L3Expr::Arith {
+        op: ArithOp::Mul,
+        left: Box::new(L3Expr::Column(ColumnRef("value".into()))),
+        right: Box::new(L3Expr::Literal(L3Scalar::Float64(2.0))),
+    };
+    assert_eq!(make(), make());
+}
+
+#[test]
+fn arith_columns_referenced_from_both_sides() {
+    let expr = L3Expr::Arith {
+        op: ArithOp::Add,
+        left: Box::new(L3Expr::Column(ColumnRef("a".into()))),
+        right: Box::new(L3Expr::Column(ColumnRef("b".into()))),
+    };
+    let refs = expr.columns_referenced();
+    assert_eq!(refs.len(), 2);
+    assert!(refs.iter().any(|r| r.0 == "a"));
+    assert!(refs.iter().any(|r| r.0 == "b"));
+}
+
+#[test]
+fn arith_columns_referenced_literal_side_is_empty() {
+    let expr = L3Expr::Arith {
+        op: ArithOp::Mul,
+        left: Box::new(L3Expr::Column(ColumnRef("value".into()))),
+        right: Box::new(L3Expr::Literal(L3Scalar::Float64(2.0))),
+    };
+    let refs = expr.columns_referenced();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].0, "value");
+}
+
+// ── L3Expr::Case ─────────────────────────────────────────────────────────────
+
+#[test]
+fn case_searched_columns_referenced_from_all_branches() {
+    // CASE WHEN a > 0 THEN b ELSE c END
+    let expr = L3Expr::Case {
+        operand: None,
+        branches: vec![(
+            L3Expr::Compare {
+                left: Box::new(L3Expr::Column(ColumnRef("a".into()))),
+                op: CompareOp::Gt,
+                right: Box::new(L3Expr::Literal(L3Scalar::Int64(0))),
+            },
+            L3Expr::Column(ColumnRef("b".into())),
+        )],
+        else_expr: Some(Box::new(L3Expr::Column(ColumnRef("c".into())))),
+    };
+    let refs = expr.columns_referenced();
+    assert_eq!(refs.len(), 3);
+    assert!(refs.iter().any(|r| r.0 == "a"));
+    assert!(refs.iter().any(|r| r.0 == "b"));
+    assert!(refs.iter().any(|r| r.0 == "c"));
+}
+
+#[test]
+fn case_simple_operand_included_in_refs() {
+    // CASE value WHEN 1 THEN x END
+    let expr = L3Expr::Case {
+        operand: Some(Box::new(L3Expr::Column(ColumnRef("value".into())))),
+        branches: vec![(
+            L3Expr::Literal(L3Scalar::Int64(1)),
+            L3Expr::Column(ColumnRef("x".into())),
+        )],
+        else_expr: None,
+    };
+    let refs = expr.columns_referenced();
+    assert!(refs.iter().any(|r| r.0 == "value"));
+    assert!(refs.iter().any(|r| r.0 == "x"));
+}
+
+// ── CompareOp::ILike / NotILike ───────────────────────────────────────────────
+
+#[test]
+fn compare_op_ilike_eq() {
+    assert_eq!(CompareOp::ILike, CompareOp::ILike);
+    assert_ne!(CompareOp::ILike, CompareOp::Like);
+}
+
+#[test]
+fn compare_op_not_ilike_eq() {
+    assert_eq!(CompareOp::NotILike, CompareOp::NotILike);
+    assert_ne!(CompareOp::NotILike, CompareOp::NotLike);
 }

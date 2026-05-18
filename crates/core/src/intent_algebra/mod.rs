@@ -8,5 +8,5 @@ pub use expr::{
     SortKey, Source, TableRef, TimeRange, TimeWindowKind, VectorMatch, WindowFrame,
     WindowFuncKind,
 };
-pub use expr_ir::{CompareOp, L3Expr, L3Scalar};
+pub use expr_ir::{ArithOp, CompareOp, L3Expr, L3Scalar};
 pub use schema::{ColumnDef, HasSchema, L3DataType, L3Field, L3Schema, SchemaCatalog, TableSchema};

@@ -10,11 +10,11 @@ use datafusion::logical_expr::{
 use datafusion::prelude::SessionContext;
 
 use asap_control_core::intent_algebra::expr::{
-    AggIntent, ColumnRef, GroupKey, L3Node, Predicate, ProjectItem, QueryExpr, SortKey, Source,
-    TableRef, TimeRange, WindowFuncKind,
+    AggIntent, ColumnRef, GroupKey, L3Node, Predicate, ProjectItem, QueryExpr, SetOpKind, SortKey,
+    Source, TableRef, TimeRange, WindowFuncKind,
 };
 use asap_control_core::intent_algebra::schema::{L3DataType, L3Schema, SchemaCatalog, TableSchema};
-use asap_control_core::intent_algebra::{CompareOp, L3Expr, L3Scalar};
+use asap_control_core::intent_algebra::{ArithOp, CompareOp, L3Expr, L3Scalar};
 use asap_control_core::types::AccuracyTarget;
 
 use crate::error::LoweringError;
@@ -62,6 +62,23 @@ impl<'a> SqlLowerer<'a> {
                 };
                 let child = self.lower_plan(input)?;
                 Ok(QueryExpr::Distinct { child: make_node(child), cols: vec![] })
+            }
+            LogicalPlan::Union(u) => {
+                // Fold n inputs left-associatively into SetOp { Union, all: true }.
+                let mut iter = u.inputs.iter();
+                let first = iter.next().ok_or_else(|| {
+                    LoweringError::InvalidExpression("empty union".into())
+                })?;
+                let first_expr = self.lower_plan(first)?;
+                iter.try_fold(first_expr, |left, right_plan| {
+                    let right = self.lower_plan(right_plan)?;
+                    Ok(QueryExpr::SetOp {
+                        kind: SetOpKind::Union,
+                        all: true,
+                        left: make_node(left),
+                        right: make_node(right),
+                    })
+                })
             }
             LogicalPlan::Join(_) => {
                 Err(LoweringError::UnsupportedFeature("JOIN".into()))
@@ -538,10 +555,64 @@ fn df_expr_to_l3(expr: &Expr) -> Result<L3Expr, LoweringError> {
             Operator::LtEq => compare(left, CompareOp::Le, right),
             Operator::Gt => compare(left, CompareOp::Gt, right),
             Operator::GtEq => compare(left, CompareOp::Ge, right),
+            // BinaryExpr LIKE/ILIKE operators (from optimizer rewrites)
             Operator::LikeMatch => compare(left, CompareOp::Like, right),
+            Operator::ILikeMatch => compare(left, CompareOp::ILike, right),
             Operator::NotLikeMatch => compare(left, CompareOp::NotLike, right),
+            Operator::NotILikeMatch => compare(left, CompareOp::NotILike, right),
+            // Arithmetic
+            Operator::Plus => arith(left, ArithOp::Add, right),
+            Operator::Minus => arith(left, ArithOp::Sub, right),
+            Operator::Multiply => arith(left, ArithOp::Mul, right),
+            Operator::Divide => arith(left, ArithOp::Div, right),
+            Operator::Modulo => arith(left, ArithOp::Mod, right),
             other => Err(LoweringError::UnsupportedFeature(format!("operator: {other:?}"))),
         },
+
+        // SQL LIKE / ILIKE (dedicated expr node from the SQL parser)
+        Expr::Like(like) => {
+            let op = match (like.negated, like.case_insensitive) {
+                (false, false) => CompareOp::Like,
+                (true,  false) => CompareOp::NotLike,
+                (false, true)  => CompareOp::ILike,
+                (true,  true)  => CompareOp::NotILike,
+            };
+            compare(&like.expr, op, &like.pattern)
+        }
+
+        // Unary minus: negate literals directly; wrap others in -1 * x.
+        Expr::Negative(inner) => {
+            let inner_l3 = df_expr_to_l3(inner)?;
+            match inner_l3 {
+                L3Expr::Literal(L3Scalar::Int64(v))   => Ok(L3Expr::Literal(L3Scalar::Int64(-v))),
+                L3Expr::Literal(L3Scalar::Float64(v)) => Ok(L3Expr::Literal(L3Scalar::Float64(-v))),
+                other => Ok(L3Expr::Arith {
+                    op: ArithOp::Mul,
+                    left: Box::new(L3Expr::Literal(L3Scalar::Int64(-1))),
+                    right: Box::new(other),
+                }),
+            }
+        }
+
+        // SQL CASE expression
+        Expr::Case(c) => {
+            let operand = c
+                .expr
+                .as_ref()
+                .map(|e| df_expr_to_l3(e).map(Box::new))
+                .transpose()?;
+            let branches = c
+                .when_then_expr
+                .iter()
+                .map(|(when, then)| Ok((df_expr_to_l3(when)?, df_expr_to_l3(then)?)))
+                .collect::<Result<Vec<_>, LoweringError>>()?;
+            let else_expr = c
+                .else_expr
+                .as_ref()
+                .map(|e| df_expr_to_l3(e).map(Box::new))
+                .transpose()?;
+            Ok(L3Expr::Case { operand, branches, else_expr })
+        }
 
         Expr::Not(inner) => Ok(L3Expr::Not(Box::new(df_expr_to_l3(inner)?))),
 
@@ -595,6 +666,14 @@ fn compare(left: &Expr, op: CompareOp, right: &Expr) -> Result<L3Expr, LoweringE
     Ok(L3Expr::Compare {
         left: Box::new(df_expr_to_l3(left)?),
         op,
+        right: Box::new(df_expr_to_l3(right)?),
+    })
+}
+
+fn arith(left: &Expr, op: ArithOp, right: &Expr) -> Result<L3Expr, LoweringError> {
+    Ok(L3Expr::Arith {
+        op,
+        left: Box::new(df_expr_to_l3(left)?),
         right: Box::new(df_expr_to_l3(right)?),
     })
 }
