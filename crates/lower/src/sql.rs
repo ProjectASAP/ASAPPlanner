@@ -61,14 +61,17 @@ impl<'a> SqlLowerer<'a> {
                     Distinct::On(on) => on.input.as_ref(),
                 };
                 let child = self.lower_plan(input)?;
-                Ok(QueryExpr::Distinct { child: make_node(child), cols: vec![] })
+                Ok(QueryExpr::Distinct {
+                    child: make_node(child),
+                    cols: vec![],
+                })
             }
             LogicalPlan::Union(u) => {
                 // Fold n inputs left-associatively into SetOp { Union, all: true }.
                 let mut iter = u.inputs.iter();
-                let first = iter.next().ok_or_else(|| {
-                    LoweringError::InvalidExpression("empty union".into())
-                })?;
+                let first = iter
+                    .next()
+                    .ok_or_else(|| LoweringError::InvalidExpression("empty union".into()))?;
                 let first_expr = self.lower_plan(first)?;
                 iter.try_fold(first_expr, |left, right_plan| {
                     let right = self.lower_plan(right_plan)?;
@@ -80,12 +83,8 @@ impl<'a> SqlLowerer<'a> {
                     })
                 })
             }
-            LogicalPlan::Join(_) => {
-                Err(LoweringError::UnsupportedFeature("JOIN".into()))
-            }
-            LogicalPlan::Subquery(_) => {
-                Err(LoweringError::UnsupportedFeature("subquery".into()))
-            }
+            LogicalPlan::Join(_) => Err(LoweringError::UnsupportedFeature("JOIN".into())),
+            LogicalPlan::Subquery(_) => Err(LoweringError::UnsupportedFeature("subquery".into())),
             LogicalPlan::SubqueryAlias(alias) => {
                 // Simple table alias (wraps only a TableScan or another alias) is
                 // transparent. A derived table (wraps Projection, Aggregate, etc.)
@@ -106,10 +105,7 @@ impl<'a> SqlLowerer<'a> {
         }
     }
 
-    fn lower_table_scan(
-        &self,
-        scan: &logical_expr::TableScan,
-    ) -> Result<QueryExpr, LoweringError> {
+    fn lower_table_scan(&self, scan: &logical_expr::TableScan) -> Result<QueryExpr, LoweringError> {
         let table_name = scan.table_name.to_string();
         let table_schema = self
             .catalog
@@ -118,7 +114,11 @@ impl<'a> SqlLowerer<'a> {
             .ok_or_else(|| LoweringError::TableNotFound(table_name.clone()))?;
         let columns = projection_columns(scan, table_schema);
         Ok(QueryExpr::Scan {
-            source: Source::Table { table_ref: TableRef(table_name), columns, time_range: None },
+            source: Source::Table {
+                table_ref: TableRef(table_name),
+                columns,
+                time_range: None,
+            },
             predicates: vec![],
         })
     }
@@ -132,8 +132,7 @@ impl<'a> SqlLowerer<'a> {
             let table_name = scan.table_name.to_string();
             if let Some(schema) = self.catalog.tables.get(&table_name) {
                 if let Some(time_col) = &schema.time_column {
-                    let (time_range, non_time) =
-                        extract_time_range(&filter.predicate, time_col);
+                    let (time_range, non_time) = extract_time_range(&filter.predicate, time_col);
                     let columns = projection_columns(scan, schema);
                     let scan_expr = QueryExpr::Scan {
                         source: Source::Table {
@@ -158,7 +157,10 @@ impl<'a> SqlLowerer<'a> {
 
         let pred_expr = df_expr_to_l3(&filter.predicate)?;
         let child = self.lower_plan(&filter.input)?;
-        Ok(QueryExpr::Filter { child: make_node(child), pred: Predicate(pred_expr) })
+        Ok(QueryExpr::Filter {
+            child: make_node(child),
+            pred: Predicate(pred_expr),
+        })
     }
 
     fn lower_projection(
@@ -176,10 +178,10 @@ impl<'a> SqlLowerer<'a> {
             .expr
             .iter()
             .map(|e| match e {
-                Expr::Alias(a) => {
-                    df_expr_to_l3(&a.expr)
-                        .map(|expr| ProjectItem { expr, alias: Some(a.name.clone()) })
-                }
+                Expr::Alias(a) => df_expr_to_l3(&a.expr).map(|expr| ProjectItem {
+                    expr,
+                    alias: Some(a.name.clone()),
+                }),
                 _ => df_expr_to_l3(e).map(|expr| ProjectItem { expr, alias: None }),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -188,13 +190,13 @@ impl<'a> SqlLowerer<'a> {
         // derive the Scan's column list from the enclosing projection instead.
         let child = push_columns_into_scan(child, &cols);
 
-        Ok(QueryExpr::Project { child: make_node(child), cols })
+        Ok(QueryExpr::Project {
+            child: make_node(child),
+            cols,
+        })
     }
 
-    fn lower_aggregate(
-        &self,
-        agg: &logical_expr::Aggregate,
-    ) -> Result<QueryExpr, LoweringError> {
+    fn lower_aggregate(&self, agg: &logical_expr::Aggregate) -> Result<QueryExpr, LoweringError> {
         let child = self.lower_plan(&agg.input)?;
         let by = agg
             .group_expr
@@ -206,7 +208,12 @@ impl<'a> SqlLowerer<'a> {
             .iter()
             .map(|e| self.lower_agg_expr(e))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(QueryExpr::Aggregate { child: make_node(child), by, aggs, having: None })
+        Ok(QueryExpr::Aggregate {
+            child: make_node(child),
+            by,
+            aggs,
+            having: None,
+        })
     }
 
     fn lower_sort(&self, sort: &logical_expr::Sort) -> Result<QueryExpr, LoweringError> {
@@ -231,7 +238,10 @@ impl<'a> SqlLowerer<'a> {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(QueryExpr::Sort { child: make_node(child), keys })
+        Ok(QueryExpr::Sort {
+            child: make_node(child),
+            keys,
+        })
     }
 
     fn lower_limit(&self, limit: &logical_expr::Limit) -> Result<QueryExpr, LoweringError> {
@@ -240,9 +250,7 @@ impl<'a> SqlLowerer<'a> {
             let inner = strip_aliases(&limit.input);
             if let LogicalPlan::Sort(sort) = inner {
                 if sort.expr.iter().all(|s| !s.asc) {
-                    if let Some(agg) =
-                        find_aggregate(strip_projections_and_aliases(&sort.input))
-                    {
+                    if let Some(agg) = find_aggregate(strip_projections_and_aliases(&sort.input)) {
                         return self.lower_as_topk(agg, k);
                     }
                 }
@@ -270,7 +278,11 @@ impl<'a> SqlLowerer<'a> {
         Ok(QueryExpr::Aggregate {
             child: make_node(child),
             by: vec![],
-            aggs: vec![AggIntent::TopK { k, by, accuracy: self.accuracy.clone() }],
+            aggs: vec![AggIntent::TopK {
+                k,
+                by,
+                accuracy: self.accuracy.clone(),
+            }],
             having: None,
         })
     }
@@ -314,7 +326,9 @@ impl<'a> SqlLowerer<'a> {
                 frame: None,
             });
         }
-        Err(LoweringError::InvalidExpression("expected WindowFunction expr".into()))
+        Err(LoweringError::InvalidExpression(
+            "expected WindowFunction expr".into(),
+        ))
     }
 
     fn lower_agg_expr(&self, expr: &Expr) -> Result<AggIntent, LoweringError> {
@@ -322,10 +336,12 @@ impl<'a> SqlLowerer<'a> {
             Expr::AggregateFunction(agg_fn) => {
                 let name = agg_fn.func.name().to_lowercase();
                 match name.as_str() {
-                    "count" if agg_fn.distinct => {
-                        Ok(AggIntent::Cardinality { accuracy: self.accuracy.clone() })
-                    }
-                    "count" => Ok(AggIntent::Count { accuracy: self.accuracy.clone() }),
+                    "count" if agg_fn.distinct => Ok(AggIntent::Cardinality {
+                        accuracy: self.accuracy.clone(),
+                    }),
+                    "count" => Ok(AggIntent::Count {
+                        accuracy: self.accuracy.clone(),
+                    }),
                     "sum" => Ok(AggIntent::Sum),
                     "min" => Ok(AggIntent::Min),
                     "max" => Ok(AggIntent::Max),
@@ -334,11 +350,14 @@ impl<'a> SqlLowerer<'a> {
                     "stddev_pop" => Ok(AggIntent::Stddev { population: true }),
                     "approx_percentile_cont" | "percentile_cont" => {
                         let q = extract_percentile_q(&agg_fn.args)?;
-                        Ok(AggIntent::Quantile { q, accuracy: self.accuracy.clone() })
+                        Ok(AggIntent::Quantile {
+                            q,
+                            accuracy: self.accuracy.clone(),
+                        })
                     }
-                    "approx_distinct" => {
-                        Ok(AggIntent::Cardinality { accuracy: self.accuracy.clone() })
-                    }
+                    "approx_distinct" => Ok(AggIntent::Cardinality {
+                        accuracy: self.accuracy.clone(),
+                    }),
                     _ => Err(LoweringError::UnsupportedAggregate(name)),
                 }
             }
@@ -353,10 +372,7 @@ impl<'a> SqlLowerer<'a> {
 /// Map a DataFusion `TableScan.projection` (column index list) back to
 /// `ColumnRef` names from the catalog schema.
 /// Returns an empty `Vec` when the projection is absent (full scan / `SELECT *`).
-fn projection_columns(
-    scan: &logical_expr::TableScan,
-    schema: &TableSchema,
-) -> Vec<ColumnRef> {
+fn projection_columns(scan: &logical_expr::TableScan, schema: &TableSchema) -> Vec<ColumnRef> {
     match &scan.projection {
         Some(indices) => indices
             .iter()
@@ -373,7 +389,12 @@ fn projection_columns(
 /// passes that could alter other plan-node shapes our lowerer depends on.
 fn push_columns_into_scan(child: QueryExpr, cols: &[ProjectItem]) -> QueryExpr {
     let QueryExpr::Scan {
-        source: Source::Table { table_ref, columns, time_range },
+        source:
+            Source::Table {
+                table_ref,
+                columns,
+                time_range,
+            },
         predicates,
     } = child
     else {
@@ -381,7 +402,11 @@ fn push_columns_into_scan(child: QueryExpr, cols: &[ProjectItem]) -> QueryExpr {
     };
     if !columns.is_empty() {
         return QueryExpr::Scan {
-            source: Source::Table { table_ref, columns, time_range },
+            source: Source::Table {
+                table_ref,
+                columns,
+                time_range,
+            },
             predicates,
         };
     }
@@ -389,17 +414,27 @@ fn push_columns_into_scan(child: QueryExpr, cols: &[ProjectItem]) -> QueryExpr {
     let col_refs: Vec<ColumnRef> = cols
         .iter()
         .flat_map(|item| item.expr.columns_referenced())
-        .map(|c| c.clone())
-        .filter(|c| seen.insert(c.0.clone()))
+        .filter(|&c| seen.insert(c.0.clone()))
+        .cloned()
         .collect();
     QueryExpr::Scan {
-        source: Source::Table { table_ref, columns: col_refs, time_range },
+        source: Source::Table {
+            table_ref,
+            columns: col_refs,
+            time_range,
+        },
         predicates,
     }
 }
 
 fn make_node(expr: QueryExpr) -> Rc<L3Node> {
-    Rc::new(L3Node { expr, schema: L3Schema { fields: vec![], time_index: None } })
+    Rc::new(L3Node {
+        expr,
+        schema: L3Schema {
+            fields: vec![],
+            time_index: None,
+        },
+    })
 }
 
 /// Evaluate a constant fetch/skip expression to a `usize`.
@@ -470,7 +505,11 @@ fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
 
 fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
     match expr {
-        Expr::BinaryExpr(BinaryExpr { left, op: Operator::And, right }) => {
+        Expr::BinaryExpr(BinaryExpr {
+            left,
+            op: Operator::And,
+            right,
+        }) => {
             let mut v = split_conjuncts(left);
             v.extend(split_conjuncts(right));
             v
@@ -566,16 +605,18 @@ fn df_expr_to_l3(expr: &Expr) -> Result<L3Expr, LoweringError> {
             Operator::Multiply => arith(left, ArithOp::Mul, right),
             Operator::Divide => arith(left, ArithOp::Div, right),
             Operator::Modulo => arith(left, ArithOp::Mod, right),
-            other => Err(LoweringError::UnsupportedFeature(format!("operator: {other:?}"))),
+            other => Err(LoweringError::UnsupportedFeature(format!(
+                "operator: {other:?}"
+            ))),
         },
 
         // SQL LIKE / ILIKE (dedicated expr node from the SQL parser)
         Expr::Like(like) => {
             let op = match (like.negated, like.case_insensitive) {
                 (false, false) => CompareOp::Like,
-                (true,  false) => CompareOp::NotLike,
-                (false, true)  => CompareOp::ILike,
-                (true,  true)  => CompareOp::NotILike,
+                (true, false) => CompareOp::NotLike,
+                (false, true) => CompareOp::ILike,
+                (true, true) => CompareOp::NotILike,
             };
             compare(&like.expr, op, &like.pattern)
         }
@@ -584,7 +625,7 @@ fn df_expr_to_l3(expr: &Expr) -> Result<L3Expr, LoweringError> {
         Expr::Negative(inner) => {
             let inner_l3 = df_expr_to_l3(inner)?;
             match inner_l3 {
-                L3Expr::Literal(L3Scalar::Int64(v))   => Ok(L3Expr::Literal(L3Scalar::Int64(-v))),
+                L3Expr::Literal(L3Scalar::Int64(v)) => Ok(L3Expr::Literal(L3Scalar::Int64(-v))),
                 L3Expr::Literal(L3Scalar::Float64(v)) => Ok(L3Expr::Literal(L3Scalar::Float64(-v))),
                 other => Ok(L3Expr::Arith {
                     op: ArithOp::Mul,
@@ -611,7 +652,11 @@ fn df_expr_to_l3(expr: &Expr) -> Result<L3Expr, LoweringError> {
                 .as_ref()
                 .map(|e| df_expr_to_l3(e).map(Box::new))
                 .transpose()?;
-            Ok(L3Expr::Case { operand, branches, else_expr })
+            Ok(L3Expr::Case {
+                operand,
+                branches,
+                else_expr,
+            })
         }
 
         Expr::Not(inner) => Ok(L3Expr::Not(Box::new(df_expr_to_l3(inner)?))),
@@ -623,19 +668,29 @@ fn df_expr_to_l3(expr: &Expr) -> Result<L3Expr, LoweringError> {
         Expr::Cast(c) => {
             let inner = df_expr_to_l3(&c.expr)?;
             let to = arrow_to_l3(&c.data_type)?;
-            Ok(L3Expr::Cast { expr: Box::new(inner), to })
+            Ok(L3Expr::Cast {
+                expr: Box::new(inner),
+                to,
+            })
         }
 
         Expr::TryCast(c) => {
             let inner = df_expr_to_l3(&c.expr)?;
             let to = arrow_to_l3(&c.data_type)?;
-            Ok(L3Expr::Cast { expr: Box::new(inner), to })
+            Ok(L3Expr::Cast {
+                expr: Box::new(inner),
+                to,
+            })
         }
 
         Expr::InList(il) => {
             let expr = df_expr_to_l3(&il.expr)?;
             let list: Result<Vec<_>, _> = il.list.iter().map(df_expr_to_l3).collect();
-            Ok(L3Expr::InList { expr: Box::new(expr), list: list?, negated: il.negated })
+            Ok(L3Expr::InList {
+                expr: Box::new(expr),
+                list: list?,
+                negated: il.negated,
+            })
         }
 
         Expr::Between(b) => {
@@ -655,10 +710,16 @@ fn df_expr_to_l3(expr: &Expr) -> Result<L3Expr, LoweringError> {
 
         Expr::ScalarFunction(sf) => {
             let args: Result<Vec<_>, _> = sf.args.iter().map(df_expr_to_l3).collect();
-            Ok(L3Expr::FunctionCall { name: sf.func.name().to_string(), args: args? })
+            Ok(L3Expr::FunctionCall {
+                name: sf.func.name().to_string(),
+                args: args?,
+            })
         }
 
-        other => Err(LoweringError::UnsupportedFeature(format!("expression: {}", other))),
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "expression: {}",
+            other
+        ))),
     }
 }
 
@@ -694,7 +755,9 @@ fn scalar_value_to_l3(sv: &ScalarValue) -> Result<L3Scalar, LoweringError> {
         ScalarValue::Boolean(Some(b)) => Ok(L3Scalar::Boolean(*b)),
         // Typed nulls and untyped null both become L3Scalar::Null
         _ if sv.is_null() => Ok(L3Scalar::Null),
-        _ => Err(LoweringError::InvalidExpression(format!("unsupported scalar: {sv:?}"))),
+        _ => Err(LoweringError::InvalidExpression(format!(
+            "unsupported scalar: {sv:?}"
+        ))),
     }
 }
 
@@ -709,15 +772,19 @@ fn arrow_to_l3(dt: &ArrowDataType) -> Result<L3DataType, LoweringError> {
         ArrowDataType::Boolean => Ok(L3DataType::Boolean),
         ArrowDataType::Timestamp(_, _) => Ok(L3DataType::Timestamp),
         ArrowDataType::Duration(_) => Ok(L3DataType::Duration),
-        other => {
-            Err(LoweringError::UnsupportedFeature(format!("Arrow type in cast: {other:?}")))
-        }
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "Arrow type in cast: {other:?}"
+        ))),
     }
 }
 
 fn split_disjuncts(expr: &Expr) -> Vec<&Expr> {
     match expr {
-        Expr::BinaryExpr(BinaryExpr { left, op: Operator::Or, right }) => {
+        Expr::BinaryExpr(BinaryExpr {
+            left,
+            op: Operator::Or,
+            right,
+        }) => {
             let mut v = split_disjuncts(left);
             v.extend(split_disjuncts(right));
             v
@@ -757,10 +824,12 @@ fn classify_time_pred(expr: &Expr, time_col: &str) -> TimeClass {
                 return TimeClass::NonTime;
             };
             match (op, col_is_left) {
-                (Operator::Gt | Operator::GtEq, true)
-                | (Operator::Lt | Operator::LtEq, false) => TimeClass::Start(ms),
-                (Operator::Lt | Operator::LtEq, true)
-                | (Operator::Gt | Operator::GtEq, false) => TimeClass::End(ms),
+                (Operator::Gt | Operator::GtEq, true) | (Operator::Lt | Operator::LtEq, false) => {
+                    TimeClass::Start(ms)
+                }
+                (Operator::Lt | Operator::LtEq, true) | (Operator::Gt | Operator::GtEq, false) => {
+                    TimeClass::End(ms)
+                }
                 _ => TimeClass::NonTime,
             }
         }
@@ -832,40 +901,34 @@ fn l3_to_arrow(dt: &L3DataType) -> ArrowDataType {
     }
 }
 
-fn lower_window_func_kind(
-    fun: &WindowFunctionDefinition,
-) -> Result<WindowFuncKind, LoweringError> {
+fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKind, LoweringError> {
     match fun {
         // In DataFusion 43 most ranking/nav window functions are WindowUDF.
-        WindowFunctionDefinition::WindowUDF(udf) => {
-            match udf.name().to_lowercase().as_str() {
-                "row_number" => Ok(WindowFuncKind::RowNumber),
-                "rank" => Ok(WindowFuncKind::Rank),
-                "dense_rank" => Ok(WindowFuncKind::DenseRank),
-                "lag" => Ok(WindowFuncKind::Lag),
-                "lead" => Ok(WindowFuncKind::Lead),
-                "first_value" => Ok(WindowFuncKind::FirstValue),
-                "last_value" => Ok(WindowFuncKind::LastValue),
-                "nth_value" => Ok(WindowFuncKind::NthValue(0)),
-                other => {
-                    Err(LoweringError::UnsupportedFeature(format!("window fn: {other}")))
-                }
-            }
-        }
-        WindowFunctionDefinition::AggregateUDF(udf) => {
-            match udf.name().to_lowercase().as_str() {
-                "sum" => Ok(WindowFuncKind::Sum),
-                "avg" | "mean" => Ok(WindowFuncKind::Avg),
-                "count" => Ok(WindowFuncKind::Count),
-                "min" => Ok(WindowFuncKind::Min),
-                "max" => Ok(WindowFuncKind::Max),
-                other => {
-                    Err(LoweringError::UnsupportedFeature(format!("window agg: {other}")))
-                }
-            }
-        }
-        WindowFunctionDefinition::BuiltInWindowFunction(biwf) => {
-            Err(LoweringError::UnsupportedFeature(format!("built-in window fn: {biwf:?}")))
-        }
+        WindowFunctionDefinition::WindowUDF(udf) => match udf.name().to_lowercase().as_str() {
+            "row_number" => Ok(WindowFuncKind::RowNumber),
+            "rank" => Ok(WindowFuncKind::Rank),
+            "dense_rank" => Ok(WindowFuncKind::DenseRank),
+            "lag" => Ok(WindowFuncKind::Lag),
+            "lead" => Ok(WindowFuncKind::Lead),
+            "first_value" => Ok(WindowFuncKind::FirstValue),
+            "last_value" => Ok(WindowFuncKind::LastValue),
+            "nth_value" => Ok(WindowFuncKind::NthValue(0)),
+            other => Err(LoweringError::UnsupportedFeature(format!(
+                "window fn: {other}"
+            ))),
+        },
+        WindowFunctionDefinition::AggregateUDF(udf) => match udf.name().to_lowercase().as_str() {
+            "sum" => Ok(WindowFuncKind::Sum),
+            "avg" | "mean" => Ok(WindowFuncKind::Avg),
+            "count" => Ok(WindowFuncKind::Count),
+            "min" => Ok(WindowFuncKind::Min),
+            "max" => Ok(WindowFuncKind::Max),
+            other => Err(LoweringError::UnsupportedFeature(format!(
+                "window agg: {other}"
+            ))),
+        },
+        WindowFunctionDefinition::BuiltInWindowFunction(biwf) => Err(
+            LoweringError::UnsupportedFeature(format!("built-in window fn: {biwf:?}")),
+        ),
     }
 }

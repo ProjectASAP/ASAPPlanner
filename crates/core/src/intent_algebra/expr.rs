@@ -1,9 +1,9 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::types::AccuracyTarget;
 use super::expr_ir::L3Expr;
 use super::schema::{HasSchema, L3Schema, SchemaCatalog};
+use crate::types::AccuracyTarget;
 
 // ── Leaf / supporting types ───────────────────────────────────────────────────
 
@@ -19,11 +19,14 @@ pub struct ProjectItem {
 }
 
 /// A GROUP BY key reference (column name).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)] pub struct GroupKey(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GroupKey(pub String);
 /// A reference to a column by name.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)] pub struct ColumnRef(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ColumnRef(pub String);
 /// A set of partitioning keys (sharding hint for L5 stage allocator).
-#[derive(Debug, Clone)] pub struct PartitionKeys;
+#[derive(Debug, Clone)]
+pub struct PartitionKeys;
 
 /// One key in an ORDER BY or window OVER clause.
 #[derive(Debug, Clone)]
@@ -33,11 +36,14 @@ pub struct SortKey {
     pub nulls_first: bool,
 }
 /// An analytic window frame (ROWS / RANGE BETWEEN …).
-#[derive(Debug, Clone)] pub struct WindowFrame;
+#[derive(Debug, Clone)]
+pub struct WindowFrame;
 /// PromQL vector-match modifiers (`on`/`ignoring` + `group_left`/`group_right`).
-#[derive(Debug, Clone)] pub struct VectorMatch;
+#[derive(Debug, Clone)]
+pub struct VectorMatch;
 /// Reference to a metric by name (PromQL / OTLP).
-#[derive(Debug, Clone)] pub struct MetricRef;
+#[derive(Debug, Clone)]
+pub struct MetricRef;
 /// Closed time interval [start_ms, end_ms] in milliseconds since Unix epoch.
 /// Either bound may be `None`, meaning unbounded on that side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,11 +52,14 @@ pub struct TimeRange {
     pub end_ms: Option<i64>,
 }
 /// Label matchers applied to a time-series scan.
-#[derive(Debug, Clone)] pub struct LabelFilter;
+#[derive(Debug, Clone)]
+pub struct LabelFilter;
 /// Reference to a relational table by name.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)] pub struct TableRef(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TableRef(pub String);
 /// Join key specification (USING / ON column reference).
-#[derive(Debug, Clone)] pub struct JoinKey;
+#[derive(Debug, Clone)]
+pub struct JoinKey;
 
 // ── Enum supporting types ─────────────────────────────────────────────────────
 
@@ -73,20 +82,39 @@ pub enum SetOpKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryOpKind {
     // Arithmetic
-    Add, Sub, Mul, Div, Mod,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
     // Comparison
-    Eq, NotEq, Lt, LtEq, Gt, GtEq,
+    Eq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
     // Boolean / PromQL set operators
-    And, Or, Unless,
+    And,
+    Or,
+    Unless,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowFuncKind {
-    RowNumber, Rank, DenseRank,
-    Lag, Lead,
-    FirstValue, LastValue,
+    RowNumber,
+    Rank,
+    DenseRank,
+    Lag,
+    Lead,
+    FirstValue,
+    LastValue,
     NthValue(u64),
-    Sum, Avg, Count, Min, Max,
+    Sum,
+    Avg,
+    Count,
+    Min,
+    Max,
 }
 
 /// Which data model a `Source` or `AggIntent` operates over.
@@ -162,26 +190,43 @@ impl Source {
 #[derive(Debug, Clone)]
 pub enum AggIntent {
     // ── Data-model-agnostic ───────────────────────────────────────────────────
-    Count { accuracy: AccuracyTarget },
+    Count {
+        accuracy: AccuracyTarget,
+    },
     Sum,
     Min,
     Max,
     Avg,
     /// Sample stddev when `population == false`; population stddev otherwise.
-    Stddev { population: bool },
-    Quantile { q: f64, accuracy: AccuracyTarget },
+    Stddev {
+        population: bool,
+    },
+    Quantile {
+        q: f64,
+        accuracy: AccuracyTarget,
+    },
     /// Heavy-hitter top-k. Distinct from generic `Sort + Limit` — a
     /// dedicated sketch (SpaceSaving, CMS-with-heap) computes it as a single
     /// primitive. Recognised by L1→L2→L3 lowering on `ORDER BY count DESC
     /// LIMIT k` / PromQL `topk(k, …)`.
-    TopK { k: usize, by: Vec<ColumnRef>, accuracy: AccuracyTarget },
-    Cardinality { accuracy: AccuracyTarget },
+    TopK {
+        k: usize,
+        by: Vec<ColumnRef>,
+        accuracy: AccuracyTarget,
+    },
+    Cardinality {
+        accuracy: AccuracyTarget,
+    },
 
     // ── Time-series streaming derivatives ────────────────────────────────────
     // Include PromQL counter-reset adjustment; not equivalent to Sum/Count
     // over a Window. Kept distinct so delta-set aggregators bind directly.
-    Rate { window: Duration },
-    Increase { window: Duration },
+    Rate {
+        window: Duration,
+    },
+    Increase {
+        window: Duration,
+    },
 }
 
 impl AggIntent {
@@ -244,15 +289,24 @@ pub struct L3Node {
 pub enum QueryExpr {
     // ── Base relations ────────────────────────────────────────────────────────
     /// Outermost leaf. `source` carries the data-model-specific leaf shape.
-    Scan { source: Source, predicates: Vec<Predicate> },
+    Scan {
+        source: Source,
+        predicates: Vec<Predicate>,
+    },
     /// Reference to a named `LetBinding` sub-expression; resolved at plan time.
     Ref(String),
 
     // ── Filtering & projection ────────────────────────────────────────────────
     /// σ — row-level filter. Output schema = child schema (unchanged).
-    Filter { child: Rc<L3Node>, pred: Predicate },
+    Filter {
+        child: Rc<L3Node>,
+        pred: Predicate,
+    },
     /// π — column projection. Output schema = child schema projected to `cols`.
-    Project { child: Rc<L3Node>, cols: Vec<ProjectItem> },
+    Project {
+        child: Rc<L3Node>,
+        cols: Vec<ProjectItem>,
+    },
 
     // ── Aggregation ───────────────────────────────────────────────────────────
     /// γ + α — GROUP BY + aggregate intents. Concrete operator (HashAgg /
@@ -278,13 +332,21 @@ pub enum QueryExpr {
     // ── Distributed-execution structure ───────────────────────────────────────
     /// Logical-only partitioning marker. Output schema = child schema.
     /// Carries a sharding hint for the L5 stage allocator.
-    Partition { child: Rc<L3Node>, keys: PartitionKeys },
+    Partition {
+        child: Rc<L3Node>,
+        keys: PartitionKeys,
+    },
     /// δ — SQL `DISTINCT` / row deduplication.
-    Distinct { child: Rc<L3Node>, cols: Vec<ColumnRef> },
+    Distinct {
+        child: Rc<L3Node>,
+        cols: Vec<ColumnRef>,
+    },
     /// ⊕ — exact union of sub-results from independent stages or shards.
     /// Sketch unions are a separate node in `SummaryExpr` because they carry
     /// sketch-family / params type constraints.
-    Merge { children: Vec<Rc<L3Node>> },
+    Merge {
+        children: Vec<Rc<L3Node>>,
+    },
 
     // ── Joins ─────────────────────────────────────────────────────────────────
     /// Logical join. L4 picks the physical alternative (HashJoin /
@@ -308,11 +370,21 @@ pub enum QueryExpr {
     // ── Ordering & limiting ───────────────────────────────────────────────────
     /// Generic order-by for non-heavy-hitter cases (`ORDER BY name LIMIT 10`).
     /// Heavy-hitter shapes lower to `AggIntent::TopK` instead.
-    Sort { child: Rc<L3Node>, keys: Vec<SortKey> },
-    Limit { child: Rc<L3Node>, n: u64, offset: u64 },
+    Sort {
+        child: Rc<L3Node>,
+        keys: Vec<SortKey>,
+    },
+    Limit {
+        child: Rc<L3Node>,
+        n: u64,
+        offset: u64,
+    },
 
     // ── Subquery / CTE ────────────────────────────────────────────────────────
-    Subquery { child: Rc<L3Node>, alias: String },
+    Subquery {
+        child: Rc<L3Node>,
+        alias: String,
+    },
     /// SQL `WITH name AS (expr) … body`; lowering target for PromQL
     /// recording-rule bindings. The `expr` sub-DAG may be referenced N times
     /// via `Ref(name)` in `body`, giving the DAG its fan-in.
@@ -372,14 +444,15 @@ impl HasSchema for QueryExpr {
                             nullable: c.nullable,
                         })
                         .collect();
-                    let time_index = table.time_column.as_ref().and_then(|tc| {
-                        fields.iter().position(|f| &f.name == tc)
-                    });
+                    let time_index = table
+                        .time_column
+                        .as_ref()
+                        .and_then(|tc| fields.iter().position(|f| &f.name == tc));
                     L3Schema { fields, time_index }
                 }
-                Source::TimeSeries { .. } | Source::Join { .. } => todo!(
-                    "schema derivation for TimeSeries and Join sources (PromQL path)"
-                ),
+                Source::TimeSeries { .. } | Source::Join { .. } => {
+                    todo!("schema derivation for TimeSeries and Join sources (PromQL path)")
+                }
             },
 
             // ── Project: one output field per ProjectItem ─────────────────────
@@ -394,42 +467,64 @@ impl HasSchema for QueryExpr {
                     .iter()
                     .map(|item| match &item.expr {
                         L3Expr::Column(col_ref) => {
-                            let child_f =
-                                cs.fields.iter().find(|f| f.name == col_ref.0);
+                            let child_f = cs.fields.iter().find(|f| f.name == col_ref.0);
                             let (dtype, nullable) = child_f
                                 .map(|f| (f.dtype.clone(), f.nullable))
                                 .unwrap_or((L3DataType::Float64, true));
-                            let out_name = item
-                                .alias
-                                .as_deref()
-                                .unwrap_or(&col_ref.0)
-                                .to_string();
-                            let is_time =
-                                time_col_src.as_deref() == Some(col_ref.0.as_str());
-                            (L3Field { name: out_name, dtype, nullable }, is_time)
+                            let out_name = item.alias.as_deref().unwrap_or(&col_ref.0).to_string();
+                            let is_time = time_col_src.as_deref() == Some(col_ref.0.as_str());
+                            (
+                                L3Field {
+                                    name: out_name,
+                                    dtype,
+                                    nullable,
+                                },
+                                is_time,
+                            )
                         }
                         // CAST: output type is the cast target.
                         L3Expr::Cast { to, .. } => {
                             let name = item.alias.as_deref().unwrap_or("cast").to_string();
-                            (L3Field { name, dtype: to.clone(), nullable: true }, false)
+                            (
+                                L3Field {
+                                    name,
+                                    dtype: to.clone(),
+                                    nullable: true,
+                                },
+                                false,
+                            )
                         }
                         // Literal: infer type from the scalar variant.
                         L3Expr::Literal(scalar) => {
                             let (dtype, nullable) = match scalar {
-                                L3Scalar::Int64(_)   => (L3DataType::Int64,   false),
+                                L3Scalar::Int64(_) => (L3DataType::Int64, false),
                                 L3Scalar::Float64(_) => (L3DataType::Float64, false),
-                                L3Scalar::Utf8(_)    => (L3DataType::Utf8,    false),
+                                L3Scalar::Utf8(_) => (L3DataType::Utf8, false),
                                 L3Scalar::Boolean(_) => (L3DataType::Boolean, false),
-                                L3Scalar::Null       => (L3DataType::Float64, true),
+                                L3Scalar::Null => (L3DataType::Float64, true),
                             };
                             let name = item.alias.as_deref().unwrap_or("literal").to_string();
-                            (L3Field { name, dtype, nullable }, false)
+                            (
+                                L3Field {
+                                    name,
+                                    dtype,
+                                    nullable,
+                                },
+                                false,
+                            )
                         }
                         // Arithmetic, CASE, function calls, boolean exprs:
                         // default to Float64 (full type inference is future work).
                         _ => {
                             let name = item.alias.as_deref().unwrap_or("expr").to_string();
-                            (L3Field { name, dtype: L3DataType::Float64, nullable: true }, false)
+                            (
+                                L3Field {
+                                    name,
+                                    dtype: L3DataType::Float64,
+                                    nullable: true,
+                                },
+                                false,
+                            )
                         }
                     })
                     .collect();
@@ -457,16 +552,17 @@ impl HasSchema for QueryExpr {
                 if let [AggIntent::TopK { by: topk_by, .. }] = aggs.as_slice() {
                     let mut fields: Vec<L3Field> = topk_by
                         .iter()
-                        .filter_map(|col| {
-                            cs.fields.iter().find(|f| f.name == col.0).cloned()
-                        })
+                        .filter_map(|col| cs.fields.iter().find(|f| f.name == col.0).cloned())
                         .collect();
                     fields.push(L3Field {
                         name: "count".to_string(),
                         dtype: super::schema::L3DataType::Int64,
                         nullable: false,
                     });
-                    return L3Schema { fields, time_index: None };
+                    return L3Schema {
+                        fields,
+                        time_index: None,
+                    };
                 }
 
                 // General case: GROUP BY fields (preserving child type) followed
@@ -508,30 +604,40 @@ impl HasSchema for QueryExpr {
                     L3Expr::Column(col_ref) => cs.fields.iter().find(|f| f.name == col_ref.0),
                     _ => None,
                 });
-                let arg_dtype =
-                    || arg_field.map_or(L3DataType::Float64, |f| f.dtype.clone());
+                let arg_dtype = || arg_field.map_or(L3DataType::Float64, |f| f.dtype.clone());
 
                 let (win_name, win_dtype, win_nullable) = match func {
                     WindowFuncKind::RowNumber => ("row_number", L3DataType::Int64, false),
-                    WindowFuncKind::Rank     => ("rank",        L3DataType::Int64, false),
+                    WindowFuncKind::Rank => ("rank", L3DataType::Int64, false),
                     WindowFuncKind::DenseRank => ("dense_rank", L3DataType::Int64, false),
-                    WindowFuncKind::Count    => ("count",       L3DataType::Int64, false),
-                    WindowFuncKind::Sum      => ("sum",         L3DataType::Float64, true),
-                    WindowFuncKind::Avg      => ("avg",         L3DataType::Float64, true),
+                    WindowFuncKind::Count => ("count", L3DataType::Int64, false),
+                    WindowFuncKind::Sum => ("sum", L3DataType::Float64, true),
+                    WindowFuncKind::Avg => ("avg", L3DataType::Float64, true),
                     // Navigation funcs: same type as arg, always nullable (boundary rows)
-                    WindowFuncKind::Lag       => ("lag",         arg_dtype(), true),
-                    WindowFuncKind::Lead      => ("lead",        arg_dtype(), true),
+                    WindowFuncKind::Lag => ("lag", arg_dtype(), true),
+                    WindowFuncKind::Lead => ("lead", arg_dtype(), true),
                     WindowFuncKind::FirstValue => ("first_value", arg_dtype(), true),
-                    WindowFuncKind::LastValue  => ("last_value",  arg_dtype(), true),
-                    WindowFuncKind::NthValue(_) => ("nth_value",  arg_dtype(), true),
+                    WindowFuncKind::LastValue => ("last_value", arg_dtype(), true),
+                    WindowFuncKind::NthValue(_) => ("nth_value", arg_dtype(), true),
                     // Min/Max: preserve input type and nullability
-                    WindowFuncKind::Min => ("min", arg_dtype(), arg_field.map_or(true, |f| f.nullable)),
-                    WindowFuncKind::Max => ("max", arg_dtype(), arg_field.map_or(true, |f| f.nullable)),
+                    WindowFuncKind::Min => {
+                        ("min", arg_dtype(), arg_field.is_none_or(|f| f.nullable))
+                    }
+                    WindowFuncKind::Max => {
+                        ("max", arg_dtype(), arg_field.is_none_or(|f| f.nullable))
+                    }
                 };
 
                 let mut fields = cs.fields.clone();
-                fields.push(L3Field { name: win_name.to_string(), dtype: win_dtype, nullable: win_nullable });
-                L3Schema { fields, time_index: cs.time_index }
+                fields.push(L3Field {
+                    name: win_name.to_string(),
+                    dtype: win_dtype,
+                    nullable: win_nullable,
+                });
+                L3Schema {
+                    fields,
+                    time_index: cs.time_index,
+                }
             }
 
             // ── Merge: all shards have identical schemas; use first ────────────

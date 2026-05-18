@@ -4,7 +4,10 @@ use std::fmt;
 pub enum LoweringError {
     DataFusion(datafusion::error::DataFusionError),
     TableNotFound(String),
-    ColumnNotFound { table: String, column: String },
+    ColumnNotFound {
+        table: String,
+        column: String,
+    },
     /// A SQL feature (JOIN, subquery, etc.) not supported in this version.
     UnsupportedFeature(String),
     UnsupportedAggregate(String),

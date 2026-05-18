@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
-use crate::intent_algebra::{ColumnRef, GroupKey, L3Node};
 use super::schema::L4Schema;
-use super::sketch::{SummaryKind, SummaryParams, SketchQuery};
+use super::sketch::{SketchQuery, SummaryKind, SummaryParams};
+use crate::intent_algebra::{ColumnRef, GroupKey, L3Node};
 
 // ── L4 DAG node ───────────────────────────────────────────────────────────────
 
@@ -63,10 +63,7 @@ pub enum SummaryExpr {
     /// linear-inverse property (CMS, theta, count-based). Catalog flag
     /// `subtractable` must be true for the sketch family.
     /// Output schema: one `Sketch(s, p)` field (same family + params as inputs).
-    SummarySubtract {
-        left: Rc<L4Node>,
-        right: Rc<L4Node>,
-    },
+    SummarySubtract { left: Rc<L4Node>, right: Rc<L4Node> },
 
     /// Delete a key from a sketch (CMS update with −1, deletable Bloom
     /// filter). Catalog flag `deletable` must be true. Output schema =
@@ -90,7 +87,5 @@ pub enum SummaryExpr {
     /// agree on `(sketch, params)` and the catalog flag `mergeable` must
     /// be true. Inserted by the L5 stage allocator on cut edges.
     /// Output schema: one `Sketch(s, p)` field (same family + params as inputs).
-    SummaryMerge {
-        children: Vec<Rc<L4Node>>,
-    },
+    SummaryMerge { children: Vec<Rc<L4Node>> },
 }

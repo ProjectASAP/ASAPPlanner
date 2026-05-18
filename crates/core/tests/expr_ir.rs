@@ -16,7 +16,10 @@ fn l3scalar_float64_eq() {
 
 #[test]
 fn l3scalar_utf8_eq() {
-    assert_eq!(L3Scalar::Utf8("hello".into()), L3Scalar::Utf8("hello".into()));
+    assert_eq!(
+        L3Scalar::Utf8("hello".into()),
+        L3Scalar::Utf8("hello".into())
+    );
     assert_ne!(L3Scalar::Utf8("a".into()), L3Scalar::Utf8("b".into()));
 }
 
@@ -32,12 +35,18 @@ fn l3expr_column_eq() {
     let a = L3Expr::Column(ColumnRef("ts".into()));
     let b = L3Expr::Column(ColumnRef("ts".into()));
     assert_eq!(a, b);
-    assert_ne!(L3Expr::Column(ColumnRef("ts".into())), L3Expr::Column(ColumnRef("x".into())));
+    assert_ne!(
+        L3Expr::Column(ColumnRef("ts".into())),
+        L3Expr::Column(ColumnRef("x".into()))
+    );
 }
 
 #[test]
 fn l3expr_literal_eq() {
-    assert_eq!(L3Expr::Literal(L3Scalar::Int64(5)), L3Expr::Literal(L3Scalar::Int64(5)));
+    assert_eq!(
+        L3Expr::Literal(L3Scalar::Int64(5)),
+        L3Expr::Literal(L3Scalar::Int64(5))
+    );
 }
 
 #[test]

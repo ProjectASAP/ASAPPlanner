@@ -26,7 +26,10 @@ pub async fn lower_batch(
     };
 
     // Guard: only SQL languages are handled by this lowerer.
-    if !matches!(workload.language, QueryLanguage::SQL(_) | QueryLanguage::DataFusion) {
+    if !matches!(
+        workload.language,
+        QueryLanguage::SQL(_) | QueryLanguage::DataFusion
+    ) {
         let lang = format!("{:?}", workload.language);
         return entries
             .iter()

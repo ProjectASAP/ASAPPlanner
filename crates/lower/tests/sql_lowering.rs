@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 
-use asap_control_core::intent_algebra::expr::{AggIntent, Predicate, ProjectItem, QueryExpr, SortKey, Source};
-use asap_control_core::intent_algebra::schema::{ColumnDef, L3DataType, SchemaCatalog, TableSchema};
+use asap_control_core::intent_algebra::expr::{
+    AggIntent, Predicate, ProjectItem, QueryExpr, SortKey, Source,
+};
+use asap_control_core::intent_algebra::schema::{
+    ColumnDef, L3DataType, SchemaCatalog, TableSchema,
+};
 use asap_control_core::intent_algebra::{CompareOp, L3Expr, SetOpKind};
 use asap_control_core::types::AccuracyTarget;
 use asap_control_core::workload::{BatchEntry, Query, QueryLanguage, QueryWorkload, SqlDialect};
@@ -15,7 +19,11 @@ fn metrics_catalog() -> SchemaCatalog {
         "metrics".to_string(),
         TableSchema {
             columns: vec![
-                ColumnDef { name: "ts".to_string(), data_type: L3DataType::Int64, nullable: false },
+                ColumnDef {
+                    name: "ts".to_string(),
+                    data_type: L3DataType::Int64,
+                    nullable: false,
+                },
                 ColumnDef {
                     name: "value".to_string(),
                     data_type: L3DataType::Float64,
@@ -44,7 +52,11 @@ fn no_time_catalog() -> SchemaCatalog {
         "events".to_string(),
         TableSchema {
             columns: vec![
-                ColumnDef { name: "id".to_string(), data_type: L3DataType::Int64, nullable: false },
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: L3DataType::Int64,
+                    nullable: false,
+                },
                 ColumnDef {
                     name: "value".to_string(),
                     data_type: L3DataType::Float64,
@@ -65,7 +77,12 @@ fn no_time_catalog() -> SchemaCatalog {
 // ── Tree-walking helpers ──────────────────────────────────────────────────────
 
 /// Walk through Project/Filter/Sort/Limit wrappers to find the first Aggregate.
-fn find_aggregate(expr: &QueryExpr) -> Option<(&Vec<asap_control_core::intent_algebra::expr::GroupKey>, &Vec<AggIntent>)> {
+fn find_aggregate(
+    expr: &QueryExpr,
+) -> Option<(
+    &Vec<asap_control_core::intent_algebra::expr::GroupKey>,
+    &Vec<AggIntent>,
+)> {
     match expr {
         QueryExpr::Aggregate { by, aggs, .. } => Some((by, aggs)),
         QueryExpr::Project { child, .. }
@@ -79,7 +96,9 @@ fn find_aggregate(expr: &QueryExpr) -> Option<(&Vec<asap_control_core::intent_al
 /// Walk through wrappers to find the predicate of the first Filter node.
 fn find_predicate(expr: &QueryExpr) -> Option<&L3Expr> {
     match expr {
-        QueryExpr::Filter { pred: Predicate(e), .. } => Some(e),
+        QueryExpr::Filter {
+            pred: Predicate(e), ..
+        } => Some(e),
         QueryExpr::Project { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. } => find_predicate(&child.expr),
@@ -128,7 +147,10 @@ fn find_source(expr: &QueryExpr) -> Option<&Source> {
 async fn test_scan_table_name() {
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result = lowerer.lower("SELECT ts, value FROM metrics").await.unwrap();
+    let result = lowerer
+        .lower("SELECT ts, value FROM metrics")
+        .await
+        .unwrap();
 
     let source = find_source(&result).expect("expected a Scan node");
     let Source::Table { table_ref, .. } = source else {
@@ -141,7 +163,10 @@ async fn test_scan_table_name() {
 async fn test_projection_wraps_scan() {
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result = lowerer.lower("SELECT ts, value FROM metrics").await.unwrap();
+    let result = lowerer
+        .lower("SELECT ts, value FROM metrics")
+        .await
+        .unwrap();
 
     // DataFusion always emits a Projection for explicit SELECT lists.
     let QueryExpr::Project { cols, child } = result else {
@@ -209,7 +234,10 @@ async fn test_time_predicate_no_filter_wrapper() {
             _ => false,
         }
     }
-    assert!(!has_filter(&result), "expected no Filter node when only time predicates");
+    assert!(
+        !has_filter(&result),
+        "expected no Filter node when only time predicates"
+    );
 }
 
 #[tokio::test]
@@ -236,7 +264,10 @@ async fn test_mixed_filter_keeps_filter_and_time_range() {
             _ => false,
         }
     }
-    assert!(has_filter(&result), "expected Filter node for non-time predicate");
+    assert!(
+        has_filter(&result),
+        "expected Filter node for non-time predicate"
+    );
 }
 
 // ── Tests: Aggregates ─────────────────────────────────────────────────────────
@@ -250,25 +281,34 @@ async fn test_count_star_exact() {
     let (by, aggs) = find_aggregate(&result).expect("expected Aggregate");
     assert!(by.is_empty(), "no GROUP BY expected");
     assert_eq!(aggs.len(), 1);
-    assert!(matches!(aggs[0], AggIntent::Count { accuracy: AccuracyTarget::Exact }));
+    assert!(matches!(
+        aggs[0],
+        AggIntent::Count {
+            accuracy: AccuracyTarget::Exact
+        }
+    ));
 }
 
 #[tokio::test]
 async fn test_count_inherits_accuracy() {
     let catalog = metrics_catalog();
-    let lowerer =
-        SqlLowerer::new(&catalog, AccuracyTarget::Epsilon(0.01));
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Epsilon(0.01));
     let result = lowerer.lower("SELECT COUNT(*) FROM metrics").await.unwrap();
 
     let (_, aggs) = find_aggregate(&result).unwrap();
-    assert!(matches!(aggs[0], AggIntent::Count { accuracy: AccuracyTarget::Epsilon(e) } if (e - 0.01).abs() < 1e-12));
+    assert!(
+        matches!(aggs[0], AggIntent::Count { accuracy: AccuracyTarget::Epsilon(e) } if (e - 0.01).abs() < 1e-12)
+    );
 }
 
 #[tokio::test]
 async fn test_sum_aggregate() {
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result = lowerer.lower("SELECT SUM(value) FROM metrics").await.unwrap();
+    let result = lowerer
+        .lower("SELECT SUM(value) FROM metrics")
+        .await
+        .unwrap();
 
     let (_, aggs) = find_aggregate(&result).unwrap();
     assert_eq!(aggs.len(), 1);
@@ -279,8 +319,10 @@ async fn test_sum_aggregate() {
 async fn test_min_max_aggregates() {
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result =
-        lowerer.lower("SELECT MIN(value), MAX(value) FROM metrics").await.unwrap();
+    let result = lowerer
+        .lower("SELECT MIN(value), MAX(value) FROM metrics")
+        .await
+        .unwrap();
 
     let (_, aggs) = find_aggregate(&result).unwrap();
     assert_eq!(aggs.len(), 2);
@@ -292,7 +334,10 @@ async fn test_min_max_aggregates() {
 async fn test_avg_aggregate() {
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result = lowerer.lower("SELECT AVG(value) FROM metrics").await.unwrap();
+    let result = lowerer
+        .lower("SELECT AVG(value) FROM metrics")
+        .await
+        .unwrap();
 
     let (_, aggs) = find_aggregate(&result).unwrap();
     assert!(aggs.iter().any(|a| matches!(a, AggIntent::Avg)));
@@ -302,7 +347,10 @@ async fn test_avg_aggregate() {
 async fn test_stddev_sample() {
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result = lowerer.lower("SELECT STDDEV(value) FROM metrics").await.unwrap();
+    let result = lowerer
+        .lower("SELECT STDDEV(value) FROM metrics")
+        .await
+        .unwrap();
 
     let (_, aggs) = find_aggregate(&result).unwrap();
     assert!(aggs
@@ -314,8 +362,10 @@ async fn test_stddev_sample() {
 async fn test_group_by_extracted() {
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result =
-        lowerer.lower("SELECT region, COUNT(*) FROM metrics GROUP BY region").await.unwrap();
+    let result = lowerer
+        .lower("SELECT region, COUNT(*) FROM metrics GROUP BY region")
+        .await
+        .unwrap();
 
     let (by, aggs) = find_aggregate(&result).unwrap();
     assert_eq!(by.len(), 1);
@@ -342,25 +392,36 @@ async fn test_multiple_aggregates_in_one_node() {
 async fn test_count_distinct_becomes_cardinality() {
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result =
-        lowerer.lower("SELECT COUNT(DISTINCT host) FROM metrics").await.unwrap();
+    let result = lowerer
+        .lower("SELECT COUNT(DISTINCT host) FROM metrics")
+        .await
+        .unwrap();
 
     let (_, aggs) = find_aggregate(&result).unwrap();
-    assert!(aggs.iter().any(|a| matches!(a, AggIntent::Cardinality { .. })));
+    assert!(aggs
+        .iter()
+        .any(|a| matches!(a, AggIntent::Cardinality { .. })));
 }
 
 #[tokio::test]
 async fn test_approx_percentile_becomes_quantile() {
     let catalog = metrics_catalog();
-    let lowerer =
-        SqlLowerer::new(&catalog, AccuracyTarget::EpsilonDelta { epsilon: 0.01, delta: 0.001 });
+    let lowerer = SqlLowerer::new(
+        &catalog,
+        AccuracyTarget::EpsilonDelta {
+            epsilon: 0.01,
+            delta: 0.001,
+        },
+    );
     let result = lowerer
         .lower("SELECT approx_percentile_cont(value, 0.99) FROM metrics")
         .await
         .unwrap();
 
     let (_, aggs) = find_aggregate(&result).unwrap();
-    assert!(aggs.iter().any(|a| matches!(a, AggIntent::Quantile { q, .. } if (*q - 0.99).abs() < 1e-12)));
+    assert!(aggs
+        .iter()
+        .any(|a| matches!(a, AggIntent::Quantile { q, .. } if (*q - 0.99).abs() < 1e-12)));
 }
 
 // ── Test: TopK heavy-hitter pattern ──────────────────────────────────────────
@@ -454,7 +515,10 @@ async fn test_filter_predicate_references_filtered_column() {
 
     let pred = find_predicate(&result).expect("expected Filter predicate");
     let refs = pred.columns_referenced();
-    assert!(refs.iter().any(|r| r.0 == "value"), "expected 'value' column ref in predicate");
+    assert!(
+        refs.iter().any(|r| r.0 == "value"),
+        "expected 'value' column ref in predicate"
+    );
 }
 
 #[tokio::test]
@@ -488,11 +552,18 @@ async fn test_project_items_carry_column_refs() {
     let col_names: Vec<&str> = items
         .iter()
         .filter_map(|pi| {
-            if let L3Expr::Column(c) = &pi.expr { Some(c.0.as_str()) } else { None }
+            if let L3Expr::Column(c) = &pi.expr {
+                Some(c.0.as_str())
+            } else {
+                None
+            }
         })
         .collect();
     assert!(col_names.contains(&"id"), "expected 'id' in project items");
-    assert!(col_names.contains(&"value"), "expected 'value' in project items");
+    assert!(
+        col_names.contains(&"value"),
+        "expected 'value' in project items"
+    );
 }
 
 #[tokio::test]
@@ -500,7 +571,10 @@ async fn test_sort_key_ascending_flag() {
     // ORDER BY id ASC → SortKey with ascending = true.
     let catalog = no_time_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result = lowerer.lower("SELECT id FROM events ORDER BY id ASC").await.unwrap();
+    let result = lowerer
+        .lower("SELECT id FROM events ORDER BY id ASC")
+        .await
+        .unwrap();
 
     let keys = find_sort_keys(&result).expect("expected Sort node");
     assert_eq!(keys.len(), 1);
@@ -512,7 +586,10 @@ async fn test_sort_key_descending_flag() {
     // ORDER BY value DESC → SortKey with ascending = false.
     let catalog = no_time_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result = lowerer.lower("SELECT id FROM events ORDER BY value DESC").await.unwrap();
+    let result = lowerer
+        .lower("SELECT id FROM events ORDER BY value DESC")
+        .await
+        .unwrap();
 
     let keys = find_sort_keys(&result).expect("expected Sort node");
     assert_eq!(keys.len(), 1);
@@ -526,7 +603,10 @@ async fn test_filter_is_null_predicate() {
     // WHERE value IS NULL → IsNull(Column("value"))
     let catalog = no_time_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result = lowerer.lower("SELECT id FROM events WHERE value IS NULL").await.unwrap();
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE value IS NULL")
+        .await
+        .unwrap();
 
     let pred = find_predicate(&result).expect("expected Filter predicate");
     assert!(
@@ -540,10 +620,18 @@ async fn test_filter_in_list_predicate() {
     // WHERE id IN (1, 2, 3) → InList { expr: Column("id"), list: [..], negated: false }
     let catalog = no_time_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result = lowerer.lower("SELECT id FROM events WHERE id IN (1, 2, 3)").await.unwrap();
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE id IN (1, 2, 3)")
+        .await
+        .unwrap();
 
     let pred = find_predicate(&result).expect("expected Filter predicate");
-    let L3Expr::InList { expr, list, negated } = pred else {
+    let L3Expr::InList {
+        expr,
+        list,
+        negated,
+    } = pred
+    else {
         panic!("expected InList, got: {pred:?}");
     };
     assert!(matches!(expr.as_ref(), L3Expr::Column(c) if c.0 == "id"));
@@ -563,10 +651,26 @@ async fn test_filter_between_normalizes_to_bool_and() {
 
     let pred = find_predicate(&result).expect("expected Filter predicate");
     let conjuncts = pred.conjuncts();
-    assert_eq!(conjuncts.len(), 2, "BETWEEN should produce 2 conjuncts, got: {pred:?}");
+    assert_eq!(
+        conjuncts.len(),
+        2,
+        "BETWEEN should produce 2 conjuncts, got: {pred:?}"
+    );
     // First conjunct: value >= 0, second: value <= 100
-    assert!(matches!(&conjuncts[0], L3Expr::Compare { op: CompareOp::Ge, .. }));
-    assert!(matches!(&conjuncts[1], L3Expr::Compare { op: CompareOp::Le, .. }));
+    assert!(matches!(
+        &conjuncts[0],
+        L3Expr::Compare {
+            op: CompareOp::Ge,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &conjuncts[1],
+        L3Expr::Compare {
+            op: CompareOp::Le,
+            ..
+        }
+    ));
 }
 
 // ── Tests: lower_batch ────────────────────────────────────────────────────────
@@ -577,7 +681,10 @@ fn make_workload(queries: Vec<&str>) -> QueryWorkload {
         query_batch: Some(
             queries
                 .into_iter()
-                .map(|q| BatchEntry { query: Query(q.to_string()), requirements: None })
+                .map(|q| BatchEntry {
+                    query: Query(q.to_string()),
+                    requirements: None,
+                })
                 .collect(),
         ),
         repeating_queries: None,
@@ -601,8 +708,10 @@ async fn test_lower_batch_empty_returns_empty_vec() {
 #[tokio::test]
 async fn test_lower_batch_two_valid_queries() {
     let catalog = metrics_catalog();
-    let workload =
-        make_workload(vec!["SELECT COUNT(*) FROM metrics", "SELECT SUM(value) FROM metrics"]);
+    let workload = make_workload(vec![
+        "SELECT COUNT(*) FROM metrics",
+        "SELECT SUM(value) FROM metrics",
+    ]);
     let results = lower_batch(&workload, &catalog).await;
     assert_eq!(results.len(), 2);
     assert!(results[0].is_ok(), "first query should succeed");
@@ -624,10 +733,16 @@ async fn test_lower_batch_error_is_per_query() {
 async fn test_unknown_table_returns_error() {
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let err = lowerer.lower("SELECT x FROM ghost_table").await.unwrap_err();
+    let err = lowerer
+        .lower("SELECT x FROM ghost_table")
+        .await
+        .unwrap_err();
     // DataFusion will reject the unknown table during planning
     assert!(
-        matches!(err, LoweringError::DataFusion(_) | LoweringError::TableNotFound(_)),
+        matches!(
+            err,
+            LoweringError::DataFusion(_) | LoweringError::TableNotFound(_)
+        ),
         "unexpected error variant: {err}"
     );
 }
@@ -639,9 +754,10 @@ async fn test_promql_workload_returns_wrong_language() {
     let catalog = metrics_catalog();
     let workload = QueryWorkload {
         language: QueryLanguage::PromQL,
-        query_batch: Some(vec![
-            BatchEntry { query: Query("some_metric".into()), requirements: None },
-        ]),
+        query_batch: Some(vec![BatchEntry {
+            query: Query("some_metric".into()),
+            requirements: None,
+        }]),
         repeating_queries: None,
         data_characteristics: None,
     };
@@ -649,7 +765,8 @@ async fn test_promql_workload_returns_wrong_language() {
     assert_eq!(results.len(), 1);
     assert!(
         matches!(results[0], Err(LoweringError::WrongLanguage(_))),
-        "expected WrongLanguage, got: {:?}", results[0]
+        "expected WrongLanguage, got: {:?}",
+        results[0]
     );
 }
 
@@ -658,9 +775,10 @@ async fn test_elastic_dsl_workload_returns_wrong_language() {
     let catalog = metrics_catalog();
     let workload = QueryWorkload {
         language: QueryLanguage::ElasticDSL,
-        query_batch: Some(vec![
-            BatchEntry { query: Query("{\"query\":{}}".into()), requirements: None },
-        ]),
+        query_batch: Some(vec![BatchEntry {
+            query: Query("{\"query\":{}}".into()),
+            requirements: None,
+        }]),
         repeating_queries: None,
         data_characteristics: None,
     };
@@ -674,9 +792,10 @@ async fn test_datafusion_language_accepted() {
     let catalog = metrics_catalog();
     let workload = QueryWorkload {
         language: QueryLanguage::DataFusion,
-        query_batch: Some(vec![
-            BatchEntry { query: Query("SELECT COUNT(*) FROM metrics".into()), requirements: None },
-        ]),
+        query_batch: Some(vec![BatchEntry {
+            query: Query("SELECT COUNT(*) FROM metrics".into()),
+            requirements: None,
+        }]),
         repeating_queries: None,
         data_characteristics: None,
     };
@@ -701,7 +820,9 @@ async fn test_time_between_extracted_to_source() {
     let Source::Table { time_range, .. } = source else {
         panic!("expected Source::Table");
     };
-    let tr = time_range.as_ref().expect("expected time_range from BETWEEN");
+    let tr = time_range
+        .as_ref()
+        .expect("expected time_range from BETWEEN");
     assert_eq!(tr.start_ms, Some(1000));
     assert_eq!(tr.end_ms, Some(2000));
 }
@@ -724,7 +845,10 @@ async fn test_time_between_leaves_no_filter_wrapper() {
             _ => false,
         }
     }
-    assert!(!has_filter(&result), "BETWEEN on time col should leave no Filter wrapper");
+    assert!(
+        !has_filter(&result),
+        "BETWEEN on time col should leave no Filter wrapper"
+    );
 }
 
 #[tokio::test]
@@ -753,7 +877,10 @@ async fn test_time_between_mixed_with_non_time_predicate() {
             _ => false,
         }
     }
-    assert!(has_filter(&result), "expected Filter for non-time predicate");
+    assert!(
+        has_filter(&result),
+        "expected Filter for non-time predicate"
+    );
 }
 
 // ── Tests: multi-dialect SQL ──────────────────────────────────────────────────
@@ -763,9 +890,10 @@ async fn test_clickhouse_dialect_returns_unsupported_dialect() {
     let catalog = metrics_catalog();
     let workload = QueryWorkload {
         language: QueryLanguage::SQL(SqlDialect::ClickhouseSQL),
-        query_batch: Some(vec![
-            BatchEntry { query: Query("SELECT COUNT(*) FROM metrics".into()), requirements: None },
-        ]),
+        query_batch: Some(vec![BatchEntry {
+            query: Query("SELECT COUNT(*) FROM metrics".into()),
+            requirements: None,
+        }]),
         repeating_queries: None,
         data_characteristics: None,
     };
@@ -773,7 +901,8 @@ async fn test_clickhouse_dialect_returns_unsupported_dialect() {
     assert_eq!(results.len(), 1);
     assert!(
         matches!(results[0], Err(LoweringError::UnsupportedDialect(_))),
-        "expected UnsupportedDialect, got: {:?}", results[0]
+        "expected UnsupportedDialect, got: {:?}",
+        results[0]
     );
 }
 
@@ -782,9 +911,10 @@ async fn test_elastic_sql_dialect_returns_unsupported_dialect() {
     let catalog = metrics_catalog();
     let workload = QueryWorkload {
         language: QueryLanguage::SQL(SqlDialect::ElasticSQL),
-        query_batch: Some(vec![
-            BatchEntry { query: Query("{\"query\":{}}".into()), requirements: None },
-        ]),
+        query_batch: Some(vec![BatchEntry {
+            query: Query("{\"query\":{}}".into()),
+            requirements: None,
+        }]),
         repeating_queries: None,
         data_characteristics: None,
     };
@@ -792,7 +922,8 @@ async fn test_elastic_sql_dialect_returns_unsupported_dialect() {
     assert_eq!(results.len(), 1);
     assert!(
         matches!(results[0], Err(LoweringError::UnsupportedDialect(_))),
-        "expected UnsupportedDialect, got: {:?}", results[0]
+        "expected UnsupportedDialect, got: {:?}",
+        results[0]
     );
 }
 
@@ -801,15 +932,20 @@ async fn test_datafusion_sql_dialect_accepted() {
     let catalog = metrics_catalog();
     let workload = QueryWorkload {
         language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
-        query_batch: Some(vec![
-            BatchEntry { query: Query("SELECT COUNT(*) FROM metrics".into()), requirements: None },
-        ]),
+        query_batch: Some(vec![BatchEntry {
+            query: Query("SELECT COUNT(*) FROM metrics".into()),
+            requirements: None,
+        }]),
         repeating_queries: None,
         data_characteristics: None,
     };
     let results = lower_batch(&workload, &catalog).await;
     assert_eq!(results.len(), 1);
-    assert!(results[0].is_ok(), "SQL(DataFusionSQL) should be accepted, got: {:?}", results[0]);
+    assert!(
+        results[0].is_ok(),
+        "SQL(DataFusionSQL) should be accepted, got: {:?}",
+        results[0]
+    );
 }
 
 // ── Tests: Source::Table.columns ─────────────────────────────────────────────
@@ -820,7 +956,10 @@ async fn test_scan_columns_populated_from_projection() {
     // into the TableScan; Source::Table.columns should name the two columns.
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let result = lowerer.lower("SELECT ts, value FROM metrics").await.unwrap();
+    let result = lowerer
+        .lower("SELECT ts, value FROM metrics")
+        .await
+        .unwrap();
 
     let source = find_source(&result).expect("expected a Scan");
     let Source::Table { columns, .. } = source else {
@@ -828,8 +967,14 @@ async fn test_scan_columns_populated_from_projection() {
     };
     // At minimum, each named column should appear in the list.
     let names: Vec<&str> = columns.iter().map(|c| c.0.as_str()).collect();
-    assert!(names.contains(&"ts"), "expected 'ts' in columns, got: {names:?}");
-    assert!(names.contains(&"value"), "expected 'value' in columns, got: {names:?}");
+    assert!(
+        names.contains(&"ts"),
+        "expected 'ts' in columns, got: {names:?}"
+    );
+    assert!(
+        names.contains(&"value"),
+        "expected 'value' in columns, got: {names:?}"
+    );
 }
 
 #[tokio::test]
@@ -844,7 +989,10 @@ async fn test_scan_columns_empty_for_select_star() {
     let Source::Table { columns, .. } = source else {
         panic!("expected Source::Table");
     };
-    assert!(columns.is_empty(), "SELECT * should produce no column constraints, got: {columns:?}");
+    assert!(
+        columns.is_empty(),
+        "SELECT * should produce no column constraints, got: {columns:?}"
+    );
 }
 
 // ── Tests: UNION / UNION ALL ──────────────────────────────────────────────────
@@ -888,7 +1036,10 @@ async fn test_union_distinct_produces_distinct_over_set_op() {
             _ => false,
         }
     }
-    assert!(has_distinct(&result), "UNION DISTINCT should produce a Distinct node");
+    assert!(
+        has_distinct(&result),
+        "UNION DISTINCT should produce a Distinct node"
+    );
 }
 
 // ── Tests: arithmetic / negative / LIKE / CASE in expressions ────────────────
@@ -899,7 +1050,10 @@ async fn test_arithmetic_in_projection_succeeds() {
     let catalog = no_time_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
     let result = lowerer.lower("SELECT value * 2.0 FROM events").await;
-    assert!(result.is_ok(), "arithmetic in projection should succeed, got: {result:?}");
+    assert!(
+        result.is_ok(),
+        "arithmetic in projection should succeed, got: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -910,7 +1064,10 @@ async fn test_arithmetic_in_predicate_succeeds() {
     let result = lowerer
         .lower("SELECT id FROM events WHERE value * 0.9 > 5.0")
         .await;
-    assert!(result.is_ok(), "arithmetic in predicate should succeed, got: {result:?}");
+    assert!(
+        result.is_ok(),
+        "arithmetic in predicate should succeed, got: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -924,7 +1081,10 @@ async fn test_arithmetic_predicate_references_column() {
         .unwrap();
     let pred = find_predicate(&result).expect("expected Filter predicate");
     let refs = pred.columns_referenced();
-    assert!(refs.iter().any(|r| r.0 == "value"), "expected 'value' in predicate refs");
+    assert!(
+        refs.iter().any(|r| r.0 == "value"),
+        "expected 'value' in predicate refs"
+    );
 }
 
 #[tokio::test]
@@ -935,7 +1095,10 @@ async fn test_negative_literal_in_predicate_succeeds() {
     let result = lowerer
         .lower("SELECT id FROM events WHERE value > -1.0")
         .await;
-    assert!(result.is_ok(), "unary minus in predicate should succeed, got: {result:?}");
+    assert!(
+        result.is_ok(),
+        "unary minus in predicate should succeed, got: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -949,7 +1112,13 @@ async fn test_like_predicate_produces_compare_like() {
         .unwrap();
     let pred = find_predicate(&result).expect("expected Filter predicate");
     assert!(
-        matches!(pred, L3Expr::Compare { op: CompareOp::Like, .. }),
+        matches!(
+            pred,
+            L3Expr::Compare {
+                op: CompareOp::Like,
+                ..
+            }
+        ),
         "expected Compare(Like), got: {pred:?}"
     );
 }
@@ -965,7 +1134,13 @@ async fn test_ilike_predicate_produces_compare_ilike() {
         .unwrap();
     let pred = find_predicate(&result).expect("expected Filter predicate");
     assert!(
-        matches!(pred, L3Expr::Compare { op: CompareOp::ILike, .. }),
+        matches!(
+            pred,
+            L3Expr::Compare {
+                op: CompareOp::ILike,
+                ..
+            }
+        ),
         "expected Compare(ILike), got: {pred:?}"
     );
 }
@@ -978,7 +1153,10 @@ async fn test_case_in_projection_succeeds() {
     let result = lowerer
         .lower("SELECT CASE WHEN value > 5.0 THEN 1 ELSE 0 END AS tier FROM events")
         .await;
-    assert!(result.is_ok(), "CASE WHEN in projection should succeed, got: {result:?}");
+    assert!(
+        result.is_ok(),
+        "CASE WHEN in projection should succeed, got: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -990,8 +1168,13 @@ async fn test_case_projection_item_is_case_expr() {
         .await
         .unwrap();
     let items = find_project_items(&result).expect("expected Project node");
-    let has_case = items.iter().any(|pi| matches!(pi.expr, L3Expr::Case { .. }));
-    assert!(has_case, "expected a Case expr in project items, got: {items:?}");
+    let has_case = items
+        .iter()
+        .any(|pi| matches!(pi.expr, L3Expr::Case { .. }));
+    assert!(
+        has_case,
+        "expected a Case expr in project items, got: {items:?}"
+    );
 }
 
 // ── Tests: populate_schemas ───────────────────────────────────────────────────
@@ -1003,7 +1186,11 @@ async fn test_populate_schemas_scan_gets_catalog_schema() {
     let expr = lowerer.lower("SELECT * FROM metrics").await.unwrap();
 
     let typed = populate_schemas(expr, &catalog);
-    assert_eq!(typed.schema.fields.len(), 4, "scan schema should have 4 fields from catalog");
+    assert_eq!(
+        typed.schema.fields.len(),
+        4,
+        "scan schema should have 4 fields from catalog"
+    );
     assert_eq!(typed.schema.fields[0].name, "ts");
     assert_eq!(typed.schema.time_index, Some(0));
 }
@@ -1012,7 +1199,10 @@ async fn test_populate_schemas_scan_gets_catalog_schema() {
 async fn test_populate_schemas_project_gives_subset_schema() {
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let expr = lowerer.lower("SELECT ts, value FROM metrics").await.unwrap();
+    let expr = lowerer
+        .lower("SELECT ts, value FROM metrics")
+        .await
+        .unwrap();
 
     let typed = populate_schemas(expr, &catalog);
     assert_eq!(typed.schema.fields.len(), 2);
@@ -1026,7 +1216,10 @@ async fn test_populate_schemas_inner_nodes_are_typed() {
     // The child of the root Project (a Scan) should also have a non-empty schema.
     let catalog = metrics_catalog();
     let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
-    let expr = lowerer.lower("SELECT ts, value FROM metrics").await.unwrap();
+    let expr = lowerer
+        .lower("SELECT ts, value FROM metrics")
+        .await
+        .unwrap();
 
     let typed = populate_schemas(expr, &catalog);
     let QueryExpr::Project { child, .. } = &typed.expr else {

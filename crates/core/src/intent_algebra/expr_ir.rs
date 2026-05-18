@@ -55,7 +55,11 @@ pub enum L3Expr {
     /// A constant literal value.
     Literal(L3Scalar),
     /// `left op right` — binary comparison.
-    Compare { left: Box<L3Expr>, op: CompareOp, right: Box<L3Expr> },
+    Compare {
+        left: Box<L3Expr>,
+        op: CompareOp,
+        right: Box<L3Expr>,
+    },
     /// Flat conjunction (logical AND). An empty list is vacuously true.
     BoolAnd(Vec<L3Expr>),
     /// Flat disjunction (logical OR). An empty list is vacuously false.
@@ -69,11 +73,19 @@ pub enum L3Expr {
     /// `CAST(expr AS to)`.
     Cast { expr: Box<L3Expr>, to: L3DataType },
     /// `expr [NOT] IN (v1, v2, …)`.
-    InList { expr: Box<L3Expr>, list: Vec<L3Expr>, negated: bool },
+    InList {
+        expr: Box<L3Expr>,
+        list: Vec<L3Expr>,
+        negated: bool,
+    },
     /// Scalar function call, e.g. `LOWER(col)`, `ABS(x)`.
     FunctionCall { name: String, args: Vec<L3Expr> },
     /// Binary arithmetic: `left op right`.
-    Arith { op: ArithOp, left: Box<L3Expr>, right: Box<L3Expr> },
+    Arith {
+        op: ArithOp,
+        left: Box<L3Expr>,
+        right: Box<L3Expr>,
+    },
     /// SQL `CASE` expression (both searched and simple forms).
     /// `operand` is present for simple CASE (`CASE expr WHEN ...`),
     /// absent for searched CASE (`CASE WHEN condition THEN ...`).
@@ -118,9 +130,7 @@ impl L3Expr {
             L3Expr::BoolAnd(parts) | L3Expr::BoolOr(parts) => {
                 parts.iter().flat_map(|e| e.columns_referenced()).collect()
             }
-            L3Expr::Not(e) | L3Expr::IsNull(e) | L3Expr::IsNotNull(e) => {
-                e.columns_referenced()
-            }
+            L3Expr::Not(e) | L3Expr::IsNull(e) | L3Expr::IsNotNull(e) => e.columns_referenced(),
             L3Expr::Cast { expr, .. } => expr.columns_referenced(),
             L3Expr::InList { expr, list, .. } => {
                 let mut v = expr.columns_referenced();
@@ -135,7 +145,11 @@ impl L3Expr {
                 v.extend(right.columns_referenced());
                 v
             }
-            L3Expr::Case { operand, branches, else_expr } => {
+            L3Expr::Case {
+                operand,
+                branches,
+                else_expr,
+            } => {
                 let mut v = vec![];
                 if let Some(op) = operand {
                     v.extend(op.columns_referenced());
