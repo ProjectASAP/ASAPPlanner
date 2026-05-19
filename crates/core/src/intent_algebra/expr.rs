@@ -29,6 +29,11 @@ impl ColumnRef {
     /// Returns `true` when this ref is the `"*"` wildcard sentinel produced by
     /// `agg_col` for aggregate args that are not a named column (e.g. `COUNT(*)`).
     /// Schema derivation skips wildcard refs and falls back to the `Float64` default.
+    ///
+    /// TODO: replace this sentinel with `Option<ColumnRef>` in the `AggIntent` variants
+    /// that carry a `col` field (`Sum`, `Min`, `Max`, `Avg`, `Stddev`). `None` = no
+    /// column (wildcard / count-star); `Some(ColumnRef(...))` = real column. `agg_col`
+    /// would return `Option<ColumnRef>` and this method disappears entirely.
     pub fn is_wildcard(&self) -> bool {
         self.0 == "*"
     }
@@ -508,6 +513,10 @@ impl HasSchema for QueryExpr {
                     .iter()
                     .map(|item| match &item.expr {
                         L3Expr::Column(col_ref) => {
+                            // TODO: DataFusion may qualify column names with the table name
+                            // (e.g. "metrics.value") while child schema stores bare names
+                            // ("value"). Strip the qualifier before lookup so the fallback
+                            // Float64 default is not silently applied to real columns.
                             let child_f = cs.fields.iter().find(|f| f.name == col_ref.0);
                             let (dtype, nullable) = child_f
                                 .map(|f| (f.dtype.clone(), f.nullable))
@@ -645,9 +654,20 @@ impl HasSchema for QueryExpr {
                         }
                     })
                     .collect();
+                let time_col_name = cs.time_index.map(|ti| cs.fields[ti].name.clone());
+                let all_fields: Vec<L3Field> = by_fields.into_iter().chain(agg_fields).collect();
+                // Propagate time_index if a GROUP BY key preserved the time column in
+                // the output. Agg output columns are never the time axis.
+                let time_index = time_col_name.and_then(|tc| {
+                    if by.iter().any(|key| key.0 == tc) {
+                        all_fields.iter().position(|f| f.name == tc)
+                    } else {
+                        None
+                    }
+                });
                 L3Schema {
-                    fields: by_fields.into_iter().chain(agg_fields).collect(),
-                    time_index: None,
+                    fields: all_fields,
+                    time_index,
                 }
             }
 
@@ -664,6 +684,12 @@ impl HasSchema for QueryExpr {
                 });
                 let arg_dtype = || arg_field.map_or(L3DataType::Float64, |f| f.dtype.clone());
 
+                // TODO: the output column name should come from DataFusion's Window plan
+                // node schema (the actual name the enclosing Projection was built against,
+                // e.g. "row_number_1"), not a hardcoded string. An enclosing Project that
+                // references DataFusion's real name won't resolve it from this schema.
+                // Fix: thread the Window node's output field name through lower_window and
+                // store it on WindowFunc, then use it here instead of the hardcoded literals.
                 let (win_name, win_dtype, win_nullable) = match func {
                     WindowFuncKind::RowNumber => ("row_number", L3DataType::Int64, false),
                     WindowFuncKind::Rank => ("rank", L3DataType::Int64, false),

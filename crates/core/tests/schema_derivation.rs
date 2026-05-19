@@ -652,8 +652,8 @@ fn aggregate_topk_multi_key() {
 }
 
 #[test]
-fn aggregate_time_index_not_propagated() {
-    // Aggregating over a time-indexed child drops the time axis.
+fn aggregate_drops_time_index_when_time_col_not_in_group_by() {
+    // GROUP BY value (not ts): time axis is consumed by the aggregation.
     let cs = schema_with_time(
         vec![
             field("ts", L3DataType::Int64),
@@ -670,6 +670,31 @@ fn aggregate_time_index_not_propagated() {
     };
     let out = node.output_schema(&[&cs], &empty_catalog());
     assert_eq!(out.time_index, None);
+}
+
+#[test]
+fn aggregate_propagates_time_index_when_time_col_in_group_by() {
+    // GROUP BY ts — the time column survives into the output; time_index must be set.
+    let cs = schema_with_time(
+        vec![
+            field("ts", L3DataType::Int64),
+            nullable_field("value", L3DataType::Float64),
+        ],
+        0,
+    );
+    let node = QueryExpr::Aggregate {
+        child: dummy_scan(cs.clone()),
+        by: vec![GroupKey("ts".into())],
+        aggs: vec![AggIntent::Sum {
+            col: ColumnRef("value".into()),
+        }],
+        having: None,
+        output_names: vec!["sum_value".into()],
+    };
+    let out = node.output_schema(&[&cs], &empty_catalog());
+    // Output fields: [ts (by), sum_value (agg)]; ts is at index 0.
+    assert_eq!(out.time_index, Some(0));
+    assert_eq!(out.fields[0].name, "ts");
 }
 
 // ── HasSchema::output_schema() — Project ──────────────────────────────────────

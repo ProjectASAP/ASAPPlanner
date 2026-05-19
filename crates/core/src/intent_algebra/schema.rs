@@ -86,5 +86,10 @@ pub struct L3Schema {
 /// its children's output schemas. The `L3Node` wrapper stores the derived
 /// schema so derivation runs once at construction, not on every traversal.
 pub trait HasSchema {
+    /// # Panics
+    /// Panics if a `Scan` node references a table that is not present in
+    /// `catalog`. Callers must ensure every table referenced by the expression
+    /// tree is registered in the catalog before calling this method.
+    /// `lower_batch` enforces this invariant via upfront catalog validation.
     fn output_schema(&self, input_schemas: &[&L3Schema], catalog: &SchemaCatalog) -> L3Schema;
 }

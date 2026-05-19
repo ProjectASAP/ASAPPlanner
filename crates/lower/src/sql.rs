@@ -214,6 +214,10 @@ impl<'a> SqlLowerer<'a> {
         // schema the enclosing Projection was built against when it wrote its column
         // references (e.g. "MIN(metrics.ts)"). The first n_groups fields are the
         // GROUP BY columns; the remaining fields are the aggregate outputs.
+        // TODO: output_names couples core's Aggregate IR to DataFusion's internal
+        // naming convention. Cleaner boundary: emit a Project on top of every
+        // Aggregate that renames DataFusion's names to user-visible aliases, so
+        // Aggregate.output_names can be removed and column resolution lives in Project.
         let n_groups = agg.group_expr.len();
         let output_names: Vec<String> = agg
             .schema
@@ -339,6 +343,12 @@ impl<'a> SqlLowerer<'a> {
             } else {
                 func
             };
+            // lower_window_func_kind emits NthValue(0) as a sentinel that must
+            // be resolved to a real N above. Catch any bypass in debug builds.
+            debug_assert!(
+                !matches!(func, WindowFuncKind::NthValue(0)),
+                "NthValue(0) sentinel was not resolved; lower_window has a bug"
+            );
 
             let partition_by = wf
                 .partition_by
@@ -949,12 +959,25 @@ fn expr_to_ms(expr: &Expr) -> Option<i64> {
     }
 }
 
+/// Round `v` to the nearest millisecond and return it as `i64`.
+/// Returns `None` if `v` is non-finite or outside the `i64` range.
+fn float_to_ms(v: f64) -> Option<i64> {
+    let rounded = v.round();
+    // i64::MAX as f64 rounds up to 2^63, which overflows i64 on cast.
+    // Use strict less-than for the upper bound.
+    if rounded.is_finite() && rounded >= i64::MIN as f64 && rounded < i64::MAX as f64 {
+        Some(rounded as i64)
+    } else {
+        None
+    }
+}
+
 fn scalar_to_ms(sv: &ScalarValue) -> Option<i64> {
     match sv {
         ScalarValue::Int64(Some(v)) => Some(*v),
         ScalarValue::Int32(Some(v)) => Some(*v as i64),
-        ScalarValue::Float64(Some(v)) => Some(v.round() as i64), // ms-since-epoch stored as float
-        ScalarValue::Float32(Some(v)) => Some((*v as f64).round() as i64),
+        ScalarValue::Float64(Some(v)) => float_to_ms(*v),
+        ScalarValue::Float32(Some(v)) => float_to_ms(*v as f64),
         ScalarValue::TimestampMillisecond(Some(ms), _) => Some(*ms),
         ScalarValue::TimestampNanosecond(Some(ns), _) => Some(*ns / 1_000_000),
         ScalarValue::TimestampMicrosecond(Some(us), _) => Some(*us / 1_000),
@@ -1008,6 +1031,7 @@ fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKi
             "lead" => Ok(WindowFuncKind::Lead),
             "first_value" => Ok(WindowFuncKind::FirstValue),
             "last_value" => Ok(WindowFuncKind::LastValue),
+            // NthValue(0) is a sentinel; lower_window extracts the real N from args.
             "nth_value" => Ok(WindowFuncKind::NthValue(0)),
             other => Err(LoweringError::UnsupportedFeature(format!(
                 "window fn: {other}"
