@@ -16,6 +16,10 @@ pub use sql::SqlLowerer;
 /// One `Result` per entry — errors are per-query, not fatal for the batch.
 /// Returns an empty `Vec` if `workload.query_batch` is absent or empty.
 /// Returns `WrongLanguage` for every entry if the workload language is not SQL.
+///
+/// **The returned trees have empty schemas on every node** (`L3Schema::fields`
+/// is `vec![]`). Call [`populate_schemas`] on each successful result before
+/// inspecting node schemas or passing the trees to schema-aware stages.
 pub async fn lower_batch(
     workload: &QueryWorkload,
     catalog: &SchemaCatalog,

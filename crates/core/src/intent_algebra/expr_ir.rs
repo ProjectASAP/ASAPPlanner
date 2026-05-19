@@ -70,8 +70,13 @@ pub enum L3Expr {
     IsNull(Box<L3Expr>),
     /// `expr IS NOT NULL`.
     IsNotNull(Box<L3Expr>),
-    /// `CAST(expr AS to)`.
-    Cast { expr: Box<L3Expr>, to: L3DataType },
+    /// `CAST(expr AS to)`. `try_cast` is `true` for SQL `TRY_CAST`, which
+    /// returns `NULL` on conversion failure instead of raising an error.
+    Cast {
+        expr: Box<L3Expr>,
+        to: L3DataType,
+        try_cast: bool,
+    },
     /// `expr [NOT] IN (v1, v2, …)`.
     InList {
         expr: Box<L3Expr>,

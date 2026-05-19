@@ -1477,14 +1477,238 @@ async fn test_multiple_window_funcs_same_over_returns_error() {
              FROM metrics",
         )
         .await;
-    // Either succeeds (DataFusion split them into separate Window nodes) or
-    // returns our UnsupportedFeature error — never silently drops one.
-    if let Err(e) = &result {
-        assert!(
+
+    match &result {
+        Err(e) => assert!(
             matches!(e, LoweringError::UnsupportedFeature(msg) if msg.contains("multiple window")),
             "unexpected error: {e}"
-        );
+        ),
+        Ok(expr) => {
+            // DataFusion split them into separate Window nodes — both must be present.
+            fn count_window_funcs(e: &QueryExpr) -> usize {
+                match e {
+                    QueryExpr::WindowFunc { child, .. } => 1 + count_window_funcs(&child.expr),
+                    QueryExpr::Project { child, .. } => count_window_funcs(&child.expr),
+                    _ => 0,
+                }
+            }
+            assert_eq!(
+                count_window_funcs(expr),
+                2,
+                "when DataFusion splits window funcs both must appear in the lowered tree"
+            );
+        }
     }
-    // If it succeeds, both window funcs must produce output columns.
-    // (This case fires when DataFusion already splits them; accept it.)
+}
+
+// ── Tests: missing predicate coverage ────────────────────────────────────────
+
+#[tokio::test]
+async fn test_filter_is_not_null_predicate() {
+    // WHERE value IS NOT NULL → IsNotNull(Column("value"))
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE value IS NOT NULL")
+        .await
+        .unwrap();
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    assert!(
+        matches!(pred, L3Expr::IsNotNull(inner) if matches!(inner.as_ref(), L3Expr::Column(c) if c.0 == "value")),
+        "expected IsNotNull(Column(\"value\")), got: {pred:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_filter_not_in_list() {
+    // WHERE id NOT IN (1, 2, 3) → InList { negated: true }
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE id NOT IN (1, 2, 3)")
+        .await
+        .unwrap();
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    let L3Expr::InList {
+        expr,
+        list,
+        negated,
+    } = pred
+    else {
+        panic!("expected InList, got: {pred:?}");
+    };
+    assert!(matches!(expr.as_ref(), L3Expr::Column(c) if c.0 == "id"));
+    assert_eq!(list.len(), 3);
+    assert!(negated, "NOT IN should set negated=true");
+}
+
+#[tokio::test]
+async fn test_not_between_normalizes_to_bool_or() {
+    // WHERE value NOT BETWEEN 0 AND 100 → BoolOr([Compare(Lt), Compare(Gt)])
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT id FROM events WHERE value NOT BETWEEN 0.0 AND 100.0")
+        .await
+        .unwrap();
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    let disjuncts = pred.disjuncts();
+    assert_eq!(
+        disjuncts.len(),
+        2,
+        "NOT BETWEEN should produce 2 disjuncts, got: {pred:?}"
+    );
+    assert!(matches!(
+        &disjuncts[0],
+        L3Expr::Compare {
+            op: CompareOp::Lt,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &disjuncts[1],
+        L3Expr::Compare {
+            op: CompareOp::Gt,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn test_try_cast_sets_try_cast_flag() {
+    // TRY_CAST(value AS BIGINT) → Cast { try_cast: true }
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT TRY_CAST(value AS BIGINT) FROM events")
+        .await
+        .unwrap();
+    let items = find_project_items(&result).expect("expected Project node");
+    let has_try_cast = items
+        .iter()
+        .any(|pi| matches!(pi.expr, L3Expr::Cast { try_cast: true, .. }));
+    assert!(
+        has_try_cast,
+        "TRY_CAST should produce Cast {{ try_cast: true }}, got: {items:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_regular_cast_sets_try_cast_false() {
+    // CAST(value AS BIGINT) → Cast { try_cast: false }
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT CAST(value AS BIGINT) FROM events")
+        .await
+        .unwrap();
+    let items = find_project_items(&result).expect("expected Project node");
+    let has_cast = items.iter().any(|pi| {
+        matches!(
+            pi.expr,
+            L3Expr::Cast {
+                try_cast: false,
+                ..
+            }
+        )
+    });
+    assert!(
+        has_cast,
+        "CAST should produce Cast {{ try_cast: false }}, got: {items:?}"
+    );
+}
+
+// ── Tests: populate_schemas for additional node types ─────────────────────────
+
+#[tokio::test]
+async fn test_populate_schemas_filter_node_typed() {
+    // Project → Filter → Scan: both the root Project and the inner Filter
+    // should have non-empty schemas after populate_schemas.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower("SELECT ts FROM metrics WHERE value > 0.0")
+        .await
+        .unwrap();
+    let typed = populate_schemas(expr, &catalog);
+    // Root Project selects 1 column.
+    assert_eq!(typed.schema.fields.len(), 1);
+    assert_eq!(typed.schema.fields[0].name, "ts");
+    // The inner Filter child should also carry the full scan schema.
+    let QueryExpr::Project { child, .. } = &typed.expr else {
+        panic!("expected Project at root");
+    };
+    assert!(
+        !child.schema.fields.is_empty(),
+        "Filter child schema should be populated"
+    );
+}
+
+#[tokio::test]
+async fn test_populate_schemas_sort_node_typed() {
+    // Sort passes through its child schema.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower("SELECT ts, value FROM metrics ORDER BY ts")
+        .await
+        .unwrap();
+    let typed = populate_schemas(expr, &catalog);
+    // Root should have 2 fields regardless of whether Sort or Project is on top.
+    assert_eq!(typed.schema.fields.len(), 2);
+}
+
+#[tokio::test]
+async fn test_populate_schemas_limit_node_typed() {
+    // Limit passes through its child schema.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower("SELECT id FROM events LIMIT 5")
+        .await
+        .unwrap();
+    let typed = populate_schemas(expr, &catalog);
+    assert_eq!(typed.schema.fields.len(), 1);
+    assert_eq!(typed.schema.fields[0].name, "id");
+}
+
+#[tokio::test]
+async fn test_populate_schemas_set_op_uses_left_schema() {
+    // SetOp output schema matches the left child.
+    let catalog = no_time_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower("SELECT id FROM events UNION ALL SELECT id FROM events")
+        .await
+        .unwrap();
+    let typed = populate_schemas(expr, &catalog);
+    assert!(
+        !typed.schema.fields.is_empty(),
+        "SetOp schema should be populated after populate_schemas"
+    );
+    assert!(
+        typed.schema.fields.iter().any(|f| f.name == "id"),
+        "expected 'id' field in SetOp output schema, got: {:?}",
+        typed.schema.fields
+    );
+}
+
+#[tokio::test]
+async fn test_populate_schemas_window_func_appends_column() {
+    // WindowFunc appends one column to the child schema.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower(
+            "SELECT region, ROW_NUMBER() OVER (PARTITION BY region ORDER BY ts) \
+             FROM metrics",
+        )
+        .await
+        .unwrap();
+    let typed = populate_schemas(expr, &catalog);
+    // Root may be a Project; all nodes in the tree should have non-empty schemas.
+    assert!(
+        !typed.schema.fields.is_empty(),
+        "root schema should be populated after populate_schemas"
+    );
 }

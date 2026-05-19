@@ -1032,6 +1032,7 @@ fn project_cast_item_uses_target_type() {
             expr: L3Expr::Cast {
                 expr: Box::new(L3Expr::Column(ColumnRef("ts".into()))),
                 to: L3DataType::Float64,
+                try_cast: false,
             },
             alias: Some("ts_f".into()),
         }],

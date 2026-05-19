@@ -24,6 +24,15 @@ pub struct GroupKey(pub String);
 /// A reference to a column by name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ColumnRef(pub String);
+
+impl ColumnRef {
+    /// Returns `true` when this ref is the `"*"` wildcard sentinel produced by
+    /// `agg_col` for aggregate args that are not a named column (e.g. `COUNT(*)`).
+    /// Schema derivation skips wildcard refs and falls back to the `Float64` default.
+    pub fn is_wildcard(&self) -> bool {
+        self.0 == "*"
+    }
+}
 /// A set of partitioning keys (sharding hint for L5 stage allocator).
 #[derive(Debug, Clone)]
 pub struct PartitionKeys;
@@ -250,13 +259,22 @@ impl AggIntent {
 
     /// The column this intent aggregates, if tracked. Used by schema derivation
     /// to resolve the actual field type (e.g. so `MIN(ts: Int64)` → `Int64`).
+    /// Returns `None` for intents with no specific column (`Count`, `Cardinality`,
+    /// `TopK`, ...) and for the `"*"` wildcard sentinel produced by `agg_col`
+    /// when the aggregate arg is not a named column.
     pub fn col(&self) -> Option<&ColumnRef> {
         match self {
             Self::Sum { col }
             | Self::Min { col }
             | Self::Max { col }
             | Self::Avg { col }
-            | Self::Stddev { col, .. } => Some(col),
+            | Self::Stddev { col, .. } => {
+                if col.is_wildcard() {
+                    None
+                } else {
+                    Some(col)
+                }
+            }
             _ => None,
         }
     }

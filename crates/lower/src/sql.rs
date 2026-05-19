@@ -210,12 +210,19 @@ impl<'a> SqlLowerer<'a> {
             .iter()
             .map(|e| self.lower_agg_expr(e))
             .collect::<Result<Vec<_>, _>>()?;
-        // Use DataFusion's display string for each aggregate expression — this is
-        // exactly the name DataFusion assigns to the output column (e.g. "MIN(metrics.ts)"),
-        // which the enclosing Projection uses to reference aggregate outputs.
-        // Verified against DataFusion 43. If a DataFusion upgrade changes Expr::fmt output
-        // the aggregate schema tests in tests/sql_lowering.rs will fail loudly.
-        let output_names: Vec<String> = agg.aggr_expr.iter().map(|e| format!("{e}")).collect();
+        // Use DataFusion's own aggregate output schema for column names — the same
+        // schema the enclosing Projection was built against when it wrote its column
+        // references (e.g. "MIN(metrics.ts)"). The first n_groups fields are the
+        // GROUP BY columns; the remaining fields are the aggregate outputs.
+        let n_groups = agg.group_expr.len();
+        let output_names: Vec<String> = agg
+            .schema
+            .fields()
+            .iter()
+            .skip(n_groups)
+            .take(agg.aggr_expr.len())
+            .map(|f| f.name().to_string())
+            .collect();
         Ok(QueryExpr::Aggregate {
             child: make_untyped_node(child),
             by,
@@ -359,8 +366,8 @@ impl<'a> SqlLowerer<'a> {
                 frame: None,
             });
         }
-        Err(LoweringError::InvalidExpression(
-            "expected WindowFunction expr".into(),
+        Err(LoweringError::UnsupportedFeature(
+            "unexpected non-WindowFunction expr in Window plan node".into(),
         ))
     }
 
@@ -437,9 +444,13 @@ fn projection_columns(scan: &logical_expr::TableScan, schema: &TableSchema) -> V
 /// plan-node shapes our lowerer depends on.
 ///
 /// Handled topologies: `Project → Scan` and `Project → Filter → Scan`.
-/// `Project → Aggregate → Filter → Scan` is NOT handled here; aggregate
-/// lowering does not call this function, so Scan columns are left empty in
-/// that topology (benign for the current lowerer, but worth noting for extensions).
+///
+/// **Known gap**: `Project → Aggregate → * → Scan` is NOT handled. Aggregate
+/// lowering does not call this function, so `Scan.columns` stays empty in any
+/// topology where an Aggregate sits between the Project and the Scan. Any
+/// downstream stage that uses `Scan.columns` for pruning or cost estimation
+/// will see an unconstrained (full) scan in those cases. TODO: propagate
+/// column refs through the Aggregate child when implementing column-pruning.
 fn push_columns_into_scan(child: QueryExpr, cols: &[ProjectItem]) -> QueryExpr {
     match child {
         // Recurse through Filter so that Project → Filter → Scan works.
@@ -599,10 +610,7 @@ fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
 /// Split `expr` into `(time_range, non_time_conjuncts)`.
 /// Time-bound conjuncts are folded into the `TimeRange`; the rest are returned
 /// as a `Vec<&Expr>` so the caller can translate them with `df_expr_to_l3`.
-pub(crate) fn extract_time_range<'a>(
-    expr: &'a Expr,
-    time_col: &str,
-) -> (Option<TimeRange>, Vec<&'a Expr>) {
+fn extract_time_range<'a>(expr: &'a Expr, time_col: &str) -> (Option<TimeRange>, Vec<&'a Expr>) {
     let conjuncts = split_conjuncts(expr);
     let mut start_ms: Option<i64> = None;
     let mut end_ms: Option<i64> = None;
@@ -749,15 +757,18 @@ fn df_expr_to_l3(expr: &Expr) -> Result<L3Expr, LoweringError> {
             Ok(L3Expr::Cast {
                 expr: Box::new(inner),
                 to,
+                try_cast: false,
             })
         }
 
+        // TRY_CAST returns NULL on conversion failure; preserve that semantic.
         Expr::TryCast(c) => {
             let inner = df_expr_to_l3(&c.expr)?;
             let to = arrow_to_l3(&c.data_type)?;
             Ok(L3Expr::Cast {
                 expr: Box::new(inner),
                 to,
+                try_cast: true,
             })
         }
 
@@ -910,6 +921,9 @@ fn classify_time_pred(expr: &Expr, time_col: &str) -> TimeClass {
                 (Operator::Lt | Operator::LtEq, true) | (Operator::Gt | Operator::GtEq, false) => {
                     TimeClass::End(ms)
                 }
+                // Eq (exact timestamp equality) and all other operators cannot be
+                // expressed as a contiguous half-open range, so leave them as
+                // regular Filter predicates rather than time-range bounds.
                 _ => TimeClass::NonTime,
             }
         }
@@ -939,8 +953,8 @@ fn scalar_to_ms(sv: &ScalarValue) -> Option<i64> {
     match sv {
         ScalarValue::Int64(Some(v)) => Some(*v),
         ScalarValue::Int32(Some(v)) => Some(*v as i64),
-        ScalarValue::Float64(Some(v)) => Some(*v as i64), // ms-since-epoch stored as float
-        ScalarValue::Float32(Some(v)) => Some(*v as i64),
+        ScalarValue::Float64(Some(v)) => Some(v.round() as i64), // ms-since-epoch stored as float
+        ScalarValue::Float32(Some(v)) => Some((*v as f64).round() as i64),
         ScalarValue::TimestampMillisecond(Some(ms), _) => Some(*ms),
         ScalarValue::TimestampNanosecond(Some(ns), _) => Some(*ns / 1_000_000),
         ScalarValue::TimestampMicrosecond(Some(us), _) => Some(*us / 1_000),
