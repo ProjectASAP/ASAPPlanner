@@ -1,4 +1,3 @@
-use std::rc::Rc;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, Fields, Schema, TimeUnit};
@@ -55,17 +54,16 @@ impl<'a> SqlLowerer<'a> {
             LogicalPlan::Sort(sort) => self.lower_sort(sort),
             LogicalPlan::Limit(limit) => self.lower_limit(limit),
             LogicalPlan::Window(window) => self.lower_window(window),
-            LogicalPlan::Distinct(d) => {
-                let input = match d {
-                    Distinct::All(input) => input.as_ref(),
-                    Distinct::On(on) => on.input.as_ref(),
-                };
-                let child = self.lower_plan(input)?;
-                Ok(QueryExpr::Distinct {
-                    child: make_node(child),
-                    cols: vec![],
-                })
-            }
+            LogicalPlan::Distinct(d) => match d {
+                Distinct::On(_) => Err(LoweringError::UnsupportedFeature("DISTINCT ON".into())),
+                Distinct::All(input) => {
+                    let child = self.lower_plan(input)?;
+                    Ok(QueryExpr::Distinct {
+                        child: make_untyped_node(child),
+                        cols: vec![],
+                    })
+                }
+            },
             LogicalPlan::Union(u) => {
                 // Fold n inputs left-associatively into SetOp { Union, all: true }.
                 let mut iter = u.inputs.iter();
@@ -78,8 +76,8 @@ impl<'a> SqlLowerer<'a> {
                     Ok(QueryExpr::SetOp {
                         kind: SetOpKind::Union,
                         all: true,
-                        left: make_node(left),
-                        right: make_node(right),
+                        left: make_untyped_node(left),
+                        right: make_untyped_node(right),
                     })
                 })
             }
@@ -151,7 +149,7 @@ impl<'a> SqlLowerer<'a> {
                     } else {
                         let pred_expr = conjuncts_to_l3expr(non_time)?;
                         Ok(QueryExpr::Filter {
-                            child: make_node(scan_expr),
+                            child: make_untyped_node(scan_expr),
                             pred: Predicate(pred_expr),
                         })
                     };
@@ -162,7 +160,7 @@ impl<'a> SqlLowerer<'a> {
         let pred_expr = df_expr_to_l3(&filter.predicate)?;
         let child = self.lower_plan(&filter.input)?;
         Ok(QueryExpr::Filter {
-            child: make_node(child),
+            child: make_untyped_node(child),
             pred: Predicate(pred_expr),
         })
     }
@@ -195,7 +193,7 @@ impl<'a> SqlLowerer<'a> {
         let child = push_columns_into_scan(child, &cols);
 
         Ok(QueryExpr::Project {
-            child: make_node(child),
+            child: make_untyped_node(child),
             cols,
         })
     }
@@ -215,9 +213,11 @@ impl<'a> SqlLowerer<'a> {
         // Use DataFusion's display string for each aggregate expression — this is
         // exactly the name DataFusion assigns to the output column (e.g. "MIN(metrics.ts)"),
         // which the enclosing Projection uses to reference aggregate outputs.
+        // Verified against DataFusion 43. If a DataFusion upgrade changes Expr::fmt output
+        // the aggregate schema tests in tests/sql_lowering.rs will fail loudly.
         let output_names: Vec<String> = agg.aggr_expr.iter().map(|e| format!("{e}")).collect();
         Ok(QueryExpr::Aggregate {
-            child: make_node(child),
+            child: make_untyped_node(child),
             by,
             aggs,
             having: None,
@@ -248,7 +248,7 @@ impl<'a> SqlLowerer<'a> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(QueryExpr::Sort {
-            child: make_node(child),
+            child: make_untyped_node(child),
             keys,
         })
     }
@@ -267,7 +267,7 @@ impl<'a> SqlLowerer<'a> {
         }
         let child = self.lower_plan(&limit.input)?;
         Ok(QueryExpr::Limit {
-            child: make_node(child),
+            child: make_untyped_node(child),
             n: eval_fetch(&limit.fetch).map(|v| v as u64),
             offset: eval_fetch(&limit.skip).unwrap_or(0) as u64,
         })
@@ -285,7 +285,7 @@ impl<'a> SqlLowerer<'a> {
             .map(expr_to_col_ref)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(QueryExpr::Aggregate {
-            child: make_node(child),
+            child: make_untyped_node(child),
             by: vec![],
             aggs: vec![AggIntent::TopK {
                 k,
@@ -351,7 +351,7 @@ impl<'a> SqlLowerer<'a> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             return Ok(QueryExpr::WindowFunc {
-                child: make_node(child),
+                child: make_untyped_node(child),
                 func,
                 args,
                 partition_by,
@@ -435,13 +435,18 @@ fn projection_columns(scan: &logical_expr::TableScan, schema: &TableSchema) -> V
 /// DataFusion's unoptimized plan never sets `TableScan.projection`, so this
 /// compensates without requiring optimizer passes that could alter other
 /// plan-node shapes our lowerer depends on.
+///
+/// Handled topologies: `Project → Scan` and `Project → Filter → Scan`.
+/// `Project → Aggregate → Filter → Scan` is NOT handled here; aggregate
+/// lowering does not call this function, so Scan columns are left empty in
+/// that topology (benign for the current lowerer, but worth noting for extensions).
 fn push_columns_into_scan(child: QueryExpr, cols: &[ProjectItem]) -> QueryExpr {
     match child {
         // Recurse through Filter so that Project → Filter → Scan works.
         QueryExpr::Filter { child: inner, pred } => {
             let updated = push_columns_into_scan(inner.expr.clone(), cols);
             QueryExpr::Filter {
-                child: Rc::new(L3Node {
+                child: Arc::new(L3Node {
                     expr: updated,
                     schema: inner.schema.clone(),
                 }),
@@ -477,8 +482,8 @@ fn push_columns_into_scan(child: QueryExpr, cols: &[ProjectItem]) -> QueryExpr {
     }
 }
 
-fn make_node(expr: QueryExpr) -> Rc<L3Node> {
-    Rc::new(L3Node {
+fn make_untyped_node(expr: QueryExpr) -> Arc<L3Node> {
+    Arc::new(L3Node {
         expr,
         schema: L3Schema {
             fields: vec![],
@@ -491,9 +496,9 @@ fn make_node(expr: QueryExpr) -> Rc<L3Node> {
 /// Returns `None` for parametric (non-literal) fetch expressions.
 fn eval_fetch(expr_opt: &Option<Box<Expr>>) -> Option<usize> {
     expr_opt.as_ref().and_then(|e| match e.as_ref() {
-        Expr::Literal(ScalarValue::Int64(Some(v))) => Some(*v as usize),
+        Expr::Literal(ScalarValue::Int64(Some(v))) if *v >= 0 => Some(*v as usize),
         Expr::Literal(ScalarValue::UInt64(Some(v))) => Some(*v as usize),
-        Expr::Literal(ScalarValue::Int32(Some(v))) => Some(*v as usize),
+        Expr::Literal(ScalarValue::Int32(Some(v))) if *v >= 0 => Some(*v as usize),
         _ => None,
     })
 }
@@ -634,7 +639,7 @@ fn conjuncts_to_l3expr(conjuncts: Vec<&Expr>) -> Result<L3Expr, LoweringError> {
     let parts: Result<Vec<_>, _> = conjuncts.iter().map(|e| df_expr_to_l3(e)).collect();
     let mut parts = parts?;
     if parts.len() == 1 {
-        Ok(parts.remove(0))
+        Ok(parts.pop().unwrap())
     } else {
         Ok(L3Expr::BoolAnd(parts))
     }
@@ -934,6 +939,8 @@ fn scalar_to_ms(sv: &ScalarValue) -> Option<i64> {
     match sv {
         ScalarValue::Int64(Some(v)) => Some(*v),
         ScalarValue::Int32(Some(v)) => Some(*v as i64),
+        ScalarValue::Float64(Some(v)) => Some(*v as i64), // ms-since-epoch stored as float
+        ScalarValue::Float32(Some(v)) => Some(*v as i64),
         ScalarValue::TimestampMillisecond(Some(ms), _) => Some(*ms),
         ScalarValue::TimestampNanosecond(Some(ns), _) => Some(*ns / 1_000_000),
         ScalarValue::TimestampMicrosecond(Some(us), _) => Some(*us / 1_000),
@@ -1012,5 +1019,157 @@ fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKi
                 BuiltInWindowFunction::NthValue => Ok(WindowFuncKind::NthValue(0)),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
+
+    fn col(name: &str) -> Expr {
+        Expr::Column(datafusion::common::Column::new_unqualified(name))
+    }
+    fn int(v: i64) -> Expr {
+        Expr::Literal(ScalarValue::Int64(Some(v)))
+    }
+    fn float(v: f64) -> Expr {
+        Expr::Literal(ScalarValue::Float64(Some(v)))
+    }
+    fn bin(left: Expr, op: Operator, right: Expr) -> Expr {
+        Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        })
+    }
+    fn and(l: Expr, r: Expr) -> Expr {
+        bin(l, Operator::And, r)
+    }
+
+    #[test]
+    fn col_left_gt_lower_bound() {
+        let expr = bin(col("ts"), Operator::Gt, int(1000));
+        let (range, non_time) = extract_time_range(&expr, "ts");
+        assert_eq!(
+            range,
+            Some(TimeRange {
+                start_ms: Some(1000),
+                end_ms: None
+            })
+        );
+        assert!(non_time.is_empty());
+    }
+
+    #[test]
+    fn col_right_lt_is_start_bound() {
+        // `1000 < ts` ≡ `ts > 1000`
+        let expr = bin(int(1000), Operator::Lt, col("ts"));
+        let (range, non_time) = extract_time_range(&expr, "ts");
+        assert_eq!(
+            range,
+            Some(TimeRange {
+                start_ms: Some(1000),
+                end_ms: None
+            })
+        );
+        assert!(non_time.is_empty());
+    }
+
+    #[test]
+    fn col_right_gt_is_end_bound() {
+        // `2000 > ts` ≡ `ts < 2000`
+        let expr = bin(int(2000), Operator::Gt, col("ts"));
+        let (range, non_time) = extract_time_range(&expr, "ts");
+        assert_eq!(
+            range,
+            Some(TimeRange {
+                start_ms: None,
+                end_ms: Some(2000)
+            })
+        );
+        assert!(non_time.is_empty());
+    }
+
+    #[test]
+    fn overlapping_repeated_bounds_tighten() {
+        // `ts > 500 AND ts > 1000` → start = 1000 (tighter)
+        let expr = and(
+            bin(col("ts"), Operator::Gt, int(500)),
+            bin(col("ts"), Operator::Gt, int(1000)),
+        );
+        let (range, _) = extract_time_range(&expr, "ts");
+        assert_eq!(range.unwrap().start_ms, Some(1000));
+    }
+
+    #[test]
+    fn overlapping_end_bounds_tighten() {
+        // `ts < 2000 AND ts < 1500` → end = 1500 (tighter)
+        let expr = and(
+            bin(col("ts"), Operator::Lt, int(2000)),
+            bin(col("ts"), Operator::Lt, int(1500)),
+        );
+        let (range, _) = extract_time_range(&expr, "ts");
+        assert_eq!(range.unwrap().end_ms, Some(1500));
+    }
+
+    #[test]
+    fn between_contributes_both_bounds() {
+        use datafusion::logical_expr::Between;
+        let expr = Expr::Between(Between {
+            expr: Box::new(col("ts")),
+            negated: false,
+            low: Box::new(int(1000)),
+            high: Box::new(int(2000)),
+        });
+        let (range, non_time) = extract_time_range(&expr, "ts");
+        assert_eq!(
+            range,
+            Some(TimeRange {
+                start_ms: Some(1000),
+                end_ms: Some(2000)
+            })
+        );
+        assert!(non_time.is_empty());
+    }
+
+    #[test]
+    fn not_between_is_non_time() {
+        use datafusion::logical_expr::Between;
+        let expr = Expr::Between(Between {
+            expr: Box::new(col("ts")),
+            negated: true,
+            low: Box::new(int(1000)),
+            high: Box::new(int(2000)),
+        });
+        let (range, non_time) = extract_time_range(&expr, "ts");
+        assert!(range.is_none());
+        assert_eq!(non_time.len(), 1);
+    }
+
+    #[test]
+    fn float_literal_extracted_as_ms() {
+        let expr = bin(col("ts"), Operator::Gt, float(1_000_000.0));
+        let (range, non_time) = extract_time_range(&expr, "ts");
+        assert_eq!(
+            range,
+            Some(TimeRange {
+                start_ms: Some(1_000_000),
+                end_ms: None
+            })
+        );
+        assert!(non_time.is_empty());
+    }
+
+    #[test]
+    fn non_time_conjunct_passes_through() {
+        let expr = and(
+            bin(col("ts"), Operator::Gt, int(1000)),
+            bin(col("value"), Operator::Gt, int(0)),
+        );
+        let (range, non_time) = extract_time_range(&expr, "ts");
+        assert!(range.is_some());
+        assert_eq!(non_time.len(), 1);
     }
 }

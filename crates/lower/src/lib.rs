@@ -26,6 +26,10 @@ pub async fn lower_batch(
     };
 
     // Guard: only SQL languages are handled by this lowerer.
+    // `QueryLanguage::DataFusion` is an alias for `QueryLanguage::SQL(SqlDialect::DataFusionSQL)`:
+    // both were kept for backward compatibility with callers that pre-date the `SQL(dialect)`
+    // variant. New code should prefer `SQL(DataFusionSQL)`; `DataFusion` may be removed in a
+    // future version once all callers have migrated.
     if !matches!(
         workload.language,
         QueryLanguage::SQL(_) | QueryLanguage::DataFusion
@@ -45,6 +49,18 @@ pub async fn lower_batch(
             return entries
                 .iter()
                 .map(|_| Err(LoweringError::UnsupportedDialect(d.clone())))
+                .collect();
+        }
+    }
+
+    // Validate the catalog upfront so invalid time_column names are caught in all
+    // build profiles (debug_assert in lower_filter fires only in debug builds).
+    for (name, schema) in &catalog.tables {
+        if let Err(e) = schema.validate() {
+            let msg = format!("catalog table '{name}': {e}");
+            return entries
+                .iter()
+                .map(|_| Err(LoweringError::InvalidExpression(msg.clone())))
                 .collect();
         }
     }

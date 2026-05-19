@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::expr_ir::L3Expr;
@@ -263,26 +263,20 @@ impl AggIntent {
 
     /// Output column type for a single-column aggregate result.
     ///
-    /// `input` is the field being aggregated; used by `Min` and `Max` to
-    /// preserve the input type. For all other variants the input type is
-    /// ignored.
-    ///
-    /// **Do not call this for `TopK`** — TopK produces multiple output
-    /// columns; its schema is derived directly in `QueryExpr::output_schema`.
-    pub fn output_type(&self, input: &super::schema::L3Field) -> super::schema::L3DataType {
+    /// Returns `None` for `TopK`, which produces multiple output columns.
+    /// Use `QueryExpr::output_schema` for TopK schema derivation instead.
+    pub fn output_type(&self, input: &super::schema::L3Field) -> Option<super::schema::L3DataType> {
         use super::schema::L3DataType;
         match self {
-            Self::Count { .. } | Self::Cardinality { .. } => L3DataType::Int64,
-            Self::Min { .. } | Self::Max { .. } => input.dtype.clone(),
+            Self::Count { .. } | Self::Cardinality { .. } => Some(L3DataType::Int64),
+            Self::Min { .. } | Self::Max { .. } => Some(input.dtype.clone()),
             Self::Sum { .. }
             | Self::Avg { .. }
             | Self::Stddev { .. }
             | Self::Quantile { .. }
             | Self::Rate { .. }
-            | Self::Increase { .. } => L3DataType::Float64,
-            Self::TopK { .. } => {
-                panic!("TopK is multi-column; derive schema via QueryExpr::output_schema")
-            }
+            | Self::Increase { .. } => Some(L3DataType::Float64),
+            Self::TopK { .. } => None,
         }
     }
 }
@@ -291,7 +285,7 @@ impl AggIntent {
 
 /// A node in the L3 DAG. Wraps the expression and its derived output schema
 /// so that every edge implicitly carries a typed schema: holding an
-/// `Rc<L3Node>` gives you both the child expression and the schema of the
+/// `Arc<L3Node>` gives you both the child expression and the schema of the
 /// data flowing on that edge.
 #[derive(Debug, Clone)]
 pub struct L3Node {
@@ -321,12 +315,12 @@ pub enum QueryExpr {
     // ── Filtering & projection ────────────────────────────────────────────────
     /// σ — row-level filter. Output schema = child schema (unchanged).
     Filter {
-        child: Rc<L3Node>,
+        child: Arc<L3Node>,
         pred: Predicate,
     },
     /// π — column projection. Output schema = child schema projected to `cols`.
     Project {
-        child: Rc<L3Node>,
+        child: Arc<L3Node>,
         cols: Vec<ProjectItem>,
     },
 
@@ -334,7 +328,7 @@ pub enum QueryExpr {
     /// γ + α — GROUP BY + aggregate intents. Concrete operator (HashAgg /
     /// SortAgg / SketchAgg) chosen by L4; `aggs` carry intent only.
     Aggregate {
-        child: Rc<L3Node>,
+        child: Arc<L3Node>,
         by: Vec<GroupKey>,
         aggs: Vec<AggIntent>,
         having: Option<Predicate>,
@@ -351,7 +345,7 @@ pub enum QueryExpr {
     /// the flush / reset lifecycle for aggregates in its sub-DAG. SQL analytic
     /// frames are a different node (`WindowFunc`).
     TimeWindow {
-        child: Rc<L3Node>,
+        child: Arc<L3Node>,
         kind: TimeWindowKind,
         size: Duration,
         slide: Option<Duration>,
@@ -361,19 +355,19 @@ pub enum QueryExpr {
     /// Logical-only partitioning marker. Output schema = child schema.
     /// Carries a sharding hint for the L5 stage allocator.
     Partition {
-        child: Rc<L3Node>,
+        child: Arc<L3Node>,
         keys: PartitionKeys,
     },
     /// δ — SQL `DISTINCT` / row deduplication.
     Distinct {
-        child: Rc<L3Node>,
+        child: Arc<L3Node>,
         cols: Vec<ColumnRef>,
     },
     /// ⊕ — exact union of sub-results from independent stages or shards.
     /// Sketch unions are a separate node in `SummaryExpr` because they carry
     /// sketch-family / params type constraints.
     Merge {
-        children: Vec<Rc<L3Node>>,
+        children: Vec<Arc<L3Node>>,
     },
 
     // ── Joins ─────────────────────────────────────────────────────────────────
@@ -382,8 +376,8 @@ pub enum QueryExpr {
     /// accuracy target.
     Join {
         kind: JoinKind,
-        left: Rc<L3Node>,
-        right: Rc<L3Node>,
+        left: Arc<L3Node>,
+        right: Arc<L3Node>,
         pred: Option<Predicate>,
     },
 
@@ -391,19 +385,19 @@ pub enum QueryExpr {
     SetOp {
         kind: SetOpKind,
         all: bool,
-        left: Rc<L3Node>,
-        right: Rc<L3Node>,
+        left: Arc<L3Node>,
+        right: Arc<L3Node>,
     },
 
     // ── Ordering & limiting ───────────────────────────────────────────────────
     /// Generic order-by for non-heavy-hitter cases (`ORDER BY name LIMIT 10`).
     /// Heavy-hitter shapes lower to `AggIntent::TopK` instead.
     Sort {
-        child: Rc<L3Node>,
+        child: Arc<L3Node>,
         keys: Vec<SortKey>,
     },
     Limit {
-        child: Rc<L3Node>,
+        child: Arc<L3Node>,
         /// `None` means no upper bound (only an offset applies).
         n: Option<u64>,
         offset: u64,
@@ -411,7 +405,7 @@ pub enum QueryExpr {
 
     // ── Subquery / CTE ────────────────────────────────────────────────────────
     Subquery {
-        child: Rc<L3Node>,
+        child: Arc<L3Node>,
         alias: String,
     },
     /// SQL `WITH name AS (expr) … body`; lowering target for PromQL
@@ -419,8 +413,8 @@ pub enum QueryExpr {
     /// via `Ref(name)` in `body`, giving the DAG its fan-in.
     LetBinding {
         name: String,
-        expr: Rc<L3Node>,
-        body: Rc<L3Node>,
+        expr: Arc<L3Node>,
+        body: Arc<L3Node>,
     },
 
     // ── Analytic window functions ─────────────────────────────────────────────
@@ -428,7 +422,7 @@ pub enum QueryExpr {
     /// Distinct from `TimeWindow` — that is a streaming window over the time
     /// axis; this is an analytic frame over already-grouped rows.
     WindowFunc {
-        child: Rc<L3Node>,
+        child: Arc<L3Node>,
         func: WindowFuncKind,
         /// Expressions the function operates on (e.g. `LAG(value)` → `[Column("value")]`).
         /// Empty for rank-only funcs (`ROW_NUMBER`, `RANK`, `DENSE_RANK`).
@@ -443,8 +437,8 @@ pub enum QueryExpr {
     /// including `and` / `or` / `unless`, SQL boolean composition).
     BinaryOp {
         op: BinaryOpKind,
-        lhs: Rc<L3Node>,
-        rhs: Rc<L3Node>,
+        lhs: Arc<L3Node>,
+        rhs: Arc<L3Node>,
         vector_match: Option<VectorMatch>,
     },
 }
@@ -626,7 +620,9 @@ impl HasSchema for QueryExpr {
                             .unwrap_or_else(|| format!("agg_{i}"));
                         L3Field {
                             name,
-                            dtype: agg.output_type(&col_field),
+                            dtype: agg
+                                .output_type(&col_field)
+                                .unwrap_or(super::schema::L3DataType::Float64),
                             nullable: true,
                         }
                     })

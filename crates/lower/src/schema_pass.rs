@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 
 use asap_control_core::intent_algebra::expr::QueryExpr;
 use asap_control_core::intent_algebra::schema::{HasSchema, L3Schema, SchemaCatalog};
@@ -9,12 +9,12 @@ use asap_control_core::intent_algebra::L3Node;
 /// The lowerer creates every node with an empty schema (`make_node`). This
 /// pass walks the tree bottom-up, computing each node's output schema from
 /// its children's schemas and the catalog, and returns a fully typed
-/// `Rc<L3Node>` tree.
-pub fn populate_schemas(expr: QueryExpr, catalog: &SchemaCatalog) -> Rc<L3Node> {
+/// `Arc<L3Node>` tree.
+pub fn populate_schemas(expr: QueryExpr, catalog: &SchemaCatalog) -> Arc<L3Node> {
     let (rebuilt, child_schemas) = rebuild(expr, catalog);
     let refs: Vec<&L3Schema> = child_schemas.iter().collect();
     let schema = rebuilt.output_schema(&refs, catalog);
-    Rc::new(L3Node {
+    Arc::new(L3Node {
         expr: rebuilt,
         schema,
     })
@@ -26,8 +26,8 @@ pub fn populate_schemas(expr: QueryExpr, catalog: &SchemaCatalog) -> Rc<L3Node> 
 fn rebuild(expr: QueryExpr, catalog: &SchemaCatalog) -> (QueryExpr, Vec<L3Schema>) {
     use QueryExpr::*;
 
-    // Helper: process one child Rc<L3Node> → fresh Rc<L3Node> with schema set.
-    let proc = |node: Rc<L3Node>| populate_schemas(node.expr.clone(), catalog);
+    // Helper: process one child Arc<L3Node> → fresh Arc<L3Node> with schema set.
+    let proc = |node: Arc<L3Node>| populate_schemas(node.expr.clone(), catalog);
 
     match expr {
         // Leaf: schema comes from the catalog, no child schemas needed.
@@ -151,7 +151,7 @@ fn rebuild(expr: QueryExpr, catalog: &SchemaCatalog) -> (QueryExpr, Vec<L3Schema
             )
         }
         Merge { children } => {
-            let new_children: Vec<Rc<L3Node>> = children.into_iter().map(proc).collect();
+            let new_children: Vec<Arc<L3Node>> = children.into_iter().map(proc).collect();
             let schemas: Vec<L3Schema> = new_children.iter().map(|c| c.schema.clone()).collect();
             (
                 Merge {

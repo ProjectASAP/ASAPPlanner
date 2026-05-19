@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use asap_control_core::intent_algebra::{
     AggIntent, ArithOp, ColumnDef, ColumnRef, DataModel, GroupKey, HasSchema, L3DataType, L3Expr,
@@ -40,8 +40,8 @@ fn schema_with_time(fields: Vec<L3Field>, time_index: usize) -> L3Schema {
     }
 }
 
-fn make_node(expr: QueryExpr, s: L3Schema) -> Rc<L3Node> {
-    Rc::new(L3Node { expr, schema: s })
+fn make_node(expr: QueryExpr, s: L3Schema) -> Arc<L3Node> {
+    Arc::new(L3Node { expr, schema: s })
 }
 
 fn empty_catalog() -> SchemaCatalog {
@@ -244,7 +244,7 @@ fn output_type_count_is_int64() {
     let f = field("x", L3DataType::Float64);
     assert_eq!(
         AggIntent::Count { accuracy: exact() }.output_type(&f),
-        L3DataType::Int64
+        Some(L3DataType::Int64)
     );
 }
 
@@ -257,7 +257,7 @@ fn output_type_count_ignores_input_type() {
             accuracy: eps(0.01)
         }
         .output_type(&f),
-        L3DataType::Int64
+        Some(L3DataType::Int64)
     );
 }
 
@@ -266,7 +266,7 @@ fn output_type_cardinality_is_int64() {
     let f = field("host", L3DataType::Utf8);
     assert_eq!(
         AggIntent::Cardinality { accuracy: exact() }.output_type(&f),
-        L3DataType::Int64
+        Some(L3DataType::Int64)
     );
 }
 
@@ -278,7 +278,7 @@ fn output_type_sum_is_float64() {
             col: ColumnRef("value".into())
         }
         .output_type(&f),
-        L3DataType::Float64
+        Some(L3DataType::Float64)
     );
 }
 
@@ -290,7 +290,7 @@ fn output_type_avg_is_float64() {
             col: ColumnRef("value".into())
         }
         .output_type(&f),
-        L3DataType::Float64
+        Some(L3DataType::Float64)
     );
 }
 
@@ -303,7 +303,7 @@ fn output_type_stddev_sample_is_float64() {
             population: false
         }
         .output_type(&f),
-        L3DataType::Float64
+        Some(L3DataType::Float64)
     );
 }
 
@@ -316,7 +316,7 @@ fn output_type_stddev_population_is_float64() {
             population: true
         }
         .output_type(&f),
-        L3DataType::Float64
+        Some(L3DataType::Float64)
     );
 }
 
@@ -329,7 +329,7 @@ fn output_type_quantile_is_float64() {
             accuracy: exact()
         }
         .output_type(&f),
-        L3DataType::Float64
+        Some(L3DataType::Float64)
     );
 }
 
@@ -341,7 +341,7 @@ fn output_type_rate_is_float64() {
             window: std::time::Duration::from_secs(60)
         }
         .output_type(&f),
-        L3DataType::Float64
+        Some(L3DataType::Float64)
     );
 }
 
@@ -353,7 +353,7 @@ fn output_type_increase_is_float64() {
             window: std::time::Duration::from_secs(60)
         }
         .output_type(&f),
-        L3DataType::Float64
+        Some(L3DataType::Float64)
     );
 }
 
@@ -365,7 +365,7 @@ fn output_type_min_preserves_int64_input() {
             col: ColumnRef("count".into())
         }
         .output_type(&f),
-        L3DataType::Int64
+        Some(L3DataType::Int64)
     );
 }
 
@@ -377,7 +377,7 @@ fn output_type_min_preserves_float64_input() {
             col: ColumnRef("value".into())
         }
         .output_type(&f),
-        L3DataType::Float64
+        Some(L3DataType::Float64)
     );
 }
 
@@ -389,7 +389,21 @@ fn output_type_max_preserves_utf8_input() {
             col: ColumnRef("name".into())
         }
         .output_type(&f),
-        L3DataType::Utf8
+        Some(L3DataType::Utf8)
+    );
+}
+
+#[test]
+fn output_type_topk_is_none() {
+    let f = field("region", L3DataType::Utf8);
+    assert_eq!(
+        AggIntent::TopK {
+            k: 10,
+            by: vec![ColumnRef("region".into())],
+            accuracy: exact()
+        }
+        .output_type(&f),
+        None
     );
 }
 
@@ -455,7 +469,7 @@ fn child_schema() -> L3Schema {
     ])
 }
 
-fn dummy_scan(s: L3Schema) -> Rc<L3Node> {
+fn dummy_scan(s: L3Schema) -> Arc<L3Node> {
     make_node(
         QueryExpr::Scan {
             source: Source::Table {
