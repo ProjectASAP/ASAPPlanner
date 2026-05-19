@@ -193,12 +193,21 @@ pub enum AggIntent {
     Count {
         accuracy: AccuracyTarget,
     },
-    Sum,
-    Min,
-    Max,
-    Avg,
+    Sum {
+        col: ColumnRef,
+    },
+    Min {
+        col: ColumnRef,
+    },
+    Max {
+        col: ColumnRef,
+    },
+    Avg {
+        col: ColumnRef,
+    },
     /// Sample stddev when `population == false`; population stddev otherwise.
     Stddev {
+        col: ColumnRef,
         population: bool,
     },
     Quantile {
@@ -239,6 +248,19 @@ impl AggIntent {
         }
     }
 
+    /// The column this intent aggregates, if tracked. Used by schema derivation
+    /// to resolve the actual field type (e.g. so `MIN(ts: Int64)` → `Int64`).
+    pub fn col(&self) -> Option<&ColumnRef> {
+        match self {
+            Self::Sum { col }
+            | Self::Min { col }
+            | Self::Max { col }
+            | Self::Avg { col }
+            | Self::Stddev { col, .. } => Some(col),
+            _ => None,
+        }
+    }
+
     /// Output column type for a single-column aggregate result.
     ///
     /// `input` is the field being aggregated; used by `Min` and `Max` to
@@ -251,9 +273,9 @@ impl AggIntent {
         use super::schema::L3DataType;
         match self {
             Self::Count { .. } | Self::Cardinality { .. } => L3DataType::Int64,
-            Self::Min | Self::Max => input.dtype.clone(),
-            Self::Sum
-            | Self::Avg
+            Self::Min { .. } | Self::Max { .. } => input.dtype.clone(),
+            Self::Sum { .. }
+            | Self::Avg { .. }
             | Self::Stddev { .. }
             | Self::Quantile { .. }
             | Self::Rate { .. }
@@ -316,6 +338,12 @@ pub enum QueryExpr {
         by: Vec<GroupKey>,
         aggs: Vec<AggIntent>,
         having: Option<Predicate>,
+        /// Output column names parallel to `aggs`. When non-empty (populated by
+        /// the SQL lowerer from DataFusion's aggregate schema), `output_schema`
+        /// uses these names so that an enclosing `Project` can resolve aggregate
+        /// outputs by the names DataFusion assigned them (e.g. `"MIN(metrics.ts)"`).
+        /// Empty = fall back to synthetic `"agg_{i}"` names.
+        output_names: Vec<String>,
     },
 
     // ── Time / streaming windows ──────────────────────────────────────────────
@@ -376,7 +404,8 @@ pub enum QueryExpr {
     },
     Limit {
         child: Rc<L3Node>,
-        n: u64,
+        /// `None` means no upper bound (only an offset applies).
+        n: Option<u64>,
         offset: u64,
     },
 
@@ -543,7 +572,12 @@ impl HasSchema for QueryExpr {
             | QueryExpr::TimeWindow { .. } => child().clone(),
 
             // ── Aggregate: GROUP BY cols + one output col per AggIntent ───────
-            QueryExpr::Aggregate { by, aggs, .. } => {
+            QueryExpr::Aggregate {
+                by,
+                aggs,
+                output_names,
+                ..
+            } => {
                 let cs = child();
 
                 // TopK is the only multi-column AggIntent: produces the TopK
@@ -566,10 +600,9 @@ impl HasSchema for QueryExpr {
                 }
 
                 // General case: GROUP BY fields (preserving child type) followed
-                // by one output field per AggIntent. We use a Float64 dummy as
-                // the input field to output_type because L3 AggIntent does not
-                // track the aggregated column (known limitation; see TODO.md).
-                let dummy = L3Field {
+                // by one output field per AggIntent. Use the tracked col to look
+                // up the real field type; fall back to Float64 for untracked intents.
+                let float64_dummy = L3Field {
                     name: String::new(),
                     dtype: super::schema::L3DataType::Float64,
                     nullable: true,
@@ -581,10 +614,21 @@ impl HasSchema for QueryExpr {
                 let agg_fields: Vec<L3Field> = aggs
                     .iter()
                     .enumerate()
-                    .map(|(i, agg)| L3Field {
-                        name: format!("agg_{i}"),
-                        dtype: agg.output_type(&dummy),
-                        nullable: true,
+                    .map(|(i, agg)| {
+                        let col_field = agg
+                            .col()
+                            .and_then(|c| cs.fields.iter().find(|f| f.name == c.0))
+                            .cloned()
+                            .unwrap_or_else(|| float64_dummy.clone());
+                        let name = output_names
+                            .get(i)
+                            .cloned()
+                            .unwrap_or_else(|| format!("agg_{i}"));
+                        L3Field {
+                            name,
+                            dtype: agg.output_type(&col_field),
+                            nullable: true,
+                        }
                     })
                     .collect();
                 L3Schema {

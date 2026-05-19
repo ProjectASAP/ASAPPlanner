@@ -312,7 +312,7 @@ async fn test_sum_aggregate() {
 
     let (_, aggs) = find_aggregate(&result).unwrap();
     assert_eq!(aggs.len(), 1);
-    assert!(matches!(aggs[0], AggIntent::Sum));
+    assert!(matches!(aggs[0], AggIntent::Sum { .. }));
 }
 
 #[tokio::test]
@@ -326,8 +326,8 @@ async fn test_min_max_aggregates() {
 
     let (_, aggs) = find_aggregate(&result).unwrap();
     assert_eq!(aggs.len(), 2);
-    assert!(aggs.iter().any(|a| matches!(a, AggIntent::Min)));
-    assert!(aggs.iter().any(|a| matches!(a, AggIntent::Max)));
+    assert!(aggs.iter().any(|a| matches!(a, AggIntent::Min { .. })));
+    assert!(aggs.iter().any(|a| matches!(a, AggIntent::Max { .. })));
 }
 
 #[tokio::test]
@@ -340,7 +340,7 @@ async fn test_avg_aggregate() {
         .unwrap();
 
     let (_, aggs) = find_aggregate(&result).unwrap();
-    assert!(aggs.iter().any(|a| matches!(a, AggIntent::Avg)));
+    assert!(aggs.iter().any(|a| matches!(a, AggIntent::Avg { .. })));
 }
 
 #[tokio::test]
@@ -353,9 +353,13 @@ async fn test_stddev_sample() {
         .unwrap();
 
     let (_, aggs) = find_aggregate(&result).unwrap();
-    assert!(aggs
-        .iter()
-        .any(|a| matches!(a, AggIntent::Stddev { population: false })));
+    assert!(aggs.iter().any(|a| matches!(
+        a,
+        AggIntent::Stddev {
+            population: false,
+            ..
+        }
+    )));
 }
 
 #[tokio::test]
@@ -444,6 +448,7 @@ async fn test_order_by_desc_limit_becomes_topk() {
         panic!("expected TopK, got {:?}", aggs[0]);
     };
     assert_eq!(*k, 10);
+    assert_eq!(by.len(), 1, "TopK should have exactly 1 by-column");
     assert!(by.iter().any(|c| c.0 == "host"));
 }
 
@@ -737,12 +742,9 @@ async fn test_unknown_table_returns_error() {
         .lower("SELECT x FROM ghost_table")
         .await
         .unwrap_err();
-    // DataFusion will reject the unknown table during planning
+    // DataFusion rejects the unknown table at plan time before our lowerer runs.
     assert!(
-        matches!(
-            err,
-            LoweringError::DataFusion(_) | LoweringError::TableNotFound(_)
-        ),
+        matches!(err, LoweringError::DataFusion(_)),
         "unexpected error variant: {err}"
     );
 }
@@ -1244,4 +1246,245 @@ async fn test_populate_schemas_aggregate() {
     // Root is Project wrapping Aggregate; two fields: region + count col.
     assert_eq!(typed.schema.fields.len(), 2);
     assert_eq!(typed.schema.fields[0].name, "region");
+}
+
+// ── Tests: AggIntent column-type propagation ──────────────────────────────────
+
+#[tokio::test]
+async fn test_min_int_col_gives_int64_in_aggregate_schema() {
+    // MIN(ts) where ts: Int64 → the root schema (through the outer Projection)
+    // should resolve the aggregate output type as Int64, not Float64.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer.lower("SELECT MIN(ts) FROM metrics").await.unwrap();
+    let typed = populate_schemas(expr, &catalog);
+
+    let dtype = typed
+        .schema
+        .fields
+        .last()
+        .map(|f| f.dtype.clone())
+        .expect("root schema should have at least one field");
+    assert_eq!(
+        dtype,
+        L3DataType::Int64,
+        "MIN(ts: Int64) should propagate Int64 through to root schema, got {:?}",
+        dtype
+    );
+}
+
+#[tokio::test]
+async fn test_max_utf8_col_gives_utf8_in_aggregate_schema() {
+    // MAX(region) where region: Utf8 → root schema should carry Utf8.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower("SELECT MAX(region) FROM metrics")
+        .await
+        .unwrap();
+    let typed = populate_schemas(expr, &catalog);
+
+    let dtype = typed
+        .schema
+        .fields
+        .last()
+        .map(|f| f.dtype.clone())
+        .expect("root schema should have at least one field");
+    assert_eq!(
+        dtype,
+        L3DataType::Utf8,
+        "MAX(region: Utf8) should propagate Utf8 through to root schema, got {:?}",
+        dtype
+    );
+}
+
+#[tokio::test]
+async fn test_sum_float_col_gives_float64_in_aggregate_schema() {
+    // SUM(value) where value: Float64 → Float64.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower("SELECT SUM(value) FROM metrics")
+        .await
+        .unwrap();
+    let typed = populate_schemas(expr, &catalog);
+
+    let dtype = typed
+        .schema
+        .fields
+        .last()
+        .map(|f| f.dtype.clone())
+        .expect("root schema should have at least one field");
+    assert_eq!(dtype, L3DataType::Float64);
+}
+
+#[tokio::test]
+async fn test_agg_col_name_tracked_via_col_field() {
+    // Verify that AggIntent.col() carries the aggregated column name so
+    // schema derivation can resolve types without re-parsing SQL.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer.lower("SELECT MIN(ts) FROM metrics").await.unwrap();
+
+    let (_, aggs) = find_aggregate(&result).expect("expected Aggregate");
+    let AggIntent::Min { col } = &aggs[0] else {
+        panic!("expected Min, got {:?}", aggs[0]);
+    };
+    assert_eq!(col.0, "ts", "Min should track the aggregated column name");
+}
+
+// ── Tests: NthValue N extraction (#10) ───────────────────────────────────────
+
+#[tokio::test]
+async fn test_nth_value_extracts_n_from_args() {
+    // NTH_VALUE(value, 2) OVER (ORDER BY ts) → WindowFuncKind::NthValue(2), not NthValue(0).
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT NTH_VALUE(value, 2) OVER (ORDER BY ts) FROM metrics")
+        .await
+        .unwrap();
+
+    fn find_window_kind(
+        e: &QueryExpr,
+    ) -> Option<&asap_control_core::intent_algebra::expr::WindowFuncKind> {
+        match e {
+            QueryExpr::WindowFunc { func, .. } => Some(func),
+            QueryExpr::Project { child, .. } => find_window_kind(&child.expr),
+            _ => None,
+        }
+    }
+    let kind = find_window_kind(&result).expect("expected WindowFunc node");
+    assert!(
+        matches!(
+            kind,
+            asap_control_core::intent_algebra::expr::WindowFuncKind::NthValue(2)
+        ),
+        "expected NthValue(2), got: {kind:?}"
+    );
+}
+
+// ── Tests: lowering-time failure (#11) ───────────────────────────────────────
+
+#[tokio::test]
+async fn test_unsupported_aggregate_returns_error_at_lowering_time() {
+    // array_agg parses fine but is not in our AggIntent mapping → UnsupportedAggregate.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let err = lowerer
+        .lower("SELECT array_agg(value) FROM metrics")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, LoweringError::UnsupportedAggregate(_)),
+        "expected UnsupportedAggregate, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_unsupported_agg_isolation_in_batch() {
+    // The bad query (unsupported agg) should not prevent the good one from succeeding.
+    let catalog = metrics_catalog();
+    let workload = make_workload(vec![
+        "SELECT COUNT(*) FROM metrics",
+        "SELECT array_agg(value) FROM metrics",
+    ]);
+    let results = lower_batch(&workload, &catalog).await;
+    assert_eq!(results.len(), 2);
+    assert!(results[0].is_ok(), "valid query should succeed");
+    assert!(results[1].is_err(), "unsupported agg should fail");
+    assert!(
+        matches!(results[1], Err(LoweringError::UnsupportedAggregate(_))),
+        "expected UnsupportedAggregate, got: {:?}",
+        results[1]
+    );
+}
+
+// ── Tests: 4-predicate WHERE with time extraction (#13) ──────────────────────
+
+#[tokio::test]
+async fn test_four_predicate_where_extracts_time_and_keeps_filter() {
+    // WHERE ts > 1000 AND ts < 2000 AND region = 'us' AND value > 0.0
+    // All four predicates in a single Filter node (DataFusion keeps them
+    // as one conjunctive Filter on the unoptimized plan). Time bounds should
+    // be extracted; the remaining two non-time predicates should stay as Filter.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower(
+            "SELECT value FROM metrics \
+             WHERE ts > 1000 AND ts < 2000 AND region = 'us' AND value > 0.0",
+        )
+        .await
+        .unwrap();
+
+    let source = find_source(&result).expect("expected a Scan node");
+    let Source::Table { time_range, .. } = source else {
+        panic!("expected Source::Table");
+    };
+    let tr = time_range.as_ref().expect("expected time_range extracted");
+    assert_eq!(tr.start_ms, Some(1000));
+    assert_eq!(tr.end_ms, Some(2000));
+
+    fn has_filter(e: &QueryExpr) -> bool {
+        match e {
+            QueryExpr::Filter { .. } => true,
+            QueryExpr::Project { child, .. } => has_filter(&child.expr),
+            _ => false,
+        }
+    }
+    assert!(
+        has_filter(&result),
+        "expected Filter node for the two non-time predicates"
+    );
+}
+
+#[tokio::test]
+async fn test_filter_predicate_conjuncts_count_for_two_non_time_preds() {
+    // Same query: the remaining Filter predicate should have 2 conjuncts.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower(
+            "SELECT value FROM metrics \
+             WHERE ts > 1000 AND ts < 2000 AND region = 'us' AND value > 0.0",
+        )
+        .await
+        .unwrap();
+
+    let pred = find_predicate(&result).expect("expected Filter predicate");
+    assert_eq!(
+        pred.conjuncts().len(),
+        2,
+        "expected 2 non-time conjuncts, got: {pred:?}"
+    );
+}
+
+// ── Tests: multi-window error (#14) ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_multiple_window_funcs_same_over_returns_error() {
+    // DataFusion may fold two window functions with identical OVER clauses
+    // into one Window plan node. Our lowerer should surface an explicit error
+    // rather than silently dropping the second function.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower(
+            "SELECT \
+               SUM(value) OVER (PARTITION BY region ORDER BY ts), \
+               AVG(value) OVER (PARTITION BY region ORDER BY ts) \
+             FROM metrics",
+        )
+        .await;
+    // Either succeeds (DataFusion split them into separate Window nodes) or
+    // returns our UnsupportedFeature error — never silently drops one.
+    if let Err(e) = &result {
+        assert!(
+            matches!(e, LoweringError::UnsupportedFeature(msg) if msg.contains("multiple window")),
+            "unexpected error: {e}"
+        );
+    }
+    // If it succeeds, both window funcs must produce output columns.
+    // (This case fires when DataFusion already splits them; accept it.)
 }

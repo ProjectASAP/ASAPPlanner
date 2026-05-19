@@ -116,28 +116,56 @@ fn requires_count_is_any() {
 
 #[test]
 fn requires_sum_is_any() {
-    assert_eq!(AggIntent::Sum.requires(), DataModel::Any);
+    assert_eq!(
+        AggIntent::Sum {
+            col: ColumnRef("x".into())
+        }
+        .requires(),
+        DataModel::Any
+    );
 }
 
 #[test]
 fn requires_min_is_any() {
-    assert_eq!(AggIntent::Min.requires(), DataModel::Any);
+    assert_eq!(
+        AggIntent::Min {
+            col: ColumnRef("x".into())
+        }
+        .requires(),
+        DataModel::Any
+    );
 }
 
 #[test]
 fn requires_max_is_any() {
-    assert_eq!(AggIntent::Max.requires(), DataModel::Any);
+    assert_eq!(
+        AggIntent::Max {
+            col: ColumnRef("x".into())
+        }
+        .requires(),
+        DataModel::Any
+    );
 }
 
 #[test]
 fn requires_avg_is_any() {
-    assert_eq!(AggIntent::Avg.requires(), DataModel::Any);
+    assert_eq!(
+        AggIntent::Avg {
+            col: ColumnRef("x".into())
+        }
+        .requires(),
+        DataModel::Any
+    );
 }
 
 #[test]
 fn requires_stddev_sample_is_any() {
     assert_eq!(
-        AggIntent::Stddev { population: false }.requires(),
+        AggIntent::Stddev {
+            col: ColumnRef("x".into()),
+            population: false
+        }
+        .requires(),
         DataModel::Any
     );
 }
@@ -145,7 +173,11 @@ fn requires_stddev_sample_is_any() {
 #[test]
 fn requires_stddev_population_is_any() {
     assert_eq!(
-        AggIntent::Stddev { population: true }.requires(),
+        AggIntent::Stddev {
+            col: ColumnRef("x".into()),
+            population: true
+        }
+        .requires(),
         DataModel::Any
     );
 }
@@ -241,20 +273,36 @@ fn output_type_cardinality_is_int64() {
 #[test]
 fn output_type_sum_is_float64() {
     let f = field("value", L3DataType::Float64);
-    assert_eq!(AggIntent::Sum.output_type(&f), L3DataType::Float64);
+    assert_eq!(
+        AggIntent::Sum {
+            col: ColumnRef("value".into())
+        }
+        .output_type(&f),
+        L3DataType::Float64
+    );
 }
 
 #[test]
 fn output_type_avg_is_float64() {
     let f = field("value", L3DataType::Int64);
-    assert_eq!(AggIntent::Avg.output_type(&f), L3DataType::Float64);
+    assert_eq!(
+        AggIntent::Avg {
+            col: ColumnRef("value".into())
+        }
+        .output_type(&f),
+        L3DataType::Float64
+    );
 }
 
 #[test]
 fn output_type_stddev_sample_is_float64() {
     let f = field("value", L3DataType::Float64);
     assert_eq!(
-        AggIntent::Stddev { population: false }.output_type(&f),
+        AggIntent::Stddev {
+            col: ColumnRef("value".into()),
+            population: false
+        }
+        .output_type(&f),
         L3DataType::Float64
     );
 }
@@ -263,7 +311,11 @@ fn output_type_stddev_sample_is_float64() {
 fn output_type_stddev_population_is_float64() {
     let f = field("value", L3DataType::Float64);
     assert_eq!(
-        AggIntent::Stddev { population: true }.output_type(&f),
+        AggIntent::Stddev {
+            col: ColumnRef("value".into()),
+            population: true
+        }
+        .output_type(&f),
         L3DataType::Float64
     );
 }
@@ -308,19 +360,37 @@ fn output_type_increase_is_float64() {
 #[test]
 fn output_type_min_preserves_int64_input() {
     let f = field("count", L3DataType::Int64);
-    assert_eq!(AggIntent::Min.output_type(&f), L3DataType::Int64);
+    assert_eq!(
+        AggIntent::Min {
+            col: ColumnRef("count".into())
+        }
+        .output_type(&f),
+        L3DataType::Int64
+    );
 }
 
 #[test]
 fn output_type_min_preserves_float64_input() {
     let f = field("value", L3DataType::Float64);
-    assert_eq!(AggIntent::Min.output_type(&f), L3DataType::Float64);
+    assert_eq!(
+        AggIntent::Min {
+            col: ColumnRef("value".into())
+        }
+        .output_type(&f),
+        L3DataType::Float64
+    );
 }
 
 #[test]
 fn output_type_max_preserves_utf8_input() {
     let f = field("name", L3DataType::Utf8);
-    assert_eq!(AggIntent::Max.output_type(&f), L3DataType::Utf8);
+    assert_eq!(
+        AggIntent::Max {
+            col: ColumnRef("name".into())
+        }
+        .output_type(&f),
+        L3DataType::Utf8
+    );
 }
 
 // ── HasSchema::output_schema() — Scan ─────────────────────────────────────────
@@ -431,7 +501,7 @@ fn limit_passes_through_child_schema() {
     let cs = child_schema();
     let node = QueryExpr::Limit {
         child: dummy_scan(cs.clone()),
-        n: 10,
+        n: Some(10),
         offset: 0,
     };
     let out = node.output_schema(&[&cs], &empty_catalog());
@@ -469,6 +539,7 @@ fn aggregate_count_star_no_group_by() {
         by: vec![],
         aggs: vec![AggIntent::Count { accuracy: exact() }],
         having: None,
+        output_names: vec![],
     };
     let out = node.output_schema(&[&cs], &empty_catalog());
     assert_eq!(out.fields.len(), 1);
@@ -484,6 +555,7 @@ fn aggregate_group_by_adds_by_cols_first() {
         by: vec![GroupKey("region".into())],
         aggs: vec![AggIntent::Count { accuracy: exact() }],
         having: None,
+        output_names: vec![],
     };
     let out = node.output_schema(&[&cs], &empty_catalog());
     // region col + count col
@@ -502,17 +574,21 @@ fn aggregate_multiple_aggs() {
         by: vec![],
         aggs: vec![
             AggIntent::Count { accuracy: exact() },
-            AggIntent::Sum,
-            AggIntent::Min,
+            AggIntent::Sum {
+                col: ColumnRef("value".into()),
+            },
+            AggIntent::Min {
+                col: ColumnRef("value".into()),
+            },
         ],
         having: None,
+        output_names: vec![],
     };
     let out = node.output_schema(&[&cs], &empty_catalog());
     assert_eq!(out.fields.len(), 3);
     assert_eq!(out.fields[0].dtype, L3DataType::Int64); // Count
-    assert_eq!(out.fields[1].dtype, L3DataType::Float64); // Sum
-                                                          // Min: uses dummy Float64 input (known limitation — column not tracked at L3)
-    assert_eq!(out.fields[2].dtype, L3DataType::Float64);
+    assert_eq!(out.fields[1].dtype, L3DataType::Float64); // Sum(value: Float64)
+    assert_eq!(out.fields[2].dtype, L3DataType::Float64); // Min(value: Float64)
 }
 
 #[test]
@@ -528,6 +604,7 @@ fn aggregate_topk_produces_by_cols_plus_count() {
             accuracy: exact(),
         }],
         having: None,
+        output_names: vec![],
     };
     let out = node.output_schema(&[&cs], &empty_catalog());
     assert_eq!(out.fields.len(), 2);
@@ -550,6 +627,7 @@ fn aggregate_topk_multi_key() {
             accuracy: exact(),
         }],
         having: None,
+        output_names: vec![],
     };
     let out = node.output_schema(&[&cs], &empty_catalog());
     assert_eq!(out.fields.len(), 3);
@@ -574,6 +652,7 @@ fn aggregate_time_index_not_propagated() {
         by: vec![],
         aggs: vec![AggIntent::Count { accuracy: exact() }],
         having: None,
+        output_names: vec![],
     };
     let out = node.output_schema(&[&cs], &empty_catalog());
     assert_eq!(out.time_index, None);

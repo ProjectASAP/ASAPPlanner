@@ -48,6 +48,7 @@ fn rebuild(expr: QueryExpr, catalog: &SchemaCatalog) -> (QueryExpr, Vec<L3Schema
             by,
             aggs,
             having,
+            output_names,
         } => {
             let c = proc(child);
             let cs = c.schema.clone();
@@ -57,6 +58,7 @@ fn rebuild(expr: QueryExpr, catalog: &SchemaCatalog) -> (QueryExpr, Vec<L3Schema
                     by,
                     aggs,
                     having,
+                    output_names,
                 },
                 vec![cs],
             )

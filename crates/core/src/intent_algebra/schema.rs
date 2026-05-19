@@ -18,6 +18,21 @@ pub struct TableSchema {
     pub time_column: Option<String>,
 }
 
+impl TableSchema {
+    /// Returns `Err` if `time_column` names a column that does not exist in `columns`.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(tc) = &self.time_column {
+            if !self.columns.iter().any(|c| &c.name == tc) {
+                return Err(format!(
+                    "time_column '{tc}' not found in table columns {:?}",
+                    self.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One column in a `TableSchema`.
 #[derive(Debug, Clone)]
 pub struct ColumnDef {

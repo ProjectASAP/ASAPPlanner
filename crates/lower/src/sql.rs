@@ -132,6 +132,10 @@ impl<'a> SqlLowerer<'a> {
             let table_name = scan.table_name.to_string();
             if let Some(schema) = self.catalog.tables.get(&table_name) {
                 if let Some(time_col) = &schema.time_column {
+                    debug_assert!(
+                        schema.columns.iter().any(|c| &c.name == time_col),
+                        "time_column '{time_col}' not found in table columns; call TableSchema::validate() on catalog construction"
+                    );
                     let (time_range, non_time) = extract_time_range(&filter.predicate, time_col);
                     let columns = projection_columns(scan, schema);
                     let scan_expr = QueryExpr::Scan {
@@ -208,11 +212,16 @@ impl<'a> SqlLowerer<'a> {
             .iter()
             .map(|e| self.lower_agg_expr(e))
             .collect::<Result<Vec<_>, _>>()?;
+        // Use DataFusion's display string for each aggregate expression — this is
+        // exactly the name DataFusion assigns to the output column (e.g. "MIN(metrics.ts)"),
+        // which the enclosing Projection uses to reference aggregate outputs.
+        let output_names: Vec<String> = agg.aggr_expr.iter().map(|e| format!("{e}")).collect();
         Ok(QueryExpr::Aggregate {
             child: make_node(child),
             by,
             aggs,
             having: None,
+            output_names,
         })
     }
 
@@ -259,7 +268,7 @@ impl<'a> SqlLowerer<'a> {
         let child = self.lower_plan(&limit.input)?;
         Ok(QueryExpr::Limit {
             child: make_node(child),
-            n: eval_fetch(&limit.fetch).unwrap_or(0) as u64,
+            n: eval_fetch(&limit.fetch).map(|v| v as u64),
             offset: eval_fetch(&limit.skip).unwrap_or(0) as u64,
         })
     }
@@ -284,10 +293,17 @@ impl<'a> SqlLowerer<'a> {
                 accuracy: self.accuracy.clone(),
             }],
             having: None,
+            output_names: vec![],
         })
     }
 
     fn lower_window(&self, window: &logical_expr::Window) -> Result<QueryExpr, LoweringError> {
+        if window.window_expr.len() > 1 {
+            return Err(LoweringError::UnsupportedFeature(format!(
+                "multiple window functions in one Window plan node (got {}); split into separate nodes",
+                window.window_expr.len()
+            )));
+        }
         let child = self.lower_plan(&window.input)?;
         let first = window
             .window_expr
@@ -295,11 +311,28 @@ impl<'a> SqlLowerer<'a> {
             .ok_or_else(|| LoweringError::InvalidExpression("empty window expressions".into()))?;
         if let Expr::WindowFunction(wf) = first {
             let func = lower_window_func_kind(&wf.fun)?;
-            let args = wf
+            let mut args = wf
                 .args
                 .iter()
                 .map(df_expr_to_l3)
                 .collect::<Result<Vec<_>, _>>()?;
+
+            // For NthValue, extract N from args[1] and keep only the column (args[0]).
+            let func = if matches!(func, WindowFuncKind::NthValue(_)) {
+                let n = match args.get(1) {
+                    Some(L3Expr::Literal(L3Scalar::Int64(n))) if *n > 0 => *n as u64,
+                    other => {
+                        return Err(LoweringError::InvalidExpression(format!(
+                            "NthValue requires a positive integer literal as second arg, got: {other:?}"
+                        )))
+                    }
+                };
+                args.truncate(1);
+                WindowFuncKind::NthValue(n)
+            } else {
+                func
+            };
+
             let partition_by = wf
                 .partition_by
                 .iter()
@@ -342,12 +375,26 @@ impl<'a> SqlLowerer<'a> {
                     "count" => Ok(AggIntent::Count {
                         accuracy: self.accuracy.clone(),
                     }),
-                    "sum" => Ok(AggIntent::Sum),
-                    "min" => Ok(AggIntent::Min),
-                    "max" => Ok(AggIntent::Max),
-                    "avg" | "mean" => Ok(AggIntent::Avg),
-                    "stddev" | "stddev_samp" => Ok(AggIntent::Stddev { population: false }),
-                    "stddev_pop" => Ok(AggIntent::Stddev { population: true }),
+                    "sum" => Ok(AggIntent::Sum {
+                        col: agg_col(&agg_fn.args),
+                    }),
+                    "min" => Ok(AggIntent::Min {
+                        col: agg_col(&agg_fn.args),
+                    }),
+                    "max" => Ok(AggIntent::Max {
+                        col: agg_col(&agg_fn.args),
+                    }),
+                    "avg" | "mean" => Ok(AggIntent::Avg {
+                        col: agg_col(&agg_fn.args),
+                    }),
+                    "stddev" | "stddev_samp" => Ok(AggIntent::Stddev {
+                        col: agg_col(&agg_fn.args),
+                        population: false,
+                    }),
+                    "stddev_pop" => Ok(AggIntent::Stddev {
+                        col: agg_col(&agg_fn.args),
+                        population: true,
+                    }),
                     "approx_percentile_cont" | "percentile_cont" => {
                         let q = extract_percentile_q(&agg_fn.args)?;
                         Ok(AggIntent::Quantile {
@@ -383,47 +430,50 @@ fn projection_columns(scan: &logical_expr::TableScan, schema: &TableSchema) -> V
     }
 }
 
-/// If `child` is a `Scan` with an empty column list, populate it from the
-/// columns referenced in `cols`. DataFusion's unoptimized plan never sets
-/// `TableScan.projection`, so this compensates without requiring optimizer
-/// passes that could alter other plan-node shapes our lowerer depends on.
+/// If `child` (or a Filter wrapping it) contains a `Scan` with an empty
+/// column list, populate it from the columns referenced in `cols`.
+/// DataFusion's unoptimized plan never sets `TableScan.projection`, so this
+/// compensates without requiring optimizer passes that could alter other
+/// plan-node shapes our lowerer depends on.
 fn push_columns_into_scan(child: QueryExpr, cols: &[ProjectItem]) -> QueryExpr {
-    let QueryExpr::Scan {
-        source:
-            Source::Table {
-                table_ref,
-                columns,
-                time_range,
-            },
-        predicates,
-    } = child
-    else {
-        return child;
-    };
-    if !columns.is_empty() {
-        return QueryExpr::Scan {
-            source: Source::Table {
-                table_ref,
-                columns,
-                time_range,
-            },
+    match child {
+        // Recurse through Filter so that Project → Filter → Scan works.
+        QueryExpr::Filter { child: inner, pred } => {
+            let updated = push_columns_into_scan(inner.expr.clone(), cols);
+            QueryExpr::Filter {
+                child: Rc::new(L3Node {
+                    expr: updated,
+                    schema: inner.schema.clone(),
+                }),
+                pred,
+            }
+        }
+        QueryExpr::Scan {
+            source:
+                Source::Table {
+                    table_ref,
+                    columns,
+                    time_range,
+                },
             predicates,
-        };
-    }
-    let mut seen = std::collections::HashSet::<String>::new();
-    let col_refs: Vec<ColumnRef> = cols
-        .iter()
-        .flat_map(|item| item.expr.columns_referenced())
-        .filter(|&c| seen.insert(c.0.clone()))
-        .cloned()
-        .collect();
-    QueryExpr::Scan {
-        source: Source::Table {
-            table_ref,
-            columns: col_refs,
-            time_range,
-        },
-        predicates,
+        } if columns.is_empty() => {
+            let mut seen = std::collections::HashSet::<String>::new();
+            let col_refs: Vec<ColumnRef> = cols
+                .iter()
+                .flat_map(|item| item.expr.columns_referenced())
+                .filter(|&c| seen.insert(c.0.clone()))
+                .cloned()
+                .collect();
+            QueryExpr::Scan {
+                source: Source::Table {
+                    table_ref,
+                    columns: col_refs,
+                    time_range,
+                },
+                predicates,
+            }
+        }
+        other => other,
     }
 }
 
@@ -478,7 +528,9 @@ fn expr_to_group_key(expr: &Expr) -> Result<GroupKey, LoweringError> {
     match expr {
         Expr::Column(col) => Ok(GroupKey(col.name.clone())),
         Expr::Alias(a) => expr_to_group_key(&a.expr),
-        _ => Ok(GroupKey(format!("{expr}"))),
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "non-column GROUP BY expression: {other}"
+        ))),
     }
 }
 
@@ -486,7 +538,28 @@ fn expr_to_col_ref(expr: &Expr) -> Result<ColumnRef, LoweringError> {
     match expr {
         Expr::Column(col) => Ok(ColumnRef(col.name.clone())),
         Expr::Alias(a) => expr_to_col_ref(&a.expr),
-        _ => Ok(ColumnRef(format!("{expr}"))),
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "non-column reference in TopK by-list: {other}"
+        ))),
+    }
+}
+
+/// Best-effort: extract the first column name from aggregate function args.
+/// For `SUM(value)` → `ColumnRef("value")`. For `COUNT(*)` or expressions,
+/// falls back to `"*"` or the expression display string.
+fn agg_col(args: &[Expr]) -> ColumnRef {
+    match args.first() {
+        Some(Expr::Column(col)) => ColumnRef(col.name.clone()),
+        Some(Expr::Alias(a)) => match a.expr.as_ref() {
+            Expr::Column(col) => ColumnRef(col.name.clone()),
+            e => ColumnRef(format!("{e}")),
+        },
+        Some(Expr::Cast(c)) => match c.expr.as_ref() {
+            Expr::Column(col) => ColumnRef(col.name.clone()),
+            e => ColumnRef(format!("{e}")),
+        },
+        Some(Expr::Wildcard { .. }) | None => ColumnRef("*".into()),
+        Some(e) => ColumnRef(format!("{e}")),
     }
 }
 
@@ -745,7 +818,9 @@ fn scalar_value_to_l3(sv: &ScalarValue) -> Result<L3Scalar, LoweringError> {
         ScalarValue::Int32(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
         ScalarValue::Int16(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
         ScalarValue::Int8(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
-        ScalarValue::UInt64(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
+        ScalarValue::UInt64(Some(v)) => i64::try_from(*v).map(L3Scalar::Int64).map_err(|_| {
+            LoweringError::InvalidExpression(format!("UInt64 value {v} overflows i64"))
+        }),
         ScalarValue::UInt32(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
         ScalarValue::Float64(Some(v)) => Ok(L3Scalar::Float64(*v)),
         ScalarValue::Float32(Some(v)) => Ok(L3Scalar::Float64(*v as f64)),
@@ -927,8 +1002,15 @@ fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKi
                 "window agg: {other}"
             ))),
         },
-        WindowFunctionDefinition::BuiltInWindowFunction(biwf) => Err(
-            LoweringError::UnsupportedFeature(format!("built-in window fn: {biwf:?}")),
-        ),
+        // In DataFusion 43, BuiltInWindowFunction covers FirstValue, LastValue, NthValue.
+        // NthValue(0) is a placeholder; the real N is extracted from args in lower_window.
+        WindowFunctionDefinition::BuiltInWindowFunction(biwf) => {
+            use datafusion::logical_expr::BuiltInWindowFunction;
+            match biwf {
+                BuiltInWindowFunction::FirstValue => Ok(WindowFuncKind::FirstValue),
+                BuiltInWindowFunction::LastValue => Ok(WindowFuncKind::LastValue),
+                BuiltInWindowFunction::NthValue => Ok(WindowFuncKind::NthValue(0)),
+            }
+        }
     }
 }
