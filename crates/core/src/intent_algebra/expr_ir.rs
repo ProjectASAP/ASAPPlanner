@@ -1,9 +1,16 @@
-use super::expr::ColumnRef;
+//! Language-independent scalar expression IR.
+//!
+//! Used for filter predicates (PromQL label matchers, SQL `WHERE` conjuncts)
+//! and projection / sort-key expressions. Carried by both the Layer-2
+//! `relational` IR and the canonical L3 `query_expr` IR so the predicate
+//! representation is identical across the lowering boundary.
 
-// ── Scalar literals ───────────────────────────────────────────────────────────
+use serde::{Deserialize, Serialize};
 
-/// A typed scalar constant. Used in `L3Expr::Literal`.
-#[derive(Debug, Clone, PartialEq)]
+use super::query_expr::ColumnRef;
+
+/// A typed scalar constant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum L3Scalar {
     Int64(i64),
     Float64(f64),
@@ -12,15 +19,11 @@ pub enum L3Scalar {
     Null,
 }
 
-// ── Comparison operators ──────────────────────────────────────────────────────
-
 /// Binary comparison operators for `L3Expr::Compare`.
 ///
 /// `Regex` / `NotRegex` carry PromQL/RE2 regex-match semantics (`=~` / `!~`):
 /// the right-hand side is a regular-expression pattern, not a literal value.
-/// SQL `LIKE` / `ILIKE` are kept as separate operators because their
-/// wildcard grammar (`%` / `_`) differs from regex.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompareOp {
     Eq,
     Ne,
@@ -34,19 +37,12 @@ pub enum CompareOp {
     NotRegex,
 }
 
-// ── Expression IR ─────────────────────────────────────────────────────────────
-
-/// A scalar expression used in filter predicates and (eventually) projection
-/// lists and sort keys. Language-independent: PromQL label matchers, SQL
-/// `WHERE` conjuncts, and Elastic term filters all lower to the same shape.
-///
-/// Flat conjunctions (`BoolAnd`) / disjunctions (`BoolOr`) make per-conjunct
-/// selectivity estimation and label-matcher lowering straightforward without
-/// recursive descent.
-#[derive(Debug, Clone, PartialEq)]
+/// A scalar expression. Flat conjunctions (`BoolAnd`) / disjunctions
+/// (`BoolOr`) make per-conjunct selectivity estimation and label-matcher
+/// lowering straightforward without recursive descent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum L3Expr {
-    /// Reference to a named column. For time-series sources a label name
-    /// (e.g. `Column("env")`) or the synthetic sample-value column.
+    /// Reference to a named column / label.
     Column(ColumnRef),
     /// A constant literal value.
     Literal(L3Scalar),
@@ -66,8 +62,7 @@ pub enum L3Expr {
 
 impl L3Expr {
     /// If this expression is a `BoolAnd`, return its elements; otherwise a
-    /// single-element slice containing `self`. Lets callers iterate all
-    /// top-level conjuncts without cloning.
+    /// single-element slice containing `self`.
     pub fn conjuncts(&self) -> &[L3Expr] {
         match self {
             L3Expr::BoolAnd(v) => v.as_slice(),
@@ -76,9 +71,7 @@ impl L3Expr {
     }
 
     /// Recursively collect every `ColumnRef` referenced anywhere in this
-    /// expression. Used by L4 for column-lineage and selectivity estimation,
-    /// and by schema derivation to discover label columns referenced by a
-    /// time-series scan's predicates.
+    /// expression.
     pub fn columns_referenced(&self) -> Vec<&ColumnRef> {
         match self {
             L3Expr::Column(c) => vec![c],

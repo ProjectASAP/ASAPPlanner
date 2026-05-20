@@ -16,6 +16,8 @@ pub enum LoweringError {
     InvalidParameter(String),
     /// The workload's query language is not handled by this lowerer.
     WrongLanguage(String),
+    /// The L2→L3 converter failed (name resolution against the bound schema).
+    Convert(asap_control_core::intent_algebra::ConvertError),
 }
 
 impl fmt::Display for LoweringError {
@@ -28,8 +30,15 @@ impl fmt::Display for LoweringError {
             Self::MissingArgument(m) => write!(f, "missing argument: {m}"),
             Self::InvalidParameter(m) => write!(f, "invalid parameter: {m}"),
             Self::WrongLanguage(l) => write!(f, "unsupported query language: {l}"),
+            Self::Convert(e) => write!(f, "L2→L3 conversion failed: {e}"),
         }
     }
 }
 
 impl std::error::Error for LoweringError {}
+
+impl From<asap_control_core::intent_algebra::ConvertError> for LoweringError {
+    fn from(e: asap_control_core::intent_algebra::ConvertError) -> Self {
+        Self::Convert(e)
+    }
+}
