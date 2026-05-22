@@ -24,6 +24,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The promql-parser dependency is a private git repo (ProjectASAP/promql-parser).
+  # Cargo must fetch it via the git CLI so it picks up the credential helper
+  # configured by the "Authenticate private git deps" step below.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   format-and-lint:
@@ -31,6 +35,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+
+    # Grant read access to the private promql-parser mirror. Requires an org/repo
+    # secret CARGO_PRIVATE_GIT_TOKEN (fine-grained PAT or GitHub App token with
+    # read access to ProjectASAP/promql-parser).
+    - name: Authenticate private git deps
+      run: |
+        git config --global url."https://x-access-token:${{ secrets.CARGO_PRIVATE_GIT_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -63,6 +74,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+
+    # Grant read access to the private promql-parser mirror. Requires an org/repo
+    # secret CARGO_PRIVATE_GIT_TOKEN (fine-grained PAT or GitHub App token with
+    # read access to ProjectASAP/promql-parser).
+    - name: Authenticate private git deps
+      run: |
+        git config --global url."https://x-access-token:${{ secrets.CARGO_PRIVATE_GIT_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable

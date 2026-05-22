@@ -73,8 +73,8 @@ fn lowering_is_total_over_the_entire_corpus() {
 
     // Coverage tripwire: a code change that breaks lowering for a large slice of
     // real PromQL trips this. Set well below the current numbers (docs≈29,
-    // testdata≈574 lowered / 316 unparseable on promql-parser 0.9); it guards
-    // regressions, it is not an exact count.
+    // testdata≈574 lowered / 1014 rejected / 235 unparseable on the private
+    // promql-parser `asap` branch); it guards regressions, not an exact count.
     assert!(
         docs.lowered >= 20,
         "docs lowering coverage regressed: {docs:?}"

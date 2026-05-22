@@ -389,7 +389,7 @@ dependencies = [
 [[package]]
 name = "promql-parser"
 version = "0.9.0"
-source = "git+https://github.com/ProjectASAP/promql-parser?branch=main#2e4ebde7cef1351459229b2fbca4822c43d0cdfc"
+source = "git+https://github.com/ProjectASAP/promql-parser?branch=asap#c51beafb361af4cc95ed62ae377862c660ceb757"
 dependencies = [
  "cfgrammar",
  "chrono",
