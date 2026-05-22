@@ -1,0 +1,86 @@
+# Verbatim example PromQL queries from the official docs and the PromLabs cheat sheet.
+# Sources:
+#   https://prometheus.io/docs/prometheus/latest/querying/basics/
+#   https://promlabs.com/promql-cheat-sheet/
+# Used only as lowering INPUT (we do not execute) — see promql_corpus.rs.
+
+# --- basics: selectors & matchers ---
+http_requests_total
+http_requests_total{job="prometheus",group="canary"}
+http_requests_total{environment=~"staging|testing|development",method!="GET"}
+http_requests_total{replica!="rep-a",replica=~"rep.*"}
+{__name__=~"job:.*"}
+http_requests_total{job="prometheus"}[5m]
+
+# --- basics: time-shift modifiers & subqueries ---
+http_requests_total offset 5m
+sum(http_requests_total{method="GET"} offset 5m)
+http_requests_total @ 1609746000
+http_requests_total @ 1609746000 offset 5m
+rate(http_requests_total[5m])[30m:1m]
+rate(http_requests_total[5m])[30m:]
+
+# --- cheat sheet: selecting series ---
+node_cpu_seconds_total
+node_cpu_seconds_total[5m]
+node_cpu_seconds_total{cpu="0",mode="idle"}
+
+# --- cheat sheet: rates of increase for counters ---
+rate(demo_api_request_duration_seconds_count[5m])
+irate(demo_api_request_duration_seconds_count[1m])
+increase(demo_api_request_duration_seconds_count[1h])
+
+# --- cheat sheet: aggregating over multiple series ---
+sum(node_filesystem_size_bytes)
+sum by(job, instance) (node_filesystem_size_bytes)
+sum without(instance, job) (node_filesystem_size_bytes)
+
+# --- cheat sheet: math between series ---
+node_memory_MemFree_bytes + node_memory_Cached_bytes
+node_memory_MemFree_bytes + on(instance, job) node_memory_Cached_bytes
+rate(demo_cpu_usage_seconds_total[1m]) / on(instance, job) group_left demo_num_cpus
+
+# --- cheat sheet: filtering series by value ---
+node_filesystem_avail_bytes > 10*1024*1024
+go_goroutines > go_threads
+go_goroutines > bool on(job, instance) go_threads
+
+# --- cheat sheet: set operations ---
+up{job="prometheus"} or up{job="node"}
+node_network_mtu_bytes and (node_network_address_assign_type == 0)
+node_network_mtu_bytes unless (node_network_address_assign_type == 1)
+
+# --- cheat sheet: quantiles from histograms ---
+histogram_quantile(0.9, rate(demo_api_request_duration_seconds_bucket[5m]))
+histogram_quantile(0.9, sum by(le, path, method) (rate(demo_api_request_duration_seconds_bucket[5m])))
+
+# --- cheat sheet: changes in gauges ---
+deriv(demo_disk_usage_bytes[1h])
+delta(demo_disk_usage_bytes[1h])
+predict_linear(demo_disk_usage_bytes[4h], 3600)
+
+# --- cheat sheet: aggregating over time ---
+avg_over_time(go_goroutines[5m])
+max_over_time(process_resident_memory_bytes[1d])
+count_over_time(process_resident_memory_bytes[5m])
+
+# --- cheat sheet: time ---
+time()
+time() - demo_batch_last_success_timestamp_seconds
+time() - demo_batch_last_success_timestamp_seconds > 3600
+
+# --- cheat sheet: dealing with missing data ---
+absent(up{job="some-job"})
+absent_over_time(up{job="some-job"}[5m])
+
+# --- cheat sheet: manipulating labels ---
+label_replace(up, "hostname", "$1", "instance", "(.+):(\\d+)")
+
+# --- cheat sheet: subqueries ---
+rate(demo_api_request_duration_seconds_count[5m])[1h:]
+rate(demo_api_request_duration_seconds_count[5m])[1h:15s]
+max_over_time(rate(demo_api_request_duration_seconds_count[5m])[1h:])
+
+# --- cheat sheet: sorting / top-k ---
+topk(3, sum by(method, path) (rate(demo_api_request_duration_seconds_count[5m])))
+sort_desc(sum by(method, path) (rate(demo_api_request_duration_seconds_count[5m])))

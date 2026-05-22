@@ -1,0 +1,1849 @@
+# PromQL expressions extracted from the Prometheus engine test corpus.
+# Source: https://github.com/prometheus/prometheus/tree/main/promql/promqltest/testdata (Apache-2.0).
+# Each line is the <expr> from an `eval ...` directive; deduped, grouped by source file.
+# Used only as lowering INPUT (we do not execute) — see promql_corpus.rs.
+#
+# --- prometheus testdata: aggregators.test ---
+SUM BY (group) (http_requests{job="api-server"})
+SUM BY (group) (((http_requests{job="api-server"})))
+sum by (group) (http_requests{job="api-server"})
+avg by (group) (http_requests{job="api-server"})
+count by (group) (http_requests{job="api-server"})
+sum without (instance) (http_requests{job="api-server"})
+sum by () (http_requests{job="api-server"})
+sum(http_requests{job="api-server"})
+sum without () (http_requests{job="api-server",group="production"})
+sum without (instance) (http_requests{job="api-server"} or foo)
+sum(http_requests) by (job) + min(http_requests) by (job) + max(http_requests) by (job) + avg(http_requests) by (job)
+sum(sum by (group) (http_requests{job="api-server"})) by (job)
+SUM(http_requests)
+SUM(http_requests{instance="0"}) BY(job)
+SUM(http_requests) BY (job)
+SUM(http_requests) BY (job, nonexistent)
+COUNT(http_requests) BY (job)
+SUM(http_requests) BY (job, group)
+AVG(http_requests) BY (job)
+MIN(http_requests) BY (job)
+MAX(http_requests) BY (job)
+abs(-1 * http_requests{group="production",job="api-server"})
+floor(0.004 * http_requests{group="production",job="api-server"})
+ceil(0.004 * http_requests{group="production",job="api-server"})
+round(0.004 * http_requests{group="production",job="api-server"})
+round(-1 * (0.004 * http_requests{group="production",job="api-server"}))
+round(0.005 * http_requests{group="production",job="api-server"})
+round(-1 * (0.005 * http_requests{group="production",job="api-server"}))
+round(1 + 0.005 * http_requests{group="production",job="api-server"})
+round(-1 * (1 + 0.005 * http_requests{group="production",job="api-server"}))
+round(0.0005 * http_requests{group="production",job="api-server"}, 0.1)
+round(2.1 + 0.0005 * http_requests{group="production",job="api-server"}, 0.1)
+round(5.2 + 0.0005 * http_requests{group="production",job="api-server"}, 0.1)
+round(-1 * (5.2 + 0.0005 * http_requests{group="production",job="api-server"}), 0.1)
+round(0.025 * http_requests{group="production",job="api-server"}, 5)
+round(0.045 * http_requests{group="production",job="api-server"}, 5)
+stddev(http_requests)
+stddev by (instance)(http_requests)
+stdvar(http_requests)
+stdvar by (instance)(http_requests)
+sum(label_grouping_test) by (a, b)
+max(http_requests)
+max({job="api-server"})
+max(http_requests_histogram)
+min(http_requests)
+min({job="api-server"})
+min(http_requests_histogram)
+max by (group) (http_requests)
+min by (group) (http_requests)
+topk(3, http_requests)
+topk((3), (http_requests))
+topk(5, http_requests{group="canary",job="app-server"})
+bottomk(3, http_requests)
+bottomk(5, http_requests{group="canary",job="app-server"})
+topk by (group) (1, http_requests)
+bottomk by (group) (2, http_requests)
+bottomk by (group) (2, http_requests{group="production"})
+topk(3, http_requests{job="api-server",group="production"})
+bottomk(3, http_requests{job="api-server",group="production"})
+bottomk(9999999999, http_requests{job="app-server",group="canary"})
+topk(9999999999, http_requests{job="api-server",group="production"})
+topk(scalar(foo), http_requests)
+count(topk(scalar(foo), http_requests))
+count(bottomk(scalar(foo), http_requests))
+topk(100, http_requests_histogram)
+topk(1, {__name__=~"http_requests(_histogram)?"})
+count(topk(1000, {__name__=~"http_requests(_histogram)?"}))
+topk by (instance) (1, {__name__=~"http_requests(_histogram)?"})
+bottomk(100, http_requests_histogram)
+bottomk(1, {__name__=~"http_requests(_histogram)?"})
+count(bottomk(1000, {__name__=~"http_requests(_histogram)?"}))
+bottomk by (instance) (1, {__name__=~"http_requests(_histogram)?"})
+topk(NaN, non_existent)
+limitk(NaN, non_existent)
+limit_ratio(NaN, non_existent)
+count_values("version", version)
+count_values(((("version"))), version)
+count_values without (instance)("version", version)
+count_values without (instance)("job", version)
+count_values by (job, group)("job", version)
+count_values("a\xc5z", version)
+quantile without(point)(0.8, data)
+quantile without(point)(0.2, data)
+quantile without(point)(0.8, {__name__=~"data(_histogram)?"})
+quantile(0.8, data_histogram)
+quantile without(point)(scalar(foo), data)
+quantile without(point)((scalar(foo)), data)
+quantile without(point)(NaN, data)
+quantile without(point) (scalar(foo), data)
+group without(point)(data)
+group(foo)
+avg(data{test="ten"})
+avg(data{test="inf"})
+avg(data{test="inf2"})
+avg(data{test="inf3"})
+avg(data{test="-inf"})
+avg(data{test="-inf2"})
+avg(data{test="-inf3"})
+avg(data{test="nan"})
+avg(data{test="big"})
+avg(data{test="-big"})
+avg(data{test="bigzero"})
+avg(data)
+sum(data{test="ten"})
+sum by (group) (data{test="pos_inf"})
+avg by (group) (data{test="pos_inf"})
+sum by (group) (data{test="neg_inf"})
+avg by (group) (data{test="neg_inf"})
+sum(data{test="inf_inf"})
+avg(data{test="inf_inf"})
+sum by (group) (data{test="nan"})
+avg by (group) (data{test="nan"})
+avg(foo) - 52
+avg(topk(11, foo)) - 52
+avg(topk(10, foo)) - 52
+avg(topk(9, foo)) - 52
+avg(topk(8, foo)) - 52
+avg(foo) == 52
+avg(topk(11, foo)) == 52
+avg(topk(10, foo)) == 52
+avg(topk(9, foo)) == 52
+avg(topk(8, foo)) == 52
+stddev(series)
+stdvar(series)
+stddev({label="c"})
+stdvar({label="c"})
+stddev by (label) (series)
+stdvar by (label) (series)
+stddev (series)
+stdvar (series)
+# --- prometheus testdata: at_modifier.test ---
+metric @ 100
+metric @ 100s
+metric @ 1m40s
+metric @ 100 offset 50s
+metric @ 100 offset 50
+metric offset 50s @ 100
+metric offset 50 @ 100
+metric @ 0 offset -50s
+metric @ 0 offset -50
+metric offset -50s @ 0
+metric offset -50 @ 0
+-metric @ 100
+---metric @ 100
+metric_ms @ 1.234
+sum_over_time(metric{job="1"}[100s] @ 100)
+sum_over_time(metric{job="1"}[100s] @ 100 offset 50s)
+sum_over_time(metric{job="1"}[100s] offset 50s @ 100)
+sum_over_time(metric{job="1"}[100] @ 100 offset 50)
+sum_over_time(metric{job="1"}[100] offset 50s @ 100)
+metric{job="1"} @ 50 + metric{job="1"} @ 100
+rate(metric{job="1"}[100s] @ 100) + label_replace(rate(metric{job="2"}[123s] @ 200), "job", "1", "", "")
+sum_over_time(metric{job="1"}[100s] @ 100) + label_replace(sum_over_time(metric{job="2"}[100s] @ 100), "job", "1", "", "")
+sum_over_time(metric{job="1"}[100] @ 100) + label_replace(sum_over_time(metric{job="2"}[100] @ 100), "job", "1", "", "")
+sum_over_time(metric{job="1"}[100s:1s] @ 100)
+sum_over_time(metric{job="1"}[100s:1s] @ 100 offset 20s)
+sum_over_time(metric{job="1"}[100s:1s] offset 20s @ 100)
+sum_over_time(metric{job="1"}[100:1] offset 20 @ 100)
+sum_over_time(sum_over_time(metric{job="1"}[100s] @ 100)[100s:25s] @ 50)
+sum_over_time(sum_over_time(sum_over_time(metric{job="1"}[100s] @ 100)[100s:25s] @ 50)[3s:1s] @ 3000)
+sum_over_time(sum_over_time(sum_over_time(metric{job="1"}[10s])[100s:25s] @ 50)[3s:1s] @ 200)
+sum_over_time(sum_over_time(sum_over_time(metric{job="1"}[10s])[100s:25s] @ 200)[3s:1s] @ 50)
+sum_over_time(sum_over_time(sum_over_time(metric{job="1"}[20s])[20s:10s] offset 10s)[100s:25s] @ 1000)
+minute(metric @ 1500)
+timestamp(metric{job="1"} @ 10)
+timestamp(timestamp(metric{job="1"} @ 10))
+sum_over_time(minute(metric @ 1500)[100s:10s])
+sum_over_time(minute()[50m:1m] @ 6000)
+sum_over_time(minute()[50m:1m] @ 6000 offset 5m)
+sum_over_time(vector(time())[100s:1s] @ 3000)
+sum_over_time(vector(time())[100s:1s] @ 3000 offset 600s)
+sum_over_time(timestamp(metric{job="1"} @ 10)[100s:10s] @ 3000)
+sum_over_time(timestamp(timestamp(metric{job="1"} @ 999))[10s:1s] @ 10)
+quantile_over_time(scalar(up) + 1, {__name__="up"}[1h:1m] @ 1111111)
+predict_linear({__name__="up"}[1h:1m] @ 1111111, 0.1)
+deriv({__name__="up"}[1h:1m] @ 1111111)
+changes({__name__="up"}[1h:1m] @ 1111111)
+resets({__name__="up"}[1h:1m] @ 1111111)
+first_over_time({__name__="up"}[1h:1m] @ 1111111)
+last_over_time({__name__="up"}[1h:1m] @ 1111111)
+sum_over_time({__name__="up"}[1h:1m] @ 1111111)
+avg_over_time({__name__="up"}[1h:1m] @ 1111111)
+min_over_time({__name__="up"}[1h:1m] @ 1111111)
+max_over_time({__name__="up"}[1h:1m] @ 1111111)
+count_over_time({__name__="up"}[1h:1m] @ 1111111)
+stddev_over_time({__name__="up"}[1h:1m] @ 1111111)
+stdvar_over_time({__name__="up"}[1h:1m] @ 1111111)
+mad_over_time({__name__="up"}[1h:1m] @ 1111111)
+metric @ 11
+abs(metric @ 11)
+timestamp(metric)
+timestamp(metric @ 11)
+timestamp(metric @ 19)
+timestamp(metric @ 20)
+timestamp(metric_missing @ 0)
+timestamp(metric_missing @ 10)
+timestamp(metric_missing @ 20)
+timestamp(abs(metric @ 11))
+timestamp(abs(metric_missing @ 11))
+# --- prometheus testdata: collision.test ---
+count by(namespace, pod, cpu) (node_cpu_seconds_total{cpu=~".*",job="node-exporter",mode="idle",namespace="observability",pod="node-exporter-l454v"}) * on(namespace, pod) group_left(node) node_namespace_pod:kube_pod_info:{namespace="observability",pod="node-exporter-l454v"}
+ceil({__name__=~'testmetric1|testmetric2'})
+# --- prometheus testdata: duration_expression.test ---
+changes(http_requests[30m])
+changes(http_requests[26m+4m])
+changes(http_requests[30m+0s])
+changes(http_requests[1800])
+changes(http_requests[60*30])
+changes(http_requests[2m*15])
+changes(http_requests[2m*(10+5)])
+changes(http_requests[29m+60s])
+changes(http_requests[24m+((1.5*2m)+2m)])
+changes(http_requests[-5m+35m])
+changes(http_requests[1h/2])
+changes(http_requests[1h30m % 1h])
+changes(http_requests[30m1s-30m1s % 1m])
+changes(http_requests[(9m30s+30s)*3])
+sum_over_time(metric1_total[29s+1s:5s+5s])
+sum_over_time(metric1_total[29s+1s:((((8 - 2) / 3) * 7s) % 4) + 8000ms])
+sum_over_time(metric1_total[29s+1s:20*500ms] offset (20*(((((8 - 2) / 3) * 7s) % 4) + 8000ms)))
+sum_over_time(metric1_total[29s+1s:20*500ms] offset -(20*(((((8 - 2) / 3) * 7s) % 4) + 8000ms)))
+metric1_total offset (100 + 2)
+metric1_total offset 100 + 2
+(metric1_total offset 2) ^ 2
+metric1_total offset 2 ^ 2
+metric1_total offset -2 ^ 2
+metric1_total offset (2 ^ 2)
+metric1_total offset (2 * 2)
+metric1_total offset -2 * 2
+metric1_total offset (-2 * 2)
+metric1_total offset -4
+metric1_total offset (-2 ^ 2)
+count_over_time(metric1_total[step()])
+count_over_time(metric1_total[step()+1ms])
+count_over_time(metric1_total[(step())+1])
+count_over_time(metric1_total[1+(STep()-5)*2])
+count_over_time(metric1_total[step()+1])
+count_over_time(metric1_total[min_of(step()+1,1h)])
+count_over_time(metric1_total[max_of(min_of(step()+1,1h),1ms)])
+count_over_time(metric1_total[((max_of(min_of((step()+1),((1h))),1ms)))])
+metric1_total offset STEP()
+metric1_total offset step()
+metric1_total offset step()*0
+metric1_total offset (-step()*2)
+metric1_total offset -step()*2
+metric1_total offset step()^0
+metric1_total offset (STEP()/10)
+metric1_total offset (step())
+metric1_total offset min_of(step(), 1s)
+metric1_total offset min_of(step(), 1s)+8000
+metric1_total offset -min_of(step(), 1s)+8000
+metric1_total offset -(min_of(step(), 1s))+8000
+metric1_total offset -min_of(step(), 1s)^0
+metric1_total offset +min_of(step(), 1s)^0
+metric1_total offset min_of(step(), 1s)^0
+metric1_total offset max_of(3s,min_of(step(), 1s))+8000
+metric1_total offset -(min_of(step(), 2s)-5)+8000
+count_over_time(metric1_total[range()])
+metric1_total offset range()
+metric1_total offset min_of(range(), 8s)
+# --- prometheus testdata: extended_vectors.test ---
+increase(metric[1m])
+increase(metric[1m] anchored)
+increase(metric[1m] smoothed)
+delta(metric[1m])
+delta(metric[1m] anchored)
+increase(metric[5m])
+increase(metric[5m] smoothed)
+increase(metric[5m] anchored)
+delta(metric[5m] smoothed)
+changes(metric[5m])
+changes(metric[5m] anchored)
+resets(metric[5m])
+resets(metric[5m] anchored)
+changes(metric[1m])
+changes(metric[1m] anchored)
+changes(metric[1m1ms] anchored)
+resets(metric[1m])
+resets(metric[1m] anchored)
+resets(metric[1m1ms] anchored)
+increase(metric[2m] smoothed)
+rate(metric[10s] smoothed)
+deriv(foo[3m] smoothed)
+resets(foo[3m] smoothed)
+changes(foo[3m] smoothed)
+max_over_time(foo[3m] smoothed)
+predict_linear(foo[3m] smoothed, 4)
+deriv(foo[3m] anchored)
+resets(foo[3m] anchored)
+changes(foo[3m] anchored)
+max_over_time(foo[3m] anchored)
+predict_linear(foo[3m] anchored, 4)
+metric smoothed
+withreset smoothed
+notregular smoothed
+rate(metric[5s] smoothed)
+increase(metric[5s] smoothed)
+increase(metric[10s] smoothed)
+metric @ 100 smoothed
+metric @ 100 smoothed + 0
+metric offset -100
+metric offset -100 smoothed
+metric offset -100 smoothed + 0
+histogram_count(rate(hist_counter[1m]))
+histogram_count(increase(hist_counter[1m]))
+histogram_count(increase(hist_counter[1m] anchored))
+histogram_sum(increase(hist_counter[1m] anchored))
+histogram_count(increase(hist_counter[1m] smoothed))
+histogram_sum(increase(hist_counter[1m] smoothed))
+histogram_count(rate(hist_counter[1m] smoothed))
+histogram_count(delta(hist_counter[1m] smoothed))
+histogram_count(rate(hist_counter[1m] anchored))
+histogram_count(delta(hist_counter[1m] anchored))
+histogram_count(hist_counter smoothed)
+rate(mixed_hist[1m] anchored)
+rate(mixed_hist[1m] smoothed)
+histogram_count(increase(reset_custom_hist[90s]))
+histogram_sum(increase(reset_custom_hist[90s]))
+histogram_count(increase(reset_custom_hist[90s] anchored))
+histogram_sum(increase(reset_custom_hist[90s] anchored))
+histogram_count(rate(mid_gauge_hist[90s] anchored))
+histogram_count(increase(mid_gauge_hist[90s] smoothed))
+histogram_count(delta(mid_gauge_hist[90s] anchored))
+histogram_count(increase(custom_only[1m] smoothed))
+histogram_sum(increase(custom_only[1m] smoothed))
+histogram_count(reset_middle smoothed)
+histogram_count(rate(reset_boundary[1s] smoothed))
+histogram_count(increase(anchored_reset_at_end[70s] anchored))
+histogram_count(increase(anchored_two_sample_reset[30s] anchored))
+histogram_count(increase(smoothed_double_reset[14s] smoothed))
+histogram_count(increase(smoothed_two_sample_both_interp[10s] smoothed))
+histogram_count(smoothed_mix smoothed)
+sort(mixed_types smoothed)
+histogram_count(rate(right_boundary_reset[10s] smoothed))
+# --- prometheus testdata: fill-modifier.test ---
+left_vector + fill(0) right_vector
+left_vector + fill_left(0) right_vector
+left_vector + fill_right(0) right_vector
+left_vector + fill_left(5) fill_right(7) right_vector
+left_vector + fill(NaN) right_vector
+left_vector + fill(Inf) right_vector
+left_vector + fill(-Inf) right_vector
+left_vector == fill(30) right_vector
+left_vector != fill(30) right_vector
+left_vector > fill(25) right_vector
+left_vector == bool fill(30) right_vector
+left_vector != bool fill(30) right_vector
+left_vector > bool fill(25) right_vector
+left_vector + on(job, instance) fill(0) right_vector
+left_vector + on(job, instance) fill_right(0) right_vector
+left_vector + on(job, instance) fill_left(0) right_vector
+left_vector + ignoring(job) group_left fill(0) right_vector
+requests / on(status) group_left fill_right(1) limits
+requests + on(status) group_left fill_left(0) limits
+requests + on(status) group_left fill(0) limits
+node_meta * on(instance) group_right fill_left(1) cpu_info
+node_meta * on(instance) group_right fill_right(0) cpu_info
+node_meta * on(instance) group_right fill(1) cpu_info
+requests + on(status) group_left(owner) fill_right(0) limits
+only_left + fill(0) only_right
+only_left + fill_left(0) only_right
+only_left + fill_right(0) only_right
+complete_left + fill(99) complete_right
+range_left + fill(0) range_right
+range_left + fill_right(0) range_right
+range_left + fill_left(0) range_right
+intermittent_left + fill(0) intermittent_right
+intermittent_left + fill_right(0) intermittent_right
+intermittent_left + fill_left(0) intermittent_right
+non_empty + fill_right(0) nonexistent
+non_empty + fill_left(0) nonexistent
+nonexistent + fill_left(0) non_empty
+nonexistent + fill_right(0) non_empty
+non_empty + fill(0) nonexistent
+nonexistent + fill(0) non_empty
+fill + fill(0) other
+other + fill
+other + fill(0) fill
+other + fill_left(0) fill_left
+other + fill_right(0) fill_right
+# --- prometheus testdata: functions.test ---
+resets(http_requests[5m])
+resets(http_requests[10m])
+resets(http_requests[600])
+resets(http_requests[20m])
+resets(http_requests[30m])
+resets(http_requests[32m])
+resets(http_requests[50m])
+resets(nonexistent_metric[50m])
+resets(http_requests_histogram[6m])
+resets(http_requests_histogram[60m])
+changes(http_requests[5m])
+changes(http_requests[6m])
+changes(http_requests[20m])
+changes(http_requests[50m])
+changes((http_requests[50m]))
+changes(nonexistent_metric[50m])
+changes(http_requests_histogram[5m])
+changes(http_requests_histogram[6m])
+changes(http_requests_histogram[60m])
+changes(x[20m])
+increase(http_requests_total[50m])
+increase(http_requests_total[100m])
+increase(http_requests_total[30m])
+rate(testcounter_reset_middle_total[50m])
+rate(testcounter_reset_end_total[5m])
+rate(testcounter_reset_end_total[6m])
+rate(calculate_rate_window_total[50m])
+rate(calculate_rate_offset_total[10m] offset 5m)
+rate(testcounter_zero_cutoff_total[20m])
+irate(http_requests_total[50m])
+irate(http_requests_nan[15m1s])
+irate(http_requests_histogram{path="/a"}[20m])
+irate(http_requests_histogram{path="/b"}[20m])
+irate(http_requests_histogram{path="/b"}[6m])
+irate(http_requests_histogram{path="/c"}[20m])
+irate(http_requests_histogram{path="/d"}[20m])
+irate(http_requests_histogram{path="/e"}[20m])
+irate(http_requests_histogram{path="/f"}[20m])
+irate(http_requests_histogram{path="/g"}[20m])
+delta(http_requests[20m])
+delta(http_requests_gauge[20m])
+delta(http_requests_counter[20m])
+delta(http_requests_mix[20m])
+idelta(http_requests[20m])
+idelta(http_requests_nan[15m1s])
+idelta(http_requests_histogram{path="/a"}[20m])
+idelta(http_requests_histogram{path="/b"}[20m])
+idelta(http_requests_histogram{path="/b"}[6m])
+idelta(http_requests_histogram{path="/c"}[20m])
+idelta(http_requests_histogram{path="/d"}[20m])
+idelta(http_requests_histogram{path="/e"}[20m])
+idelta(http_requests_histogram{path="/f"}[20m])
+idelta(http_requests_histogram{path="/g"}[20m])
+rate(http_requests_total{group="canary", instance="1", job="app-server"}[50m])
+deriv(http_requests_total{group="canary", instance="1", job="app-server"}[50m])
+deriv(testcounter_reset_middle_total[100m])
+deriv(http_requests_mix{group="canary", instance="1", job="app-server"}[110m])
+deriv(testcounter_reset_middle_mix[110m])
+deriv(http_requests_histogram[60m])
+deriv(http_requests_inf[100m])
+predict_linear(testcounter_reset_middle_total[50m], 3600)
+predict_linear(testcounter_reset_middle_total[50m], 1h)
+predict_linear(testcounter_reset_middle_total[55m] @ 3000, 3600)
+predict_linear(testcounter_reset_middle_total[55m] @ 3000, 1h)
+predict_linear(testcounter_reset_middle_mix[60m], 3000)
+predict_linear(testcounter_reset_middle_mix[60m], 50m)
+predict_linear(http_requests_histogram[60m], 50m)
+predict_linear(http_requests_inf[100m], 6000)
+predict_linear(http_requests_total[50m], 3600) - (http_requests_total + deriv(http_requests_total[50m]) * 3600)
+label_replace(testmetric, "dst", "destination-value-$1", "src", "source-value-(.*)")
+label_replace(testmetric, "dst", "destination-value-$1", "src", "value-(.*)")
+label_replace(testmetric, "dst", "$1-value-$2", "src", "(.*)-value-(.*)")
+label_replace(testmetric, "dst", "value-$1", "nonexistent-src", "source-value-(.*)")
+label_replace(testmetric, "dst", "value-$1", "nonexistent-src", "(.*)")
+label_replace(testmetric, "dst", "value-$1", "src", "non-matching-regex")
+label_replace((((testmetric))), (("dst")), (("value-$1")), (("src")), (("non-matching-regex")))
+label_replace(testmetric, "dst", "", "dst", ".*")
+label_replace(testmetric, "dst", "value-$1", "src", "(.*")
+label_replace(testmetric, "\xff", "", "src", "(.*)")
+label_replace(testmetric, "src", "", "", "")
+timestamp(((metric)))
+label_join(testmetric, "dst", "-", "src", "src1", "src2")
+label_join(testmetric, "dst", "-", "src", "src3", "src1")
+label_join(testmetric, "dst", "", "emptysrc", "emptysrc1", "emptysrc2")
+label_join(testmetric, "dst", ", ")
+label_join(testmetric1, "dst", ", ", "src", "src1", "src2")
+label_join(dup, "label", "", "this")
+vector(1)
+vector(time())
+clamp_max(test_clamp, 75)
+clamp_min(test_clamp, -25)
+clamp(test_clamp, -25, 75)
+clamp_max(clamp_min(test_clamp, -20), 70)
+clamp_max((clamp_min(test_clamp, (-20))), (70))
+clamp(test_clamp, 0, NaN)
+clamp(test_clamp, NaN, 0)
+clamp(test_clamp, 5, -5)
+clamp(mixed_metric, 2, 5)
+clamp_min(mixed_metric, 2)
+clamp_max(mixed_metric, 2)
+sgn(test_sgn)
+sort(http_requests)
+sort_desc(http_requests)
+sort_by_label(http_requests, "instance")
+sort_by_label(http_requests, "instance", "group")
+sort_by_label(http_requests, "group", "instance", "job")
+sort_by_label(http_requests, "job", "instance", "group")
+sort_by_label_desc(http_requests, "instance")
+sort_by_label_desc(http_requests, "instance", "group")
+sort_by_label_desc(http_requests, "instance", "group", "job")
+sort_by_label(cpu_time_total, "cpu")
+sort_by_label(node_uname_info, "instance")
+sort_by_label(node_uname_info, "release")
+double_exponential_smoothing(http_requests[1m], 0.01, 0.1)
+double_exponential_smoothing(http_requests_mix[1m], 0.01, 0.1)
+double_exponential_smoothing(http_requests_histogram[1m], 0.01, 0.1)
+avg_over_time(metric[10s])
+avg_over_time(metric[20s])
+avg_over_time(metric[1m])
+sum_over_time(metric[1m])/count_over_time(metric[1m])
+avg_over_time(metric2[1m])
+sum_over_time(metric2[1m])/count_over_time(metric2[1m])
+avg_over_time(metric3[1m])
+sum_over_time(metric3[1m])/count_over_time(metric3[1m])
+avg_over_time(metric4[1m])
+sum_over_time(metric4[1m])/count_over_time(metric4[1m])
+avg_over_time(metric5[1m])
+sum_over_time(metric5[1m])/count_over_time(metric5[1m])
+avg_over_time(metric5b[1m])
+sum_over_time(metric5b[1m])/count_over_time(metric5b[1m])
+avg_over_time(metric5c[1m])
+sum_over_time(metric5c[1m])/count_over_time(metric5c[1m])
+avg_over_time(metric6[1m])
+sum_over_time(metric6[1m])/count_over_time(metric6[1m])
+avg_over_time(metric6b[1m])
+sum_over_time(metric6b[1m])/count_over_time(metric6b[1m])
+avg_over_time(metric6c[1m])
+sum_over_time(metric6c[1m])/count_over_time(metric6c[1m])
+avg_over_time(metric7[1m])
+sum_over_time(metric7[1m])/count_over_time(metric7[1m])
+avg_over_time(metric8[1m])
+sum_over_time(metric8[1m])/count_over_time(metric8[1m])
+avg_over_time(metric9[1m])
+sum_over_time(metric9[1m])/count_over_time(metric9[1m])
+avg_over_time(metric10[1m])
+sum_over_time(metric10[1m])/count_over_time(metric10[1m])
+avg_over_time(metric11[1m])
+sum_over_time(metric11[1m])/count_over_time(metric11[1m])
+sum_over_time(metric12[1m])
+avg_over_time(metric12[1m])
+sum_over_time(metric13[1m])
+avg_over_time(metric13[1m])
+sum_over_time(metric13[1m])/count_over_time(metric13[1m])
+sum_over_time(metric[2m])
+avg_over_time(metric[2m])
+avg_over_time(metric1[1m])
+avg_over_time(foo[100s]) - 52
+avg_over_time(foo[110s]) - 52
+avg_over_time(foo[120s]) - 52
+avg_over_time(foo[130s]) - 52
+avg_over_time(foo[100s]) == 52
+avg_over_time(foo[110s]) == 52
+avg_over_time(foo[120s]) == 52
+avg_over_time(foo[130s]) == 52
+sum_over_time(metric[1000ms])
+sum_over_time(metric[1001ms])
+sum_over_time(metric[1002ms])
+sum_over_time(metric[1003ms])
+sum_over_time(metric[2000ms])
+sum_over_time(metric[2001ms])
+sum_over_time(metric[2002ms])
+sum_over_time(metric[2003ms])
+sum_over_time(metric[3000ms])
+sum_over_time(metric[3001ms])
+sum_over_time(metric[3002ms])
+sum_over_time(metric[3003ms])
+stdvar_over_time(metric[2m])
+stddev_over_time(metric[2m])
+stddev_over_time((metric[2m]))
+stddev_over_time(metric_histogram{type="only_histogram"}[2m])
+stddev_over_time(metric_histogram{type="mix"}[2m])
+stdvar_over_time(metric_histogram{type="only_histogram"}[2m])
+stdvar_over_time(metric_histogram{type="mix"}[2m])
+stdvar_over_time(metric[1m])
+stddev_over_time(metric[1m])
+mad_over_time(metric[70s])
+mad_over_time(metric_histogram{type="only_histogram"}[70s])
+mad_over_time(metric_histogram{type="mix"}[70s])
+ts_of_min_over_time(metric[90s])
+ts_of_max_over_time(metric[90s])
+ts_of_last_over_time(metric[90s])
+ts_of_last_over_time(metric_histogram{type="only_histogram"}[90s])
+ts_of_last_over_time(metric_histogram{type="mix"}[90s])
+ts_of_first_over_time(metric[90s])
+ts_of_first_over_time(metric_histogram{type="only_histogram"}[90s])
+ts_of_first_over_time(metric_histogram{type="mix"}[90s])
+quantile_over_time(0, data[2m])
+quantile_over_time(0.5, data[2m])
+quantile_over_time(0.75, data[2m])
+quantile_over_time(0.8, data[2m])
+quantile_over_time(1, data[2m])
+quantile_over_time(-1, data[2m])
+quantile_over_time(2, data[2m])
+(quantile_over_time(2, (data[2m])))
+quantile_over_time(0.5, data_histogram{test="only histogram samples"}[2m])
+quantile_over_time(0.5, data_histogram{test="mix samples"}[2m])
+year()
+time()
+year(vector(1136239445))
+month()
+month(vector(1136239445))
+day_of_month()
+day_of_month(vector(1136239445))
+day_of_year()
+day_of_year(vector(1136239445))
+day_of_week()
+day_of_week(vector(1136239445))
+hour()
+hour(vector(1136239445))
+minute()
+minute(vector(1136239445))
+year(vector(1230767999))
+year(vector(1230768000))
+month(vector(1456790399)) + day_of_month(vector(1456790399)) / 100
+month(vector(1456790400)) + day_of_month(vector(1456790400)) / 100
+day_of_year(vector(1483191420))
+day_of_year(vector(1672493820))
+days_in_month(vector(1454284800))
+days_in_month(vector(1485907200))
+day_of_month(histogram_sample)
+day_of_week(histogram_sample)
+day_of_year(histogram_sample)
+days_in_month(histogram_sample)
+hour(histogram_sample)
+minute(histogram_sample)
+month(histogram_sample)
+year(histogram_sample)
+changes({__name__=~'testmetric1|testmetric2'}[5m])
+min_over_time(data[2m])
+min_over_time(data_histogram{type="only_histogram"}[2m])
+min_over_time(data_histogram{type=~"mix_samples.*"}[2m])
+min_over_time(data_sparse[2m])
+max_over_time(data[2m])
+max_over_time(data_histogram{type="only_histogram"}[2m])
+max_over_time(data_histogram{type=~"mix_samples.*"}[2m])
+max_over_time(data_sparse[2m])
+last_over_time({__name__=~"data(_histogram|_sparse|_empty)?"}[2m])
+first_over_time({__name__=~"data(_histogram|_sparse|_empty)?"}[2m])
+count_over_time({__name__=~"data(_histogram|_sparse|_empty)?"}[2m])
+abs(data)
+ceil(data)
+floor(data)
+round(data)
+absent(nonexistent)
+absent(nonexistent{job="testjob", instance="testinstance", method=~".x"})
+absent(nonexistent{job="testjob",job="testjob2",foo="bar"})
+absent(nonexistent{job="testjob",job="testjob2",job="three",foo="bar"})
+absent(nonexistent{job="testjob",job=~"testjob2",foo="bar"})
+absent(http_requests)
+absent(sum(http_requests))
+absent(http_requests_histogram)
+absent(sum(http_requests_histogram))
+absent(sum(nonexistent{job="testjob", instance="testinstance"}))
+absent(max(nonexistent))
+absent(nonexistent > 1)
+absent(a + b)
+absent(a and b)
+absent(rate(nonexistent[5m]))
+absent_over_time(http_requests_total[5m])
+absent_over_time(http_requests_total{handler="/foo"}[5m])
+absent_over_time(http_requests_total{handler!="/foo"}[5m])
+absent_over_time(http_requests_total{handler="/foo", handler="/bar", handler="/foobar"}[5m])
+absent_over_time(rate(nonexistent[5m])[5m:])
+absent_over_time(http_requests_total{handler="/foo", handler="/bar", instance="127.0.0.1"}[5m])
+absent_over_time(rate(http_requests_total[5m])[5m:1m])
+absent_over_time(httpd_log_lines_total[30s])
+absent_over_time(http_requests_total[10m])
+absent_over_time(http_requests_total[6m])
+absent_over_time(http_requests_total[16m])
+absent_over_time(httpd_handshake_failures_total[1m])
+absent_over_time(httpd_handshake_failures_total[2m])
+absent_over_time({instance="127.0.0.1"}[5m])
+absent_over_time({instance="127.0.0.1"}[20m])
+absent_over_time({job="grok"}[20m])
+absent_over_time({instance="127.0.0.1"}[5m:5s])
+absent_over_time({job="ingress"}[4m])
+absent_over_time(http_requests_histogram[5m])
+absent_over_time(rate(http_requests_histogram[5m])[5m:1m])
+present_over_time(http_requests_total[5m])
+present_over_time(http_requests_total{handler="/foo"}[5m])
+present_over_time(http_requests_total{handler!="/foo"}[5m])
+present_over_time(http_requests_total{handler="/foo", handler="/bar", handler="/foobar"}[5m])
+present_over_time(rate(nonexistent[5m])[5m:])
+present_over_time(http_requests_total{handler="/foo", handler="/bar", instance="127.0.0.1"}[5m])
+present_over_time(rate(http_requests_total[5m])[5m:1m])
+present_over_time(httpd_log_lines_total[30s])
+present_over_time(http_requests_total[10m])
+present_over_time(http_requests_total[6m])
+present_over_time(http_requests_total[16m])
+present_over_time(httpd_handshake_failures_total[1m])
+present_over_time({instance="127.0.0.1"}[5m])
+present_over_time({job="grok"}[20m])
+present_over_time({instance="127.0.0.1"}[5m:5s])
+present_over_time({job="ingress"}[4m])
+exp(exp_root_log)
+exp({__name__=~"exp_root_log(_h)?"})
+exp(exp_root_log - 10)
+exp(exp_root_log - 20)
+ln(exp_root_log)
+ln({__name__=~"exp_root_log(_h)?"})
+ln(exp_root_log - 10)
+ln(exp_root_log - 20)
+exp(ln(exp_root_log))
+exp(ln({__name__=~"exp_root_log(_h)?"}))
+sqrt(exp_root_log)
+sqrt({__name__=~"exp_root_log(_h)?"})
+log2(exp_root_log)
+log2({__name__=~"exp_root_log(_h)?"})
+log2(exp_root_log - 10)
+log2(exp_root_log - 20)
+log10(exp_root_log)
+log10({__name__=~"exp_root_log(_h)?"})
+log10(exp_root_log - 10)
+log10(exp_root_log - 20)
+round(mixed_metric)
+scalar(metric)
+scalar({type="histogram"})
+scalar({l="x"})
+label_replace(series, "idx", "replaced", "idx", ".*")
+label_join(series, "idx", ",", "label", "label")
+label_replace(overlap, "idx", "same", "idx", ".*")
+label_join(overlap, "idx", ",", "label", "label")
+step()
+range()
+vector(step())
+vector(range())
+metric * step()
+metric + range()
+start()
+end()
+vector(start())
+vector(end())
+end() - start()
+(end() + start()) / 2
+start() + range()
+end() - range()
+metric_for_at @ start()
+metric_for_at @ end()
+min_of(3, 5)
+min_of(5, 3)
+max_of(3, 5)
+max_of(5, 3)
+min_of(4, 4)
+max_of(4, 4)
+min_of(-2, -5)
+max_of(-2, -5)
+min_of(0, 1)
+max_of(0, 1)
+min_of(NaN, 3)
+min_of(3, NaN)
+max_of(NaN, 3)
+max_of(3, NaN)
+# --- prometheus testdata: histograms.test ---
+histogram_count(testhistogram3)
+testhistogram3_count
+histogram_sum(testhistogram3)
+testhistogram3_sum
+histogram_avg(testhistogram3)
+histogram_stddev(testhistogram3)
+histogram_stdvar(testhistogram3)
+histogram_fraction(0, 4, testhistogram2)
+histogram_fraction(0, 4, testhistogram2_bucket)
+histogram_fraction(0, 6, testhistogram2)
+histogram_fraction(0, 6, testhistogram2_bucket)
+histogram_fraction(0, 3.5, testhistogram2)
+histogram_fraction(0, 3.5, testhistogram2_bucket)
+histogram_fraction(0, 0.2, testhistogram3)
+histogram_fraction(0, 0.2, testhistogram3_bucket)
+histogram_fraction(0, 0.2, rate(testhistogram3[10m]))
+histogram_fraction(0, 0.2, rate(testhistogram3_bucket[10m]))
+histogram_fraction(0, 1.5, positive_buckets_lower_falls_in_the_first_bucket_bucket)
+histogram_fraction(0, 1.5, positive_buckets_lower_falls_in_the_first_bucket)
+histogram_fraction(-4, -2, negative_buckets_lower_falls_in_the_first_bucket_bucket)
+histogram_fraction(-4, -2, negative_buckets_lower_falls_in_the_first_bucket)
+histogram_fraction(-Inf, -1.5, lower_is_negative_Inf_bucket)
+histogram_fraction(-Inf, -1.5, lower_is_negative_Inf)
+histogram_fraction(-Inf, +Inf, lower_is_negative_Inf_and_upper_is_positive_Inf__positive_buckets__bucket)
+histogram_fraction(-Inf, +Inf, lower_is_negative_Inf_and_upper_is_positive_Inf__positive_buckets_)
+histogram_fraction(-Inf, +Inf, lower_is_negative_Inf_and_upper_is_positive_Inf__negative_buckets__bucket)
+histogram_fraction(-Inf, +Inf, lower_is_negative_Inf_and_upper_is_positive_Inf__negative_buckets_)
+histogram_fraction(4, 5, lower_and_upper_fall_in_last_bucket__positive_buckets__bucket)
+histogram_fraction(4, 5, lower_and_upper_fall_in_last_bucket__positive_buckets_)
+histogram_fraction(0, 1, lower_and_upper_fall_in_last_bucket__negative_buckets__bucket)
+histogram_fraction(0, 1, lower_and_upper_fall_in_last_bucket__negative_buckets_)
+histogram_fraction(2, 5, upper_falls_in_last_bucket_bucket)
+histogram_fraction(2, 5, upper_falls_in_last_bucket)
+histogram_fraction(400, +Inf, upper_is_positive_Inf_bucket)
+histogram_fraction(400, +Inf, upper_is_positive_Inf)
+histogram_fraction(2, 2, lower_equals_upper_bucket)
+histogram_fraction(2, 2, lower_equals_upper)
+histogram_fraction(3, 2, lower_greater_than_upper_bucket)
+histogram_fraction(3, 2, lower_greater_than_upper)
+histogram_fraction(0, 1, single_bucket_bucket)
+histogram_fraction(0, 1, single_bucket)
+histogram_fraction(0, 5, all_zero_counts_bucket)
+histogram_fraction(0, 5, all_zero_counts)
+histogram_fraction(2, 3.5, lower_exactly_on_bucket_boundary_bucket)
+histogram_fraction(2, 3.5, lower_exactly_on_bucket_boundary)
+histogram_fraction(0.5, 2, upper_exactly_on_bucket_boundary_bucket)
+histogram_fraction(0.5, 2, upper_exactly_on_bucket_boundary)
+histogram_fraction(1, 3, both_bounds_exactly_on_bucket_boundaries_bucket)
+histogram_fraction(1, 3, both_bounds_exactly_on_bucket_boundaries)
+histogram_fraction(0.1, 0.75, fractional_bucket_bounds_bucket)
+histogram_fraction(0.1, 0.75, fractional_bucket_bounds)
+histogram_fraction(-1, 1, range_crosses_zero_bucket)
+histogram_fraction(-1, 1, range_crosses_zero)
+histogram_fraction(NaN, 1, lower_is_NaN_bucket)
+histogram_fraction(NaN, 1, lower_is_NaN)
+histogram_fraction(0, NaN, upper_is_NaN_bucket)
+histogram_fraction(0, NaN, upper_is_NaN)
+histogram_fraction(-10, -5, range_entirely_below_all_buckets_bucket)
+histogram_fraction(-10, -5, range_entirely_below_all_buckets)
+histogram_fraction(5, 10, range_entirely_above_all_buckets_bucket)
+histogram_fraction(5, 10, range_entirely_above_all_buckets)
+testhistogram3_bucket{le=".2"} / ignoring(le) testhistogram3_count
+rate(testhistogram3_bucket{le=".2"}[10m]) / ignoring(le) rate(testhistogram3_count[10m])
+histogram_quantile(0, testhistogram3)
+histogram_quantile(0, testhistogram3_bucket)
+histogram_quantile(0.25, testhistogram3)
+histogram_quantile(0.25, testhistogram3_bucket)
+histogram_quantile(0.5, testhistogram3)
+histogram_quantile(0.5, testhistogram3_bucket)
+histogram_quantile(0.75, testhistogram3)
+histogram_quantile(0.75, testhistogram3_bucket)
+histogram_quantile(1, testhistogram3)
+histogram_quantile(1, testhistogram3_bucket)
+histogram_quantiles(testhistogram3, "q", 0, 0.25, 0.5, 0.75, 1)
+histogram_quantiles(testhistogram3_bucket, "q", 0, 0.25, 0.5, 0.75, 1)
+histogram_quantiles(testhistogram3, "start", 0, 0.25, 0.5, 0.75, 1)
+histogram_quantiles(testhistogram3_bucket, "start", 0, 0.25, 0.5, 0.75, 1)
+histogram_quantile(-0.1, testhistogram)
+histogram_quantile(-0.1, testhistogram_bucket)
+histogram_quantiles(testhistogram, "q", -0.1)
+histogram_quantiles(testhistogram_bucket, "q", -0.1)
+histogram_quantile(1.01, testhistogram)
+histogram_quantile(1.01, testhistogram_bucket)
+histogram_quantiles(testhistogram, "q", 1.01)
+histogram_quantiles(testhistogram_bucket, "q", 1.01)
+histogram_quantile(NaN, testhistogram)
+histogram_quantile(NaN, testhistogram_bucket)
+histogram_quantiles(testhistogram, "q", NaN)
+histogram_quantiles(testhistogram_bucket, "q", NaN)
+histogram_quantile(NaN, non_existent)
+histogram_quantiles(non_existent, "q", NaN)
+histogram_quantile(0, testhistogram)
+histogram_quantile(0, testhistogram_bucket)
+histogram_quantile(1, testhistogram)
+histogram_quantile(1, testhistogram_bucket)
+histogram_quantile(0.2, testhistogram)
+histogram_quantile(0.2, testhistogram_bucket)
+histogram_quantile(0.5, testhistogram)
+histogram_quantile(0.5, testhistogram_bucket)
+histogram_quantile(0.8, testhistogram)
+histogram_quantile(0.8, testhistogram_bucket)
+histogram_quantile(0.2, rate(testhistogram[10m]))
+histogram_quantile(0.2, rate(testhistogram_bucket[10m]))
+histogram_quantile(0.5, rate(testhistogram[10m]))
+histogram_quantile(0.5, rate(testhistogram_bucket[10m]))
+histogram_quantile(0.8, rate(testhistogram[10m]))
+histogram_quantile(0.8, rate(testhistogram_bucket[10m]))
+histogram_quantile(1./6., testhistogram2)
+histogram_quantile(1./6., testhistogram2_bucket)
+histogram_quantile(0.5, testhistogram2)
+histogram_quantile(0.5, testhistogram2_bucket)
+histogram_quantile(5./6., testhistogram2)
+histogram_quantile(5./6., testhistogram2_bucket)
+histogram_quantile(1./6., rate(testhistogram2[15m]))
+histogram_quantile(1./6., rate(testhistogram2_bucket[15m]))
+histogram_quantile(0.5, rate(testhistogram2[15m]))
+histogram_quantile(0.5, rate(testhistogram2_bucket[15m]))
+histogram_quantile(5./6., rate(testhistogram2[15m]))
+histogram_quantile(5./6., rate(testhistogram2_bucket[15m]))
+histogram_quantile(0.3, sum(rate(request_duration_seconds[10m])))
+histogram_quantile(0.3, sum(rate(request_duration_seconds_bucket[10m])) by (le))
+histogram_quantile(0.5, sum(rate(request_duration_seconds[10m])))
+histogram_quantile(0.5, sum(rate(request_duration_seconds_bucket[10m])) by (le))
+histogram_quantile(0.3, avg(rate(request_duration_seconds[10m])))
+histogram_quantile(0.3, avg(rate(request_duration_seconds_bucket[10m])) by (le))
+histogram_quantile(0.5, avg(rate(request_duration_seconds[10m])))
+histogram_quantile(0.5, avg(rate(request_duration_seconds_bucket[10m])) by (le))
+histogram_quantile(0.3, sum(rate(request_duration_seconds[10m])) by (instance))
+histogram_quantile(0.3, sum(rate(request_duration_seconds_bucket[10m])) by (le, instance))
+histogram_quantile(0.5, sum(rate(request_duration_seconds[10m])) by (instance))
+histogram_quantile(0.5, sum(rate(request_duration_seconds_bucket[10m])) by (le, instance))
+histogram_quantile(0.3, sum(rate(request_duration_seconds[10m])) by (job))
+histogram_quantile(0.3, sum(rate(request_duration_seconds_bucket[10m])) by (le, job))
+histogram_quantile(0.5, sum(rate(request_duration_seconds[10m])) by (job))
+histogram_quantile(0.5, sum(rate(request_duration_seconds_bucket[10m])) by (le, job))
+histogram_quantile(0.3, sum(rate(request_duration_seconds[10m])) by (job, instance))
+histogram_quantile(0.3, sum(rate(request_duration_seconds_bucket[10m])) by (le, job, instance))
+histogram_quantile(0.5, sum(rate(request_duration_seconds[10m])) by (job, instance))
+histogram_quantile(0.5, sum(rate(request_duration_seconds_bucket[10m])) by (le, job, instance))
+histogram_quantile(0.3, rate(request_duration_seconds[10m]))
+histogram_quantile(0.3, rate(request_duration_seconds_bucket[10m]))
+histogram_quantile(0.5, rate(request_duration_seconds[10m]))
+histogram_quantile(0.5, rate(request_duration_seconds_bucket[10m]))
+sum(request_duration_seconds)
+sum(request_duration_seconds{job="job1",instance="ins1"} + ignoring(job,instance) request_duration_seconds{job="job1",instance="ins2"} + ignoring(job,instance) request_duration_seconds{job="job2",instance="ins1"} + ignoring(job,instance) request_duration_seconds{job="job2",instance="ins2"})
+avg(request_duration_seconds)
+avg (request_duration_seconds_bucket{le="0.1"})
+avg (request_duration_seconds_bucket{le="0.2"}) - avg (request_duration_seconds_bucket{le="0.1"})
+avg (request_duration_seconds_bucket{le="+Inf"}) - avg (request_duration_seconds_bucket{le="0.2"})
+count(request_duration_seconds)
+histogram_quantile(0.01, nonmonotonic_bucket)
+histogram_quantile(0.5, nonmonotonic_bucket)
+histogram_quantile(0.99, nonmonotonic_bucket)
+histogram_quantiles(nonmonotonic_bucket, "q", 0.01, 0.5, 0.99)
+histogram_quantile(0.5, rate(mixed_bucket[10m]))
+histogram_quantile(0.5, rate(mixed[10m]))
+histogram_quantile(0.75, rate(mixed_bucket[10m]))
+histogram_quantile(1, rate(mixed_bucket[10m]))
+histogram_quantile(0.2, rate(empty_bucket[10m]))
+histogram_quantile(0.99, {__name__=~"request_duration_seconds\\d*_bucket"})
+histogram_quantiles({__name__=~"request_duration_seconds\\d*_bucket"}, "q", 0.99)
+histogram_quantile(0.99, {__name__=~"request_duration_seconds\\d*"})
+histogram_quantiles({__name__=~"request_duration_seconds\\d*"}, "q", 0.99)
+rate(const_histogram_bucket[5m])
+rate(const_histogram[5m])
+histogram_quantile(1.0, sum by (le) (rate(const_histogram_bucket[5m])))
+histogram_quantile(1.0, sum(rate(const_histogram[5m])))
+sum_over_time(histogram_over_time[4m:1m])
+avg_over_time(histogram_over_time[4m:1m])
+increase(histogram_with_reset[15m])
+resets(histogram_with_reset[15m])
+histogram_count(increase(histogram_with_reset[15m]))
+histogram_sum(increase(histogram_with_reset[15m]))
+histogram_quantile(0.8, series)
+histogram_quantiles(series, "q", 0.1, 0.2)
+histogram_fraction(-Inf, 1, series)
+# --- prometheus testdata: info.test ---
+info(metric, {data=~".+"})
+info(metric)
+info(metric_not_matching_target_info)
+info(metric_not_matching_target_info, {data=~".*"})
+info(metric_not_matching_target_info, {data=~".+"})
+info(metric, {non_existent=~".+"})
+info(metric, {non_existent=~".*"})
+info(metric_with_overlapping_label)
+info(metric_with_overlapping_label, {data="info"})
+info(metric_with_overlapping_label, {data=~".+"})
+info(metric_with_overlapping_label, {instance="a"})
+info(metric, {__name__="target_info"})
+info(metric, {__name__="non_existent"})
+info(metric, {__name__="non_existent", data=~".+"})
+info(metric, {__name__="build_info"})
+info(metric, {__name__=~".+_info"})
+info(build_info, {__name__=~".+_info", another_data=~".+"})
+info(build_info, {__name__=~".+_info"})
+info(metric, {__name__!~".+_info", data=~".+"})
+info(metric, {__name__!~".+_info", data=~".*"})
+info(metric, {__name__!="target_info"})
+info(build_info, {__name__=~"target_.+", __name__=~".+_info"})
+info({__name__=~"websvc_.+"}, {__name__=~".+_info", __name__!~"websvc_.+"})
+info(metric, {__name__=~"target_.+", __name__=~".+_info"})
+info(metric, {__name__=~".+_info", __name__!~".*build.*"})
+info(metric, {data=~".*"})
+info(metric, {__name__="histogram"})
+info(metric @ 60)
+info(metric offset 1m)
+info(data_metric, {__name__="info_metric"})
+info({job="work"}, {__name__="info_metric"})
+info(metric, {__name__="custom_info"})
+# --- prometheus testdata: limit.test ---
+count(limitk by (group) (0, http_requests))
+count(limitk by (group) (-1, http_requests))
+count(limitk by (group) (1, http_requests) and http_requests)
+count(limitk by (group) (2, http_requests) and http_requests)
+count(limitk(100, http_requests) and http_requests)
+limitk(1, http_requests{instance="histogram_1"})
+limitk(8, http_requests{instance=~"(histogram_2|0)"})
+count(limitk(2, http_requests{instance=~"histogram_[0-9]"}))
+count(limitk(1000, http_requests{instance=~"histogram_[0-9]"}))
+count(limitk(scalar(foo), http_requests))
+count(limit_ratio(0.0, http_requests))
+count(limitk(2, http_requests) and http_requests)
+count(limit_ratio(0.5, http_requests) and http_requests) <= bool (4+1)
+count(limit_ratio(0.5, http_requests) and http_requests) >= bool (4-1)
+count(limit_ratio(1.0, http_requests) and http_requests)
+count(limit_ratio(-1.0, http_requests) and http_requests)
+count(limit_ratio(1.1, http_requests) and http_requests)
+count(limit_ratio(-1.1, http_requests) and http_requests)
+count(limit_ratio(0.2, http_requests) or limit_ratio(-0.8, http_requests))
+count(limit_ratio(0.2, http_requests) and limit_ratio(-0.8, http_requests))
+count(limit_ratio(0.5, http_requests) or limit_ratio(-0.5, http_requests))
+count(limit_ratio(0.5, http_requests) and limit_ratio(-0.5, http_requests))
+count(limit_ratio(0.8, http_requests) or limit_ratio(-0.2, http_requests))
+count(limit_ratio(0.8, http_requests) and limit_ratio(-0.2, http_requests))
+count(limit_ratio(time() % 17/17, http_requests) or limit_ratio( - (1.0 - (time() % 17/17)), http_requests))
+count(limit_ratio(time() % 17/17, http_requests) and limit_ratio( - (1.0 - (time() % 17/17)), http_requests))
+abs(avg(limit_ratio(0.5, http_requests{instance!~"histogram_[0-9]"})) - avg(limit_ratio(-0.5, http_requests{instance!~"histogram_[0-9]"}))) <= bool stddev(http_requests{instance!~"histogram_[0-9]"})
+limit_ratio(1, http_requests{instance="histogram_1"})
+count(limit_ratio(scalar(bar), http_requests))
+# --- prometheus testdata: literals.test ---
+12.34e6
+12.34e+6
+12.34e-6
+1+1
+1-1
+1 - -1
+.2
++0.2
+-0.2e-6
++Inf
+inF
+-inf
+NaN
+nan
+2.
+1 / 0
+((1) / (0))
+-1 / 0
+0 / 0
+1 % 0
+("Foo")
+"Foo"
+" Foo "
+("")
+""
+# --- prometheus testdata: name_label_dropping.test ---
+metric_total{env="1"}
+-metric_total
+metric_total + another_metric_total
+metric_total <= another_metric_total
+metric_total <= bool another_metric_total
+metric_total * 2
+clamp(metric_total, 0, 100)
+round(metric_total)
+rate(metric_total{env="1"}[10m])
+last_over_time(metric_total{env="1"}[10m])
+first_over_time(metric_total{env="1"}[10m])
+last_over_time(abs(metric_total{env="1"})[10m:])
+max_over_time(metric_total{env="1"}[10m])
+label_replace(rate({env="1"}[10m]), "my_name", "rate_$1", "__name__", "(.+)")
+label_replace(rate({env="1"}[10m]), "__name__", "rate_$1", "__name__", "(.+)")
+label_join(rate({env="1"}[10m]), "my_name", "_", "__name__")
+label_join(rate({env="1"}[10m]), "__name__", "_", "__name__", "env")
+sum by (__name__, env) (metric_total{env="1"})
+sum by (__name__) (rate({env="1"}[10m]))
+sum(rate({env="1"}[10m])) by (env)
+topk(10, sum by (__name__, env) (metric_total{env="1"}))
+topk(10, sum by (__name__, env) (rate(metric_total{env="1"}[10m])))
+sum by (__name__) (metric_total{env="1"})
+sum by (__name__) (rate(metric_total{env="2"}[5m]))
+label_replace(sum by (__name__) (rate(metric_total{env="2"}[5m])), "__name__", "$1", "__name__", "(.+)")
+sum by (__name__) (metric_total{env="1"} or rate(metric_total{env="2"}[5m]))
+sum by (__name__) (rate(metric_total{env="2"}[5m]) or metric_total{env="1"})
+sum by (__name__) (metric_total{env="3"} or rate(metric_total{env="2"}[5m]))
+sum by (__name__) (rate(metric_total{env="3"}[5m]) or metric_total{env="1"})
+-metric_a or -metric_b
+# --- prometheus testdata: native_histograms.test ---
+empty_histogram
+histogram_count(empty_histogram)
+histogram_sum(empty_histogram)
+histogram_avg(empty_histogram)
+histogram_fraction(-Inf, +Inf, empty_histogram)
+histogram_fraction(0, 8, empty_histogram)
+histogram_count(single_histogram)
+histogram_sum(single_histogram)
+histogram_avg(single_histogram)
+histogram_fraction(1, 2, single_histogram)
+histogram_fraction(0, 8, single_histogram)
+histogram_quantile(0.5, single_histogram)
+histogram_quantiles(single_histogram, "q", 0.5)
+histogram_count(multi_histogram)
+histogram_sum(multi_histogram)
+histogram_avg(multi_histogram)
+histogram_fraction(1, 2, multi_histogram)
+histogram_quantile(0.5, multi_histogram)
+histogram_count(incr_histogram)
+histogram_sum(incr_histogram)
+histogram_avg(incr_histogram)
+histogram_fraction(1, 2, incr_histogram)
+histogram_quantile(0.5, incr_histogram)
+incr_histogram
+rate(incr_histogram[10m])
+histogram_quantile(0.5, rate(incr_histogram[10m]))
+low_res_histogram
+histogram_count(low_res_histogram)
+histogram_sum(low_res_histogram)
+histogram_avg(low_res_histogram)
+histogram_fraction(1, 4, low_res_histogram)
+histogram_count(single_zero_histogram)
+histogram_sum(single_zero_histogram)
+histogram_avg(single_zero_histogram)
+histogram_fraction(-0.5, 0.5, single_zero_histogram)
+histogram_quantile(0.5, single_zero_histogram)
+histogram_count(negative_histogram)
+histogram_sum(negative_histogram)
+histogram_avg(negative_histogram)
+histogram_fraction(-2, -1, negative_histogram)
+histogram_quantile(0.5, negative_histogram)
+histogram_count(two_samples_histogram)
+histogram_sum(two_samples_histogram)
+histogram_avg(two_samples_histogram)
+histogram_fraction(-2, -1, two_samples_histogram)
+histogram_quantile(0.5, two_samples_histogram)
+histogram_count(balanced_histogram)
+histogram_sum(balanced_histogram)
+histogram_avg(balanced_histogram)
+histogram_fraction(0, 4, balanced_histogram)
+histogram_quantile(0.5, balanced_histogram)
+histogram_sum(sum(incr_sum_histogram))
+histogram_sum(sum(last_over_time(incr_sum_histogram[5m])))
+rate(histogram_rate[45s])
+histogram_count(histogram_count_sum_2)
+histogram_sum(histogram_count_sum_2)
+histogram_stddev(histogram_stddev_stdvar_1)
+histogram_stdvar(histogram_stddev_stdvar_1)
+histogram_stddev(histogram_stddev_stdvar_2)
+histogram_stdvar(histogram_stddev_stdvar_2)
+histogram_stddev(histogram_stddev_stdvar_3)
+histogram_stdvar(histogram_stddev_stdvar_3)
+histogram_stddev(histogram_stddev_stdvar_4)
+histogram_stdvar(histogram_stddev_stdvar_4)
+histogram_stddev(histogram_stddev_stdvar_5)
+histogram_stdvar(histogram_stddev_stdvar_5)
+histogram_stddev(histogram_stddev_stdvar_6)
+histogram_stdvar(histogram_stddev_stdvar_6)
+histogram_stddev(histogram_stddev_stdvar_7)
+histogram_stdvar(histogram_stddev_stdvar_7)
+histogram_quantile(1.001, histogram_quantile_1)
+histogram_quantile(1, histogram_quantile_1)
+histogram_quantile(0.99, histogram_quantile_1)
+histogram_quantile(0.9, histogram_quantile_1)
+histogram_quantile(0.6, histogram_quantile_1)
+histogram_quantile(0.5, histogram_quantile_1)
+histogram_quantile(0.1, histogram_quantile_1)
+histogram_quantile(0, histogram_quantile_1)
+histogram_quantile(-1, histogram_quantile_1)
+histogram_quantile(1.001, histogram_quantile_2)
+histogram_quantile(1, histogram_quantile_2)
+histogram_quantile(0.99, histogram_quantile_2)
+histogram_quantile(0.9, histogram_quantile_2)
+histogram_quantile(0.5, histogram_quantile_2)
+histogram_quantile(0.1, histogram_quantile_2)
+histogram_quantile(0, histogram_quantile_2)
+histogram_quantile(-1, histogram_quantile_2)
+histogram_quantile(1.001, histogram_quantile_3)
+histogram_quantile(1, histogram_quantile_3)
+histogram_quantile(0.99, histogram_quantile_3)
+histogram_quantile(0.9, histogram_quantile_3)
+histogram_quantile(0.7, histogram_quantile_3)
+histogram_quantile(0.55, histogram_quantile_3)
+histogram_quantile(0.5, histogram_quantile_3)
+histogram_quantile(0.45, histogram_quantile_3)
+histogram_quantile(0.3, histogram_quantile_3)
+histogram_quantile(0.1, histogram_quantile_3)
+histogram_quantile(0.01, histogram_quantile_3)
+histogram_quantile(0, histogram_quantile_3)
+histogram_quantile(-1, histogram_quantile_3)
+histogram_quantile(0.5, var_res_histogram)
+histogram_fraction(0, 2, var_res_histogram{schema="-1"})
+histogram_fraction(0, 1.4142135623730951, var_res_histogram{schema="0"})
+histogram_fraction(0, 1.189207, var_res_histogram{schema="+1"})
+histogram_fraction(0, 8, var_res_histogram{schema="-1"})
+histogram_fraction(0, 2.82842712474619, var_res_histogram{schema="0"})
+histogram_fraction(0, 1.6817928305074292, var_res_histogram{schema="+1"})
+histogram_fraction(-2, 0, var_res_histogram{schema="-1"})
+histogram_fraction(-1.4142135623730951, 0, var_res_histogram{schema="0"})
+histogram_fraction(-1.189207, 0, var_res_histogram{schema="+1"})
+histogram_fraction(-8, 0, var_res_histogram{schema="-1"})
+histogram_fraction(-2.82842712474619, 0, var_res_histogram{schema="0"})
+histogram_fraction(-1.6817928305074292, 0, var_res_histogram{schema="+1"})
+histogram_fraction(3.1415, 42, histogram_fraction_1)
+histogram_fraction(0, +Inf, histogram_fraction_2)
+histogram_fraction(-Inf, 0, histogram_fraction_2)
+histogram_fraction(-0.001, 0, histogram_fraction_2)
+histogram_fraction(0, 0.001, histogram_fraction_2)
+histogram_fraction(0.001, inf, histogram_fraction_2)
+histogram_fraction(0, 0.0005, histogram_fraction_2)
+histogram_quantile(0.08333333333333333, histogram_fraction_2)
+histogram_fraction(-inf, -0.001, histogram_fraction_2)
+histogram_fraction(1, 2, histogram_fraction_2)
+histogram_fraction(0, 1.5, histogram_fraction_2)
+histogram_fraction(1.5, 2, histogram_fraction_2)
+histogram_fraction(1, 8, histogram_fraction_2)
+histogram_fraction(0, 6, histogram_fraction_2)
+histogram_quantile(0.6320802083934297, histogram_fraction_2)
+histogram_fraction(1, 6, histogram_fraction_2)
+histogram_fraction(1.5, 6, histogram_fraction_2)
+histogram_fraction(-2, -1, histogram_fraction_2)
+histogram_fraction(-2, -1.5, histogram_fraction_2)
+histogram_fraction(-8, -1, histogram_fraction_2)
+histogram_fraction(-6, -1, histogram_fraction_2)
+histogram_fraction(-6, -1.5, histogram_fraction_2)
+histogram_fraction(42, 3.1415, histogram_fraction_2)
+histogram_fraction(0, 0, histogram_fraction_2)
+histogram_fraction(0.000001, 0.000001, histogram_fraction_2)
+histogram_fraction(42, 42, histogram_fraction_2)
+histogram_fraction(-3.1, -3.1, histogram_fraction_2)
+histogram_fraction(3.1415, NaN, histogram_fraction_2)
+histogram_fraction(NaN, 42, histogram_fraction_2)
+histogram_fraction(NaN, NaN, histogram_fraction_2)
+histogram_fraction(-Inf, +Inf, histogram_fraction_2)
+histogram_fraction(0, +Inf, histogram_fraction_3)
+histogram_fraction(-Inf, 0, histogram_fraction_3)
+histogram_fraction(-0.001, 0, histogram_fraction_3)
+histogram_fraction(0, 0.001, histogram_fraction_3)
+histogram_fraction(-0.0005, 0, histogram_fraction_3)
+histogram_fraction(-inf, -0.0005, histogram_fraction_3)
+histogram_quantile(0.9166666666666666, histogram_fraction_3)
+histogram_fraction(0.001, inf, histogram_fraction_3)
+histogram_fraction(-inf, -0.001, histogram_fraction_3)
+histogram_fraction(1, 2, histogram_fraction_3)
+histogram_fraction(1.5, 2, histogram_fraction_3)
+histogram_fraction(1, 8, histogram_fraction_3)
+histogram_fraction(1, 6, histogram_fraction_3)
+histogram_fraction(1.5, 6, histogram_fraction_3)
+histogram_fraction(-2, -1, histogram_fraction_3)
+histogram_fraction(-2, -1.5, histogram_fraction_3)
+histogram_fraction(-8, -1, histogram_fraction_3)
+histogram_fraction(-inf, -6, histogram_fraction_3)
+histogram_quantile(0.36791979160657035, histogram_fraction_3)
+histogram_fraction(-6, -1, histogram_fraction_3)
+histogram_fraction(-6, -1.5, histogram_fraction_3)
+histogram_fraction(42, 3.1415, histogram_fraction_3)
+histogram_fraction(0, 0, histogram_fraction_3)
+histogram_fraction(0.000001, 0.000001, histogram_fraction_3)
+histogram_fraction(42, 42, histogram_fraction_3)
+histogram_fraction(-3.1, -3.1, histogram_fraction_3)
+histogram_fraction(3.1415, NaN, histogram_fraction_3)
+histogram_fraction(NaN, 42, histogram_fraction_3)
+histogram_fraction(NaN, NaN, histogram_fraction_3)
+histogram_fraction(-Inf, +Inf, histogram_fraction_3)
+histogram_fraction(0, +Inf, histogram_fraction_4)
+histogram_fraction(-Inf, 0, histogram_fraction_4)
+histogram_fraction(-0.001, 0, histogram_fraction_4)
+histogram_fraction(0, 0.001, histogram_fraction_4)
+histogram_fraction(-0.0005, 0.0005, histogram_fraction_4)
+histogram_fraction(-inf, 0.0005, histogram_fraction_4)
+histogram_quantile(0.5416666666666666, histogram_fraction_4)
+histogram_fraction(-inf, -0.0005, histogram_fraction_4)
+histogram_quantile(0.4583333333333333, histogram_fraction_4)
+histogram_fraction(0.001, inf, histogram_fraction_4)
+histogram_fraction(-inf, -0.001, histogram_fraction_4)
+histogram_fraction(1, 2, histogram_fraction_4)
+histogram_fraction(1.5, 2, histogram_fraction_4)
+histogram_fraction(1, 8, histogram_fraction_4)
+histogram_fraction(1, 6, histogram_fraction_4)
+histogram_fraction(1.5, 6, histogram_fraction_4)
+histogram_fraction(-2, -1, histogram_fraction_4)
+histogram_fraction(-2, -1.5, histogram_fraction_4)
+histogram_fraction(-8, -1, histogram_fraction_4)
+histogram_fraction(-6, -1, histogram_fraction_4)
+histogram_fraction(-6, -1.5, histogram_fraction_4)
+histogram_fraction(42, 3.1415, histogram_fraction_4)
+histogram_fraction(0, 0, histogram_fraction_4)
+histogram_fraction(0.000001, 0.000001, histogram_fraction_4)
+histogram_fraction(42, 42, histogram_fraction_4)
+histogram_fraction(-3.1, -3.1, histogram_fraction_4)
+histogram_fraction(3.1415, NaN, histogram_fraction_4)
+histogram_fraction(NaN, 42, histogram_fraction_4)
+histogram_fraction(NaN, NaN, histogram_fraction_4)
+histogram_fraction(-Inf, +Inf, histogram_fraction_4)
+histogram_sum(scalar(histogram_fraction(-Inf, +Inf, sum(histogram_fraction_4))) * histogram_fraction_4)
+histogram_mul_div*3
+histogram_mul_div*-1
+-histogram_mul_div
+histogram_mul_div*-3
+3*histogram_mul_div
+histogram_mul_div*float_series_3
+float_series_3*histogram_mul_div
+histogram_mul_div/3
+histogram_mul_div/-3
+histogram_mul_div/float_series_3
+histogram_mul_div*0
+0*histogram_mul_div
+histogram_mul_div*float_series_0
+float_series_0*histogram_mul_div
+histogram_mul_div/0
+histogram_mul_div/float_series_0
+histogram_mul_div*0/0
+histogram_mul_div*histogram_mul_div
+histogram_mul_div/histogram_mul_div
+float_series_3/histogram_mul_div
+0/histogram_mul_div
+float_sample+histogram_sample
+histogram_sample+float_sample
+float_sample-histogram_sample
+histogram_sample-float_sample
+increase(reset_in_bucket[15m])
+histogram_count(increase(reset_in_bucket[15m]))
+histogram_sum(increase(reset_in_bucket[15m]))
+histogram_fraction(5, 10, custom_buckets_histogram)
+histogram_quantile(0.5, custom_buckets_histogram)
+sum(custom_buckets_histogram)
+rate(some_metric[1m])
+rate(some_metric[1m30s])
+histogram_count(rate(some_metric[1m30s]))
+histogram_avg(rate(const_histogram[5m]))
+histogram_count(rate(const_histogram[5m]))
+histogram_sum(rate(const_histogram[5m]))
+histogram_fraction(0.0, 1.0, rate(const_histogram[5m]))
+histogram_count(rate(const_histogram[5m])) == 0.0 or histogram_fraction(0.0, 1.0, rate(const_histogram[5m])) * histogram_count(rate(const_histogram[5m]))
+histogram_quantile(1.0, rate(const_histogram[5m]))
+histogram_stddev(rate(const_histogram[5m]))
+histogram_stdvar(rate(const_histogram[5m]))
+sum(metric)
+avg(metric)
+count(metric)
+group(metric)
+count(limitk(1, metric))
+limitk(3, metric)
+limit_ratio(1, metric)
+metric{series="1"} and ignoring(series) metric{series="2"}
+metric{series="1"} or ignoring(series) metric{series="2"}
+metric{series="2"} + ignoring (series) metric{series="3"}
+metric{series="2"} - ignoring (series) metric{series="3"}
+metric1 == metric2
+metric1 != metric2
+metric2 > metric2
+sum_over_time(nhcb_metric[13m])
+avg_over_time(nhcb_metric[13m])
+last_over_time(nhcb_metric[13m])
+count_over_time(nhcb_metric[13m])
+present_over_time(nhcb_metric[13m])
+changes(nhcb_metric[13m])
+delta(nhcb_metric[13m])
+increase(nhcb_metric[13m])
+rate(nhcb_metric[13m])
+resets(nhcb_metric[13m])
+sum by (group) (metric)
+sum(histogram_sum)
+sum({idx="0"})
+sum(histogram_sum{idx="0"} + ignoring(idx) histogram_sum{idx="3"})
+count(histogram_sum)
+avg(histogram_sum)
+avg(histogram_avg_incremental)
+sum_over_time(histogram_sum_over_time[4m:1m])
+avg_over_time(histogram_sum_over_time[4m:1m])
+sum_over_time(histogram_sum_over_time_2[8m:1m])
+avg_over_time(histogram_sum_over_time_2[8m:1m])
+sum_over_time(histogram_sum_over_time_3[4m:1m])
+avg_over_time(histogram_sum_over_time_3[4m:1m])
+sum_over_time(histogram_sum_over_time_4[7m:1m])
+avg_over_time(histogram_sum_over_time_4[7m:1m])
+sum_over_time(histogram_sum_over_time_incremental[8m:1m])
+avg_over_time(histogram_sum_over_time_incremental[8m:1m])
+sum_over_time(histogram_sum_over_time_incremental_2[7m:1m])
+avg_over_time(histogram_sum_over_time_incremental_2[7m:1m])
+sum_over_time(histogram_sum_over_time_incremental_3[7m:1m])
+avg_over_time(histogram_sum_over_time_incremental_3[7m:1m])
+sum_over_time(histogram_sum_over_time_incremental_4[7m:1m])
+avg_over_time(histogram_sum_over_time_incremental_4[7m:1m])
+sum_over_time(histogram_sum_over_time_incremental_6[4m:1m])
+avg_over_time(histogram_sum_over_time_incremental_6[4m:1m])
+avg_over_time(single_histogram_sample[1m])
+avg_over_time(single_nhcb_sample[1m])
+histogram_sub_1{idx="0"} - ignoring(idx) histogram_sub_1{idx="1"}
+histogram_sub_2{idx="0"} - ignoring(idx) histogram_sub_2{idx="1"}
+histogram_sub_3{idx="0"} - ignoring(idx) histogram_sub_3{idx="1"}
+last_over_time({__name__="http_request_duration_seconds"} @ start()[1h:1m] offset 1m16s)
+histogram_quantile(1, histogram_nan)
+histogram_quantile(0.81, histogram_nan)
+histogram_quantiles(histogram_nan, "q", 0.81)
+histogram_quantile(0.8, histogram_nan{case="100% NaNs"})
+histogram_quantile(0.8, histogram_nan{case="20% NaNs"})
+histogram_quantile(0.4, histogram_nan{case="100% NaNs"})
+histogram_quantile(0.4, histogram_nan{case="20% NaNs"})
+histogram_fraction(-Inf, 0.7071067811865475, histogram_nan)
+histogram_fraction(-Inf, +Inf, histogram_nan)
+increase(metric[90m])
+increase(metric[55m15s])
+increase(metric[54m45s])
+histogram_count(increase(metric[90m]))
+histogram_count(increase(metric[55m15s]))
+histogram_count(increase(metric[54m45s]))
+-metric
+metric - 0.5 * metric
+metric - 2 * metric
+sum_over_time(mixed[3m])
+avg_over_time(mixed[3m])
+sum_over_time(mixed[10m])
+avg_over_time(mixed[10m])
+sum(metric{type=~"counter.*"})
+avg(metric{type=~"counter.*"})
+histogram_count(sum(metric))
+histogram_count(avg(metric))
+histogram_count(sum_over_time(mixed[10m]))
+histogram_count(avg_over_time(mixed[10m]))
+histogram_count(sum_over_time(mixed[2m]))
+histogram_count(avg_over_time(mixed[2m]))
+histogram_quantile(0.5, myHistogram1)
+histogram_quantile(0.5, myHistogram2)
+histogram_quantile(0.5, mixedHistogram)
+histogram_quantiles(mixedHistogram, "q", 0.5)
+histogram_count(increase(h[40m:9m]))
+increase(h[40m:9m])
+histogram_count(sum_over_time(reset{timing="late"}[5m]))
+histogram_count(sum(reset))
+histogram_count(avg(reset))
+histogram_count(rate(reset{timing="late"}[5m]))
+histogram_count(histogram unless histogram_quantile(0.5, histogram) < 3)
+histogram_quantile(0.5, histogram unless histogram_count(histogram) == 0)
+histogram_quantiles(histogram unless histogram_count(histogram) == 0, "q", 0.5)
+mixed_metric1
+mixed_metric2
+irate(nhcb_add_buckets[2m]) * 60
+irate(nhcb_remove_buckets[2m]) * 60
+irate(nhcb_add_bucket[2m]) * 60
+h_test >/ -Inf
+h_test </ +Inf
+h_test >/ +Inf
+h_test </ -Inf
+h_test >/ 0
+h_test </ 0
+h_test </ 1.4142135624
+h_test >/ 1.4142135624
+h_test_2 </ 1.13
+h_test_2 >/ 1.13
+h_test_2 >/ -1.3
+h_test_2 </ -1.3
+h_test </ 2
+h_test >/ 2
+h_test >/ -1
+h_test </ -1
+h_positive_buckets >/ 0.5
+h_positive_buckets >/ 0.1
+h_positive_buckets >/ 0
+h_positive_buckets </ 0.5
+h_positive_buckets </ 0.1
+h_positive_buckets </ 0
+h_negative_buckets </ -0.5
+h_negative_buckets </ -0.1
+h_negative_buckets </ 0
+h_negative_buckets >/ -0.5
+h_negative_buckets >/ -0.1
+h_negative_buckets >/ 0
+zero_bucket_only >/ 0.1
+zero_bucket_only </ 0.1
+zero_bucket_only >/ 0.05
+zero_bucket_only </ 0.05
+zero_bucket_only >/ 0
+zero_bucket_only </ 0
+zero_bucket_only >/ -0.05
+zero_bucket_only </ -0.05
+zero_bucket_only </ -0.1
+zero_bucket_only >/ -0.1
+cbh </ 15
+cbh >/ 15
+cbh </ 13
+cbh >/ 13
+cbh </ 7.5
+cbh </ 50
+cbh </ -Inf
+cbh >/ +Inf
+cbh </ +Inf
+cbh >/ -Inf
+cbh >/ 0
+cbh </ 0
+cbh_has_neg </ 2
+cbh_has_neg </ -4
+cbh_has_neg </ -15
+zero_bucket </ -0.005
+zero_bucket >/ 0
+cbh_one_bucket </ 10.0
+cbh_one_bucket >/ 10.0
+cbh_one_bucket </ +Inf
+cbh_one_bucket >/ +Inf
+cbh_one_bucket >/ -Inf
+cbh_one_bucket </ -Inf
+cbh_two_buckets_split_at_zero </ 10.0
+cbh_two_buckets_split_at_zero </ 0.0
+cbh_two_buckets_split_at_zero </ -10.0
+cbh_two_buckets_split_at_zero >/ -10.0
+cbh_two_buckets_split_at_zero >/ 0.0
+cbh_two_buckets_split_at_zero >/ 10.0
+cbh_two_buckets_split_at_positive </ 10.0
+cbh_two_buckets_split_at_positive </ 2.0
+cbh_two_buckets_split_at_positive </ 0.0
+cbh_two_buckets_split_at_positive </ -10.0
+cbh_two_buckets_split_at_positive >/ -10.0
+cbh_two_buckets_split_at_positive >/ 0.0
+cbh_two_buckets_split_at_positive >/ 2.0
+cbh_two_buckets_split_at_positive >/ 10.0
+cbh_two_buckets_split_at_negative </ 10.0
+cbh_two_buckets_split_at_negative </ 0.0
+cbh_two_buckets_split_at_negative </ -2.0
+cbh_two_buckets_split_at_negative </ -10.0
+cbh_two_buckets_split_at_negative >/ -10.0
+cbh_two_buckets_split_at_negative >/ -2.0
+cbh_two_buckets_split_at_negative >/ 0.0
+cbh_two_buckets_split_at_negative >/ 10.0
+histogram_sum(cbh_two_buckets_split_at_negative >/ 10.0)
+histogram_count(cbh_two_buckets_split_at_negative >/ 10.0)
+cbh_for_join >/ on (label) float_for_join
+empty </ -Inf
+empty </ -5
+empty </ 0
+empty </ 5
+empty </ +Inf
+empty >/ -Inf
+empty >/ -5
+empty >/ 0
+empty >/ 5
+empty >/ +Inf
+histogram_count(h_test </ 2)
+histogram_fraction(-Inf, 2, h_test) * histogram_count(h_test)
+histogram_count(h_test >/ 2)
+histogram_fraction(2, +Inf, h_test) * histogram_count(h_test)
+histogram_count(h_test </ -1)
+histogram_fraction(-Inf, -1, h_test) * histogram_count(h_test)
+histogram_count(h_test >/ -1)
+histogram_fraction(-1, +Inf, h_test) * histogram_count(h_test)
+histogram_count(h_test </ 0)
+histogram_fraction(-Inf, 0, h_test) * histogram_count(h_test)
+histogram_count(h_test >/ 0)
+histogram_fraction(0, +Inf, h_test) * histogram_count(h_test)
+histogram_count(h_test </ 1.4142135624)
+histogram_fraction(-Inf, 1.4142135624, h_test) * histogram_count(h_test)
+histogram_count(h_test >/ 1.4142135624)
+histogram_fraction(1.4142135624, +Inf, h_test) * histogram_count(h_test)
+histogram_count(h_test_2 </ 1.13)
+histogram_fraction(-Inf, 1.13, h_test_2) * histogram_count(h_test_2)
+histogram_count(h_test_2 >/ 1.13)
+histogram_fraction(1.13, +Inf, h_test_2) * histogram_count(h_test_2)
+histogram_count(cbh </ 15)
+histogram_fraction(-Inf, 15, cbh) * histogram_count(cbh)
+histogram_count(cbh >/ 15)
+histogram_fraction(15, +Inf, cbh) * histogram_count(cbh)
+histogram_count(cbh </ 13)
+histogram_fraction(-Inf, 13, cbh) * histogram_count(cbh)
+histogram_count(cbh >/ 13)
+histogram_fraction(13, +Inf, cbh) * histogram_count(cbh)
+# --- prometheus testdata: operators.test ---
+SUM(http_requests_total) BY (job) - COUNT(http_requests_total) BY (job)
+2 - SUM(http_requests_total) BY (job)
+-http_requests_total{job="api-server",instance="0",group="production"}
++http_requests_total{job="api-server",instance="0",group="production"}
+- - - SUM(http_requests_total) BY (job)
+- - - 1
+-2^---1*3
+2/-2^---1*3+2
+-10^3 * - SUM(http_requests_total) BY (job) ^ -1
+1000 / SUM(http_requests_total) BY (job)
+SUM(http_requests_total) BY (job) - 2
+SUM(http_requests_total) BY (job) % 3
+SUM(http_requests_total) BY (job) % 0.3
+SUM(http_requests_total) BY (job) ^ 2
+SUM(http_requests_total) BY (job) % 3 ^ 2
+SUM(http_requests_total) BY (job) % 2 ^ (3 ^ 2)
+SUM(http_requests_total) BY (job) % 2 ^ 3 ^ 2
+SUM(http_requests_total) BY (job) % 2 ^ 3 ^ 2 ^ 2
+COUNT(http_requests_total) BY (job) ^ COUNT(http_requests_total) BY (job)
+SUM(http_requests_total) BY (job) / 0
+http_requests_total{group="canary", instance="0", job="api-server"} / 0
+-1 * http_requests_total{group="canary", instance="0", job="api-server"} / 0
+0 * http_requests_total{group="canary", instance="0", job="api-server"} / 0
+0 * http_requests_total{group="canary", instance="0", job="api-server"} % 0
+SUM(http_requests_total) BY (job) + SUM(http_requests_total) BY (job)
+(SUM((http_requests_total)) BY (job)) + SUM(http_requests_total) BY (job)
+http_requests_total{job="api-server", group="canary"}
+http_requests_total{job="api-server", group="canary"} + rate(http_requests_total{job="api-server"}[10m]) * 5 * 60
+rate(http_requests_total[25m]) * 25 * 60
+(rate((http_requests_total[25m])) * 25) * 60
+http_requests_total{group="canary"} and http_requests_total{instance="0"}
+(http_requests_total{group="canary"} + 1) and http_requests_total{instance="0"}
+(http_requests_total{group="canary"} + 1) and on(instance, job) http_requests_total{instance="0", group="production"}
+(http_requests_total{group="canary"} + 1) and on(instance) http_requests_total{instance="0", group="production"}
+(http_requests_total{group="canary"} + 1) and ignoring(group) http_requests_total{instance="0", group="production"}
+(http_requests_total{group="canary"} + 1) and ignoring(group, job) http_requests_total{instance="0", group="production"}
+http_requests_total{group="canary"} or http_requests_total{group="production"}
+(http_requests_total{group="canary"} + 1) or http_requests_total{instance="1"}
+(http_requests_total{group="canary"} + 1) or on(instance) (http_requests_total or cpu_count or vector_matching_a)
+(http_requests_total{group="canary"} + 1) or ignoring(l, group, job) (http_requests_total or cpu_count or vector_matching_a)
+http_requests_total{group="canary"} unless http_requests_total{instance="0"}
+http_requests_total{group="canary"} unless on(job) http_requests_total{instance="0"}
+http_requests_total{group="canary"} unless on(job, instance) http_requests_total{instance="0"}
+http_requests_total{group="canary"} / on(instance,job) http_requests_total{group="production"}
+http_requests_total{group="canary"} unless ignoring(group, instance) http_requests_total{instance="0"}
+http_requests_total{group="canary"} unless ignoring(group) http_requests_total{instance="0"}
+http_requests_total{group="canary"} / ignoring(group) http_requests_total{group="production"}
+http_requests_total AND ON (dummy) vector(1)
+http_requests_total AND IGNORING (group, instance, job) vector(1)
+SUM(http_requests_total) BY (job) > 1000
+1000 < SUM(http_requests_total) BY (job)
+SUM(http_requests_total) BY (job) <= 1000
+SUM(http_requests_total) BY (job) != 1000
+SUM(http_requests_total) BY (job) == 1000
+SUM(http_requests_total) BY (job) == bool 1000
+SUM(http_requests_total) BY (job) == bool SUM(http_requests_total) BY (job)
+SUM(http_requests_total) BY (job) != bool SUM(http_requests_total) BY (job)
+0 == bool 1
+1 == bool 1
+http_requests_total{job="api-server", instance="0", group="production"} == bool 100
+{job="app-server"} == 80
+http_requests_histogram != 80
+http_requests_histogram > 80
+http_requests_histogram < 80
+http_requests_histogram >= 80
+http_requests_histogram <= 80
+http_requests_histogram == http_requests_histogram
+http_requests_histogram != http_requests_histogram
+many_side > on(job) one_side
+many_side >= on(job) one_side
+many_side <= on(job) one_side
+node_role * on (instance) group_right (role) node_var
+node_var * on (instance) group_left (role) node_role
+node_var * ignoring (role) group_left (role) node_role
+node_role * ignoring (role) group_right (role) node_var
+node_cpu * ignoring (role, mode) group_left (role) node_role
+node_cpu * on (instance) group_left (role) node_role
+node_cpu / on (instance) group_left sum by (instance,job)(node_cpu)
+sum by (mode, job)(node_cpu) / on (job) group_left sum by (job)(node_cpu)
+sum(sum by (mode, job)(node_cpu) / on (job) group_left sum by (job)(node_cpu))
+node_cpu / ignoring (mode) group_left sum without (mode)(node_cpu)
+node_cpu / ignoring (mode) group_left(dummy) sum without (mode)(node_cpu)
+sum without (instance)(node_cpu) / ignoring (mode) group_left sum without (instance, mode)(node_cpu)
+sum(sum without (instance)(node_cpu) / ignoring (mode) group_left sum without (instance, mode)(node_cpu))
+node_cpu + on(dummy) group_left(foo) random*0
+node_cpu > on(job, instance) group_left(target) threshold
+node_cpu > on(job, instance) group_left(target) (threshold or on (job, instance) (sum by (job, instance)(node_cpu) * 0 + 1))
+node_cpu + 2
+node_cpu - 2
+node_cpu / 2
+node_cpu * 2
+node_cpu ^ 2
+node_cpu % 2
+random + on() metricA
+metricA + ignoring() metricB
+metricA + metricB
+-{__name__=~'testmetric1|testmetric2'}
+test_total > bool test_smaller
+test_total > test_smaller
+test_total < bool test_smaller
+test_total < test_smaller
+trigy atan2 trigx
+trigy atan2 trigNaN
+10 atan2 20
+10 atan2 NaN
+left_floats == right_floats
+left_floats == bool right_floats
+left_floats == does_not_match
+left_histograms == right_histograms
+left_histograms == bool right_histograms
+left_histograms == right_floats_for_histograms
+left_histograms == bool right_floats_for_histograms
+left_floats != right_floats
+left_floats != bool right_floats
+left_histograms != right_histograms
+left_histograms != bool right_histograms
+left_histograms != right_floats_for_histograms
+left_histograms != bool right_floats_for_histograms
+left_floats > right_floats
+left_floats > bool right_floats
+left_histograms > right_histograms
+left_histograms > bool right_histograms
+left_histograms > right_floats_for_histograms
+left_histograms > bool right_floats_for_histograms
+left_floats >= right_floats
+left_floats >= bool right_floats
+left_histograms >= right_histograms
+left_histograms >= bool right_histograms
+left_histograms >= right_floats_for_histograms
+left_histograms >= bool right_floats_for_histograms
+left_floats < right_floats
+left_floats < bool right_floats
+left_histograms < right_histograms
+left_histograms < bool right_histograms
+left_histograms < right_floats_for_histograms
+left_histograms < bool right_floats_for_histograms
+left_floats <= right_floats
+left_floats <= bool right_floats
+left_histograms <= right_histograms
+left_histograms <= bool right_histograms
+left_histograms <= right_floats_for_histograms
+left_histograms <= bool right_floats_for_histograms
+left_floats == 3
+left_floats != 3
+left_floats > 3
+left_floats >= 3
+left_floats < 3
+left_floats <= 3
+left_floats == bool 3
+left_floats == Inf
+left_floats == bool Inf
+left_floats == NaN
+left_floats == bool NaN
+left_histograms == 3
+left_histograms == 0
+left_histograms != 3
+left_histograms != 0
+left_histograms > 3
+left_histograms > 0
+left_histograms >= 3
+left_histograms >= 0
+left_histograms < 3
+left_histograms < 0
+left_histograms <= 3
+left_histograms <= 0
+left_histograms == bool 3
+left_histograms == bool 0
+left_histograms != bool 3
+left_histograms != bool 0
+left_histograms > bool 3
+left_histograms > bool 0
+left_histograms >= bool 3
+left_histograms >= bool 0
+left_histograms < bool 3
+left_histograms < bool 0
+left_histograms <= bool 3
+left_histograms <= bool 0
+3 == left_floats
+3 != left_floats
+3 < left_floats
+3 <= left_floats
+3 > left_floats
+3 >= left_floats
+3 == bool left_floats
+Inf == left_floats
+Inf == bool left_floats
+NaN == left_floats
+NaN == bool left_floats
+3 == left_histograms
+0 == left_histograms
+3 != left_histograms
+0 != left_histograms
+3 < left_histograms
+0 < left_histograms
+3 > left_histograms
+0 > left_histograms
+3 >= left_histograms
+0 >= left_histograms
+(testhistogram_bucket) and on() (vector(1) == 1)
+(testhistogram_bucket) and on() (vector(-1) == 1)
+(testhistogram) and on() (vector(1) == 1)
+(testhistogram) and on() (vector(-1) == 1)
+-{job="api"}
+# --- prometheus testdata: range_queries.test ---
+sum_over_time(bar[30s])
+metric
+foo > 2 or bar
+requests * 2
+some_metric[1m]
+some_metric[2m]
+some_metric_with_stale_marker[3m]
+some_nonexistent_metric[1m]
+sort(series)
+sort_desc(series)
+sort_by_label(series)
+sort_by_label_desc(series)
+sum(sort(series))
+# --- prometheus testdata: selectors.test ---
+rate(http_requests_total[1m])
+rate(http_requests_total{group=~"pro.*"}[1m])
+rate(http_requests_total{group=~".*ry", instance="1"}[1m])
+rate(http_requests_total{instance!="3"}[1m] offset 10000s)
+rate(http_requests_total{instance!="3"}[1m] offset -4000s)
+rate(http_requests_total[40s]) - rate(http_requests_total[1m] offset 10000s)
+http_requests_total{foo!="bar"}
+http_requests_total{foo!="bar", job="api-server"}
+http_requests_total{foo!~"bar", job="api-server"}
+http_requests_total{foo!~"bar", job="api-server", instance="1", x!="y", z="", group!=""}
+rate(http_requests_total{group=~"(?i:PRO).*"}[1m])
+rate(http_requests_total{group=~".*?(?i:PRO).*"}[1m])
+rate(http_requests_total{group=~".*(?i:DUC).*"}[1m])
+rate(http_requests_total{group=~".*(?i:TION)"}[1m])
+rate(http_requests_total{group=~".*(?i:TION).*?"}[1m])
+rate(http_requests_total{group=~"((?i)PRO).*"}[1m])
+rate(http_requests_total{group=~".*((?i)DUC).*"}[1m])
+rate(http_requests_total{group=~".*((?i)TION)"}[1m])
+rate(http_requests_total{group=~"(?i:PRODUCTION)"}[1m])
+rate(http_requests_total{group=~".*(?i:C).*"}[1m])
+metric1 offset 15m or metric2 offset 45m
+x{y="testvalue"}
+{__name__=~".+"}
+{job=~".+-server", job!~"api-.+"}
+http_requests_total{group!="canary"}
+http_requests_total{job=~".+-server",group!="canary"}
+http_requests_total{job!~"api-.+",group!="canary"}
+http_requests_total{group="production",job=~"api-.+"}
+http_requests_total{group="production",job="api-server"} offset 5m
+testmetric
+# --- prometheus testdata: staleness.test ---
+count_over_time(metric[1m])
+count_over_time(metric[1s])
+count_over_time(metric[10s])
+count_over_time(metric[20s])
+count_over_time(metric[10])
+count_over_time(metric[20])
+# --- prometheus testdata: start_timestamps.test ---
+increase(cumulative[5m])
+rate(cumulative[5m])
+irate(cumulative[5m])
+round(increase(cumulative[5m1ms]))
+increase(cumulative[5m:1m])
+resets(cumulative[5m])
+increase(delta[5m])
+rate(delta[5m])
+irate(delta[5m])
+increase(delta[5m:1m])
+round(increase(series[1m1ms]))
+# --- prometheus testdata: subquery.test ---
+sum_over_time(metric_total[50s:10s])
+sum_over_time(metric_total[50s:5s])
+sum_over_time(metric_total[60s:10s])
+rate(metric_total[20s:10s])
+rate(metric_total[20s:5s])
+rate(http_requests_total{group=~"pro.*"}[1m:10s])
+avg_over_time(rate(http_requests_total[1m])[1m:1s])
+sum_over_time(metric1_total[30s:10s])
+sum_over_time(metric1_total[30s:5s])
+sum_over_time(metric1_total[30s:10s] offset 10s)
+sum_over_time(metric1_total[30s:10s] offset 9s)
+sum_over_time(metric1_total[30s:10s] offset 7s)
+sum_over_time(metric1_total[30s:10s] offset 5s)
+sum_over_time(metric1_total[30s:10s] offset 3s)
+sum_over_time((metric1_total)[30s:10s] offset 3s)
+sum_over_time(metric1_total[30:10] offset 3)
+sum_over_time((metric1_total)[30:10s] offset 3s)
+sum_over_time((metric1_total)[30:10] offset 3s)
+sum_over_time((metric1_total)[30:10] offset 3)
+rate(sum_over_time(metric1_total[30s:10s])[50s:10s])
+rate(sum_over_time(metric2_total[30s:10s])[50s:10s])
+rate(sum_over_time(metric3_total[30s:10s])[50s:10s])
+rate(sum_over_time((metric1_total+metric2_total+metric3_total)[30s:10s])[30s:10s])
+rate(metric_total[1m])
+rate(metric_total[1m500ms:10s])
+rate(metric_total[1m1s:10s])
+min_over_time(metric_total[10s])
+min_over_time(metric_total[15s:10s])
+min_over_time(rate(metric_total[5m])[20m:1m])
+increase(native_histogram[10m:3m])
+increase(native_histogram[10m:15s])
+min_over_time((topk(1, foo))[1m:5m])
+# --- prometheus testdata: trig_functions.test ---
+sin(trig)
+cos(trig)
+tan(trig)
+asin(trig - 10.1)
+acos(trig - 10.1)
+atan(trig)
+sinh(trig)
+cosh(trig)
+tanh(trig)
+asinh(trig)
+acosh(trig)
+atanh(trig - 10.1)
+rad(trig)
+rad(trig - 10)
+rad(trig - 20)
+deg(trig)
+deg(trig - 10)
+deg(trig - 20)
+pi()
+# --- prometheus testdata: type_and_unit.test ---
+SUM(http_requests_total) BY (job)
+SUM(http_requests_total{__type__="counter", __unit__="request"}) BY (job)
+SUM({__type__="counter"}) BY (job)
+SUM({__unit__="request"}) BY (job)
+SUM({__type__="counter", __unit__="request"}) BY (job)
+http_requests_total{__type__="counter", job="api-server", group="canary"}
