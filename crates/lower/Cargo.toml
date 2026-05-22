@@ -5,4 +5,6 @@ edition = "2021"
 
 [dependencies]
 asap-control-core = { path = "../core" }
-promql-parser = "0.9"
+# Private mirror of GreptimeTeam/promql-parser (Apache-2.0), vendored so we can
+# carry local PromQL grammar/function additions ahead of upstream releases.
+promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", branch = "main" }
