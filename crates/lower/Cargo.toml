@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 asap-control-core = { path = "../core" }
-promql-parser = "0.8"
+promql-parser = "0.9"
