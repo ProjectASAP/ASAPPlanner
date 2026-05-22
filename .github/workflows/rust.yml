@@ -1,22 +1,26 @@
 name: Rust CI
 
+# TEMPORARILY DISABLED: auto-triggers are off because CI can't fetch the private
+# promql-parser dependency until the CARGO_PRIVATE_GIT_TOKEN secret is added (see
+# THIRD_PARTY.md). The auth scaffolding below is ready — re-enable the push /
+# pull_request triggers once the credential is configured. Manual runs still work.
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/rust.yml'
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [ main ]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/rust.yml'
   workflow_dispatch:
+  # push:
+  #   branches: [ main ]
+  #   paths:
+  #     - 'crates/**'
+  #     - 'Cargo.toml'
+  #     - 'Cargo.lock'
+  #     - '.github/workflows/rust.yml'
+  # pull_request:
+  #   types: [opened, synchronize, reopened, ready_for_review]
+  #   branches: [ main ]
+  #   paths:
+  #     - 'crates/**'
+  #     - 'Cargo.toml'
+  #     - 'Cargo.lock'
+  #     - '.github/workflows/rust.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

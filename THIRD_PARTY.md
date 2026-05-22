@@ -78,4 +78,6 @@ to `ProjectASAP/promql-parser`:
 - **CI:** the `rust.yml` workflow sets `CARGO_NET_GIT_FETCH_WITH_CLI=true` and
   configures a git credential helper from the secret **`CARGO_PRIVATE_GIT_TOKEN`**
   — add that org/repo secret (a fine-grained PAT or GitHub App token with read
-  access to the mirror) or CI will fail to fetch the dependency.
+  access to the mirror) or CI will fail to fetch the dependency. Until the secret
+  exists, `rust.yml`'s auto-triggers are **disabled** (manual `workflow_dispatch`
+  only); re-enable the commented `push` / `pull_request` triggers afterward.
