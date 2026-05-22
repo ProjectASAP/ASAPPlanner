@@ -12,33 +12,36 @@ details — Layer 3"). It mirrors the `asapquery-backend` control-plane IR:
 
 ```
 PromQL string
-   │  L1: parse                         promql-parser 0.8 → Expr AST
+   │  parse                             promql-parser 0.8
    ▼
-Expr AST
-   │  L2: front-end lowering            crates/lower/src/promql.rs
+Expr AST                  ← L1
+   │  front-end lowering                crates/lower/src/promql.rs
    ▼
-relational::QueryExpr     ← columns are NAMES (ColumnRef::Named, Aggregate.keys: Vec<String>)
-   │  Binder: build Schema + resolve    crates/core/src/intent_algebra/binder.rs
-   │                                     + column_resolution.rs
+relational::QueryExpr     ← L2 — columns are NAMES (ColumnRef::Named, Aggregate.keys: Vec<String>)
+   │  Binder pass: build Schema +       crates/core/src/intent_algebra/binder.rs
+   │  resolve names → ColumnId           + column_resolution.rs
    ▼
-query_expr::QueryExpr     ← columns are POSITIONS (Aggregate.by: Vec<ColumnId>)
+query_expr::QueryExpr     ← L3 — columns are POSITIONS (Aggregate.by: Vec<ColumnId>)
                             + a self-contained Schema rides on each Scan
 ```
 
-`convert_root` (`intent_algebra/lower.rs`) runs the Binder first, then converts
-the L2 tree structurally:
+The three layers are **L1 (`Expr AST`) → L2 (`relational::QueryExpr`, names) →
+L3 (`query_expr::QueryExpr`, positions)**. The **Binder is not a layer** — it is
+the pass that sits on the L2→L3 edge, turning names into positional `ColumnId`s.
+`convert_root` (`intent_algebra/lower.rs`) runs it first, then converts the L2
+tree structurally:
 
 ```rust
 pub fn convert_root(legacy: &LQueryExpr, accuracy: &AccuracyTarget)
     -> Result<CQueryExpr, ConvertError>
 {
-    let schema = Binder::new().bind(legacy);   // ← name resolution, once
+    let schema = Binder::new().bind(legacy);   // ← L2→L3 name resolution, once
     convert(legacy, &schema, accuracy)          // ← purely structural after this
 }
 ```
 
-The four stages below — **parse → L2 (names) → Binder (schema) → canonical
-(positions)** — are what we trace at the end.
+The worked example at the end traces a query through all three layers (with the
+Binder pass shown explicitly between L2 and L3).
 
 ---
 
@@ -147,7 +150,10 @@ plans never read `unique_keys`.
 
 ---
 
-## Worked example — one query through all four stages
+## Worked example — one query through L1 → L2 → L3
+
+Four steps: the three layers, plus the Binder pass shown explicitly on the
+L2→L3 edge.
 
 ```promql
 topk by (service) (10, count_over_time(requests{env="prod"}[1m]))
@@ -189,7 +195,7 @@ No `Aggregate` wraps the scan — the heavy-hitter sketch counts directly off th
 windowed scan (`window_scan`). Grouping rides as a *name list* on `TopK.by`,
 awaiting resolution.
 
-### Stage 3 — Binder builds the Schema, resolves names → `ColumnId`
+### Stage 3 — Binder pass (L2→L3 edge): build the Schema, resolve names → `ColumnId`
 
 `Binder::bind` walks the L2 tree:
 
@@ -211,7 +217,7 @@ Schema {
 `resolve_named_keys(["service"], schema)` → `"service"` is at position 2 →
 `by = [2]`.
 
-### Stage 4 — canonical IR (positions) · `lower.rs convert`
+### Stage 4 — L3 canonical IR (positions) · `lower.rs convert`
 
 The `TopK` arm rewrites to the canonical `Aggregate{TopK}`, threading the
 accuracy target and the resolved positional `by`; the `Filter`-over-`Source`
