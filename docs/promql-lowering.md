@@ -258,4 +258,74 @@ decline to share rather than risk an unsound plan. A registry-backed
 populate `Scan.schema.unique_keys`, flip the gate green, and let the windowed
 scan be hoisted into a `LetBinding` — without any change to the Binder or
 converter (cf. the `dedupe_subtrees_basic` test, which constructs exactly such a
-Scan).
+Scan). The next section traces exactly that.
+
+---
+
+## `unique_keys` propagation
+
+`unique_keys` is **not** something the Binder computes — `Binder::bind` always
+emits `unique_keys: Vec::new()`. It enters at the leaf (from the catalog) and is
+then derived edge-by-edge by each operator's output-schema rule
+(`QueryExpr::output_schema_in`). The rules:
+
+| Operator | `unique_keys` of its output |
+|---|---|
+| `Scan` | **verbatim** from the schema the Binder/catalog built |
+| `Window`, `Filter`, `Partition`, `Sort`, `Limit`, `Subquery`, `Project` | **pass through** the child's unchanged |
+| `Aggregate { by }` | **replaced** with `[[0..by.len()]]` — the group keys, *re-based to output positions*; empty when `by` is empty |
+| `Distinct { cols }` | child's keys **plus** `cols` added as a new key (`add_unique_key`) |
+| `Merge` | first child's |
+| `SetOp`, `Join`, `BinaryOp` | left / `lhs` child's |
+
+Two rules carry the weight: leaf-bearing operators **pass keys through** untouched,
+while `Aggregate` **manufactures** a key — grouping by a column makes that column
+unique in the result, so it becomes the new key (and the input's keys are
+dropped, because the grouped output no longer has those rows).
+
+### Same tree, under a registry catalog
+
+Take the worked example's canonical tree, but bind it with a `SchemaCatalog` that
+declares `(ts, service)` unique on `requests`. Now the leaf schema arrives with a
+key, and we can watch it flow up (bottom → top):
+
+```
+                                                      ── unique_keys on this edge ──
+Scan { requests,                                       [[0, 2]]      ← from catalog
+       schema: [ts(0), value(1), service(2)],                          (ts, service)
+               unique_keys = [[0, 2]] }
+  ▲
+Window { 1m }                                          [[0, 2]]      ← pass-through
+  ▲                                                                    (time_index present)
+Aggregate { by:[2]=service, aggs:[TopK{10}] }          [[0]]         ← REPLACED
+       output cols: [service(0), topk_10(1)]                           by re-based to
+                                                                       output position 0
+```
+
+Three things to read off this:
+
+1. **Scan** hands up the catalog's `[[0, 2]]` verbatim.
+2. **Window** (and any `Filter`/`Sort`/`Limit` between) passes `[[0, 2]]` straight
+   through — these operators don't change which rows are distinct.
+3. **Aggregate** does *not* forward `[[0, 2]]`. After `GROUP BY service`, the old
+   per-sample identity is gone; what's unique now is `service` itself — and in the
+   output schema `service` sits at **position 0**, so the derived key is `[[0]]`,
+   not `[[2]]`. This re-basing is why keys are positional `ColumnId`s, not names:
+   the same column is id `2` below the aggregate and id `0` above it.
+
+### Why this makes CSE legal here
+
+The shared producer the deduper would hoist is the `Window → Scan` sub-tree. Its
+output edge now carries `unique_keys = [[0, 2]]`, so:
+
+```
+cse_reuse_is_legal( window.output_schema()  // unique_keys = [[0, 2]]
+                  , 2 /* consumers */ )      ==> Ok(())
+```
+
+The gate fires green, the `Window → Scan` is hoisted into a `LetBinding`, and both
+queries `Ref` it — scan + window computed once. Under the default
+`UsageDerivedCatalog` the very same tree carries `unique_keys = []` at every edge
+(nothing manufactures a key below the top `Aggregate`), so the gate returns
+`Err(NoUniqueKeys)` and each consumer recomputes. **The only thing that changed
+was the leaf key the catalog supplied; propagation and the gate did the rest.**
