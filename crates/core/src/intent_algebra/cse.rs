@@ -10,8 +10,6 @@
 //! case. The fully-general algorithm (alpha-equivalence, schema-merge,
 //! nested CSE) is a downstream optimisation, not part of the IR contract.
 
-use std::collections::HashMap;
-
 use crate::intent_algebra::names::{BindingName, QueryId};
 use crate::intent_algebra::query_expr::QueryExpr;
 use crate::intent_algebra::schema::cse_reuse_is_legal;
@@ -38,24 +36,30 @@ pub fn dedupe_subtrees(roots: Vec<(QueryId, QueryExpr)>) -> CseWorkloadPlan {
         };
     }
 
-    // Count `Aggregate`-child sub-trees that appear in ≥2 roots.
-    let mut candidate_counts: HashMap<String, (QueryExpr, usize)> = HashMap::new();
+    // Count `Aggregate`-child sub-trees that appear in ≥2 roots. Group by
+    // structural equality (`QueryExpr: PartialEq`) rather than `Debug`
+    // output: `{:?}` is not a guaranteed-injective, stable identity contract.
+    // The candidate set is one entry per distinct root child, so this linear
+    // scan is bounded by the number of distinct queries.
+    let mut candidate_counts: Vec<(QueryExpr, usize)> = Vec::new();
     for (_, root) in &roots {
         if let QueryExpr::Aggregate { child, .. } = root {
             if matches!(**child, QueryExpr::Ref { .. }) {
                 continue;
             }
-            let key = format!("{child:?}");
-            let entry = candidate_counts
-                .entry(key)
-                .or_insert_with(|| ((**child).clone(), 0));
-            entry.1 += 1;
+            match candidate_counts
+                .iter_mut()
+                .find(|(e, _)| e == child.as_ref())
+            {
+                Some(entry) => entry.1 += 1,
+                None => candidate_counts.push(((**child).clone(), 1)),
+            }
         }
     }
 
     // Pick the most-shared legal candidate (biggest reuse first).
     let mut chosen: Option<(QueryExpr, usize)> = None;
-    for (_key, (expr, count)) in candidate_counts.into_iter() {
+    for (expr, count) in candidate_counts.into_iter() {
         if count < 2 {
             continue;
         }

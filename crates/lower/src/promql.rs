@@ -13,7 +13,8 @@
 //! | PromQL | L2 shape (→ canonical via `convert_root`) |
 //! |---|---|
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], Window{w, Filter(Source)}}` |
-//! | `histogram_quantile(φ, rate(m[w]))` | `Aggregate{[Quantile(φ)], Window{w, …}}` |
+//! | `histogram_quantile(φ, <expr>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered `<expr>` (preserves any `sum by (le)`/`rate`) |
+//! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
 //! | `avg/min/max/sum_over_time(m[w])` | `Aggregate{[Avg/Min/Max/Sum], Window{w}}` |
 //! | `stddev/stdvar_over_time(m[w])` | `Aggregate{[StdDev/Variance], Window{w}}` |
 //! | `count_over_time(m[w])` | `Aggregate{[Count], Window{w}}` |
@@ -99,6 +100,7 @@ impl PromqlLowerer {
 fn walk(expr: &Expr) -> Result<L2> {
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
+        Expr::Call(call) if call.func.name == "histogram_quantile" => walk_histogram_quantile(call),
         Expr::Call(call) => build(lower_inner_call(call)?, vec![], Outer::None),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -167,6 +169,20 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<L2> {
     };
 
     build(inner, keys, outer)
+}
+
+/// `histogram_quantile(φ, <expr>)` lowers `<expr>` in full — preserving any
+/// `sum by (le)` / `rate` structure inside it — and wraps the result in an
+/// `Aggregate{[Quantile(φ)]}`. The φ-quantile reduces across the `le` buckets,
+/// so the wrapper carries no grouping keys: the usage-derived schema can't
+/// enumerate the non-`le` labels to group by (the same limitation that rejects
+/// `without`). This handles the canonical
+/// `histogram_quantile(φ, sum by (le) (rate(m_bucket[w])))` pattern, which the
+/// old "extract the matrix and substitute a bare Quantile" path could not.
+fn walk_histogram_quantile(call: &Call) -> Result<L2> {
+    let phi = num_arg(call, 0)?;
+    let inner = walk(arg(call, 1)?)?;
+    Ok(outer_aggregate(vec![], AggFunc::Quantile(phi), inner))
 }
 
 fn walk_binary(bin: &BinaryExpr) -> Result<L2> {
@@ -273,17 +289,6 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
                 func: Some(InnerFunc::Quantile(phi)),
             })
         }
-        // Substitute histogram_quantile(φ, buckets) with a plain Quantile(φ).
-        "histogram_quantile" => {
-            let phi = num_arg(call, 0)?;
-            let (metric, matchers, window) = extract_matrix(arg(call, 1)?)?;
-            Ok(Inner {
-                metric,
-                matchers,
-                window: Some(window),
-                func: Some(InnerFunc::Quantile(phi)),
-            })
-        }
         "avg_over_time" => at0(InnerFunc::Avg),
         "min_over_time" => at0(InnerFunc::Min),
         "max_over_time" => at0(InnerFunc::Max),
@@ -306,14 +311,27 @@ fn build(inner: Inner, keys: Vec<String>, outer: Outer) -> Result<L2> {
                 Ok(windowed_aggregate(inner, keys, func))
             }
         },
-        Outer::Plain(outer_intent) => {
-            let func = match &inner.func {
-                Some(f) => inner_func(f),
-                None => outer_func(&outer_intent),
-            };
-            Ok(windowed_aggregate(inner, keys, func))
-        }
-        Outer::Count => Ok(windowed_aggregate(inner, keys, AggFunc::CountDistinct)),
+        // An OUTER aggregation operator (`sum`/`avg`/…/`count`) over an inner
+        // range-vector function (`rate`/`increase`/`*_over_time`) is a
+        // two-level reduction: the inner func runs per series, the outer op
+        // then aggregates across series. Collapsing them into one aggregate
+        // silently drops a level — e.g. `sum(rate(m[w]))` must keep the `sum`.
+        Outer::Plain(outer_intent) => Ok(match &inner.func {
+            None => windowed_aggregate(inner, keys, outer_func(&outer_intent)),
+            Some(f) => {
+                let inner_f = inner_func(f);
+                let inner_agg = windowed_aggregate(inner, vec![], inner_f);
+                outer_aggregate(keys, outer_func(&outer_intent), inner_agg)
+            }
+        }),
+        Outer::Count => Ok(match &inner.func {
+            None => windowed_aggregate(inner, keys, AggFunc::CountDistinct),
+            Some(f) => {
+                let inner_f = inner_func(f);
+                let inner_agg = windowed_aggregate(inner, vec![], inner_f);
+                outer_aggregate(keys, AggFunc::CountDistinct, inner_agg)
+            }
+        }),
         Outer::TopK { k, descending } => {
             // Heavy-hitter only when ranking by frequency (`count`): a dedicated
             // sketch serves it in one pass → first-class `TopK`. Any other
@@ -365,6 +383,23 @@ fn windowed_aggregate(inner: Inner, keys: Vec<String>, func: AggFunc) -> L2 {
         },
         _ => base,
     };
+    L2::Aggregate {
+        keys,
+        aggs: vec![AggItem {
+            alias: "value".into(),
+            func,
+            col: ColumnRef::SampleValue,
+            distinct: false,
+        }],
+        having: None,
+        input: Box::new(input),
+    }
+}
+
+/// `Aggregate{keys, [func]}` directly over an existing L2 subtree — the OUTER
+/// level of a two-level aggregation such as `sum(rate(…))` or the
+/// `Aggregate{[Quantile]}` that wraps a `histogram_quantile` argument.
+fn outer_aggregate(keys: Vec<String>, func: AggFunc, input: L2) -> L2 {
     L2::Aggregate {
         keys,
         aggs: vec![AggItem {

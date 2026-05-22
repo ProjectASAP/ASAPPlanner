@@ -78,15 +78,22 @@ fn quantile_over_time_is_window_over_aggregate() {
 
 #[test]
 fn outer_sum_by_wraps_in_partition() {
-    // `sum by (host) (...)` → grouping rides on a `Partition` (backend model).
+    // `sum by (host) (quantile_over_time(...))` is a two-level reduction: an
+    // inner per-series quantile-over-time, then an outer cross-series sum.
+    // Grouping rides on a `Partition` wrapping the outer Sum (backend model).
     let qe = lower(r#"sum by (host) (quantile_over_time(0.99, latency{service="web"}[5m]))"#);
     let QueryExpr::Partition { keys, child } = &qe else {
         panic!("expected Partition, got {qe:?}");
     };
     assert_eq!(keys, &PartitionKeys::By(vec!["host".into()]));
-    // Inner: Window over Aggregate{Quantile} (the inner func wins the intent).
+    // Outer cross-series Sum.
+    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+        panic!("expected outer Aggregate{{Sum}} under Partition, got {child:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum]));
+    // Inner: Window over Aggregate{Quantile}.
     let QueryExpr::Window { child, .. } = child.as_ref() else {
-        panic!("expected Window under Partition");
+        panic!("expected Window under the outer Sum, got {child:?}");
     };
     assert!(matches!(
         child.as_ref(),
@@ -129,17 +136,37 @@ fn stddev_and_stdvar_over_time() {
 }
 
 #[test]
-fn histogram_quantile_substitutes_to_quantile() {
+fn histogram_quantile_wraps_inner_in_quantile() {
+    // The argument's structure (here `rate`) is preserved *under* the Quantile,
+    // not squashed away — `Aggregate{Quantile}` over `Aggregate{Rate}` over Scan.
     let qe = lower(r#"histogram_quantile(0.95, rate(http_duration_seconds_bucket{le="0.5"}[5m]))"#);
-    let QueryExpr::Window { size, child, .. } = &qe else {
-        panic!("expected Window, got {qe:?}");
-    };
-    assert_eq!(*size, Duration::from_secs(300));
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
-        panic!("expected Aggregate");
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected outer Aggregate{{Quantile}}, got {qe:?}");
     };
     assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.95).abs() < 1e-9));
+    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+        panic!("expected inner Aggregate{{Rate}}, got {child:?}");
+    };
+    assert!(
+        matches!(aggs.as_slice(), [AggIntent::Rate { window }] if *window == Duration::from_secs(300))
+    );
     assert!(matches!(child.as_ref(), QueryExpr::Scan { predicates, .. } if predicates.len() == 1));
+}
+
+#[test]
+fn histogram_quantile_over_sum_by_le_preserves_grouping() {
+    // The canonical Prometheus histogram pattern. Previously returned
+    // UnsupportedFeature because `extract_matrix` couldn't see through the
+    // `sum by (le)` aggregate; now the `le` grouping survives into L3.
+    let qe = lower(r#"histogram_quantile(0.99, sum by (le) (rate(http_requests_bucket[5m])))"#);
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected outer Aggregate{{Quantile}}, got {qe:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.99).abs() < 1e-9));
+    assert!(
+        matches!(child.as_ref(), QueryExpr::Partition { keys, .. } if *keys == PartitionKeys::By(vec!["le".into()])),
+        "expected `sum by (le)` to survive as a Partition under the quantile, got {child:?}"
+    );
 }
 
 // ── rate / increase carry their own window (no Window node) ─────────────────────
@@ -169,6 +196,59 @@ fn increase_maps_to_increase_intent() {
     ));
 }
 
+// ── outer aggregation over an inner range-vector func is two levels ─────────────
+
+#[test]
+fn sum_over_rate_keeps_both_levels() {
+    // Regression: `sum(rate(m[w]))` — the most common PromQL shape — must keep
+    // the cross-series Sum, not collapse to a bare per-series Rate.
+    let qe = lower("sum(rate(http_requests_total[5m]))");
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected outer Aggregate{{Sum}}, got {qe:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum]));
+    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+        panic!("expected inner Aggregate{{Rate}}, got {child:?}");
+    };
+    assert!(
+        matches!(aggs.as_slice(), [AggIntent::Rate { window }] if *window == Duration::from_secs(300))
+    );
+    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+}
+
+#[test]
+fn sum_by_over_rate_groups_the_outer_sum() {
+    // `sum by (job) (rate(...))`: the grouping belongs to the OUTER sum, landing
+    // on a Partition that wraps the two-level aggregate.
+    let qe = lower("sum by (job) (rate(http_requests_total[5m]))");
+    let QueryExpr::Partition { keys, child } = &qe else {
+        panic!("expected Partition by job, got {qe:?}");
+    };
+    assert_eq!(*keys, PartitionKeys::By(vec!["job".into()]));
+    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+        panic!("expected Aggregate{{Sum}} under Partition, got {child:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum]));
+    assert!(matches!(
+        child.as_ref(),
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate { .. }])
+    ));
+}
+
+#[test]
+fn count_over_rate_keeps_both_levels() {
+    // The `Outer::Count` sibling of the `sum(rate(...))` bug.
+    let qe = lower("count(rate(http_requests_total[5m]))");
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected outer Aggregate{{Cardinality}}, got {qe:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Cardinality { .. }]));
+    assert!(matches!(
+        child.as_ref(),
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate { .. }])
+    ));
+}
+
 // ── count / cardinality ───────────────────────────────────────────────────────
 
 #[test]
@@ -185,17 +265,25 @@ fn count_over_time_is_count_intent() {
 
 #[test]
 fn outer_count_is_cardinality() {
+    // `count by (symbol) (count_over_time(...))`: inner per-series sample count
+    // over the window, outer cross-series cardinality grouped by symbol.
     let qe = lower("count by (symbol) (count_over_time(financial_last_trade_price[5m]))");
     let QueryExpr::Partition { keys, child } = &qe else {
         panic!("expected Partition, got {qe:?}");
     };
     assert_eq!(keys, &PartitionKeys::By(vec!["symbol".into()]));
+    // Outer cardinality (count of series).
+    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+        panic!("expected outer Aggregate{{Cardinality}} under Partition, got {child:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Cardinality { .. }]));
+    // Inner: Window over Aggregate{Count} (count_over_time).
     let QueryExpr::Window { child, .. } = child.as_ref() else {
-        panic!("expected Window");
+        panic!("expected Window under the outer cardinality, got {child:?}");
     };
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Cardinality { .. }])
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Count { .. }])
     ));
 }
 
@@ -281,6 +369,41 @@ fn binary_op_with_on_grouping() {
     use asap_control_core::intent_algebra::VectorMatchKind;
     assert_eq!(vm.kind, VectorMatchKind::On);
     assert_eq!(vm.labels, vec!["host".to_string()]);
+}
+
+#[test]
+fn binary_op_binds_each_branch_against_its_own_schema() {
+    // Each side scans a different metric and groups by a different label. With a
+    // single root schema threaded to both branches, the left scan would leak the
+    // right's group key (and vice-versa). Per-branch binding keeps them separate.
+    let qe = lower("count by (job) (a) / count by (region) (b)");
+    let QueryExpr::BinaryOp { lhs, rhs, .. } = &qe else {
+        panic!("expected BinaryOp, got {qe:?}");
+    };
+    let lcols = scan_columns(lhs);
+    let rcols = scan_columns(rhs);
+    assert!(
+        lcols.iter().any(|c| c == "job") && !lcols.iter().any(|c| c == "region"),
+        "lhs scan schema leaked the rhs key: {lcols:?}"
+    );
+    assert!(
+        rcols.iter().any(|c| c == "region") && !rcols.iter().any(|c| c == "job"),
+        "rhs scan schema leaked the lhs key: {rcols:?}"
+    );
+}
+
+/// Column names on the first `Scan` reachable by descending single-child nodes.
+fn scan_columns(e: &QueryExpr) -> Vec<String> {
+    match e {
+        QueryExpr::Scan { schema, .. } => schema.columns.iter().map(|c| c.name.clone()).collect(),
+        QueryExpr::Partition { child, .. }
+        | QueryExpr::Aggregate { child, .. }
+        | QueryExpr::Window { child, .. }
+        | QueryExpr::Filter { child, .. }
+        | QueryExpr::Sort { child, .. }
+        | QueryExpr::Limit { child, .. } => scan_columns(child),
+        _ => vec![],
+    }
 }
 
 // ── without is unsupported (no label registry) ──────────────────────────────────

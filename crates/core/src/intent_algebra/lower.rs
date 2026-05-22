@@ -187,8 +187,9 @@ pub fn convert(
                     crate::intent_algebra::expr_ir::L3Scalar::Boolean(true),
                 ),
             )),
-            left: Box::new(convert(left, schema, acc)?),
-            right: Box::new(convert(right, schema, acc)?),
+            // Each branch is bound independently — see the `BinaryOp` arm.
+            left: Box::new(convert_root(left, acc)?),
+            right: Box::new(convert_root(right, acc)?),
         },
 
         LQueryExpr::SetOp {
@@ -199,8 +200,8 @@ pub fn convert(
         } => CQueryExpr::SetOp {
             kind: kind.clone(),
             all: *all,
-            left: Box::new(convert(left, schema, acc)?),
-            right: Box::new(convert(right, schema, acc)?),
+            left: Box::new(convert_root(left, acc)?),
+            right: Box::new(convert_root(right, acc)?),
         },
 
         LQueryExpr::Sort { keys, input } => CQueryExpr::Sort {
@@ -237,8 +238,13 @@ pub fn convert(
             vector_match,
         } => CQueryExpr::BinaryOp {
             op: op.clone(),
-            lhs: Box::new(convert(lhs, schema, acc)?),
-            rhs: Box::new(convert(rhs, schema, acc)?),
+            // A binary op's two sides may scan different metrics with different
+            // label sets, so each branch must resolve against its OWN bound
+            // schema. `convert_root` re-runs the Binder per sub-tree; threading
+            // the parent `schema` (derived from the left leaf only) would bind
+            // the right side's columns to the wrong positions.
+            lhs: Box::new(convert_root(lhs, acc)?),
+            rhs: Box::new(convert_root(rhs, acc)?),
             vector_match: vector_match.clone(),
         },
     })
