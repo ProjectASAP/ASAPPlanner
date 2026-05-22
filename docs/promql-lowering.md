@@ -313,6 +313,48 @@ Three things to read off this:
    not `[[2]]`. This re-basing is why keys are positional `ColumnId`s, not names:
    the same column is id `2` below the aggregate and id `0` above it.
 
+### `ColumnId` is relative to a schema — the `2` vs `0`
+
+A `ColumnId` is a position *within one schema*. The input and output edges of
+`Aggregate` are **different schemas**, so the *same* logical `service` column
+gets a different id on each. Watch it with sample rows.
+
+**Input edge** (below the aggregate) — `service` is column **2**:
+
+| `ts` · id 0 | `value` · id 1 | `service` · id 2 |
+|---|---|---|
+| 100 | 0.5 | api |
+| 100 | 0.3 | web |
+| 200 | 0.7 | api |
+| 200 | 0.4 | web |
+
+→ "group by `service`" is written `by = [2]`. And every `(ts, service)` combo
+occurs once, so the edge carries `unique_keys = [[0, 2]]`.
+
+**Output edge** (above the aggregate) — a *brand-new* table; `service` is now
+column **0**:
+
+| `service` · id 0 | `topk_10` · id 1 |
+|---|---|
+| api | … |
+| web | … |
+
+→ after grouping, each `service` appears exactly once, so `service` *alone* is
+the key — at its **new** position: `unique_keys = [[0]]`.
+
+So `2` and `0` both name `service`; they differ only because input and output are
+different schemas. This is also the cleanest way to see how the two concepts
+divide up:
+
+- **`ColumnId`** answers *"which column"* — a pointer (`by = [2]`: group by the
+  column at position 2). Used everywhere a column must be named.
+- **`unique_keys`** answers *"which set(s) of columns are jointly non-duplicating"*
+  — a fact about the data, *written using* `ColumnId`s (`[[0, 2]]`: columns 0 and
+  2 together identify a row). Read only by the CSE gate.
+
+The outer `Vec` allows several such sets: `[[0, 2]]` = one key (the pair);
+`[[0], [1, 2]]` = two independent keys.
+
 ### Why this makes CSE legal here
 
 The shared producer the deduper would hoist is the `Window → Scan` sub-tree. Its
