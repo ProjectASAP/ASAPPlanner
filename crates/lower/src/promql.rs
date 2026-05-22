@@ -18,7 +18,9 @@
 //! | `avg/min/max/sum_over_time(m[w])` | `Aggregate{[Avg/Min/Max/Sum], Window{w}}` |
 //! | `stddev/stdvar_over_time(m[w])` | `Aggregate{[StdDev/Variance], Window{w}}` |
 //! | `count_over_time(m[w])` | `Aggregate{[Count], Window{w}}` |
-//! | `rate/irate/increase(m[w])` | `Aggregate{[Rate{w}/Increase{w}]}` (no Window) |
+//! | `rate/irate(m[w])` | `Aggregate{[Rate{w}]}` (no Window) — `irate` shares the `rate` *intent*; the avg-vs-last-two-samples difference is an L4 estimation method |
+//! | `increase(m[w])` | `Aggregate{[Increase{w}]}` (no Window) |
+//! | `changes` / `resets` / `group` / `offset` / `@` | **rejected** — distinct semantics with no intent-algebra representation yet |
 //! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ `Partition` in L3) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
 //! | `topk(k, count_over_time(…))` | `TopK{k, by}` (heavy-hitter, one pass) |
@@ -111,11 +113,11 @@ fn walk(expr: &Expr) -> Result<L2> {
             input: Box::new(walk(&sq.expr)?),
         }),
         Expr::VectorSelector(vs) => {
-            let (metric, matchers) = vs_parts(vs);
+            let (metric, matchers) = vs_parts(vs)?;
             Ok(filtered_source(metric, matchers))
         }
         Expr::MatrixSelector(ms) => {
-            let (metric, matchers) = vs_parts(&ms.vs);
+            let (metric, matchers) = vs_parts(&ms.vs)?;
             Ok(L2::Window {
                 duration: ms.range,
                 slide: None,
@@ -148,8 +150,15 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<L2> {
         }
     } else if op == token::T_COUNT {
         Outer::Count
-    } else if op == token::T_SUM || op == token::T_GROUP {
+    } else if op == token::T_SUM {
         Outer::Plain(OuterIntent::Sum)
+    } else if op == token::T_GROUP {
+        // `group(v)` yields a constant 1 per group (presence), not a sum of
+        // values. Folding it onto `Sum` changed the result; reject until a
+        // distinct group-presence intent exists.
+        return Err(LoweringError::UnsupportedAggregateOp(
+            "`group` (constant-1 presence) is not `sum`; no distinct intent yet".into(),
+        ));
     } else if op == token::T_AVG {
         Outer::Plain(OuterIntent::Avg)
     } else if op == token::T_MIN {
@@ -223,7 +232,7 @@ fn walk_binary(bin: &BinaryExpr) -> Result<L2> {
 fn lower_inner(expr: &Expr) -> Result<Inner> {
     match expr {
         Expr::VectorSelector(vs) => {
-            let (metric, matchers) = vs_parts(vs);
+            let (metric, matchers) = vs_parts(vs)?;
             Ok(Inner {
                 metric,
                 matchers,
@@ -232,7 +241,7 @@ fn lower_inner(expr: &Expr) -> Result<Inner> {
             })
         }
         Expr::MatrixSelector(ms) => {
-            let (metric, matchers) = vs_parts(&ms.vs);
+            let (metric, matchers) = vs_parts(&ms.vs)?;
             Ok(Inner {
                 metric,
                 matchers,
@@ -295,7 +304,10 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
         "sum_over_time" => at0(InnerFunc::Sum),
         "stddev_over_time" => at0(InnerFunc::StdDev),
         "stdvar_over_time" => at0(InnerFunc::Variance),
-        "count_over_time" | "changes" | "resets" => at0(InnerFunc::Count),
+        "count_over_time" => at0(InnerFunc::Count),
+        // `changes` (value changes) and `resets` (counter resets) are NOT
+        // sample counts — aliasing them to `count_over_time` silently produced
+        // the wrong number. Reject until they have distinct intents.
         other => Err(LoweringError::UnsupportedFunction(other.to_string())),
     }
 }
@@ -477,7 +489,14 @@ fn outer_func(o: &OuterIntent) -> AggFunc {
 fn resolve_group(agg: &AggregateExpr) -> Result<Vec<String>> {
     match &agg.modifier {
         None => Ok(vec![]),
-        Some(LabelModifier::Include(ls)) => Ok(ls.labels.clone()),
+        Some(LabelModifier::Include(ls)) => {
+            // Grouping labels are a set: `by (a, b)` ≡ `by (b, a)`. Canonicalise
+            // so equivalent groupings lower to identical keys.
+            let mut keys = ls.labels.clone();
+            keys.sort();
+            keys.dedup();
+            Ok(keys)
+        }
         Some(LabelModifier::Exclude(_)) => Err(LoweringError::UnsupportedFeature(
             "`without(...)` grouping requires a registry-backed catalog of the \
              metric's label set (the usage-derived schema can't enumerate the \
@@ -489,7 +508,15 @@ fn resolve_group(agg: &AggregateExpr) -> Result<Vec<String>> {
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
-fn vs_parts(vs: &VectorSelector) -> (String, Vec<L3Expr>) {
+fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L3Expr>)> {
+    // `offset` / `@` shift the evaluation/lookback time. The intent algebra has
+    // no representation for either, so silently lowering them (as if absent)
+    // would change the query's meaning. Reject rather than mislower.
+    if vs.offset.is_some() || vs.at.is_some() {
+        return Err(LoweringError::UnsupportedFeature(
+            "`offset` / `@` time-shift modifiers have no intent-algebra representation".into(),
+        ));
+    }
     let metric = vs.name.clone().unwrap_or_else(|| {
         vs.matchers
             .matchers
@@ -498,14 +525,18 @@ fn vs_parts(vs: &VectorSelector) -> (String, Vec<L3Expr>) {
             .map(|m| m.value.clone())
             .unwrap_or_default()
     });
-    let matchers = vs
+    // Label matchers are an unordered set: `{a="1",b="2"}` and `{b="2",a="1"}`
+    // select the same series. Canonicalise by (name, value) so equivalent
+    // selectors lower to identical predicates.
+    let mut ms: Vec<&Matcher> = vs
         .matchers
         .matchers
         .iter()
         .filter(|m| m.name != "__name__")
-        .map(matcher_to_l3expr)
         .collect();
-    (metric, matchers)
+    ms.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.value.cmp(&b.value)));
+    let matchers = ms.into_iter().map(matcher_to_l3expr).collect();
+    Ok((metric, matchers))
 }
 
 fn matcher_to_l3expr(m: &Matcher) -> L3Expr {
@@ -525,7 +556,7 @@ fn matcher_to_l3expr(m: &Matcher) -> L3Expr {
 fn extract_matrix(expr: &Expr) -> Result<(String, Vec<L3Expr>, Duration)> {
     match expr {
         Expr::MatrixSelector(ms) => {
-            let (metric, matchers) = vs_parts(&ms.vs);
+            let (metric, matchers) = vs_parts(&ms.vs)?;
             Ok((metric, matchers, ms.range))
         }
         Expr::Paren(p) => extract_matrix(&p.expr),

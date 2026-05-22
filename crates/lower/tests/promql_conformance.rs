@@ -20,10 +20,13 @@
 //!
 //! Legend used in test names:
 //! - (no suffix)  — we lower it and the L3 intent matches PromQL.
-//! - `__rejected` — we cleanly return an error (capability not implemented).
-//! - `__GAP`      — we lower it but the result **diverges** from PromQL
-//!   semantics (silent loss or over-aggregation). Pinned so a future fix
-//!   flips the assertion deliberately.
+//! - `__GAP`      — a PromQL capability we don't *yet* support. It is **cleanly
+//!   rejected** (never silently mislowered), and pinned here so adding support
+//!   later flips the assertion deliberately.
+//!
+//! NOTE: the formerly-silent divergences (`group`→sum, dropped `offset`/`@`,
+//! `changes`/`resets`→count) are now rejected rather than mislowered — see the
+//! equivalence suite (`promql_equivalence.rs`) and section L below.
 
 // `__GAP`-suffixed test names intentionally SHOUT the documented divergences.
 #![allow(non_snake_case)]
@@ -207,14 +210,15 @@ fn sum_collapses_all_series() {
 
 #[test]
 fn sum_by_preserves_dimensions_as_partition() {
-    // SEMANTICS: `by(job,instance)` keeps those labels; grouping rides on Partition.
+    // SEMANTICS: `by(job,instance)` keeps those labels; grouping rides on
+    // Partition. Keys are canonicalised (sorted), so order is normalised.
     let qe = ok("sum by(job, instance) (node_filesystem_size_bytes)");
     let QueryExpr::Partition { keys, .. } = &qe else {
         panic!("expected Partition for `by(...)`, got {qe:?}");
     };
     assert_eq!(
         *keys,
-        PartitionKeys::By(vec!["job".into(), "instance".into()])
+        PartitionKeys::By(vec!["instance".into(), "job".into()])
     );
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum)));
 }
@@ -256,13 +260,10 @@ fn sum_without_is_rejected() {
 }
 
 #[test]
-fn group_aggregator_is_lowered_as_sum__GAP() {
+fn group_aggregator_is_rejected() {
     // SEMANTICS (PromQL): `group(v)` returns a constant 1 per group (presence),
-    // NOT a sum. We currently fold it onto `Sum`. Pinned as a known divergence.
-    assert!(has(&ok("group by (job) (up)"), |i| matches!(
-        i,
-        AggIntent::Sum
-    )));
+    // NOT a sum. Rather than fold it onto `Sum` (wrong value) we reject it.
+    let _ = rejected("group by (job) (up)");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -495,19 +496,18 @@ fn over_time_of_subquery_is_rejected__GAP() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn offset_modifier_is_silently_dropped__GAP() {
-    // SEMANTICS (PromQL): `offset 5m` shifts the lookback 5m into the past.
-    // `vs_parts` reads only name + matchers, so the offset is lost: the query
-    // lowers as if there were no offset. Pinned so the silent loss is visible.
-    let (metric, _) = first_scan(&ok("http_requests_total offset 5m"));
-    assert_eq!(metric, "http_requests_total");
+fn offset_modifier_is_rejected() {
+    // SEMANTICS (PromQL): `offset 5m` shifts the lookback 5m into the past. The
+    // intent algebra can't represent it, so we reject rather than silently drop
+    // it (which would change the query's meaning).
+    let _ = rejected("http_requests_total offset 5m");
 }
 
 #[test]
-fn at_modifier_is_silently_dropped__GAP() {
-    // SEMANTICS (PromQL): `@ <ts>` pins the evaluation time. Also dropped today.
-    let (metric, _) = first_scan(&ok("http_requests_total @ 1609746000"));
-    assert_eq!(metric, "http_requests_total");
+fn at_modifier_is_rejected() {
+    // SEMANTICS (PromQL): `@ <ts>` pins the evaluation time. Rejected for the
+    // same reason as `offset`.
+    let _ = rejected("http_requests_total @ 1609746000");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -528,6 +528,9 @@ fn unsupported_functions_are_rejected() {
         "predict_linear(demo_disk_usage_bytes[4h], 3600)",
         r#"label_replace(up, "host", "$1", "instance", "(.+):.*")"#,
         "clamp_max(go_goroutines, 5)",
+        // changes / resets are NOT sample counts (formerly aliased to Count).
+        "changes(demo_disk_usage_bytes[1h])",
+        "resets(http_requests_total[1h])",
     ] {
         let _ = rejected(q);
     }
