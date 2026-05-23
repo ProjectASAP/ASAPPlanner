@@ -25,19 +25,6 @@ pub struct GroupKey(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ColumnRef(pub String);
 
-impl ColumnRef {
-    /// Returns `true` when this ref is the `"*"` wildcard sentinel produced by
-    /// `agg_col` for aggregate args that are not a named column (e.g. `COUNT(*)`).
-    /// Schema derivation skips wildcard refs and falls back to the `Float64` default.
-    ///
-    /// TODO: replace this sentinel with `Option<ColumnRef>` in the `AggIntent` variants
-    /// that carry a `col` field (`Sum`, `Min`, `Max`, `Avg`, `Stddev`). `None` = no
-    /// column (wildcard / count-star); `Some(ColumnRef(...))` = real column. `agg_col`
-    /// would return `Option<ColumnRef>` and this method disappears entirely.
-    pub fn is_wildcard(&self) -> bool {
-        self.0 == "*"
-    }
-}
 /// A set of partitioning keys (sharding hint for L5 stage allocator).
 #[derive(Debug, Clone)]
 pub struct PartitionKeys;
@@ -123,7 +110,7 @@ pub enum WindowFuncKind {
     Lead,
     FirstValue,
     LastValue,
-    NthValue(u64),
+    NthValue(Option<u64>),
     Sum,
     Avg,
     Count,
@@ -208,20 +195,20 @@ pub enum AggIntent {
         accuracy: AccuracyTarget,
     },
     Sum {
-        col: ColumnRef,
+        col: Option<ColumnRef>,
     },
     Min {
-        col: ColumnRef,
+        col: Option<ColumnRef>,
     },
     Max {
-        col: ColumnRef,
+        col: Option<ColumnRef>,
     },
     Avg {
-        col: ColumnRef,
+        col: Option<ColumnRef>,
     },
     /// Sample stddev when `population == false`; population stddev otherwise.
     Stddev {
-        col: ColumnRef,
+        col: Option<ColumnRef>,
         population: bool,
     },
     Quantile {
@@ -273,13 +260,7 @@ impl AggIntent {
             | Self::Min { col }
             | Self::Max { col }
             | Self::Avg { col }
-            | Self::Stddev { col, .. } => {
-                if col.is_wildcard() {
-                    None
-                } else {
-                    Some(col)
-                }
-            }
+            | Self::Stddev { col, .. } => col.as_ref(),
             _ => None,
         }
     }

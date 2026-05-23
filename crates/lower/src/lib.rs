@@ -57,18 +57,6 @@ pub async fn lower_batch(
         }
     }
 
-    // Validate the catalog upfront so invalid time_column names are caught in all
-    // build profiles (debug_assert in lower_filter fires only in debug builds).
-    for (name, schema) in &catalog.tables {
-        if let Err(e) = schema.validate() {
-            let msg = format!("catalog table '{name}': {e}");
-            return entries
-                .iter()
-                .map(|_| Err(LoweringError::InvalidExpression(msg.clone())))
-                .collect();
-        }
-    }
-
     let mut results = Vec::with_capacity(entries.len());
     for entry in entries {
         let accuracy = entry

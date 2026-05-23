@@ -122,19 +122,27 @@ impl<'a> SqlLowerer<'a> {
     }
 
     fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<QueryExpr, LoweringError> {
-        // When the direct child is a TableScan and the table has a time column,
-        // split the predicate: time bounds go into Source::Table.time_range; the
-        // remaining non-time conjuncts become the Filter predicate.
-        let inner = strip_aliases(&filter.input);
-        if let LogicalPlan::TableScan(scan) = inner {
+        // Walk the full filter chain to find a TableScan at any depth, then
+        // collect predicates from all stacked filters (including the outermost).
+        let (inner_preds, maybe_scan) = collect_filter_chain(&filter.input);
+
+        if let Some(scan) = maybe_scan {
             let table_name = scan.table_name.to_string();
             if let Some(schema) = self.catalog.tables.get(&table_name) {
                 if let Some(time_col) = &schema.time_column {
-                    debug_assert!(
-                        schema.columns.iter().any(|c| &c.name == time_col),
-                        "time_column '{time_col}' not found in table columns; call TableSchema::validate() on catalog construction"
-                    );
-                    let (time_range, non_time) = extract_time_range(&filter.predicate, time_col);
+                    if let Err(e) = schema.validate() {
+                        return Err(LoweringError::InvalidExpression(format!(
+                            "catalog table '{table_name}': {e}"
+                        )));
+                    }
+                    // Merge outermost predicate + all inner filter predicates into one
+                    // flat conjunct list, then classify for time-range extraction.
+                    let all_conjuncts: Vec<&Expr> = std::iter::once(&filter.predicate)
+                        .chain(inner_preds)
+                        .flat_map(|p| split_conjuncts(p))
+                        .collect();
+                    let (time_range, non_time) =
+                        extract_time_range_from_conjuncts(all_conjuncts, time_col);
                     let columns = projection_columns(scan, schema);
                     let scan_expr = QueryExpr::Scan {
                         source: Source::Table {
@@ -267,6 +275,12 @@ impl<'a> SqlLowerer<'a> {
     fn lower_limit(&self, limit: &logical_expr::Limit) -> Result<QueryExpr, LoweringError> {
         // TopK: Limit on top of Sort on top of Aggregate, all sort keys DESC.
         if let Some(k) = eval_fetch(&limit.fetch) {
+            if eval_fetch(&limit.skip).unwrap_or(0) > 0 {
+                return Err(LoweringError::UnsupportedFeature(
+                    "LIMIT ... OFFSET is not supported with ORDER BY ... DESC aggregates (TopK)"
+                        .into(),
+                ));
+            }
             let inner = strip_aliases(&limit.input);
             if let LogicalPlan::Sort(sort) = inner {
                 if sort.expr.iter().all(|s| !s.asc) {
@@ -329,7 +343,7 @@ impl<'a> SqlLowerer<'a> {
                 .collect::<Result<Vec<_>, _>>()?;
 
             // For NthValue, extract N from args[1] and keep only the column (args[0]).
-            let func = if matches!(func, WindowFuncKind::NthValue(_)) {
+            let func = if matches!(func, WindowFuncKind::NthValue(None)) {
                 let n = match args.get(1) {
                     Some(L3Expr::Literal(L3Scalar::Int64(n))) if *n > 0 => *n as u64,
                     other => {
@@ -339,15 +353,13 @@ impl<'a> SqlLowerer<'a> {
                     }
                 };
                 args.truncate(1);
-                WindowFuncKind::NthValue(n)
+                WindowFuncKind::NthValue(Some(n))
             } else {
                 func
             };
-            // lower_window_func_kind emits NthValue(0) as a sentinel that must
-            // be resolved to a real N above. Catch any bypass in debug builds.
             debug_assert!(
-                !matches!(func, WindowFuncKind::NthValue(0)),
-                "NthValue(0) sentinel was not resolved; lower_window has a bug"
+                !matches!(func, WindowFuncKind::NthValue(None)),
+                "NthValue sentinel not resolved; lower_window has a bug"
             );
 
             let partition_by = wf
@@ -570,22 +582,21 @@ fn expr_to_col_ref(expr: &Expr) -> Result<ColumnRef, LoweringError> {
     }
 }
 
-/// Best-effort: extract the first column name from aggregate function args.
-/// For `SUM(value)` → `ColumnRef("value")`. For `COUNT(*)` or expressions,
-/// falls back to `"*"` or the expression display string.
-fn agg_col(args: &[Expr]) -> ColumnRef {
+/// Extract the aggregated column name from aggregate function args.
+/// Returns `None` for wildcards (`COUNT(*)`) and non-column expressions.
+fn agg_col(args: &[Expr]) -> Option<ColumnRef> {
     match args.first() {
-        Some(Expr::Column(col)) => ColumnRef(col.name.clone()),
+        Some(Expr::Column(col)) => Some(ColumnRef(col.name.clone())),
         Some(Expr::Alias(a)) => match a.expr.as_ref() {
-            Expr::Column(col) => ColumnRef(col.name.clone()),
-            e => ColumnRef(format!("{e}")),
+            Expr::Column(col) => Some(ColumnRef(col.name.clone())),
+            _ => None,
         },
         Some(Expr::Cast(c)) => match c.expr.as_ref() {
-            Expr::Column(col) => ColumnRef(col.name.clone()),
-            e => ColumnRef(format!("{e}")),
+            Expr::Column(col) => Some(ColumnRef(col.name.clone())),
+            _ => None,
         },
-        Some(Expr::Wildcard { .. }) | None => ColumnRef("*".into()),
-        Some(e) => ColumnRef(format!("{e}")),
+        Some(Expr::Wildcard { .. }) | None => None,
+        _ => None,
     }
 }
 
@@ -617,11 +628,11 @@ fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// Split `expr` into `(time_range, non_time_conjuncts)`.
-/// Time-bound conjuncts are folded into the `TimeRange`; the rest are returned
-/// as a `Vec<&Expr>` so the caller can translate them with `df_expr_to_l3`.
-fn extract_time_range<'a>(expr: &'a Expr, time_col: &str) -> (Option<TimeRange>, Vec<&'a Expr>) {
-    let conjuncts = split_conjuncts(expr);
+/// Core: classify a pre-split list of conjuncts into time bounds + residual.
+fn extract_time_range_from_conjuncts<'a>(
+    conjuncts: Vec<&'a Expr>,
+    time_col: &str,
+) -> (Option<TimeRange>, Vec<&'a Expr>) {
     let mut start_ms: Option<i64> = None;
     let mut end_ms: Option<i64> = None;
     let mut non_time: Vec<&'a Expr> = vec![];
@@ -648,6 +659,32 @@ fn extract_time_range<'a>(expr: &'a Expr, time_col: &str) -> (Option<TimeRange>,
         None
     };
     (range, non_time)
+}
+
+/// Convenience wrapper: split a single expression then classify conjuncts.
+#[cfg(test)]
+fn extract_time_range<'a>(expr: &'a Expr, time_col: &str) -> (Option<TimeRange>, Vec<&'a Expr>) {
+    extract_time_range_from_conjuncts(split_conjuncts(expr), time_col)
+}
+
+/// Walk a `Filter(Filter(...(TableScan)))` chain.
+/// Returns `(predicates_from_inner_filters, Some(scan))` when a TableScan is
+/// found at any depth, or `(vec![], None)` if a non-Filter non-Scan node is
+/// reached first. The outermost filter's predicate is NOT included — the
+/// caller adds it.
+fn collect_filter_chain(plan: &LogicalPlan) -> (Vec<&Expr>, Option<&logical_expr::TableScan>) {
+    let plan = strip_aliases(plan);
+    match plan {
+        LogicalPlan::TableScan(scan) => (vec![], Some(scan)),
+        LogicalPlan::Filter(f) => {
+            let (mut inner_preds, maybe_scan) = collect_filter_chain(&f.input);
+            if maybe_scan.is_some() {
+                inner_preds.push(&f.predicate);
+            }
+            (inner_preds, maybe_scan)
+        }
+        _ => (vec![], None),
+    }
 }
 
 /// Translate a slice of DataFusion `Expr`s (non-time conjuncts) into a single
@@ -1031,8 +1068,8 @@ fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKi
             "lead" => Ok(WindowFuncKind::Lead),
             "first_value" => Ok(WindowFuncKind::FirstValue),
             "last_value" => Ok(WindowFuncKind::LastValue),
-            // NthValue(0) is a sentinel; lower_window extracts the real N from args.
-            "nth_value" => Ok(WindowFuncKind::NthValue(0)),
+            // NthValue(None) is a sentinel; lower_window extracts the real N from args.
+            "nth_value" => Ok(WindowFuncKind::NthValue(None)),
             other => Err(LoweringError::UnsupportedFeature(format!(
                 "window fn: {other}"
             ))),
@@ -1048,13 +1085,13 @@ fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKi
             ))),
         },
         // In DataFusion 43, BuiltInWindowFunction covers FirstValue, LastValue, NthValue.
-        // NthValue(0) is a placeholder; the real N is extracted from args in lower_window.
+        // NthValue(None) is a sentinel; the real N is extracted from args in lower_window.
         WindowFunctionDefinition::BuiltInWindowFunction(biwf) => {
             use datafusion::logical_expr::BuiltInWindowFunction;
             match biwf {
                 BuiltInWindowFunction::FirstValue => Ok(WindowFuncKind::FirstValue),
                 BuiltInWindowFunction::LastValue => Ok(WindowFuncKind::LastValue),
-                BuiltInWindowFunction::NthValue => Ok(WindowFuncKind::NthValue(0)),
+                BuiltInWindowFunction::NthValue => Ok(WindowFuncKind::NthValue(None)),
             }
         }
     }
@@ -1209,5 +1246,42 @@ mod tests {
         let (range, non_time) = extract_time_range(&expr, "ts");
         assert!(range.is_some());
         assert_eq!(non_time.len(), 1);
+    }
+
+    // ── collect_filter_chain unit tests (Fix 3) ───────────────────────────────
+
+    fn empty_scan() -> LogicalPlan {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::logical_expr::builder::LogicalTableSource;
+        use datafusion::logical_expr::LogicalPlanBuilder;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let source = Arc::new(LogicalTableSource::new(schema));
+        LogicalPlanBuilder::scan("t", source, None)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn collect_filter_chain_finds_scan_at_depth_zero() {
+        let scan = empty_scan();
+        let (preds, maybe_scan) = collect_filter_chain(&scan);
+        assert!(maybe_scan.is_some(), "should find the TableScan");
+        assert!(preds.is_empty(), "no inner predicates at depth zero");
+    }
+
+    #[test]
+    fn collect_filter_chain_returns_none_for_non_scan() {
+        use datafusion::common::DFSchema;
+        use datafusion::logical_expr::EmptyRelation;
+
+        let empty = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::empty()),
+        });
+        let (preds, maybe_scan) = collect_filter_chain(&empty);
+        assert!(maybe_scan.is_none());
+        assert!(preds.is_empty());
     }
 }

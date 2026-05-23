@@ -118,7 +118,7 @@ fn requires_count_is_any() {
 fn requires_sum_is_any() {
     assert_eq!(
         AggIntent::Sum {
-            col: ColumnRef("x".into())
+            col: Some(ColumnRef("x".into()))
         }
         .requires(),
         DataModel::Any
@@ -129,7 +129,7 @@ fn requires_sum_is_any() {
 fn requires_min_is_any() {
     assert_eq!(
         AggIntent::Min {
-            col: ColumnRef("x".into())
+            col: Some(ColumnRef("x".into()))
         }
         .requires(),
         DataModel::Any
@@ -140,7 +140,7 @@ fn requires_min_is_any() {
 fn requires_max_is_any() {
     assert_eq!(
         AggIntent::Max {
-            col: ColumnRef("x".into())
+            col: Some(ColumnRef("x".into()))
         }
         .requires(),
         DataModel::Any
@@ -151,7 +151,7 @@ fn requires_max_is_any() {
 fn requires_avg_is_any() {
     assert_eq!(
         AggIntent::Avg {
-            col: ColumnRef("x".into())
+            col: Some(ColumnRef("x".into()))
         }
         .requires(),
         DataModel::Any
@@ -162,7 +162,7 @@ fn requires_avg_is_any() {
 fn requires_stddev_sample_is_any() {
     assert_eq!(
         AggIntent::Stddev {
-            col: ColumnRef("x".into()),
+            col: Some(ColumnRef("x".into())),
             population: false
         }
         .requires(),
@@ -174,7 +174,7 @@ fn requires_stddev_sample_is_any() {
 fn requires_stddev_population_is_any() {
     assert_eq!(
         AggIntent::Stddev {
-            col: ColumnRef("x".into()),
+            col: Some(ColumnRef("x".into())),
             population: true
         }
         .requires(),
@@ -275,7 +275,7 @@ fn output_type_sum_is_float64() {
     let f = field("value", L3DataType::Float64);
     assert_eq!(
         AggIntent::Sum {
-            col: ColumnRef("value".into())
+            col: Some(ColumnRef("value".into()))
         }
         .output_type(&f),
         Some(L3DataType::Float64)
@@ -287,7 +287,7 @@ fn output_type_avg_is_float64() {
     let f = field("value", L3DataType::Int64);
     assert_eq!(
         AggIntent::Avg {
-            col: ColumnRef("value".into())
+            col: Some(ColumnRef("value".into()))
         }
         .output_type(&f),
         Some(L3DataType::Float64)
@@ -299,7 +299,7 @@ fn output_type_stddev_sample_is_float64() {
     let f = field("value", L3DataType::Float64);
     assert_eq!(
         AggIntent::Stddev {
-            col: ColumnRef("value".into()),
+            col: Some(ColumnRef("value".into())),
             population: false
         }
         .output_type(&f),
@@ -312,7 +312,7 @@ fn output_type_stddev_population_is_float64() {
     let f = field("value", L3DataType::Float64);
     assert_eq!(
         AggIntent::Stddev {
-            col: ColumnRef("value".into()),
+            col: Some(ColumnRef("value".into())),
             population: true
         }
         .output_type(&f),
@@ -362,7 +362,7 @@ fn output_type_min_preserves_int64_input() {
     let f = field("count", L3DataType::Int64);
     assert_eq!(
         AggIntent::Min {
-            col: ColumnRef("count".into())
+            col: Some(ColumnRef("count".into()))
         }
         .output_type(&f),
         Some(L3DataType::Int64)
@@ -374,7 +374,7 @@ fn output_type_min_preserves_float64_input() {
     let f = field("value", L3DataType::Float64);
     assert_eq!(
         AggIntent::Min {
-            col: ColumnRef("value".into())
+            col: Some(ColumnRef("value".into()))
         }
         .output_type(&f),
         Some(L3DataType::Float64)
@@ -386,7 +386,7 @@ fn output_type_max_preserves_utf8_input() {
     let f = field("name", L3DataType::Utf8);
     assert_eq!(
         AggIntent::Max {
-            col: ColumnRef("name".into())
+            col: Some(ColumnRef("name".into()))
         }
         .output_type(&f),
         Some(L3DataType::Utf8)
@@ -589,10 +589,10 @@ fn aggregate_multiple_aggs() {
         aggs: vec![
             AggIntent::Count { accuracy: exact() },
             AggIntent::Sum {
-                col: ColumnRef("value".into()),
+                col: Some(ColumnRef("value".into())),
             },
             AggIntent::Min {
-                col: ColumnRef("value".into()),
+                col: Some(ColumnRef("value".into())),
             },
         ],
         having: None,
@@ -686,7 +686,7 @@ fn aggregate_propagates_time_index_when_time_col_in_group_by() {
         child: dummy_scan(cs.clone()),
         by: vec![GroupKey("ts".into())],
         aggs: vec![AggIntent::Sum {
-            col: ColumnRef("value".into()),
+            col: Some(ColumnRef("value".into())),
         }],
         having: None,
         output_names: vec!["sum_value".into()],

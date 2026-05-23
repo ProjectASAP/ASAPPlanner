@@ -452,6 +452,25 @@ async fn test_order_by_desc_limit_becomes_topk() {
     assert!(by.iter().any(|c| c.0 == "host"));
 }
 
+// ── Test: TopK + OFFSET returns error (#1) ───────────────────────────────────
+
+#[tokio::test]
+async fn test_order_by_desc_limit_with_offset_returns_error() {
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let err = lowerer
+        .lower(
+            "SELECT host, COUNT(*) FROM metrics \
+             GROUP BY host ORDER BY 2 DESC LIMIT 10 OFFSET 5",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, LoweringError::UnsupportedFeature(ref msg) if msg.contains("OFFSET")),
+        "expected UnsupportedFeature(OFFSET), got: {err}"
+    );
+}
+
 // ── Test: Window functions ────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -749,6 +768,56 @@ async fn test_unknown_table_returns_error() {
     );
 }
 
+// ── Tests: per-table catalog validation (#9) ──────────────────────────────────
+
+#[tokio::test]
+async fn test_bad_time_column_fails_query_touching_that_table() {
+    let mut tables = HashMap::new();
+    // Valid table.
+    tables.insert(
+        "metrics".to_string(),
+        TableSchema {
+            columns: vec![ColumnDef {
+                name: "value".to_string(),
+                data_type: L3DataType::Float64,
+                nullable: true,
+            }],
+            time_column: None,
+        },
+    );
+    // Table whose time_column doesn't exist in its columns list.
+    tables.insert(
+        "broken".to_string(),
+        TableSchema {
+            columns: vec![ColumnDef {
+                name: "id".to_string(),
+                data_type: L3DataType::Int64,
+                nullable: false,
+            }],
+            time_column: Some("nonexistent".to_string()),
+        },
+    );
+    let catalog = SchemaCatalog { tables };
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+
+    // Query on the valid table must succeed.
+    let result = lowerer.lower("SELECT value FROM metrics").await;
+    assert!(
+        result.is_ok(),
+        "query on valid table should succeed: {result:?}"
+    );
+
+    // Query on the broken table must fail with InvalidExpression.
+    let err = lowerer
+        .lower("SELECT id FROM broken WHERE id > 0")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, LoweringError::InvalidExpression(_)),
+        "expected InvalidExpression for bad time_column, got: {err}"
+    );
+}
+
 // ── Tests: language guard ─────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -994,6 +1063,32 @@ async fn test_scan_columns_empty_for_select_star() {
     assert!(
         columns.is_empty(),
         "SELECT * should produce no column constraints, got: {columns:?}"
+    );
+}
+
+// ── Tests: push_columns_into_scan gap for aggregate topology (#4) ────────────
+
+#[tokio::test]
+async fn test_scan_columns_empty_for_aggregate_topology() {
+    // push_columns_into_scan only rewrites a Scan that is the direct child of
+    // a Project. When there is an Aggregate between Project and Scan (the normal
+    // GROUP BY shape), column pushdown is skipped and Scan.columns stays empty
+    // ("all columns" semantics). This test documents the known gap so that any
+    // future fix must also update this assertion.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let result = lowerer
+        .lower("SELECT region, COUNT(*) FROM metrics GROUP BY region")
+        .await
+        .unwrap();
+
+    let source = find_source(&result).expect("expected a Scan node");
+    let Source::Table { columns, .. } = source else {
+        panic!("expected Source::Table");
+    };
+    assert!(
+        columns.is_empty(),
+        "Project→Aggregate→Scan: Scan.columns should be empty (all-columns semantics), got: {columns:?}"
     );
 }
 
@@ -1330,7 +1425,11 @@ async fn test_agg_col_name_tracked_via_col_field() {
     let AggIntent::Min { col } = &aggs[0] else {
         panic!("expected Min, got {:?}", aggs[0]);
     };
-    assert_eq!(col.0, "ts", "Min should track the aggregated column name");
+    assert_eq!(
+        col.as_ref().map(|c| c.0.as_str()),
+        Some("ts"),
+        "Min should track the aggregated column name"
+    );
 }
 
 // ── Tests: NthValue N extraction (#10) ───────────────────────────────────────
@@ -1358,9 +1457,9 @@ async fn test_nth_value_extracts_n_from_args() {
     assert!(
         matches!(
             kind,
-            asap_control_core::intent_algebra::expr::WindowFuncKind::NthValue(2)
+            asap_control_core::intent_algebra::expr::WindowFuncKind::NthValue(Some(2))
         ),
-        "expected NthValue(2), got: {kind:?}"
+        "expected NthValue(Some(2)), got: {kind:?}"
     );
 }
 
