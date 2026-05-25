@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use super::schema::L4Schema;
 use super::sketch::{SketchQuery, SummaryKind, SummaryParams};
@@ -31,7 +32,7 @@ pub enum SummaryExpr {
     /// Any L3 node that no L4 rule rewrote (e.g. `Filter`, `Project`, `Sort`).
     /// Output schema is the inner L3 node's schema, lifted to `L4Schema`
     /// with all fields as `L4DataType::Primitive`.
-    Logical(Rc<L3Node>),
+    Logical(Arc<L3Node>),
 
     /// Sketch aggregation. L4 chose `sketch` + `params` from the catalog
     /// for `AggIntent` under `DeploymentConstraints`.

@@ -1,8 +1,45 @@
-/// Opaque handle to the external data-source catalog (Prometheus metric
-/// metadata, SQL `information_schema`, DataFusion catalog). Used only by
-/// `Scan` schema derivation to resolve leaf column types; all other nodes
-/// derive their output schemas purely from their input schemas.
-pub struct SchemaCatalog;
+use std::collections::HashMap;
+
+/// Catalog of known relational tables and their column definitions.
+/// Passed to `lower_batch` so the SQL lowerer can resolve table and column
+/// types and identify each table's designated time column.
+#[derive(Debug, Clone, Default)]
+pub struct SchemaCatalog {
+    pub tables: HashMap<String, TableSchema>,
+}
+
+/// Schema for a single relational table.
+#[derive(Debug, Clone)]
+pub struct TableSchema {
+    pub columns: Vec<ColumnDef>,
+    /// Name of the column that holds the row timestamp. When set, WHERE
+    /// predicates on this column are extracted into `Source::Table.time_range`
+    /// rather than left as opaque `Filter` predicates.
+    pub time_column: Option<String>,
+}
+
+impl TableSchema {
+    /// Returns `Err` if `time_column` names a column that does not exist in `columns`.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(tc) = &self.time_column {
+            if !self.columns.iter().any(|c| &c.name == tc) {
+                return Err(format!(
+                    "time_column '{tc}' not found in table columns {:?}",
+                    self.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One column in a `TableSchema`.
+#[derive(Debug, Clone)]
+pub struct ColumnDef {
+    pub name: String,
+    pub data_type: L3DataType,
+    pub nullable: bool,
+}
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -24,7 +61,7 @@ pub enum L3DataType {
 
 // ── Schema ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct L3Field {
     pub name: String,
     pub dtype: L3DataType,
@@ -35,7 +72,7 @@ pub struct L3Field {
 /// flowing between two operators. Type-checked at plan construction time:
 /// a node whose predicate references a column absent from its child's
 /// `L3Schema` is a plan-time error.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct L3Schema {
     pub fields: Vec<L3Field>,
     /// Index into `fields` for the time axis, if any.
@@ -49,5 +86,10 @@ pub struct L3Schema {
 /// its children's output schemas. The `L3Node` wrapper stores the derived
 /// schema so derivation runs once at construction, not on every traversal.
 pub trait HasSchema {
+    /// # Panics
+    /// Panics if a `Scan` node references a table that is not present in
+    /// `catalog`. Callers must ensure every table referenced by the expression
+    /// tree is registered in the catalog before calling this method.
+    /// `lower_batch` enforces this invariant via upfront catalog validation.
     fn output_schema(&self, input_schemas: &[&L3Schema], catalog: &SchemaCatalog) -> L3Schema;
 }
