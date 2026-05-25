@@ -1811,3 +1811,179 @@ async fn test_populate_schemas_window_func_appends_column() {
         "root schema should be populated after populate_schemas"
     );
 }
+
+// ── Tests: CR findings #1, #2, #5 ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_having_filter_fallback_preserves_inner_time_range() {
+    // Finding #1: lower_filter's collect_filter_chain stops at Aggregate
+    // (not a scan-chain node), so the HAVING Filter takes the fallback path.
+    // The WHERE Filter sitting below the Aggregate must still fold ts predicates
+    // into Source::Table.time_range via the normal scan-chain path.
+    //
+    // This test would catch a regression where the HAVING fallback accidentally
+    // short-circuits the inner time extraction.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower(
+            "SELECT region, COUNT(*) FROM metrics \
+             WHERE ts >= 1000 AND ts < 2000 \
+             GROUP BY region \
+             HAVING region = 'us'",
+        )
+        .await
+        .unwrap();
+
+    // Inner WHERE predicates must still be folded into time_range.
+    let source = find_source(&expr).expect("expected Scan in tree");
+    let Source::Table { time_range, .. } = source else {
+        panic!("expected Source::Table, got {source:?}");
+    };
+    assert!(
+        time_range.is_some(),
+        "time_range should be extracted from WHERE ts >= 1000 AND ts < 2000; \
+         the HAVING-path fallback must not prevent inner time extraction"
+    );
+    let range = time_range.as_ref().unwrap();
+    assert_eq!(range.start_ms, Some(1000), "start_ms from ts >= 1000");
+    assert_eq!(range.end_ms, Some(2000), "end_ms from ts < 2000");
+
+    // The HAVING predicate must appear as a Filter node directly above an Aggregate.
+    fn has_filter_over_aggregate(expr: &QueryExpr) -> bool {
+        match expr {
+            QueryExpr::Filter { child, .. } => matches!(child.expr, QueryExpr::Aggregate { .. }),
+            QueryExpr::Project { child, .. } | QueryExpr::Sort { child, .. } => {
+                has_filter_over_aggregate(&child.expr)
+            }
+            _ => false,
+        }
+    }
+    assert!(
+        has_filter_over_aggregate(&expr),
+        "HAVING should produce a Filter node directly wrapping an Aggregate; got: {expr:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_scan_columns_empty_when_aggregate_between_project_and_scan() {
+    // Finding #2: push_columns_into_scan recurses only through Filter nodes.
+    // For Project → Aggregate → Scan, push_columns_into_scan encounters the
+    // Aggregate and falls through to `other => other`, leaving Scan.columns empty.
+    //
+    // An empty Scan.columns means "all columns" (semantically safe), but prevents
+    // downstream stages from pruning unneeded columns.
+    //
+    // TODO: when this gap is fixed, update the assertion to check that columns
+    //       contains ["value", "region"] (the columns actually referenced).
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower("SELECT MAX(value) FROM metrics GROUP BY region")
+        .await
+        .unwrap();
+
+    let source = find_source(&expr).expect("expected Scan in tree");
+    let Source::Table { columns, .. } = source else {
+        panic!("expected Source::Table, got {source:?}");
+    };
+    assert!(
+        columns.is_empty(),
+        "known gap: Scan.columns should be empty (full scan) when Aggregate sits \
+         between Project and Scan — if this fails the gap has been fixed, \
+         update to assert columns == [value, region]; got {columns:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_max_of_expression_arg_schema_reports_float64_known_bug() {
+    // Finding #5: agg_col() returns None for non-bare-column aggregate args
+    // (e.g. `ts + 1`). Schema derivation falls back to a Float64 dummy field,
+    // so MAX(ts + 1) reports Float64 even though ts: Int64 → correct type is Int64.
+    //
+    // This test pins the current (incorrect) Float64 output as a known bug.
+    // TODO: fix agg_col / output_type so MAX of an Int64 expression → Int64.
+    //       When fixed, change the assertion below to L3DataType::Int64.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower("SELECT MAX(ts + 1) FROM metrics")
+        .await
+        .unwrap();
+    let typed = populate_schemas(expr, &catalog);
+
+    // Root is Project → Aggregate → Scan; first schema field is the MAX output.
+    assert_eq!(
+        typed.schema.fields.len(),
+        1,
+        "expected one output field for SELECT MAX(...)"
+    );
+    let dtype = &typed.schema.fields[0].dtype;
+    // BUG: currently Float64 because agg_col returns None → float64_dummy fallback.
+    // Should be Int64 (MAX of Int64 expression preserves the type).
+    assert_eq!(
+        *dtype,
+        L3DataType::Float64,
+        "known bug: MAX(ts + 1) schema reports {dtype:?} — expected Float64 \
+         (the current wrong value); update to Int64 when the agg_col bug is fixed"
+    );
+}
+
+// ── Tests: CR findings #11 and #12 ───────────────────────────────────────────
+
+#[tokio::test]
+async fn test_invalid_time_column_in_catalog_returns_error() {
+    // Finding #11: lower_filter calls schema.validate() when a table has a
+    // time_column set. If time_column names a column that doesn't exist in
+    // TableSchema.columns, validate() returns Err, which lower_filter propagates
+    // as LoweringError::InvalidExpression.
+    let mut tables = HashMap::new();
+    tables.insert(
+        "metrics".to_string(),
+        TableSchema {
+            columns: vec![ColumnDef {
+                name: "value".to_string(),
+                data_type: L3DataType::Float64,
+                nullable: true,
+            }],
+            // "ghost_ts" doesn't exist in columns — validate() will reject this.
+            time_column: Some("ghost_ts".to_string()),
+        },
+    );
+    let catalog = SchemaCatalog { tables };
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    // Any WHERE clause triggers lower_filter → collect_filter_chain finds the
+    // TableScan → catalog lookup → time_column is Some → validate() fires.
+    let result = lowerer
+        .lower("SELECT value FROM metrics WHERE value > 0.0")
+        .await;
+    assert!(
+        matches!(result, Err(LoweringError::InvalidExpression(_))),
+        "expected InvalidExpression for catalog with invalid time_column, got: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_agg_col_is_none_for_expression_arg() {
+    // Finding #12: agg_col() returns None when the aggregate argument is not
+    // a bare column reference (e.g. SUM(value + 1) uses a BinaryExpr, not Column).
+    // This documents the boundary: only Column, Alias(Column), and Cast(Column)
+    // produce a Some(ColumnRef); any other expression shape produces None.
+    let catalog = metrics_catalog();
+    let lowerer = SqlLowerer::new(&catalog, AccuracyTarget::Exact);
+    let expr = lowerer
+        .lower("SELECT SUM(value + 1) FROM metrics GROUP BY region")
+        .await
+        .unwrap();
+
+    let (_, aggs) = find_aggregate(&expr).expect("expected Aggregate in tree");
+    assert_eq!(aggs.len(), 1);
+    let AggIntent::Sum { col } = &aggs[0] else {
+        panic!("expected AggIntent::Sum, got {:?}", aggs[0]);
+    };
+    assert!(
+        col.is_none(),
+        "agg_col should return None for SUM(value + 1) — the arg is a BinaryExpr, \
+         not a bare ColumnRef; got {col:?}"
+    );
+}
