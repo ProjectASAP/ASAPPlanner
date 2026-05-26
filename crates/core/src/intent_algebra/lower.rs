@@ -17,10 +17,11 @@ use crate::intent_algebra::binder::Binder;
 use crate::intent_algebra::column_resolution::{resolve_named_keys, ResolveError};
 use crate::intent_algebra::names::BindingName;
 use crate::intent_algebra::query_expr::{
-    PartitionKeys as CPartitionKeys, Predicate, QueryExpr as CQueryExpr, Source, WindowKind,
+    ColumnRef, PartitionKeys as CPartitionKeys, Predicate, QueryExpr as CQueryExpr, Source,
+    WindowKind,
 };
 use crate::intent_algebra::relational::{AggFunc, QueryExpr as LQueryExpr};
-use crate::intent_algebra::schema::Schema;
+use crate::intent_algebra::schema::{ColumnId, Schema};
 use crate::types::AccuracyTarget;
 
 /// Errors produced while converting a Layer-2 tree to canonical.
@@ -78,7 +79,8 @@ pub fn convert(
             // becomes `Window { Aggregate { by: [] } }`; GROUP BY keys wrap the
             // result in a `Partition`.
             if aggs.len() == 1 && having.is_none() {
-                let intent = agg_func_to_intent(&aggs[0].func, acc);
+                let intent =
+                    agg_func_to_intent(&aggs[0].func, acc, resolve_agg_col(&aggs[0].col, schema));
                 let sketch = match input.as_ref() {
                     LQueryExpr::Window {
                         duration,
@@ -120,7 +122,7 @@ pub fn convert(
             let by = resolve_named_keys(keys, schema)?;
             let intents = aggs
                 .iter()
-                .map(|item| agg_func_to_intent(&item.func, acc))
+                .map(|item| agg_func_to_intent(&item.func, acc, resolve_agg_col(&item.col, schema)))
                 .collect();
             CQueryExpr::Aggregate {
                 by,
@@ -260,26 +262,36 @@ fn scan(metric: String, schema: &Schema, predicates: Vec<Predicate>) -> CQueryEx
     }
 }
 
+/// Resolve a Layer-2 aggregate-input [`ColumnRef`] to a positional input
+/// column. `SampleValue` / `Wildcard` carry no specific column → `None` (the
+/// PromQL sample-value convention); a named column (`SUM(bytes)`) resolves to
+/// its position so the L3 reducer types off the right input.
+fn resolve_agg_col(col: &ColumnRef, schema: &Schema) -> Option<ColumnId> {
+    match col {
+        ColumnRef::Named(name) => schema.column_id(name),
+        ColumnRef::SampleValue | ColumnRef::Wildcard => None,
+    }
+}
+
 /// Map a Layer-2 [`AggFunc`] to its canonical [`AggIntent`], threading the
-/// workload's accuracy target onto the approximate intents.
-fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget) -> AggIntent {
+/// workload's accuracy target onto the approximate intents and the resolved
+/// input column (`col`) onto the single-column reducers. `col = None` is the
+/// PromQL sample-value convention.
+fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId>) -> AggIntent {
     match func {
         AggFunc::Count => AggIntent::Count {
             accuracy: acc.clone(),
         },
-        // PromQL reduces the synthetic sample value, so `col = None`. SQL's
-        // per-column binding (`SUM(bytes)`) is threaded in `agg_func_to_intent`
-        // callers that carry an `AggItem.col` resolved to a `ColumnId`.
-        AggFunc::Sum => AggIntent::Sum { col: None },
-        AggFunc::Avg => AggIntent::Avg { col: None },
-        AggFunc::Min => AggIntent::Min { col: None },
-        AggFunc::Max => AggIntent::Max { col: None },
+        AggFunc::Sum => AggIntent::Sum { col },
+        AggFunc::Avg => AggIntent::Avg { col },
+        AggFunc::Min => AggIntent::Min { col },
+        AggFunc::Max => AggIntent::Max { col },
         AggFunc::StdDev { population } => AggIntent::StdDev {
-            col: None,
+            col,
             population: *population,
         },
         AggFunc::Variance { population } => AggIntent::Variance {
-            col: None,
+            col,
             population: *population,
         },
         AggFunc::Quantile(q) => AggIntent::Quantile {
@@ -295,5 +307,109 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget) -> AggIntent {
         },
         AggFunc::Rate { window } => AggIntent::Rate { window: *window },
         AggFunc::Increase { window } => AggIntent::Increase { window: *window },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::intent_algebra::agg_intent::AggIntent;
+    use crate::intent_algebra::query_expr::QueryExpr as CQueryExpr;
+    use crate::intent_algebra::relational::{
+        AggFunc, AggItem, QueryExpr as LQueryExpr, SourceSpec,
+    };
+    use crate::intent_algebra::schema::{Column, DataType, Schema};
+
+    fn col(name: &str, dtype: DataType) -> Column {
+        Column {
+            name: name.into(),
+            dtype,
+            nullable: false,
+        }
+    }
+
+    /// A SQL-shaped `SELECT SUM(bytes), AVG(latency) FROM t` lowers each
+    /// reducer onto its own input column (positional), and the derived output
+    /// schema types each result off that column (`SUM(bytes:Int64)→Int64`).
+    #[test]
+    fn multi_column_aggregate_threads_per_agg_col() {
+        let schema = Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp),
+                col("bytes", DataType::Int64),
+                col("latency", DataType::Float64),
+                col("value", DataType::Float64),
+            ],
+            0,
+            vec![],
+        );
+        let tree = LQueryExpr::Aggregate {
+            keys: vec![],
+            aggs: vec![
+                AggItem {
+                    alias: "total_bytes".into(),
+                    func: AggFunc::Sum,
+                    col: ColumnRef::Named("bytes".into()),
+                    distinct: false,
+                },
+                AggItem {
+                    alias: "avg_latency".into(),
+                    func: AggFunc::Avg,
+                    col: ColumnRef::Named("latency".into()),
+                    distinct: false,
+                },
+            ],
+            having: None,
+            input: Box::new(LQueryExpr::Source(SourceSpec { name: "t".into() })),
+        };
+
+        let l3 = convert(&tree, &schema, &AccuracyTarget::Exact).unwrap();
+        let CQueryExpr::Aggregate { by, aggs, .. } = &l3 else {
+            panic!("expected Aggregate, got {l3:?}");
+        };
+        assert!(by.is_empty());
+        // bytes is column 1, latency is column 2 in the input schema.
+        assert_eq!(
+            aggs,
+            &vec![
+                AggIntent::Sum { col: Some(1) },
+                AggIntent::Avg { col: Some(2) },
+            ]
+        );
+
+        // Output schema types each reducer off its own input column.
+        let out = l3.output_schema().unwrap();
+        assert_eq!(out.columns[0], col("sum", DataType::Int64)); // SUM(bytes:Int64)
+        assert_eq!(out.columns[1], col("avg", DataType::Float64)); // AVG(latency)→Float64
+    }
+
+    /// PromQL's single sample-value reducer stays `col: None`.
+    #[test]
+    fn promql_sample_value_agg_stays_col_none() {
+        let schema = Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp),
+                col("value", DataType::Float64),
+            ],
+            0,
+            vec![],
+        );
+        let tree = LQueryExpr::Aggregate {
+            keys: vec![],
+            aggs: vec![AggItem {
+                alias: "value".into(),
+                func: AggFunc::Sum,
+                col: ColumnRef::SampleValue,
+                distinct: false,
+            }],
+            having: None,
+            input: Box::new(LQueryExpr::Source(SourceSpec { name: "m".into() })),
+        };
+        let l3 = convert(&tree, &schema, &AccuracyTarget::Exact).unwrap();
+        // single-agg fused path → bare Aggregate (no keys → no Partition)
+        let CQueryExpr::Aggregate { aggs, .. } = &l3 else {
+            panic!("expected Aggregate, got {l3:?}");
+        };
+        assert_eq!(aggs, &vec![AggIntent::Sum { col: None }]);
     }
 }
