@@ -267,14 +267,19 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget) -> AggIntent {
         AggFunc::Count => AggIntent::Count {
             accuracy: acc.clone(),
         },
-        AggFunc::Sum => AggIntent::Sum,
-        AggFunc::Avg => AggIntent::Avg,
-        AggFunc::Min => AggIntent::Min,
-        AggFunc::Max => AggIntent::Max,
+        // PromQL reduces the synthetic sample value, so `col = None`. SQL's
+        // per-column binding (`SUM(bytes)`) is threaded in `agg_func_to_intent`
+        // callers that carry an `AggItem.col` resolved to a `ColumnId`.
+        AggFunc::Sum => AggIntent::Sum { col: None },
+        AggFunc::Avg => AggIntent::Avg { col: None },
+        AggFunc::Min => AggIntent::Min { col: None },
+        AggFunc::Max => AggIntent::Max { col: None },
         AggFunc::StdDev { population } => AggIntent::StdDev {
+            col: None,
             population: *population,
         },
         AggFunc::Variance { population } => AggIntent::Variance {
+            col: None,
             population: *population,
         },
         AggFunc::Quantile(q) => AggIntent::Quantile {

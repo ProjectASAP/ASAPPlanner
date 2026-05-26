@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::agg_intent::AggIntent;
-use super::expr_ir::L3Expr;
+use super::expr_ir::{L3Expr, L3Scalar};
 use super::names::BindingName;
 use super::schema::{Column, ColumnId, DataType, Schema};
 
@@ -363,8 +363,15 @@ impl QueryExpr {
                         dtype: DataType::Float64,
                         nullable: false,
                     });
+                // Each reducer types off its own input column (`SUM(bytes)` vs
+                // `AVG(latency)` in one node); `None` falls back to the sample-
+                // value probe (PromQL's single-column convention).
                 for intent in aggs {
-                    out_cols.push(intent.output_column(&probe));
+                    let in_col = intent
+                        .input_col()
+                        .and_then(|id| in_schema.columns.get(id))
+                        .unwrap_or(&probe);
+                    out_cols.push(intent.output_column(in_col));
                 }
                 let unique_keys = if by.is_empty() {
                     Vec::new()
@@ -392,8 +399,37 @@ impl QueryExpr {
             | QueryExpr::Partition { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }
-            | QueryExpr::Subquery { child, .. }
-            | QueryExpr::Project { child, .. } => child.output_schema_in(scope),
+            | QueryExpr::Subquery { child, .. } => child.output_schema_in(scope),
+
+            // π — one output column per projection item. Each item's type is
+            // inferred from its expression against the child schema; the name
+            // is the explicit alias or a derived default. Projection may drop
+            // the grouping/time columns, so unique_keys reset and time_index
+            // is re-found by name.
+            QueryExpr::Project { cols, child } => {
+                let in_schema = child.output_schema_in(scope)?;
+                let columns: Vec<Column> = cols
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let (dtype, nullable) = infer_expr_type(&item.expr, &in_schema);
+                        Column {
+                            name: item
+                                .alias
+                                .clone()
+                                .unwrap_or_else(|| default_proj_name(&item.expr, i)),
+                            dtype,
+                            nullable,
+                        }
+                    })
+                    .collect();
+                let time_index = columns.iter().position(|c| c.name == "ts");
+                Ok(Schema {
+                    columns,
+                    time_index,
+                    unique_keys: Vec::new(),
+                })
+            }
 
             QueryExpr::Distinct { cols, child } => {
                 let in_schema = child.output_schema_in(scope)?;
@@ -416,11 +452,117 @@ impl QueryExpr {
                 .first()
                 .ok_or(QueryExprError::EmptyMerge)
                 .and_then(|c| c.output_schema_in(scope)),
-            QueryExpr::SetOp { left, .. } | QueryExpr::Join { left, .. } => {
-                left.output_schema_in(scope)
+            // Set operations are union-compatible: both sides share the left's
+            // column shape, so the output schema is the left's. (Row identity
+            // is not preserved across a UNION, so unique_keys are dropped.)
+            QueryExpr::SetOp { left, .. } => {
+                let mut s = left.output_schema_in(scope)?;
+                s.unique_keys.clear();
+                Ok(s)
+            }
+            // ⋈ — output is the concatenation of both inputs' columns. Outer
+            // joins make the non-preserved side nullable. Post-join row
+            // identity isn't provable in general, so unique_keys reset.
+            QueryExpr::Join {
+                kind, left, right, ..
+            } => {
+                let l = left.output_schema_in(scope)?;
+                let r = right.output_schema_in(scope)?;
+                let (left_null, right_null) = match kind {
+                    JoinKind::Left => (false, true),
+                    JoinKind::Right => (true, false),
+                    JoinKind::Full => (true, true),
+                    JoinKind::Inner | JoinKind::Cross => (false, false),
+                };
+                let l_len = l.columns.len();
+                let mut columns = Vec::with_capacity(l_len + r.columns.len());
+                columns.extend(l.columns.iter().cloned().map(|mut c| {
+                    c.nullable |= left_null;
+                    c
+                }));
+                columns.extend(r.columns.iter().cloned().map(|mut c| {
+                    c.nullable |= right_null;
+                    c
+                }));
+                let time_index = l.time_index.or(r.time_index.map(|i| i + l_len));
+                Ok(Schema {
+                    columns,
+                    time_index,
+                    unique_keys: Vec::new(),
+                })
             }
             QueryExpr::BinaryOp { lhs, .. } => lhs.output_schema_in(scope),
         }
+    }
+}
+
+/// Infer the `(DataType, nullable)` a scalar [`L3Expr`] produces against an
+/// input [`Schema`]. Used by `Project` schema derivation. Approximate at L3:
+/// unknown columns and bare `FunctionCall`s fall back to a permissive default
+/// (the L4/emit layer refines with a real function/type registry).
+fn infer_expr_type(expr: &L3Expr, schema: &Schema) -> (DataType, bool) {
+    match expr {
+        L3Expr::Column(ColumnRef::Named(name)) => schema
+            .column_id(name)
+            .and_then(|id| schema.columns.get(id))
+            .map(|c| (c.dtype.clone(), c.nullable))
+            .unwrap_or((DataType::Utf8, true)),
+        L3Expr::Column(ColumnRef::SampleValue) => schema
+            .column_id("value")
+            .and_then(|id| schema.columns.get(id))
+            .map(|c| (c.dtype.clone(), c.nullable))
+            .unwrap_or((DataType::Float64, false)),
+        L3Expr::Column(ColumnRef::Wildcard) => (DataType::Float64, false),
+        L3Expr::Literal(s) => match s {
+            L3Scalar::Int64(_) => (DataType::Int64, false),
+            L3Scalar::Float64(_) => (DataType::Float64, false),
+            L3Scalar::Utf8(_) => (DataType::Utf8, false),
+            L3Scalar::Boolean(_) => (DataType::Bool, false),
+            L3Scalar::Null => (DataType::Float64, true),
+        },
+        // Boolean-valued expressions (SQL three-valued logic → nullable).
+        L3Expr::Compare { .. }
+        | L3Expr::BoolAnd(_)
+        | L3Expr::BoolOr(_)
+        | L3Expr::Not(_)
+        | L3Expr::IsNull(_)
+        | L3Expr::IsNotNull(_)
+        | L3Expr::InList { .. } => (DataType::Bool, true),
+        L3Expr::Arith { left, right, .. } => {
+            let (lt, ln) = infer_expr_type(left, schema);
+            let (rt, rn) = infer_expr_type(right, schema);
+            let dtype = if matches!(lt, DataType::Int64) && matches!(rt, DataType::Int64) {
+                DataType::Int64
+            } else {
+                DataType::Float64
+            };
+            (dtype, ln || rn)
+        }
+        L3Expr::Cast { to, try_cast, expr } => {
+            let (_, nullable) = infer_expr_type(expr, schema);
+            (to.clone(), *try_cast || nullable)
+        }
+        // No function/type registry at L3 — default permissive.
+        L3Expr::FunctionCall { .. } => (DataType::Float64, true),
+        L3Expr::Case {
+            branches,
+            else_expr,
+            ..
+        } => branches
+            .first()
+            .map(|(_, then)| (infer_expr_type(then, schema).0, true))
+            .or_else(|| else_expr.as_ref().map(|e| infer_expr_type(e, schema)))
+            .unwrap_or((DataType::Float64, true)),
+    }
+}
+
+/// Default output-column name for a projection item with no explicit alias:
+/// a bare column keeps its name; anything else gets a positional `col_{i}`.
+fn default_proj_name(expr: &L3Expr, idx: usize) -> String {
+    match expr {
+        L3Expr::Column(ColumnRef::Named(n)) => n.clone(),
+        L3Expr::Column(ColumnRef::SampleValue) => "value".to_string(),
+        _ => format!("col_{idx}"),
     }
 }
 
@@ -441,5 +583,183 @@ impl BindingScope {
     }
     pub fn lookup(&self, name: &BindingName) -> Option<&Schema> {
         self.bindings.get(name.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::intent_algebra::expr_ir::{ArithOp, CompareOp};
+
+    fn col(name: &str, dtype: DataType, nullable: bool) -> Column {
+        Column {
+            name: name.into(),
+            dtype,
+            nullable,
+        }
+    }
+
+    fn scan(
+        columns: Vec<Column>,
+        time_index: Option<ColumnId>,
+        uk: Vec<Vec<ColumnId>>,
+    ) -> QueryExpr {
+        QueryExpr::Scan {
+            source: Source::Table {
+                table_ref: "t".into(),
+            },
+            predicates: vec![],
+            schema: Schema {
+                columns,
+                time_index,
+                unique_keys: uk,
+            },
+        }
+    }
+
+    #[test]
+    fn project_retypes_and_renames_per_item() {
+        let child = scan(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("host", DataType::Utf8, false),
+                col("value", DataType::Float64, false),
+            ],
+            Some(0),
+            vec![vec![0, 1]],
+        );
+        let q = QueryExpr::Project {
+            cols: vec![
+                // bare column passthrough keeps its name + type
+                ProjectItem {
+                    alias: None,
+                    expr: L3Expr::Column(ColumnRef::Named("host".into())),
+                },
+                // arithmetic over the sample value → Float64
+                ProjectItem {
+                    alias: Some("dbl".into()),
+                    expr: L3Expr::Arith {
+                        op: ArithOp::Add,
+                        left: Box::new(L3Expr::Column(ColumnRef::SampleValue)),
+                        right: Box::new(L3Expr::Column(ColumnRef::SampleValue)),
+                    },
+                },
+                // comparison → Bool (nullable under 3-valued logic)
+                ProjectItem {
+                    alias: Some("flag".into()),
+                    expr: L3Expr::Compare {
+                        left: Box::new(L3Expr::Column(ColumnRef::SampleValue)),
+                        op: CompareOp::Gt,
+                        right: Box::new(L3Expr::Literal(L3Scalar::Float64(0.0))),
+                    },
+                },
+            ],
+            child: Box::new(child),
+        };
+        let s = q.output_schema().unwrap();
+        assert_eq!(s.columns.len(), 3);
+        assert_eq!(s.columns[0], col("host", DataType::Utf8, false));
+        assert_eq!(s.columns[1], col("dbl", DataType::Float64, false));
+        assert_eq!(s.columns[2], col("flag", DataType::Bool, true));
+        // projection drops the time axis + unique keys (ts not retained)
+        assert!(s.time_index.is_none());
+        assert!(s.unique_keys.is_empty());
+    }
+
+    #[test]
+    fn project_keeps_time_index_when_ts_passed_through() {
+        let child = scan(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("value", DataType::Float64, false),
+            ],
+            Some(0),
+            vec![],
+        );
+        let q = QueryExpr::Project {
+            cols: vec![
+                ProjectItem {
+                    alias: None,
+                    expr: L3Expr::Column(ColumnRef::SampleValue),
+                },
+                ProjectItem {
+                    alias: None,
+                    expr: L3Expr::Column(ColumnRef::Named("ts".into())),
+                },
+            ],
+            child: Box::new(child),
+        };
+        let s = q.output_schema().unwrap();
+        assert_eq!(s.columns[0].name, "value");
+        assert_eq!(s.columns[1].name, "ts");
+        assert_eq!(s.time_index, Some(1));
+    }
+
+    fn join(kind: JoinKind) -> QueryExpr {
+        let left = scan(vec![col("a", DataType::Int64, false)], None, vec![vec![0]]);
+        let right = scan(vec![col("b", DataType::Utf8, false)], None, vec![]);
+        QueryExpr::Join {
+            kind,
+            pred: Predicate(L3Expr::Literal(L3Scalar::Boolean(true))),
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    #[test]
+    fn inner_join_concatenates_both_sides() {
+        let s = join(JoinKind::Inner).output_schema().unwrap();
+        assert_eq!(s.columns.len(), 2);
+        assert_eq!(s.columns[0], col("a", DataType::Int64, false));
+        assert_eq!(s.columns[1], col("b", DataType::Utf8, false));
+        // post-join row identity not provable → no unique keys
+        assert!(s.unique_keys.is_empty());
+    }
+
+    #[test]
+    fn left_join_makes_right_side_nullable() {
+        let s = join(JoinKind::Left).output_schema().unwrap();
+        assert!(!s.columns[0].nullable, "preserved left side stays non-null");
+        assert!(s.columns[1].nullable, "right side nullable under LEFT JOIN");
+    }
+
+    #[test]
+    fn full_join_makes_both_sides_nullable() {
+        let s = join(JoinKind::Full).output_schema().unwrap();
+        assert!(s.columns[0].nullable);
+        assert!(s.columns[1].nullable);
+    }
+
+    #[test]
+    fn setop_takes_left_shape_and_drops_unique_keys() {
+        let left = scan(
+            vec![
+                col("k", DataType::Utf8, false),
+                col("v", DataType::Int64, false),
+            ],
+            None,
+            vec![vec![0]],
+        );
+        let right = scan(
+            vec![
+                col("k", DataType::Utf8, false),
+                col("v", DataType::Int64, false),
+            ],
+            None,
+            vec![vec![0]],
+        );
+        let q = QueryExpr::SetOp {
+            kind: SetOpKind::Union,
+            all: false,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
+        let s = q.output_schema().unwrap();
+        assert_eq!(s.columns.len(), 2);
+        assert_eq!(s.columns[0].name, "k");
+        assert!(
+            s.unique_keys.is_empty(),
+            "UNION does not preserve row identity"
+        );
     }
 }

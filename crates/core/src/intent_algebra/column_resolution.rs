@@ -120,7 +120,11 @@ pub fn output_schema_for_aggregate(input: &Schema, by: &[ColumnId], aggs: &[AggI
             nullable: false,
         });
     for intent in aggs {
-        out_cols.push(intent.output_column(&probe));
+        let in_col = intent
+            .input_col()
+            .and_then(|id| input.columns.get(id))
+            .unwrap_or(&probe);
+        out_cols.push(intent.output_column(in_col));
     }
     let unique_keys = if by.is_empty() {
         Vec::new()
@@ -167,7 +171,7 @@ mod tests {
             dtype: DataType::Utf8,
             nullable: false,
         });
-        let out = output_schema_for_aggregate(&input, &[2usize], &[AggIntent::Sum]);
+        let out = output_schema_for_aggregate(&input, &[2usize], &[AggIntent::Sum { col: None }]);
         assert_eq!(out.columns.len(), 2); // host, sum
         assert_eq!(out.columns[0].name, "host");
         assert_eq!(out.columns[1].name, "sum");

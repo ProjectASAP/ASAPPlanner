@@ -90,7 +90,7 @@ fn outer_sum_by_wraps_in_partition() {
     let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
         panic!("expected outer Aggregate{{Sum}} under Partition, got {child:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum]));
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     // Inner: Window over Aggregate{Quantile}.
     let QueryExpr::Window { child, .. } = child.as_ref() else {
         panic!("expected Window under the outer Sum, got {child:?}");
@@ -110,7 +110,7 @@ fn avg_over_time_maps_to_avg_intent() {
     assert_eq!(*size, Duration::from_secs(600));
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Avg])
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Avg { .. }])
     ));
 }
 
@@ -122,7 +122,7 @@ fn stddev_and_stdvar_over_time() {
     };
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::StdDev { population: false }])
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::StdDev { population: false, .. }])
     ));
 
     let qe = lower("stdvar_over_time(m[5m])");
@@ -131,7 +131,7 @@ fn stddev_and_stdvar_over_time() {
     };
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Variance { population: false }])
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Variance { population: false, .. }])
     ));
 }
 
@@ -206,7 +206,7 @@ fn sum_over_rate_keeps_both_levels() {
     let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
         panic!("expected outer Aggregate{{Sum}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum]));
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
         panic!("expected inner Aggregate{{Rate}}, got {child:?}");
     };
@@ -228,7 +228,7 @@ fn sum_by_over_rate_groups_the_outer_sum() {
     let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
         panic!("expected Aggregate{{Sum}} under Partition, got {child:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum]));
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),
         QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate { .. }])

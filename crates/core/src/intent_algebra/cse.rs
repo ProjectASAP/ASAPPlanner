@@ -218,7 +218,7 @@ mod tests {
         };
         let mk = || QueryExpr::Aggregate {
             by: vec![],
-            aggs: vec![AggIntent::Sum],
+            aggs: vec![AggIntent::Sum { col: None }],
             having: None,
             child: Box::new(scan_no_uk.clone()),
         };

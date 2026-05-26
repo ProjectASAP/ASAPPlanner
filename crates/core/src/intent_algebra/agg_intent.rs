@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::intent_algebra::query_expr::DataModel;
-use crate::intent_algebra::schema::{Column, DataType};
+use crate::intent_algebra::schema::{Column, ColumnId, DataType};
 use crate::types::AccuracyTarget;
 
 /// "What to compute" at L3 — the vocabulary the planner pivots on.
@@ -22,6 +22,12 @@ use crate::types::AccuracyTarget;
 /// Grouping for `TopK` rides on the enclosing `QueryExpr::Aggregate.by`
 /// (positional `ColumnId`s), like every other aggregate; the intent itself
 /// carries only `k` + the accuracy target.
+///
+/// The single-column reducers (`Sum` / `Min` / `Max` / `Avg` / `StdDev` /
+/// `Variance`) carry `col: Option<ColumnId>` — the positional input column
+/// they reduce. `None` is the PromQL convention "the time-series sample
+/// value"; SQL `SUM(bytes), AVG(latency)` sets distinct `Some(id)`s so a
+/// multi-aggregate node binds each reducer to the right column.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AggIntent {
@@ -29,17 +35,33 @@ pub enum AggIntent {
     Count {
         accuracy: AccuracyTarget,
     },
-    Sum,
-    Min,
-    Max,
-    Avg,
+    Sum {
+        #[serde(default)]
+        col: Option<ColumnId>,
+    },
+    Min {
+        #[serde(default)]
+        col: Option<ColumnId>,
+    },
+    Max {
+        #[serde(default)]
+        col: Option<ColumnId>,
+    },
+    Avg {
+        #[serde(default)]
+        col: Option<ColumnId>,
+    },
     /// Sample standard deviation when `population == false`; population stddev
-    /// otherwise. PromQL `stddev` / `stddev_over_time`.
+    /// otherwise. PromQL `stddev` / `stddev_over_time`; SQL `STDDEV(col)`.
     StdDev {
+        #[serde(default)]
+        col: Option<ColumnId>,
         population: bool,
     },
-    /// Variance — PromQL `stdvar` / `stdvar_over_time`.
+    /// Variance — PromQL `stdvar` / `stdvar_over_time`; SQL `VARIANCE(col)`.
     Variance {
+        #[serde(default)]
+        col: Option<ColumnId>,
         population: bool,
     },
     Quantile {
@@ -77,6 +99,22 @@ impl AggIntent {
         }
     }
 
+    /// The positional input column this intent reduces, if it carries one.
+    /// `None` = the synthetic time-series sample value (PromQL) or an
+    /// argument-less aggregate (`Count` / `Cardinality` / `TopK`). Used by
+    /// schema derivation to resolve each reducer's input column.
+    pub fn input_col(&self) -> Option<ColumnId> {
+        match self {
+            AggIntent::Sum { col }
+            | AggIntent::Min { col }
+            | AggIntent::Max { col }
+            | AggIntent::Avg { col }
+            | AggIntent::StdDev { col, .. }
+            | AggIntent::Variance { col, .. } => *col,
+            _ => None,
+        }
+    }
+
     /// Output column name + type produced by this intent over `input`.
     /// Used by `QueryExpr::Aggregate`'s schema-derivation rule. The PromQL
     /// convention names the column after the intent kind so consumers can
@@ -84,10 +122,10 @@ impl AggIntent {
     pub fn output_column(&self, input: &Column) -> Column {
         match self {
             AggIntent::Count { .. } => col("count", DataType::Int64, false),
-            AggIntent::Sum => col("sum", input.dtype.clone(), false),
-            AggIntent::Min => col("min", input.dtype.clone(), input.nullable),
-            AggIntent::Max => col("max", input.dtype.clone(), input.nullable),
-            AggIntent::Avg => col("avg", DataType::Float64, false),
+            AggIntent::Sum { .. } => col("sum", input.dtype.clone(), false),
+            AggIntent::Min { .. } => col("min", input.dtype.clone(), input.nullable),
+            AggIntent::Max { .. } => col("max", input.dtype.clone(), input.nullable),
+            AggIntent::Avg { .. } => col("avg", DataType::Float64, false),
             AggIntent::StdDev { .. } => col("stddev", DataType::Float64, false),
             AggIntent::Variance { .. } => col("variance", DataType::Float64, false),
             AggIntent::Quantile { q, .. } => col(
@@ -131,7 +169,7 @@ fn quantile_suffix(q: f64) -> String {
 pub fn agg_is_mergeable(op: &AggIntent) -> bool {
     !matches!(
         op,
-        AggIntent::Avg | AggIntent::StdDev { .. } | AggIntent::Variance { .. }
+        AggIntent::Avg { .. } | AggIntent::StdDev { .. } | AggIntent::Variance { .. }
     )
 }
 
@@ -140,7 +178,11 @@ pub fn agg_is_mergeable(op: &AggIntent) -> bool {
 pub fn agg_is_exact(op: &AggIntent) -> bool {
     matches!(
         op,
-        AggIntent::Sum | AggIntent::Count { .. } | AggIntent::Avg | AggIntent::Min | AggIntent::Max
+        AggIntent::Sum { .. }
+            | AggIntent::Count { .. }
+            | AggIntent::Avg { .. }
+            | AggIntent::Min { .. }
+            | AggIntent::Max { .. }
     )
 }
 
@@ -203,7 +245,7 @@ mod tests {
             .name,
             "count"
         );
-        assert_eq!(AggIntent::Sum.output_column(&v).name, "sum");
+        assert_eq!(AggIntent::Sum { col: None }.output_column(&v).name, "sum");
         assert_eq!(
             AggIntent::Quantile {
                 q: 0.99,
@@ -218,18 +260,40 @@ mod tests {
     #[test]
     fn sum_preserves_input_dtype() {
         assert!(matches!(
-            AggIntent::Sum.output_column(&c("c", DataType::Int64)).dtype,
+            AggIntent::Sum { col: None }
+                .output_column(&c("c", DataType::Int64))
+                .dtype,
             DataType::Int64
         ));
     }
 
     #[test]
     fn mergeability_and_exactness() {
-        assert!(agg_is_mergeable(&AggIntent::Sum));
-        assert!(!agg_is_mergeable(&AggIntent::Avg));
-        assert!(!agg_is_mergeable(&AggIntent::StdDev { population: false }));
-        assert!(agg_is_exact(&AggIntent::Min));
+        assert!(agg_is_mergeable(&AggIntent::Sum { col: None }));
+        assert!(!agg_is_mergeable(&AggIntent::Avg { col: None }));
+        assert!(!agg_is_mergeable(&AggIntent::StdDev {
+            col: None,
+            population: false
+        }));
+        assert!(agg_is_exact(&AggIntent::Min { col: None }));
         assert!(!agg_is_exact(&default_cardinality()));
+    }
+
+    #[test]
+    fn input_col_tracks_only_reducers() {
+        assert_eq!(AggIntent::Sum { col: Some(3) }.input_col(), Some(3));
+        assert_eq!(
+            AggIntent::Avg { col: None }.input_col(),
+            None,
+            "None = PromQL sample value"
+        );
+        assert_eq!(
+            AggIntent::Count {
+                accuracy: AccuracyTarget::Exact
+            }
+            .input_col(),
+            None
+        );
     }
 
     #[test]

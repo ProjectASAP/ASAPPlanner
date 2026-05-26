@@ -205,7 +205,7 @@ fn sum_collapses_all_series() {
     // SEMANTICS: `sum(v)` → one output series. No grouping → no Partition.
     let qe = ok("sum(node_filesystem_size_bytes)");
     assert!(matches!(&qe, QueryExpr::Aggregate { .. }));
-    assert!(has(&qe, |i| matches!(i, AggIntent::Sum)));
+    assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn sum_by_preserves_dimensions_as_partition() {
         *keys,
         PartitionKeys::By(vec!["instance".into(), "job".into()])
     );
-    assert!(has(&qe, |i| matches!(i, AggIntent::Sum)));
+    assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
 }
 
 #[test]
@@ -233,9 +233,9 @@ fn count_is_cardinality() {
 
 #[test]
 fn avg_min_max_stddev_stdvar_quantile_aggregators() {
-    assert!(has(&ok("avg(up)"), |i| matches!(i, AggIntent::Avg)));
-    assert!(has(&ok("min(up)"), |i| matches!(i, AggIntent::Min)));
-    assert!(has(&ok("max(up)"), |i| matches!(i, AggIntent::Max)));
+    assert!(has(&ok("avg(up)"), |i| matches!(i, AggIntent::Avg { .. })));
+    assert!(has(&ok("min(up)"), |i| matches!(i, AggIntent::Min { .. })));
+    assert!(has(&ok("max(up)"), |i| matches!(i, AggIntent::Max { .. })));
     assert!(has(&ok("stddev(up)"), |i| matches!(
         i,
         AggIntent::StdDev { .. }
@@ -278,7 +278,7 @@ fn sum_of_rate_is_two_levels() {
     let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
         panic!("expected outer Aggregate{{Sum}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum]));
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),
         QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate { .. }])
@@ -295,7 +295,7 @@ fn sum_by_of_rate_groups_outer_level() {
     // Partition → Sum → Rate.
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Sum])
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Sum { .. }])
     ));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate { .. })));
 }
@@ -322,10 +322,10 @@ fn over_time_functions_window_then_reduce() {
             "{q}: expected Window"
         );
         let matched = intents(&qe).iter().any(|i| match want {
-            "avg" => matches!(i, AggIntent::Avg),
-            "max" => matches!(i, AggIntent::Max),
-            "min" => matches!(i, AggIntent::Min),
-            "sum" => matches!(i, AggIntent::Sum),
+            "avg" => matches!(i, AggIntent::Avg { .. }),
+            "max" => matches!(i, AggIntent::Max { .. }),
+            "min" => matches!(i, AggIntent::Min { .. }),
+            "sum" => matches!(i, AggIntent::Sum { .. }),
             "count" => matches!(i, AggIntent::Count { .. }),
             _ => unreachable!(),
         });

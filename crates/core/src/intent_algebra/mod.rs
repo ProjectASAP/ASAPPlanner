@@ -30,7 +30,7 @@ pub use column_resolution::{
     resolve_column_refs, resolve_named_keys, ResolveError,
 };
 pub use cse::{dedupe_subtrees, CseWorkloadPlan};
-pub use expr_ir::{CompareOp, L3Expr, L3Scalar};
+pub use expr_ir::{ArithOp, CompareOp, L3Expr, L3Scalar};
 pub use lower::{convert, convert_root, ConvertError};
 pub use names::{BindingName, QueryId};
 pub use query_expr::{
