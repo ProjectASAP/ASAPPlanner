@@ -132,7 +132,7 @@ mod tests {
     use crate::intent_algebra::relational::{QueryExpr as LQueryExpr, SourceSpec};
 
     fn src(name: &str) -> LQueryExpr {
-        LQueryExpr::Source(SourceSpec { name: name.into() })
+        LQueryExpr::Source(SourceSpec::new(name))
     }
 
     #[test]

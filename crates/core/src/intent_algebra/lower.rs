@@ -20,17 +20,21 @@ use crate::intent_algebra::query_expr::{
     ColumnRef, PartitionKeys as CPartitionKeys, Predicate, QueryExpr as CQueryExpr, Source,
     WindowKind,
 };
-use crate::intent_algebra::relational::{AggFunc, QueryExpr as LQueryExpr};
+use crate::intent_algebra::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
 use crate::intent_algebra::schema::{ColumnId, Schema};
 use crate::types::AccuracyTarget;
 
 /// Errors produced while converting a Layer-2 tree to canonical.
 #[derive(Debug, Error)]
 pub enum ConvertError {
-    /// A column reference (`Aggregate` key, `Partition` / `TopK` key) did not
-    /// resolve against the inherited schema.
+    /// A column reference (`Aggregate` key, `TopK` key, aggregate input column)
+    /// did not resolve against the child's derived schema.
     #[error("column resolution failed: {0}")]
     Resolve(#[from] ResolveError),
+    /// Deriving the schema of an already-converted child failed (needed to
+    /// resolve positional column references against it).
+    #[error("schema derivation failed: {0}")]
+    Schema(#[from] crate::intent_algebra::query_expr::QueryExprError),
 }
 
 /// Lower a Layer-2 tree to canonical L3, threading `accuracy` onto every
@@ -39,18 +43,26 @@ pub fn convert_root(
     legacy: &LQueryExpr,
     accuracy: &AccuracyTarget,
 ) -> Result<CQueryExpr, ConvertError> {
-    let schema = Binder::new().bind(legacy);
-    convert(legacy, &schema, accuracy)
+    let fallback = Binder::new().bind(legacy);
+    convert(legacy, &fallback, accuracy)
 }
 
-/// Convert a Layer-2 tree to canonical against an explicit inherited schema.
+/// Convert a Layer-2 tree to canonical L3.
+///
+/// `fallback` is the leaf schema used for schema-less (PromQL) `Source`s —
+/// the Binder's usage-derived `(ts, value)` floor + referenced labels. SQL
+/// leaves carry their own resolved schema on [`SourceSpec::schema`], so the
+/// fallback is unused for them. Positional column references (`Aggregate`
+/// keys + input columns, `TopK` keys) resolve against the **converted child's
+/// derived output schema**, so a `JOIN`'s concatenated schema and a table's
+/// real columns bind to the right positions.
 pub fn convert(
     legacy: &LQueryExpr,
-    schema: &Schema,
+    fallback: &Schema,
     acc: &AccuracyTarget,
 ) -> Result<CQueryExpr, ConvertError> {
     Ok(match legacy {
-        LQueryExpr::Source(spec) => scan(spec.name.clone(), schema, Vec::new()),
+        LQueryExpr::Source(spec) => scan(spec, fallback, Vec::new()),
 
         LQueryExpr::Ref(name) => CQueryExpr::Ref {
             name: BindingName::new(name.clone()),
@@ -61,11 +73,11 @@ pub fn convert(
         LQueryExpr::Filter { pred, input } => match input.as_ref() {
             LQueryExpr::Source(spec) => {
                 let predicates = pred.conjuncts().iter().cloned().map(Predicate).collect();
-                scan(spec.name.clone(), schema, predicates)
+                scan(spec, fallback, predicates)
             }
             other => CQueryExpr::Filter {
                 pred: Predicate(pred.clone()),
-                child: Box::new(convert(other, schema, acc)?),
+                child: Box::new(convert(other, fallback, acc)?),
             },
         },
 
@@ -77,36 +89,42 @@ pub fn convert(
         } => {
             // Single-statistic aggregate (no HAVING) fuses: a `Window` input
             // becomes `Window { Aggregate { by: [] } }`; GROUP BY keys wrap the
-            // result in a `Partition`.
+            // result in a `Partition`. The reducer's input column resolves
+            // against the aggregate's *direct* input (the scan under any window).
             if aggs.len() == 1 && having.is_none() {
-                let intent =
-                    agg_func_to_intent(&aggs[0].func, acc, resolve_agg_col(&aggs[0].col, schema));
-                let sketch = match input.as_ref() {
+                let (agg_input_l2, window): (&LQueryExpr, Option<(_, _)>) = match input.as_ref() {
                     LQueryExpr::Window {
                         duration,
                         slide,
                         input: win_input,
-                    } => CQueryExpr::Window {
+                    } => (win_input, Some((*duration, *slide))),
+                    other => (other, None),
+                };
+                let agg_child = convert(agg_input_l2, fallback, acc)?;
+                let agg_in_schema = agg_child.output_schema()?;
+                let intent = agg_func_to_intent(
+                    &aggs[0].func,
+                    acc,
+                    resolve_agg_col(&aggs[0].col, &agg_in_schema),
+                );
+                let aggregate = CQueryExpr::Aggregate {
+                    by: Vec::new(),
+                    aggs: vec![intent],
+                    having: None,
+                    child: Box::new(agg_child),
+                };
+                let sketch = match window {
+                    Some((duration, slide)) => CQueryExpr::Window {
                         kind: if slide.is_some() {
                             WindowKind::Sliding
                         } else {
                             WindowKind::Tumbling
                         },
-                        size: *duration,
-                        slide: *slide,
-                        child: Box::new(CQueryExpr::Aggregate {
-                            by: Vec::new(),
-                            aggs: vec![intent],
-                            having: None,
-                            child: Box::new(convert(win_input, schema, acc)?),
-                        }),
+                        size: duration,
+                        slide,
+                        child: Box::new(aggregate),
                     },
-                    other => CQueryExpr::Aggregate {
-                        by: Vec::new(),
-                        aggs: vec![intent],
-                        having: None,
-                        child: Box::new(convert(other, schema, acc)?),
-                    },
+                    None => aggregate,
                 };
                 return Ok(if keys.is_empty() {
                     sketch
@@ -118,17 +136,22 @@ pub fn convert(
                 });
             }
 
-            // Plain canonical `Aggregate`: multi-agg or HAVING-bearing.
-            let by = resolve_named_keys(keys, schema)?;
+            // Plain canonical `Aggregate`: multi-agg or HAVING-bearing. Keys +
+            // per-reducer input columns resolve against the child's schema.
+            let child = convert(input, fallback, acc)?;
+            let child_schema = child.output_schema()?;
+            let by = resolve_named_keys(keys, &child_schema)?;
             let intents = aggs
                 .iter()
-                .map(|item| agg_func_to_intent(&item.func, acc, resolve_agg_col(&item.col, schema)))
+                .map(|item| {
+                    agg_func_to_intent(&item.func, acc, resolve_agg_col(&item.col, &child_schema))
+                })
                 .collect();
             CQueryExpr::Aggregate {
                 by,
                 aggs: intents,
                 having: having.clone().map(Predicate),
-                child: Box::new(convert(input, schema, acc)?),
+                child: Box::new(child),
             }
         }
 
@@ -144,21 +167,23 @@ pub fn convert(
             },
             size: *duration,
             slide: *slide,
-            child: Box::new(convert(input, schema, acc)?),
+            child: Box::new(convert(input, fallback, acc)?),
         },
 
         LQueryExpr::Partition { keys, input } => CQueryExpr::Partition {
             keys: keys.clone(),
-            child: Box::new(convert(input, schema, acc)?),
+            child: Box::new(convert(input, fallback, acc)?),
         },
 
         LQueryExpr::Distinct { cols, input } => CQueryExpr::Distinct {
             cols: cols.clone(),
-            child: Box::new(convert(input, schema, acc)?),
+            child: Box::new(convert(input, fallback, acc)?),
         },
 
         LQueryExpr::TopK { k, by, input } => {
-            let by = resolve_named_keys(by, schema)?;
+            let child = convert(input, fallback, acc)?;
+            let child_schema = child.output_schema()?;
+            let by = resolve_named_keys(by, &child_schema)?;
             CQueryExpr::Aggregate {
                 by,
                 aggs: vec![AggIntent::TopK {
@@ -166,14 +191,14 @@ pub fn convert(
                     accuracy: acc.clone(),
                 }],
                 having: None,
-                child: Box::new(convert(input, schema, acc)?),
+                child: Box::new(child),
             }
         }
 
         LQueryExpr::Merge { inputs } => CQueryExpr::Merge {
             children: inputs
                 .iter()
-                .map(|i| convert(i, schema, acc))
+                .map(|i| convert(i, fallback, acc))
                 .collect::<Result<Vec<_>, _>>()?,
         },
 
@@ -208,19 +233,19 @@ pub fn convert(
 
         LQueryExpr::Sort { keys, input } => CQueryExpr::Sort {
             keys: keys.clone(),
-            child: Box::new(convert(input, schema, acc)?),
+            child: Box::new(convert(input, fallback, acc)?),
         },
 
         LQueryExpr::Limit { n, offset, input } => CQueryExpr::Limit {
             n: *n as usize,
             offset: *offset as usize,
-            child: Box::new(convert(input, schema, acc)?),
+            child: Box::new(convert(input, fallback, acc)?),
         },
 
         LQueryExpr::LetBinding { name, expr, body } => CQueryExpr::LetBinding {
             name: BindingName::new(name.clone()),
-            expr: Box::new(convert(expr, schema, acc)?),
-            child: Box::new(convert(body, schema, acc)?),
+            expr: Box::new(convert(expr, fallback, acc)?),
+            child: Box::new(convert(body, fallback, acc)?),
         },
 
         LQueryExpr::PromQLSubquery {
@@ -230,7 +255,7 @@ pub fn convert(
         } => CQueryExpr::Subquery {
             range: *range,
             resolution: *resolution,
-            child: Box::new(convert(input, schema, acc)?),
+            child: Box::new(convert(input, fallback, acc)?),
         },
 
         LQueryExpr::BinaryOp {
@@ -252,13 +277,28 @@ pub fn convert(
     })
 }
 
-/// Build a canonical `Scan` over a time-series source carrying the Binder's
-/// self-contained schema.
-fn scan(metric: String, schema: &Schema, predicates: Vec<Predicate>) -> CQueryExpr {
+/// Build a canonical `Scan`. A schema-bearing [`SourceSpec`] (SQL table) emits
+/// a `Source::Table` carrying that resolved schema; a schema-less one (PromQL)
+/// emits a `Source::TimeSeries` carrying the Binder's usage-derived `fallback`.
+fn scan(spec: &SourceSpec, fallback: &Schema, predicates: Vec<Predicate>) -> CQueryExpr {
+    let (source, schema) = match &spec.schema {
+        Some(s) => (
+            Source::Table {
+                table_ref: spec.name.clone(),
+            },
+            s.clone(),
+        ),
+        None => (
+            Source::TimeSeries {
+                metric: spec.name.clone(),
+            },
+            fallback.clone(),
+        ),
+    };
     CQueryExpr::Scan {
-        source: Source::TimeSeries { metric },
+        source,
         predicates,
-        schema: schema.clone(),
+        schema,
     }
 }
 
@@ -314,7 +354,7 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
 mod tests {
     use super::*;
     use crate::intent_algebra::agg_intent::AggIntent;
-    use crate::intent_algebra::query_expr::QueryExpr as CQueryExpr;
+    use crate::intent_algebra::query_expr::{JoinKind, QueryExpr as CQueryExpr};
     use crate::intent_algebra::relational::{
         AggFunc, AggItem, QueryExpr as LQueryExpr, SourceSpec,
     };
@@ -360,7 +400,7 @@ mod tests {
                 },
             ],
             having: None,
-            input: Box::new(LQueryExpr::Source(SourceSpec { name: "t".into() })),
+            input: Box::new(LQueryExpr::Source(SourceSpec::new("t"))),
         };
 
         let l3 = convert(&tree, &schema, &AccuracyTarget::Exact).unwrap();
@@ -403,7 +443,7 @@ mod tests {
                 distinct: false,
             }],
             having: None,
-            input: Box::new(LQueryExpr::Source(SourceSpec { name: "m".into() })),
+            input: Box::new(LQueryExpr::Source(SourceSpec::new("m"))),
         };
         let l3 = convert(&tree, &schema, &AccuracyTarget::Exact).unwrap();
         // single-agg fused path → bare Aggregate (no keys → no Partition)
@@ -411,5 +451,67 @@ mod tests {
             panic!("expected Aggregate, got {l3:?}");
         };
         assert_eq!(aggs, &vec![AggIntent::Sum { col: None }]);
+    }
+
+    /// `SELECT region, SUM(bytes), COUNT(*) FROM logs JOIN meta … GROUP BY region`
+    /// — keys and per-agg input columns resolve against the JOIN's *concatenated*
+    /// schema, not either leaf's. logs=[id,bytes] meta=[id,region] →
+    /// concat [id(0), bytes(1), id(2), region(3)].
+    #[test]
+    fn aggregate_over_join_resolves_against_concatenated_schema() {
+        let logs = LQueryExpr::Source(SourceSpec::with_schema(
+            "logs",
+            Schema::new(vec![
+                col("id", DataType::Int64),
+                col("bytes", DataType::Int64),
+            ]),
+        ));
+        let meta = LQueryExpr::Source(SourceSpec::with_schema(
+            "meta",
+            Schema::new(vec![
+                col("id", DataType::Int64),
+                col("region", DataType::Utf8),
+            ]),
+        ));
+        let join = LQueryExpr::Join {
+            kind: JoinKind::Inner,
+            pred: None,
+            left: Box::new(logs),
+            right: Box::new(meta),
+        };
+        let tree = LQueryExpr::Aggregate {
+            keys: vec!["region".into()],
+            aggs: vec![
+                AggItem {
+                    alias: "tot".into(),
+                    func: AggFunc::Sum,
+                    col: ColumnRef::Named("bytes".into()),
+                    distinct: false,
+                },
+                AggItem {
+                    alias: "n".into(),
+                    func: AggFunc::Count,
+                    col: ColumnRef::Wildcard,
+                    distinct: false,
+                },
+            ],
+            having: None,
+            input: Box::new(join),
+        };
+        let l3 = convert_root(&tree, &AccuracyTarget::Exact).unwrap();
+        let CQueryExpr::Aggregate {
+            by, aggs, child, ..
+        } = &l3
+        else {
+            panic!("expected multi-agg Aggregate, got {l3:?}");
+        };
+        assert_eq!(by, &vec![3], "region is column 3 of the joined schema");
+        assert_eq!(
+            aggs[0],
+            AggIntent::Sum { col: Some(1) },
+            "bytes is column 1"
+        );
+        assert!(matches!(aggs[1], AggIntent::Count { .. }));
+        assert!(matches!(child.as_ref(), CQueryExpr::Join { .. }));
     }
 }

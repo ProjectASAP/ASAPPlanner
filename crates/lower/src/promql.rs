@@ -440,7 +440,7 @@ fn window_scan(inner: Inner) -> L2 {
 }
 
 fn filtered_source(metric: String, matchers: Vec<L3Expr>) -> L2 {
-    let source = L2::Source(SourceSpec { name: metric });
+    let source = L2::Source(SourceSpec::new(metric));
     if matchers.is_empty() {
         source
     } else {

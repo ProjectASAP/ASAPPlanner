@@ -11,12 +11,37 @@ use std::time::Duration;
 
 use super::expr_ir::L3Expr;
 pub use super::query_expr::{BinaryOpKind, ColumnRef, PartitionKeys, SortKey, VectorMatch};
+use super::schema::Schema;
 
 /// Base relation / metric stream source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceSpec {
     /// Metric name (PromQL) or table name (SQL).
     pub name: String,
+    /// Front-end-resolved leaf schema. `Some` for SQL tables (DataFusion knows
+    /// the columns); `None` for PromQL, where the [`Binder`](super::binder)
+    /// synthesises a usage-derived schema (the `(ts, value)` floor + referenced
+    /// labels). The presence of a schema also selects the L3 `Source` variant:
+    /// `Some` → `Source::Table`, `None` → `Source::TimeSeries`.
+    pub schema: Option<Schema>,
+}
+
+impl SourceSpec {
+    /// A PromQL-style leaf whose schema the Binder synthesises.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            schema: None,
+        }
+    }
+
+    /// A SQL-style leaf carrying its front-end-resolved schema.
+    pub fn with_schema(name: impl Into<String>, schema: Schema) -> Self {
+        Self {
+            name: name.into(),
+            schema: Some(schema),
+        }
+    }
 }
 
 /// One aggregate function in a GROUP BY / AGGREGATE node.

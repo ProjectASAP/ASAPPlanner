@@ -23,8 +23,6 @@ pub enum QueryExprError {
     UnresolvedRef(String),
     #[error("by-column id {0} out of range (input has {1} columns)")]
     InvalidGroupByColumn(ColumnId, usize),
-    #[error("Window requires a time_index on input schema")]
-    WindowMissingTimeIndex,
     #[error("Merge requires at least one child")]
     EmptyMerge,
 }
@@ -328,13 +326,11 @@ impl QueryExpr {
         match self {
             QueryExpr::Scan { schema, .. } => Ok(schema.clone()),
 
-            QueryExpr::Window { child, .. } => {
-                let in_schema = child.output_schema_in(scope)?;
-                if in_schema.time_index.is_none() {
-                    return Err(QueryExprError::WindowMissingTimeIndex);
-                }
-                Ok(in_schema)
-            }
+            // ψ — a window reshapes the time axis but not the column set. Over a
+            // time-indexed Scan it preserves the time_index; over an Aggregate
+            // (the canonical Window-over-Aggregate fused shape) the child has
+            // already consumed the time axis, so the child schema passes through.
+            QueryExpr::Window { child, .. } => child.output_schema_in(scope),
 
             QueryExpr::Aggregate {
                 by, aggs, child, ..
