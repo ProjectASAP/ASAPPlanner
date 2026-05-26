@@ -9,6 +9,7 @@
 use thiserror::Error;
 
 use crate::intent_algebra::agg_intent::AggIntent;
+use crate::intent_algebra::expr_ir::{L2Expr, L3Expr};
 use crate::intent_algebra::query_expr::ColumnRef;
 use crate::intent_algebra::relational::QueryExpr;
 use crate::intent_algebra::schema::{Column, ColumnId, DataType, Schema};
@@ -64,13 +65,19 @@ pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, 
                 name: name.clone(),
                 available: schema.columns.iter().map(|c| c.name.clone()).collect(),
             }),
-        ColumnRef::SampleValue => {
-            schema
-                .column_id("value")
-                .ok_or_else(|| ResolveError::NoSampleValue {
-                    available: schema.columns.iter().map(|c| c.name.clone()).collect(),
-                })
-        }
+        ColumnRef::SampleValue => schema
+            .column_id("value")
+            .or_else(|| {
+                // After an aggregate the sample value is renamed (e.g. "avg");
+                // fall back to the sole non-timestamp column when unambiguous.
+                let non_ts: Vec<ColumnId> = (0..schema.columns.len())
+                    .filter(|&i| Some(i) != schema.time_index)
+                    .collect();
+                (non_ts.len() == 1).then(|| non_ts[0])
+            })
+            .ok_or_else(|| ResolveError::NoSampleValue {
+                available: schema.columns.iter().map(|c| c.name.clone()).collect(),
+            }),
         ColumnRef::Wildcard => Err(ResolveError::WildcardNotPositional),
     }
 }
@@ -81,6 +88,66 @@ pub fn resolve_column_refs(
     schema: &Schema,
 ) -> Result<Vec<ColumnId>, ResolveError> {
     cols.iter().map(|c| resolve_column_ref(c, schema)).collect()
+}
+
+/// Resolve a Layer-2 [`L2Expr`] (name-based) into a positional [`L3Expr`] by
+/// resolving every column reference against `schema`. Structural otherwise.
+pub fn resolve_expr(expr: &L2Expr, schema: &Schema) -> Result<L3Expr, ResolveError> {
+    let boxed = |e: &L2Expr| -> Result<Box<L3Expr>, ResolveError> {
+        Ok(Box::new(resolve_expr(e, schema)?))
+    };
+    let each = |es: &[L2Expr]| -> Result<Vec<L3Expr>, ResolveError> {
+        es.iter().map(|e| resolve_expr(e, schema)).collect()
+    };
+    Ok(match expr {
+        L2Expr::Column(c) => L3Expr::Column(resolve_column_ref(c, schema)?),
+        L2Expr::Literal(s) => L3Expr::Literal(s.clone()),
+        L2Expr::Compare { left, op, right } => L3Expr::Compare {
+            left: boxed(left)?,
+            op: op.clone(),
+            right: boxed(right)?,
+        },
+        L2Expr::BoolAnd(v) => L3Expr::BoolAnd(each(v)?),
+        L2Expr::BoolOr(v) => L3Expr::BoolOr(each(v)?),
+        L2Expr::Not(e) => L3Expr::Not(boxed(e)?),
+        L2Expr::IsNull(e) => L3Expr::IsNull(boxed(e)?),
+        L2Expr::IsNotNull(e) => L3Expr::IsNotNull(boxed(e)?),
+        L2Expr::Cast { expr, to, try_cast } => L3Expr::Cast {
+            expr: boxed(expr)?,
+            to: to.clone(),
+            try_cast: *try_cast,
+        },
+        L2Expr::InList {
+            expr,
+            list,
+            negated,
+        } => L3Expr::InList {
+            expr: boxed(expr)?,
+            list: each(list)?,
+            negated: *negated,
+        },
+        L2Expr::FunctionCall { name, args } => L3Expr::FunctionCall {
+            name: name.clone(),
+            args: each(args)?,
+        },
+        L2Expr::Arith { op, left, right } => L3Expr::Arith {
+            op: op.clone(),
+            left: boxed(left)?,
+            right: boxed(right)?,
+        },
+        L2Expr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => L3Expr::Case {
+            operand: operand.as_deref().map(&boxed).transpose()?,
+            branches: branches
+                .iter()
+                .map(|(w, t)| Ok((resolve_expr(w, schema)?, resolve_expr(t, schema)?)))
+                .collect::<Result<Vec<_>, ResolveError>>()?,
+            else_expr: else_expr.as_deref().map(&boxed).transpose()?,
+        },
+    })
 }
 
 /// Resolve a list of named GROUP BY keys (`Aggregate.keys`) to `ColumnId`s.

@@ -38,12 +38,12 @@ use promql_parser::parser::{
 };
 
 use asap_control_core::intent_algebra::query_expr::{
-    BinaryOpKind, ColumnRef, GroupSide, SortKey, VectorGrouping, VectorMatch, VectorMatchKind,
+    BinaryOpKind, ColumnRef, GroupSide, VectorGrouping, VectorMatch, VectorMatchKind,
 };
 use asap_control_core::intent_algebra::relational::{
-    AggFunc, AggItem, QueryExpr as L2, SourceSpec,
+    AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
-use asap_control_core::intent_algebra::{CompareOp, L3Expr, L3Scalar};
+use asap_control_core::intent_algebra::{CompareOp, L2Expr, L3Scalar};
 
 use crate::error::LoweringError;
 
@@ -87,7 +87,7 @@ enum InnerFunc {
 
 struct Inner {
     metric: String,
-    matchers: Vec<L3Expr>,
+    matchers: Vec<L2Expr>,
     window: Option<Duration>,
     func: Option<InnerFunc>,
 }
@@ -364,8 +364,8 @@ fn build(inner: Inner, keys: Vec<String>, outer: Outer) -> Result<L2> {
                 };
                 let base = windowed_aggregate(inner, keys, func);
                 let sorted = L2::Sort {
-                    keys: vec![SortKey {
-                        expr: L3Expr::Column(ColumnRef::SampleValue),
+                    keys: vec![L2SortKey {
+                        expr: L2Expr::Column(ColumnRef::SampleValue),
                         ascending: !descending,
                         nulls_first: false,
                     }],
@@ -443,7 +443,7 @@ fn window_scan(inner: Inner) -> L2 {
     }
 }
 
-fn filtered_source(metric: String, matchers: Vec<L3Expr>) -> L2 {
+fn filtered_source(metric: String, matchers: Vec<L2Expr>) -> L2 {
     let source = L2::Source(SourceSpec::new(metric));
     if matchers.is_empty() {
         source
@@ -451,7 +451,7 @@ fn filtered_source(metric: String, matchers: Vec<L3Expr>) -> L2 {
         let pred = if matchers.len() == 1 {
             matchers.into_iter().next().unwrap()
         } else {
-            L3Expr::BoolAnd(matchers)
+            L2Expr::BoolAnd(matchers)
         };
         L2::Filter {
             pred,
@@ -512,7 +512,7 @@ fn resolve_group(agg: &AggregateExpr) -> Result<Vec<String>> {
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
-fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L3Expr>)> {
+fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2Expr>)> {
     // `offset` / `@` shift the evaluation/lookback time. The intent algebra has
     // no representation for either, so silently lowering them (as if absent)
     // would change the query's meaning. Reject rather than mislower.
@@ -543,21 +543,21 @@ fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L3Expr>)> {
     Ok((metric, matchers))
 }
 
-fn matcher_to_l3expr(m: &Matcher) -> L3Expr {
+fn matcher_to_l3expr(m: &Matcher) -> L2Expr {
     let op = match &m.op {
         MatchOp::Equal => CompareOp::Eq,
         MatchOp::NotEqual => CompareOp::Ne,
         MatchOp::Re(_) => CompareOp::Regex,
         MatchOp::NotRe(_) => CompareOp::NotRegex,
     };
-    L3Expr::Compare {
-        left: Box::new(L3Expr::Column(ColumnRef::Named(m.name.clone()))),
+    L2Expr::Compare {
+        left: Box::new(L2Expr::Column(ColumnRef::Named(m.name.clone()))),
         op,
-        right: Box::new(L3Expr::Literal(L3Scalar::Utf8(m.value.clone()))),
+        right: Box::new(L2Expr::Literal(L3Scalar::Utf8(m.value.clone()))),
     }
 }
 
-fn extract_matrix(expr: &Expr) -> Result<(String, Vec<L3Expr>, Duration)> {
+fn extract_matrix(expr: &Expr) -> Result<(String, Vec<L2Expr>, Duration)> {
     match expr {
         Expr::MatrixSelector(ms) => {
             let (metric, matchers) = vs_parts(&ms.vs)?;

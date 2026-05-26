@@ -9,11 +9,25 @@
 
 use std::time::Duration;
 
-use super::expr_ir::L3Expr;
-pub use super::query_expr::{
-    BinaryOpKind, ColumnRef, PartitionKeys, ProjectItem, SortKey, VectorMatch,
-};
+use super::expr_ir::L2Expr;
+pub use super::query_expr::{BinaryOpKind, ColumnRef, PartitionKeys, VectorMatch};
 use super::schema::Schema;
+
+/// SELECT-list item at Layer 2 — a name-based [`L2Expr`] + optional alias.
+/// (`query_expr::ProjectItem` is the positional L3 sibling.)
+#[derive(Debug, Clone, PartialEq)]
+pub struct L2ProjectItem {
+    pub alias: Option<String>,
+    pub expr: L2Expr,
+}
+
+/// ORDER BY key at Layer 2 — a name-based [`L2Expr`] + direction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct L2SortKey {
+    pub expr: L2Expr,
+    pub ascending: bool,
+    pub nulls_first: bool,
+}
 
 /// Base relation / metric stream source.
 #[derive(Debug, Clone, PartialEq)]
@@ -97,12 +111,12 @@ pub enum QueryExpr {
     Ref(String),
 
     /// σ — row-level filter (WHERE / PromQL label matchers).
-    Filter { pred: L3Expr, input: Box<QueryExpr> },
+    Filter { pred: L2Expr, input: Box<QueryExpr> },
 
     /// π — projection / SELECT list (SQL). Column refs in `cols` resolve by
     /// name against the child schema during conversion.
     Project {
-        cols: Vec<ProjectItem>,
+        cols: Vec<L2ProjectItem>,
         input: Box<QueryExpr>,
     },
 
@@ -110,7 +124,7 @@ pub enum QueryExpr {
     Aggregate {
         keys: Vec<String>,
         aggs: Vec<AggItem>,
-        having: Option<L3Expr>,
+        having: Option<L2Expr>,
         input: Box<QueryExpr>,
     },
 
@@ -142,7 +156,7 @@ pub enum QueryExpr {
 
     Join {
         kind: super::query_expr::JoinKind,
-        pred: Option<L3Expr>,
+        pred: Option<L2Expr>,
         left: Box<QueryExpr>,
         right: Box<QueryExpr>,
     },
@@ -154,7 +168,7 @@ pub enum QueryExpr {
     },
 
     Sort {
-        keys: Vec<SortKey>,
+        keys: Vec<L2SortKey>,
         input: Box<QueryExpr>,
     },
     Limit {

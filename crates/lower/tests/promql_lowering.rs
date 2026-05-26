@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use asap_control_core::intent_algebra::{
-    AggIntent, BinaryOpKind, ColumnRef, CompareOp, L3Expr, L3Scalar, PartitionKeys, QueryExpr,
-    Source, WindowKind,
+    AggIntent, BinaryOpKind, CompareOp, L3Expr, L3Scalar, PartitionKeys, QueryExpr, Source,
+    WindowKind,
 };
 use asap_control_core::types::AccuracyTarget;
 use asap_control_core::workload::{
@@ -40,14 +40,19 @@ fn bare_selector_is_scan_with_predicates() {
 #[test]
 fn regex_matcher_lowers_to_regex_compareop() {
     let qe = lower(r#"http_requests_total{path=~"/api/.*"}"#);
-    let QueryExpr::Scan { predicates, .. } = &qe else {
+    let QueryExpr::Scan {
+        predicates, schema, ..
+    } = &qe
+    else {
         panic!("expected Scan, got {qe:?}");
     };
     let L3Expr::Compare { left, op, right } = &predicates[0].0 else {
         panic!("expected Compare, got {:?}", predicates[0].0);
     };
     assert_eq!(*op, CompareOp::Regex);
-    assert!(matches!(left.as_ref(), L3Expr::Column(ColumnRef::Named(n)) if n == "path"));
+    // The label matcher's column is resolved positionally against the scan schema.
+    let path_id = schema.column_id("path").expect("path in scan schema");
+    assert!(matches!(left.as_ref(), L3Expr::Column(id) if *id == path_id));
     assert!(matches!(right.as_ref(), L3Expr::Literal(L3Scalar::Utf8(v)) if v == "/api/.*"));
 }
 

@@ -11,6 +11,8 @@
 //! `SchemaCatalog` is future work; the `Binder` pass does not change when it
 //! lands, only the catalog impl swaps.
 
+use crate::intent_algebra::expr_ir::L2Expr;
+use crate::intent_algebra::query_expr::ColumnRef;
 use crate::intent_algebra::relational::QueryExpr as LQueryExpr;
 use crate::intent_algebra::schema::{Column, DataType, Schema};
 
@@ -110,14 +112,42 @@ fn default_leaf_columns() -> Vec<Column> {
     ]
 }
 
-/// Collect every distinct group-key name the converter resolves positionally:
-/// `Aggregate.keys`, `TopK.by`, and `Partition.keys`.
+/// Collect every distinct column name the converter resolves positionally:
+/// group keys (`Aggregate.keys`, `TopK.by`, `Partition.keys`) **and** the
+/// columns referenced by name in filter / having / project / sort / join
+/// expressions (e.g. a PromQL label matcher `m{env="prod"}` references `env`).
+/// The Binder seeds these into the usage-derived leaf so positional resolution
+/// downstream is total.
 fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
+    fn named(expr: &L2Expr, out: &mut Vec<String>) {
+        for c in expr.columns_referenced() {
+            if let ColumnRef::Named(n) = c {
+                out.push(n.clone());
+            }
+        }
+    }
     let mut out: Vec<String> = Vec::new();
     tree.walk(&mut |node| match node {
-        LQueryExpr::Aggregate { keys, .. } => out.extend(keys.iter().cloned()),
+        LQueryExpr::Aggregate { keys, having, .. } => {
+            out.extend(keys.iter().cloned());
+            if let Some(h) = having {
+                named(h, &mut out);
+            }
+        }
         LQueryExpr::TopK { by, .. } => out.extend(by.iter().cloned()),
         LQueryExpr::Partition { keys, .. } => out.extend(keys.keys().iter().cloned()),
+        LQueryExpr::Filter { pred, .. } => named(pred, &mut out),
+        LQueryExpr::Project { cols, .. } => {
+            for item in cols {
+                named(&item.expr, &mut out);
+            }
+        }
+        LQueryExpr::Sort { keys, .. } => {
+            for k in keys {
+                named(&k.expr, &mut out);
+            }
+        }
+        LQueryExpr::Join { pred: Some(p), .. } => named(p, &mut out),
         _ => {}
     });
     out.sort();

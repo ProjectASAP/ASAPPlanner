@@ -421,21 +421,20 @@ impl QueryExpr {
             // is re-found by name.
             QueryExpr::Project { cols, child } => {
                 let in_schema = child.output_schema_in(scope)?;
-                let columns: Vec<Column> = cols
-                    .iter()
-                    .enumerate()
-                    .map(|(i, item)| {
-                        let (dtype, nullable) = infer_expr_type(&item.expr, &in_schema);
-                        Column {
-                            name: item
-                                .alias
-                                .clone()
-                                .unwrap_or_else(|| default_proj_name(&item.expr, i)),
-                            dtype,
-                            nullable,
-                        }
-                    })
-                    .collect();
+                let columns: Vec<Column> =
+                    cols.iter()
+                        .enumerate()
+                        .map(|(i, item)| {
+                            let (dtype, nullable) = infer_expr_type(&item.expr, &in_schema);
+                            Column {
+                                name: item.alias.clone().unwrap_or_else(|| {
+                                    default_proj_name(&item.expr, i, &in_schema)
+                                }),
+                                dtype,
+                                nullable,
+                            }
+                        })
+                        .collect();
                 let time_index = columns.iter().position(|c| c.name == "ts");
                 Ok(Schema {
                     columns,
@@ -515,17 +514,11 @@ impl QueryExpr {
 /// (the L4/emit layer refines with a real function/type registry).
 fn infer_expr_type(expr: &L3Expr, schema: &Schema) -> (DataType, bool) {
     match expr {
-        L3Expr::Column(ColumnRef::Named(name)) => schema
-            .column_id(name)
-            .and_then(|id| schema.columns.get(id))
+        L3Expr::Column(id) => schema
+            .columns
+            .get(*id)
             .map(|c| (c.dtype.clone(), c.nullable))
-            .unwrap_or((DataType::Utf8, true)),
-        L3Expr::Column(ColumnRef::SampleValue) => schema
-            .column_id("value")
-            .and_then(|id| schema.columns.get(id))
-            .map(|c| (c.dtype.clone(), c.nullable))
-            .unwrap_or((DataType::Float64, false)),
-        L3Expr::Column(ColumnRef::Wildcard) => (DataType::Float64, false),
+            .unwrap_or((DataType::Float64, true)),
         L3Expr::Literal(s) => match s {
             L3Scalar::Int64(_) => (DataType::Int64, false),
             L3Scalar::Float64(_) => (DataType::Float64, false),
@@ -570,11 +563,14 @@ fn infer_expr_type(expr: &L3Expr, schema: &Schema) -> (DataType, bool) {
 }
 
 /// Default output-column name for a projection item with no explicit alias:
-/// a bare column keeps its name; anything else gets a positional `col_{i}`.
-fn default_proj_name(expr: &L3Expr, idx: usize) -> String {
+/// a bare column keeps its (schema) name; anything else gets `col_{i}`.
+fn default_proj_name(expr: &L3Expr, idx: usize, schema: &Schema) -> String {
     match expr {
-        L3Expr::Column(ColumnRef::Named(n)) => n.clone(),
-        L3Expr::Column(ColumnRef::SampleValue) => "value".to_string(),
+        L3Expr::Column(id) => schema
+            .columns
+            .get(*id)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| format!("col_{idx}")),
         _ => format!("col_{idx}"),
     }
 }
@@ -643,25 +639,25 @@ mod tests {
         );
         let q = QueryExpr::Project {
             cols: vec![
-                // bare column passthrough keeps its name + type
+                // bare column passthrough keeps its (schema) name + type: host=col 1
                 ProjectItem {
                     alias: None,
-                    expr: L3Expr::Column(ColumnRef::Named("host".into())),
+                    expr: L3Expr::Column(1),
                 },
-                // arithmetic over the sample value → Float64
+                // arithmetic over value (col 2) → Float64
                 ProjectItem {
                     alias: Some("dbl".into()),
                     expr: L3Expr::Arith {
                         op: ArithOp::Add,
-                        left: Box::new(L3Expr::Column(ColumnRef::SampleValue)),
-                        right: Box::new(L3Expr::Column(ColumnRef::SampleValue)),
+                        left: Box::new(L3Expr::Column(2)),
+                        right: Box::new(L3Expr::Column(2)),
                     },
                 },
                 // comparison → Bool (nullable under 3-valued logic)
                 ProjectItem {
                     alias: Some("flag".into()),
                     expr: L3Expr::Compare {
-                        left: Box::new(L3Expr::Column(ColumnRef::SampleValue)),
+                        left: Box::new(L3Expr::Column(2)),
                         op: CompareOp::Gt,
                         right: Box::new(L3Expr::Literal(L3Scalar::Float64(0.0))),
                     },
@@ -691,13 +687,14 @@ mod tests {
         );
         let q = QueryExpr::Project {
             cols: vec![
+                // value=col 1, ts=col 0
                 ProjectItem {
                     alias: None,
-                    expr: L3Expr::Column(ColumnRef::SampleValue),
+                    expr: L3Expr::Column(1),
                 },
                 ProjectItem {
                     alias: None,
-                    expr: L3Expr::Column(ColumnRef::Named("ts".into())),
+                    expr: L3Expr::Column(0),
                 },
             ],
             child: Box::new(child),

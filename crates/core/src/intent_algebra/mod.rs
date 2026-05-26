@@ -27,10 +27,10 @@ pub use agg_intent::{
 pub use binder::{Binder, SchemaCatalog, UsageDerivedCatalog};
 pub use column_resolution::{
     infer_schema_for_root, infer_source_schema, output_schema_for_aggregate, resolve_column_ref,
-    resolve_column_refs, resolve_named_keys, ResolveError,
+    resolve_column_refs, resolve_expr, resolve_named_keys, ResolveError,
 };
 pub use cse::{dedupe_subtrees, CseWorkloadPlan};
-pub use expr_ir::{ArithOp, CompareOp, L3Expr, L3Scalar};
+pub use expr_ir::{ArithOp, CompareOp, L2Expr, L3Expr, L3Scalar};
 pub use lower::{convert, convert_root, ConvertError};
 pub use names::{BindingName, QueryId};
 pub use query_expr::{

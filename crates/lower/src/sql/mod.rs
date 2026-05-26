@@ -16,11 +16,9 @@ use datafusion::logical_expr::{self, Distinct, Expr, JoinType, LogicalPlan};
 use datafusion::prelude::SessionContext;
 
 use asap_control_core::intent_algebra::relational::{
-    AggFunc, AggItem, QueryExpr as L2, SourceSpec,
+    AggFunc, AggItem, L2ProjectItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
-use asap_control_core::intent_algebra::{
-    ColumnRef, CompareOp, JoinKind, L3Expr, ProjectItem, SetOpKind, SortKey,
-};
+use asap_control_core::intent_algebra::{ColumnRef, CompareOp, JoinKind, L2Expr, SetOpKind};
 
 use crate::error::LoweringError;
 
@@ -29,7 +27,7 @@ mod types;
 
 pub use types::SqlCatalog;
 
-use self::expr::df_expr_to_l3;
+use self::expr::df_expr_to_l2;
 use self::types::schema_to_arrow;
 
 /// Lowers SQL strings to the Layer-2 [`relational::QueryExpr`] over a table
@@ -68,7 +66,7 @@ impl<'a> SqlLowerer<'a> {
         match plan {
             LogicalPlan::TableScan(scan) => self.lower_table_scan(scan),
             LogicalPlan::Filter(filter) => Ok(L2::Filter {
-                pred: df_expr_to_l3(&filter.predicate)?,
+                pred: df_expr_to_l2(&filter.predicate)?,
                 input: Box::new(self.lower_plan(&filter.input)?),
             }),
             LogicalPlan::Projection(proj) => self.lower_projection(proj),
@@ -159,20 +157,20 @@ impl<'a> SqlLowerer<'a> {
             .on
             .iter()
             .map(|(l, r)| {
-                Ok(L3Expr::Compare {
-                    left: Box::new(df_expr_to_l3(l)?),
+                Ok(L2Expr::Compare {
+                    left: Box::new(df_expr_to_l2(l)?),
                     op: CompareOp::Eq,
-                    right: Box::new(df_expr_to_l3(r)?),
+                    right: Box::new(df_expr_to_l2(r)?),
                 })
             })
             .collect::<Result<Vec<_>, LoweringError>>()?;
         if let Some(filter) = &join.filter {
-            conjuncts.push(df_expr_to_l3(filter)?);
+            conjuncts.push(df_expr_to_l2(filter)?);
         }
         let pred = match conjuncts.len() {
             0 => None,
             1 => Some(conjuncts.pop().unwrap()),
-            _ => Some(L3Expr::BoolAnd(conjuncts)),
+            _ => Some(L2Expr::BoolAnd(conjuncts)),
         };
         Ok(L2::Join {
             kind,
@@ -192,11 +190,11 @@ impl<'a> SqlLowerer<'a> {
             .expr
             .iter()
             .map(|e| match e {
-                Expr::Alias(a) => df_expr_to_l3(&a.expr).map(|expr| ProjectItem {
+                Expr::Alias(a) => df_expr_to_l2(&a.expr).map(|expr| L2ProjectItem {
                     expr,
                     alias: Some(a.name.clone()),
                 }),
-                _ => df_expr_to_l3(e).map(|expr| ProjectItem { expr, alias: None }),
+                _ => df_expr_to_l2(e).map(|expr| L2ProjectItem { expr, alias: None }),
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(L2::Project { cols, input })
@@ -254,7 +252,7 @@ impl<'a> SqlLowerer<'a> {
             .expr
             .iter()
             .map(|s| {
-                df_expr_to_l3(&s.expr).map(|expr| SortKey {
+                df_expr_to_l2(&s.expr).map(|expr| L2SortKey {
                     expr,
                     ascending: s.asc,
                     nulls_first: s.nulls_first,

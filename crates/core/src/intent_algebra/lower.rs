@@ -14,11 +14,12 @@ use thiserror::Error;
 
 use crate::intent_algebra::agg_intent::AggIntent;
 use crate::intent_algebra::binder::Binder;
-use crate::intent_algebra::column_resolution::{resolve_named_keys, ResolveError};
+use crate::intent_algebra::column_resolution::{resolve_expr, resolve_named_keys, ResolveError};
+use crate::intent_algebra::expr_ir::{L2Expr, L3Expr, L3Scalar};
 use crate::intent_algebra::names::BindingName;
 use crate::intent_algebra::query_expr::{
-    ColumnRef, PartitionKeys as CPartitionKeys, Predicate, QueryExpr as CQueryExpr, Source,
-    WindowKind,
+    ColumnRef, PartitionKeys as CPartitionKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr,
+    SortKey, Source, WindowKind,
 };
 use crate::intent_algebra::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
 use crate::intent_algebra::schema::{ColumnId, Schema};
@@ -62,7 +63,7 @@ pub fn convert(
     acc: &AccuracyTarget,
 ) -> Result<CQueryExpr, ConvertError> {
     Ok(match legacy {
-        LQueryExpr::Source(spec) => scan(spec, fallback, Vec::new()),
+        LQueryExpr::Source(spec) => scan(spec, fallback, &[])?,
 
         LQueryExpr::Ref(name) => CQueryExpr::Ref {
             name: BindingName::new(name.clone()),
@@ -70,15 +71,17 @@ pub fn convert(
 
         // Fold label matchers / pushed-down predicates directly onto the Scan
         // when the immediate child is a `Source`; otherwise emit a `Filter`.
+        // Predicate column refs resolve positionally against the input schema.
         LQueryExpr::Filter { pred, input } => match input.as_ref() {
-            LQueryExpr::Source(spec) => {
-                let predicates = pred.conjuncts().iter().cloned().map(Predicate).collect();
-                scan(spec, fallback, predicates)
+            LQueryExpr::Source(spec) => scan(spec, fallback, pred.conjuncts())?,
+            other => {
+                let child = convert(other, fallback, acc)?;
+                let child_schema = child.output_schema()?;
+                CQueryExpr::Filter {
+                    pred: Predicate(resolve_expr(pred, &child_schema)?),
+                    child: Box::new(child),
+                }
             }
-            other => CQueryExpr::Filter {
-                pred: Predicate(pred.clone()),
-                child: Box::new(convert(other, fallback, acc)?),
-            },
         },
 
         LQueryExpr::Aggregate {
@@ -152,11 +155,17 @@ pub fn convert(
                     agg_func_to_intent(&item.func, acc, resolve_agg_col(&item.col, &child_schema))
                 })
                 .collect();
+            let having = having
+                .as_ref()
+                .map(|h| -> Result<Predicate, ConvertError> {
+                    Ok(Predicate(resolve_expr(h, &child_schema)?))
+                })
+                .transpose()?;
             CQueryExpr::Aggregate {
                 by,
                 aggs: intents,
                 output_names: aggs.iter().map(|item| item.alias.clone()).collect(),
-                having: having.clone().map(Predicate),
+                having,
                 child: Box::new(child),
             }
         }
@@ -176,13 +185,25 @@ pub fn convert(
             child: Box::new(convert(input, fallback, acc)?),
         },
 
-        // π — column refs in the project items resolve by name against the
-        // child schema during L3 schema derivation, so the conversion is a
-        // structural pass-through of the (shared) `ProjectItem` list.
-        LQueryExpr::Project { cols, input } => CQueryExpr::Project {
-            cols: cols.clone(),
-            child: Box::new(convert(input, fallback, acc)?),
-        },
+        // π — resolve each project item's expression to positional against the
+        // child's schema.
+        LQueryExpr::Project { cols, input } => {
+            let child = convert(input, fallback, acc)?;
+            let child_schema = child.output_schema()?;
+            let cols = cols
+                .iter()
+                .map(|item| -> Result<ProjectItem, ConvertError> {
+                    Ok(ProjectItem {
+                        alias: item.alias.clone(),
+                        expr: resolve_expr(&item.expr, &child_schema)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            CQueryExpr::Project {
+                cols,
+                child: Box::new(child),
+            }
+        }
 
         LQueryExpr::Partition { keys, input } => CQueryExpr::Partition {
             keys: keys.clone(),
@@ -222,17 +243,26 @@ pub fn convert(
             pred,
             left,
             right,
-        } => CQueryExpr::Join {
-            kind: kind.clone(),
-            pred: Predicate(pred.clone().unwrap_or(
-                crate::intent_algebra::expr_ir::L3Expr::Literal(
-                    crate::intent_algebra::expr_ir::L3Scalar::Boolean(true),
-                ),
-            )),
-            // Each branch is bound independently — see the `BinaryOp` arm.
-            left: Box::new(convert_root(left, acc)?),
-            right: Box::new(convert_root(right, acc)?),
-        },
+        } => {
+            // Each branch is bound independently (different leaves / label sets).
+            let left = convert_root(left, acc)?;
+            let right = convert_root(right, acc)?;
+            // The join predicate resolves against the concatenated left++right
+            // schema (the Join's own output shape), so left refs land at
+            // 0..left_len and right refs at left_len.. .
+            let mut concat = left.output_schema()?;
+            concat.columns.extend(right.output_schema()?.columns);
+            let pred = match pred {
+                Some(p) => Predicate(resolve_expr(p, &concat)?),
+                None => Predicate(L3Expr::Literal(L3Scalar::Boolean(true))),
+            };
+            CQueryExpr::Join {
+                kind: kind.clone(),
+                pred,
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+        }
 
         LQueryExpr::SetOp {
             kind,
@@ -246,10 +276,24 @@ pub fn convert(
             right: Box::new(convert_root(right, acc)?),
         },
 
-        LQueryExpr::Sort { keys, input } => CQueryExpr::Sort {
-            keys: keys.clone(),
-            child: Box::new(convert(input, fallback, acc)?),
-        },
+        LQueryExpr::Sort { keys, input } => {
+            let child = convert(input, fallback, acc)?;
+            let child_schema = child.output_schema()?;
+            let keys = keys
+                .iter()
+                .map(|k| -> Result<SortKey, ConvertError> {
+                    Ok(SortKey {
+                        expr: resolve_expr(&k.expr, &child_schema)?,
+                        ascending: k.ascending,
+                        nulls_first: k.nulls_first,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            CQueryExpr::Sort {
+                keys,
+                child: Box::new(child),
+            }
+        }
 
         LQueryExpr::Limit { n, offset, input } => CQueryExpr::Limit {
             n: *n as usize,
@@ -295,7 +339,12 @@ pub fn convert(
 /// Build a canonical `Scan`. A schema-bearing [`SourceSpec`] (SQL table) emits
 /// a `Source::Table` carrying that resolved schema; a schema-less one (PromQL)
 /// emits a `Source::TimeSeries` carrying the Binder's usage-derived `fallback`.
-fn scan(spec: &SourceSpec, fallback: &Schema, predicates: Vec<Predicate>) -> CQueryExpr {
+/// The L2 predicate conjuncts are resolved positionally against the leaf schema.
+fn scan(
+    spec: &SourceSpec,
+    fallback: &Schema,
+    pred_conjuncts: &[L2Expr],
+) -> Result<CQueryExpr, ConvertError> {
     let (source, schema) = match &spec.schema {
         Some(s) => (
             Source::Table {
@@ -310,11 +359,15 @@ fn scan(spec: &SourceSpec, fallback: &Schema, predicates: Vec<Predicate>) -> CQu
             fallback.clone(),
         ),
     };
-    CQueryExpr::Scan {
+    let predicates = pred_conjuncts
+        .iter()
+        .map(|e| -> Result<Predicate, ConvertError> { Ok(Predicate(resolve_expr(e, &schema)?)) })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CQueryExpr::Scan {
         source,
         predicates,
         schema,
-    }
+    })
 }
 
 /// Resolve a Layer-2 aggregate-input [`ColumnRef`] to a positional input
