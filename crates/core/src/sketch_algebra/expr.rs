@@ -22,10 +22,11 @@ pub struct L4Node {
 /// Sketch-bound IR produced by L4 optimizer rules. L4 rules selectively
 /// replace logical aggregates and joins in the L3 `QueryExpr` with their
 /// sketch-bound counterparts; everything not rewritten passes through as
-/// `Logical(Rc<L3Node>)`.
+/// `Logical(Box<QueryExpr>)`.
 ///
 /// Traversing from the root node yields a DAG; shared sub-expressions appear
-/// as multiple `Rc` references to the same `L4Node` or `L3Node`.
+/// as multiple `Rc` references to the same `L4Node` (L3 fan-in is expressed
+/// via `QueryExpr`'s own `LetBinding`/`Ref`).
 #[derive(Debug, Clone)]
 pub enum SummaryExpr {
     /// Any L3 node that no L4 rule rewrote (e.g. `Filter`, `Project`, `Sort`).

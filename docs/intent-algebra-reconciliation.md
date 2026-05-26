@@ -1,5 +1,13 @@
 # `intent_algebra` reconciliation plan (ASAPController ⇄ ASAPQuery-backend)
 
+> **Status (prerequisite done):** the *intra-repo* reconciliation — PR #4's
+> name-based SQL L3 ⇄ PR #5's positional L3 — is complete on `feat/promql-l1-l3`.
+> Both front ends (PromQL + SQL) now lower onto **one positional IR** via the
+> shared `convert_root`: `expr_ir` is the SQL∪PromQL scalar superset, `AggIntent`
+> carries `col: Option<ColumnId>`, the converter is bottom-up schema-aware, and
+> the DataFusion front end emits relational L2. The plan below (ASAP ⇄
+> control_plane) is the *next* step, now unblocked.
+
 ASAPController's `crates/core/src/intent_algebra` is a slimmed, refactored fork
 of the canonical L3 IR in `ASAPQuery-backend/control_plane/src/intent_algebra`.
 This is the first concrete step of the L4/L5 consolidation: produce **one**
