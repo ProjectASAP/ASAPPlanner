@@ -8,7 +8,8 @@ pub enum LoweringError {
     UnsupportedFunction(String),
     /// A PromQL aggregation operator (`sum`, `topk`, …) not supported.
     UnsupportedAggregateOp(String),
-    /// A structural PromQL feature (offset, `@`, `without` w/o catalog, …) not supported.
+    /// A structural feature (PromQL offset/`@`/`without`; SQL JOIN/subquery/…)
+    /// not supported in this version.
     UnsupportedFeature(String),
     /// A required function / aggregator argument was missing.
     MissingArgument(String),
@@ -18,6 +19,18 @@ pub enum LoweringError {
     WrongLanguage(String),
     /// The L2→L3 converter failed (name resolution against the bound schema).
     Convert(asap_control_core::intent_algebra::ConvertError),
+
+    // ── SQL front end (DataFusion) ───────────────────────────────────────────
+    /// DataFusion failed to parse / plan the SQL query.
+    DataFusion(datafusion::error::DataFusionError),
+    /// A table referenced by the query is absent from the catalog.
+    TableNotFound(String),
+    /// A SQL aggregate function not supported in this version.
+    UnsupportedAggregate(String),
+    /// A SQL scalar expression that could not be lowered.
+    InvalidExpression(String),
+    /// The SQL dialect is not supported (only DataFusionSQL is implemented).
+    UnsupportedDialect(String),
 }
 
 impl fmt::Display for LoweringError {
@@ -31,6 +44,11 @@ impl fmt::Display for LoweringError {
             Self::InvalidParameter(m) => write!(f, "invalid parameter: {m}"),
             Self::WrongLanguage(l) => write!(f, "unsupported query language: {l}"),
             Self::Convert(e) => write!(f, "L2→L3 conversion failed: {e}"),
+            Self::DataFusion(e) => write!(f, "DataFusion error: {e}"),
+            Self::TableNotFound(t) => write!(f, "table not found in catalog: {t}"),
+            Self::UnsupportedAggregate(n) => write!(f, "unsupported aggregate: {n}"),
+            Self::InvalidExpression(m) => write!(f, "invalid expression: {m}"),
+            Self::UnsupportedDialect(d) => write!(f, "unsupported SQL dialect: {d}"),
         }
     }
 }
@@ -40,5 +58,11 @@ impl std::error::Error for LoweringError {}
 impl From<asap_control_core::intent_algebra::ConvertError> for LoweringError {
     fn from(e: asap_control_core::intent_algebra::ConvertError) -> Self {
         Self::Convert(e)
+    }
+}
+
+impl From<datafusion::error::DataFusionError> for LoweringError {
+    fn from(e: datafusion::error::DataFusionError) -> Self {
+        Self::DataFusion(e)
     }
 }

@@ -9,3 +9,8 @@ asap-control-core = { path = "../core" }
 # upstream untouched; the `asap` branch carries our local grammar/function
 # additions (see THIRD_PARTY.md).
 promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", branch = "asap" }
+# SQL front end: parse + plan via DataFusion, then lower its LogicalPlan to L2.
+datafusion = "43"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

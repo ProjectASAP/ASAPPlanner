@@ -1,7 +1,6 @@
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use asap_control_core::intent_algebra::expr::ColumnRef;
-use asap_control_core::intent_algebra::{ArithOp, CompareOp, L3Expr, L3Scalar};
+use asap_control_core::intent_algebra::{ArithOp, ColumnRef, CompareOp, L3Expr, L3Scalar};
 
 use crate::error::LoweringError;
 
@@ -22,24 +21,11 @@ pub(super) fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// Translate a slice of DataFusion `Expr`s (non-time conjuncts) into a single
-/// `L3Expr`. A single element is returned as-is; multiple elements are wrapped
-/// in `L3Expr::BoolAnd`.
-pub(super) fn conjuncts_to_l3expr(conjuncts: Vec<&Expr>) -> Result<L3Expr, LoweringError> {
-    let parts: Result<Vec<_>, _> = conjuncts.iter().map(|e| df_expr_to_l3(e)).collect();
-    let mut parts = parts?;
-    if parts.len() == 1 {
-        Ok(parts.pop().unwrap())
-    } else {
-        Ok(L3Expr::BoolAnd(parts))
-    }
-}
-
 /// Translate a DataFusion `Expr` to an `L3Expr`.
 /// Returns `UnsupportedFeature` for anything not needed in v1.
 pub(super) fn df_expr_to_l3(expr: &Expr) -> Result<L3Expr, LoweringError> {
     match expr {
-        Expr::Column(col) => Ok(L3Expr::Column(ColumnRef(col.name.clone()))),
+        Expr::Column(col) => Ok(L3Expr::Column(ColumnRef::Named(col.name.clone()))),
 
         Expr::Literal(sv) => scalar_value_to_l3(sv).map(L3Expr::Literal),
 
