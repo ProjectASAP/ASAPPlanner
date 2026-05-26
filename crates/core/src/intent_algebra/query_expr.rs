@@ -237,6 +237,14 @@ pub enum QueryExpr {
     Aggregate {
         by: Vec<ColumnId>,
         aggs: Vec<AggIntent>,
+        /// Output column names parallel to `aggs`. A non-empty entry overrides
+        /// the synthetic intent-keyed name — SQL threads DataFusion's generated
+        /// name (e.g. `"sum(metrics.bytes)"`) here so an enclosing `Project`
+        /// resolves the aggregate output by the name it references. An empty
+        /// entry (or empty vec) falls back to `AggIntent::output_column`'s name
+        /// (PromQL's convention).
+        #[serde(default)]
+        output_names: Vec<String>,
         #[serde(default)]
         having: Option<Predicate>,
         child: Box<QueryExpr>,
@@ -333,7 +341,11 @@ impl QueryExpr {
             QueryExpr::Window { child, .. } => child.output_schema_in(scope),
 
             QueryExpr::Aggregate {
-                by, aggs, child, ..
+                by,
+                aggs,
+                output_names,
+                child,
+                ..
             } => {
                 let in_schema = child.output_schema_in(scope)?;
                 let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + aggs.len());
@@ -361,13 +373,18 @@ impl QueryExpr {
                     });
                 // Each reducer types off its own input column (`SUM(bytes)` vs
                 // `AVG(latency)` in one node); `None` falls back to the sample-
-                // value probe (PromQL's single-column convention).
-                for intent in aggs {
+                // value probe (PromQL's single-column convention). A non-empty
+                // `output_names[i]` overrides the synthetic output column name.
+                for (i, intent) in aggs.iter().enumerate() {
                     let in_col = intent
                         .input_col()
                         .and_then(|id| in_schema.columns.get(id))
                         .unwrap_or(&probe);
-                    out_cols.push(intent.output_column(in_col));
+                    let mut out = intent.output_column(in_col);
+                    if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
+                        out.name = name.clone();
+                    }
+                    out_cols.push(out);
                 }
                 let unique_keys = if by.is_empty() {
                     Vec::new()

@@ -110,6 +110,7 @@ pub fn convert(
                 let aggregate = CQueryExpr::Aggregate {
                     by: Vec::new(),
                     aggs: vec![intent],
+                    output_names: vec![aggs[0].alias.clone()],
                     having: None,
                     child: Box::new(agg_child),
                 };
@@ -150,6 +151,7 @@ pub fn convert(
             CQueryExpr::Aggregate {
                 by,
                 aggs: intents,
+                output_names: aggs.iter().map(|item| item.alias.clone()).collect(),
                 having: having.clone().map(Predicate),
                 child: Box::new(child),
             }
@@ -198,6 +200,7 @@ pub fn convert(
                     k: *k as usize,
                     accuracy: acc.clone(),
                 }],
+                output_names: vec![],
                 having: None,
                 child: Box::new(child),
             }
@@ -425,10 +428,11 @@ mod tests {
             ]
         );
 
-        // Output schema types each reducer off its own input column.
+        // Output schema types each reducer off its own input column, and names
+        // it from the AggItem alias (threaded via Aggregate.output_names).
         let out = l3.output_schema().unwrap();
-        assert_eq!(out.columns[0], col("sum", DataType::Int64)); // SUM(bytes:Int64)
-        assert_eq!(out.columns[1], col("avg", DataType::Float64)); // AVG(latency)→Float64
+        assert_eq!(out.columns[0], col("total_bytes", DataType::Int64)); // SUM(bytes:Int64)
+        assert_eq!(out.columns[1], col("avg_latency", DataType::Float64)); // AVG(latency)→Float64
     }
 
     /// PromQL's single sample-value reducer stays `col: None`.

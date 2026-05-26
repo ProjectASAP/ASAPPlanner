@@ -209,11 +209,30 @@ impl<'a> SqlLowerer<'a> {
             .iter()
             .map(expr_to_group_name)
             .collect::<Result<Vec<_>, _>>()?;
+        // DataFusion names the aggregate outputs in its own schema (e.g.
+        // "sum(metrics.bytes)") — the same names the enclosing Projection
+        // references. The schema is [group fields …, aggregate fields …], so
+        // skip the group fields and thread the rest as L2 aliases → L3
+        // `Aggregate.output_names`, letting that Projection resolve them.
+        let out_names: Vec<String> = agg
+            .schema
+            .fields()
+            .iter()
+            .skip(agg.group_expr.len())
+            .map(|f| f.name().to_string())
+            .collect();
         let aggs = agg
             .aggr_expr
             .iter()
-            .map(lower_agg_item)
-            .collect::<Result<Vec<_>, _>>()?;
+            .enumerate()
+            .map(|(i, e)| {
+                let mut item = lower_agg_item(e)?;
+                if let Some(name) = out_names.get(i) {
+                    item.alias = name.clone();
+                }
+                Ok(item)
+            })
+            .collect::<Result<Vec<_>, LoweringError>>()?;
         Ok(L2::Aggregate {
             keys,
             aggs,

@@ -112,6 +112,29 @@ async fn multi_aggregate_group_by_binds_columns_positionally() {
 }
 
 #[tokio::test]
+async fn projection_over_aggregate_resolves_output_types_via_output_names() {
+    // The enclosing Projection references the aggregates by DataFusion's
+    // generated names (e.g. "sum(metrics.bytes)"); output_names threads those
+    // onto the L3 Aggregate so the Project resolves real types — not the Utf8
+    // fallback that an unresolved column would get.
+    let qe = lower("SELECT SUM(bytes), AVG(latency) FROM metrics").await;
+    let schema = qe
+        .output_schema()
+        .expect("root projection schema derivation");
+    assert_eq!(schema.columns.len(), 2);
+    assert_eq!(
+        schema.columns[0].dtype,
+        DataType::Int64,
+        "SUM(bytes:Int64) resolves to Int64, not the Utf8 fallback"
+    );
+    assert_eq!(
+        schema.columns[1].dtype,
+        DataType::Float64,
+        "AVG(latency) resolves to Float64"
+    );
+}
+
+#[tokio::test]
 async fn count_star_is_count_intent() {
     let qe = lower("SELECT COUNT(*) FROM metrics").await;
     let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate");

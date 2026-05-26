@@ -101,7 +101,12 @@ pub fn resolve_named_keys(keys: &[String], schema: &Schema) -> Result<Vec<Column
 /// Mirrors `QueryExpr::output_schema_in`'s `Aggregate` arm; out-of-range `by`
 /// ids are silently dropped (callers needing the strict check resolve `by`
 /// via [`resolve_named_keys`], which surfaces `NotFound`).
-pub fn output_schema_for_aggregate(input: &Schema, by: &[ColumnId], aggs: &[AggIntent]) -> Schema {
+pub fn output_schema_for_aggregate(
+    input: &Schema,
+    by: &[ColumnId],
+    aggs: &[AggIntent],
+    output_names: &[String],
+) -> Schema {
     let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + aggs.len());
     for &id in by {
         if let Some(c) = input.columns.get(id) {
@@ -119,12 +124,16 @@ pub fn output_schema_for_aggregate(input: &Schema, by: &[ColumnId], aggs: &[AggI
             dtype: DataType::Float64,
             nullable: false,
         });
-    for intent in aggs {
+    for (i, intent) in aggs.iter().enumerate() {
         let in_col = intent
             .input_col()
             .and_then(|id| input.columns.get(id))
             .unwrap_or(&probe);
-        out_cols.push(intent.output_column(in_col));
+        let mut out = intent.output_column(in_col);
+        if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
+            out.name = name.clone();
+        }
+        out_cols.push(out);
     }
     let unique_keys = if by.is_empty() {
         Vec::new()
@@ -171,7 +180,8 @@ mod tests {
             dtype: DataType::Utf8,
             nullable: false,
         });
-        let out = output_schema_for_aggregate(&input, &[2usize], &[AggIntent::Sum { col: None }]);
+        let out =
+            output_schema_for_aggregate(&input, &[2usize], &[AggIntent::Sum { col: None }], &[]);
         assert_eq!(out.columns.len(), 2); // host, sum
         assert_eq!(out.columns[0].name, "host");
         assert_eq!(out.columns[1].name, "sum");

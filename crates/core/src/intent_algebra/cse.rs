@@ -89,11 +89,13 @@ pub fn dedupe_subtrees(roots: Vec<(QueryId, QueryExpr)>) -> CseWorkloadPlan {
             QueryExpr::Aggregate {
                 by,
                 aggs,
+                output_names,
                 having,
                 child,
             } if *child == shared_expr => QueryExpr::Aggregate {
                 by,
                 aggs,
+                output_names,
                 having,
                 child: Box::new(QueryExpr::Ref {
                     name: binding_name.clone(),
@@ -162,6 +164,7 @@ mod tests {
                 q: 0.99,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             }],
+            output_names: vec![],
             having: None,
             child: Box::new(windowed_scan()),
         };
@@ -178,6 +181,7 @@ mod tests {
                 q,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             }],
+            output_names: vec![],
             having: None,
             child: Box::new(windowed_scan()),
         };
@@ -219,6 +223,7 @@ mod tests {
         let mk = || QueryExpr::Aggregate {
             by: vec![],
             aggs: vec![AggIntent::Sum { col: None }],
+            output_names: vec![],
             having: None,
             child: Box::new(scan_no_uk.clone()),
         };
