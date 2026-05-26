@@ -5,7 +5,7 @@
 //! canonical L3 (the same converter the PromQL path uses).
 
 use asap_control_core::intent_algebra::schema::{Column, DataType, Schema};
-use asap_control_core::intent_algebra::{AggIntent, QueryExpr, Source};
+use asap_control_core::intent_algebra::{AggIntent, JoinKind, QueryExpr, Source};
 use asap_control_core::types::AccuracyTarget;
 use asap_control_lower::{lower_sql, SqlCatalog};
 
@@ -17,21 +17,29 @@ fn col(name: &str, dtype: DataType) -> Column {
     }
 }
 
-/// `metrics(ts, service, latency, bytes)` — column positions 0..3.
+/// `metrics(ts, service, latency, bytes)` + `hosts(service, region)`.
 fn catalog() -> SqlCatalog {
-    SqlCatalog::new().with_table(
-        "metrics",
-        Schema::with_time_index(
-            vec![
-                col("ts", DataType::Timestamp),
+    SqlCatalog::new()
+        .with_table(
+            "metrics",
+            Schema::with_time_index(
+                vec![
+                    col("ts", DataType::Timestamp),
+                    col("service", DataType::Utf8),
+                    col("latency", DataType::Float64),
+                    col("bytes", DataType::Int64),
+                ],
+                0,
+                vec![],
+            ),
+        )
+        .with_table(
+            "hosts",
+            Schema::new(vec![
                 col("service", DataType::Utf8),
-                col("latency", DataType::Float64),
-                col("bytes", DataType::Int64),
-            ],
-            0,
-            vec![],
-        ),
-    )
+                col("region", DataType::Utf8),
+            ]),
+        )
 }
 
 async fn lower(sql: &str) -> QueryExpr {
@@ -40,7 +48,7 @@ async fn lower(sql: &str) -> QueryExpr {
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
 }
 
-/// Find the first `Aggregate` node anywhere in the tree.
+/// Find the first `Aggregate` node along the single-child spine.
 fn find_aggregate(qe: &QueryExpr) -> Option<(&Vec<usize>, &Vec<AggIntent>)> {
     match qe {
         QueryExpr::Aggregate { by, aggs, .. } => Some((by, aggs)),
@@ -52,6 +60,23 @@ fn find_aggregate(qe: &QueryExpr) -> Option<(&Vec<usize>, &Vec<AggIntent>)> {
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
         | QueryExpr::Subquery { child, .. } => find_aggregate(child),
+        _ => None,
+    }
+}
+
+/// Find the first `Join` node along the single-child spine.
+fn find_join(qe: &QueryExpr) -> Option<&QueryExpr> {
+    match qe {
+        QueryExpr::Join { .. } => Some(qe),
+        QueryExpr::Project { child, .. }
+        | QueryExpr::Filter { child, .. }
+        | QueryExpr::Aggregate { child, .. }
+        | QueryExpr::Window { child, .. }
+        | QueryExpr::Partition { child, .. }
+        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Sort { child, .. }
+        | QueryExpr::Limit { child, .. }
+        | QueryExpr::Subquery { child, .. } => find_join(child),
         _ => None,
     }
 }
@@ -102,13 +127,62 @@ async fn count_distinct_is_cardinality() {
 }
 
 #[tokio::test]
-async fn unsupported_join_is_rejected_not_mislowered() {
-    // The front end declines JOIN rather than silently dropping a side.
+async fn inner_join_lowers_to_join_over_two_scans() {
+    // INNER JOIN over two distinct tables → L3 Join with both leaves as Scans.
+    let qe = lower(
+        "SELECT metrics.bytes, hosts.region \
+         FROM metrics JOIN hosts ON metrics.service = hosts.service",
+    )
+    .await;
+    let join = find_join(&qe).expect("expected a Join in the tree");
+    let QueryExpr::Join {
+        kind, left, right, ..
+    } = join
+    else {
+        unreachable!("find_join only returns Join");
+    };
+    assert_eq!(*kind, JoinKind::Inner);
+    assert!(matches!(left.as_ref(), QueryExpr::Scan { .. }));
+    assert!(matches!(right.as_ref(), QueryExpr::Scan { .. }));
+}
+
+#[tokio::test]
+async fn aggregate_over_join_binds_against_concatenated_schema() {
+    // GROUP BY a right-table column over a join: the key must resolve against
+    // the concatenated schema, exercising the bottom-up converter end to end.
+    // Two aggregates → the multi-agg path, which carries GROUP BY keys as
+    // positional `Aggregate.by` (the single-agg path folds them into Partition).
+    let qe = lower(
+        "SELECT hosts.region, SUM(metrics.bytes), COUNT(*) \
+         FROM metrics JOIN hosts ON metrics.service = hosts.service \
+         GROUP BY hosts.region",
+    )
+    .await;
+    let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate over the join");
+    // metrics(ts,service,latency,bytes) ++ hosts(service,region) →
+    // region is column 5, bytes is column 3 of the concatenated schema.
+    assert_eq!(
+        by,
+        &vec![5],
+        "GROUP BY hosts.region → concatenated column 5"
+    );
+    assert!(
+        aggs.contains(&AggIntent::Sum { col: Some(3) }),
+        "SUM(metrics.bytes) → Sum{{col:3}}, got {aggs:?}"
+    );
+}
+
+#[tokio::test]
+async fn semi_join_is_rejected_not_mislowered() {
+    // No L3 counterpart for semi/anti joins yet → reject rather than mislower.
     let res = lower_sql(
-        "SELECT a.service FROM metrics a JOIN metrics b ON a.service = b.service",
+        "SELECT service FROM metrics WHERE service IN (SELECT service FROM hosts)",
         &catalog(),
         AccuracyTarget::Exact,
     )
     .await;
-    assert!(res.is_err(), "JOIN should be rejected in v1");
+    assert!(
+        res.is_err(),
+        "semi-join / IN-subquery should be rejected in v1"
+    );
 }

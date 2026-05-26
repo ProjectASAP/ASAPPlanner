@@ -12,13 +12,15 @@ use std::sync::Arc;
 
 use datafusion::common::ScalarValue;
 use datafusion::datasource::MemTable;
-use datafusion::logical_expr::{self, Distinct, Expr, LogicalPlan};
+use datafusion::logical_expr::{self, Distinct, Expr, JoinType, LogicalPlan};
 use datafusion::prelude::SessionContext;
 
 use asap_control_core::intent_algebra::relational::{
     AggFunc, AggItem, QueryExpr as L2, SourceSpec,
 };
-use asap_control_core::intent_algebra::{ColumnRef, ProjectItem, SetOpKind, SortKey};
+use asap_control_core::intent_algebra::{
+    ColumnRef, CompareOp, JoinKind, L3Expr, ProjectItem, SetOpKind, SortKey,
+};
 
 use crate::error::LoweringError;
 
@@ -99,7 +101,7 @@ impl<'a> SqlLowerer<'a> {
             LogicalPlan::Window(_) => Err(LoweringError::UnsupportedFeature(
                 "SQL window functions (no L3 analytic-window node yet)".into(),
             )),
-            LogicalPlan::Join(_) => Err(LoweringError::UnsupportedFeature("JOIN".into())),
+            LogicalPlan::Join(join) => self.lower_join(join),
             LogicalPlan::Subquery(_) => Err(LoweringError::UnsupportedFeature("subquery".into())),
             LogicalPlan::SubqueryAlias(alias) => {
                 // A bare table alias is transparent; a derived table (inline view)
@@ -134,6 +136,50 @@ impl<'a> SqlLowerer<'a> {
             table_name,
             schema.clone(),
         )))
+    }
+
+    /// ⋈ — equijoin. The `on` key pairs become `left = right` comparisons,
+    /// AND-ed with any non-equi `filter`, into the L2 join predicate. The L2→L3
+    /// converter derives the concatenated output schema; the join predicate
+    /// stays name-based (like a `WHERE`). Semi/anti/mark joins have no L3
+    /// counterpart yet and are rejected.
+    fn lower_join(&self, join: &logical_expr::Join) -> Result<L2, LoweringError> {
+        let kind = match join.join_type {
+            JoinType::Inner => JoinKind::Inner,
+            JoinType::Left => JoinKind::Left,
+            JoinType::Right => JoinKind::Right,
+            JoinType::Full => JoinKind::Full,
+            other => {
+                return Err(LoweringError::UnsupportedFeature(format!(
+                    "join type: {other:?}"
+                )))
+            }
+        };
+        let mut conjuncts = join
+            .on
+            .iter()
+            .map(|(l, r)| {
+                Ok(L3Expr::Compare {
+                    left: Box::new(df_expr_to_l3(l)?),
+                    op: CompareOp::Eq,
+                    right: Box::new(df_expr_to_l3(r)?),
+                })
+            })
+            .collect::<Result<Vec<_>, LoweringError>>()?;
+        if let Some(filter) = &join.filter {
+            conjuncts.push(df_expr_to_l3(filter)?);
+        }
+        let pred = match conjuncts.len() {
+            0 => None,
+            1 => Some(conjuncts.pop().unwrap()),
+            _ => Some(L3Expr::BoolAnd(conjuncts)),
+        };
+        Ok(L2::Join {
+            kind,
+            pred,
+            left: Box::new(self.lower_plan(&join.left)?),
+            right: Box::new(self.lower_plan(&join.right)?),
+        })
     }
 
     fn lower_projection(&self, proj: &logical_expr::Projection) -> Result<L2, LoweringError> {
