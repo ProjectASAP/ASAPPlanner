@@ -170,6 +170,14 @@ pub fn convert(
             child: Box::new(convert(input, fallback, acc)?),
         },
 
+        // π — column refs in the project items resolve by name against the
+        // child schema during L3 schema derivation, so the conversion is a
+        // structural pass-through of the (shared) `ProjectItem` list.
+        LQueryExpr::Project { cols, input } => CQueryExpr::Project {
+            cols: cols.clone(),
+            child: Box::new(convert(input, fallback, acc)?),
+        },
+
         LQueryExpr::Partition { keys, input } => CQueryExpr::Partition {
             keys: keys.clone(),
             child: Box::new(convert(input, fallback, acc)?),

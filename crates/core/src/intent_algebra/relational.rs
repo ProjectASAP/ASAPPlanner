@@ -10,7 +10,9 @@
 use std::time::Duration;
 
 use super::expr_ir::L3Expr;
-pub use super::query_expr::{BinaryOpKind, ColumnRef, PartitionKeys, SortKey, VectorMatch};
+pub use super::query_expr::{
+    BinaryOpKind, ColumnRef, PartitionKeys, ProjectItem, SortKey, VectorMatch,
+};
 use super::schema::Schema;
 
 /// Base relation / metric stream source.
@@ -96,6 +98,13 @@ pub enum QueryExpr {
 
     /// σ — row-level filter (WHERE / PromQL label matchers).
     Filter { pred: L3Expr, input: Box<QueryExpr> },
+
+    /// π — projection / SELECT list (SQL). Column refs in `cols` resolve by
+    /// name against the child schema during conversion.
+    Project {
+        cols: Vec<ProjectItem>,
+        input: Box<QueryExpr>,
+    },
 
     /// γ + α — GROUP BY (`keys`) followed by aggregate functions.
     Aggregate {
@@ -183,6 +192,7 @@ impl QueryExpr {
         match self {
             QueryExpr::Source(_) | QueryExpr::Ref(_) => {}
             QueryExpr::Filter { input, .. }
+            | QueryExpr::Project { input, .. }
             | QueryExpr::Aggregate { input, .. }
             | QueryExpr::Window { input, .. }
             | QueryExpr::Partition { input, .. }
@@ -218,6 +228,7 @@ impl QueryExpr {
         match self {
             QueryExpr::Source(s) => Some(&s.name),
             QueryExpr::Filter { input, .. }
+            | QueryExpr::Project { input, .. }
             | QueryExpr::Aggregate { input, .. }
             | QueryExpr::Window { input, .. }
             | QueryExpr::Partition { input, .. }
