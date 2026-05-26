@@ -223,10 +223,10 @@ impl QueryExpr {
         }
     }
 
-    /// Outermost metric/table name from the first `Source` leaf.
-    pub fn source_name(&self) -> Option<&str> {
+    /// The leftmost `Source` leaf.
+    pub fn leaf_source(&self) -> Option<&SourceSpec> {
         match self {
-            QueryExpr::Source(s) => Some(&s.name),
+            QueryExpr::Source(s) => Some(s),
             QueryExpr::Filter { input, .. }
             | QueryExpr::Project { input, .. }
             | QueryExpr::Aggregate { input, .. }
@@ -236,13 +236,27 @@ impl QueryExpr {
             | QueryExpr::TopK { input, .. }
             | QueryExpr::Sort { input, .. }
             | QueryExpr::Limit { input, .. }
-            | QueryExpr::PromQLSubquery { input, .. } => input.source_name(),
-            QueryExpr::Merge { inputs } => inputs.first()?.source_name(),
+            | QueryExpr::PromQLSubquery { input, .. } => input.leaf_source(),
+            QueryExpr::Merge { inputs } => inputs.first()?.leaf_source(),
             QueryExpr::Join { left, .. }
             | QueryExpr::SetOp { left, .. }
-            | QueryExpr::BinaryOp { lhs: left, .. } => left.source_name(),
-            QueryExpr::LetBinding { body, .. } => body.source_name(),
+            | QueryExpr::BinaryOp { lhs: left, .. } => left.leaf_source(),
+            QueryExpr::LetBinding { body, .. } => body.leaf_source(),
             QueryExpr::Ref(_) => None,
         }
+    }
+
+    /// Outermost metric/table name from the first `Source` leaf.
+    pub fn source_name(&self) -> Option<&str> {
+        self.leaf_source().map(|s| s.name.as_str())
+    }
+
+    /// Whether the leftmost `Source` leaf carries a resolved schema — i.e. it is
+    /// a SQL table (`Source::Table`). Time-series (PromQL) leaves return
+    /// `false`. The converter uses this to keep the time-series fused-Partition
+    /// canonical shape for PromQL while routing tabular GROUP BY through a
+    /// positional `Aggregate.by` (so group keys land in the output schema).
+    pub fn leaf_is_tabular(&self) -> bool {
+        self.leaf_source().is_some_and(|s| s.schema.is_some())
     }
 }

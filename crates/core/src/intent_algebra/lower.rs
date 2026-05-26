@@ -87,11 +87,15 @@ pub fn convert(
             having,
             input,
         } => {
-            // Single-statistic aggregate (no HAVING) fuses: a `Window` input
-            // becomes `Window { Aggregate { by: [] } }`; GROUP BY keys wrap the
-            // result in a `Partition`. The reducer's input column resolves
-            // against the aggregate's *direct* input (the scan under any window).
-            if aggs.len() == 1 && having.is_none() {
+            // Single-statistic aggregate (no HAVING) over a *time-series* leaf
+            // fuses: a `Window` input becomes `Window { Aggregate { by: [] } }`;
+            // GROUP BY keys wrap the result in a `Partition` (the streaming
+            // sketch canonical shape). Tabular (SQL) GROUP BY instead falls
+            // through to the positional `Aggregate.by` path below, so the group
+            // keys land in the output schema (a SELECT projects them). The
+            // reducer's input column resolves against the aggregate's *direct*
+            // input (the scan under any window).
+            if aggs.len() == 1 && having.is_none() && !input.leaf_is_tabular() {
                 let (agg_input_l2, window): (&LQueryExpr, Option<(_, _)>) = match input.as_ref() {
                     LQueryExpr::Window {
                         duration,

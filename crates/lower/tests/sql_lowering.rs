@@ -135,6 +135,27 @@ async fn projection_over_aggregate_resolves_output_types_via_output_names() {
 }
 
 #[tokio::test]
+async fn single_agg_group_by_keeps_key_in_output_schema() {
+    // A tabular single-aggregate GROUP BY routes through the positional
+    // Aggregate.by path (not the PromQL fused-Partition shape), so the group
+    // key is a real output column the enclosing SELECT projection resolves.
+    let qe = lower("SELECT service, SUM(bytes) FROM metrics GROUP BY service").await;
+    let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate (not a Partition)");
+    assert_eq!(by, &vec![1], "GROUP BY service → Aggregate.by column 1");
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { col: Some(3) }]));
+
+    // Both the group key and the aggregate resolve in the root projection schema.
+    let schema = qe.output_schema().expect("root projection schema");
+    assert_eq!(schema.columns.len(), 2);
+    assert_eq!(
+        schema.columns[0].dtype,
+        DataType::Utf8,
+        "service is in the output"
+    );
+    assert_eq!(schema.columns[1].dtype, DataType::Int64, "SUM(bytes)");
+}
+
+#[tokio::test]
 async fn count_star_is_count_intent() {
     let qe = lower("SELECT COUNT(*) FROM metrics").await;
     let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
