@@ -58,6 +58,25 @@ pub enum CompareOp {
     NotRegex,
 }
 
+impl std::fmt::Display for CompareOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CompareOp::Eq => "==",
+            CompareOp::Ne => "!=",
+            CompareOp::Lt => "<",
+            CompareOp::Le => "<=",
+            CompareOp::Gt => ">",
+            CompareOp::Ge => ">=",
+            CompareOp::Like => "LIKE",
+            CompareOp::NotLike => "NOT LIKE",
+            CompareOp::ILike => "ILIKE",
+            CompareOp::NotILike => "NOT ILIKE",
+            CompareOp::Regex => "=~",
+            CompareOp::NotRegex => "!~",
+        })
+    }
+}
+
 /// Binary arithmetic operators.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArithOp {
@@ -66,6 +85,18 @@ pub enum ArithOp {
     Mul,
     Div,
     Mod,
+}
+
+impl std::fmt::Display for ArithOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "/",
+            ArithOp::Mod => "%",
+        })
+    }
 }
 
 /// Layer-2 (name-based) scalar expression. Front ends emit this; the converter

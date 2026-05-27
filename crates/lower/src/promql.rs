@@ -43,7 +43,7 @@ use asap_control_core::intent_algebra::query_expr::{
 use asap_control_core::intent_algebra::relational::{
     AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
-use asap_control_core::intent_algebra::{CompareOp, L2Expr, L3Scalar};
+use asap_control_core::intent_algebra::{ArithOp, CompareOp, L2Expr, L3Scalar};
 
 use crate::error::LoweringError;
 
@@ -689,31 +689,31 @@ fn quantile_param(q: f64) -> Result<f64> {
 
 fn binop(id: token::TokenId) -> Result<BinaryOpKind> {
     Ok(if id == token::T_ADD {
-        BinaryOpKind::Add
+        BinaryOpKind::Arith(ArithOp::Add)
     } else if id == token::T_SUB {
-        BinaryOpKind::Sub
+        BinaryOpKind::Arith(ArithOp::Sub)
     } else if id == token::T_MUL {
-        BinaryOpKind::Mul
+        BinaryOpKind::Arith(ArithOp::Mul)
     } else if id == token::T_DIV {
-        BinaryOpKind::Div
+        BinaryOpKind::Arith(ArithOp::Div)
     } else if id == token::T_MOD {
-        BinaryOpKind::Mod
+        BinaryOpKind::Arith(ArithOp::Mod)
     } else if id == token::T_POW {
         BinaryOpKind::Pow
     } else if id == token::T_ATAN2 {
         BinaryOpKind::Atan2
     } else if id == token::T_EQLC {
-        BinaryOpKind::Eq
+        BinaryOpKind::Compare(CompareOp::Eq)
     } else if id == token::T_NEQ {
-        BinaryOpKind::Ne
+        BinaryOpKind::Compare(CompareOp::Ne)
     } else if id == token::T_LSS {
-        BinaryOpKind::Lt
+        BinaryOpKind::Compare(CompareOp::Lt)
     } else if id == token::T_LTE {
-        BinaryOpKind::Le
+        BinaryOpKind::Compare(CompareOp::Le)
     } else if id == token::T_GTR {
-        BinaryOpKind::Gt
+        BinaryOpKind::Compare(CompareOp::Gt)
     } else if id == token::T_GTE {
-        BinaryOpKind::Ge
+        BinaryOpKind::Compare(CompareOp::Ge)
     } else if id == token::T_LAND {
         BinaryOpKind::And
     } else if id == token::T_LOR {

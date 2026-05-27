@@ -34,7 +34,7 @@
 use std::time::Duration;
 
 use asap_control_core::intent_algebra::{
-    AggIntent, BinaryOpKind, PartitionKeys, QueryExpr, Source,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, PartitionKeys, QueryExpr, Source,
 };
 use asap_control_core::types::AccuracyTarget;
 use asap_control_lower::{lower_promql, LoweringError};
@@ -388,7 +388,7 @@ fn vector_arithmetic() {
     let QueryExpr::BinaryOp { op, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Add);
+    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Add));
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn on_matching_with_group_left() {
     else {
         panic!("expected BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Div);
+    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Div));
     let vm = vector_match.as_ref().expect("on(...) group_left present");
     assert_eq!(vm.labels, vec!["instance".to_string(), "job".to_string()]);
     assert!(
@@ -415,7 +415,9 @@ fn on_matching_with_group_left() {
 fn vector_comparison_filters() {
     // SEMANTICS: `>` between two vectors keeps the LHS series where it holds.
     let qe = ok("go_goroutines > go_threads");
-    assert!(matches!(&qe, QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Gt));
+    assert!(
+        matches!(&qe, QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Compare(CompareOp::Gt))
+    );
 }
 
 #[test]

@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use asap_control_core::intent_algebra::{
-    AggIntent, BinaryOpKind, CompareOp, L3Expr, L3Scalar, PartitionKeys, QueryExpr, Source,
-    WindowKind,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, PartitionKeys, QueryExpr,
+    Source, WindowKind,
 };
 use asap_control_core::types::AccuracyTarget;
 use asap_control_core::workload::{
@@ -355,7 +355,7 @@ fn binary_op_division() {
     let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Div);
+    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Div));
     assert!(
         matches!(lhs.as_ref(), QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate { .. }]))
     );

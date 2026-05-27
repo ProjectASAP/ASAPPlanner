@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::agg_intent::AggIntent;
-use super::expr_ir::{L3Expr, L3Scalar};
+use super::expr_ir::{ArithOp, CompareOp, L3Expr, L3Scalar};
 use super::names::BindingName;
 use super::schema::{Column, ColumnId, DataType, Schema};
 
@@ -101,55 +101,40 @@ impl PartitionKeys {
     }
 }
 
+/// Operator on the query-level `BinaryOp` node. Reuses the scalar IR's
+/// [`ArithOp`] / [`CompareOp`] so every arithmetic/comparison operator has
+/// exactly one representation (and one `Display`) across the IR; the remaining
+/// variants are PromQL vector-set / power ops with no scalar-IR counterpart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOpKind {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-    Pow,
-    Atan2,
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
+    /// Arithmetic — `Add/Sub/Mul/Div/Mod` (shared with `L3Expr::Arith`).
+    Arith(ArithOp),
+    /// Comparison — `Eq/Ne/Lt/Le/Gt/Ge` + `Like/ILike/Regex` family (shared
+    /// with `L3Expr::Compare`).
+    Compare(CompareOp),
+    /// PromQL logical-set intersection (`and`).
     And,
+    /// PromQL logical-set union (`or`).
     Or,
+    /// PromQL logical-set complement (`unless`).
     Unless,
-    Like,
-    NotLike,
-    Regex,
-    NotRegex,
+    /// Exponentiation (`^`) — PromQL vector op, no scalar-IR counterpart.
+    Pow,
+    /// `atan2` — PromQL vector op, no scalar-IR counterpart.
+    Atan2,
 }
 
 impl std::fmt::Display for BinaryOpKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            BinaryOpKind::Add => "+",
-            BinaryOpKind::Sub => "-",
-            BinaryOpKind::Mul => "*",
-            BinaryOpKind::Div => "/",
-            BinaryOpKind::Mod => "%",
-            BinaryOpKind::Pow => "^",
-            BinaryOpKind::Atan2 => "atan2",
-            BinaryOpKind::Eq => "==",
-            BinaryOpKind::Ne => "!=",
-            BinaryOpKind::Lt => "<",
-            BinaryOpKind::Le => "<=",
-            BinaryOpKind::Gt => ">",
-            BinaryOpKind::Ge => ">=",
-            BinaryOpKind::And => "AND",
-            BinaryOpKind::Or => "OR",
-            BinaryOpKind::Unless => "unless",
-            BinaryOpKind::Like => "LIKE",
-            BinaryOpKind::NotLike => "NOT LIKE",
-            BinaryOpKind::Regex => "=~",
-            BinaryOpKind::NotRegex => "!~",
-        };
-        f.write_str(s)
+        match self {
+            BinaryOpKind::Arith(op) => write!(f, "{op}"),
+            BinaryOpKind::Compare(op) => write!(f, "{op}"),
+            BinaryOpKind::And => f.write_str("AND"),
+            BinaryOpKind::Or => f.write_str("OR"),
+            BinaryOpKind::Unless => f.write_str("unless"),
+            BinaryOpKind::Pow => f.write_str("^"),
+            BinaryOpKind::Atan2 => f.write_str("atan2"),
+        }
     }
 }
 
