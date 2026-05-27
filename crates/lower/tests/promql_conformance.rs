@@ -419,6 +419,18 @@ fn vector_comparison_filters() {
 }
 
 #[test]
+fn unary_negation_is_rejected__GAP() {
+    // SEMANTICS (PromQL): `-expr` flips the sign of every sample (and `-rate(…)`
+    // negates the rate). With no negate/scalar node in the L2 PromQL path we
+    // can't model that, so it's rejected rather than silently lowered as `+expr`
+    // (which would compute the wrong result). `-<literal>` folds into the
+    // literal at parse time and is caught by the bare-scalar rejection instead.
+    let _ = rejected("-rate(http_errors_total[5m])");
+    let _ = rejected("-some_metric");
+    let _ = rejected("-metric_a or -metric_b");
+}
+
+#[test]
 fn scalar_literal_operand_is_rejected__GAP() {
     // SEMANTICS (PromQL): `v > 10*1024*1024` filters by a scalar threshold.
     // We have no scalar/number-literal expression in L2, so a literal operand

@@ -152,7 +152,15 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Call(call) => build(lower_inner_call(call)?, vec![], Outer::None),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
-        Expr::Unary(u) => walk(&u.expr),
+        // `UnaryExpr` is built only by negation (`Neg`); unary `+` is folded to
+        // identity and `-<literal>` to a negated `NumberLiteral`, so this always
+        // wraps a vector expression whose samples must be sign-flipped. The L2
+        // PromQL path has no scalar/negate node to express that (there's no
+        // `-1 * x`, since `walk` rejects bare scalar operands), so reject it
+        // rather than silently dropping the sign and computing `+expr`.
+        Expr::Unary(_) => Err(LoweringError::UnsupportedFeature(
+            "unary negation (`-expr`): no negate/scalar node in the L2 PromQL path".into(),
+        )),
         Expr::Subquery(sq) => Ok(L2::PromQLSubquery {
             range: sq.range,
             resolution: sq.step,
