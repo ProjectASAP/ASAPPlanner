@@ -423,6 +423,37 @@ fn without_grouping_is_unsupported() {
     assert!(format!("{err}").contains("without"), "got {err}");
 }
 
+// ── parameter validation (reject rather than silently truncate/garble) ──────────
+
+#[test]
+fn fractional_or_negative_topk_k_is_rejected() {
+    // `as u64` would silently truncate 2.7→2 / saturate -1→0.
+    assert!(lower_promql("topk(2.7, count_over_time(m[1m]))", AccuracyTarget::Exact).is_err());
+    assert!(lower_promql("bottomk(2.5, sum_over_time(m[1m]))", AccuracyTarget::Exact).is_err());
+}
+
+#[test]
+fn out_of_range_quantile_phi_is_rejected() {
+    // φ outside [0,1] would otherwise yield a bogus `quantile_1_5` column.
+    assert!(lower_promql("quantile(1.5, up)", AccuracyTarget::Exact).is_err());
+    assert!(lower_promql("quantile_over_time(1.5, m[5m])", AccuracyTarget::Exact).is_err());
+    assert!(lower_promql(
+        "histogram_quantile(2.0, rate(b[5m]))",
+        AccuracyTarget::Exact
+    )
+    .is_err());
+}
+
+#[test]
+fn function_wrapped_range_vector_is_rejected_not_stripped() {
+    // `rate(abs(m[5m]))` must NOT silently lower as `rate(m[5m])` — the wrapper
+    // is rejected (here, at parse or in extract_matrix), never stripped.
+    assert!(
+        lower_promql("rate(abs(http_requests_total[5m]))", AccuracyTarget::Exact).is_err(),
+        "function-wrapped range vector should be rejected"
+    );
+}
+
 // ── accuracy propagation ──────────────────────────────────────────────────────
 
 #[test]

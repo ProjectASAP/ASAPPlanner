@@ -408,12 +408,21 @@ fn expr_to_group_name(expr: &Expr) -> Result<String, LoweringError> {
 }
 
 fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
-    match args.get(1) {
-        Some(Expr::Literal(ScalarValue::Float64(Some(q)))) => Ok(*q),
-        Some(Expr::Literal(ScalarValue::Float32(Some(q)))) => Ok(*q as f64),
-        _ => Err(LoweringError::InvalidExpression(
-            "percentile value must be a float literal (2nd arg)".into(),
-        )),
+    let q = match args.get(1) {
+        Some(Expr::Literal(ScalarValue::Float64(Some(q)))) => *q,
+        Some(Expr::Literal(ScalarValue::Float32(Some(q)))) => *q as f64,
+        _ => {
+            return Err(LoweringError::InvalidExpression(
+                "percentile value must be a float literal (2nd arg)".into(),
+            ))
+        }
+    };
+    if q.is_finite() && (0.0..=1.0).contains(&q) {
+        Ok(q)
+    } else {
+        Err(LoweringError::InvalidExpression(format!(
+            "percentile must be in [0, 1], got {q}"
+        )))
     }
 }
 

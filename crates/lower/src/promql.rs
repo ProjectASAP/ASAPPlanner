@@ -140,12 +140,12 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<L2> {
 
     let outer = if op == token::T_TOPK {
         Outer::TopK {
-            k: num_param(agg)? as u64,
+            k: count_param(agg)?,
             descending: true,
         }
     } else if op == token::T_BOTTOMK {
         Outer::TopK {
-            k: num_param(agg)? as u64,
+            k: count_param(agg)?,
             descending: false,
         }
     } else if op == token::T_COUNT {
@@ -170,7 +170,7 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<L2> {
     } else if op == token::T_STDVAR {
         Outer::Plain(OuterIntent::Variance)
     } else if op == token::T_QUANTILE {
-        Outer::Plain(OuterIntent::Quantile(num_param(agg)?))
+        Outer::Plain(OuterIntent::Quantile(quantile_param(num_param(agg)?)?))
     } else {
         return Err(LoweringError::UnsupportedAggregateOp(format!(
             "aggregate token {op}"
@@ -189,7 +189,7 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<L2> {
 /// `histogram_quantile(φ, sum by (le) (rate(m_bucket[w])))` pattern, which the
 /// old "extract the matrix and substitute a bare Quantile" path could not.
 fn walk_histogram_quantile(call: &Call) -> Result<L2> {
-    let phi = num_arg(call, 0)?;
+    let phi = quantile_param(num_arg(call, 0)?)?;
     let inner = walk(arg(call, 1)?)?;
     Ok(outer_aggregate(vec![], AggFunc::Quantile(phi), inner))
 }
@@ -289,7 +289,7 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
             })
         }
         "quantile_over_time" => {
-            let phi = num_arg(call, 0)?;
+            let phi = quantile_param(num_arg(call, 0)?)?;
             let (metric, matchers, window) = extract_matrix(arg(call, 1)?)?;
             Ok(Inner {
                 metric,
@@ -564,9 +564,12 @@ fn extract_matrix(expr: &Expr) -> Result<(String, Vec<L2Expr>, Duration)> {
             Ok((metric, matchers, ms.range))
         }
         Expr::Paren(p) => extract_matrix(&p.expr),
-        Expr::Call(c) => extract_matrix(arg(c, 0)?),
+        // A range-vector function argument must be a (parenthesised) matrix
+        // selector. Do NOT descend through an arbitrary `Call` — that would
+        // silently strip an unsupported wrapper (`rate(deriv(m[5m]))` lowering
+        // as `rate(m[5m])`). Reject instead.
         other => Err(LoweringError::UnsupportedFeature(format!(
-            "expected range-vector argument, got {:?}",
+            "expected a range-vector (matrix) argument, got {:?}",
             std::mem::discriminant(other)
         ))),
     }
@@ -600,6 +603,33 @@ fn num_expr(expr: &Expr) -> Result<f64> {
             "expected a numeric literal, got {:?}",
             std::mem::discriminant(other)
         ))),
+    }
+}
+
+/// `topk`/`bottomk` count parameter — a non-negative integer. Rejects
+/// fractional / negative / non-finite values rather than silently truncating
+/// or saturating them via `as u64` (`topk(2.7, …)` ≠ `topk(2, …)`).
+fn count_param(agg: &AggregateExpr) -> Result<u64> {
+    let v = num_param(agg)?;
+    if v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= u64::MAX as f64 {
+        Ok(v as u64)
+    } else {
+        Err(LoweringError::InvalidParameter(format!(
+            "topk/bottomk k must be a non-negative integer, got {v}"
+        )))
+    }
+}
+
+/// Quantile φ — must be a finite value in `[0, 1]`. Rejects NaN/∞ and
+/// out-of-range φ (which would otherwise propagate into a bogus intent and
+/// output-column name like `quantile_NaN`).
+fn quantile_param(q: f64) -> Result<f64> {
+    if q.is_finite() && (0.0..=1.0).contains(&q) {
+        Ok(q)
+    } else {
+        Err(LoweringError::InvalidParameter(format!(
+            "quantile φ must be in [0, 1], got {q}"
+        )))
     }
 }
 
