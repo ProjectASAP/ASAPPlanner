@@ -32,16 +32,8 @@ pub enum ResolveError {
 pub fn infer_source_schema(_metric_or_table: &str) -> Schema {
     Schema::with_time_index(
         vec![
-            Column {
-                name: "ts".into(),
-                dtype: DataType::Timestamp,
-                nullable: false,
-            },
-            Column {
-                name: "value".into(),
-                dtype: DataType::Float64,
-                nullable: false,
-            },
+            Column::new("ts", DataType::Timestamp, false),
+            Column::new("value", DataType::Float64, false),
         ],
         0,
         Vec::new(),
@@ -63,6 +55,15 @@ pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, 
             .column_id(name)
             .ok_or_else(|| ResolveError::NotFound {
                 name: name.clone(),
+                available: schema.columns.iter().map(|c| c.name.clone()).collect(),
+            }),
+        // Prefer the (table, name) match; fall back to the bare name for
+        // schemas whose columns carry no qualifier.
+        ColumnRef::Qualified { table, name } => schema
+            .column_id_qualified(table, name)
+            .or_else(|| schema.column_id(name))
+            .ok_or_else(|| ResolveError::NotFound {
+                name: format!("{table}.{name}"),
                 available: schema.columns.iter().map(|c| c.name.clone()).collect(),
             }),
         ColumnRef::SampleValue => schema
@@ -186,11 +187,7 @@ pub fn output_schema_for_aggregate(
     let probe = value_col_idx
         .and_then(|i| input.columns.get(i))
         .cloned()
-        .unwrap_or(Column {
-            name: "value".into(),
-            dtype: DataType::Float64,
-            nullable: false,
-        });
+        .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
     for (i, intent) in aggs.iter().enumerate() {
         let in_col = intent
             .input_col()
@@ -242,11 +239,9 @@ mod tests {
     #[test]
     fn aggregate_strips_time_and_keeps_unique_keys() {
         let mut input = infer_source_schema("m");
-        input.columns.push(Column {
-            name: "host".into(),
-            dtype: DataType::Utf8,
-            nullable: false,
-        });
+        input
+            .columns
+            .push(Column::new("host", DataType::Utf8, false));
         let out =
             output_schema_for_aggregate(&input, &[2usize], &[AggIntent::Sum { col: None }], &[]);
         assert_eq!(out.columns.len(), 2); // host, sum

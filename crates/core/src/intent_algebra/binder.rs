@@ -79,11 +79,7 @@ impl<C: SchemaCatalog> Binder<C> {
         // Append one column per referenced-but-unknown name (group keys etc.).
         for name in collect_referenced_columns(tree) {
             if !columns.iter().any(|c| c.name == name) {
-                columns.push(Column {
-                    name,
-                    dtype: DataType::Utf8,
-                    nullable: true,
-                });
+                columns.push(Column::new(name, DataType::Utf8, true));
             }
         }
 
@@ -99,16 +95,8 @@ impl<C: SchemaCatalog> Binder<C> {
 /// The conventional PromQL leaf shape: `(ts: Timestamp, value: Float64)`.
 fn default_leaf_columns() -> Vec<Column> {
     vec![
-        Column {
-            name: "ts".into(),
-            dtype: DataType::Timestamp,
-            nullable: false,
-        },
-        Column {
-            name: "value".into(),
-            dtype: DataType::Float64,
-            nullable: false,
-        },
+        Column::new("ts", DataType::Timestamp, false),
+        Column::new("value", DataType::Float64, false),
     ]
 }
 
@@ -191,21 +179,9 @@ mod tests {
             fn columns_for(&self, source: &str) -> Option<Vec<Column>> {
                 (source == "known").then(|| {
                     vec![
-                        Column {
-                            name: "ts".into(),
-                            dtype: DataType::Timestamp,
-                            nullable: false,
-                        },
-                        Column {
-                            name: "value".into(),
-                            dtype: DataType::Float64,
-                            nullable: false,
-                        },
-                        Column {
-                            name: "datacenter".into(),
-                            dtype: DataType::Utf8,
-                            nullable: false,
-                        },
+                        Column::new("ts", DataType::Timestamp, false),
+                        Column::new("value", DataType::Float64, false),
+                        Column::new("datacenter", DataType::Utf8, false),
                     ]
                 })
             }

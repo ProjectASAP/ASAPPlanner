@@ -122,11 +122,7 @@ mod tests {
     use std::time::Duration;
 
     fn col(name: &str, dtype: DataType) -> Column {
-        Column {
-            name: name.into(),
-            dtype,
-            nullable: false,
-        }
+        Column::new(name, dtype, false)
     }
 
     fn ts_scan() -> QueryExpr {

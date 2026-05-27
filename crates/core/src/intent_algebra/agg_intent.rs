@@ -144,11 +144,7 @@ impl AggIntent {
 }
 
 fn col(name: &str, dtype: DataType, nullable: bool) -> Column {
-    Column {
-        name: name.into(),
-        dtype,
-        nullable,
-    }
+    Column::new(name, dtype, nullable)
 }
 
 /// `0.99` → `"0_99"`, `0.5` → `"0_5"`. Used by `Quantile` output naming so
@@ -227,11 +223,7 @@ mod tests {
     use crate::intent_algebra::schema::{Column, DataType};
 
     fn c(name: &str, dtype: DataType) -> Column {
-        Column {
-            name: name.into(),
-            dtype,
-            nullable: false,
-        }
+        Column::new(name, dtype, false)
     }
 
     #[test]

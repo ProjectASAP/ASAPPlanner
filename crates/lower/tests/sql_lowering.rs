@@ -6,17 +6,13 @@
 
 use asap_control_core::intent_algebra::schema::{Column, DataType, Schema};
 use asap_control_core::intent_algebra::{
-    AggIntent, JoinKind, L3Expr, QueryExpr, Source, WindowFuncKind,
+    AggIntent, CompareOp, JoinKind, L3Expr, QueryExpr, Source, WindowFuncKind,
 };
 use asap_control_core::types::AccuracyTarget;
 use asap_control_lower::{lower_sql, SqlCatalog};
 
 fn col(name: &str, dtype: DataType) -> Column {
-    Column {
-        name: name.into(),
-        dtype,
-        nullable: false,
-    }
+    Column::new(name, dtype, false)
 }
 
 /// `metrics(ts, service, latency, bytes)` + `hosts(service, region)`.
@@ -253,6 +249,68 @@ async fn inner_join_lowers_to_join_over_two_scans() {
     assert_eq!(*kind, JoinKind::Inner);
     assert!(matches!(left.as_ref(), QueryExpr::Scan { .. }));
     assert!(matches!(right.as_ref(), QueryExpr::Scan { .. }));
+}
+
+/// The two `ColumnId`s an equijoin predicate `Column(l) = Column(r)` binds to,
+/// returned sorted so the assertion is independent of left/right ordering.
+fn join_eq_columns(join: &QueryExpr) -> [usize; 2] {
+    let QueryExpr::Join { pred, .. } = join else {
+        unreachable!("expected a Join");
+    };
+    let L3Expr::Compare {
+        left,
+        op: CompareOp::Eq,
+        right,
+    } = &pred.0
+    else {
+        panic!("expected an equijoin Compare, got {:?}", pred.0);
+    };
+    match (left.as_ref(), right.as_ref()) {
+        (L3Expr::Column(l), L3Expr::Column(r)) => {
+            let mut cols = [*l, *r];
+            cols.sort_unstable();
+            cols
+        }
+        other => panic!("expected Column = Column, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn join_predicate_disambiguates_shared_column_name() {
+    // Issue #7: `metrics.service = hosts.service` shares a column name across the
+    // join. The qualified refs must bind to two *distinct* positions in the
+    // concatenated schema, not collapse onto the first `service`.
+    // metrics(ts,service,latency,bytes) ++ hosts(service,region)
+    // → metrics.service = col 1, hosts.service = col 4.
+    let qe = lower(
+        "SELECT metrics.bytes, hosts.region \
+         FROM metrics JOIN hosts ON metrics.service = hosts.service",
+    )
+    .await;
+    let join = find_join(&qe).expect("expected a Join in the tree");
+    assert_eq!(
+        join_eq_columns(join),
+        [1, 4],
+        "join key must bind to distinct positions, not the same `service`"
+    );
+}
+
+#[tokio::test]
+async fn self_join_disambiguates_via_aliases() {
+    // A self-join shares *every* column name; the alias qualifiers (`a`/`b`) are
+    // the only way to tell the two `service` columns apart.
+    // metrics ++ metrics → a.service = col 1, b.service = col 5 (4 cols/side).
+    let qe = lower(
+        "SELECT a.bytes, b.latency \
+         FROM metrics a JOIN metrics b ON a.service = b.service",
+    )
+    .await;
+    let join = find_join(&qe).expect("expected a self-Join in the tree");
+    assert_eq!(
+        join_eq_columns(join),
+        [1, 5],
+        "self-join keys must bind to distinct sides"
+    );
 }
 
 #[tokio::test]

@@ -42,6 +42,30 @@ pub struct Column {
     /// Whether NULL values are allowed in this column. PromQL value
     /// columns are non-nullable; SQL columns inherit their DDL nullability.
     pub nullable: bool,
+    /// Optional table/alias qualifier (SQL `t.col` / `t AS a` → `a`). Travels
+    /// with the column through joins so a `ColumnRef::Qualified` can pick the
+    /// right side when both carry the same `name`. `None` for PromQL labels and
+    /// unqualified columns.
+    #[serde(default)]
+    pub table: Option<String>,
+}
+
+impl Column {
+    /// An unqualified column (`table = None`).
+    pub fn new(name: impl Into<String>, dtype: DataType, nullable: bool) -> Self {
+        Self {
+            name: name.into(),
+            dtype,
+            nullable,
+            table: None,
+        }
+    }
+
+    /// This column re-qualified under `table` (e.g. by a `SubqueryAlias`).
+    pub fn with_table(mut self, table: impl Into<String>) -> Self {
+        self.table = Some(table.into());
+        self
+    }
 }
 
 /// L3 column data types. Deliberately narrow: no sketch state at this
@@ -117,9 +141,18 @@ impl Schema {
         }
     }
 
-    /// Look up a column by name. `None` if not present.
+    /// Look up a column by name (first match). `None` if not present.
     pub fn column_id(&self, name: &str) -> Option<ColumnId> {
         self.columns.iter().position(|c| c.name == name)
+    }
+
+    /// Look up a column by `(table, name)` qualifier — disambiguates columns
+    /// that share a `name` across a join (`a.k` vs `b.k`). `None` if no column
+    /// has both that qualifier and name.
+    pub fn column_id_qualified(&self, table: &str, name: &str) -> Option<ColumnId> {
+        self.columns
+            .iter()
+            .position(|c| c.name == name && c.table.as_deref() == Some(table))
     }
 
     /// Whether this schema has *any* provable unique key. The CSE pass
@@ -209,11 +242,7 @@ mod tests {
     use super::*;
 
     fn col(name: &str, dtype: DataType) -> Column {
-        Column {
-            name: name.into(),
-            dtype,
-            nullable: false,
-        }
+        Column::new(name, dtype, false)
     }
 
     /// `cse_reuse_is_legal` accepts a producer schema with at least one

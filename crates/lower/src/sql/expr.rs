@@ -25,7 +25,15 @@ pub(super) fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
 /// Returns `UnsupportedFeature` for anything not needed in v1.
 pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
     match expr {
-        Expr::Column(col) => Ok(L2Expr::Column(ColumnRef::Named(col.name.clone()))),
+        // Preserve DataFusion's relation qualifier so a column name shared
+        // across a join (`a.k` vs `b.k`) resolves to the correct side.
+        Expr::Column(col) => Ok(L2Expr::Column(match &col.relation {
+            Some(rel) => ColumnRef::Qualified {
+                table: rel.to_string(),
+                name: col.name.clone(),
+            },
+            None => ColumnRef::Named(col.name.clone()),
+        })),
 
         Expr::Literal(sv) => scalar_value_to_l3(sv).map(L2Expr::Literal),
 

@@ -70,6 +70,13 @@ impl Source {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnRef {
     Named(String),
+    /// Table-qualified reference (`t.col` / `alias.col`). Resolved by
+    /// `(table, name)` so a column name shared across a join (`a.k` vs `b.k`)
+    /// binds to the correct side.
+    Qualified {
+        table: String,
+        name: String,
+    },
     /// The implicit metric sample value (PromQL — always the series value).
     SampleValue,
     /// All rows / COUNT(*).
@@ -403,11 +410,7 @@ impl QueryExpr {
                 let probe = value_col_idx
                     .and_then(|i| in_schema.columns.get(i))
                     .cloned()
-                    .unwrap_or(Column {
-                        name: "value".into(),
-                        dtype: DataType::Float64,
-                        nullable: false,
-                    });
+                    .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
                 // Each reducer types off its own input column (`SUM(bytes)` vs
                 // `AVG(latency)` in one node); `None` falls back to the sample-
                 // value probe (PromQL's single-column convention). A non-empty
@@ -458,20 +461,18 @@ impl QueryExpr {
             // is re-found by name.
             QueryExpr::Project { cols, child } => {
                 let in_schema = child.output_schema_in(scope)?;
-                let columns: Vec<Column> =
-                    cols.iter()
-                        .enumerate()
-                        .map(|(i, item)| {
-                            let (dtype, nullable) = infer_expr_type(&item.expr, &in_schema);
-                            Column {
-                                name: item.alias.clone().unwrap_or_else(|| {
-                                    default_proj_name(&item.expr, i, &in_schema)
-                                }),
-                                dtype,
-                                nullable,
-                            }
-                        })
-                        .collect();
+                let columns: Vec<Column> = cols
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let (dtype, nullable) = infer_expr_type(&item.expr, &in_schema);
+                        let name = item
+                            .alias
+                            .clone()
+                            .unwrap_or_else(|| default_proj_name(&item.expr, i, &in_schema));
+                        Column::new(name, dtype, nullable)
+                    })
+                    .collect();
                 let time_index = columns.iter().position(|c| c.name == "ts");
                 Ok(Schema {
                     columns,
@@ -572,11 +573,8 @@ impl QueryExpr {
                         (arg_dtype(), arg.is_none_or(|c| c.nullable))
                     }
                 };
-                out.columns.push(Column {
-                    name: output_name.clone(),
-                    dtype,
-                    nullable,
-                });
+                out.columns
+                    .push(Column::new(output_name.clone(), dtype, nullable));
                 Ok(out)
             }
 
@@ -678,11 +676,7 @@ mod tests {
     use crate::intent_algebra::expr_ir::{ArithOp, CompareOp};
 
     fn col(name: &str, dtype: DataType, nullable: bool) -> Column {
-        Column {
-            name: name.into(),
-            dtype,
-            nullable,
-        }
+        Column::new(name, dtype, nullable)
     }
 
     fn scan(

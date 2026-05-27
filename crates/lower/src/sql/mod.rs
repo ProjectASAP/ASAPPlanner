@@ -20,6 +20,7 @@ use datafusion::prelude::SessionContext;
 use asap_control_core::intent_algebra::relational::{
     AggFunc, AggItem, L2ProjectItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
+use asap_control_core::intent_algebra::schema::Schema;
 use asap_control_core::intent_algebra::{
     ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
 };
@@ -104,12 +105,14 @@ impl<'a> SqlLowerer<'a> {
             LogicalPlan::Join(join) => self.lower_join(join),
             LogicalPlan::Subquery(_) => Err(LoweringError::UnsupportedFeature("subquery".into())),
             LogicalPlan::SubqueryAlias(alias) => {
-                // A bare table alias is transparent; a derived table (inline view)
-                // is unsupported in v1.
+                // An alias over a table re-qualifies the scan's columns with the
+                // alias (so `a.col` / `b.col` in a self-join disambiguate). A
+                // derived table (inline view) is unsupported in v1.
                 match alias.input.as_ref() {
-                    LogicalPlan::TableScan(_) | LogicalPlan::SubqueryAlias(_) => {
-                        self.lower_plan(&alias.input)
+                    LogicalPlan::TableScan(scan) => {
+                        self.scan_source(&scan.table_name.to_string(), &alias.alias.to_string())
                     }
+                    LogicalPlan::SubqueryAlias(_) => self.lower_plan(&alias.input),
                     _ => Err(LoweringError::UnsupportedFeature(
                         "subquery (inline view / derived table)".into(),
                     )),
@@ -126,15 +129,32 @@ impl<'a> SqlLowerer<'a> {
     /// has positional column identity. Projection pushdown is left to the
     /// enclosing `Project` (DataFusion's unoptimized plan sets no projection).
     fn lower_table_scan(&self, scan: &logical_expr::TableScan) -> Result<L2, LoweringError> {
-        let table_name = scan.table_name.to_string();
+        let table = scan.table_name.to_string();
+        self.scan_source(&table, &table)
+    }
+
+    /// A `Source` over catalog table `table`, with its columns qualified by
+    /// `qualifier` (the table name, or an alias from a `SubqueryAlias`) so
+    /// `Qualified` column refs resolve to the right side across a join.
+    fn scan_source(&self, table: &str, qualifier: &str) -> Result<L2, LoweringError> {
         let schema = self
             .catalog
             .tables
-            .get(&table_name)
-            .ok_or_else(|| LoweringError::TableNotFound(table_name.clone()))?;
+            .get(table)
+            .ok_or_else(|| LoweringError::TableNotFound(table.to_string()))?;
+        let qualified = Schema {
+            columns: schema
+                .columns
+                .iter()
+                .cloned()
+                .map(|c| c.with_table(qualifier))
+                .collect(),
+            time_index: schema.time_index,
+            unique_keys: schema.unique_keys.clone(),
+        };
         Ok(L2::Source(SourceSpec::with_schema(
-            table_name,
-            schema.clone(),
+            table.to_string(),
+            qualified,
         )))
     }
 

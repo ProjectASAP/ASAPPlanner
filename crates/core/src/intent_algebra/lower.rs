@@ -431,6 +431,14 @@ fn resolve_agg_col(col: &ColumnRef, schema: &Schema) -> Result<Option<ColumnId>,
                     available: schema.columns.iter().map(|c| c.name.clone()).collect(),
                 })
         }
+        ColumnRef::Qualified { table, name } => schema
+            .column_id_qualified(table, name)
+            .or_else(|| schema.column_id(name))
+            .map(Some)
+            .ok_or_else(|| ResolveError::NotFound {
+                name: format!("{table}.{name}"),
+                available: schema.columns.iter().map(|c| c.name.clone()).collect(),
+            }),
         ColumnRef::SampleValue | ColumnRef::Wildcard => Ok(None),
     }
 }
@@ -484,11 +492,7 @@ mod tests {
     use crate::intent_algebra::schema::{Column, DataType, Schema};
 
     fn col(name: &str, dtype: DataType) -> Column {
-        Column {
-            name: name.into(),
-            dtype,
-            nullable: false,
-        }
+        Column::new(name, dtype, false)
     }
 
     /// A SQL-shaped `SELECT SUM(bytes), AVG(latency) FROM t` lowers each
