@@ -358,4 +358,24 @@ mod tests {
         let back: Schema = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
     }
+
+    #[test]
+    fn column_table_defaults_to_none_when_absent() {
+        // `Column.table` is `#[serde(default)]` so schemas serialized before the
+        // qualifier field existed still deserialize (to `table: None`) instead
+        // of erroring. Drop the key from a serialized column to simulate that.
+        let mut v = serde_json::to_value(col("svc", DataType::Utf8)).unwrap();
+        assert!(v.as_object_mut().unwrap().remove("table").is_some());
+        let back: Column = serde_json::from_value(v).unwrap();
+        assert_eq!(back, col("svc", DataType::Utf8));
+        assert!(back.table.is_none());
+    }
+
+    #[test]
+    fn qualified_column_serde_roundtrip() {
+        let c = col("service", DataType::Utf8).with_table("hosts");
+        let back: Column = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back, c);
+        assert_eq!(back.table.as_deref(), Some("hosts"));
+    }
 }

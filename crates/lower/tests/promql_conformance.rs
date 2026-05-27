@@ -428,6 +428,42 @@ fn unary_negation_is_rejected__GAP() {
     let _ = rejected("-rate(http_errors_total[5m])");
     let _ = rejected("-some_metric");
     let _ = rejected("-metric_a or -metric_b");
+    // Negation nested inside a larger expression propagates the rejection,
+    // rather than lowering the rest with the inner sign silently dropped.
+    let _ = rejected("http_requests_total - -http_errors_total");
+    let _ = rejected("sum(-node_cpu_seconds_total)");
+}
+
+#[test]
+fn count_maps_to_cardinality_and_inherits_accuracy() {
+    // SEMANTICS (review #2): PromQL `count by (...)` counts distinct series → the
+    // `Cardinality` intent. The workload's AccuracyTarget threads onto it:
+    // `Exact` stays exact (no silent HLL substitution); an approximate target is
+    // carried through for L4 to honor. This pins the intentional count→Cardinality
+    // mapping and its accuracy gating.
+    let exact = lower_promql("count by (job) (up)", AccuracyTarget::Exact).unwrap();
+    assert!(
+        has(&exact, |i| matches!(
+            i,
+            AggIntent::Cardinality {
+                accuracy: AccuracyTarget::Exact
+            }
+        )),
+        "count→Cardinality must stay Exact under AccuracyTarget::Exact, got {:?}",
+        intents(&exact)
+    );
+
+    let approx = lower_promql("count by (job) (up)", AccuracyTarget::Epsilon(0.01)).unwrap();
+    assert!(
+        has(&approx, |i| matches!(
+            i,
+            AggIntent::Cardinality {
+                accuracy: AccuracyTarget::Epsilon(e)
+            } if (*e - 0.01).abs() < 1e-9
+        )),
+        "count→Cardinality must carry the approximate target, got {:?}",
+        intents(&approx)
+    );
 }
 
 #[test]

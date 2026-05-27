@@ -79,6 +79,22 @@ fn find_join(qe: &QueryExpr) -> Option<&QueryExpr> {
     }
 }
 
+/// The first `Filter` node along the single-child spine.
+fn find_filter(qe: &QueryExpr) -> Option<&QueryExpr> {
+    match qe {
+        QueryExpr::Filter { .. } => Some(qe),
+        QueryExpr::Project { child, .. }
+        | QueryExpr::Aggregate { child, .. }
+        | QueryExpr::Window { child, .. }
+        | QueryExpr::Partition { child, .. }
+        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Sort { child, .. }
+        | QueryExpr::Limit { child, .. }
+        | QueryExpr::Subquery { child, .. } => find_filter(child),
+        _ => None,
+    }
+}
+
 #[tokio::test]
 async fn select_star_with_where_folds_predicate_onto_scan() {
     // SELECT * elides the projection; WHERE folds onto the Scan predicates.
@@ -310,6 +326,30 @@ async fn self_join_disambiguates_via_aliases() {
         join_eq_columns(join),
         [1, 5],
         "self-join keys must bind to distinct sides"
+    );
+}
+
+#[tokio::test]
+async fn qualified_where_over_join_resolves_to_right_side() {
+    // Issue #7 beyond the join key: a WHERE on the *duplicated* column name
+    // (`service` exists on both sides) must bind to the qualified side, not the
+    // first match. metrics.service = col 1, hosts.service = col 4 → `hosts.service`
+    // must resolve to 4. (Unoptimized plan keeps the Filter above the Join — no
+    // predicate pushdown — so it binds against the concatenated schema.)
+    let qe = lower(
+        "SELECT metrics.bytes FROM metrics JOIN hosts ON metrics.service = hosts.service \
+         WHERE hosts.service = 'api'",
+    )
+    .await;
+    let filter = find_filter(&qe).expect("expected a Filter over the join");
+    let QueryExpr::Filter { pred, .. } = filter else {
+        unreachable!("find_filter only returns Filter");
+    };
+    assert!(
+        matches!(&pred.0, L3Expr::Compare { left, op: CompareOp::Eq, .. }
+            if matches!(left.as_ref(), L3Expr::Column(4))),
+        "hosts.service must bind to concatenated position 4 (not the first `service`), got {:?}",
+        pred.0
     );
 }
 

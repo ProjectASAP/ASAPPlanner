@@ -69,3 +69,18 @@ impl From<datafusion::error::DataFusionError> for LoweringError {
         Self::DataFusion(e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_feature_label_is_language_neutral() {
+        // `UnsupportedFeature` is raised by both front ends, so its Display must
+        // not hardcode "PromQL" — a SQL user rejecting a subquery shouldn't see
+        // "unsupported PromQL feature: subquery".
+        let msg = LoweringError::UnsupportedFeature("subquery".into()).to_string();
+        assert_eq!(msg, "unsupported feature: subquery");
+        assert!(!msg.contains("PromQL"), "got: {msg}");
+    }
+}
