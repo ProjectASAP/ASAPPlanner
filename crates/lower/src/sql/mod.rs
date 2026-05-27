@@ -245,7 +245,7 @@ impl<'a> SqlLowerer<'a> {
         let partition_by = wf
             .partition_by
             .iter()
-            .map(expr_to_group_name)
+            .map(expr_to_group_ref)
             .collect::<Result<Vec<_>, _>>()?;
         let order_by = wf
             .order_by
@@ -301,7 +301,7 @@ impl<'a> SqlLowerer<'a> {
         let keys = agg
             .group_expr
             .iter()
-            .map(expr_to_group_name)
+            .map(expr_to_group_ref)
             .collect::<Result<Vec<_>, _>>()?;
         // DataFusion names the aggregate outputs in its own schema (e.g.
         // "sum(metrics.bytes)") — the same names the enclosing Projection
@@ -389,7 +389,7 @@ impl<'a> SqlLowerer<'a> {
         let by = agg
             .group_expr
             .iter()
-            .map(expr_to_group_name)
+            .map(expr_to_group_ref)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(L2::TopK {
             k,
@@ -493,10 +493,19 @@ fn reducer_col(name: &str, args: &[Expr]) -> Result<ColumnRef, LoweringError> {
     })
 }
 
-fn expr_to_group_name(expr: &Expr) -> Result<String, LoweringError> {
+fn expr_to_group_ref(expr: &Expr) -> Result<ColumnRef, LoweringError> {
     match expr {
-        Expr::Column(col) => Ok(col.name.clone()),
-        Expr::Alias(a) => expr_to_group_name(&a.expr),
+        // Preserve the relation qualifier so a GROUP BY / PARTITION BY key over a
+        // join (`b.k` vs `a.k`) resolves to the correct side — the same rule the
+        // scalar predicate path uses (`df_expr_to_l2`).
+        Expr::Column(col) => Ok(match &col.relation {
+            Some(rel) => ColumnRef::Qualified {
+                table: rel.to_string(),
+                name: col.name.clone(),
+            },
+            None => ColumnRef::Named(col.name.clone()),
+        }),
+        Expr::Alias(a) => expr_to_group_ref(&a.expr),
         other => Err(LoweringError::UnsupportedFeature(format!(
             "non-column GROUP BY expression: {other}"
         ))),

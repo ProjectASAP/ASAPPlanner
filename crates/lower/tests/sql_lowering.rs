@@ -367,6 +367,37 @@ async fn qualified_where_over_join_resolves_to_right_side() {
 }
 
 #[tokio::test]
+async fn self_join_group_by_disambiguates_via_qualifier() {
+    // L2 group-key qualifier fix: GROUP BY on the *duplicated* column over a
+    // self-join must bind to the qualified side, not first-match. metrics ⋈
+    // metrics → a.service = col 1, b.service = col 5. (Without qualified keys,
+    // both `GROUP BY a.service` and `GROUP BY b.service` collapsed to col 1.)
+    let qe_b = lower(
+        "SELECT b.service, COUNT(*) FROM metrics a JOIN metrics b \
+         ON a.service = b.service GROUP BY b.service",
+    )
+    .await;
+    let (by, _) = find_aggregate(&qe_b).expect("expected an Aggregate over the self-join");
+    assert_eq!(
+        by,
+        &vec![5],
+        "GROUP BY b.service binds to the b side (col 5)"
+    );
+
+    let qe_a = lower(
+        "SELECT a.service, COUNT(*) FROM metrics a JOIN metrics b \
+         ON a.service = b.service GROUP BY a.service",
+    )
+    .await;
+    let (by, _) = find_aggregate(&qe_a).expect("expected an Aggregate over the self-join");
+    assert_eq!(
+        by,
+        &vec![1],
+        "GROUP BY a.service binds to the a side (col 1)"
+    );
+}
+
+#[tokio::test]
 async fn aggregate_over_join_binds_against_concatenated_schema() {
     // GROUP BY a right-table column over a join: the key must resolve against
     // the concatenated schema, exercising the bottom-up converter end to end.

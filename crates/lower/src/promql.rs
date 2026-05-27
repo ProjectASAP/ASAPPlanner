@@ -368,7 +368,7 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
 
 /// Assemble the Layer-2 tree from a lowered inner vector, the resolved group
 /// keys, and the enclosing aggregator shape.
-fn build(inner: Inner, keys: Vec<String>, outer: Outer) -> Result<L2> {
+fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
     match outer {
         Outer::None => match &inner.func {
             None => Ok(filtered_source(inner.metric, inner.matchers)),
@@ -437,7 +437,7 @@ fn build(inner: Inner, keys: Vec<String>, outer: Outer) -> Result<L2> {
 
 /// `Aggregate{keys, [func]}` over `[Window{w}] → Filter(Source)`. Rate/Increase
 /// carry their own window in the func, so no `Window` node is emitted.
-fn windowed_aggregate(inner: Inner, keys: Vec<String>, func: AggFunc) -> L2 {
+fn windowed_aggregate(inner: Inner, keys: Vec<ColumnRef>, func: AggFunc) -> L2 {
     let skip_window = matches!(func, AggFunc::Rate { .. } | AggFunc::Increase { .. });
     let window = inner.window;
     let base = filtered_source(inner.metric, inner.matchers);
@@ -467,7 +467,7 @@ fn windowed_aggregate(inner: Inner, keys: Vec<String>, func: AggFunc) -> L2 {
 /// `Aggregate{keys, [func]}` directly over an existing L2 subtree — the OUTER
 /// level of a two-level aggregation such as `sum(rate(…))` or the
 /// `Aggregate{[Quantile]}` that wraps a `histogram_quantile` argument.
-fn outer_aggregate(keys: Vec<String>, func: AggFunc, input: L2) -> L2 {
+fn outer_aggregate(keys: Vec<ColumnRef>, func: AggFunc, input: L2) -> L2 {
     L2::Aggregate {
         keys,
         aggs: vec![AggItem {
@@ -544,16 +544,17 @@ fn outer_func(o: &OuterIntent) -> AggFunc {
 /// Resolve `by(labels)` into a key list. `without(...)` needs the metric's
 /// full label set, which the usage-derived schema model doesn't carry, so it
 /// is rejected (a registry-backed `SchemaCatalog` would lift this).
-fn resolve_group(agg: &AggregateExpr) -> Result<Vec<String>> {
+fn resolve_group(agg: &AggregateExpr) -> Result<Vec<ColumnRef>> {
     match &agg.modifier {
         None => Ok(vec![]),
         Some(LabelModifier::Include(ls)) => {
             // Grouping labels are a set: `by (a, b)` ≡ `by (b, a)`. Canonicalise
-            // so equivalent groupings lower to identical keys.
+            // so equivalent groupings lower to identical keys. PromQL labels have
+            // no table qualifier → `ColumnRef::Named`.
             let mut keys = ls.labels.clone();
             keys.sort();
             keys.dedup();
-            Ok(keys)
+            Ok(keys.into_iter().map(ColumnRef::Named).collect())
         }
         Some(LabelModifier::Exclude(_)) => Err(LoweringError::UnsupportedFeature(
             "`without(...)` grouping requires a registry-backed catalog of the \

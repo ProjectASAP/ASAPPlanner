@@ -120,9 +120,11 @@ pub enum QueryExpr {
         input: Box<QueryExpr>,
     },
 
-    /// γ + α — GROUP BY (`keys`) followed by aggregate functions.
+    /// γ + α — GROUP BY (`keys`) followed by aggregate functions. Keys are
+    /// `ColumnRef` (not bare strings) so a table-qualified key (`b.k`) resolves
+    /// to the correct join side, matching the scalar-predicate path.
     Aggregate {
-        keys: Vec<String>,
+        keys: Vec<ColumnRef>,
         aggs: Vec<AggItem>,
         having: Option<L2Expr>,
         input: Box<QueryExpr>,
@@ -145,10 +147,10 @@ pub enum QueryExpr {
         cols: Vec<ColumnRef>,
         input: Box<QueryExpr>,
     },
-    /// τ — heavy-hitter top-k. `by` are the grouping keys.
+    /// τ — heavy-hitter top-k. `by` are the grouping keys (qualified-capable).
     TopK {
         k: u64,
-        by: Vec<String>,
+        by: Vec<ColumnRef>,
         input: Box<QueryExpr>,
     },
     /// ⊕ — merge sub-results from independent branches.
@@ -194,7 +196,7 @@ pub enum QueryExpr {
     WindowFunc {
         func: WindowFuncKind,
         args: Vec<L2Expr>,
-        partition_by: Vec<String>,
+        partition_by: Vec<ColumnRef>,
         order_by: Vec<L2SortKey>,
         output_name: String,
         input: Box<QueryExpr>,

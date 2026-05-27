@@ -15,8 +15,7 @@ use thiserror::Error;
 use crate::intent_algebra::agg_intent::AggIntent;
 use crate::intent_algebra::binder::Binder;
 use crate::intent_algebra::column_resolution::{
-    output_schema_for_aggregate, resolve_column_refs, resolve_expr, resolve_named_keys,
-    ResolveError,
+    output_schema_for_aggregate, resolve_column_refs, resolve_expr, ResolveError,
 };
 use crate::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
 use crate::intent_algebra::names::BindingName;
@@ -128,7 +127,7 @@ pub fn convert(
                 // keep the legacy name-based `Partition` marker instead of
                 // folding them into a per-series `by`.
                 let by = if window.is_none() {
-                    resolve_named_keys(keys, &agg_in_schema).unwrap_or_default()
+                    resolve_column_refs(keys, &agg_in_schema).unwrap_or_default()
                 } else {
                     Vec::new()
                 };
@@ -156,8 +155,11 @@ pub fn convert(
                 return Ok(if grouped_positionally {
                     sketch
                 } else {
+                    // Fallback (windowed per-series reduction): keep the legacy
+                    // name-based `Partition`. These keys are PromQL labels
+                    // (unqualified), so the bare names suffice.
                     CQueryExpr::Partition {
-                        keys: CPartitionKeys::By(keys.clone()),
+                        keys: CPartitionKeys::By(ref_names(keys)),
                         child: Box::new(sketch),
                     }
                 });
@@ -169,7 +171,7 @@ pub fn convert(
             // resolves against the derived output schema instead.
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
-            let by = resolve_named_keys(keys, &child_schema)?;
+            let by = resolve_column_refs(keys, &child_schema)?;
             let intents: Vec<AggIntent> = aggs
                 .iter()
                 .map(|item| -> Result<AggIntent, ConvertError> {
@@ -249,7 +251,7 @@ pub fn convert(
         LQueryExpr::TopK { k, by, input } => {
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
-            let by = resolve_named_keys(by, &child_schema)?;
+            let by = resolve_column_refs(by, &child_schema)?;
             CQueryExpr::Aggregate {
                 by,
                 aggs: vec![AggIntent::TopK {
@@ -364,7 +366,7 @@ pub fn convert(
                 .iter()
                 .map(|a| resolve_expr(a, &child_schema))
                 .collect::<Result<Vec<_>, _>>()?;
-            let partition_by = resolve_named_keys(partition_by, &child_schema)?;
+            let partition_by = resolve_column_refs(partition_by, &child_schema)?;
             let order_by = order_by
                 .iter()
                 .map(|k| -> Result<SortKey, ConvertError> {
@@ -436,6 +438,19 @@ fn scan(
         predicates,
         schema,
     })
+}
+
+/// Bare names of a `ColumnRef` list, dropping `SampleValue`/`Wildcard`. Used
+/// only for the legacy name-based `Partition` fallback (PromQL labels, which
+/// are unqualified — `Qualified` collapses to its bare `name`).
+fn ref_names(refs: &[ColumnRef]) -> Vec<String> {
+    refs.iter()
+        .filter_map(|c| match c {
+            ColumnRef::Named(n) => Some(n.clone()),
+            ColumnRef::Qualified { name, .. } => Some(name.clone()),
+            ColumnRef::SampleValue | ColumnRef::Wildcard => None,
+        })
+        .collect()
 }
 
 /// Resolve a Layer-2 aggregate-input [`ColumnRef`] to a positional input
@@ -631,7 +646,7 @@ mod tests {
             right: Box::new(meta),
         };
         let tree = LQueryExpr::Aggregate {
-            keys: vec!["region".into()],
+            keys: vec![ColumnRef::Named("region".into())],
             aggs: vec![
                 AggItem {
                     alias: "tot".into(),
@@ -676,7 +691,7 @@ mod tests {
             col("bytes", DataType::Int64),
         ]);
         let tree = LQueryExpr::Aggregate {
-            keys: vec!["region".into()],
+            keys: vec![ColumnRef::Named("region".into())],
             aggs: vec![
                 AggItem {
                     alias: "tot".into(),

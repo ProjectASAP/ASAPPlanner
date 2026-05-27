@@ -1,10 +1,10 @@
 //! Schema-driven column resolution for the Layer-2 `relational` IR.
 //!
-//! The Layer-2 IR uses `ColumnRef::Named(String)` / `Aggregate.keys:
-//! Vec<String>`; the canonical IR uses positional [`ColumnId`] resolved
-//! against a per-node [`Schema`]. These helpers bridge the two — the
-//! [`Binder`](super::binder) builds the schema, and [`resolve_named_keys`]
-//! turns the L2 names into positional ids.
+//! The Layer-2 IR uses `ColumnRef` (name-based, optionally table-qualified);
+//! the canonical IR uses positional [`ColumnId`] resolved against a per-node
+//! [`Schema`]. These helpers bridge the two — the [`Binder`](super::binder)
+//! builds the schema, and [`resolve_column_refs`] turns the L2 refs (group
+//! keys, dedup columns) into positional ids, qualifier-aware.
 
 use thiserror::Error;
 
@@ -151,24 +151,10 @@ pub fn resolve_expr(expr: &L2Expr, schema: &Schema) -> Result<L3Expr, ResolveErr
     })
 }
 
-/// Resolve a list of named GROUP BY keys (`Aggregate.keys`) to `ColumnId`s.
-pub fn resolve_named_keys(keys: &[String], schema: &Schema) -> Result<Vec<ColumnId>, ResolveError> {
-    keys.iter()
-        .map(|name| {
-            schema
-                .column_id(name)
-                .ok_or_else(|| ResolveError::NotFound {
-                    name: name.clone(),
-                    available: schema.columns.iter().map(|c| c.name.clone()).collect(),
-                })
-        })
-        .collect()
-}
-
 /// Output schema produced by an `Aggregate { by, aggs }` over `input`.
 /// Mirrors `QueryExpr::output_schema_in`'s `Aggregate` arm; out-of-range `by`
 /// ids are silently dropped (callers needing the strict check resolve `by`
-/// via [`resolve_named_keys`], which surfaces `NotFound`).
+/// via [`resolve_column_refs`], which surfaces `NotFound`).
 pub fn output_schema_for_aggregate(
     input: &Schema,
     by: &[ColumnId],

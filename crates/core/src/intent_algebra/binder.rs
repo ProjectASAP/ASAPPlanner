@@ -106,23 +106,31 @@ fn default_leaf_columns() -> Vec<Column> {
 /// expressions (e.g. a PromQL label matcher `m{env="prod"}` references `env`).
 /// The Binder seeds these into the usage-derived leaf so positional resolution
 /// downstream is total.
+/// Push a `ColumnRef`'s bare name (the schema-seedable identifier). `Qualified`
+/// collapses to its `name`; `SampleValue`/`Wildcard` carry no name.
+fn push_ref_name(c: &ColumnRef, out: &mut Vec<String>) {
+    match c {
+        ColumnRef::Named(n) => out.push(n.clone()),
+        ColumnRef::Qualified { name, .. } => out.push(name.clone()),
+        ColumnRef::SampleValue | ColumnRef::Wildcard => {}
+    }
+}
+
 fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
     fn named(expr: &L2Expr, out: &mut Vec<String>) {
         for c in expr.columns_referenced() {
-            if let ColumnRef::Named(n) = c {
-                out.push(n.clone());
-            }
+            push_ref_name(c, out);
         }
     }
     let mut out: Vec<String> = Vec::new();
     tree.walk(&mut |node| match node {
         LQueryExpr::Aggregate { keys, having, .. } => {
-            out.extend(keys.iter().cloned());
+            keys.iter().for_each(|k| push_ref_name(k, &mut out));
             if let Some(h) = having {
                 named(h, &mut out);
             }
         }
-        LQueryExpr::TopK { by, .. } => out.extend(by.iter().cloned()),
+        LQueryExpr::TopK { by, .. } => by.iter().for_each(|k| push_ref_name(k, &mut out)),
         LQueryExpr::Partition { keys, .. } => out.extend(keys.keys().iter().cloned()),
         LQueryExpr::Filter { pred, .. } => named(pred, &mut out),
         LQueryExpr::Project { cols, .. } => {
