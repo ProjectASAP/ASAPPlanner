@@ -14,7 +14,9 @@ use thiserror::Error;
 
 use crate::intent_algebra::agg_intent::AggIntent;
 use crate::intent_algebra::binder::Binder;
-use crate::intent_algebra::column_resolution::{resolve_expr, resolve_named_keys, ResolveError};
+use crate::intent_algebra::column_resolution::{
+    output_schema_for_aggregate, resolve_expr, resolve_named_keys, ResolveError,
+};
 use crate::intent_algebra::expr_ir::{L2Expr, L3Expr, L3Scalar};
 use crate::intent_algebra::names::BindingName;
 use crate::intent_algebra::query_expr::{
@@ -145,27 +147,32 @@ pub fn convert(
             }
 
             // Plain canonical `Aggregate`: multi-agg or HAVING-bearing. Keys +
-            // per-reducer input columns resolve against the child's schema.
+            // per-reducer input columns resolve against the child's (input)
+            // schema; HAVING references the aggregate's *output* columns, so it
+            // resolves against the derived output schema instead.
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
             let by = resolve_named_keys(keys, &child_schema)?;
-            let intents = aggs
+            let intents: Vec<AggIntent> = aggs
                 .iter()
                 .map(|item| -> Result<AggIntent, ConvertError> {
                     let col = resolve_agg_col(&item.col, &child_schema)?;
                     Ok(agg_func_to_intent(&item.func, acc, col))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let output_names: Vec<String> = aggs.iter().map(|item| item.alias.clone()).collect();
             let having = having
                 .as_ref()
                 .map(|h| -> Result<Predicate, ConvertError> {
-                    Ok(Predicate(resolve_expr(h, &child_schema)?))
+                    let out_schema =
+                        output_schema_for_aggregate(&child_schema, &by, &intents, &output_names);
+                    Ok(Predicate(resolve_expr(h, &out_schema)?))
                 })
                 .transpose()?;
             CQueryExpr::Aggregate {
                 by,
                 aggs: intents,
-                output_names: aggs.iter().map(|item| item.alias.clone()).collect(),
+                output_names,
                 having,
                 child: Box::new(child),
             }
@@ -432,6 +439,7 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
 mod tests {
     use super::*;
     use crate::intent_algebra::agg_intent::AggIntent;
+    use crate::intent_algebra::expr_ir::{CompareOp, L2Expr, L3Expr, L3Scalar};
     use crate::intent_algebra::query_expr::{JoinKind, QueryExpr as CQueryExpr};
     use crate::intent_algebra::relational::{
         AggFunc, AggItem, QueryExpr as LQueryExpr, SourceSpec,
@@ -592,5 +600,55 @@ mod tests {
         );
         assert!(matches!(aggs[1], AggIntent::Count { .. }));
         assert!(matches!(child.as_ref(), CQueryExpr::Join { .. }));
+    }
+
+    /// `GROUP BY region HAVING <count> > 5` — HAVING references the aggregate
+    /// OUTPUT column (`n`), absent from the input schema, so it must resolve
+    /// against the derived output schema `[region(0), tot(1), n(2)]`.
+    #[test]
+    fn having_resolves_against_aggregate_output_schema() {
+        let schema = Schema::new(vec![
+            col("region", DataType::Utf8),
+            col("bytes", DataType::Int64),
+        ]);
+        let tree = LQueryExpr::Aggregate {
+            keys: vec!["region".into()],
+            aggs: vec![
+                AggItem {
+                    alias: "tot".into(),
+                    func: AggFunc::Sum,
+                    col: ColumnRef::Named("bytes".into()),
+                    distinct: false,
+                },
+                AggItem {
+                    alias: "n".into(),
+                    func: AggFunc::Count,
+                    col: ColumnRef::Wildcard,
+                    distinct: false,
+                },
+            ],
+            having: Some(L2Expr::Compare {
+                left: Box::new(L2Expr::Column(ColumnRef::Named("n".into()))),
+                op: CompareOp::Gt,
+                right: Box::new(L2Expr::Literal(L3Scalar::Int64(5))),
+            }),
+            input: Box::new(LQueryExpr::Source(SourceSpec::with_schema("t", schema))),
+        };
+        let l3 = convert(&tree, &Schema::default(), &AccuracyTarget::Exact).unwrap();
+        let CQueryExpr::Aggregate {
+            having: Some(having),
+            ..
+        } = &l3
+        else {
+            panic!("expected Aggregate with HAVING, got {l3:?}");
+        };
+        let L3Expr::Compare { left, .. } = &having.0 else {
+            panic!("expected Compare HAVING, got {:?}", having.0);
+        };
+        assert_eq!(
+            **left,
+            L3Expr::Column(2),
+            "HAVING `n` resolves to the count output column (index 2), not the input schema"
+        );
     }
 }

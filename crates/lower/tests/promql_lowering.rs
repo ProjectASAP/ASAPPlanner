@@ -454,6 +454,15 @@ fn function_wrapped_range_vector_is_rejected_not_stripped() {
     );
 }
 
+#[test]
+fn pathologically_nested_query_is_rejected_not_stack_overflow() {
+    // 300 nested parens parse fine but exceed the walker's depth limit (256);
+    // it must return an error, not overflow the stack.
+    let q = format!("{}m{}", "(".repeat(300), ")".repeat(300));
+    let err = lower_promql(&q, AccuracyTarget::Exact).unwrap_err();
+    assert!(format!("{err}").contains("nesting"), "got {err}");
+}
+
 // ── accuracy propagation ──────────────────────────────────────────────────────
 
 #[test]

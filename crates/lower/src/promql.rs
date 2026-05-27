@@ -92,11 +92,57 @@ struct Inner {
     func: Option<InnerFunc>,
 }
 
+/// Maximum PromQL expression nesting depth the walker accepts. Real queries
+/// nest only a handful deep; this bounds the recursive descent (`walk` and the
+/// mutually-recursive helpers) so a pathologically nested query is rejected
+/// rather than overflowing the stack.
+const MAX_DEPTH: usize = 256;
+
 impl PromqlLowerer {
     pub fn lower(query: &str) -> Result<L2> {
         let ast = parser::parse(query).map_err(LoweringError::Parse)?;
+        // Reject over-deep nesting up front, so the (mutually-recursive) walk
+        // below cannot blow the stack. The check itself recurses at most
+        // `MAX_DEPTH` frames before erroring, so it is bounded too.
+        check_depth(&ast, MAX_DEPTH)?;
         walk(&ast)
     }
+}
+
+/// Bounded depth check over the parser AST: errors once nesting would exceed
+/// `budget` frames, descending into every child expression.
+fn check_depth(expr: &Expr, budget: usize) -> Result<()> {
+    let Some(budget) = budget.checked_sub(1) else {
+        return Err(LoweringError::UnsupportedFeature(format!(
+            "query nesting exceeds the {MAX_DEPTH}-level limit"
+        )));
+    };
+    match expr {
+        Expr::Aggregate(a) => {
+            check_depth(&a.expr, budget)?;
+            if let Some(p) = &a.param {
+                check_depth(p, budget)?;
+            }
+        }
+        Expr::Unary(u) => check_depth(&u.expr, budget)?,
+        Expr::Binary(b) => {
+            check_depth(&b.lhs, budget)?;
+            check_depth(&b.rhs, budget)?;
+        }
+        Expr::Paren(p) => check_depth(&p.expr, budget)?,
+        Expr::Subquery(s) => check_depth(&s.expr, budget)?,
+        Expr::Call(c) => {
+            for arg in &c.args.args {
+                check_depth(arg, budget)?;
+            }
+        }
+        Expr::MatrixSelector(_)
+        | Expr::VectorSelector(_)
+        | Expr::NumberLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::Extension(_) => {}
+    }
+    Ok(())
 }
 
 fn walk(expr: &Expr) -> Result<L2> {
