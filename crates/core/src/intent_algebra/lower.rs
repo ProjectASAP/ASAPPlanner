@@ -93,13 +93,18 @@ pub fn convert(
             input,
         } => {
             // Single-statistic aggregate (no HAVING) over a *time-series* leaf
-            // fuses: a `Window` input becomes `Window { Aggregate { by: [] } }`;
-            // GROUP BY keys wrap the result in a `Partition` (the streaming
-            // sketch canonical shape). Tabular (SQL) GROUP BY instead falls
-            // through to the positional `Aggregate.by` path below, so the group
-            // keys land in the output schema (a SELECT projects them). The
-            // reducer's input column resolves against the aggregate's *direct*
-            // input (the scan under any window).
+            // fuses into the canonical shape: a `Window` input becomes
+            // `Window { Aggregate { by: [] } }` (a per-series, label-preserving
+            // reduction — see `output_schema_in`'s `Window` arm). GROUP BY keys
+            // resolve *positionally* into `Aggregate.by` — the same shape SQL
+            // produces — whenever they're in scope: an instant selector, or a
+            // label-preserving per-series `rate`/`increase`/`*_over_time`. They
+            // fall back to a name-based `Partition` only when they can't be (a
+            // windowed reduction's own keys, or an unresolved name; see below).
+            // The reducer's input column resolves against the aggregate's
+            // *direct* input (the scan under any window). (SQL GROUP BY is
+            // tabular, so it skips this branch for the plain `Aggregate.by` path
+            // below.)
             if aggs.len() == 1 && having.is_none() && !input.leaf_is_tabular() {
                 let (agg_input_l2, window): (&LQueryExpr, Option<(_, _)>) = match input.as_ref() {
                     LQueryExpr::Window {
