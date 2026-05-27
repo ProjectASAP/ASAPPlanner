@@ -240,10 +240,13 @@ impl<'a> SqlLowerer<'a> {
     }
 
     fn lower_sort(&self, sort: &logical_expr::Sort) -> Result<L2, LoweringError> {
-        // TopK: Sort with a folded LIMIT, all keys descending, over an Aggregate.
+        // Heavy-hitter TopK only when ranking DESC by a single COUNT aggregate
+        // (the frequency sketch the `TopK` intent represents). Any other
+        // ranking — by a SUM/AVG/… output or a group column — keeps the real
+        // Aggregate under a generic Sort+Limit so its aggregate isn't discarded.
         if let Some(k) = sort.fetch {
-            if sort.expr.iter().all(|s| !s.asc) {
-                if let Some(agg) = find_aggregate(strip_projections_and_aliases(&sort.input)) {
+            if let Some(agg) = find_aggregate(strip_projections_and_aliases(&sort.input)) {
+                if heavy_hitter_topk(sort, agg) {
                     return self.lower_as_topk(agg, k as u64);
                 }
             }
@@ -266,14 +269,13 @@ impl<'a> SqlLowerer<'a> {
     }
 
     fn lower_limit(&self, limit: &logical_expr::Limit) -> Result<L2, LoweringError> {
-        // TopK: Limit over Sort over Aggregate, all sort keys DESC, no OFFSET.
+        // Heavy-hitter TopK only for a count-ranked Limit-over-Sort-over-Aggregate
+        // with no OFFSET (see `lower_sort`). Otherwise fall through to Limit+Sort.
         if let Some(k) = eval_fetch(&limit.fetch) {
             if eval_fetch(&limit.skip).unwrap_or(0) == 0 {
                 if let LogicalPlan::Sort(sort) = strip_aliases(&limit.input) {
-                    if sort.expr.iter().all(|s| !s.asc) {
-                        if let Some(agg) =
-                            find_aggregate(strip_projections_and_aliases(&sort.input))
-                        {
+                    if let Some(agg) = find_aggregate(strip_projections_and_aliases(&sort.input)) {
+                        if heavy_hitter_topk(sort, agg) {
                             return self.lower_as_topk(agg, k as u64);
                         }
                     }
@@ -311,28 +313,38 @@ fn lower_agg_item(expr: &Expr) -> Result<AggItem, LoweringError> {
         Expr::Alias(a) => lower_agg_item(&a.expr),
         Expr::AggregateFunction(agg_fn) => {
             let name = agg_fn.func.name().to_lowercase();
+            // L3 has no DISTINCT modifier for the value reducers; only
+            // COUNT(DISTINCT) maps (to Cardinality). Reject DISTINCT elsewhere
+            // rather than silently lowering `SUM(DISTINCT x)` as `SUM(x)`.
+            if agg_fn.distinct && name != "count" {
+                return Err(LoweringError::UnsupportedAggregate(format!(
+                    "DISTINCT {name}"
+                )));
+            }
+            // Value reducers (`reducer_col`) require a real column — `SUM(a*b)`
+            // is rejected, not silently reduced over a probe column.
             let (func, col) = match name.as_str() {
                 "count" if agg_fn.distinct => (AggFunc::CountDistinct, agg_col_ref(&agg_fn.args)),
                 "count" => (AggFunc::Count, ColumnRef::Wildcard),
-                "sum" => (AggFunc::Sum, agg_col_ref(&agg_fn.args)),
-                "min" => (AggFunc::Min, agg_col_ref(&agg_fn.args)),
-                "max" => (AggFunc::Max, agg_col_ref(&agg_fn.args)),
-                "avg" | "mean" => (AggFunc::Avg, agg_col_ref(&agg_fn.args)),
+                "sum" => (AggFunc::Sum, reducer_col(&name, &agg_fn.args)?),
+                "min" => (AggFunc::Min, reducer_col(&name, &agg_fn.args)?),
+                "max" => (AggFunc::Max, reducer_col(&name, &agg_fn.args)?),
+                "avg" | "mean" => (AggFunc::Avg, reducer_col(&name, &agg_fn.args)?),
                 "stddev" | "stddev_samp" => (
                     AggFunc::StdDev { population: false },
-                    agg_col_ref(&agg_fn.args),
+                    reducer_col(&name, &agg_fn.args)?,
                 ),
                 "stddev_pop" => (
                     AggFunc::StdDev { population: true },
-                    agg_col_ref(&agg_fn.args),
+                    reducer_col(&name, &agg_fn.args)?,
                 ),
                 "var" | "variance" | "var_samp" => (
                     AggFunc::Variance { population: false },
-                    agg_col_ref(&agg_fn.args),
+                    reducer_col(&name, &agg_fn.args)?,
                 ),
                 "var_pop" => (
                     AggFunc::Variance { population: true },
-                    agg_col_ref(&agg_fn.args),
+                    reducer_col(&name, &agg_fn.args)?,
                 ),
                 "approx_percentile_cont" | "percentile_cont" => (
                     AggFunc::Quantile(extract_percentile_q(&agg_fn.args)?),
@@ -352,9 +364,9 @@ fn lower_agg_item(expr: &Expr) -> Result<AggItem, LoweringError> {
     }
 }
 
-/// The aggregated input column. `COUNT(*)` and non-column arguments yield
-/// `Wildcard`; a bare/aliased/cast column yields its name.
-fn agg_col_ref(args: &[Expr]) -> ColumnRef {
+/// The first aggregate argument's column name (bare / aliased / cast column),
+/// or `None` for `*` / a non-column expression.
+fn agg_col_name(args: &[Expr]) -> Option<String> {
     fn col_name(e: &Expr) -> Option<String> {
         match e {
             Expr::Column(c) => Some(c.name.clone()),
@@ -363,10 +375,26 @@ fn agg_col_ref(args: &[Expr]) -> ColumnRef {
             _ => None,
         }
     }
-    match args.first().and_then(col_name) {
+    args.first().and_then(col_name)
+}
+
+/// The aggregated input column. `COUNT(*)` and non-column arguments yield
+/// `Wildcard`; a bare/aliased/cast column yields its name.
+fn agg_col_ref(args: &[Expr]) -> ColumnRef {
+    match agg_col_name(args) {
         Some(name) => ColumnRef::Named(name),
         None => ColumnRef::Wildcard,
     }
+}
+
+/// The single input column of a value reducer (`SUM`/`MIN`/`MAX`/`AVG`/stddev/
+/// variance). Errors if the argument is not a column: L3 reduces a column, not
+/// an arbitrary expression (`SUM(a*b)`), so silently picking a probe column
+/// would compute the wrong result.
+fn reducer_col(name: &str, args: &[Expr]) -> Result<ColumnRef, LoweringError> {
+    agg_col_name(args).map(ColumnRef::Named).ok_or_else(|| {
+        LoweringError::UnsupportedAggregate(format!("{name} over a non-column expression"))
+    })
 }
 
 fn expr_to_group_name(expr: &Expr) -> Result<String, LoweringError> {
@@ -386,6 +414,53 @@ fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
         _ => Err(LoweringError::InvalidExpression(
             "percentile value must be a float literal (2nd arg)".into(),
         )),
+    }
+}
+
+/// True iff `sort` ranks **descending by a single `COUNT` aggregate** of `agg`
+/// — the only shape the heavy-hitter (frequency) `TopK` sketch is correct for.
+///
+/// Requires `agg` to have exactly one aggregate (a plain, non-`DISTINCT`
+/// `COUNT`) and the sole sort key to reference *that* output column (not a
+/// group key, a `SUM`/`AVG`/… output, or a multi-aggregate select). Anything
+/// else stays a generic `Sort` + `Limit` over the real `Aggregate`, mirroring
+/// the PromQL gate (`topk` is heavy-hitter only over `count_over_time`).
+fn heavy_hitter_topk(sort: &logical_expr::Sort, agg: &logical_expr::Aggregate) -> bool {
+    let [key] = sort.expr.as_slice() else {
+        return false;
+    };
+    if key.asc {
+        return false;
+    }
+    if agg.aggr_expr.len() != 1 || !is_count_aggregate(&agg.aggr_expr[0]) {
+        return false;
+    }
+    // The DESC key must rank by the count's output column, not a group key. The
+    // aggregate schema is `[group fields …, aggregate fields …]`, so the single
+    // count output sits at index `group_expr.len()`.
+    let count_name = agg
+        .schema
+        .fields()
+        .get(agg.group_expr.len())
+        .map(|f| f.name().clone());
+    column_name(&key.expr) == count_name
+}
+
+/// The referenced column name of a bare/aliased column expression, else `None`.
+fn column_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Column(c) => Some(c.name.clone()),
+        Expr::Alias(a) => column_name(&a.expr),
+        _ => None,
+    }
+}
+
+/// Whether `expr` is a plain (non-`DISTINCT`) `COUNT` aggregate.
+fn is_count_aggregate(expr: &Expr) -> bool {
+    match expr {
+        Expr::Alias(a) => is_count_aggregate(&a.expr),
+        Expr::AggregateFunction(f) => f.func.name().eq_ignore_ascii_case("count") && !f.distinct,
+        _ => false,
     }
 }
 

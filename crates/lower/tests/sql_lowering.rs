@@ -156,6 +156,69 @@ async fn single_agg_group_by_keeps_key_in_output_schema() {
 }
 
 #[tokio::test]
+async fn count_ranked_topk_is_heavy_hitter() {
+    // `ORDER BY COUNT(*) DESC LIMIT k` over a single COUNT aggregate is the one
+    // case the heavy-hitter (frequency) sketch is correct for. (The key must
+    // reference the count output directly; an alias would safely fall back to a
+    // generic Sort+Limit.)
+    let qe = lower(
+        "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 10",
+    )
+    .await;
+    let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert_eq!(by, &vec![1], "GROUP BY service → col 1");
+    assert!(
+        matches!(aggs.as_slice(), [AggIntent::TopK { k: 10, .. }]),
+        "count-ranked topk → heavy-hitter TopK, got {aggs:?}"
+    );
+}
+
+#[tokio::test]
+async fn non_count_ranked_limit_keeps_the_aggregate() {
+    // Ranking by AVG (not a count) must NOT become a frequency heavy-hitter —
+    // the AVG aggregate has to survive as a generic Sort+Limit.
+    let qe = lower(
+        "SELECT service, AVG(latency) AS a FROM metrics GROUP BY service ORDER BY a DESC LIMIT 10",
+    )
+    .await;
+    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        aggs.iter().any(|a| matches!(a, AggIntent::Avg { .. })),
+        "AVG must be preserved, got {aggs:?}"
+    );
+    assert!(
+        !aggs.iter().any(|a| matches!(a, AggIntent::TopK { .. })),
+        "AVG ranking must not become a frequency heavy-hitter, got {aggs:?}"
+    );
+}
+
+#[tokio::test]
+async fn distinct_value_reducer_is_rejected_not_dropped() {
+    // L3 has no distinct-Sum; SUM(DISTINCT x) must be rejected, not silently
+    // lowered as SUM(x).
+    let res = lower_sql(
+        "SELECT SUM(DISTINCT bytes) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await;
+    assert!(res.is_err(), "SUM(DISTINCT ...) should be rejected");
+}
+
+#[tokio::test]
+async fn aggregate_over_non_column_expression_is_rejected() {
+    // L3 reduces a column, not an arbitrary expression — SUM(bytes + 1) must be
+    // rejected rather than silently reducing a probe column.
+    let res = lower_sql(
+        "SELECT SUM(bytes + 1) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await;
+    assert!(res.is_err(), "SUM(<expr>) should be rejected");
+}
+
+#[tokio::test]
 async fn count_star_is_count_intent() {
     let qe = lower("SELECT COUNT(*) FROM metrics").await;
     let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate");

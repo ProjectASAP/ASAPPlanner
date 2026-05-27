@@ -112,7 +112,7 @@ pub fn convert(
                 let intent = agg_func_to_intent(
                     &aggs[0].func,
                     acc,
-                    resolve_agg_col(&aggs[0].col, &agg_in_schema),
+                    resolve_agg_col(&aggs[0].col, &agg_in_schema)?,
                 );
                 let aggregate = CQueryExpr::Aggregate {
                     by: Vec::new(),
@@ -151,10 +151,11 @@ pub fn convert(
             let by = resolve_named_keys(keys, &child_schema)?;
             let intents = aggs
                 .iter()
-                .map(|item| {
-                    agg_func_to_intent(&item.func, acc, resolve_agg_col(&item.col, &child_schema))
+                .map(|item| -> Result<AggIntent, ConvertError> {
+                    let col = resolve_agg_col(&item.col, &child_schema)?;
+                    Ok(agg_func_to_intent(&item.func, acc, col))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             let having = having
                 .as_ref()
                 .map(|h| -> Result<Predicate, ConvertError> {
@@ -371,13 +372,22 @@ fn scan(
 }
 
 /// Resolve a Layer-2 aggregate-input [`ColumnRef`] to a positional input
-/// column. `SampleValue` / `Wildcard` carry no specific column → `None` (the
-/// PromQL sample-value convention); a named column (`SUM(bytes)`) resolves to
-/// its position so the L3 reducer types off the right input.
-fn resolve_agg_col(col: &ColumnRef, schema: &Schema) -> Option<ColumnId> {
+/// column. `SampleValue` / `Wildcard` carry no specific column → `Ok(None)`
+/// (the PromQL sample-value / `COUNT(*)` convention); a `Named` column
+/// (`SUM(bytes)`) must resolve to its position, else it is an error — silently
+/// dropping it to `None` would reduce the wrong column (the schema probe).
+fn resolve_agg_col(col: &ColumnRef, schema: &Schema) -> Result<Option<ColumnId>, ResolveError> {
     match col {
-        ColumnRef::Named(name) => schema.column_id(name),
-        ColumnRef::SampleValue | ColumnRef::Wildcard => None,
+        ColumnRef::Named(name) => {
+            schema
+                .column_id(name)
+                .map(Some)
+                .ok_or_else(|| ResolveError::NotFound {
+                    name: name.clone(),
+                    available: schema.columns.iter().map(|c| c.name.clone()).collect(),
+                })
+        }
+        ColumnRef::SampleValue | ColumnRef::Wildcard => Ok(None),
     }
 }
 
