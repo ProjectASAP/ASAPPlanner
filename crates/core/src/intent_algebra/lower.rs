@@ -15,13 +15,14 @@ use thiserror::Error;
 use crate::intent_algebra::agg_intent::AggIntent;
 use crate::intent_algebra::binder::Binder;
 use crate::intent_algebra::column_resolution::{
-    output_schema_for_aggregate, resolve_expr, resolve_named_keys, ResolveError,
+    output_schema_for_aggregate, resolve_column_refs, resolve_expr, resolve_named_keys,
+    ResolveError,
 };
-use crate::intent_algebra::expr_ir::{L2Expr, L3Expr, L3Scalar};
+use crate::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
 use crate::intent_algebra::names::BindingName;
 use crate::intent_algebra::query_expr::{
-    ColumnRef, PartitionKeys as CPartitionKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr,
-    SortKey, Source, WindowKind,
+    PartitionKeys as CPartitionKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, SortKey,
+    Source, WindowKind,
 };
 use crate::intent_algebra::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
 use crate::intent_algebra::schema::{ColumnId, Schema};
@@ -218,10 +219,16 @@ pub fn convert(
             child: Box::new(convert(input, fallback, acc)?),
         },
 
-        LQueryExpr::Distinct { cols, input } => CQueryExpr::Distinct {
-            cols: cols.clone(),
-            child: Box::new(convert(input, fallback, acc)?),
-        },
+        LQueryExpr::Distinct { cols, input } => {
+            // Resolve the L2 (name-based) dedup keys to positional ids against
+            // the converted child's schema, like every other L3 column ref.
+            let child = convert(input, fallback, acc)?;
+            let cols = resolve_column_refs(cols, &child.output_schema()?)?;
+            CQueryExpr::Distinct {
+                cols,
+                child: Box::new(child),
+            }
+        }
 
         LQueryExpr::TopK { k, by, input } => {
             let child = convert(input, fallback, acc)?;

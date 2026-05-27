@@ -9,8 +9,8 @@
 
 use std::time::Duration;
 
-use super::expr_ir::L2Expr;
-pub use super::query_expr::{BinaryOpKind, ColumnRef, PartitionKeys, VectorMatch, WindowFuncKind};
+pub use super::expr_ir::{ColumnRef, L2Expr};
+pub use super::query_expr::{BinaryOpKind, PartitionKeys, VectorMatch, WindowFuncKind};
 use super::schema::Schema;
 
 /// SELECT-list item at Layer 2 — a name-based [`L2Expr`] + optional alias.

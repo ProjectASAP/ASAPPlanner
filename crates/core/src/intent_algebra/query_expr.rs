@@ -65,24 +65,6 @@ impl Source {
     }
 }
 
-/// A column reference by name, or one of the two PromQL-conventional
-/// synthetic columns.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ColumnRef {
-    Named(String),
-    /// Table-qualified reference (`t.col` / `alias.col`). Resolved by
-    /// `(table, name)` so a column name shared across a join (`a.k` vs `b.k`)
-    /// binds to the correct side.
-    Qualified {
-        table: String,
-        name: String,
-    },
-    /// The implicit metric sample value (PromQL — always the series value).
-    SampleValue,
-    /// All rows / COUNT(*).
-    Wildcard,
-}
-
 /// Grouping key set (`by (...)` / `without (...)`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PartitionKeys {
@@ -278,9 +260,10 @@ pub enum QueryExpr {
         keys: PartitionKeys,
         child: Box<QueryExpr>,
     },
-    /// δ — SQL `DISTINCT` / row deduplication.
+    /// δ — SQL `DISTINCT` / row deduplication. Positional like every other L3
+    /// column reference; empty = dedup on all columns (`SELECT DISTINCT *`).
     Distinct {
-        cols: Vec<ColumnRef>,
+        cols: Vec<ColumnId>,
         child: Box<QueryExpr>,
     },
     /// ⊕ — exact union of sub-results from independent stages / shards.
@@ -467,18 +450,10 @@ impl QueryExpr {
             }
 
             QueryExpr::Distinct { cols, child } => {
-                let in_schema = child.output_schema_in(scope)?;
-                let mut out = in_schema.clone();
-                let mut key_ids: Vec<ColumnId> = Vec::with_capacity(cols.len());
-                for c in cols {
-                    if let ColumnRef::Named(name) = c {
-                        if let Some(id) = in_schema.column_id(name) {
-                            key_ids.push(id);
-                        }
-                    }
-                }
-                if !key_ids.is_empty() {
-                    out.add_unique_key(key_ids);
+                let mut out = child.output_schema_in(scope)?;
+                // Deduplicating on `cols` makes them a unique key of the result.
+                if !cols.is_empty() {
+                    out.add_unique_key(cols.clone());
                 }
                 Ok(out)
             }

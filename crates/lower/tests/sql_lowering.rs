@@ -248,6 +248,19 @@ async fn count_distinct_is_cardinality() {
 }
 
 #[tokio::test]
+async fn select_distinct_lowers_to_distinct_with_positional_cols() {
+    // SELECT DISTINCT → a `Distinct` node whose `cols` are positional ColumnIds
+    // (not name-based ColumnRefs). DataFusion's `Distinct::All` dedups on every
+    // column, so `cols` is empty here — but the field type is now `Vec<ColumnId>`.
+    let qe = lower("SELECT DISTINCT service FROM metrics").await;
+    let QueryExpr::Distinct { cols, .. } = &qe else {
+        panic!("expected a Distinct at the root, got {qe:?}");
+    };
+    let _: &Vec<usize> = cols; // compile-time: positional ids, not ColumnRefs
+    assert!(cols.is_empty(), "DISTINCT * dedups on all columns");
+}
+
+#[tokio::test]
 async fn inner_join_lowers_to_join_over_two_scans() {
     // INNER JOIN over two distinct tables → L3 Join with both leaves as Scans.
     let qe = lower(

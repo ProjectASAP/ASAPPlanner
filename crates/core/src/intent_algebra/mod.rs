@@ -30,12 +30,12 @@ pub use column_resolution::{
     resolve_column_refs, resolve_expr, resolve_named_keys, ResolveError,
 };
 pub use cse::{dedupe_subtrees, CseWorkloadPlan};
-pub use expr_ir::{ArithOp, CompareOp, L2Expr, L3Expr, L3Scalar};
+pub use expr_ir::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Expr, L3Scalar};
 pub use lower::{convert, convert_root, ConvertError};
 pub use names::{BindingName, QueryId};
 pub use query_expr::{
-    BinaryOpKind, BindingScope, ColumnRef, DataModel, GroupSide, JoinKind, PartitionKeys,
-    Predicate, ProjectItem, QueryExpr, QueryExprError, SetOpKind, SortKey, Source, VectorGrouping,
+    BinaryOpKind, BindingScope, DataModel, GroupSide, JoinKind, PartitionKeys, Predicate,
+    ProjectItem, QueryExpr, QueryExprError, SetOpKind, SortKey, Source, VectorGrouping,
     VectorMatch, VectorMatchKind, WindowFuncKind, WindowKind,
 };
 pub use schema::{cse_reuse_is_legal, Column, ColumnId, CseError, DataType, Schema};

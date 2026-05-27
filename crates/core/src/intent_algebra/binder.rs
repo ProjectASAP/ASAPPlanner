@@ -11,8 +11,8 @@
 //! `SchemaCatalog` is future work; the `Binder` pass does not change when it
 //! lands, only the catalog impl swaps.
 
+use crate::intent_algebra::expr_ir::ColumnRef;
 use crate::intent_algebra::expr_ir::L2Expr;
-use crate::intent_algebra::query_expr::ColumnRef;
 use crate::intent_algebra::relational::QueryExpr as LQueryExpr;
 use crate::intent_algebra::schema::{Column, DataType, Schema};
 

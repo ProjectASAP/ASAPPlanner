@@ -18,8 +18,27 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::query_expr::ColumnRef;
 use super::schema::{ColumnId, DataType};
+
+/// A name-based column reference. This is an L2 / front-end concept — the
+/// converter resolves every `ColumnRef` into a positional [`ColumnId`], so it
+/// does not appear in the L3 [`QueryExpr`](super::query_expr::QueryExpr). It
+/// includes the two PromQL-conventional synthetic columns.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ColumnRef {
+    Named(String),
+    /// Table-qualified reference (`t.col` / `alias.col`). Resolved by
+    /// `(table, name)` so a column name shared across a join (`a.k` vs `b.k`)
+    /// binds to the correct side.
+    Qualified {
+        table: String,
+        name: String,
+    },
+    /// The implicit metric sample value (PromQL — always the series value).
+    SampleValue,
+    /// All rows / COUNT(*).
+    Wildcard,
+}
 
 /// A typed scalar constant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
