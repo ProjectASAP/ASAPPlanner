@@ -360,6 +360,30 @@ impl QueryExpr {
                 ..
             } => {
                 let in_schema = child.output_schema_in(scope)?;
+
+                // Per-series range reduction (`rate`/`increase`): one value out
+                // per series, so it is *label-preserving* — every label column
+                // survives and only the sample value is replaced (kept named
+                // `value`, the PromQL convention). This is what lets an outer
+                // cross-series `Aggregate.by` resolve its group keys positionally
+                // over `sum by (job) (rate(...))`.
+                if by.is_empty() && !aggs.is_empty() && aggs.iter().all(|a| a.is_per_series()) {
+                    let value_idx = in_schema.column_id("value").or_else(|| {
+                        (0..in_schema.columns.len()).find(|&i| Some(i) != in_schema.time_index)
+                    });
+                    let mut columns = in_schema.columns.clone();
+                    if let Some(vi) = value_idx {
+                        let mut out = aggs[0].output_column(&columns[vi]);
+                        out.name = "value".into();
+                        columns[vi] = out;
+                    }
+                    return Ok(Schema {
+                        columns,
+                        time_index: in_schema.time_index,
+                        unique_keys: in_schema.unique_keys.clone(),
+                    });
+                }
+
                 let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + aggs.len());
                 for &id in by {
                     let c =
@@ -704,6 +728,43 @@ mod tests {
         // projection drops the time axis + unique keys (ts not retained)
         assert!(s.time_index.is_none());
         assert!(s.unique_keys.is_empty());
+    }
+
+    #[test]
+    fn per_series_rate_preserves_labels() {
+        // A per-series range reduction (`rate`) is label-preserving: it produces
+        // one value per series, so every label survives and only the sample
+        // value is replaced (kept named `value`). This is what lets an outer
+        // cross-series `Aggregate.by` group on those labels positionally.
+        let child = scan(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("value", DataType::Float64, false),
+                col("job", DataType::Utf8, true),
+            ],
+            Some(0),
+            vec![],
+        );
+        let rate = QueryExpr::Aggregate {
+            by: vec![],
+            aggs: vec![AggIntent::Rate {
+                window: Duration::from_secs(300),
+            }],
+            output_names: vec![],
+            having: None,
+            child: Box::new(child),
+        };
+        let s = rate.output_schema().unwrap();
+        assert_eq!(
+            s.columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ts", "value", "job"],
+            "rate preserves all labels; only the sample value is replaced"
+        );
+        assert_eq!(s.time_index, Some(0));
+        assert!(s.column_id("job").is_some(), "label survives the reduction");
     }
 
     #[test]

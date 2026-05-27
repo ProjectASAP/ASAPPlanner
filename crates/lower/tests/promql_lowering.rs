@@ -168,10 +168,13 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
         panic!("expected outer Aggregate{{Quantile}}, got {qe:?}");
     };
     assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.99).abs() < 1e-9));
-    assert!(
-        matches!(child.as_ref(), QueryExpr::Partition { keys, .. } if *keys == PartitionKeys::By(vec!["le".into()])),
-        "expected `sum by (le)` to survive as a Partition under the quantile, got {child:?}"
-    );
+    // `sum by (le)` survives as a positional Aggregate (by = [2], `le`) over the
+    // inner Rate — no name-based Partition.
+    let QueryExpr::Aggregate { by, aggs, .. } = child.as_ref() else {
+        panic!("expected `sum by (le)` as a positional Aggregate, got {child:?}");
+    };
+    assert_eq!(by, &vec![2]);
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
 }
 
 // ── rate / increase carry their own window (no Window node) ─────────────────────
@@ -223,16 +226,17 @@ fn sum_over_rate_keeps_both_levels() {
 
 #[test]
 fn sum_by_over_rate_groups_the_outer_sum() {
-    // `sum by (job) (rate(...))`: the grouping belongs to the OUTER sum, landing
-    // on a Partition that wraps the two-level aggregate.
+    // `sum by (job) (rate(...))`: the grouping belongs to the OUTER sum and lands
+    // on a positional `Aggregate.by` (the same shape SQL produces) over the
+    // label-preserving inner Rate. Leaf = [ts, value, job] → by = [2].
     let qe = lower("sum by (job) (rate(http_requests_total[5m]))");
-    let QueryExpr::Partition { keys, child } = &qe else {
-        panic!("expected Partition by job, got {qe:?}");
+    let QueryExpr::Aggregate {
+        by, aggs, child, ..
+    } = &qe
+    else {
+        panic!("expected outer Aggregate grouped by job, got {qe:?}");
     };
-    assert_eq!(*keys, PartitionKeys::By(vec!["job".into()]));
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
-        panic!("expected Aggregate{{Sum}} under Partition, got {child:?}");
-    };
+    assert_eq!(by, &vec![2]);
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),

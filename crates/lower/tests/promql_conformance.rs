@@ -34,7 +34,7 @@
 use std::time::Duration;
 
 use asap_control_core::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, PartitionKeys, QueryExpr, Source,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, QueryExpr, Source,
 };
 use asap_control_core::types::AccuracyTarget;
 use asap_control_lower::{lower_promql, LoweringError};
@@ -210,18 +210,25 @@ fn sum_collapses_all_series() {
 }
 
 #[test]
-fn sum_by_preserves_dimensions_as_partition() {
-    // SEMANTICS: `by(job,instance)` keeps those labels; grouping rides on
-    // Partition. Keys are canonicalised (sorted), so order is normalised.
+fn sum_by_groups_via_positional_aggregate() {
+    // SEMANTICS: `by(job,instance)` keeps those labels; the grouping lives on a
+    // positional `Aggregate.by` — the same shape SQL `GROUP BY` produces (not a
+    // name-based Partition). Binder leaf = [ts, value, instance, job] (referenced
+    // keys appended sorted), so the keys resolve to columns [2, 3].
     let qe = ok("sum by(job, instance) (node_filesystem_size_bytes)");
-    let QueryExpr::Partition { keys, .. } = &qe else {
-        panic!("expected Partition for `by(...)`, got {qe:?}");
+    let QueryExpr::Aggregate {
+        by, aggs, child, ..
+    } = &qe
+    else {
+        panic!("expected positional Aggregate for `by(...)`, got {qe:?}");
     };
     assert_eq!(
-        *keys,
-        PartitionKeys::By(vec!["instance".into(), "job".into()])
+        by,
+        &vec![2, 3],
+        "group keys resolve to positional ColumnIds"
     );
-    assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
 }
 
 #[test]
@@ -288,17 +295,22 @@ fn sum_of_rate_is_two_levels() {
 
 #[test]
 fn sum_by_of_rate_groups_outer_level() {
+    // Outer cross-series Sum grouped on positional `Aggregate.by` over the
+    // label-preserving inner Rate. Leaf = [ts, value, instance] → by = [2].
     let qe = ok("sum by(instance) (rate(node_network_receive_bytes_total[5m]))");
-    let QueryExpr::Partition { keys, child } = &qe else {
-        panic!("expected Partition, got {qe:?}");
+    let QueryExpr::Aggregate {
+        by, aggs, child, ..
+    } = &qe
+    else {
+        panic!("expected outer Aggregate grouped by instance, got {qe:?}");
     };
-    assert_eq!(*keys, PartitionKeys::By(vec!["instance".into()]));
-    // Partition → Sum → Rate.
+    assert_eq!(by, &vec![2]);
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    // child is the inner per-series Rate aggregate.
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Sum { .. }])
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate { .. }])
     ));
-    assert!(has(&qe, |i| matches!(i, AggIntent::Rate { .. })));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -371,10 +383,13 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
         panic!("expected outer Aggregate{{Quantile}}, got {qe:?}");
     };
     assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { .. }]));
-    assert!(matches!(
-        child.as_ref(),
-        QueryExpr::Partition { keys, .. } if *keys == PartitionKeys::By(vec!["le".into()])
-    ));
+    // `sum by(le)` now survives as a positional Aggregate (by = [2], `le`), over
+    // the inner Rate — no name-based Partition.
+    let QueryExpr::Aggregate { by, aggs, .. } = child.as_ref() else {
+        panic!("expected `sum by(le)` as a positional Aggregate, got {child:?}");
+    };
+    assert_eq!(by, &vec![2]);
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

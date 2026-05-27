@@ -117,8 +117,24 @@ pub fn convert(
                     acc,
                     resolve_agg_col(&aggs[0].col, &agg_in_schema)?,
                 );
+                // Resolve the group keys positionally against the aggregate's
+                // input so the grouping lives in `Aggregate.by` — the *same*
+                // shape SQL produces. Only when this is a *non-windowed*
+                // reduction: an instant aggregate (`sum by (job) (m)`) or a
+                // cross-series reduction over a label-preserving `rate`/
+                // `increase` (`sum by (job) (rate(m[w]))`), where the key is in
+                // scope. A *windowed* reduction here is per-series (e.g.
+                // `avg_over_time`) — its keys belong to an enclosing level, so
+                // keep the legacy name-based `Partition` marker instead of
+                // folding them into a per-series `by`.
+                let by = if window.is_none() {
+                    resolve_named_keys(keys, &agg_in_schema).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let grouped_positionally = by.len() == keys.len();
                 let aggregate = CQueryExpr::Aggregate {
-                    by: Vec::new(),
+                    by,
                     aggs: vec![intent],
                     output_names: vec![aggs[0].alias.clone()],
                     having: None,
@@ -137,7 +153,7 @@ pub fn convert(
                     },
                     None => aggregate,
                 };
-                return Ok(if keys.is_empty() {
+                return Ok(if grouped_positionally {
                     sketch
                 } else {
                     CQueryExpr::Partition {

@@ -99,6 +99,15 @@ impl AggIntent {
         }
     }
 
+    /// Whether this is a *per-series* reduction — it reduces a single series'
+    /// samples over its range window (one value out per series), so it does
+    /// **not** collapse across series and every label column is preserved.
+    /// `rate`/`increase` carry their window in the intent. (Cross-series
+    /// reductions like `sum`/`avg` over a series set return `false`.)
+    pub fn is_per_series(&self) -> bool {
+        matches!(self, Self::Rate { .. } | Self::Increase { .. })
+    }
+
     /// The positional input column this intent reduces, if it carries one.
     /// `None` = the synthetic time-series sample value (PromQL) or an
     /// argument-less aggregate (`Count` / `Cardinality` / `TopK`). Used by
