@@ -1,22 +1,26 @@
 name: Rust CI
 
+# TEMPORARILY DISABLED: auto-triggers are off because CI can't fetch the private
+# promql-parser dependency until the CARGO_PRIVATE_GIT_TOKEN secret is added (see
+# THIRD_PARTY.md). The auth scaffolding below is ready — re-enable the push /
+# pull_request triggers once the credential is configured. Manual runs still work.
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/rust.yml'
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [ main ]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/rust.yml'
   workflow_dispatch:
+  # push:
+  #   branches: [ main ]
+  #   paths:
+  #     - 'crates/**'
+  #     - 'Cargo.toml'
+  #     - 'Cargo.lock'
+  #     - '.github/workflows/rust.yml'
+  # pull_request:
+  #   types: [opened, synchronize, reopened, ready_for_review]
+  #   branches: [ main ]
+  #   paths:
+  #     - 'crates/**'
+  #     - 'Cargo.toml'
+  #     - 'Cargo.lock'
+  #     - '.github/workflows/rust.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,6 +28,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The promql-parser dependency is a private git repo (ProjectASAP/promql-parser).
+  # Cargo must fetch it via the git CLI so it picks up the credential helper
+  # configured by the "Authenticate private git deps" step below.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
 jobs:
   format-and-lint:
@@ -31,6 +39,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+
+    # Grant read access to the private promql-parser mirror. Requires an org/repo
+    # secret CARGO_PRIVATE_GIT_TOKEN (fine-grained PAT or GitHub App token with
+    # read access to ProjectASAP/promql-parser).
+    - name: Authenticate private git deps
+      run: |
+        git config --global url."https://x-access-token:${{ secrets.CARGO_PRIVATE_GIT_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -63,6 +78,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+
+    # Grant read access to the private promql-parser mirror. Requires an org/repo
+    # secret CARGO_PRIVATE_GIT_TOKEN (fine-grained PAT or GitHub App token with
+    # read access to ProjectASAP/promql-parser).
+    - name: Authenticate private git deps
+      run: |
+        git config --global url."https://x-access-token:${{ secrets.CARGO_PRIVATE_GIT_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable

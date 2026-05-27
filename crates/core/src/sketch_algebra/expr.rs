@@ -1,9 +1,8 @@
 use std::rc::Rc;
-use std::sync::Arc;
 
 use super::schema::L4Schema;
 use super::sketch::{SketchQuery, SummaryKind, SummaryParams};
-use crate::intent_algebra::{ColumnRef, GroupKey, L3Node};
+use crate::intent_algebra::{ColumnId, ColumnRef, QueryExpr};
 
 // ── L4 DAG node ───────────────────────────────────────────────────────────────
 
@@ -23,16 +22,17 @@ pub struct L4Node {
 /// Sketch-bound IR produced by L4 optimizer rules. L4 rules selectively
 /// replace logical aggregates and joins in the L3 `QueryExpr` with their
 /// sketch-bound counterparts; everything not rewritten passes through as
-/// `Logical(Rc<L3Node>)`.
+/// `Logical(Box<QueryExpr>)`.
 ///
 /// Traversing from the root node yields a DAG; shared sub-expressions appear
-/// as multiple `Rc` references to the same `L4Node` or `L3Node`.
+/// as multiple `Rc` references to the same `L4Node` (L3 fan-in is expressed
+/// via `QueryExpr`'s own `LetBinding`/`Ref`).
 #[derive(Debug, Clone)]
 pub enum SummaryExpr {
     /// Any L3 node that no L4 rule rewrote (e.g. `Filter`, `Project`, `Sort`).
     /// Output schema is the inner L3 node's schema, lifted to `L4Schema`
     /// with all fields as `L4DataType::Primitive`.
-    Logical(Arc<L3Node>),
+    Logical(Box<QueryExpr>),
 
     /// Sketch aggregation. L4 chose `sketch` + `params` from the catalog
     /// for `AggIntent` under `DeploymentConstraints`.
@@ -44,8 +44,8 @@ pub enum SummaryExpr {
         params: SummaryParams,
         /// The column being summarised (fed into the sketch).
         col: ColumnRef,
-        /// GROUP BY keys carried through to the output schema.
-        by: Vec<GroupKey>,
+        /// GROUP BY keys (positional) carried through to the output schema.
+        by: Vec<ColumnId>,
     },
 
     /// Sketch-aware join (KMV / theta for join-cardinality; join-sample for

@@ -1,12 +1,40 @@
-use std::sync::Arc;
+//! Type bridges between DataFusion's Arrow types and the L3 `DataType`, plus
+//! the SQL table catalog used to register tables with DataFusion and to carry
+//! resolved leaf schemas into the relational L2 tree.
 
-use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, Fields, Schema, TimeUnit};
+use std::collections::HashMap;
+
+use datafusion::arrow::datatypes::{
+    DataType as ArrowDataType, Field, Fields, Schema as ArrowSchema,
+};
 use datafusion::common::ScalarValue;
 
-use asap_control_core::intent_algebra::schema::{L3DataType, TableSchema};
+use asap_control_core::intent_algebra::schema::{Column, DataType, Schema};
 use asap_control_core::intent_algebra::L3Scalar;
 
 use crate::error::LoweringError;
+
+/// Table catalog for SQL lowering: table name → resolved L3 [`Schema`].
+///
+/// Used twice: to register Arrow-backed `MemTable`s so DataFusion can resolve
+/// `SELECT … FROM t`, and to attach each table's schema to the relational
+/// `SourceSpec` so the L2→L3 Binder/converter has positional column identity.
+#[derive(Debug, Clone, Default)]
+pub struct SqlCatalog {
+    pub tables: HashMap<String, Schema>,
+}
+
+impl SqlCatalog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builder: register `name` with its resolved L3 schema.
+    pub fn with_table(mut self, name: impl Into<String>, schema: Schema) -> Self {
+        self.tables.insert(name.into(), schema);
+        self
+    }
+}
 
 pub(super) fn scalar_value_to_l3(sv: &ScalarValue) -> Result<L3Scalar, LoweringError> {
     match sv {
@@ -24,7 +52,6 @@ pub(super) fn scalar_value_to_l3(sv: &ScalarValue) -> Result<L3Scalar, LoweringE
             Ok(L3Scalar::Utf8(s.clone()))
         }
         ScalarValue::Boolean(Some(b)) => Ok(L3Scalar::Boolean(*b)),
-        // Typed nulls and untyped null both become L3Scalar::Null
         _ if sv.is_null() => Ok(L3Scalar::Null),
         _ => Err(LoweringError::InvalidExpression(format!(
             "unsupported scalar: {sv:?}"
@@ -32,53 +59,42 @@ pub(super) fn scalar_value_to_l3(sv: &ScalarValue) -> Result<L3Scalar, LoweringE
     }
 }
 
-pub(super) fn arrow_to_l3(dt: &ArrowDataType) -> Result<L3DataType, LoweringError> {
+/// Arrow → L3 `DataType` (used for `CAST` targets). L3 is deliberately narrow.
+pub(super) fn arrow_to_l3(dt: &ArrowDataType) -> Result<DataType, LoweringError> {
     match dt {
         ArrowDataType::Int64
         | ArrowDataType::Int32
         | ArrowDataType::Int16
-        | ArrowDataType::Int8 => Ok(L3DataType::Int64),
-        ArrowDataType::Float64 | ArrowDataType::Float32 => Ok(L3DataType::Float64),
-        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Ok(L3DataType::Utf8),
-        ArrowDataType::Boolean => Ok(L3DataType::Boolean),
-        ArrowDataType::Timestamp(_, _) => Ok(L3DataType::Timestamp),
-        ArrowDataType::Duration(_) => Ok(L3DataType::Duration),
+        | ArrowDataType::Int8 => Ok(DataType::Int64),
+        ArrowDataType::Float64 | ArrowDataType::Float32 => Ok(DataType::Float64),
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Ok(DataType::Utf8),
+        ArrowDataType::Boolean => Ok(DataType::Bool),
+        ArrowDataType::Timestamp(_, _) => Ok(DataType::Timestamp),
         other => Err(LoweringError::UnsupportedFeature(format!(
-            "Arrow type in cast: {other:?}"
+            "Arrow type: {other:?}"
         ))),
     }
 }
 
-pub(super) fn table_schema_to_arrow(schema: &TableSchema) -> Schema {
+/// L3 `DataType` → Arrow (for registering catalog tables with DataFusion).
+pub(super) fn l3_to_arrow(dt: &DataType) -> ArrowDataType {
+    match dt {
+        DataType::Int64 => ArrowDataType::Int64,
+        DataType::Float64 => ArrowDataType::Float64,
+        DataType::Utf8 => ArrowDataType::Utf8,
+        DataType::Bool => ArrowDataType::Boolean,
+        DataType::Timestamp => {
+            ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None)
+        }
+    }
+}
+
+/// Build an Arrow schema from an L3 [`Schema`] (column name + type + nullability).
+pub(super) fn schema_to_arrow(schema: &Schema) -> ArrowSchema {
     let fields: Fields = schema
         .columns
         .iter()
-        .map(|c| Field::new(&c.name, l3_to_arrow(&c.data_type), c.nullable))
+        .map(|c: &Column| Field::new(&c.name, l3_to_arrow(&c.dtype), c.nullable))
         .collect();
-    Schema::new(fields)
-}
-
-pub(super) fn l3_to_arrow(dt: &L3DataType) -> ArrowDataType {
-    match dt {
-        L3DataType::Int64 => ArrowDataType::Int64,
-        L3DataType::Float64 => ArrowDataType::Float64,
-        L3DataType::Utf8 => ArrowDataType::Utf8,
-        L3DataType::Boolean => ArrowDataType::Boolean,
-        L3DataType::Timestamp => ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-        L3DataType::Duration => ArrowDataType::Duration(TimeUnit::Millisecond),
-        L3DataType::Map(k, v) => ArrowDataType::Map(
-            Arc::new(Field::new(
-                "entries",
-                ArrowDataType::Struct(Fields::from(vec![
-                    Field::new("key", l3_to_arrow(k), false),
-                    Field::new("value", l3_to_arrow(v), true),
-                ])),
-                false,
-            )),
-            false,
-        ),
-        L3DataType::List(item) => {
-            ArrowDataType::List(Arc::new(Field::new("item", l3_to_arrow(item), true)))
-        }
-    }
+    ArrowSchema::new(fields)
 }

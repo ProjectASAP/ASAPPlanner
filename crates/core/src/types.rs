@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// Accuracy requirement that a query result must satisfy.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AccuracyTarget {
     /// Additive error bound ε: |estimate − true| ≤ ε · (domain size).
     Epsilon(f64),
