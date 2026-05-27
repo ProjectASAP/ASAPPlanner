@@ -353,7 +353,24 @@ impl QueryExpr {
             // time-indexed Scan it preserves the time_index; over an Aggregate
             // (the canonical Window-over-Aggregate fused shape) the child has
             // already consumed the time axis, so the child schema passes through.
-            QueryExpr::Window { child, .. } => child.output_schema_in(scope),
+            // A time `Window` over an `Aggregate` is a per-series time-window
+            // reduction (`avg_over_time` / `quantile_over_time` / …): it keeps
+            // each series's labels and replaces only the sample value, so it is
+            // label-preserving — which lets an outer cross-series `Aggregate.by`
+            // group on those labels positionally (e.g. `sum by(x)(avg_over_time(…))`).
+            // A `Window` over a `Scan` (a bare range vector) passes through.
+            QueryExpr::Window { child, .. } => match child.as_ref() {
+                QueryExpr::Aggregate {
+                    by,
+                    aggs,
+                    child: agg_in,
+                    ..
+                } if by.is_empty() && aggs.len() == 1 => Ok(per_series_reduction_schema(
+                    &agg_in.output_schema_in(scope)?,
+                    &aggs[0],
+                )),
+                _ => child.output_schema_in(scope),
+            },
 
             QueryExpr::Aggregate {
                 by,
@@ -364,27 +381,13 @@ impl QueryExpr {
             } => {
                 let in_schema = child.output_schema_in(scope)?;
 
-                // Per-series range reduction (`rate`/`increase`): one value out
-                // per series, so it is *label-preserving* — every label column
-                // survives and only the sample value is replaced (kept named
-                // `value`, the PromQL convention). This is what lets an outer
-                // cross-series `Aggregate.by` resolve its group keys positionally
-                // over `sum by (job) (rate(...))`.
-                if by.is_empty() && !aggs.is_empty() && aggs.iter().all(|a| a.is_per_series()) {
-                    let value_idx = in_schema.column_id("value").or_else(|| {
-                        (0..in_schema.columns.len()).find(|&i| Some(i) != in_schema.time_index)
-                    });
-                    let mut columns = in_schema.columns.clone();
-                    if let Some(vi) = value_idx {
-                        let mut out = aggs[0].output_column(&columns[vi]);
-                        out.name = "value".into();
-                        columns[vi] = out;
-                    }
-                    return Ok(Schema {
-                        columns,
-                        time_index: in_schema.time_index,
-                        unique_keys: in_schema.unique_keys.clone(),
-                    });
+                // Per-series range reduction (`rate`/`increase`, whose window is
+                // carried in the intent so there is no enclosing `Window` node):
+                // one value out per series, so it is *label-preserving*. (The
+                // `*_over_time` reductions take the same shape but under a time
+                // `Window` — handled by the `Window` arm below.)
+                if by.is_empty() && aggs.len() == 1 && aggs[0].is_per_series() {
+                    return Ok(per_series_reduction_schema(&in_schema, &aggs[0]));
                 }
 
                 let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + aggs.len());
@@ -567,6 +570,28 @@ impl QueryExpr {
 
             QueryExpr::BinaryOp { lhs, .. } => lhs.output_schema_in(scope),
         }
+    }
+}
+
+/// Output schema of a *per-series* window/range reduction (`rate`/`increase`,
+/// or an `*_over_time` reducer under a time `Window`). Such a reduction emits
+/// one value per series, so every label column of `input` is preserved and only
+/// the sample value is replaced — kept named `value` so the PromQL sample-value
+/// convention (and any outer `SampleValue` reference) still resolves it by name.
+fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
+    let value_idx = input
+        .column_id("value")
+        .or_else(|| (0..input.columns.len()).find(|&i| Some(i) != input.time_index));
+    let mut columns = input.columns.clone();
+    if let Some(vi) = value_idx {
+        let mut out = agg.output_column(&columns[vi]);
+        out.name = "value".into();
+        columns[vi] = out;
+    }
+    Schema {
+        columns,
+        time_index: input.time_index,
+        unique_keys: input.unique_keys.clone(),
     }
 }
 
@@ -768,6 +793,49 @@ mod tests {
         );
         assert_eq!(s.time_index, Some(0));
         assert!(s.column_id("job").is_some(), "label survives the reduction");
+    }
+
+    #[test]
+    fn windowed_over_time_reduction_preserves_labels() {
+        // `*_over_time` lowers to `Window { Aggregate{ by:[], [reducer] } }`: a
+        // per-series time-window reduction. It must be label-preserving too
+        // (same as `rate`), so an outer `sum by(job)(avg_over_time(...))` resolves
+        // its key positionally. The reducer (`Avg`) shares its `AggIntent` with
+        // cross-series `avg`; the enclosing `Window` is what marks it per-series.
+        let child = scan(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("value", DataType::Float64, false),
+                col("job", DataType::Utf8, true),
+            ],
+            Some(0),
+            vec![],
+        );
+        let avg_over_time = QueryExpr::Window {
+            kind: WindowKind::Tumbling,
+            size: Duration::from_secs(300),
+            slide: None,
+            child: Box::new(QueryExpr::Aggregate {
+                by: vec![],
+                aggs: vec![AggIntent::Avg { col: None }],
+                output_names: vec![],
+                having: None,
+                child: Box::new(child),
+            }),
+        };
+        let s = avg_over_time.output_schema().unwrap();
+        assert_eq!(
+            s.columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ts", "value", "job"],
+            "windowed per-series reduction preserves labels; value kept named `value`"
+        );
+        assert!(
+            s.column_id("job").is_some(),
+            "outer Aggregate.by can resolve it"
+        );
     }
 
     #[test]

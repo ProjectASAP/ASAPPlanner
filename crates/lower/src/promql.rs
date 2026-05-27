@@ -21,7 +21,7 @@
 //! | `rate/irate(m[w])` | `Aggregate{[Rate{w}]}` (no Window) — `irate` shares the `rate` *intent*; the avg-vs-last-two-samples difference is an L4 estimation method |
 //! | `increase(m[w])` | `Aggregate{[Increase{w}]}` (no Window) |
 //! | `changes` / `resets` / `group` / `offset` / `@` | **rejected** — distinct semantics with no intent-algebra representation yet |
-//! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ `Partition` in L3) |
+//! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; `Partition` only as a fallback for windowed/unresolved keys) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
 //! | `topk(k, count_over_time(…))` | `TopK{k, by}` (heavy-hitter, one pass) |
 //! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
