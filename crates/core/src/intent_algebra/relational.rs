@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use super::expr_ir::L2Expr;
-pub use super::query_expr::{BinaryOpKind, ColumnRef, PartitionKeys, VectorMatch};
+pub use super::query_expr::{BinaryOpKind, ColumnRef, PartitionKeys, VectorMatch, WindowFuncKind};
 use super::schema::Schema;
 
 /// SELECT-list item at Layer 2 — a name-based [`L2Expr`] + optional alias.
@@ -190,6 +190,16 @@ pub enum QueryExpr {
         input: Box<QueryExpr>,
     },
 
+    /// SQL analytic window function `func(args) OVER (PARTITION BY … ORDER BY …)`.
+    WindowFunc {
+        func: WindowFuncKind,
+        args: Vec<L2Expr>,
+        partition_by: Vec<String>,
+        order_by: Vec<L2SortKey>,
+        output_name: String,
+        input: Box<QueryExpr>,
+    },
+
     /// Binary op between two instant-vector expressions (PromQL `+`, `/`, …).
     BinaryOp {
         op: BinaryOpKind,
@@ -214,6 +224,7 @@ impl QueryExpr {
             | QueryExpr::TopK { input, .. }
             | QueryExpr::Sort { input, .. }
             | QueryExpr::Limit { input, .. }
+            | QueryExpr::WindowFunc { input, .. }
             | QueryExpr::PromQLSubquery { input, .. } => input.walk(f),
             QueryExpr::Merge { inputs } => {
                 for i in inputs {
@@ -250,6 +261,7 @@ impl QueryExpr {
             | QueryExpr::TopK { input, .. }
             | QueryExpr::Sort { input, .. }
             | QueryExpr::Limit { input, .. }
+            | QueryExpr::WindowFunc { input, .. }
             | QueryExpr::PromQLSubquery { input, .. } => input.leaf_source(),
             QueryExpr::Merge { inputs } => inputs.first()?.leaf_source(),
             QueryExpr::Join { left, .. }

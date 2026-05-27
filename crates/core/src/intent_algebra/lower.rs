@@ -325,6 +325,43 @@ pub fn convert(
             child: Box::new(convert(input, fallback, acc)?),
         },
 
+        // Analytic window: args / partition-by / order-by resolve positionally
+        // against the child's output schema.
+        LQueryExpr::WindowFunc {
+            func,
+            args,
+            partition_by,
+            order_by,
+            output_name,
+            input,
+        } => {
+            let child = convert(input, fallback, acc)?;
+            let child_schema = child.output_schema()?;
+            let args = args
+                .iter()
+                .map(|a| resolve_expr(a, &child_schema))
+                .collect::<Result<Vec<_>, _>>()?;
+            let partition_by = resolve_named_keys(partition_by, &child_schema)?;
+            let order_by = order_by
+                .iter()
+                .map(|k| -> Result<SortKey, ConvertError> {
+                    Ok(SortKey {
+                        expr: resolve_expr(&k.expr, &child_schema)?,
+                        ascending: k.ascending,
+                        nulls_first: k.nulls_first,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            CQueryExpr::WindowFunc {
+                func: func.clone(),
+                args,
+                partition_by,
+                order_by,
+                output_name: output_name.clone(),
+                child: Box::new(child),
+            }
+        }
+
         LQueryExpr::BinaryOp {
             op,
             lhs,

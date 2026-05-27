@@ -36,6 +36,6 @@ pub use names::{BindingName, QueryId};
 pub use query_expr::{
     BinaryOpKind, BindingScope, ColumnRef, DataModel, GroupSide, JoinKind, PartitionKeys,
     Predicate, ProjectItem, QueryExpr, QueryExprError, SetOpKind, SortKey, Source, VectorGrouping,
-    VectorMatch, VectorMatchKind, WindowKind,
+    VectorMatch, VectorMatchKind, WindowFuncKind, WindowKind,
 };
 pub use schema::{cse_reuse_is_legal, Column, ColumnId, CseError, DataType, Schema};

@@ -162,6 +162,27 @@ pub enum SetOpKind {
     Except,
 }
 
+/// SQL analytic window function (`fn(...) OVER (…)`). Distinct from a streaming
+/// time `Window`: this is an analytic frame over already-materialised rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFuncKind {
+    RowNumber,
+    Rank,
+    DenseRank,
+    Lag,
+    Lead,
+    FirstValue,
+    LastValue,
+    /// `NTH_VALUE(expr, n)` — `n` is resolved from the (literal) 2nd argument.
+    NthValue(Option<u64>),
+    Sum,
+    Avg,
+    Count,
+    Min,
+    Max,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SortKey {
     pub expr: L3Expr,
@@ -310,6 +331,22 @@ pub enum QueryExpr {
         range: Duration,
         #[serde(default)]
         resolution: Option<Duration>,
+        child: Box<QueryExpr>,
+    },
+
+    /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …)`.
+    /// Output schema = child schema + one column named `output_name` (the name
+    /// the enclosing `Project` references). Window frames are not modelled yet.
+    WindowFunc {
+        func: WindowFuncKind,
+        /// Operand expressions (`LAG(value)` → `[Column(value_id)]`); empty for
+        /// the rank-only functions (`ROW_NUMBER`/`RANK`/`DENSE_RANK`).
+        args: Vec<L3Expr>,
+        partition_by: Vec<ColumnId>,
+        order_by: Vec<SortKey>,
+        /// The output column's name — DataFusion's window-expr field name, so a
+        /// `Project` above resolves it (cf. `Aggregate.output_names`).
+        output_name: String,
         child: Box<QueryExpr>,
     },
 
@@ -503,6 +540,46 @@ impl QueryExpr {
                     unique_keys: Vec::new(),
                 })
             }
+            // ψ-analytic — child schema + one appended window-output column.
+            QueryExpr::WindowFunc {
+                func,
+                args,
+                output_name,
+                child,
+                ..
+            } => {
+                let mut out = child.output_schema_in(scope)?;
+                // First operand's (dtype, nullable) from the child schema, owned
+                // so the borrow ends before we append.
+                let arg = args.first().and_then(|a| match a {
+                    L3Expr::Column(id) => out.columns.get(*id),
+                    _ => None,
+                });
+                let arg_dtype = || arg.map_or(DataType::Float64, |c| c.dtype.clone());
+                let (dtype, nullable) = match func {
+                    WindowFuncKind::RowNumber
+                    | WindowFuncKind::Rank
+                    | WindowFuncKind::DenseRank
+                    | WindowFuncKind::Count => (DataType::Int64, false),
+                    WindowFuncKind::Sum | WindowFuncKind::Avg => (DataType::Float64, true),
+                    // Navigation funcs: arg type, nullable (boundary rows are NULL).
+                    WindowFuncKind::Lag
+                    | WindowFuncKind::Lead
+                    | WindowFuncKind::FirstValue
+                    | WindowFuncKind::LastValue
+                    | WindowFuncKind::NthValue(_) => (arg_dtype(), true),
+                    WindowFuncKind::Min | WindowFuncKind::Max => {
+                        (arg_dtype(), arg.is_none_or(|c| c.nullable))
+                    }
+                };
+                out.columns.push(Column {
+                    name: output_name.clone(),
+                    dtype,
+                    nullable,
+                });
+                Ok(out)
+            }
+
             QueryExpr::BinaryOp { lhs, .. } => lhs.output_schema_in(scope),
         }
     }

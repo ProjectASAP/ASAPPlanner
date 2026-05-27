@@ -12,13 +12,17 @@ use std::sync::Arc;
 
 use datafusion::common::ScalarValue;
 use datafusion::datasource::MemTable;
-use datafusion::logical_expr::{self, Distinct, Expr, JoinType, LogicalPlan};
+use datafusion::logical_expr::{
+    self, Distinct, Expr, JoinType, LogicalPlan, WindowFunctionDefinition,
+};
 use datafusion::prelude::SessionContext;
 
 use asap_control_core::intent_algebra::relational::{
     AggFunc, AggItem, L2ProjectItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
-use asap_control_core::intent_algebra::{ColumnRef, CompareOp, JoinKind, L2Expr, SetOpKind};
+use asap_control_core::intent_algebra::{
+    ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
+};
 
 use crate::error::LoweringError;
 
@@ -96,9 +100,7 @@ impl<'a> SqlLowerer<'a> {
                     })
                 })
             }
-            LogicalPlan::Window(_) => Err(LoweringError::UnsupportedFeature(
-                "SQL window functions (no L3 analytic-window node yet)".into(),
-            )),
+            LogicalPlan::Window(window) => self.lower_window(window),
             LogicalPlan::Join(join) => self.lower_join(join),
             LogicalPlan::Subquery(_) => Err(LoweringError::UnsupportedFeature("subquery".into())),
             LogicalPlan::SubqueryAlias(alias) => {
@@ -177,6 +179,80 @@ impl<'a> SqlLowerer<'a> {
             pred,
             left: Box::new(self.lower_plan(&join.left)?),
             right: Box::new(self.lower_plan(&join.right)?),
+        })
+    }
+
+    /// `func(args) OVER (PARTITION BY … ORDER BY …)`. One window function per
+    /// plan node; window frames are not modelled yet (default frame assumed).
+    fn lower_window(&self, window: &logical_expr::Window) -> Result<L2, LoweringError> {
+        if window.window_expr.len() > 1 {
+            return Err(LoweringError::UnsupportedFeature(format!(
+                "multiple window functions in one plan node (got {}); split them",
+                window.window_expr.len()
+            )));
+        }
+        let input = Box::new(self.lower_plan(&window.input)?);
+        let first = window
+            .window_expr
+            .first()
+            .ok_or_else(|| LoweringError::InvalidExpression("empty window expression".into()))?;
+        let Expr::WindowFunction(wf) = first else {
+            return Err(LoweringError::InvalidExpression(
+                "expected a window function in Window plan node".into(),
+            ));
+        };
+        let func = lower_window_func_kind(&wf.fun)?;
+        let mut args = wf
+            .args
+            .iter()
+            .map(df_expr_to_l2)
+            .collect::<Result<Vec<_>, _>>()?;
+        // Nth_value: lift N from the (literal) 2nd arg, keep only the column.
+        let func = if matches!(func, WindowFuncKind::NthValue(None)) {
+            let n = match args.get(1) {
+                Some(L2Expr::Literal(L3Scalar::Int64(n))) if *n > 0 => *n as u64,
+                other => {
+                    return Err(LoweringError::InvalidExpression(format!(
+                        "NTH_VALUE requires a positive integer literal 2nd arg, got {other:?}"
+                    )))
+                }
+            };
+            args.truncate(1);
+            WindowFuncKind::NthValue(Some(n))
+        } else {
+            func
+        };
+        let partition_by = wf
+            .partition_by
+            .iter()
+            .map(expr_to_group_name)
+            .collect::<Result<Vec<_>, _>>()?;
+        let order_by = wf
+            .order_by
+            .iter()
+            .map(|s| {
+                df_expr_to_l2(&s.expr).map(|expr| L2SortKey {
+                    expr,
+                    ascending: s.asc,
+                    nulls_first: s.nulls_first,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // The window plan's schema is `[input fields …, window output]`; the last
+        // field is the window column's name (what an enclosing Project references).
+        let output_name = window
+            .schema
+            .fields()
+            .last()
+            .map(|f| f.name().clone())
+            .unwrap_or_else(|| "window".into());
+        Ok(L2::WindowFunc {
+            func,
+            args,
+            partition_by,
+            order_by,
+            output_name,
+            input,
         })
     }
 
@@ -506,5 +582,42 @@ fn find_aggregate(plan: &LogicalPlan) -> Option<&logical_expr::Aggregate> {
         LogicalPlan::Projection(p) => find_aggregate(&p.input),
         LogicalPlan::SubqueryAlias(a) => find_aggregate(&a.input),
         _ => None,
+    }
+}
+
+/// Map a DataFusion window-function definition to the L3 [`WindowFuncKind`].
+/// `NthValue` is returned with `None`; `lower_window` fills in `n` from args.
+fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKind, LoweringError> {
+    let unsupported = |what: &str, name: &str| {
+        LoweringError::UnsupportedFeature(format!("window {what}: {name}"))
+    };
+    match fun {
+        WindowFunctionDefinition::WindowUDF(udf) => match udf.name().to_lowercase().as_str() {
+            "row_number" => Ok(WindowFuncKind::RowNumber),
+            "rank" => Ok(WindowFuncKind::Rank),
+            "dense_rank" => Ok(WindowFuncKind::DenseRank),
+            "lag" => Ok(WindowFuncKind::Lag),
+            "lead" => Ok(WindowFuncKind::Lead),
+            "first_value" => Ok(WindowFuncKind::FirstValue),
+            "last_value" => Ok(WindowFuncKind::LastValue),
+            "nth_value" => Ok(WindowFuncKind::NthValue(None)),
+            other => Err(unsupported("function", other)),
+        },
+        WindowFunctionDefinition::AggregateUDF(udf) => match udf.name().to_lowercase().as_str() {
+            "sum" => Ok(WindowFuncKind::Sum),
+            "avg" | "mean" => Ok(WindowFuncKind::Avg),
+            "count" => Ok(WindowFuncKind::Count),
+            "min" => Ok(WindowFuncKind::Min),
+            "max" => Ok(WindowFuncKind::Max),
+            other => Err(unsupported("aggregate", other)),
+        },
+        WindowFunctionDefinition::BuiltInWindowFunction(biwf) => {
+            use datafusion::logical_expr::BuiltInWindowFunction;
+            match biwf {
+                BuiltInWindowFunction::FirstValue => Ok(WindowFuncKind::FirstValue),
+                BuiltInWindowFunction::LastValue => Ok(WindowFuncKind::LastValue),
+                BuiltInWindowFunction::NthValue => Ok(WindowFuncKind::NthValue(None)),
+            }
+        }
     }
 }

@@ -5,7 +5,9 @@
 //! canonical L3 (the same converter the PromQL path uses).
 
 use asap_control_core::intent_algebra::schema::{Column, DataType, Schema};
-use asap_control_core::intent_algebra::{AggIntent, JoinKind, QueryExpr, Source};
+use asap_control_core::intent_algebra::{
+    AggIntent, JoinKind, L3Expr, QueryExpr, Source, WindowFuncKind,
+};
 use asap_control_core::types::AccuracyTarget;
 use asap_control_lower::{lower_sql, SqlCatalog};
 
@@ -292,4 +294,70 @@ async fn semi_join_is_rejected_not_mislowered() {
         res.is_err(),
         "semi-join / IN-subquery should be rejected in v1"
     );
+}
+
+/// Find the first `WindowFunc` node along the single-child spine.
+fn find_windowfunc(qe: &QueryExpr) -> Option<&QueryExpr> {
+    match qe {
+        QueryExpr::WindowFunc { .. } => Some(qe),
+        QueryExpr::Project { child, .. }
+        | QueryExpr::Filter { child, .. }
+        | QueryExpr::Aggregate { child, .. }
+        | QueryExpr::Window { child, .. }
+        | QueryExpr::Partition { child, .. }
+        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Sort { child, .. }
+        | QueryExpr::Limit { child, .. }
+        | QueryExpr::Subquery { child, .. } => find_windowfunc(child),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn window_function_lowers_to_positional_windowfunc() {
+    // ROW_NUMBER() OVER (PARTITION BY service ORDER BY bytes DESC).
+    let qe = lower(
+        "SELECT service, ROW_NUMBER() OVER (PARTITION BY service ORDER BY bytes DESC) \
+         FROM metrics",
+    )
+    .await;
+    let win = find_windowfunc(&qe).expect("expected a WindowFunc node");
+    let QueryExpr::WindowFunc {
+        func,
+        partition_by,
+        order_by,
+        ..
+    } = win
+    else {
+        unreachable!("find_windowfunc only returns WindowFunc");
+    };
+    assert_eq!(*func, WindowFuncKind::RowNumber);
+    assert_eq!(partition_by, &vec![1], "PARTITION BY service → col 1");
+    assert_eq!(order_by.len(), 1);
+    assert_eq!(
+        order_by[0].expr,
+        L3Expr::Column(3),
+        "ORDER BY bytes → col 3"
+    );
+    assert!(!order_by[0].ascending, "DESC");
+
+    // The window output column is appended to the schema (Int64 for ROW_NUMBER),
+    // and the enclosing projection resolves it (output_name threading).
+    let schema = qe.output_schema().expect("root schema");
+    assert!(
+        schema.columns.iter().any(|c| c.dtype == DataType::Int64),
+        "row_number output column present, got {:?}",
+        schema.columns
+    );
+}
+
+#[tokio::test]
+async fn window_aggregate_lowers_to_windowfunc() {
+    let qe = lower("SELECT service, SUM(bytes) OVER (PARTITION BY service) FROM metrics").await;
+    let win = find_windowfunc(&qe).expect("expected a WindowFunc node");
+    let QueryExpr::WindowFunc { func, args, .. } = win else {
+        unreachable!();
+    };
+    assert_eq!(*func, WindowFuncKind::Sum);
+    assert_eq!(args, &vec![L3Expr::Column(3)], "SUM(bytes) → arg col 3");
 }

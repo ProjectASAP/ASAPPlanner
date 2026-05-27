@@ -75,6 +75,7 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         | QueryExpr::Limit { child, .. }
         | QueryExpr::Subquery { child, .. }
         | QueryExpr::Distinct { child, .. }
+        | QueryExpr::WindowFunc { child, .. }
         | QueryExpr::Project { child, .. } => collect(child, out),
         QueryExpr::BinaryOp { lhs, rhs, .. } => {
             collect(lhs, out);
