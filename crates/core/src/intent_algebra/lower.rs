@@ -135,7 +135,7 @@ pub fn convert(
                 let aggregate = CQueryExpr::Aggregate {
                     by,
                     aggs: vec![intent],
-                    output_names: vec![aggs[0].alias.clone()],
+                    output_names: vec![aggs[0].alias.clone().unwrap_or_default()],
                     having: None,
                     child: Box::new(agg_child),
                 };
@@ -179,7 +179,10 @@ pub fn convert(
                     Ok(agg_func_to_intent(&item.func, acc, col))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let output_names: Vec<String> = aggs.iter().map(|item| item.alias.clone()).collect();
+            let output_names: Vec<String> = aggs
+                .iter()
+                .map(|item| item.alias.clone().unwrap_or_default())
+                .collect();
             let having = having
                 .as_ref()
                 .map(|h| -> Result<Predicate, ConvertError> {
@@ -552,16 +555,14 @@ mod tests {
             keys: vec![],
             aggs: vec![
                 AggItem {
-                    alias: "total_bytes".into(),
+                    alias: Some("total_bytes".into()),
                     func: AggFunc::Sum,
                     col: ColumnRef::Named("bytes".into()),
-                    distinct: false,
                 },
                 AggItem {
-                    alias: "avg_latency".into(),
+                    alias: Some("avg_latency".into()),
                     func: AggFunc::Avg,
                     col: ColumnRef::Named("latency".into()),
-                    distinct: false,
                 },
             ],
             having: None,
@@ -603,10 +604,9 @@ mod tests {
         let tree = LQueryExpr::Aggregate {
             keys: vec![],
             aggs: vec![AggItem {
-                alias: "value".into(),
+                alias: Some("value".into()),
                 func: AggFunc::Sum,
                 col: ColumnRef::SampleValue,
-                distinct: false,
             }],
             having: None,
             input: Box::new(LQueryExpr::Source(SourceSpec::new("m"))),
@@ -649,16 +649,14 @@ mod tests {
             keys: vec![ColumnRef::Named("region".into())],
             aggs: vec![
                 AggItem {
-                    alias: "tot".into(),
+                    alias: Some("tot".into()),
                     func: AggFunc::Sum,
                     col: ColumnRef::Named("bytes".into()),
-                    distinct: false,
                 },
                 AggItem {
-                    alias: "n".into(),
+                    alias: Some("n".into()),
                     func: AggFunc::Count,
                     col: ColumnRef::Wildcard,
-                    distinct: false,
                 },
             ],
             having: None,
@@ -694,16 +692,14 @@ mod tests {
             keys: vec![ColumnRef::Named("region".into())],
             aggs: vec![
                 AggItem {
-                    alias: "tot".into(),
+                    alias: Some("tot".into()),
                     func: AggFunc::Sum,
                     col: ColumnRef::Named("bytes".into()),
-                    distinct: false,
                 },
                 AggItem {
-                    alias: "n".into(),
+                    alias: Some("n".into()),
                     func: AggFunc::Count,
                     col: ColumnRef::Wildcard,
-                    distinct: false,
                 },
             ],
             having: Some(L2Expr::Compare {

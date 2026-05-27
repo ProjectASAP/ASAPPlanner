@@ -322,7 +322,7 @@ impl<'a> SqlLowerer<'a> {
             .map(|(i, e)| {
                 let mut item = lower_agg_item(e)?;
                 if let Some(name) = out_names.get(i) {
-                    item.alias = name.clone();
+                    item.alias = Some(name.clone());
                 }
                 Ok(item)
             })
@@ -450,10 +450,9 @@ fn lower_agg_item(expr: &Expr) -> Result<AggItem, LoweringError> {
                 _ => return Err(LoweringError::UnsupportedAggregate(name)),
             };
             Ok(AggItem {
-                alias: name,
+                alias: Some(name),
                 func,
                 col,
-                distinct: agg_fn.distinct,
             })
         }
         _ => Err(LoweringError::UnsupportedAggregate(format!("{expr:?}"))),

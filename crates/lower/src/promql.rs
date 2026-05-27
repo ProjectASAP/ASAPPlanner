@@ -452,12 +452,11 @@ fn windowed_aggregate(inner: Inner, keys: Vec<ColumnRef>, func: AggFunc) -> L2 {
     L2::Aggregate {
         keys,
         aggs: vec![AggItem {
-            // Empty alias → the converter keeps PromQL's intent-keyed output
+            // None alias → the converter keeps PromQL's intent-keyed output
             // names ("sum", "quantile_0_99", …) instead of overriding them.
-            alias: String::new(),
+            alias: None,
             func,
             col: ColumnRef::SampleValue,
-            distinct: false,
         }],
         having: None,
         input: Box::new(input),
@@ -471,12 +470,11 @@ fn outer_aggregate(keys: Vec<ColumnRef>, func: AggFunc, input: L2) -> L2 {
     L2::Aggregate {
         keys,
         aggs: vec![AggItem {
-            // Empty alias → the converter keeps PromQL's intent-keyed output
+            // None alias → the converter keeps PromQL's intent-keyed output
             // names ("sum", "quantile_0_99", …) instead of overriding them.
-            alias: String::new(),
+            alias: None,
             func,
             col: ColumnRef::SampleValue,
-            distinct: false,
         }],
         having: None,
         input: Box::new(input),

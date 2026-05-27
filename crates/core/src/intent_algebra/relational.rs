@@ -63,10 +63,11 @@ impl SourceSpec {
 /// One aggregate function in a GROUP BY / AGGREGATE node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AggItem {
-    pub alias: String,
+    /// Output alias (`None` = use the intent's conventional name). Matches
+    /// `L2ProjectItem.alias`'s convention — no `""` sentinel.
+    pub alias: Option<String>,
     pub func: AggFunc,
     pub col: ColumnRef,
-    pub distinct: bool,
 }
 
 /// Layer-2 aggregate functions. Mapped to canonical [`AggIntent`] by
@@ -107,7 +108,9 @@ pub enum AggFunc {
 pub enum QueryExpr {
     /// A named metric stream or table — the outermost leaf.
     Source(SourceSpec),
-    /// Reference to a CTE / let-binding by name.
+    /// Reference to a CTE / let-binding by name. **Reserved**: no front end
+    /// emits `Ref`/`LetBinding` yet (CSE runs on L3); the converter arm exists
+    /// for forward-compatibility (e.g. PromQL recording rules).
     Ref(String),
 
     /// σ — row-level filter (WHERE / PromQL label matchers).
@@ -138,6 +141,8 @@ pub enum QueryExpr {
     },
 
     /// Partition the stream by key-tuple (`by (dims)` / `without (dims)`).
+    /// **Reserved**: PromQL `by(...)` emits `Aggregate.keys` (the converter
+    /// synthesizes any L3 `Partition`); no front end emits an L2 `Partition`.
     Partition {
         keys: PartitionKeys,
         input: Box<QueryExpr>,
@@ -153,7 +158,9 @@ pub enum QueryExpr {
         by: Vec<ColumnRef>,
         input: Box<QueryExpr>,
     },
-    /// ⊕ — merge sub-results from independent branches.
+    /// ⊕ — merge sub-results from independent branches. **Reserved**: SQL
+    /// `UNION` lowers to `SetOp`; no front end emits `Merge` yet (reserved for
+    /// sharded / fan-in plans).
     Merge { inputs: Vec<QueryExpr> },
 
     Join {
@@ -179,6 +186,8 @@ pub enum QueryExpr {
         input: Box<QueryExpr>,
     },
 
+    /// **Reserved**: see [`Ref`](Self::Ref) — no front end emits `LetBinding`
+    /// yet (DAG fan-in / CSE is expressed on L3).
     LetBinding {
         name: String,
         expr: Box<QueryExpr>,

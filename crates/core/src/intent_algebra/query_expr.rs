@@ -69,6 +69,9 @@ impl Source {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PartitionKeys {
     By(Vec<String>),
+    /// **Reserved**: PromQL `without(...)` is rejected up front (the
+    /// usage-derived schema can't enumerate the label complement), so no front
+    /// end produces this variant yet.
     Without(Vec<String>),
 }
 
