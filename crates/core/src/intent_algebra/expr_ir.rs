@@ -1,16 +1,17 @@
 //! Language-independent scalar expression IR.
 //!
-//! There are **two** scalar expression types, mirroring the lowering boundary:
+//! One generic [`Expr<C>`] spans the lowering boundary; the two layers are
+//! aliases that differ only in the column-reference type `C`:
 //!
-//! - [`L2Expr`] — name-based ([`Column(ColumnRef)`](ColumnRef)). The per-language
-//!   front ends emit it (PromQL label matchers, SQL `WHERE` / projection /
-//!   sort-key expressions) on the Layer-2 `relational` tree.
-//! - [`L3Expr`] — **positional** ([`Column(ColumnId)`](ColumnId)). The canonical
-//!   L3 `query_expr` tree carries it; the converter resolves every `L2Expr`
-//!   column reference against the in-scope schema to produce it, so L3 column
-//!   identity is unambiguous (no name collisions across a join).
+//! - [`L2Expr`] = `Expr<ColumnRef>` — name-based. The per-language front ends
+//!   emit it (PromQL label matchers, SQL `WHERE` / projection / sort-key
+//!   expressions) on the Layer-2 `relational` tree.
+//! - [`L3Expr`] = `Expr<ColumnId>` — **positional**. The canonical L3
+//!   `query_expr` tree carries it; the converter resolves every `ColumnRef`
+//!   against the in-scope schema to produce it, so L3 column identity is
+//!   unambiguous (no name collisions across a join).
 //!
-//! Both share the same shape and the scalar/operator vocabulary
+//! `Expr<C>` shares the scalar/operator vocabulary
 //! ([`L3Scalar`], [`CompareOp`], [`ArithOp`]) — the **union** of what the two
 //! front ends need: PromQL contributes `Regex` / `NotRegex` (`=~` / `!~`); SQL
 //! contributes arithmetic, `CASE`, `IN`, `CAST`, `IS [NOT] NULL`, scalar
@@ -118,223 +119,122 @@ impl std::fmt::Display for ArithOp {
     }
 }
 
-/// Layer-2 (name-based) scalar expression. Front ends emit this; the converter
-/// resolves it into a positional [`L3Expr`]. Flat conjunctions (`BoolAnd`) /
-/// disjunctions (`BoolOr`) make per-conjunct selectivity estimation and
-/// label-matcher lowering straightforward without recursive descent.
+/// Scalar expression, generic over its column-reference type `C`. The two
+/// lowering layers are aliases over the *same* shape — only the column
+/// reference differs — so there is one definition (and one set of helpers) to
+/// maintain, and the converter is a structural map that swaps `C`:
+///
+/// - [`L2Expr`] = `Expr<ColumnRef>` — name-based, front-end-emitted.
+/// - [`L3Expr`] = `Expr<ColumnId>` — positional, resolved against the schema.
+///
+/// Flat conjunctions (`BoolAnd`) / disjunctions (`BoolOr`) make per-conjunct
+/// selectivity estimation and label-matcher lowering straightforward without
+/// recursive descent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum L2Expr {
-    /// Reference to a named column / label.
-    Column(ColumnRef),
+pub enum Expr<C> {
+    /// A column reference — `ColumnRef` (L2) or positional `ColumnId` (L3).
+    Column(C),
     /// A constant literal value.
     Literal(L3Scalar),
     /// `left op right` — binary comparison.
     Compare {
-        left: Box<L2Expr>,
+        left: Box<Expr<C>>,
         op: CompareOp,
-        right: Box<L2Expr>,
+        right: Box<Expr<C>>,
     },
     /// Flat conjunction (logical AND). An empty list is vacuously true.
-    BoolAnd(Vec<L2Expr>),
+    BoolAnd(Vec<Expr<C>>),
     /// Flat disjunction (logical OR). An empty list is vacuously false.
-    BoolOr(Vec<L2Expr>),
+    BoolOr(Vec<Expr<C>>),
     /// Logical NOT.
-    Not(Box<L2Expr>),
+    Not(Box<Expr<C>>),
     /// `expr IS NULL`.
-    IsNull(Box<L2Expr>),
+    IsNull(Box<Expr<C>>),
     /// `expr IS NOT NULL`.
-    IsNotNull(Box<L2Expr>),
+    IsNotNull(Box<Expr<C>>),
     /// `CAST(expr AS to)`; `try_cast` for SQL `TRY_CAST` (NULL on failure).
     Cast {
-        expr: Box<L2Expr>,
+        expr: Box<Expr<C>>,
         to: DataType,
         try_cast: bool,
     },
     /// `expr [NOT] IN (v1, v2, …)`.
     InList {
-        expr: Box<L2Expr>,
-        list: Vec<L2Expr>,
+        expr: Box<Expr<C>>,
+        list: Vec<Expr<C>>,
         negated: bool,
     },
     /// Scalar function call, e.g. `LOWER(col)`, `ABS(x)`.
-    FunctionCall { name: String, args: Vec<L2Expr> },
+    FunctionCall { name: String, args: Vec<Expr<C>> },
     /// Binary arithmetic: `left op right`.
     Arith {
         op: ArithOp,
-        left: Box<L2Expr>,
-        right: Box<L2Expr>,
+        left: Box<Expr<C>>,
+        right: Box<Expr<C>>,
     },
     /// SQL `CASE` (both searched and simple forms). `operand` present for the
     /// simple form (`CASE expr WHEN …`), absent for searched.
     Case {
-        operand: Option<Box<L2Expr>>,
-        branches: Vec<(L2Expr, L2Expr)>,
-        else_expr: Option<Box<L2Expr>>,
+        operand: Option<Box<Expr<C>>>,
+        branches: Vec<(Expr<C>, Expr<C>)>,
+        else_expr: Option<Box<Expr<C>>>,
     },
 }
 
-impl L2Expr {
+/// Layer-2 (name-based) scalar expression. Front ends emit this; the converter
+/// resolves it into a positional [`L3Expr`].
+pub type L2Expr = Expr<ColumnRef>;
+
+/// Canonical L3 (positional) scalar expression — column references are
+/// [`ColumnId`]s resolved against the in-scope schema, so identity is
+/// unambiguous across joins / duplicate names.
+pub type L3Expr = Expr<ColumnId>;
+
+impl<C> Expr<C> {
     /// If this expression is a `BoolAnd`, return its elements; otherwise a
     /// single-element slice containing `self`.
-    pub fn conjuncts(&self) -> &[L2Expr] {
+    pub fn conjuncts(&self) -> &[Expr<C>] {
         match self {
-            L2Expr::BoolAnd(v) => v.as_slice(),
+            Expr::BoolAnd(v) => v.as_slice(),
             _ => std::slice::from_ref(self),
         }
     }
 
     /// If this expression is a `BoolOr`, return its elements; otherwise a
     /// single-element slice containing `self`.
-    pub fn disjuncts(&self) -> &[L2Expr] {
+    pub fn disjuncts(&self) -> &[Expr<C>] {
         match self {
-            L2Expr::BoolOr(v) => v.as_slice(),
+            Expr::BoolOr(v) => v.as_slice(),
             _ => std::slice::from_ref(self),
         }
     }
 
-    /// Recursively collect every `ColumnRef` referenced anywhere in this
-    /// expression. Used by the Binder to seed usage-derived leaf schemas.
-    pub fn columns_referenced(&self) -> Vec<&ColumnRef> {
+    /// Recursively collect every column reference anywhere in this expression.
+    /// Used by the Binder (L2) to seed usage-derived leaf schemas, and available
+    /// to L4 (L3) for column-lineage / selectivity.
+    pub fn columns_referenced(&self) -> Vec<&C> {
         match self {
-            L2Expr::Column(c) => vec![c],
-            L2Expr::Literal(_) => vec![],
-            L2Expr::Compare { left, right, .. } | L2Expr::Arith { left, right, .. } => {
+            Expr::Column(c) => vec![c],
+            Expr::Literal(_) => vec![],
+            Expr::Compare { left, right, .. } | Expr::Arith { left, right, .. } => {
                 let mut v = left.columns_referenced();
                 v.extend(right.columns_referenced());
                 v
             }
-            L2Expr::BoolAnd(parts) | L2Expr::BoolOr(parts) => {
+            Expr::BoolAnd(parts) | Expr::BoolOr(parts) => {
                 parts.iter().flat_map(|e| e.columns_referenced()).collect()
             }
-            L2Expr::Not(e) | L2Expr::IsNull(e) | L2Expr::IsNotNull(e) => e.columns_referenced(),
-            L2Expr::Cast { expr, .. } => expr.columns_referenced(),
-            L2Expr::InList { expr, list, .. } => {
+            Expr::Not(e) | Expr::IsNull(e) | Expr::IsNotNull(e) => e.columns_referenced(),
+            Expr::Cast { expr, .. } => expr.columns_referenced(),
+            Expr::InList { expr, list, .. } => {
                 let mut v = expr.columns_referenced();
                 v.extend(list.iter().flat_map(|e| e.columns_referenced()));
                 v
             }
-            L2Expr::FunctionCall { args, .. } => {
+            Expr::FunctionCall { args, .. } => {
                 args.iter().flat_map(|e| e.columns_referenced()).collect()
             }
-            L2Expr::Case {
-                operand,
-                branches,
-                else_expr,
-            } => {
-                let mut v = vec![];
-                if let Some(op) = operand {
-                    v.extend(op.columns_referenced());
-                }
-                for (when, then) in branches {
-                    v.extend(when.columns_referenced());
-                    v.extend(then.columns_referenced());
-                }
-                if let Some(e) = else_expr {
-                    v.extend(e.columns_referenced());
-                }
-                v
-            }
-        }
-    }
-}
-
-/// Canonical L3 (positional) scalar expression. Same shape as [`L2Expr`] but
-/// column references are positional [`ColumnId`]s resolved against the in-scope
-/// schema, so identity is unambiguous across joins / duplicate names.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum L3Expr {
-    /// Positional reference to a column in the in-scope schema.
-    Column(ColumnId),
-    /// A constant literal value.
-    Literal(L3Scalar),
-    /// `left op right` — binary comparison.
-    Compare {
-        left: Box<L3Expr>,
-        op: CompareOp,
-        right: Box<L3Expr>,
-    },
-    /// Flat conjunction (logical AND). An empty list is vacuously true.
-    BoolAnd(Vec<L3Expr>),
-    /// Flat disjunction (logical OR). An empty list is vacuously false.
-    BoolOr(Vec<L3Expr>),
-    /// Logical NOT.
-    Not(Box<L3Expr>),
-    /// `expr IS NULL`.
-    IsNull(Box<L3Expr>),
-    /// `expr IS NOT NULL`.
-    IsNotNull(Box<L3Expr>),
-    /// `CAST(expr AS to)`; `try_cast` for SQL `TRY_CAST` (NULL on failure).
-    Cast {
-        expr: Box<L3Expr>,
-        to: DataType,
-        try_cast: bool,
-    },
-    /// `expr [NOT] IN (v1, v2, …)`.
-    InList {
-        expr: Box<L3Expr>,
-        list: Vec<L3Expr>,
-        negated: bool,
-    },
-    /// Scalar function call, e.g. `LOWER(col)`, `ABS(x)`.
-    FunctionCall { name: String, args: Vec<L3Expr> },
-    /// Binary arithmetic: `left op right`.
-    Arith {
-        op: ArithOp,
-        left: Box<L3Expr>,
-        right: Box<L3Expr>,
-    },
-    /// SQL `CASE` (both searched and simple forms).
-    Case {
-        operand: Option<Box<L3Expr>>,
-        branches: Vec<(L3Expr, L3Expr)>,
-        else_expr: Option<Box<L3Expr>>,
-    },
-}
-
-impl L3Expr {
-    /// If this expression is a `BoolAnd`, return its elements; otherwise a
-    /// single-element slice containing `self`.
-    pub fn conjuncts(&self) -> &[L3Expr] {
-        match self {
-            L3Expr::BoolAnd(v) => v.as_slice(),
-            _ => std::slice::from_ref(self),
-        }
-    }
-
-    /// If this expression is a `BoolOr`, return its elements; otherwise a
-    /// single-element slice containing `self`.
-    pub fn disjuncts(&self) -> &[L3Expr] {
-        match self {
-            L3Expr::BoolOr(v) => v.as_slice(),
-            _ => std::slice::from_ref(self),
-        }
-    }
-
-    /// Recursively collect every positional [`ColumnId`] referenced anywhere in
-    /// this expression. Used by L4 for column-lineage and selectivity.
-    pub fn columns_referenced(&self) -> Vec<ColumnId> {
-        match self {
-            L3Expr::Column(id) => vec![*id],
-            L3Expr::Literal(_) => vec![],
-            L3Expr::Compare { left, right, .. } | L3Expr::Arith { left, right, .. } => {
-                let mut v = left.columns_referenced();
-                v.extend(right.columns_referenced());
-                v
-            }
-            L3Expr::BoolAnd(parts) | L3Expr::BoolOr(parts) => {
-                parts.iter().flat_map(|e| e.columns_referenced()).collect()
-            }
-            L3Expr::Not(e) | L3Expr::IsNull(e) | L3Expr::IsNotNull(e) => e.columns_referenced(),
-            L3Expr::Cast { expr, .. } => expr.columns_referenced(),
-            L3Expr::InList { expr, list, .. } => {
-                let mut v = expr.columns_referenced();
-                v.extend(list.iter().flat_map(|e| e.columns_referenced()));
-                v
-            }
-            L3Expr::FunctionCall { args, .. } => {
-                args.iter().flat_map(|e| e.columns_referenced()).collect()
-            }
-            L3Expr::Case {
+            Expr::Case {
                 operand,
                 branches,
                 else_expr,
