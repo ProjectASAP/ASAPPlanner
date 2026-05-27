@@ -39,7 +39,10 @@ impl fmt::Display for LoweringError {
             Self::Parse(e) => write!(f, "PromQL parse error: {e}"),
             Self::UnsupportedFunction(n) => write!(f, "unsupported PromQL function: {n}"),
             Self::UnsupportedAggregateOp(n) => write!(f, "unsupported PromQL aggregate op: {n}"),
-            Self::UnsupportedFeature(m) => write!(f, "unsupported PromQL feature: {m}"),
+            // Raised by both front ends (PromQL offset/`@`/`without`/negation;
+            // SQL join type/subquery/derived table), so keep the label neutral —
+            // the message string carries the specifics.
+            Self::UnsupportedFeature(m) => write!(f, "unsupported feature: {m}"),
             Self::MissingArgument(m) => write!(f, "missing argument: {m}"),
             Self::InvalidParameter(m) => write!(f, "invalid parameter: {m}"),
             Self::WrongLanguage(l) => write!(f, "unsupported query language: {l}"),
