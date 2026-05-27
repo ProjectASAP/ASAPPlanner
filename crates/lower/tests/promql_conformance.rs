@@ -313,6 +313,31 @@ fn sum_by_of_rate_groups_outer_level() {
     ));
 }
 
+#[test]
+fn sum_by_of_over_time_groups_outer_level() {
+    // Outer cross-series Sum grouped on positional `Aggregate.by` over an inner
+    // *per-series* `avg_over_time` — `Window { Aggregate{Avg} }` is label-
+    // preserving, so the key resolves positionally just like the rate case (no
+    // name-based Partition). Leaf = [ts, value, instance] → by = [2].
+    let qe = ok("sum by(instance) (avg_over_time(node_cpu_seconds_total[5m]))");
+    let QueryExpr::Aggregate {
+        by, aggs, child, ..
+    } = &qe
+    else {
+        panic!("expected outer Aggregate grouped by instance, got {qe:?}");
+    };
+    assert_eq!(by, &vec![2]);
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    // child is the inner per-series reduction: Window over Aggregate{Avg}.
+    let QueryExpr::Window { child, .. } = child.as_ref() else {
+        panic!("expected Window (per-series avg_over_time) under the Sum, got {child:?}");
+    };
+    assert!(matches!(
+        child.as_ref(),
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Avg { .. }])
+    ));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // E. Aggregation over time (per-series)    (cheat sheet "Aggregating Over
 //    Time"; functions.test)

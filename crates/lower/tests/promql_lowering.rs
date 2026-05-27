@@ -82,23 +82,24 @@ fn quantile_over_time_is_window_over_aggregate() {
 }
 
 #[test]
-fn outer_sum_by_wraps_in_partition() {
-    // `sum by (host) (quantile_over_time(...))` is a two-level reduction: an
-    // inner per-series quantile-over-time, then an outer cross-series sum.
-    // Grouping rides on a `Partition` wrapping the outer Sum (backend model).
+fn outer_sum_by_over_quantile_over_time_groups_positionally() {
+    // `sum by (host) (quantile_over_time(...))`: inner per-series
+    // quantile-over-time (label-preserving), then an outer cross-series sum
+    // grouped on a positional `Aggregate.by` — the same shape SQL produces, not
+    // a name-based Partition. Leaf = [ts, value, host, service] (referenced
+    // names appended sorted) → host = col 2.
     let qe = lower(r#"sum by (host) (quantile_over_time(0.99, latency{service="web"}[5m]))"#);
-    let QueryExpr::Partition { keys, child } = &qe else {
-        panic!("expected Partition, got {qe:?}");
+    let QueryExpr::Aggregate {
+        by, aggs, child, ..
+    } = &qe
+    else {
+        panic!("expected outer Aggregate grouped by host, got {qe:?}");
     };
-    assert_eq!(keys, &PartitionKeys::By(vec!["host".into()]));
-    // Outer cross-series Sum.
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
-        panic!("expected outer Aggregate{{Sum}} under Partition, got {child:?}");
-    };
+    assert_eq!(by, &vec![2]);
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
-    // Inner: Window over Aggregate{Quantile}.
+    // Inner: Window over Aggregate{Quantile} (the per-series over_time reduction).
     let QueryExpr::Window { child, .. } = child.as_ref() else {
-        panic!("expected Window under the outer Sum, got {child:?}");
+        panic!("expected Window (per-series over_time) under the outer Sum, got {child:?}");
     };
     assert!(matches!(
         child.as_ref(),
@@ -275,20 +276,20 @@ fn count_over_time_is_count_intent() {
 #[test]
 fn outer_count_is_cardinality() {
     // `count by (symbol) (count_over_time(...))`: inner per-series sample count
-    // over the window, outer cross-series cardinality grouped by symbol.
+    // over the window (label-preserving), outer cross-series cardinality grouped
+    // on a positional `Aggregate.by`. Leaf = [ts, value, symbol] → symbol = col 2.
     let qe = lower("count by (symbol) (count_over_time(financial_last_trade_price[5m]))");
-    let QueryExpr::Partition { keys, child } = &qe else {
-        panic!("expected Partition, got {qe:?}");
+    let QueryExpr::Aggregate {
+        by, aggs, child, ..
+    } = &qe
+    else {
+        panic!("expected outer Aggregate grouped by symbol, got {qe:?}");
     };
-    assert_eq!(keys, &PartitionKeys::By(vec!["symbol".into()]));
-    // Outer cardinality (count of series).
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
-        panic!("expected outer Aggregate{{Cardinality}} under Partition, got {child:?}");
-    };
+    assert_eq!(by, &vec![2]);
     assert!(matches!(aggs.as_slice(), [AggIntent::Cardinality { .. }]));
     // Inner: Window over Aggregate{Count} (count_over_time).
     let QueryExpr::Window { child, .. } = child.as_ref() else {
-        panic!("expected Window under the outer cardinality, got {child:?}");
+        panic!("expected Window (per-series count_over_time) under the cardinality, got {child:?}");
     };
     assert!(matches!(
         child.as_ref(),
