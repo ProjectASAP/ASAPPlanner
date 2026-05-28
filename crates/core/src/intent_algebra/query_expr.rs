@@ -213,9 +213,10 @@ pub enum QueryExpr {
     /// description of the runtime row. Complete when catalog-backed (SQL); for
     /// schemaless PromQL it is usage-derived by the [`Binder`](super::binder)
     /// (the `(ts, value)` floor + the labels the query references), since a
-    /// metric's label set is open and known only at runtime. `predicates` are
-    /// leaf-level row filters (PromQL label matchers, pushed-down `WHERE`
-    /// conjuncts).
+    /// metric's label set is open and known only at runtime. That distinction is
+    /// carried explicitly by [`Schema::closed`](super::schema::Schema::closed)
+    /// (SQL leaf → `true`, PromQL leaf → `false`). `predicates` are leaf-level
+    /// row filters (PromQL label matchers, pushed-down `WHERE` conjuncts).
     Scan {
         source: Source,
         #[serde(default)]
@@ -436,6 +437,10 @@ impl QueryExpr {
                     columns: out_cols,
                     time_index: None,
                     unique_keys,
+                    // A cross-series aggregate enumerates exactly `by ++ aggs`,
+                    // so its output is closed even over an open input — this is
+                    // the "freeze" point (cf. Calcite resolving a dynamic type).
+                    closed: true,
                 })
             }
 
@@ -480,6 +485,8 @@ impl QueryExpr {
                     columns,
                     time_index,
                     unique_keys: Vec::new(),
+                    // Projection enumerates exactly its items → closed.
+                    closed: true,
                 })
             }
 
@@ -533,6 +540,8 @@ impl QueryExpr {
                     columns,
                     time_index,
                     unique_keys: Vec::new(),
+                    // The concatenation is complete only if both sides are.
+                    closed: l.closed && r.closed,
                 })
             }
             // ψ-analytic — child schema + one appended window-output column.
@@ -596,6 +605,9 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
         columns,
         time_index: input.time_index,
         unique_keys: input.unique_keys.clone(),
+        // Per-series reduction is label-preserving: it inherits its input's
+        // completeness (an open scan stays open; a closed one stays closed).
+        closed: input.closed,
     }
 }
 
@@ -709,6 +721,7 @@ mod tests {
                 columns,
                 time_index,
                 unique_keys: uk,
+                closed: true,
             },
         }
     }
@@ -837,6 +850,56 @@ mod tests {
         assert!(
             s.column_id("job").is_some(),
             "outer Aggregate.by can resolve it"
+        );
+    }
+
+    #[test]
+    fn completeness_open_leaf_freezes_to_closed_at_cross_series_aggregate() {
+        // A schemaless (PromQL-style) leaf is *open*; it stays open through a
+        // per-series reduction (`rate`), then is **frozen to closed** by a
+        // cross-series aggregate — mirroring Calcite's DynamicRecordType being
+        // resolved to a fixed RelRecordType.
+        let open_leaf = QueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            // `with_time_index` defaults to `closed: false` (open).
+            schema: Schema::with_time_index(
+                vec![
+                    col("ts", DataType::Timestamp, false),
+                    col("value", DataType::Float64, false),
+                    col("job", DataType::Utf8, true),
+                ],
+                0,
+                vec![],
+            ),
+        };
+        assert!(
+            !open_leaf.output_schema().unwrap().closed,
+            "schemaless leaf is open"
+        );
+
+        let rate = QueryExpr::Aggregate {
+            by: vec![],
+            aggs: vec![AggIntent::Rate],
+            output_names: vec![],
+            having: None,
+            child: Box::new(open_leaf),
+        };
+        assert!(
+            !rate.output_schema().unwrap().closed,
+            "per-series rate is label-preserving → stays open"
+        );
+
+        let sum_by_job = QueryExpr::Aggregate {
+            by: vec![2], // `job`
+            aggs: vec![AggIntent::Sum { col: None }],
+            output_names: vec![],
+            having: None,
+            child: Box::new(rate),
+        };
+        assert!(
+            sum_by_job.output_schema().unwrap().closed,
+            "cross-series aggregate enumerates `by ++ aggs` → frozen to closed"
         );
     }
 

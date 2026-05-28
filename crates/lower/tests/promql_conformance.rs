@@ -138,6 +138,21 @@ fn instant_vector_selector() {
 }
 
 #[test]
+fn promql_scan_schema_is_open() {
+    // A schemaless PromQL leaf is *open*: the metric's full label set is
+    // runtime-only, so the binding schema lists only the (ts, value) floor +
+    // referenced labels and may be a subset of the runtime row.
+    let qe = ok("node_cpu_seconds_total");
+    let QueryExpr::Scan { schema, .. } = &qe else {
+        panic!("expected a Scan for a bare selector, got {qe:?}");
+    };
+    assert!(
+        !schema.closed,
+        "a schemaless PromQL scan has an open schema"
+    );
+}
+
+#[test]
 fn label_matchers_become_scan_predicates() {
     // SEMANTICS: `=`, `!=`, `=~`, `!~` filter series; one conjunct per matcher.
     let (_, preds) = first_scan(&ok(

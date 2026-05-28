@@ -113,6 +113,24 @@ pub struct Schema {
     /// "no provable unique constraint" (the conservative default).
     #[serde(default)]
     pub unique_keys: Vec<Vec<ColumnId>>,
+    /// Whether this schema **completely enumerates** the columns at this point.
+    ///
+    /// - `true` (**closed**): there are no columns beyond these — a catalog-backed
+    ///   SQL source, or an output fully determined by an `Aggregate`/`Project`.
+    /// - `false` (**open**): a dynamic / superset schema — the runtime row may
+    ///   carry more columns than are listed (a schemaless PromQL leaf lists only
+    ///   the `(ts, value)` floor + the labels the query references).
+    ///
+    /// This mirrors Apache Calcite's `DynamicRecordType` (schema-on-read): the
+    /// schema starts open at a schemaless leaf and is **frozen to closed** by the
+    /// first operator that fully determines its output columns (`Aggregate` /
+    /// `Project`). Consumers needing completeness (label validation, full-output
+    /// enumeration, cardinality for the cost model) must check this; positional
+    /// resolution does not care. **Invariant: open ⇒ do not apply closed-world
+    /// validation** (PromQL tolerates unknown labels). Defaults to `false` (open)
+    /// — the conservative choice when completeness is unknown.
+    #[serde(default)]
+    pub closed: bool,
 }
 
 impl Schema {
@@ -124,6 +142,7 @@ impl Schema {
             columns,
             time_index: None,
             unique_keys: Vec::new(),
+            closed: false,
         }
     }
 
@@ -138,6 +157,7 @@ impl Schema {
             columns,
             time_index: Some(time_index),
             unique_keys,
+            closed: false,
         }
     }
 
@@ -357,6 +377,17 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: Schema = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn schema_closed_defaults_to_open_when_absent() {
+        // `closed` is `#[serde(default)]` so schemas serialized before the field
+        // existed deserialize to `closed: false` (open) — the conservative
+        // default (don't claim completeness you can't prove).
+        let mut v = serde_json::to_value(Schema::new(vec![col("a", DataType::Utf8)])).unwrap();
+        assert!(v.as_object_mut().unwrap().remove("closed").is_some());
+        let back: Schema = serde_json::from_value(v).unwrap();
+        assert!(!back.closed, "absent `closed` ⇒ open");
     }
 
     #[test]

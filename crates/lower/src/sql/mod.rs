@@ -151,6 +151,8 @@ impl<'a> SqlLowerer<'a> {
                 .collect(),
             time_index: schema.time_index,
             unique_keys: schema.unique_keys.clone(),
+            // Catalog-backed: the table's columns are fully declared → closed.
+            closed: true,
         };
         Ok(L2::Source(SourceSpec::with_schema(
             table.to_string(),
