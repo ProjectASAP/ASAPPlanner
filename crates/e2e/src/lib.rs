@@ -33,6 +33,9 @@ pub mod fixtures {
             columns: cols,
             time_index: Some(0),
             unique_keys: vec![],
+            // Schemaless PromQL leaf: open (the metric's full label set is
+            // runtime-only; this lists just the referenced labels).
+            closed: false,
         }
     }
 }

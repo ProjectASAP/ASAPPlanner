@@ -194,6 +194,9 @@ pub fn output_schema_for_aggregate(
         columns: out_cols,
         time_index: None,
         unique_keys,
+        // A cross-series aggregate fully determines its output columns, so the
+        // result is closed even over an open input (mirrors `output_schema_in`).
+        closed: true,
     }
 }
 
