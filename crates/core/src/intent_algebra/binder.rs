@@ -18,6 +18,15 @@ use crate::intent_algebra::schema::{Column, DataType, Schema};
 
 /// The DB / source-schema metadata source — resolves a source (metric /
 /// table) name to its known columns.
+/// Source of truth for a source's columns — the "catalog". `SqlCatalog` backs
+/// it for SQL; PromQL uses [`UsageDerivedCatalog`] (returns `None`) until a
+/// registry-backed impl (returning a metric's known label set) drops in here.
+/// Distinct from `Scan.schema`, which is the *resolved* binding schema this
+/// feeds — the catalog is the input, the schema is the result. Even a
+/// registry-backed PromQL catalog yields an **open** schema
+/// ([`Schema::closed`](super::schema::Schema::closed) `= false`): a metric's
+/// labels are per-series and time-varying, so the registry is a superset hint,
+/// not a per-row contract.
 pub trait SchemaCatalog {
     /// Columns known for `source`. `None` when unknown — the [`Binder`] then
     /// falls back to a usage-derived column set.
@@ -88,6 +97,9 @@ impl<C: SchemaCatalog> Binder<C> {
             columns,
             time_index,
             unique_keys: Vec::new(),
+            // Usage-derived (schemaless PromQL): the metric's full label set is
+            // open and runtime-only, so this lists only what the query references.
+            closed: false,
         }
     }
 }

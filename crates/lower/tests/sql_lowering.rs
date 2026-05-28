@@ -100,13 +100,19 @@ async fn select_star_with_where_folds_predicate_onto_scan() {
     // SELECT * elides the projection; WHERE folds onto the Scan predicates.
     let qe = lower("SELECT * FROM metrics WHERE service = 'api'").await;
     let QueryExpr::Scan {
-        source, predicates, ..
+        source,
+        predicates,
+        schema,
     } = &qe
     else {
         panic!("expected Scan at root, got {qe:?}");
     };
     assert!(matches!(source, Source::Table { table_ref } if table_ref == "metrics"));
     assert_eq!(predicates.len(), 1, "WHERE clause folded onto the scan");
+    assert!(
+        schema.closed,
+        "a catalog-backed SQL scan has a closed schema"
+    );
 }
 
 #[tokio::test]
