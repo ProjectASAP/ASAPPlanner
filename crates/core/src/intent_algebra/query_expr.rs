@@ -439,7 +439,7 @@ impl QueryExpr {
                     unique_keys,
                     // A cross-series aggregate enumerates exactly `by ++ aggs`,
                     // so its output is closed even over an open input — this is
-                    // the "freeze" point (cf. Calcite resolving a dynamic type).
+                    // where an open schema freezes to closed.
                     closed: true,
                 })
             }
@@ -857,8 +857,7 @@ mod tests {
     fn completeness_open_leaf_freezes_to_closed_at_cross_series_aggregate() {
         // A schemaless (PromQL-style) leaf is *open*; it stays open through a
         // per-series reduction (`rate`), then is **frozen to closed** by a
-        // cross-series aggregate — mirroring Calcite's DynamicRecordType being
-        // resolved to a fixed RelRecordType.
+        // cross-series aggregate (which enumerates exactly its output columns).
         let open_leaf = QueryExpr::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
