@@ -362,6 +362,9 @@ impl<'a> SqlLowerer<'a> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(L2::Sort {
             keys,
+            // SQL `ORDER BY` is a global sort; per-group ranking would come from a
+            // window function (`WindowFunc`), not a bare Sort.
+            partition_by: vec![],
             input: Box::new(self.lower_plan(&sort.input)?),
         })
     }

@@ -143,17 +143,21 @@ fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
             }
         }
         LQueryExpr::TopK { by, .. } => by.iter().for_each(|k| push_ref_name(k, &mut out)),
-        LQueryExpr::Partition { keys, .. } => out.extend(keys.keys().iter().cloned()),
         LQueryExpr::Filter { pred, .. } => named(pred, &mut out),
         LQueryExpr::Project { cols, .. } => {
             for item in cols {
                 named(&item.expr, &mut out);
             }
         }
-        LQueryExpr::Sort { keys, .. } => {
+        LQueryExpr::Sort {
+            keys, partition_by, ..
+        } => {
             for k in keys {
                 named(&k.expr, &mut out);
             }
+            // Per-group ranking keys (`topk by (…)`) must be seeded into the
+            // leaf schema so they resolve positionally to `Sort.partition_by`.
+            partition_by.iter().for_each(|k| push_ref_name(k, &mut out));
         }
         LQueryExpr::Join { pred: Some(p), .. } => named(p, &mut out),
         _ => {}
@@ -166,8 +170,9 @@ fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent_algebra::query_expr::PartitionKeys;
-    use crate::intent_algebra::relational::{QueryExpr as LQueryExpr, SourceSpec};
+    use crate::intent_algebra::expr_ir::ColumnRef;
+    use crate::intent_algebra::relational::{L2SortKey, QueryExpr as LQueryExpr, SourceSpec};
+    use crate::intent_algebra::L2Expr;
 
     fn src(name: &str) -> LQueryExpr {
         LQueryExpr::Source(SourceSpec::new(name))
@@ -183,9 +188,16 @@ mod tests {
     }
 
     #[test]
-    fn partition_keys_land_in_schema() {
-        let tree = LQueryExpr::Partition {
-            keys: PartitionKeys::By(vec!["host".into()]),
+    fn sort_partition_keys_land_in_schema() {
+        // Per-group ranking keys (`topk by (host)` → `Sort.partition_by`) must be
+        // seeded into the usage-derived leaf so they resolve positionally.
+        let tree = LQueryExpr::Sort {
+            keys: vec![L2SortKey {
+                expr: L2Expr::Column(ColumnRef::SampleValue),
+                ascending: false,
+                nulls_first: false,
+            }],
+            partition_by: vec![ColumnRef::Named("host".into())],
             input: Box::new(src("hits")),
         };
         let schema = Binder::new().bind(&tree);

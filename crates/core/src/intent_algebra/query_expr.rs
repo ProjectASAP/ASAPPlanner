@@ -65,27 +65,6 @@ impl Source {
     }
 }
 
-/// Grouping key set (`by (...)` / `without (...)`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PartitionKeys {
-    By(Vec<String>),
-    /// **Reserved**: PromQL `without(...)` is rejected up front (the
-    /// usage-derived schema can't enumerate the label complement), so no front
-    /// end produces this variant yet.
-    Without(Vec<String>),
-}
-
-impl PartitionKeys {
-    pub fn keys(&self) -> &[String] {
-        match self {
-            PartitionKeys::By(k) | PartitionKeys::Without(k) => k,
-        }
-    }
-    pub fn is_empty(&self) -> bool {
-        self.keys().is_empty()
-    }
-}
-
 /// Operator on the query-level `BinaryOp` node. Reuses the scalar IR's
 /// [`ArithOp`] / [`CompareOp`] so every arithmetic/comparison operator has
 /// exactly one representation (and one `Display`) across the IR; the remaining
@@ -264,27 +243,6 @@ pub enum QueryExpr {
         child: Box<QueryExpr>,
     },
 
-    /// Split the stream by key tuple — **row-preserving** (schema pass-through,
-    /// see `output_schema_in`), the opposite of `Aggregate`'s group-and-reduce.
-    /// This is `PARTITION BY`, not `GROUP BY`: every reducing GROUP BY (SQL and
-    /// PromQL) lowers to `Aggregate.by`, so this node is *not* a second way to
-    /// express that. Its only live use is recording per-group structure over a
-    /// per-series (label-preserving) reduction — e.g. `topk by (host)
-    /// (avg_over_time(cpu[5m]))`, emitted by the `lower.rs` fallback.
-    ///
-    /// **Transitional** (issue #12): a split-for-parallelism is a physical
-    /// concern that does not belong in the symbolic L3 IR. End-state — per-group
-    /// ranking moves to a rank `partition_by` (mirroring `WindowFunc.partition_by`)
-    /// and the parallel split becomes an L5 stage-allocation artifact (paired with
-    /// `SketchExpr::SummaryMerge`). Naive removal is blocked because per-series
-    /// schema detection keys off `Aggregate.by.is_empty()` (see `output_schema_in`'s
-    /// `Aggregate` arm) — the keys can't simply move into `Aggregate.by` without
-    /// flipping the node to a cross-series reduce and breaking the open, label-
-    /// preserving schema.
-    Partition {
-        keys: PartitionKeys,
-        child: Box<QueryExpr>,
-    },
     /// δ — SQL `DISTINCT` / row deduplication. Positional like every other L3
     /// column reference; empty = dedup on all columns (`SELECT DISTINCT *`).
     Distinct {
@@ -309,8 +267,18 @@ pub enum QueryExpr {
     },
 
     /// Generic order-by for non-heavy-hitter cases.
+    ///
+    /// `partition_by` makes the ordering **per-group**: a non-empty set means
+    /// "rank within each `partition_by` group" — the semantics behind PromQL
+    /// `topk by (host) (…)` / SQL `… OVER (PARTITION BY host ORDER BY …)`. It is
+    /// row-preserving (schema pass-through) and is where the grouping of a
+    /// generic (non-heavy-hitter) ranking lives, so there is no separate
+    /// `Partition` node (issue #12: reducing GROUP BY → `Aggregate.by`, per-group
+    /// ranking → here, parallel sharding → L5). Empty = a global order-by.
     Sort {
         keys: Vec<SortKey>,
+        #[serde(default)]
+        partition_by: Vec<ColumnId>,
         child: Box<QueryExpr>,
     },
     Limit {
@@ -471,7 +439,6 @@ impl QueryExpr {
                 .ok_or_else(|| QueryExprError::UnresolvedRef(name.as_str().into())),
 
             QueryExpr::Filter { child, .. }
-            | QueryExpr::Partition { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }
             | QueryExpr::Subquery { child, .. }

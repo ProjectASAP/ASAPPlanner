@@ -70,7 +70,6 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         }
         QueryExpr::Window { child, .. }
         | QueryExpr::TimeRange { child, .. }
-        | QueryExpr::Partition { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -111,7 +110,6 @@ fn first_scan(e: &QueryExpr) -> (String, usize) {
         QueryExpr::Window { child, .. }
         | QueryExpr::TimeRange { child, .. }
         | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Partition { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }

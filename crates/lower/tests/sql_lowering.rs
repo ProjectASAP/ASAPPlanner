@@ -53,7 +53,6 @@ fn find_aggregate(qe: &QueryExpr) -> Option<(&Vec<usize>, &Vec<AggIntent>)> {
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Window { child, .. }
-        | QueryExpr::Partition { child, .. }
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -70,7 +69,6 @@ fn find_join(qe: &QueryExpr) -> Option<&QueryExpr> {
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Aggregate { child, .. }
         | QueryExpr::Window { child, .. }
-        | QueryExpr::Partition { child, .. }
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -86,7 +84,6 @@ fn find_filter(qe: &QueryExpr) -> Option<&QueryExpr> {
         QueryExpr::Project { child, .. }
         | QueryExpr::Aggregate { child, .. }
         | QueryExpr::Window { child, .. }
-        | QueryExpr::Partition { child, .. }
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -408,7 +405,7 @@ async fn aggregate_over_join_binds_against_concatenated_schema() {
     // GROUP BY a right-table column over a join: the key must resolve against
     // the concatenated schema, exercising the bottom-up converter end to end.
     // Two aggregates → the multi-agg path, which carries GROUP BY keys as
-    // positional `Aggregate.by` (the single-agg path folds them into Partition).
+    // positional `Aggregate.by` (as does every reducing GROUP BY).
     let qe = lower(
         "SELECT hosts.region, SUM(metrics.bytes), COUNT(*) \
          FROM metrics JOIN hosts ON metrics.service = hosts.service \
@@ -452,7 +449,6 @@ fn find_windowfunc(qe: &QueryExpr) -> Option<&QueryExpr> {
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Aggregate { child, .. }
         | QueryExpr::Window { child, .. }
-        | QueryExpr::Partition { child, .. }
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }

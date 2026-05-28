@@ -2,7 +2,7 @@
 //! front ends emit, before [`convert_root`](super::lower::convert_root) lowers
 //! it to the canonical L3 [`query_expr::QueryExpr`](super::query_expr::QueryExpr).
 //!
-//! Leaf / scalar types (`ColumnRef`, `PartitionKeys`, `SortKey`,
+//! Leaf / scalar types (`ColumnRef`, `SortKey`,
 //! `BinaryOpKind`, `VectorMatch`) are owned by `query_expr` and re-used here so
 //! there is one canonical spelling. Filter / having / project expressions use
 //! the shared language-independent [`L3Expr`](super::expr_ir::L3Expr).
@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 pub use super::expr_ir::{ColumnRef, L2Expr};
-pub use super::query_expr::{BinaryOpKind, PartitionKeys, VectorMatch, WindowFuncKind};
+pub use super::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
 use super::schema::Schema;
 
 /// SELECT-list item at Layer 2 — a name-based [`L2Expr`] + optional alias.
@@ -140,15 +140,6 @@ pub enum QueryExpr {
         input: Box<QueryExpr>,
     },
 
-    /// Split the stream by key-tuple — row-preserving (`PARTITION BY`), not a
-    /// reducing `GROUP BY`. **Reserved**: PromQL `by(...)` emits `Aggregate.keys`
-    /// (the converter synthesizes any L3 `Partition` as a transitional split-
-    /// without-reduce fallback — see the L3 `QueryExpr::Partition` doc + issue
-    /// #12); no front end emits an L2 `Partition`.
-    Partition {
-        keys: PartitionKeys,
-        input: Box<QueryExpr>,
-    },
     /// δ — deduplicate on `cols`.
     Distinct {
         cols: Vec<ColumnRef>,
@@ -180,6 +171,11 @@ pub enum QueryExpr {
 
     Sort {
         keys: Vec<L2SortKey>,
+        /// Per-group ordering keys (`PARTITION BY`): a non-empty set means
+        /// "rank within each group", the home for a generic (non-heavy-hitter)
+        /// `topk by (…)` / `bottomk` grouping. Empty = a global order-by.
+        /// Resolved to positional `Sort.partition_by` ColumnIds at L3.
+        partition_by: Vec<ColumnRef>,
         input: Box<QueryExpr>,
     },
     Limit {
@@ -232,7 +228,6 @@ impl QueryExpr {
             | QueryExpr::Project { input, .. }
             | QueryExpr::Aggregate { input, .. }
             | QueryExpr::Window { input, .. }
-            | QueryExpr::Partition { input, .. }
             | QueryExpr::Distinct { input, .. }
             | QueryExpr::TopK { input, .. }
             | QueryExpr::Sort { input, .. }
@@ -269,7 +264,6 @@ impl QueryExpr {
             | QueryExpr::Project { input, .. }
             | QueryExpr::Aggregate { input, .. }
             | QueryExpr::Window { input, .. }
-            | QueryExpr::Partition { input, .. }
             | QueryExpr::Distinct { input, .. }
             | QueryExpr::TopK { input, .. }
             | QueryExpr::Sort { input, .. }
@@ -292,8 +286,8 @@ impl QueryExpr {
 
     /// Whether the leftmost `Source` leaf carries a resolved schema — i.e. it is
     /// a SQL table (`Source::Table`). Time-series (PromQL) leaves return
-    /// `false`. The converter uses this to keep the time-series fused-Partition
-    /// canonical shape for PromQL while routing tabular GROUP BY through a
+    /// `false`. The converter uses this to keep the time-series fused per-series
+    /// reduction shape for PromQL while routing tabular GROUP BY through a
     /// positional `Aggregate.by` (so group keys land in the output schema).
     pub fn leaf_is_tabular(&self) -> bool {
         self.leaf_source().is_some_and(|s| s.schema.is_some())

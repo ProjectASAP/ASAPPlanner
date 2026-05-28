@@ -6,7 +6,8 @@
 //!   the language-flavored [`relational::QueryExpr`] the controller's L2→L3
 //!   converter ([`convert_root`](asap_control_core::intent_algebra::convert_root))
 //!   consumes. Canonicalisation (window-over-aggregate fold, GROUP-BY →
-//!   `Partition`, positional name binding) happens in that converter, not here.
+//!   positional `Aggregate.by`, positional name binding) happens in that
+//!   converter, not here.
 //!
 //! # PromQL → L2 mapping (summary)
 //!
@@ -21,7 +22,7 @@
 //! | `rate/irate(m[w])` | `Aggregate{[Rate{w}]}` (no Window) — `irate` shares the `rate` *intent*; the avg-vs-last-two-samples difference is an L4 estimation method |
 //! | `increase(m[w])` | `Aggregate{[Increase{w}]}` (no Window) |
 //! | `changes` / `resets` / `group` / `offset` / `@` | **rejected** — distinct semantics with no intent-algebra representation yet |
-//! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; `Partition` only as a fallback for windowed/unresolved keys) |
+//! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
 //! | `topk(k, count_over_time(…))` | `TopK{k, by}` (heavy-hitter, one pass) |
 //! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
@@ -421,13 +422,18 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
                     Some(f) => inner_func(f),
                     None => AggFunc::Sum,
                 };
-                let base = windowed_aggregate(inner, keys, func);
+                // The grouping (`topk by (host)`) is per-group *ranking*, not a
+                // reduction — it rides on `Sort.partition_by` (→ positional L3
+                // `Sort.partition_by`), so the windowed reduction below stays
+                // label-preserving with no group keys (issue #12).
+                let base = windowed_aggregate(inner, vec![], func);
                 let sorted = L2::Sort {
                     keys: vec![L2SortKey {
                         expr: L2Expr::Column(ColumnRef::SampleValue),
                         ascending: !descending,
                         nulls_first: false,
                     }],
+                    partition_by: keys,
                     input: Box::new(base),
                 };
                 Ok(L2::Limit {

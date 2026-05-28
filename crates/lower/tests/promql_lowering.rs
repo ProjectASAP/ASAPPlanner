@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use asap_control_core::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, PartitionKeys, QueryExpr, Source,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, QueryExpr, Source,
 };
 use asap_control_core::types::AccuracyTarget;
 use asap_control_core::workload::{
@@ -336,14 +336,26 @@ fn topk_over_avg_is_generic_sort_limit() {
     };
     assert_eq!(*n, 5);
     assert_eq!(*offset, 0);
-    let QueryExpr::Sort { keys, child } = child.as_ref() else {
+    let QueryExpr::Sort {
+        keys,
+        partition_by,
+        child,
+    } = child.as_ref()
+    else {
         panic!("expected Sort under Limit, got {child:?}");
     };
     assert_eq!(keys.len(), 1);
     assert!(!keys[0].ascending, "topk ranks descending");
-    // Underneath: the windowed avg aggregate, grouped via Partition.
+    // `by (host)` is per-group ranking → it rides on `Sort.partition_by`
+    // (positional), not a `Partition` node (issue #12). `host` is col 2 in
+    // the per-series avg schema [ts, value, host].
+    assert_eq!(partition_by, &vec![2]);
+    // Underneath: the label-preserving windowed avg aggregate (by: []), no
+    // intervening Partition.
     assert!(
-        matches!(child.as_ref(), QueryExpr::Partition { keys, .. } if *keys == PartitionKeys::By(vec!["host".into()]))
+        matches!(child.as_ref(), QueryExpr::Aggregate { by, aggs, .. }
+            if by.is_empty() && matches!(aggs.as_slice(), [AggIntent::Avg { .. }])),
+        "expected bare per-series Avg aggregate under Sort, got {child:?}"
     );
 }
 
@@ -475,8 +487,7 @@ fn collect_intents(e: &QueryExpr, out: &mut Vec<AggIntent>) {
             out.extend(aggs.iter().cloned());
             collect_intents(child, out);
         }
-        QueryExpr::Partition { child, .. }
-        | QueryExpr::Window { child, .. }
+        QueryExpr::Window { child, .. }
         | QueryExpr::TimeRange { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
@@ -498,8 +509,7 @@ fn has_intent<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, pred: F) -> bool {
 fn scan_columns(e: &QueryExpr) -> Vec<String> {
     match e {
         QueryExpr::Scan { schema, .. } => schema.columns.iter().map(|c| c.name.clone()).collect(),
-        QueryExpr::Partition { child, .. }
-        | QueryExpr::Aggregate { child, .. }
+        QueryExpr::Aggregate { child, .. }
         | QueryExpr::Window { child, .. }
         | QueryExpr::TimeRange { child, .. }
         | QueryExpr::Filter { child, .. }
@@ -610,8 +620,7 @@ fn scan_schema_carries_ts_value_and_group_keys() {
     fn find_scan(n: &QueryExpr) -> &QueryExpr {
         match n {
             QueryExpr::Scan { .. } => n,
-            QueryExpr::Partition { child, .. }
-            | QueryExpr::Window { child, .. }
+            QueryExpr::Window { child, .. }
             | QueryExpr::TimeRange { child, .. }
             | QueryExpr::Aggregate { child, .. }
             | QueryExpr::Filter { child, .. } => find_scan(child),
@@ -672,49 +681,46 @@ fn batch_rejects_non_promql_language() {
     assert!(matches!(results[0], Err(LoweringError::WrongLanguage(_))));
 }
 
-// ── #12: reducing GROUP BY canonicalizes onto `Aggregate.by`, never `Partition` ──
+// ── #12: one home per grouping concept (the L3 `Partition` node is removed) ──
 //
-// `Partition` is split-*without*-reduce (`PARTITION BY`), a different operation
-// from `Aggregate`'s group-and-reduce. Its only live use is per-group structure
-// over a per-series reduction (e.g. `topk by (host) (avg_over_time(…))`). These
-// tests pin the resolved half of issue #12: every reducing GROUP BY — grouped
-// or not, instant or over a label-preserving `rate` — lowers to `Aggregate.by`
-// with no `Partition` anywhere in the tree.
-
-/// True if any node in the tree is a `Partition`.
-fn has_partition(e: &QueryExpr) -> bool {
-    match e {
-        QueryExpr::Partition { .. } => true,
-        QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Window { child, .. }
-        | QueryExpr::TimeRange { child, .. }
-        | QueryExpr::Filter { child, .. }
-        | QueryExpr::Sort { child, .. }
-        | QueryExpr::Limit { child, .. }
-        | QueryExpr::Subquery { child, .. }
-        | QueryExpr::Distinct { child, .. }
-        | QueryExpr::Project { child, .. } => has_partition(child),
-        QueryExpr::BinaryOp { lhs, rhs, .. } => has_partition(lhs) || has_partition(rhs),
-        QueryExpr::Merge { children } => children.iter().any(has_partition),
-        _ => false,
-    }
-}
+// `Partition` and `Aggregate.by` were two ways to express grouping. #12 collapses
+// them: a reducing GROUP BY → `Aggregate.by`; per-group *ranking* (split without
+// reduce) → `Sort.partition_by`; parallel sharding → L5-physical. There is no
+// longer an L3 `Partition` node. These tests pin both surviving L3 homes.
 
 #[test]
-fn reducing_group_by_lowers_to_aggregate_by_not_partition() {
+fn reducing_group_by_lowers_to_aggregate_by() {
     // Cross-series reduce, no keys → bare `Aggregate { by: [] }`.
     let q = lower("sum(http_requests_total)");
-    assert!(!has_partition(&q), "ungrouped reduce must not emit Partition: {q:?}");
     assert!(matches!(q, QueryExpr::Aggregate { ref by, .. } if by.is_empty()));
 
-    // Cross-series reduce grouped by a label → `Aggregate.by`, no `Partition`.
+    // Cross-series reduce grouped by a label → `Aggregate.by`.
     let q = lower("sum by (job) (http_requests_total)");
-    assert!(!has_partition(&q), "grouped reduce must not emit Partition: {q:?}");
     assert!(matches!(q, QueryExpr::Aggregate { ref by, .. } if by.len() == 1));
 
     // Reduce over a label-preserving `rate` grouped by a label → still
     // `Aggregate.by` (the keys resolve against rate's preserved schema).
     let q = lower("sum by (job) (rate(http_requests_total[5m]))");
-    assert!(!has_partition(&q), "reduce over rate must not emit Partition: {q:?}");
     assert!(matches!(q, QueryExpr::Aggregate { ref by, .. } if by.len() == 1));
+}
+
+#[test]
+fn generic_topk_grouping_lowers_to_sort_partition_by() {
+    // Per-group ranking (`topk by (host)`, non-heavy-hitter) groups *without*
+    // reducing → the grouping rides on `Sort.partition_by`, and the windowed
+    // reduction beneath stays label-preserving (`by: []`). No `Partition` node.
+    let q = lower("topk by (host) (5, avg_over_time(cpu[5m]))");
+    let QueryExpr::Limit { child, .. } = &q else {
+        panic!("expected Limit, got {q:?}");
+    };
+    let QueryExpr::Sort {
+        partition_by,
+        child,
+        ..
+    } = child.as_ref()
+    else {
+        panic!("expected Sort, got {child:?}");
+    };
+    assert_eq!(partition_by, &vec![2], "host is col 2 in [ts, value, host]");
+    assert!(matches!(child.as_ref(), QueryExpr::Aggregate { by, .. } if by.is_empty()));
 }
