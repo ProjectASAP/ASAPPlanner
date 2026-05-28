@@ -1,4 +1,4 @@
-//! Tier 4 — Binary op queries (e2e test suite #18–21).
+//! `QueryExpr::BinaryOp` — arithmetic, comparison, and vector-match tests.
 //!
 //! Each side of a `BinaryOp` is bound independently by the Binder, so each
 //! gets its own scan schema derived from the labels it references.

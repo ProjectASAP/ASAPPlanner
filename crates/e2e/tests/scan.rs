@@ -1,4 +1,4 @@
-//! Tier 1 — Scan-level PromQL queries (e2e test suite #1–4 + multi-predicate).
+//! `QueryExpr::Scan` — label matcher / predicate tests.
 //!
 //! The Scan schema is always [ts(0), value(1), label_a(2), label_b(3), …]
 //! where labels are appended alphabetically after dedup by the Binder.

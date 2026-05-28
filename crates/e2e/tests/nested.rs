@@ -1,6 +1,4 @@
-//! Tier 5 — Nested queries (e2e test suite #22–24).
-//!
-//! These tests combine aggregation, range functions, and label filters.
+//! Multi-node pipeline tests — nested `Aggregate`, `TimeRange`, `BinaryOp`, and `Scan`.
 //!
 //! Key invariant: `rate`/`increase` are label-preserving (per-series), so an
 //! outer `Aggregate.by` resolves its group keys against the inner aggregate's

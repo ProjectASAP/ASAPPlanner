@@ -1,7 +1,7 @@
-//! Tier 6 — Output-schema invariants (e2e test suite).
+//! `Schema::closed` propagation — open/closed invariant tests.
 //!
-//! These tests verify that `QueryExpr::output_schema()` propagates the
-//! open/closed completeness flag correctly through a lowered query tree.
+//! Verifies that `QueryExpr::output_schema()` propagates the open/closed
+//! completeness flag correctly through a lowered query tree.
 //!
 //! Key invariant: a PromQL scan is always `closed: false` (open) because its
 //! label set is runtime-only.  The schema freezes to `closed: true` exactly at

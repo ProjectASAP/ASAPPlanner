@@ -1,11 +1,12 @@
-//! Tier 2 — Single cross-series aggregation queries (e2e test suite #5–10).
+//! `QueryExpr::Aggregate` — cross-series aggregation tests.
 //!
-//! Tests 9, 11, 12 (topk/bottomk) are omitted — topk dispatch is deferred.
+//! topk/bottomk are omitted — dispatch is deferred.
 //!
-//! PromQL cross-series aggregates lower to a single `Aggregate` node with no
-//! `TimeRange` child (that's Tier 3).  Group keys land on `Aggregate.by` as
-//! positional `ColumnId`s.  Single-stat PromQL aggregates always get
-//! `output_names: [""]` (no alias) and `having: None`.
+//! Cross-series aggregates lower to a single `Aggregate` node with no
+//! `TimeRange` child (range functions use `TimeRange` — see `time_range.rs`).
+//! Group keys land on `Aggregate.by` as positional `ColumnId`s.
+//! Single-stat PromQL aggregates always get `output_names: [""]` (no alias)
+//! and `having: None`.
 
 use asap_control_core::intent_algebra::{AggIntent, QueryExpr, Source};
 use asap_control_core::types::AccuracyTarget;

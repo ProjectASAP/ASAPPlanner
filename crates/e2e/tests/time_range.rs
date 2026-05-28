@@ -1,4 +1,4 @@
-//! Tier 3 — Range / streaming function queries (e2e test suite #13–17).
+//! `QueryExpr::TimeRange` — range / streaming function tests.
 //!
 //! All range functions lower to `Aggregate { child: TimeRange { range, child: Scan } }`.
 //! The temporal range lives on the `TimeRange` node, not in the `AggIntent`.
