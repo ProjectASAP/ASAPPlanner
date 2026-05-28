@@ -18,6 +18,11 @@ use crate::intent_algebra::schema::{Column, DataType, Schema};
 
 /// The DB / source-schema metadata source — resolves a source (metric /
 /// table) name to its known columns.
+/// Source of truth for a source's columns — the "catalog". `SqlCatalog` backs
+/// it for SQL; PromQL uses [`UsageDerivedCatalog`] (returns `None`) until a
+/// registry-backed impl (returning a metric's known label set) drops in here.
+/// Distinct from `Scan.schema`, which is the *resolved* binding schema this
+/// feeds — the catalog is the input, the schema is the result.
 pub trait SchemaCatalog {
     /// Columns known for `source`. `None` when unknown — the [`Binder`] then
     /// falls back to a usage-derived column set.

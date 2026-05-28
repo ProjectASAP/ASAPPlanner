@@ -208,9 +208,14 @@ pub struct ProjectItem {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum QueryExpr {
-    /// Outermost leaf. `schema` is the authoritative, self-contained output
-    /// schema (Binder-built); `predicates` are leaf-level row filters
-    /// (PromQL label matchers, pushed-down `WHERE` conjuncts).
+    /// Outermost leaf. `schema` is the **binding schema** — the resolved column
+    /// set every positional `ColumnId` in the tree indexes into, *not* a full
+    /// description of the runtime row. Complete when catalog-backed (SQL); for
+    /// schemaless PromQL it is usage-derived by the [`Binder`](super::binder)
+    /// (the `(ts, value)` floor + the labels the query references), since a
+    /// metric's label set is open and known only at runtime. `predicates` are
+    /// leaf-level row filters (PromQL label matchers, pushed-down `WHERE`
+    /// conjuncts).
     Scan {
         source: Source,
         #[serde(default)]
