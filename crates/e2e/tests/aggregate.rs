@@ -139,7 +139,7 @@ fn q_stddev_no_group() {
             vec![],
             AggIntent::StdDev {
                 col: None,
-                population: false
+                population: true
             },
             scan("http_requests_total", &[])
         ),
@@ -155,7 +155,7 @@ fn q_stdvar_no_group() {
             vec![],
             AggIntent::Variance {
                 col: None,
-                population: false
+                population: true
             },
             scan("http_requests_total", &[])
         ),

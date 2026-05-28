@@ -510,8 +510,8 @@ fn inner_func(f: &InnerFunc) -> AggFunc {
         InnerFunc::Min => AggFunc::Min,
         InnerFunc::Max => AggFunc::Max,
         InnerFunc::Sum => AggFunc::Sum,
-        InnerFunc::StdDev => AggFunc::StdDev { population: false },
-        InnerFunc::Variance => AggFunc::Variance { population: false },
+        InnerFunc::StdDev => AggFunc::StdDev { population: true },
+        InnerFunc::Variance => AggFunc::Variance { population: true },
         InnerFunc::Count => AggFunc::Count,
         InnerFunc::Rate(w) => AggFunc::Rate { window: *w },
         InnerFunc::Increase(w) => AggFunc::Increase { window: *w },
@@ -524,8 +524,8 @@ fn outer_func(o: &OuterIntent) -> AggFunc {
         OuterIntent::Avg => AggFunc::Avg,
         OuterIntent::Min => AggFunc::Min,
         OuterIntent::Max => AggFunc::Max,
-        OuterIntent::StdDev => AggFunc::StdDev { population: false },
-        OuterIntent::Variance => AggFunc::Variance { population: false },
+        OuterIntent::StdDev => AggFunc::StdDev { population: true },
+        OuterIntent::Variance => AggFunc::Variance { population: true },
         OuterIntent::Quantile(q) => AggFunc::Quantile(*q),
     }
 }

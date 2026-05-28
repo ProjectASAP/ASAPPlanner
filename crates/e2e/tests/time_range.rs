@@ -119,7 +119,7 @@ fn q_stddev_over_time() {
             300,
             AggIntent::StdDev {
                 col: None,
-                population: false
+                population: true
             },
             "http_requests_total"
         ),
@@ -135,7 +135,7 @@ fn q_stdvar_over_time() {
             300,
             AggIntent::Variance {
                 col: None,
-                population: false
+                population: true
             },
             "http_requests_total"
         ),
