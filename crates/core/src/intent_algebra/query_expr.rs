@@ -312,6 +312,19 @@ pub enum QueryExpr {
         child: Box<QueryExpr>,
     },
 
+    /// Temporal range selection — "look back `range` of history for this
+    /// computation." Used for all range-vector functions: `rate`, `increase`,
+    /// `*_over_time`. The range is distinct from both a streaming `Window`
+    /// (which is for query-repetition) and a row-level `Filter`.
+    ///
+    /// Structural marker: an `Aggregate` whose direct child is a `TimeRange`
+    /// is a *per-series* reduction (label-preserving); one whose child is a
+    /// plain `Scan` or another `Aggregate` is a *cross-series* reduction.
+    TimeRange {
+        range: Duration,
+        child: Box<QueryExpr>,
+    },
+
     /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …)`.
     /// Output schema = child schema + one column named `output_name` (the name
     /// the enclosing `Project` references). Window frames are not modelled yet.
@@ -349,28 +362,11 @@ impl QueryExpr {
         match self {
             QueryExpr::Scan { schema, .. } => Ok(schema.clone()),
 
-            // ψ — a window reshapes the time axis but not the column set. Over a
-            // time-indexed Scan it preserves the time_index; over an Aggregate
-            // (the canonical Window-over-Aggregate fused shape) the child has
-            // already consumed the time axis, so the child schema passes through.
-            // A time `Window` over an `Aggregate` is a per-series time-window
-            // reduction (`avg_over_time` / `quantile_over_time` / …): it keeps
-            // each series's labels and replaces only the sample value, so it is
-            // label-preserving — which lets an outer cross-series `Aggregate.by`
-            // group on those labels positionally (e.g. `sum by(x)(avg_over_time(…))`).
-            // A `Window` over a `Scan` (a bare range vector) passes through.
-            QueryExpr::Window { child, .. } => match child.as_ref() {
-                QueryExpr::Aggregate {
-                    by,
-                    aggs,
-                    child: agg_in,
-                    ..
-                } if by.is_empty() && aggs.len() == 1 => Ok(per_series_reduction_schema(
-                    &agg_in.output_schema_in(scope)?,
-                    &aggs[0],
-                )),
-                _ => child.output_schema_in(scope),
-            },
+            // ψ — streaming window (tumbling / sliding / session) for query
+            // repetition. Does not change the column schema; passes through.
+            // Per-series range reductions (`rate`, `*_over_time`) now use the
+            // `TimeRange` node instead, so this arm is a simple pass-through.
+            QueryExpr::Window { child, .. } => child.output_schema_in(scope),
 
             QueryExpr::Aggregate {
                 by,
@@ -381,12 +377,14 @@ impl QueryExpr {
             } => {
                 let in_schema = child.output_schema_in(scope)?;
 
-                // Per-series range reduction (`rate`/`increase`, whose window is
-                // carried in the intent so there is no enclosing `Window` node):
-                // one value out per series, so it is *label-preserving*. (The
-                // `*_over_time` reductions take the same shape but under a time
-                // `Window` — handled by the `Window` arm below.)
-                if by.is_empty() && aggs.len() == 1 && aggs[0].is_per_series() {
+                // Per-series range reduction: `rate`/`increase` (is_per_series)
+                // OR any single aggregate whose direct child is a `TimeRange`
+                // (`*_over_time` functions). Both produce one value per series
+                // and are label-preserving — the `TimeRange` child is the
+                // structural marker that confers per-series semantics on
+                // otherwise cross-series intents like `Avg`/`Sum`/`Count`.
+                let is_range_child = matches!(child.as_ref(), QueryExpr::TimeRange { .. });
+                if by.is_empty() && aggs.len() == 1 && (aggs[0].is_per_series() || is_range_child) {
                     return Ok(per_series_reduction_schema(&in_schema, &aggs[0]));
                 }
 
@@ -450,7 +448,8 @@ impl QueryExpr {
             | QueryExpr::Partition { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }
-            | QueryExpr::Subquery { child, .. } => child.output_schema_in(scope),
+            | QueryExpr::Subquery { child, .. }
+            | QueryExpr::TimeRange { child, .. } => child.output_schema_in(scope),
 
             // π — one output column per projection item. Each item's type is
             // inferred from its expression against the child schema; the name
@@ -762,9 +761,9 @@ mod tests {
     fn per_series_rate_preserves_labels() {
         // A per-series range reduction (`rate`) is label-preserving: it produces
         // one value per series, so every label survives and only the sample
-        // value is replaced (kept named `value`). This is what lets an outer
-        // cross-series `Aggregate.by` group on those labels positionally.
-        let child = scan(
+        // value is replaced (kept named `value`). The TimeRange child is the
+        // structural marker; the outer Aggregate carries the Rate intent.
+        let scan_node = scan(
             vec![
                 col("ts", DataType::Timestamp, false),
                 col("value", DataType::Float64, false),
@@ -775,12 +774,13 @@ mod tests {
         );
         let rate = QueryExpr::Aggregate {
             by: vec![],
-            aggs: vec![AggIntent::Rate {
-                window: Duration::from_secs(300),
-            }],
+            aggs: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
-            child: Box::new(child),
+            child: Box::new(QueryExpr::TimeRange {
+                range: Duration::from_secs(300),
+                child: Box::new(scan_node),
+            }),
         };
         let s = rate.output_schema().unwrap();
         assert_eq!(
@@ -796,13 +796,12 @@ mod tests {
     }
 
     #[test]
-    fn windowed_over_time_reduction_preserves_labels() {
-        // `*_over_time` lowers to `Window { Aggregate{ by:[], [reducer] } }`: a
-        // per-series time-window reduction. It must be label-preserving too
-        // (same as `rate`), so an outer `sum by(job)(avg_over_time(...))` resolves
-        // its key positionally. The reducer (`Avg`) shares its `AggIntent` with
-        // cross-series `avg`; the enclosing `Window` is what marks it per-series.
-        let child = scan(
+    fn over_time_reduction_preserves_labels() {
+        // `*_over_time` lowers to `Aggregate { by:[], [reducer], TimeRange { Scan } }`:
+        // a per-series time-range reduction. The TimeRange child confers per-series
+        // semantics on otherwise cross-series intents like `Avg`, so an outer
+        // `sum by(job)(avg_over_time(...))` resolves its key positionally.
+        let scan_node = scan(
             vec![
                 col("ts", DataType::Timestamp, false),
                 col("value", DataType::Float64, false),
@@ -811,16 +810,14 @@ mod tests {
             Some(0),
             vec![],
         );
-        let avg_over_time = QueryExpr::Window {
-            kind: WindowKind::Tumbling,
-            size: Duration::from_secs(300),
-            slide: None,
-            child: Box::new(QueryExpr::Aggregate {
-                by: vec![],
-                aggs: vec![AggIntent::Avg { col: None }],
-                output_names: vec![],
-                having: None,
-                child: Box::new(child),
+        let avg_over_time = QueryExpr::Aggregate {
+            by: vec![],
+            aggs: vec![AggIntent::Avg { col: None }],
+            output_names: vec![],
+            having: None,
+            child: Box::new(QueryExpr::TimeRange {
+                range: Duration::from_secs(300),
+                child: Box::new(scan_node),
             }),
         };
         let s = avg_over_time.output_schema().unwrap();
@@ -830,7 +827,7 @@ mod tests {
                 .map(|c| c.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["ts", "value", "job"],
-            "windowed per-series reduction preserves labels; value kept named `value`"
+            "TimeRange-child marks per-series: labels preserved, value renamed"
         );
         assert!(
             s.column_id("job").is_some(),

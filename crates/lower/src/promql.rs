@@ -405,11 +405,16 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
             // order-by-value + limit.
             let heavy_hitter = descending && matches!(inner.func, Some(InnerFunc::Count));
             if heavy_hitter {
-                let scan = window_scan(inner);
+                // Preserve the Count intent in L3 so the intent algebra is
+                // explicit about what is being computed. L4 may fuse the Count
+                // and TopK into a single-pass heavy-hitter sketch (SpaceSaving /
+                // CMS-with-heap), but that is a cost-model decision, not an L3
+                // concern.
+                let count_agg = windowed_aggregate(inner, vec![], inner_func(&InnerFunc::Count));
                 Ok(L2::TopK {
                     k,
                     by: keys,
-                    input: Box::new(scan),
+                    input: Box::new(count_agg),
                 })
             } else {
                 let func = match &inner.func {
@@ -478,20 +483,6 @@ fn outer_aggregate(keys: Vec<ColumnRef>, func: AggFunc, input: L2) -> L2 {
         }],
         having: None,
         input: Box::new(input),
-    }
-}
-
-/// `[Window{w}] → Filter(Source)` with no aggregate (the heavy-hitter TopK
-/// child — the sketch counts directly off the scan).
-fn window_scan(inner: Inner) -> L2 {
-    let base = filtered_source(inner.metric, inner.matchers);
-    match inner.window {
-        Some(w) => L2::Window {
-            duration: w,
-            slide: None,
-            input: Box::new(base),
-        },
-        None => base,
     }
 }
 
