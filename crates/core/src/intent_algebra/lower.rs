@@ -10,6 +10,8 @@
 //! schema every `ColumnId` indexes into, so positional resolution downstream
 //! is total.
 
+use std::time::Duration;
+
 use thiserror::Error;
 
 use crate::intent_algebra::agg_intent::AggIntent;
@@ -21,7 +23,7 @@ use crate::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
 use crate::intent_algebra::names::BindingName;
 use crate::intent_algebra::query_expr::{
     PartitionKeys as CPartitionKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, SortKey,
-    Source, WindowKind,
+    Source,
 };
 use crate::intent_algebra::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
 use crate::intent_algebra::schema::{ColumnId, Schema};
@@ -106,32 +108,52 @@ pub fn convert(
             // tabular, so it skips this branch for the plain `Aggregate.by` path
             // below.)
             if aggs.len() == 1 && having.is_none() && !input.leaf_is_tabular() {
-                let (agg_input_l2, window): (&LQueryExpr, Option<(_, _)>) = match input.as_ref() {
-                    LQueryExpr::Window {
-                        duration,
-                        slide,
-                        input: win_input,
-                    } => (win_input, Some((*duration, *slide))),
-                    other => (other, None),
-                };
-                let agg_child = convert(agg_input_l2, fallback, acc)?;
-                let agg_in_schema = agg_child.output_schema()?;
+                // Extract the temporal range. Two sources:
+                //   1. An L2 `Window` child (emitted for `*_over_time` functions).
+                //   2. `Rate`/`Increase` AggFunc (carry their own range; no L2 Window).
+                // The range becomes a `TimeRange` node wrapping the inner scan
+                // rather than a `Window` node above the aggregate — `Window` is
+                // reserved for streaming query-repetition semantics.
+                let (agg_input_l2, time_range): (&LQueryExpr, Option<Duration>) =
+                    match input.as_ref() {
+                        LQueryExpr::Window {
+                            duration,
+                            input: win_input,
+                            ..
+                        } => (win_input, Some(*duration)),
+                        other => {
+                            let range = match &aggs[0].func {
+                                AggFunc::Rate { window } | AggFunc::Increase { window } => {
+                                    Some(*window)
+                                }
+                                _ => None,
+                            };
+                            (other, range)
+                        }
+                    };
+                let agg_child_raw = convert(agg_input_l2, fallback, acc)?;
+                let agg_in_schema = agg_child_raw.output_schema()?;
                 let intent = agg_func_to_intent(
                     &aggs[0].func,
                     acc,
                     resolve_agg_col(&aggs[0].col, &agg_in_schema)?,
                 );
+                // Wrap the child in TimeRange when there is a range.
+                let agg_child = match time_range {
+                    Some(range) => CQueryExpr::TimeRange {
+                        range,
+                        child: Box::new(agg_child_raw),
+                    },
+                    None => agg_child_raw,
+                };
                 // Resolve the group keys positionally against the aggregate's
                 // input so the grouping lives in `Aggregate.by` — the *same*
-                // shape SQL produces. Only when this is a *non-windowed*
-                // reduction: an instant aggregate (`sum by (job) (m)`) or a
-                // cross-series reduction over a label-preserving `rate`/
-                // `increase` (`sum by (job) (rate(m[w]))`), where the key is in
-                // scope. A *windowed* reduction here is per-series (e.g.
-                // `avg_over_time`) — its keys belong to an enclosing level, so
-                // keep the legacy name-based `Partition` marker instead of
-                // folding them into a per-series `by`.
-                let by = if window.is_none() {
+                // shape SQL produces. Only for instant (non-range) aggregates:
+                // an instant aggregate (`sum by (job) (m)`) or a cross-series
+                // reduction over a label-preserving `rate`/`increase`.
+                // A range reduction's keys belong to an enclosing level, so fall
+                // back to a name-based `Partition` instead.
+                let by = if time_range.is_none() {
                     resolve_column_refs(keys, &agg_in_schema).unwrap_or_default()
                 } else {
                     Vec::new()
@@ -144,28 +166,12 @@ pub fn convert(
                     having: None,
                     child: Box::new(agg_child),
                 };
-                let sketch = match window {
-                    Some((duration, slide)) => CQueryExpr::Window {
-                        kind: if slide.is_some() {
-                            WindowKind::Sliding
-                        } else {
-                            WindowKind::Tumbling
-                        },
-                        size: duration,
-                        slide,
-                        child: Box::new(aggregate),
-                    },
-                    None => aggregate,
-                };
                 return Ok(if grouped_positionally {
-                    sketch
+                    aggregate
                 } else {
-                    // Fallback (windowed per-series reduction): keep the legacy
-                    // name-based `Partition`. These keys are PromQL labels
-                    // (unqualified), so the bare names suffice.
                     CQueryExpr::Partition {
                         keys: CPartitionKeys::By(ref_names(keys)),
-                        child: Box::new(sketch),
+                        child: Box::new(aggregate),
                     }
                 });
             }
@@ -205,18 +211,12 @@ pub fn convert(
             }
         }
 
+        // Standalone L2 Window (bare range vector `m[5m]` not inside a
+        // recognized single-stat Aggregate): map to TimeRange.
         LQueryExpr::Window {
-            duration,
-            slide,
-            input,
-        } => CQueryExpr::Window {
-            kind: if slide.is_some() {
-                WindowKind::Sliding
-            } else {
-                WindowKind::Tumbling
-            },
-            size: *duration,
-            slide: *slide,
+            duration, input, ..
+        } => CQueryExpr::TimeRange {
+            range: *duration,
             child: Box::new(convert(input, fallback, acc)?),
         },
 
@@ -521,8 +521,9 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
             k: *k as usize,
             accuracy: acc.clone(),
         },
-        AggFunc::Rate { window } => AggIntent::Rate { window: *window },
-        AggFunc::Increase { window } => AggIntent::Increase { window: *window },
+        // Range is on the enclosing TimeRange node; intent carries no window.
+        AggFunc::Rate { .. } => AggIntent::Rate,
+        AggFunc::Increase { .. } => AggIntent::Increase,
     }
 }
 
@@ -621,7 +622,7 @@ mod tests {
         let CQueryExpr::Aggregate { aggs, .. } = &l3 else {
             panic!("expected Aggregate, got {l3:?}");
         };
-        assert_eq!(aggs, &vec![AggIntent::Sum { col: None }]);
+        assert_eq!(aggs, &[AggIntent::Sum { col: None }]);
     }
 
     /// `SELECT region, SUM(bytes), COUNT(*) FROM logs JOIN meta … GROUP BY region`

@@ -9,8 +9,6 @@
 //! `ORDER BY value LIMIT k` stays as the `QueryExpr::Sort + Limit` operator
 //! pair. L1→L2→L3 lowering picks one or the other deterministically.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 
 use crate::intent_algebra::query_expr::DataModel;
@@ -79,14 +77,11 @@ pub enum AggIntent {
     },
 
     // ── Time-series streaming derivatives ────────────────────────────────
-    // Carry PromQL's counter-reset adjustment; not equivalent to Sum/Count
-    // over a Window. Kept distinct so delta-set aggregators bind directly.
-    Rate {
-        window: Duration,
-    },
-    Increase {
-        window: Duration,
-    },
+    // Counter-reset adjustment; not equivalent to Sum/Count over a window.
+    // The temporal range lives on the enclosing `QueryExpr::TimeRange` node,
+    // not in the intent — this keeps the intent vocabulary range-agnostic.
+    Rate,
+    Increase,
 }
 
 impl AggIntent {
@@ -94,7 +89,7 @@ impl AggIntent {
     /// this to skip non-applicable intents (e.g. `Rate` over a tabular source).
     pub fn requires(&self) -> DataModel {
         match self {
-            Self::Rate { .. } | Self::Increase { .. } => DataModel::TimeSeries,
+            Self::Rate | Self::Increase => DataModel::TimeSeries,
             _ => DataModel::Any,
         }
     }
@@ -105,7 +100,7 @@ impl AggIntent {
     /// `rate`/`increase` carry their window in the intent. (Cross-series
     /// reductions like `sum`/`avg` over a series set return `false`.)
     pub fn is_per_series(&self) -> bool {
-        matches!(self, Self::Rate { .. } | Self::Increase { .. })
+        matches!(self, Self::Rate | Self::Increase)
     }
 
     /// The positional input column this intent reduces, if it carries one.
@@ -146,8 +141,8 @@ impl AggIntent {
             // (the L4 sketch-bound IR upgrades the dtype).
             AggIntent::TopK { k, .. } => col(&format!("topk_{k}"), DataType::Utf8, false),
             AggIntent::Cardinality { .. } => col("cardinality", DataType::Int64, false),
-            AggIntent::Rate { .. } => col("rate", DataType::Float64, false),
-            AggIntent::Increase { .. } => col("increase", DataType::Float64, false),
+            AggIntent::Rate => col("rate", DataType::Float64, false),
+            AggIntent::Increase => col("increase", DataType::Float64, false),
         }
     }
 }

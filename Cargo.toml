@@ -2,5 +2,6 @@
 members = [
     "crates/core",
     "crates/lower",
+    "crates/e2e",
 ]
 resolver = "2"

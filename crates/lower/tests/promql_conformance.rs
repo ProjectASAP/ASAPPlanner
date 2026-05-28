@@ -69,6 +69,7 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
             collect(child, out);
         }
         QueryExpr::Window { child, .. }
+        | QueryExpr::TimeRange { child, .. }
         | QueryExpr::Partition { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
@@ -108,6 +109,7 @@ fn first_scan(e: &QueryExpr) -> (String, usize) {
             (name, predicates.len())
         }
         QueryExpr::Window { child, .. }
+        | QueryExpr::TimeRange { child, .. }
         | QueryExpr::Aggregate { child, .. }
         | QueryExpr::Partition { child, .. }
         | QueryExpr::Filter { child, .. }
@@ -153,13 +155,14 @@ fn name_label_selects_the_metric() {
 }
 
 #[test]
-fn range_vector_selector_is_a_window() {
+fn range_vector_selector_is_time_range() {
     // SEMANTICS: `[5m]` turns an instant vector into a range vector.
+    // In L3 this is a dedicated `TimeRange` node (not a streaming `Window`).
     let qe = ok("node_cpu_seconds_total[5m]");
-    let QueryExpr::Window { size, .. } = &qe else {
-        panic!("expected Window for a range-vector selector, got {qe:?}");
+    let QueryExpr::TimeRange { range, .. } = &qe else {
+        panic!("expected TimeRange for a range-vector selector, got {qe:?}");
     };
-    assert_eq!(*size, Duration::from_secs(300));
+    assert_eq!(*range, Duration::from_secs(300));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,15 +171,18 @@ fn range_vector_selector_is_a_window() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn rate_carries_its_window_in_the_intent() {
-    // SEMANTICS: per-second average rate over the range; the window IS the rate
-    // parameter, so no separate Window node.
+fn rate_range_lives_in_time_range_node() {
+    // SEMANTICS: per-second average rate; the temporal range lives on the
+    // enclosing `TimeRange` node, not inside the intent.
     let qe = ok("rate(http_requests_total[5m])");
-    assert!(matches!(&qe, QueryExpr::Aggregate { .. }));
-    assert!(has(
-        &qe,
-        |i| matches!(i, AggIntent::Rate { window } if *window == Duration::from_secs(300))
-    ));
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected Aggregate, got {qe:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Rate]));
+    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+        panic!("expected TimeRange child, got {child:?}");
+    };
+    assert_eq!(*range, Duration::from_secs(300));
 }
 
 #[test]
@@ -184,16 +190,21 @@ fn irate_maps_to_rate_intent() {
     // SEMANTICS: instant rate from the last two samples; same intent vocabulary.
     assert!(has(&ok("irate(http_requests_total[1m])"), |i| matches!(
         i,
-        AggIntent::Rate { .. }
+        AggIntent::Rate
     )));
 }
 
 #[test]
-fn increase_maps_to_increase_intent() {
-    assert!(has(&ok("increase(http_requests_total[1h])"), |i| matches!(
-        i,
-        AggIntent::Increase { window } if *window == Duration::from_secs(3600)
-    )));
+fn increase_range_lives_in_time_range_node() {
+    let qe = ok("increase(http_requests_total[1h])");
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected Aggregate, got {qe:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Increase]));
+    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+        panic!("expected TimeRange child, got {child:?}");
+    };
+    assert_eq!(*range, Duration::from_secs(3600));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -289,7 +300,7 @@ fn sum_of_rate_is_two_levels() {
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate { .. }])
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -309,7 +320,7 @@ fn sum_by_of_rate_groups_outer_level() {
     // child is the inner per-series Rate aggregate.
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate { .. }])
+        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -328,14 +339,12 @@ fn sum_by_of_over_time_groups_outer_level() {
     };
     assert_eq!(by, &vec![2]);
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
-    // child is the inner per-series reduction: Window over Aggregate{Avg}.
-    let QueryExpr::Window { child, .. } = child.as_ref() else {
-        panic!("expected Window (per-series avg_over_time) under the Sum, got {child:?}");
+    // child is the inner per-series reduction: Aggregate{Avg} over TimeRange.
+    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+        panic!("expected Aggregate (per-series avg_over_time) under the Sum, got {child:?}");
     };
-    assert!(matches!(
-        child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Avg { .. }])
-    ));
+    assert!(matches!(aggs.as_slice(), [AggIntent::Avg { .. }]));
+    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -344,9 +353,9 @@ fn sum_by_of_over_time_groups_outer_level() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn over_time_functions_window_then_reduce() {
-    // SEMANTICS: reduce the samples WITHIN each series over the range → Window
-    // over the matching reduce intent.
+fn over_time_functions_reduce_over_time_range() {
+    // SEMANTICS: reduce the samples WITHIN each series over the range →
+    // Aggregate over TimeRange (per-series, label-preserving).
     for (q, want) in [
         ("avg_over_time(go_goroutines[5m])", "avg"),
         ("max_over_time(process_resident_memory_bytes[1d])", "max"),
@@ -356,8 +365,8 @@ fn over_time_functions_window_then_reduce() {
     ] {
         let qe = ok(q);
         assert!(
-            matches!(&qe, QueryExpr::Window { .. }),
-            "{q}: expected Window"
+            matches!(&qe, QueryExpr::Aggregate { .. }),
+            "{q}: expected Aggregate"
         );
         let matched = intents(&qe).iter().any(|i| match want {
             "avg" => matches!(i, AggIntent::Avg { .. }),
@@ -372,9 +381,9 @@ fn over_time_functions_window_then_reduce() {
 }
 
 #[test]
-fn quantile_over_time_is_window_over_quantile() {
+fn quantile_over_time_is_aggregate_over_time_range() {
     let qe = ok("quantile_over_time(0.9, request_latency_seconds[5m])");
-    assert!(matches!(&qe, QueryExpr::Window { .. }));
+    assert!(matches!(&qe, QueryExpr::Aggregate { .. }));
     assert!(has(
         &qe,
         |i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)
@@ -394,7 +403,7 @@ fn histogram_quantile_over_rate() {
         panic!("expected Aggregate{{Quantile}}, got {qe:?}");
     };
     assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.9).abs() < 1e-9));
-    assert!(has(&qe, |i| matches!(i, AggIntent::Rate { .. })));
+    assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
 }
 
 #[test]
@@ -571,7 +580,7 @@ fn subquery_wraps_inner_query() {
     // SEMANTICS: `<inst>[range:res]` evaluates the inner query across a range.
     let qe = ok("rate(demo_api_request_duration_seconds_count[5m])[1h:]");
     assert!(matches!(&qe, QueryExpr::Subquery { .. }));
-    assert!(has(&qe, |i| matches!(i, AggIntent::Rate { .. })));
+    assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
 }
 
 #[test]
