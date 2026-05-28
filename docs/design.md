@@ -302,7 +302,12 @@ pub enum QueryExpr {
              size: Duration, slide: Option<Duration> },
 
     // ── Distributed-execution structure ───────────────────────────────────
-    /// Partition the stream by key tuple (`GROUP BY` / PromQL `by (dims)`).
+    /// Split the stream by key tuple — row-preserving, **not** a reduction
+    /// (cf. the schema-flow table below: pass-through). This is `PARTITION BY`,
+    /// not `GROUP BY`: reducing GROUP BY lowers to `Aggregate.by`. A transitional
+    /// fallback for per-group structure over per-series reductions (e.g.
+    /// `topk by (host) (avg_over_time(…))`); slated to move to a rank
+    /// `partition_by` (L3) / L5 stage-allocation artifact — see issue #12.
     Partition { child: Box<QueryExpr>, keys: PartitionKeys },
     /// δ — SQL `DISTINCT` / row deduplication on `cols`.
     Distinct  { child: Box<QueryExpr>, cols: Vec<ColumnRef> },

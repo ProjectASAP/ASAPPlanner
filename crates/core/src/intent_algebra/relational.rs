@@ -140,9 +140,11 @@ pub enum QueryExpr {
         input: Box<QueryExpr>,
     },
 
-    /// Partition the stream by key-tuple (`by (dims)` / `without (dims)`).
-    /// **Reserved**: PromQL `by(...)` emits `Aggregate.keys` (the converter
-    /// synthesizes any L3 `Partition`); no front end emits an L2 `Partition`.
+    /// Split the stream by key-tuple — row-preserving (`PARTITION BY`), not a
+    /// reducing `GROUP BY`. **Reserved**: PromQL `by(...)` emits `Aggregate.keys`
+    /// (the converter synthesizes any L3 `Partition` as a transitional split-
+    /// without-reduce fallback — see the L3 `QueryExpr::Partition` doc + issue
+    /// #12); no front end emits an L2 `Partition`.
     Partition {
         keys: PartitionKeys,
         input: Box<QueryExpr>,

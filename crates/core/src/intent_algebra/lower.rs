@@ -151,8 +151,15 @@ pub fn convert(
                 // shape SQL produces. Only for instant (non-range) aggregates:
                 // an instant aggregate (`sum by (job) (m)`) or a cross-series
                 // reduction over a label-preserving `rate`/`increase`.
-                // A range reduction's keys belong to an enclosing level, so fall
-                // back to a name-based `Partition` instead.
+                //
+                // A range reduction's keys can't go into `by`: this node must stay
+                // a per-series (label-preserving) reduction, and per-series schema
+                // detection in `output_schema_in` keys off `by.is_empty()` — adding
+                // keys here would flip it to a cross-series reduce. So they fall
+                // back to a row-preserving `Partition` wrap (split-without-reduce,
+                // not a second GROUP BY). This fallback is transitional — see the
+                // `QueryExpr::Partition` doc + issue #12 for the end-state (rank
+                // `partition_by` / L5-physical).
                 let by = if time_range.is_none() {
                     resolve_column_refs(keys, &agg_in_schema).unwrap_or_default()
                 } else {

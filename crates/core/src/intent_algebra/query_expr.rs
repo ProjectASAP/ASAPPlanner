@@ -264,7 +264,23 @@ pub enum QueryExpr {
         child: Box<QueryExpr>,
     },
 
-    /// Logical-only partitioning marker (sharding hint for L5).
+    /// Split the stream by key tuple — **row-preserving** (schema pass-through,
+    /// see `output_schema_in`), the opposite of `Aggregate`'s group-and-reduce.
+    /// This is `PARTITION BY`, not `GROUP BY`: every reducing GROUP BY (SQL and
+    /// PromQL) lowers to `Aggregate.by`, so this node is *not* a second way to
+    /// express that. Its only live use is recording per-group structure over a
+    /// per-series (label-preserving) reduction — e.g. `topk by (host)
+    /// (avg_over_time(cpu[5m]))`, emitted by the `lower.rs` fallback.
+    ///
+    /// **Transitional** (issue #12): a split-for-parallelism is a physical
+    /// concern that does not belong in the symbolic L3 IR. End-state — per-group
+    /// ranking moves to a rank `partition_by` (mirroring `WindowFunc.partition_by`)
+    /// and the parallel split becomes an L5 stage-allocation artifact (paired with
+    /// `SketchExpr::SummaryMerge`). Naive removal is blocked because per-series
+    /// schema detection keys off `Aggregate.by.is_empty()` (see `output_schema_in`'s
+    /// `Aggregate` arm) — the keys can't simply move into `Aggregate.by` without
+    /// flipping the node to a cross-series reduce and breaking the open, label-
+    /// preserving schema.
     Partition {
         keys: PartitionKeys,
         child: Box<QueryExpr>,

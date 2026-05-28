@@ -671,3 +671,50 @@ fn batch_rejects_non_promql_language() {
     assert_eq!(results.len(), 1);
     assert!(matches!(results[0], Err(LoweringError::WrongLanguage(_))));
 }
+
+// ── #12: reducing GROUP BY canonicalizes onto `Aggregate.by`, never `Partition` ──
+//
+// `Partition` is split-*without*-reduce (`PARTITION BY`), a different operation
+// from `Aggregate`'s group-and-reduce. Its only live use is per-group structure
+// over a per-series reduction (e.g. `topk by (host) (avg_over_time(…))`). These
+// tests pin the resolved half of issue #12: every reducing GROUP BY — grouped
+// or not, instant or over a label-preserving `rate` — lowers to `Aggregate.by`
+// with no `Partition` anywhere in the tree.
+
+/// True if any node in the tree is a `Partition`.
+fn has_partition(e: &QueryExpr) -> bool {
+    match e {
+        QueryExpr::Partition { .. } => true,
+        QueryExpr::Aggregate { child, .. }
+        | QueryExpr::Window { child, .. }
+        | QueryExpr::TimeRange { child, .. }
+        | QueryExpr::Filter { child, .. }
+        | QueryExpr::Sort { child, .. }
+        | QueryExpr::Limit { child, .. }
+        | QueryExpr::Subquery { child, .. }
+        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Project { child, .. } => has_partition(child),
+        QueryExpr::BinaryOp { lhs, rhs, .. } => has_partition(lhs) || has_partition(rhs),
+        QueryExpr::Merge { children } => children.iter().any(has_partition),
+        _ => false,
+    }
+}
+
+#[test]
+fn reducing_group_by_lowers_to_aggregate_by_not_partition() {
+    // Cross-series reduce, no keys → bare `Aggregate { by: [] }`.
+    let q = lower("sum(http_requests_total)");
+    assert!(!has_partition(&q), "ungrouped reduce must not emit Partition: {q:?}");
+    assert!(matches!(q, QueryExpr::Aggregate { ref by, .. } if by.is_empty()));
+
+    // Cross-series reduce grouped by a label → `Aggregate.by`, no `Partition`.
+    let q = lower("sum by (job) (http_requests_total)");
+    assert!(!has_partition(&q), "grouped reduce must not emit Partition: {q:?}");
+    assert!(matches!(q, QueryExpr::Aggregate { ref by, .. } if by.len() == 1));
+
+    // Reduce over a label-preserving `rate` grouped by a label → still
+    // `Aggregate.by` (the keys resolve against rate's preserved schema).
+    let q = lower("sum by (job) (rate(http_requests_total[5m]))");
+    assert!(!has_partition(&q), "reduce over rate must not emit Partition: {q:?}");
+    assert!(matches!(q, QueryExpr::Aggregate { ref by, .. } if by.len() == 1));
+}
