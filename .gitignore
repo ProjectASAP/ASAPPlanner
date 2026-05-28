@@ -1,0 +1,4 @@
+# Cargo build output
+/target
+
+# Cargo.lock is intentionally tracked (workspace builds binaries).

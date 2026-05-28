@@ -10,7 +10,7 @@ This repo merges three previously-separate projects into a single workspace with
 
 ## Status
 
-**Design phase.** The two docs below are the current design + migration plan; no code has landed yet.
+**Early implementation.** The workspace builds; the front-end crates are landing per the migration plan below. Present today: `crates/core` (shared planner core) and `crates/lower` (SQL/PromQL → L2 lowering). The two docs below are the design + migration plan that the code is following.
 
 - [`docs/design.md`](docs/design.md) — target architecture, repo layout, extension points, wire contracts.
 - [`docs/migration-plan.md`](docs/migration-plan.md) — phase-by-phase plan to land the merger without disrupting any running deployment.
@@ -79,6 +79,38 @@ Because core now owns the L4/L5 infrastructure (not just L1-3), deployment model
 Both produce functionally identical artifacts. The placement is a deployment/team-ownership decision, not an architectural fork. Default:
 - `deployment-model-asaplifecycle` + `deployment-model-asapquery` in ASAPController workspace (share a YAML emitter).
 - `deployment-model-asapfusion` in the `asap-fusion` repo (research cadence, independent release).
+
+## Building
+
+The build is a normal `cargo build`. The only setup is GitHub access: `crates/lower`
+depends on our private PromQL parser fork (`ProjectASAP/promql-parser`, branch `asap`)
+as a git dependency, so Cargo has to be able to clone a private repo.
+
+1. Get added to the `ProjectASAP/promql-parser` repo (ask an org owner).
+
+2. Let git authenticate to GitHub over HTTPS. Easiest is the `gh` CLI as a
+   credential helper:
+
+   ```bash
+   gh auth login        # choose GitHub.com → HTTPS, follow the prompts
+   gh auth setup-git    # registers gh as git's credential helper
+   ```
+
+3. Build:
+
+   ```bash
+   cargo build
+   ```
+
+Cargo resolves the parser to the commit pinned in `Cargo.lock`, fetches it via git
+(authenticated by `gh`), and compiles the workspace.
+
+**Troubleshooting.** If the fetch fails with `authentication failed` or
+`repository not found`, it's one of two things: your account doesn't have access to
+the private repo, or git isn't using your credentials — re-run `gh auth setup-git`.
+Don't hand-edit `~/.gitconfig` with a `url.…insteadOf` rule containing a personal
+access token; that embeds *your* token in plaintext and shares it with anyone who
+copies the snippet. Keep credentials in `gh` (or git's keychain helper) instead.
 
 ## Key design references
 
