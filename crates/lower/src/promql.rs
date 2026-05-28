@@ -24,7 +24,7 @@
 //! | `changes` / `resets` / `group` / `offset` / `@` | **rejected** — distinct semantics with no intent-algebra representation yet |
 //! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
-//! | `topk(k, count_over_time(…))` | `TopK{k, by}` (heavy-hitter, one pass) |
+//! | `topk(k, count_over_time(…))` | `TopK{k, by}` (heavy-hitter intent) |
 //! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
 //! | `m{f}` | `Filter(Source)` |
 //! | `a OP b` | `BinaryOp{vector_match}` |
@@ -400,10 +400,10 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
             }
         }),
         Outer::TopK { k, descending } => {
-            // Heavy-hitter only when ranking by frequency (`count`): a dedicated
-            // sketch serves it in one pass → first-class `TopK`. Any other
-            // ranking (topk over avg/quantile, all bottomk) is generic
-            // order-by-value + limit.
+            // Heavy-hitter only when ranking by frequency (`count`): that is a
+            // first-class aggregate intent → `TopK`. Any other ranking (topk
+            // over avg/quantile, all bottomk) is a generic order-by-value +
+            // limit and stays as the `Sort + Limit` operator pair.
             let heavy_hitter = descending && matches!(inner.func, Some(InnerFunc::Count));
             if heavy_hitter {
                 // Preserve the Count intent in L3 so the intent algebra is

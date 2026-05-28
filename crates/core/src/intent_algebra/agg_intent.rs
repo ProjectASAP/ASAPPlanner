@@ -4,10 +4,14 @@
 //! between `HashAgg` / `SortAgg` / `SketchAgg(KLL{k=200})` is an L4 cost-aware
 //! decision, not encoded here.
 //!
-//! `AggIntent::TopK` is a first-class *intent* — a dedicated heavy-hitter
-//! sketch (SpaceSaving, CMS-with-heap) computes it in one pass. Generic
-//! `ORDER BY value LIMIT k` stays as the `QueryExpr::Sort + Limit` operator
-//! pair. L1→L2→L3 lowering picks one or the other deterministically.
+//! `AggIntent::TopK` is a first-class *intent*: "the k most frequent keys by
+//! value, to accuracy ε." Like `Quantile`, the exact-vs-approximate
+//! realisation — an exact heap / sort+limit when `accuracy: Exact`, a
+//! heavy-hitter sketch when approximate — is an L4 cost-aware decision, not
+//! encoded here. The semantic distinction that *is* made at lowering is
+//! intent vs operator: a heavy-hitter aggregate becomes `TopK`, whereas a
+//! generic `ORDER BY value LIMIT k` stays as the `QueryExpr::Sort + Limit`
+//! operator pair.
 
 use serde::{Deserialize, Serialize};
 
@@ -66,8 +70,8 @@ pub enum AggIntent {
         q: f64,
         accuracy: AccuracyTarget,
     },
-    /// Heavy-hitter top-k — served by a dedicated sketch in one pass. The
-    /// group-by keys live on the enclosing `Aggregate.by`.
+    /// Heavy-hitter top-k to the given accuracy. The group-by keys live on
+    /// the enclosing `Aggregate.by`.
     TopK {
         k: usize,
         accuracy: AccuracyTarget,
