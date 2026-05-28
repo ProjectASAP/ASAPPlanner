@@ -8,7 +8,8 @@
 use std::time::Duration;
 
 use asap_control_core::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, QueryExpr, Source, VectorMatch, VectorMatchKind,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, GroupSide, QueryExpr, Source, VectorGrouping,
+    VectorMatch, VectorMatchKind,
 };
 use asap_control_core::types::AccuracyTarget;
 use asap_control_lower::lower_promql;
@@ -94,6 +95,119 @@ fn q20_div_two_rates() {
     assert_eq!(
         lower("rate(http_requests_total[5m]) / rate(http_errors_total[5m])"),
         expected,
+    );
+}
+
+// comparison ops — filter semantics; each op between two instant vectors
+#[test]
+fn q_gt_comparison() {
+    assert_eq!(
+        lower("http_requests_total > http_errors_total"),
+        QueryExpr::BinaryOp {
+            op: BinaryOpKind::Compare(CompareOp::Gt),
+            lhs: Box::new(scan("http_requests_total", &[])),
+            rhs: Box::new(scan("http_errors_total", &[])),
+            vector_match: None,
+        }
+    );
+}
+
+#[test]
+fn q_lt_comparison() {
+    assert_eq!(
+        lower("http_requests_total < http_errors_total"),
+        QueryExpr::BinaryOp {
+            op: BinaryOpKind::Compare(CompareOp::Lt),
+            lhs: Box::new(scan("http_requests_total", &[])),
+            rhs: Box::new(scan("http_errors_total", &[])),
+            vector_match: None,
+        }
+    );
+}
+
+#[test]
+fn q_ge_comparison() {
+    assert_eq!(
+        lower("http_requests_total >= http_errors_total"),
+        QueryExpr::BinaryOp {
+            op: BinaryOpKind::Compare(CompareOp::Ge),
+            lhs: Box::new(scan("http_requests_total", &[])),
+            rhs: Box::new(scan("http_errors_total", &[])),
+            vector_match: None,
+        }
+    );
+}
+
+#[test]
+fn q_le_comparison() {
+    assert_eq!(
+        lower("http_requests_total <= http_errors_total"),
+        QueryExpr::BinaryOp {
+            op: BinaryOpKind::Compare(CompareOp::Le),
+            lhs: Box::new(scan("http_requests_total", &[])),
+            rhs: Box::new(scan("http_errors_total", &[])),
+            vector_match: None,
+        }
+    );
+}
+
+// ignoring(job) — match on all labels except job; labels are strings, not column ids
+#[test]
+fn q_add_with_ignoring() {
+    assert_eq!(
+        lower("http_requests_total + ignoring(job) http_errors_total"),
+        QueryExpr::BinaryOp {
+            op: BinaryOpKind::Arith(ArithOp::Add),
+            lhs: Box::new(scan("http_requests_total", &[])),
+            rhs: Box::new(scan("http_errors_total", &[])),
+            vector_match: Some(VectorMatch {
+                kind: VectorMatchKind::Ignoring,
+                labels: vec!["job".into()],
+                grouping: None,
+            }),
+        }
+    );
+}
+
+// group_left — many-to-one: left side has higher cardinality
+#[test]
+fn q_mul_group_left() {
+    assert_eq!(
+        lower("http_requests_total * on(job) group_left() node_info"),
+        QueryExpr::BinaryOp {
+            op: BinaryOpKind::Arith(ArithOp::Mul),
+            lhs: Box::new(scan("http_requests_total", &[])),
+            rhs: Box::new(scan("node_info", &[])),
+            vector_match: Some(VectorMatch {
+                kind: VectorMatchKind::On,
+                labels: vec!["job".into()],
+                grouping: Some(VectorGrouping {
+                    side: GroupSide::Left,
+                    labels: vec![],
+                }),
+            }),
+        }
+    );
+}
+
+// group_right — one-to-many: right side has higher cardinality
+#[test]
+fn q_mul_group_right() {
+    assert_eq!(
+        lower("node_info * on(job) group_right() http_requests_total"),
+        QueryExpr::BinaryOp {
+            op: BinaryOpKind::Arith(ArithOp::Mul),
+            lhs: Box::new(scan("node_info", &[])),
+            rhs: Box::new(scan("http_requests_total", &[])),
+            vector_match: Some(VectorMatch {
+                kind: VectorMatchKind::On,
+                labels: vec!["job".into()],
+                grouping: Some(VectorGrouping {
+                    side: GroupSide::Right,
+                    labels: vec![],
+                }),
+            }),
+        }
     );
 }
 

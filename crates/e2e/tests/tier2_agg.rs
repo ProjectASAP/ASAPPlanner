@@ -90,6 +90,77 @@ fn q08_avg_by_datacenter() {
     );
 }
 
+// multiple group keys — sum by (job, status); alphabetical: job(2), status(3)
+#[test]
+fn q_sum_by_job_and_status() {
+    assert_eq!(
+        lower("sum by (job, status) (http_requests_total)"),
+        agg(
+            vec![2, 3],
+            AggIntent::Sum { col: None },
+            scan("http_requests_total", &["job", "status"])
+        ),
+    );
+}
+
+// min — cross-series minimum
+#[test]
+fn q_min_no_group() {
+    assert_eq!(
+        lower("min(http_requests_total)"),
+        agg(
+            vec![],
+            AggIntent::Min { col: None },
+            scan("http_requests_total", &[])
+        ),
+    );
+}
+
+// max — cross-series maximum, grouped by job
+#[test]
+fn q_max_by_job() {
+    assert_eq!(
+        lower("max by (job) (http_requests_total)"),
+        agg(
+            vec![2],
+            AggIntent::Max { col: None },
+            scan("http_requests_total", &["job"])
+        ),
+    );
+}
+
+// stddev — cross-series standard deviation; PromQL stddev uses population=false in the lowering
+#[test]
+fn q_stddev_no_group() {
+    assert_eq!(
+        lower("stddev(http_requests_total)"),
+        agg(
+            vec![],
+            AggIntent::StdDev {
+                col: None,
+                population: false
+            },
+            scan("http_requests_total", &[])
+        ),
+    );
+}
+
+// stdvar — cross-series variance
+#[test]
+fn q_stdvar_no_group() {
+    assert_eq!(
+        lower("stdvar(http_requests_total)"),
+        agg(
+            vec![],
+            AggIntent::Variance {
+                col: None,
+                population: false
+            },
+            scan("http_requests_total", &[])
+        ),
+    );
+}
+
 // #10 — cross-series quantile; no TimeRange node (no range window)
 #[test]
 fn q10_quantile_cross_series() {

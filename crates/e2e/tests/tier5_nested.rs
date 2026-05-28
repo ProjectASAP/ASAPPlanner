@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use asap_control_core::intent_algebra::{
-    AggIntent, CompareOp, L3Expr, L3Scalar, Predicate, QueryExpr, Source,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, Predicate, QueryExpr, Source,
 };
 use asap_control_core::types::AccuracyTarget;
 use asap_control_lower::lower_promql;
@@ -78,6 +78,71 @@ fn q23_sum_by_job_over_filtered_scan() {
     let expected = agg(vec![2], AggIntent::Sum { col: None }, scan);
     assert_eq!(
         lower(r#"sum by (job) (http_requests_total{status="200"})"#),
+        expected
+    );
+}
+
+// #25 — binary op over two complex subtrees
+//   LHS: sum by (job) over rate over filtered scan
+//     schema [ts, value, job, status]; outer by=[2] (job)
+//   RHS: sum by (job) over rate over bare scan
+//     schema [ts, value, job]; outer by=[2] (job)
+#[test]
+fn q25_div_over_complex_subtrees() {
+    let lhs_scan = QueryExpr::Scan {
+        source: Source::TimeSeries {
+            metric: "http_requests_total".into(),
+        },
+        predicates: vec![Predicate(L3Expr::Compare {
+            left: Box::new(L3Expr::Column(3)),
+            op: CompareOp::Eq,
+            right: Box::new(L3Expr::Literal(L3Scalar::Utf8("200".into()))),
+        })],
+        schema: metric_schema(&["job", "status"]),
+    };
+    let lhs = agg(
+        vec![2],
+        AggIntent::Sum { col: None },
+        agg(
+            vec![],
+            AggIntent::Rate,
+            QueryExpr::TimeRange {
+                range: Duration::from_secs(300),
+                child: Box::new(lhs_scan),
+            },
+        ),
+    );
+
+    let rhs_scan = QueryExpr::Scan {
+        source: Source::TimeSeries {
+            metric: "http_errors_total".into(),
+        },
+        predicates: vec![],
+        schema: metric_schema(&["job"]),
+    };
+    let rhs = agg(
+        vec![2],
+        AggIntent::Sum { col: None },
+        agg(
+            vec![],
+            AggIntent::Rate,
+            QueryExpr::TimeRange {
+                range: Duration::from_secs(300),
+                child: Box::new(rhs_scan),
+            },
+        ),
+    );
+
+    let expected = QueryExpr::BinaryOp {
+        op: BinaryOpKind::Arith(ArithOp::Div),
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+        vector_match: None,
+    };
+    assert_eq!(
+        lower(
+            r#"sum by (job) (rate(http_requests_total{status="200"}[5m])) / sum by (job) (rate(http_errors_total[5m]))"#
+        ),
         expected
     );
 }

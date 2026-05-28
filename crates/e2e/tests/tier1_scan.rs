@@ -51,6 +51,14 @@ fn regex_pred(col_id: usize, pattern: &str) -> Predicate {
     })
 }
 
+fn notregex_pred(col_id: usize, pattern: &str) -> Predicate {
+    Predicate(L3Expr::Compare {
+        left: Box::new(L3Expr::Column(col_id)),
+        op: CompareOp::NotRegex,
+        right: Box::new(L3Expr::Literal(L3Scalar::Utf8(pattern.into()))),
+    })
+}
+
 // #1 — bare metric name, no matchers
 #[test]
 fn q01_bare_scan() {
@@ -100,6 +108,20 @@ fn q04_regex_predicate() {
         schema: metric_schema(&["job"]),
     };
     assert_eq!(lower(r#"http_requests_total{job=~"api.*"}"#), expected);
+}
+
+// negative regex matcher; RHS is the pattern string, op is NotRegex
+//   schema: [ts(0), value(1), job(2)]
+#[test]
+fn q_notregex_predicate() {
+    let expected = QueryExpr::Scan {
+        source: Source::TimeSeries {
+            metric: "http_requests_total".into(),
+        },
+        predicates: vec![notregex_pred(2, "internal.*")],
+        schema: metric_schema(&["job"]),
+    };
+    assert_eq!(lower(r#"http_requests_total{job!~"internal.*"}"#), expected);
 }
 
 // multiple matchers — two predicates, canonicalized alphabetically by label name

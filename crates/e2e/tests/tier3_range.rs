@@ -83,6 +83,65 @@ fn q16_sum_over_time() {
     );
 }
 
+// avg_over_time: per-series mean over the window
+#[test]
+fn q_avg_over_time() {
+    assert_eq!(
+        lower("avg_over_time(http_requests_total[5m])"),
+        range_agg(300, AggIntent::Avg { col: None }, "http_requests_total"),
+    );
+}
+
+// min_over_time: per-series minimum over the window
+#[test]
+fn q_min_over_time() {
+    assert_eq!(
+        lower("min_over_time(http_requests_total[5m])"),
+        range_agg(300, AggIntent::Min { col: None }, "http_requests_total"),
+    );
+}
+
+// max_over_time: per-series maximum over the window
+#[test]
+fn q_max_over_time() {
+    assert_eq!(
+        lower("max_over_time(http_requests_total[5m])"),
+        range_agg(300, AggIntent::Max { col: None }, "http_requests_total"),
+    );
+}
+
+// stddev_over_time: per-series standard deviation over the window; population=false per lowering
+#[test]
+fn q_stddev_over_time() {
+    assert_eq!(
+        lower("stddev_over_time(http_requests_total[5m])"),
+        range_agg(
+            300,
+            AggIntent::StdDev {
+                col: None,
+                population: false
+            },
+            "http_requests_total"
+        ),
+    );
+}
+
+// stdvar_over_time: per-series variance over the window
+#[test]
+fn q_stdvar_over_time() {
+    assert_eq!(
+        lower("stdvar_over_time(http_requests_total[5m])"),
+        range_agg(
+            300,
+            AggIntent::Variance {
+                col: None,
+                population: false
+            },
+            "http_requests_total"
+        ),
+    );
+}
+
 // #17 — quantile_over_time: per-series quantile over the window
 #[test]
 fn q17_quantile_over_time() {
