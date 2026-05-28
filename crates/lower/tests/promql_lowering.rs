@@ -122,7 +122,7 @@ fn stddev_and_stdvar_over_time() {
     assert!(matches!(
         aggs.as_slice(),
         [AggIntent::StdDev {
-            population: false,
+            population: true,
             ..
         }]
     ));
@@ -135,7 +135,7 @@ fn stddev_and_stdvar_over_time() {
     assert!(matches!(
         aggs.as_slice(),
         [AggIntent::Variance {
-            population: false,
+            population: true,
             ..
         }]
     ));
