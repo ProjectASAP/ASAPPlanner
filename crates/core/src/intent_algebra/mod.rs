@@ -34,7 +34,7 @@ pub use expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L2Expr, L3Expr, L3Scalar}
 pub use lower::{convert, convert_root, ConvertError};
 pub use names::{BindingName, QueryId};
 pub use query_expr::{
-    BinaryOpKind, BindingScope, DataModel, GroupSide, JoinKind, Predicate,
+    BinaryOpKind, BindingScope, DataModel, GroupKeys, GroupSide, JoinKind, Predicate,
     ProjectItem, QueryExpr, QueryExprError, SetOpKind, SortKey, Source, VectorGrouping,
     VectorMatch, VectorMatchKind, WindowFuncKind, WindowKind,
 };

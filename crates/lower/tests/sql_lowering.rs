@@ -6,7 +6,7 @@
 
 use asap_control_core::intent_algebra::schema::{Column, DataType, Schema};
 use asap_control_core::intent_algebra::{
-    AggIntent, CompareOp, JoinKind, L3Expr, QueryExpr, Source, WindowFuncKind,
+    AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, QueryExpr, Source, WindowFuncKind,
 };
 use asap_control_core::types::AccuracyTarget;
 use asap_control_lower::{lower_sql, SqlCatalog};
@@ -47,7 +47,7 @@ async fn lower(sql: &str) -> QueryExpr {
 }
 
 /// Find the first `Aggregate` node along the single-child spine.
-fn find_aggregate(qe: &QueryExpr) -> Option<(&Vec<usize>, &Vec<AggIntent>)> {
+fn find_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
         QueryExpr::Aggregate { by, aggs, .. } => Some((by, aggs)),
         QueryExpr::Project { child, .. }

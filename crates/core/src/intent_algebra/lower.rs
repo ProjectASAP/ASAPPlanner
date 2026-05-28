@@ -22,7 +22,7 @@ use crate::intent_algebra::column_resolution::{
 use crate::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
 use crate::intent_algebra::names::BindingName;
 use crate::intent_algebra::query_expr::{
-    Predicate, ProjectItem, QueryExpr as CQueryExpr, SortKey, Source,
+    GroupKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, SortKey, Source,
 };
 use crate::intent_algebra::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
 use crate::intent_algebra::schema::{ColumnId, Schema};
@@ -172,7 +172,7 @@ pub fn convert(
                 if time_range.is_some() && !keys.is_empty() {
                     return Err(ConvertError::WindowedReductionKeys);
                 }
-                let by = resolve_column_refs(keys, &agg_in_schema)?;
+                let by: GroupKeys = resolve_column_refs(keys, &agg_in_schema)?.into();
                 return Ok(CQueryExpr::Aggregate {
                     by,
                     aggs: vec![intent],
@@ -188,7 +188,7 @@ pub fn convert(
             // resolves against the derived output schema instead.
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
-            let by = resolve_column_refs(keys, &child_schema)?;
+            let by: GroupKeys = resolve_column_refs(keys, &child_schema)?.into();
             let intents: Vec<AggIntent> = aggs
                 .iter()
                 .map(|item| -> Result<AggIntent, ConvertError> {
@@ -260,7 +260,7 @@ pub fn convert(
         LQueryExpr::TopK { k, by, input } => {
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
-            let by = resolve_column_refs(by, &child_schema)?;
+            let by: GroupKeys = resolve_column_refs(by, &child_schema)?.into();
             CQueryExpr::Aggregate {
                 by,
                 aggs: vec![AggIntent::TopK {
@@ -338,7 +338,7 @@ pub fn convert(
             // Per-group ordering keys (`topk by (…)`) resolve positionally
             // against the child schema — the per-series reduction below
             // preserves its label columns, so the grouping label is present.
-            let partition_by = resolve_column_refs(partition_by, &child_schema)?;
+            let partition_by: GroupKeys = resolve_column_refs(partition_by, &child_schema)?.into();
             CQueryExpr::Sort {
                 keys,
                 partition_by,
@@ -384,7 +384,7 @@ pub fn convert(
                 .iter()
                 .map(|a| resolve_expr(a, &child_schema))
                 .collect::<Result<Vec<_>, _>>()?;
-            let partition_by = resolve_column_refs(partition_by, &child_schema)?;
+            let partition_by: GroupKeys = resolve_column_refs(partition_by, &child_schema)?.into();
             let order_by = order_by
                 .iter()
                 .map(|k| -> Result<SortKey, ConvertError> {

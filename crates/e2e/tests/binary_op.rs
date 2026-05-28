@@ -31,7 +31,7 @@ fn scan(metric: &str, labels: &[&str]) -> QueryExpr {
 
 fn rate_agg(metric: &str) -> QueryExpr {
     QueryExpr::Aggregate {
-        by: vec![],
+        by: vec![].into(),
         aggs: vec![AggIntent::Rate],
         output_names: vec!["".into()],
         having: None,
@@ -44,7 +44,7 @@ fn rate_agg(metric: &str) -> QueryExpr {
 
 fn sum_by_job(metric: &str) -> QueryExpr {
     QueryExpr::Aggregate {
-        by: vec![2],
+        by: vec![2].into(),
         aggs: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,

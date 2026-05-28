@@ -290,7 +290,7 @@ pub enum QueryExpr {
     /// γ + α — GROUP BY + aggregate intents, with optional HAVING.
     /// `aggs` carry `AggIntent`; concrete sketch / non-sketch operator
     /// is chosen by L4 and lives in the L4-extended IR (`SketchExpr`).
-    Aggregate { child: Box<QueryExpr>, by: Vec<GroupKey>,
+    Aggregate { child: Box<QueryExpr>, by: GroupKeys,
                 aggs: Vec<AggIntent>, having: Option<Predicate> },
 
     // ── Time / streaming windows ──────────────────────────────────────────
@@ -306,6 +306,8 @@ pub enum QueryExpr {
     // concept: a reducing GROUP BY → `Aggregate.by`; per-group *ranking*
     // (split without reduce) → `Sort.partition_by` (below); a parallel/sharding
     // split is physical and lives in L5's stage allocator, not the symbolic IR.
+    // All three carry the same `GroupKeys` type — a newtype over the positional
+    // `Vec<ColumnId>` — so "per-group keys" has a single spelling.
     /// δ — SQL `DISTINCT` / row deduplication on `cols`.
     Distinct  { child: Box<QueryExpr>, cols: Vec<ColumnRef> },
     /// ⊕ — union of sub-results from independent stages or shards (the
@@ -333,7 +335,7 @@ pub enum QueryExpr {
     /// generic (non-heavy-hitter) `topk by (host)` / `bottomk` grouping and SQL
     /// `… OVER (PARTITION BY …)`. Row-preserving (schema pass-through); empty =
     /// a global order-by. (Issue #12: this replaces the old `Partition` node.)
-    Sort  { child: Box<QueryExpr>, keys: Vec<SortKey>, partition_by: Vec<ColumnId> },
+    Sort  { child: Box<QueryExpr>, keys: Vec<SortKey>, partition_by: GroupKeys },
     /// `LIMIT n OFFSET k`. The heavy-hitter shape (`ORDER BY count DESC
     /// LIMIT k`, PromQL `topk(k, …)`) is recognised at L1→L2→L3 lowering
     /// and produces `AggIntent::TopK` rather than generic `Sort + Limit`,
@@ -352,7 +354,7 @@ pub enum QueryExpr {
     /// Distinct from `Window` above — that is a streaming/tumbling window
     /// over the time axis; this is an analytic frame over already-grouped rows.
     WindowFunc { child: Box<QueryExpr>, func: WindowFuncKind,
-                 partition_by: Vec<GroupKey>, order_by: Vec<SortKey>,
+                 partition_by: GroupKeys, order_by: Vec<SortKey>,
                  frame: Option<WindowFrame> },
 
     // ── Binary composition ────────────────────────────────────────────────

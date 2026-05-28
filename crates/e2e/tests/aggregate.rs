@@ -29,7 +29,7 @@ fn scan(metric: &str, labels: &[&str]) -> QueryExpr {
 
 fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
     QueryExpr::Aggregate {
-        by,
+        by: by.into(),
         aggs: vec![intent],
         output_names: vec!["".into()],
         having: None,
