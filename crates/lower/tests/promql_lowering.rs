@@ -724,3 +724,59 @@ fn generic_topk_grouping_lowers_to_sort_partition_by() {
     assert_eq!(partition_by, &vec![2], "host is col 2 in [ts, value, host]");
     assert!(matches!(child.as_ref(), QueryExpr::Aggregate { by, .. } if by.is_empty()));
 }
+
+#[test]
+fn topk_over_bare_selector_by_label_ranks_per_group() {
+    // `topk(3, http_requests_total) by (job)` — top-3 series per `job`. A bare
+    // instant selector ranks its OWN samples; it must not be wrapped in an
+    // implicit cross-series `Sum`, which would collapse the `job` partition
+    // label before `Sort.partition_by` resolves it (issue #30 — follow-up to the
+    // Partition→Sort.partition_by reframe in #12). Expected:
+    //   Limit{3} → Sort{value desc, partition_by:[job]} → Scan
+    let q = lower("topk(3, http_requests_total) by (job)");
+    let QueryExpr::Limit { n, child, .. } = &q else {
+        panic!("expected Limit, got {q:?}");
+    };
+    assert_eq!(*n, 3);
+    let QueryExpr::Sort {
+        keys,
+        partition_by,
+        child,
+    } = child.as_ref()
+    else {
+        panic!("expected Sort, got {child:?}");
+    };
+    assert!(!keys[0].ascending, "topk ranks descending");
+    assert_eq!(partition_by, &vec![2], "job is col 2 in [ts, value, job]");
+    // No implicit reducing aggregate — the selector is label-preserving, so the
+    // sort is directly over the Scan (the `job` label survives to partition by).
+    assert!(
+        matches!(child.as_ref(), QueryExpr::Scan { .. }),
+        "ranking is over the bare Scan, not a reducing Aggregate, got {child:?}"
+    );
+    assert!(
+        !has_intent(&q, |i| matches!(i, AggIntent::Sum { .. })),
+        "no implicit Sum is introduced over a bare selector"
+    );
+}
+
+#[test]
+fn topk_over_bare_selector_ranks_raw_samples() {
+    // Even without `by`, `topk(3, m)` ranks the raw instant-vector samples — it
+    // does not sum them. The sort sits directly over the Scan, partition empty.
+    let q = lower("topk(3, http_requests_total)");
+    let QueryExpr::Limit { child, .. } = &q else {
+        panic!("expected Limit, got {q:?}");
+    };
+    let QueryExpr::Sort {
+        partition_by,
+        child,
+        ..
+    } = child.as_ref()
+    else {
+        panic!("expected Sort, got {child:?}");
+    };
+    assert!(partition_by.is_empty(), "no `by` → global ranking");
+    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+    assert!(!has_intent(&q, |i| matches!(i, AggIntent::Sum { .. })));
+}
