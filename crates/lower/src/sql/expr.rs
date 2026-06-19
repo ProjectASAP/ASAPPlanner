@@ -181,6 +181,16 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
             })
         }
 
+        // Subquery-valued expressions in a predicate/projection — `x > (SELECT
+        // …)`, `x IN (SELECT …)`, `EXISTS (SELECT …)`. These need a subquery
+        // node in the L2 expression IR (and a correlated-vs-uncorrelated
+        // decision); rejected cleanly until that lands rather than mislowered.
+        // Derived tables in `FROM` (the common nesting shape) ARE supported —
+        // see `lower_plan`'s `SubqueryAlias` arm.
+        Expr::ScalarSubquery(_) | Expr::InSubquery(_) | Expr::Exists(_) => Err(
+            LoweringError::UnsupportedFeature("subquery-valued expression in predicate".into()),
+        ),
+
         other => Err(LoweringError::UnsupportedFeature(format!(
             "expression: {}",
             other

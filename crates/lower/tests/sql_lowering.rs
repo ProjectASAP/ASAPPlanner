@@ -505,3 +505,124 @@ async fn window_aggregate_lowers_to_windowfunc() {
     assert_eq!(*func, WindowFuncKind::Sum);
     assert_eq!(args, &vec![L3Expr::Column(3)], "SUM(bytes) → arg col 3");
 }
+
+// ── Nested query functions: derived tables / inline views (issue #27) ───────────
+
+/// Collect every `AggIntent` in the tree, root-to-leaf.
+fn all_intents(qe: &QueryExpr) -> Vec<AggIntent> {
+    let mut out = Vec::new();
+    fn go(qe: &QueryExpr, out: &mut Vec<AggIntent>) {
+        match qe {
+            QueryExpr::Aggregate { aggs, child, .. } => {
+                out.extend(aggs.iter().cloned());
+                go(child, out);
+            }
+            QueryExpr::Project { child, .. }
+            | QueryExpr::Filter { child, .. }
+            | QueryExpr::Window { child, .. }
+            | QueryExpr::Distinct { child, .. }
+            | QueryExpr::Sort { child, .. }
+            | QueryExpr::Limit { child, .. }
+            | QueryExpr::WindowFunc { child, .. }
+            | QueryExpr::Subquery { child, .. } => go(child, out),
+            QueryExpr::BinaryOp { lhs, rhs, .. }
+            | QueryExpr::Join {
+                left: lhs,
+                right: rhs,
+                ..
+            }
+            | QueryExpr::SetOp {
+                left: lhs,
+                right: rhs,
+                ..
+            } => {
+                go(lhs, out);
+                go(rhs, out);
+            }
+            _ => {}
+        }
+    }
+    go(qe, &mut out);
+    out
+}
+
+#[tokio::test]
+async fn derived_table_aggregate_over_aggregate_nests() {
+    // `MAX(s)` over a derived table `(SELECT service, SUM(bytes) AS s … GROUP BY
+    // service)` — the SQL counterpart of PromQL function nesting (issue #27).
+    // Both reductions survive into L3: an outer `Max` over the inner `Sum`.
+    let qe = lower(
+        "SELECT MAX(s) FROM \
+         (SELECT service, SUM(bytes) AS s FROM metrics GROUP BY service) t",
+    )
+    .await;
+    let intents = all_intents(&qe);
+    assert!(
+        intents.iter().any(|i| matches!(i, AggIntent::Max { .. })),
+        "outer MAX survives, got {intents:?}"
+    );
+    assert!(
+        intents.iter().any(|i| matches!(i, AggIntent::Sum { .. })),
+        "inner SUM survives, got {intents:?}"
+    );
+    // The whole nested tree's output schema derives without error (positional
+    // resolution is total across the derived-table boundary).
+    assert_eq!(qe.output_schema().unwrap().columns.len(), 1);
+}
+
+#[tokio::test]
+async fn derived_table_outer_avg_over_inner_percentile() {
+    // Outer exact `AVG` over an inner approximate `Quantile` — each layer keeps
+    // its own intent (the per-node sketch-vs-exact choice is an L4 decision).
+    let qe = lower(
+        "SELECT AVG(p) FROM \
+         (SELECT service, approx_percentile_cont(latency, 0.9) AS p \
+          FROM metrics GROUP BY service) t",
+    )
+    .await;
+    let intents = all_intents(&qe);
+    assert!(intents.iter().any(|i| matches!(i, AggIntent::Avg { .. })));
+    assert!(intents
+        .iter()
+        .any(|i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)));
+}
+
+#[tokio::test]
+async fn filter_over_derived_aggregate_resolves_alias_column() {
+    // `WHERE t.s > 100` over a derived aggregate — the qualified ref `t.s`
+    // resolves by bare name against the derived output schema, and the Filter
+    // sits above the inner Aggregate.
+    let qe = lower(
+        "SELECT t.service, t.s FROM \
+         (SELECT service, SUM(bytes) AS s FROM metrics GROUP BY service) t \
+         WHERE t.s > 100",
+    )
+    .await;
+    assert!(
+        find_filter(&qe).is_some(),
+        "the outer WHERE lowers to a Filter, got {qe:?}"
+    );
+    assert!(all_intents(&qe)
+        .iter()
+        .any(|i| matches!(i, AggIntent::Sum { .. })));
+    // Schema derivation is total across the boundary.
+    let _ = qe.output_schema().expect("nested schema derivation");
+}
+
+#[tokio::test]
+async fn scalar_subquery_in_predicate_is_rejected() {
+    // A subquery-*valued* expression (`x > (SELECT …)`) needs a subquery node in
+    // the L2 expression IR (and a correlated/uncorrelated decision); rejected
+    // cleanly until that lands. Derived tables in FROM (the common nesting
+    // shape) ARE supported — see the tests above.
+    let res = lower_sql(
+        "SELECT service FROM metrics WHERE bytes > (SELECT AVG(bytes) FROM metrics)",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await;
+    assert!(
+        res.is_err(),
+        "scalar subquery in predicate should be rejected"
+    );
+}
