@@ -290,7 +290,7 @@ pub enum QueryExpr {
     /// γ + α — GROUP BY + aggregate intents, with optional HAVING.
     /// `aggs` carry `AggIntent`; concrete sketch / non-sketch operator
     /// is chosen by L4 and lives in the L4-extended IR (`SketchExpr`).
-    Aggregate { child: Box<QueryExpr>, by: Vec<GroupKey>,
+    Aggregate { child: Box<QueryExpr>, by: GroupKeys,
                 aggs: Vec<AggIntent>, having: Option<Predicate> },
 
     // ── Time / streaming windows ──────────────────────────────────────────
@@ -302,8 +302,12 @@ pub enum QueryExpr {
              size: Duration, slide: Option<Duration> },
 
     // ── Distributed-execution structure ───────────────────────────────────
-    /// Partition the stream by key tuple (`GROUP BY` / PromQL `by (dims)`).
-    Partition { child: Box<QueryExpr>, keys: PartitionKeys },
+    // There is no `Partition` node (issue #12). Grouping has one home per
+    // concept: a reducing GROUP BY → `Aggregate.by`; per-group *ranking*
+    // (split without reduce) → `Sort.partition_by` (below); a parallel/sharding
+    // split is physical and lives in L5's stage allocator, not the symbolic IR.
+    // All three carry the same `GroupKeys` type — a newtype over the positional
+    // `Vec<ColumnId>` — so "per-group keys" has a single spelling.
     /// δ — SQL `DISTINCT` / row deduplication on `cols`.
     Distinct  { child: Box<QueryExpr>, cols: Vec<ColumnRef> },
     /// ⊕ — union of sub-results from independent stages or shards (the
@@ -326,8 +330,12 @@ pub enum QueryExpr {
 
     // ── Ordering & limiting ───────────────────────────────────────────────
     /// Generic order-by — survives L3 for non-heavy-hitter cases
-    /// (`ORDER BY name LIMIT 10`, `ORDER BY ts DESC LIMIT 1`).
-    Sort  { child: Box<QueryExpr>, keys: Vec<SortKey> },
+    /// (`ORDER BY name LIMIT 10`, `ORDER BY ts DESC LIMIT 1`). `partition_by`
+    /// makes the ordering per-group ("rank within each group"): the home for a
+    /// generic (non-heavy-hitter) `topk by (host)` / `bottomk` grouping and SQL
+    /// `… OVER (PARTITION BY …)`. Row-preserving (schema pass-through); empty =
+    /// a global order-by. (Issue #12: this replaces the old `Partition` node.)
+    Sort  { child: Box<QueryExpr>, keys: Vec<SortKey>, partition_by: GroupKeys },
     /// `LIMIT n OFFSET k`. The heavy-hitter shape (`ORDER BY count DESC
     /// LIMIT k`, PromQL `topk(k, …)`) is recognised at L1→L2→L3 lowering
     /// and produces `AggIntent::TopK` rather than generic `Sort + Limit`,
@@ -346,7 +354,7 @@ pub enum QueryExpr {
     /// Distinct from `Window` above — that is a streaming/tumbling window
     /// over the time axis; this is an analytic frame over already-grouped rows.
     WindowFunc { child: Box<QueryExpr>, func: WindowFuncKind,
-                 partition_by: Vec<GroupKey>, order_by: Vec<SortKey>,
+                 partition_by: GroupKeys, order_by: Vec<SortKey>,
                  frame: Option<WindowFrame> },
 
     // ── Binary composition ────────────────────────────────────────────────
@@ -441,12 +449,11 @@ Per-node input/output spec — the stable contract for L3 nodes (full implementa
 | `Project { cols }` | one input schema | the input schema projected to `cols` — fields filtered and reordered to match `cols`; `time_index` and `unique_keys` carried over for retained columns |
 | `Aggregate { by, aggs }` | one input schema | the `by` columns (carried verbatim from input) followed by one new column per entry in `aggs`, each named and typed by `AggIntent::output_type(input_field)`; `unique_keys = [by]` |
 | `Window { kind, size, slide }` | one input schema, **must** contain a `time_index` field | the input schema extended with synthetic `window_id` and `window_start` / `window_end` metadata fields |
-| `Partition { keys }` | one input schema | the input schema unchanged — logical-only marker; carries a sharding hint for L5's stage allocator |
 | `Distinct { cols }` | one input schema | the input schema with `unique_keys` tightened to include `cols`; field types unchanged |
 | `Merge` | N input schemas, all union-compatible (same field names, same types, same nullability, same `time_index` position if any) | the first input's schema (representative; checked union-compatible with the rest) |
 | `Join { kind, pred }` | two input schemas — left and right children | the concatenation of left's fields and right's fields, minus columns that USING / NATURAL deduplicates; nullability widened on the OUTER side for outer joins |
 | `SetOp { kind, all }` | two input schemas, must be union-compatible (as for `Merge`) | the left input's schema |
-| `Sort { keys }` | one input schema; every field referenced in `keys` must be present in it | the input schema unchanged |
+| `Sort { keys, partition_by }` | one input schema; every field referenced in `keys` / `partition_by` must be present in it | the input schema unchanged (row-preserving) — `partition_by` makes the order per-group (`topk by (…)` / `OVER (PARTITION BY …)`); there is no separate `Partition` node (issue #12) |
 | `Limit { n, offset }` | one input schema | the input schema unchanged |
 | `Subquery { alias }` | one input schema | the input schema with `alias` applied as the table alias to all field names |
 | `LetBinding { name, expr, body }` | `expr` produces an intermediate schema bound to `name`; `body` consumes it (and any other in-scope bindings) | the `body`'s output schema |

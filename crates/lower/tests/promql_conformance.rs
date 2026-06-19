@@ -70,7 +70,6 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         }
         QueryExpr::Window { child, .. }
         | QueryExpr::TimeRange { child, .. }
-        | QueryExpr::Partition { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -111,7 +110,6 @@ fn first_scan(e: &QueryExpr) -> (String, usize) {
         QueryExpr::Window { child, .. }
         | QueryExpr::TimeRange { child, .. }
         | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Partition { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -563,7 +561,7 @@ fn set_ops_lower_to_binaryop() {
 
 #[test]
 fn topk_over_count_is_heavy_hitter() {
-    // SEMANTICS: top-k by frequency → single-pass heavy-hitter sketch.
+    // SEMANTICS: top-k by frequency → first-class heavy-hitter `TopK` intent.
     let qe = ok("topk(10, count_over_time(http_requests_total[1m]))");
     assert!(has(
         &qe,

@@ -2,7 +2,7 @@
 //!
 //! Language- and deployment-independent. Box-owned tree (DAG fan-in is
 //! expressed via `LetBinding` / `Ref`); column identity is **positional**
-//! (`Aggregate.by: Vec<ColumnId>`), resolved by the [`Binder`](super::binder)
+//! (`Aggregate.by: GroupKeys`), resolved by the [`Binder`](super::binder)
 //! against the self-contained [`Schema`] carried on each `Scan`.
 
 use std::collections::HashMap;
@@ -28,6 +28,65 @@ pub enum QueryExprError {
 }
 
 // ── Leaf / supporting types ───────────────────────────────────────────────────
+
+/// Positional grouping keys, shared by every "operate per group" L3 operator:
+/// `Aggregate.by` (reduce per group), `Sort.partition_by` (rank per group —
+/// including generic `topk`/`bottomk`), and `WindowFunc.partition_by` (window
+/// per group). One spelling so grouping has a single home to evolve — e.g. a
+/// future qualified-key or `without(...)` representation (issue #12). Empty =
+/// no grouping (a global operation).
+///
+/// Heavy-hitter `AggIntent::TopK` carries its grouping here too, via the
+/// enclosing `Aggregate.by` (issue #13) — so reduce, rank, and window groupings
+/// all share this one type.
+///
+/// `#[serde(transparent)]` so it serialises as a bare array — wire-compatible
+/// with the `Vec<ColumnId>` these fields held before.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GroupKeys(pub Vec<ColumnId>);
+
+impl GroupKeys {
+    /// An empty key set — a global (ungrouped) operation.
+    pub fn none() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl std::ops::Deref for GroupKeys {
+    type Target = [ColumnId];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Vec<ColumnId>> for GroupKeys {
+    fn from(keys: Vec<ColumnId>) -> Self {
+        Self(keys)
+    }
+}
+
+impl FromIterator<ColumnId> for GroupKeys {
+    fn from_iter<I: IntoIterator<Item = ColumnId>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a GroupKeys {
+    type Item = &'a ColumnId;
+    type IntoIter = std::slice::Iter<'a, ColumnId>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// Compare directly against a `Vec<ColumnId>` so call sites and tests can keep
+/// writing `keys == vec![..]` / `assert_eq!(keys, &vec![..])`.
+impl PartialEq<Vec<ColumnId>> for GroupKeys {
+    fn eq(&self, other: &Vec<ColumnId>) -> bool {
+        &self.0 == other
+    }
+}
 
 /// Lifecycle / flush semantics of a streaming time window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,27 +121,6 @@ impl Source {
             Source::TimeSeries { .. } => DataModel::TimeSeries,
             Source::Table { .. } => DataModel::Tabular,
         }
-    }
-}
-
-/// Grouping key set (`by (...)` / `without (...)`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PartitionKeys {
-    By(Vec<String>),
-    /// **Reserved**: PromQL `without(...)` is rejected up front (the
-    /// usage-derived schema can't enumerate the label complement), so no front
-    /// end produces this variant yet.
-    Without(Vec<String>),
-}
-
-impl PartitionKeys {
-    pub fn keys(&self) -> &[String] {
-        match self {
-            PartitionKeys::By(k) | PartitionKeys::Without(k) => k,
-        }
-    }
-    pub fn is_empty(&self) -> bool {
-        self.keys().is_empty()
     }
 }
 
@@ -239,7 +277,7 @@ pub enum QueryExpr {
 
     /// γ + α — GROUP BY (positional) + aggregate intents.
     Aggregate {
-        by: Vec<ColumnId>,
+        by: GroupKeys,
         aggs: Vec<AggIntent>,
         /// Output column names parallel to `aggs`. A non-empty entry overrides
         /// the synthetic intent-keyed name — SQL threads DataFusion's generated
@@ -264,11 +302,6 @@ pub enum QueryExpr {
         child: Box<QueryExpr>,
     },
 
-    /// Logical-only partitioning marker (sharding hint for L5).
-    Partition {
-        keys: PartitionKeys,
-        child: Box<QueryExpr>,
-    },
     /// δ — SQL `DISTINCT` / row deduplication. Positional like every other L3
     /// column reference; empty = dedup on all columns (`SELECT DISTINCT *`).
     Distinct {
@@ -293,8 +326,18 @@ pub enum QueryExpr {
     },
 
     /// Generic order-by for non-heavy-hitter cases.
+    ///
+    /// `partition_by` makes the ordering **per-group**: a non-empty set means
+    /// "rank within each `partition_by` group" — the semantics behind PromQL
+    /// `topk by (host) (…)` / SQL `… OVER (PARTITION BY host ORDER BY …)`. It is
+    /// row-preserving (schema pass-through) and is where the grouping of a
+    /// generic (non-heavy-hitter) ranking lives, so there is no separate
+    /// `Partition` node (issue #12: reducing GROUP BY → `Aggregate.by`, per-group
+    /// ranking → here, parallel sharding → L5). Empty = a global order-by.
     Sort {
         keys: Vec<SortKey>,
+        #[serde(default)]
+        partition_by: GroupKeys,
         child: Box<QueryExpr>,
     },
     Limit {
@@ -339,7 +382,7 @@ pub enum QueryExpr {
         /// Operand expressions (`LAG(value)` → `[Column(value_id)]`); empty for
         /// the rank-only functions (`ROW_NUMBER`/`RANK`/`DENSE_RANK`).
         args: Vec<L3Expr>,
-        partition_by: Vec<ColumnId>,
+        partition_by: GroupKeys,
         order_by: Vec<SortKey>,
         /// The output column's name — DataFusion's window-expr field name, so a
         /// `Project` above resolves it (cf. `Aggregate.output_names`).
@@ -455,7 +498,6 @@ impl QueryExpr {
                 .ok_or_else(|| QueryExprError::UnresolvedRef(name.as_str().into())),
 
             QueryExpr::Filter { child, .. }
-            | QueryExpr::Partition { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }
             | QueryExpr::Subquery { child, .. }
@@ -791,7 +833,7 @@ mod tests {
             vec![],
         );
         let rate = QueryExpr::Aggregate {
-            by: vec![],
+            by: vec![].into(),
             aggs: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
@@ -829,7 +871,7 @@ mod tests {
             vec![],
         );
         let avg_over_time = QueryExpr::Aggregate {
-            by: vec![],
+            by: vec![].into(),
             aggs: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
@@ -878,7 +920,7 @@ mod tests {
         );
 
         let rate = QueryExpr::Aggregate {
-            by: vec![],
+            by: vec![].into(),
             aggs: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
@@ -890,7 +932,7 @@ mod tests {
         );
 
         let sum_by_job = QueryExpr::Aggregate {
-            by: vec![2], // `job`
+            by: vec![2].into(), // `job`
             aggs: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,

@@ -2,8 +2,8 @@
 //!
 //! Recursively converts a whole [`relational::QueryExpr`] tree into a whole
 //! [`query_expr::QueryExpr`] tree. The single-statistic sketchable `Aggregate`
-//! fuses directly in canonical terms (window-swap, `Partition` wrap); see the
-//! `Aggregate` arm.
+//! fuses directly in canonical terms (window-swap, positional `Aggregate.by`);
+//! see the `Aggregate` arm.
 //!
 //! Name resolution is an explicit pass: [`convert_root`] runs the
 //! [`Binder`](super::binder) first to build the complete, self-contained
@@ -22,8 +22,7 @@ use crate::intent_algebra::column_resolution::{
 use crate::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
 use crate::intent_algebra::names::BindingName;
 use crate::intent_algebra::query_expr::{
-    PartitionKeys as CPartitionKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, SortKey,
-    Source,
+    GroupKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, SortKey, Source,
 };
 use crate::intent_algebra::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
 use crate::intent_algebra::schema::{ColumnId, Schema};
@@ -40,6 +39,14 @@ pub enum ConvertError {
     /// resolve positional column references against it).
     #[error("schema derivation failed: {0}")]
     Schema(#[from] crate::intent_algebra::query_expr::QueryExprError),
+    /// Group keys landed on a per-series windowed/range reduction, which must
+    /// stay label-preserving (`Aggregate.by` empty). The only PromQL shape that
+    /// would do this is a generic `topk by (…)`, whose grouping is routed to
+    /// `Sort.partition_by` instead (issue #12) — so this indicates an
+    /// unsupported query shape rather than a path that should silently group.
+    #[error("group keys on a per-series windowed reduction are unsupported \
+             (per-group ranking must use Sort.partition_by — see issue #12)")]
+    WindowedReductionKeys,
 }
 
 /// Lower a Layer-2 tree to canonical L3, threading `accuracy` onto every
@@ -100,9 +107,10 @@ pub fn convert(
             // reduction — see `output_schema_in`'s `Window` arm). GROUP BY keys
             // resolve *positionally* into `Aggregate.by` — the same shape SQL
             // produces — whenever they're in scope: an instant selector, or a
-            // label-preserving per-series `rate`/`increase`/`*_over_time`. They
-            // fall back to a name-based `Partition` only when they can't be (a
-            // windowed reduction's own keys, or an unresolved name; see below).
+            // label-preserving per-series `rate`/`increase`/`*_over_time`. A
+            // windowed reduction must stay label-preserving (no group keys); the
+            // one PromQL shape that would group here, generic `topk by (…)`,
+            // routes its grouping to `Sort.partition_by` instead (see below).
             // The reducer's input column resolves against the aggregate's
             // *direct* input (the scan under any window). (SQL GROUP BY is
             // tabular, so it skips this branch for the plain `Aggregate.by` path
@@ -151,28 +159,26 @@ pub fn convert(
                 // shape SQL produces. Only for instant (non-range) aggregates:
                 // an instant aggregate (`sum by (job) (m)`) or a cross-series
                 // reduction over a label-preserving `rate`/`increase`.
-                // A range reduction's keys belong to an enclosing level, so fall
-                // back to a name-based `Partition` instead.
-                let by = if time_range.is_none() {
-                    resolve_column_refs(keys, &agg_in_schema).unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                let grouped_positionally = by.len() == keys.len();
-                let aggregate = CQueryExpr::Aggregate {
+                //
+                // A range reduction's keys can't go into `by`: this node must stay
+                // a per-series (label-preserving) reduction, and per-series schema
+                // detection in `output_schema_in` keys off `by.is_empty()` — adding
+                // keys here would flip it to a cross-series reduce. So a windowed
+                // reduction must carry no group keys: the only PromQL shape that
+                // would put keys here is a generic `topk by (…)`, and that routes
+                // its grouping to `Sort.partition_by` instead (issue #12). Any keys
+                // still reaching a windowed reduction are an unsupported shape —
+                // surface it rather than silently dropping the grouping.
+                if time_range.is_some() && !keys.is_empty() {
+                    return Err(ConvertError::WindowedReductionKeys);
+                }
+                let by: GroupKeys = resolve_column_refs(keys, &agg_in_schema)?.into();
+                return Ok(CQueryExpr::Aggregate {
                     by,
                     aggs: vec![intent],
                     output_names: vec![aggs[0].alias.clone().unwrap_or_default()],
                     having: None,
                     child: Box::new(agg_child),
-                };
-                return Ok(if grouped_positionally {
-                    aggregate
-                } else {
-                    CQueryExpr::Partition {
-                        keys: CPartitionKeys::By(ref_names(keys)),
-                        child: Box::new(aggregate),
-                    }
                 });
             }
 
@@ -182,7 +188,7 @@ pub fn convert(
             // resolves against the derived output schema instead.
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
-            let by = resolve_column_refs(keys, &child_schema)?;
+            let by: GroupKeys = resolve_column_refs(keys, &child_schema)?.into();
             let intents: Vec<AggIntent> = aggs
                 .iter()
                 .map(|item| -> Result<AggIntent, ConvertError> {
@@ -240,11 +246,6 @@ pub fn convert(
             }
         }
 
-        LQueryExpr::Partition { keys, input } => CQueryExpr::Partition {
-            keys: keys.clone(),
-            child: Box::new(convert(input, fallback, acc)?),
-        },
-
         LQueryExpr::Distinct { cols, input } => {
             // Resolve the L2 (name-based) dedup keys to positional ids against
             // the converted child's schema, like every other L3 column ref.
@@ -259,7 +260,7 @@ pub fn convert(
         LQueryExpr::TopK { k, by, input } => {
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
-            let by = resolve_column_refs(by, &child_schema)?;
+            let by: GroupKeys = resolve_column_refs(by, &child_schema)?.into();
             CQueryExpr::Aggregate {
                 by,
                 aggs: vec![AggIntent::TopK {
@@ -317,7 +318,11 @@ pub fn convert(
             right: Box::new(convert_root(right, acc)?),
         },
 
-        LQueryExpr::Sort { keys, input } => {
+        LQueryExpr::Sort {
+            keys,
+            partition_by,
+            input,
+        } => {
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
             let keys = keys
@@ -330,8 +335,13 @@ pub fn convert(
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            // Per-group ordering keys (`topk by (…)`) resolve positionally
+            // against the child schema — the per-series reduction below
+            // preserves its label columns, so the grouping label is present.
+            let partition_by: GroupKeys = resolve_column_refs(partition_by, &child_schema)?.into();
             CQueryExpr::Sort {
                 keys,
+                partition_by,
                 child: Box::new(child),
             }
         }
@@ -374,7 +384,7 @@ pub fn convert(
                 .iter()
                 .map(|a| resolve_expr(a, &child_schema))
                 .collect::<Result<Vec<_>, _>>()?;
-            let partition_by = resolve_column_refs(partition_by, &child_schema)?;
+            let partition_by: GroupKeys = resolve_column_refs(partition_by, &child_schema)?.into();
             let order_by = order_by
                 .iter()
                 .map(|k| -> Result<SortKey, ConvertError> {
@@ -446,19 +456,6 @@ fn scan(
         predicates,
         schema,
     })
-}
-
-/// Bare names of a `ColumnRef` list, dropping `SampleValue`/`Wildcard`. Used
-/// only for the legacy name-based `Partition` fallback (PromQL labels, which
-/// are unqualified — `Qualified` collapses to its bare `name`).
-fn ref_names(refs: &[ColumnRef]) -> Vec<String> {
-    refs.iter()
-        .filter_map(|c| match c {
-            ColumnRef::Named(n) => Some(n.clone()),
-            ColumnRef::Qualified { name, .. } => Some(name.clone()),
-            ColumnRef::SampleValue | ColumnRef::Wildcard => None,
-        })
-        .collect()
 }
 
 /// Resolve a Layer-2 aggregate-input [`ColumnRef`] to a positional input

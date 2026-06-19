@@ -30,7 +30,7 @@ fn scan(metric: &str) -> QueryExpr {
 
 fn range_agg(range_secs: u64, intent: AggIntent, metric: &str) -> QueryExpr {
     QueryExpr::Aggregate {
-        by: vec![],
+        by: vec![].into(),
         aggs: vec![intent],
         output_names: vec!["".into()],
         having: None,

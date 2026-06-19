@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn dedupe_subtrees_single_root_passthrough() {
         let q = QueryExpr::Aggregate {
-            by: vec![1],
+            by: vec![1].into(),
             aggs: vec![AggIntent::Quantile {
                 q: 0.99,
                 accuracy: AccuracyTarget::Epsilon(0.01),
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn dedupe_subtrees_basic() {
         let mk = |q: f64| QueryExpr::Aggregate {
-            by: vec![1],
+            by: vec![1].into(),
             aggs: vec![AggIntent::Quantile {
                 q,
                 accuracy: AccuracyTarget::Epsilon(0.01),
@@ -217,7 +217,7 @@ mod tests {
             ),
         };
         let mk = || QueryExpr::Aggregate {
-            by: vec![],
+            by: vec![].into(),
             aggs: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
