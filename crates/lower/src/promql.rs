@@ -16,6 +16,8 @@
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], Window{w, Filter(Source)}}` |
 //! | `histogram_quantile(φ, <expr>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered `<expr>` (preserves any `sum by (le)`/`rate`) |
 //! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
+//! | `OUTER_op(<any expr>)` (e.g. `max(sum by (job) (rate(m[w])))`, `sum(rate(a[w]) + rate(b[w]))`) | `Aggregate{[OUTER_op]}` over the fully-lowered `<any expr>` — arbitrary function nesting (issue #27) |
+//! | `topk(k, <non-count expr>)` / `bottomk(k, <any expr>)` | `Sort{value} → Limit{k}` over the fully-lowered argument |
 //! | `avg/min/max/sum_over_time(m[w])` | `Aggregate{[Avg/Min/Max/Sum], Window{w}}` |
 //! | `stddev/stdvar_over_time(m[w])` | `Aggregate{[StdDev/Variance], Window{w}}` |
 //! | `count_over_time(m[w])` | `Aggregate{[Count], Window{w}}` |
@@ -190,10 +192,38 @@ fn walk(expr: &Expr) -> Result<L2> {
 
 fn walk_aggregate(agg: &AggregateExpr) -> Result<L2> {
     let keys = resolve_group(agg)?;
-    let inner = lower_inner(&agg.expr)?;
+    let outer = outer_kind(agg)?;
+
+    // Fast path — the argument is a bare selector or a single range-vector
+    // function (`rate`/`increase`/`*_over_time`). `lower_inner` lowers it via the
+    // flat selector/call template, which also recognises the heavy-hitter
+    // `topk(k, count_over_time(...))` shape. This is the common two-level case
+    // (`sum by (job) (rate(m[5m]))`).
+    if let Ok(inner) = lower_inner(&agg.expr) {
+        return build(inner, keys, outer);
+    }
+
+    // General nesting — the argument is itself a composite expression: another
+    // aggregate (`max(sum by (job) (rate(m[5m])))`), a binary op
+    // (`sum(rate(a[5m]) + rate(b[5m]))`), a sub-query, or a function lowered
+    // elsewhere (`sum(histogram_quantile(0.9, …))`). Lower it recursively with
+    // the same `walk` used at the top level, then wrap it in the outer
+    // aggregation. This is the path that lifts the old two-level limit to
+    // arbitrary function nesting (issue #27). If the inner expression is itself
+    // unsupported (e.g. unary negation), `walk` surfaces that error, so a
+    // genuinely unsupported query is still cleanly rejected rather than
+    // mislowered.
+    let child = walk(&agg.expr)?;
+    build_over_subtree(outer, keys, child)
+}
+
+/// Map an `AggregateExpr`'s operator (`sum`/`avg`/`topk`/…) to the [`Outer`]
+/// shape, independent of what the argument is — so both the flat fast path and
+/// the general recursive path share one operator-dispatch.
+fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
     let op = agg.op.id();
 
-    let outer = if op == token::T_TOPK {
+    Ok(if op == token::T_TOPK {
         Outer::TopK {
             k: count_param(agg)?,
             descending: true,
@@ -230,9 +260,41 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<L2> {
         return Err(LoweringError::UnsupportedAggregateOp(format!(
             "aggregate token {op}"
         )));
-    };
+    })
+}
 
-    build(inner, keys, outer)
+/// Wrap an already-lowered L2 subtree in the outer aggregation. This is the
+/// general-nesting counterpart to [`build`]: where `build` assembles the
+/// two-level shape from a flat [`Inner`], this composes the outer operator over
+/// an arbitrary child (`max(sum by (job) (…))`, `sum(a + b)`, …).
+///
+/// A heavy-hitter `TopK` is only recognised on the flat `count_over_time` shape
+/// (handled in `build`); over a general subtree, `topk`/`bottomk` is a generic
+/// order-by-value + limit — the same `Sort{partition_by} → Limit` pair `build`
+/// emits for any non-heavy-hitter ranking.
+fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L2> {
+    Ok(match outer {
+        // `walk_aggregate` always passes a real aggregator; `None` can't occur.
+        Outer::None => child,
+        Outer::Plain(intent) => outer_aggregate(keys, outer_func(&intent), child),
+        Outer::Count => outer_aggregate(keys, AggFunc::CountDistinct, child),
+        Outer::TopK { k, descending } => {
+            let sorted = L2::Sort {
+                keys: vec![L2SortKey {
+                    expr: L2Expr::Column(ColumnRef::SampleValue),
+                    ascending: !descending,
+                    nulls_first: false,
+                }],
+                partition_by: keys,
+                input: Box::new(child),
+            };
+            L2::Limit {
+                n: k,
+                offset: 0,
+                input: Box::new(sorted),
+            }
+        }
+    })
 }
 
 /// `histogram_quantile(φ, <expr>)` lowers `<expr>` in full — preserving any
