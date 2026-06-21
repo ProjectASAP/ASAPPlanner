@@ -577,11 +577,62 @@ fn bottomk_is_generic_sort_limit() {
 }
 
 #[test]
-fn topk_over_aggregate_arg_is_rejected__GAP() {
+fn topk_over_nested_aggregate_is_generic_sort_limit() {
     // SEMANTICS (PromQL): `topk(3, sum by(x)(rate(...)))` is extremely common.
-    // Our aggregate-argument lowering only accepts selectors/calls, not a
-    // nested aggregate, so this is rejected today.
-    let _ = rejected("topk(3, sum by(instance) (rate(node_cpu_seconds_total[5m])))");
+    // The argument is a nested aggregate (not the heavy-hitter `count` shape),
+    // so it ranks by sample value → generic `Sort{value desc} → Limit{k}` over
+    // the fully-lowered inner aggregate (issue #27: arbitrary function nesting).
+    let qe = ok("topk(3, sum by(instance) (rate(node_cpu_seconds_total[5m])))");
+    let QueryExpr::Limit { n, child, .. } = &qe else {
+        panic!("expected outer Limit, got {qe:?}");
+    };
+    assert_eq!(*n, 3);
+    let QueryExpr::Sort { keys, child, .. } = child.as_ref() else {
+        panic!("expected Sort under Limit, got {child:?}");
+    };
+    assert!(!keys[0].ascending, "topk ranks descending by value");
+    // The inner `sum by (instance)` survives as a cross-series Aggregate over the
+    // per-series rate — the nesting the old two-level template could not express.
+    assert!(
+        has(child, |i| matches!(i, AggIntent::Sum { .. }))
+            && has(child, |i| matches!(i, AggIntent::Rate)),
+        "inner sum-over-rate preserved, got {:?}",
+        intents(child)
+    );
+}
+
+#[test]
+fn outer_aggregate_over_nested_aggregate_nests() {
+    // `max(sum by (job) (rate(m[5m])))` — an outer cross-series reduction over a
+    // nested per-group reduction over a per-series rate: three stacked levels the
+    // flat two-level template rejected. Each level survives into L3 (issue #27).
+    let qe = ok("max(sum by (job) (rate(http_requests_total[5m])))");
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected outer Aggregate, got {qe:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Max { .. }]));
+    let QueryExpr::Aggregate { by, aggs, .. } = child.as_ref() else {
+        panic!("expected inner `sum by (job)` Aggregate, got {child:?}");
+    };
+    assert_eq!(by, &vec![2], "job grouping survives on the inner aggregate");
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(has(&qe, |i| matches!(i, AggIntent::Rate)), "rate preserved");
+}
+
+#[test]
+fn aggregate_over_binary_op_nests() {
+    // `sum(rate(a[5m]) + rate(b[5m]))` — an aggregate whose argument is a binary
+    // op over two range vectors. The old template only accepted a single inner
+    // selector/call; now the binary op lowers and the outer sum wraps it.
+    let qe = ok("sum(rate(a[5m]) + rate(b[5m]))");
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected outer Aggregate, got {qe:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(
+        matches!(child.as_ref(), QueryExpr::BinaryOp { .. }),
+        "argument lowers as a BinaryOp, got {child:?}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

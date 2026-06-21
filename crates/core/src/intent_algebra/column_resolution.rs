@@ -76,6 +76,22 @@ pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, 
                     .collect();
                 (non_ts.len() == 1).then(|| non_ts[0])
             })
+            .or_else(|| {
+                // A *cross-series* aggregate (`sum by (job) (…)`) emits the group
+                // labels (Utf8) alongside the single numeric value column (e.g.
+                // `[job:Utf8, sum:Float64]`), so the sole-non-ts fallback above is
+                // ambiguous. The PromQL sample value of such a vector is that one
+                // numeric column — the labels are keys, not values. Pick it when
+                // it is the unique non-timestamp numeric column, so an outer
+                // ranking (`topk(k, sum by (job) (…))`) resolves its sort key.
+                let numeric: Vec<ColumnId> = (0..schema.columns.len())
+                    .filter(|&i| Some(i) != schema.time_index)
+                    .filter(|&i| {
+                        matches!(schema.columns[i].dtype, DataType::Float64 | DataType::Int64)
+                    })
+                    .collect();
+                (numeric.len() == 1).then(|| numeric[0])
+            })
             .ok_or_else(|| ResolveError::NoSampleValue {
                 available: schema.columns.iter().map(|c| c.name.clone()).collect(),
             }),
@@ -216,6 +232,31 @@ mod tests {
     fn resolve_sample_value() {
         let s = infer_source_schema("m");
         assert_eq!(resolve_column_ref(&ColumnRef::SampleValue, &s), Ok(1));
+    }
+
+    #[test]
+    fn sample_value_resolves_to_sole_numeric_after_cross_series_aggregate() {
+        // A cross-series aggregate output `[job:Utf8, sum:Float64]` has no `value`
+        // column and two non-ts columns (ambiguous), but exactly one numeric
+        // column — the sample value an outer `topk` ranks by.
+        let s = Schema::new(vec![
+            Column::new("job", DataType::Utf8, true),
+            Column::new("sum", DataType::Float64, false),
+        ]);
+        assert_eq!(resolve_column_ref(&ColumnRef::SampleValue, &s), Ok(1));
+    }
+
+    #[test]
+    fn sample_value_ambiguous_when_two_numeric_columns() {
+        // Two numeric non-ts columns → genuinely ambiguous → NoSampleValue.
+        let s = Schema::new(vec![
+            Column::new("a", DataType::Float64, false),
+            Column::new("b", DataType::Int64, false),
+        ]);
+        assert!(matches!(
+            resolve_column_ref(&ColumnRef::SampleValue, &s),
+            Err(ResolveError::NoSampleValue { .. })
+        ));
     }
 
     #[test]

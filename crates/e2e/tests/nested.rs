@@ -145,6 +145,36 @@ fn q25_div_over_complex_subtrees() {
     );
 }
 
+// #27 — outer cross-series reduction over a nested per-group reduction over a
+//   per-series rate: `max(sum by (job) (rate(m[5m])))`. Three stacked levels —
+//   the arbitrary function nesting the old two-level template could not express.
+//   The inner `sum by (job)` resolves job at col 2 against rate's
+//   label-preserving output schema; the outer `max` has no grouping.
+#[test]
+fn q27_max_over_sum_by_job_over_rate() {
+    let scan = QueryExpr::Scan {
+        source: Source::TimeSeries {
+            metric: "http_requests_total".into(),
+        },
+        predicates: vec![],
+        schema: metric_schema(&["job"]),
+    };
+    let inner_rate = agg(
+        vec![],
+        AggIntent::Rate,
+        QueryExpr::TimeRange {
+            range: Duration::from_secs(300),
+            child: Box::new(scan),
+        },
+    );
+    let sum_by_job = agg(vec![2], AggIntent::Sum { col: None }, inner_rate);
+    let expected = agg(vec![], AggIntent::Max { col: None }, sum_by_job);
+    assert_eq!(
+        lower("max(sum by (job) (rate(http_requests_total[5m])))"),
+        expected
+    );
+}
+
 // #24 — sum by job over rate over a filtered scan
 //   same schema [ts, value, job, status]; rate is label-preserving,
 //   so outer sum by job still finds job at col 2
