@@ -106,16 +106,21 @@ impl<'a> SqlLowerer<'a> {
             LogicalPlan::Subquery(_) => Err(LoweringError::UnsupportedFeature("subquery".into())),
             LogicalPlan::SubqueryAlias(alias) => {
                 // An alias over a table re-qualifies the scan's columns with the
-                // alias (so `a.col` / `b.col` in a self-join disambiguate). A
-                // derived table (inline view) is unsupported in v1.
+                // alias (so `a.col` / `b.col` in a self-join disambiguate).
                 match alias.input.as_ref() {
                     LogicalPlan::TableScan(scan) => {
                         self.scan_source(&scan.table_name.to_string(), &alias.alias.to_string())
                     }
-                    LogicalPlan::SubqueryAlias(_) => self.lower_plan(&alias.input),
-                    _ => Err(LoweringError::UnsupportedFeature(
-                        "subquery (inline view / derived table)".into(),
-                    )),
+                    // A *derived table* / inline view — `FROM (SELECT …) t`, the
+                    // SQL counterpart of PromQL function nesting (an aggregate
+                    // over an aggregate, a filter over a derived aggregate, …).
+                    // Lower the inner plan recursively; `lower_plan` already
+                    // handles every node a sub-`SELECT` can produce. The alias is
+                    // dropped — a qualified outer reference (`t.col`) resolves by
+                    // bare name against the derived output schema, the same
+                    // `Qualified → bare-name` fallback the converter's column
+                    // resolution already applies for joins (issue #27).
+                    other => self.lower_plan(other),
                 }
             }
             other => Err(LoweringError::UnsupportedFeature(format!(
