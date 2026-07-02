@@ -480,15 +480,21 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
                     input: Box::new(count_agg),
                 })
             } else {
-                let func = match &inner.func {
-                    Some(f) => inner_func(f),
-                    None => AggFunc::Sum,
+                // The base over which we rank. A range-vector-function argument
+                // (`topk(k, rate(m[5m]))`) reduces *per series* first — that is
+                // label-preserving, so the `by (host)` partition labels survive.
+                // A **bare instant selector** (`topk(k, m)`) ranks its own
+                // samples directly: it must NOT be wrapped in a reducing
+                // aggregate. Defaulting it to `Sum` was both semantically wrong
+                // (PromQL `topk` ranks the raw samples, it does not sum them) and
+                // destructive — the cross-series `Sum` collapses every label,
+                // including the `by (…)` partition keys, so they no longer
+                // resolve at L3 (issue #30). Keep the selector label-preserving so
+                // `Sort.partition_by` can rank within each group (issue #12).
+                let base = match inner.func.as_ref().map(inner_func) {
+                    Some(func) => windowed_aggregate(inner, vec![], func),
+                    None => filtered_source(inner.metric, inner.matchers),
                 };
-                // The grouping (`topk by (host)`) is per-group *ranking*, not a
-                // reduction — it rides on `Sort.partition_by` (→ positional L3
-                // `Sort.partition_by`), so the windowed reduction below stays
-                // label-preserving with no group keys (issue #12).
-                let base = windowed_aggregate(inner, vec![], func);
                 let sorted = L2::Sort {
                     keys: vec![L2SortKey {
                         expr: L2Expr::Column(ColumnRef::SampleValue),
