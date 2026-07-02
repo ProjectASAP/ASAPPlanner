@@ -10,7 +10,7 @@ use asap_ir::workload::{
     BatchEntry, Query, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 
-use asap_control_lower::{lower_promql, lower_promql_batch, LoweringError};
+use asap_frontend_promql::{lower_promql, lower_promql_batch, PromqlError as LoweringError};
 
 fn lower(q: &str) -> QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))

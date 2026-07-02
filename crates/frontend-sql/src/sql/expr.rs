@@ -2,7 +2,7 @@ use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
 use asap_ir::intent_algebra::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Scalar};
 
-use crate::error::LoweringError;
+use crate::error::SqlError as LoweringError;
 
 use super::types::{arrow_to_l3, scalar_value_to_l3};
 

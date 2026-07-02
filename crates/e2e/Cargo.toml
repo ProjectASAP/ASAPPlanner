@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 asap-ir = { path = "../ir" }
-asap-control-lower = { path = "../lower" }
+asap-frontend-promql = { path = "../frontend-promql" }

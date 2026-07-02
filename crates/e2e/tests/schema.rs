@@ -10,7 +10,7 @@
 //! are label-preserving and keep the schema open.
 
 use asap_ir::types::AccuracyTarget;
-use asap_control_lower::lower_promql;
+use asap_frontend_promql::lower_promql;
 
 fn lower(q: &str) -> asap_ir::intent_algebra::QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))

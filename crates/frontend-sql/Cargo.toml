@@ -1,0 +1,13 @@
+[package]
+name = "asap-frontend-sql"
+version = "0.1.0"
+edition = "2021"
+
+# SQL front end: L1 (parse + plan via DataFusion) → L2 relational, then the
+# shared L2→L3 converter in asap-ir. Pulls DataFusion only — never promql-parser.
+[dependencies]
+asap-ir = { path = "../ir" }
+datafusion = "43"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
