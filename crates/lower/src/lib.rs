@@ -3,8 +3,8 @@
 //! Both front ends end at the canonical intent algebra via the same L2→L3
 //! [`convert_root`]: PromQL parses with `promql-parser`, SQL parses + plans with
 //! DataFusion. Each emits the per-language
-//! [`relational::QueryExpr`](asap_control_core::intent_algebra::relational); the
-//! shared converter runs the [`Binder`](asap_control_core::intent_algebra::Binder)
+//! [`relational::QueryExpr`](asap_ir::intent_algebra::relational); the
+//! shared converter runs the [`Binder`](asap_ir::intent_algebra::Binder)
 //! for positional name resolution and folds single-statistic sketchable
 //! aggregates into canonical shapes.
 
@@ -12,9 +12,9 @@ pub mod error;
 pub mod promql;
 pub mod sql;
 
-use asap_control_core::intent_algebra::{convert_root, QueryExpr};
-use asap_control_core::types::AccuracyTarget;
-use asap_control_core::workload::{QueryLanguage, QueryWorkload, SqlDialect};
+use asap_ir::intent_algebra::{convert_root, QueryExpr};
+use asap_ir::types::AccuracyTarget;
+use asap_ir::workload::{QueryLanguage, QueryWorkload, SqlDialect};
 
 pub use error::LoweringError;
 pub use promql::PromqlLowerer;

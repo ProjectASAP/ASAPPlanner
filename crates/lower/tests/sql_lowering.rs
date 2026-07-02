@@ -4,11 +4,11 @@
 //! the relational L2 algebra, and the shared `convert_root` produces positional
 //! canonical L3 (the same converter the PromQL path uses).
 
-use asap_control_core::intent_algebra::schema::{Column, DataType, Schema};
-use asap_control_core::intent_algebra::{
+use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
+use asap_ir::intent_algebra::{
     AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, QueryExpr, Source, WindowFuncKind,
 };
-use asap_control_core::types::AccuracyTarget;
+use asap_ir::types::AccuracyTarget;
 use asap_control_lower::{lower_sql, SqlCatalog};
 
 fn col(name: &str, dtype: DataType) -> Column {

@@ -9,10 +9,10 @@
 //! `Aggregate` or a `Project`.  Per-series reductions (`rate`, `*_over_time`)
 //! are label-preserving and keep the schema open.
 
-use asap_control_core::types::AccuracyTarget;
+use asap_ir::types::AccuracyTarget;
 use asap_control_lower::lower_promql;
 
-fn lower(q: &str) -> asap_control_core::intent_algebra::QueryExpr {
+fn lower(q: &str) -> asap_ir::intent_algebra::QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 

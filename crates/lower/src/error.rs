@@ -18,7 +18,7 @@ pub enum LoweringError {
     /// The workload's query language is not handled by this lowerer.
     WrongLanguage(String),
     /// The L2→L3 converter failed (name resolution against the bound schema).
-    Convert(asap_control_core::intent_algebra::ConvertError),
+    Convert(asap_ir::intent_algebra::ConvertError),
 
     // ── SQL front end (DataFusion) ───────────────────────────────────────────
     /// DataFusion failed to parse / plan the SQL query.
@@ -58,8 +58,8 @@ impl fmt::Display for LoweringError {
 
 impl std::error::Error for LoweringError {}
 
-impl From<asap_control_core::intent_algebra::ConvertError> for LoweringError {
-    fn from(e: asap_control_core::intent_algebra::ConvertError) -> Self {
+impl From<asap_ir::intent_algebra::ConvertError> for LoweringError {
+    fn from(e: asap_ir::intent_algebra::ConvertError) -> Self {
         Self::Convert(e)
     }
 }

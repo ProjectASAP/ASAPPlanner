@@ -13,7 +13,7 @@
 //! that is the guarantee. A coverage floor guards against a change silently
 //! tanking how much of the corpus we can lower.
 
-use asap_control_core::types::AccuracyTarget;
+use asap_ir::types::AccuracyTarget;
 use asap_control_lower::{lower_promql, LoweringError};
 
 const DOCS: &str = include_str!("data/promql_corpus_docs.txt");

@@ -3,8 +3,8 @@
 // Lowers every topk-shaped query from the design discussion and prints the
 // resulting L3 IR. Used for interactive exploration; not a test.
 
-use asap_control_core::intent_algebra::schema::{Column, DataType, Schema};
-use asap_control_core::types::AccuracyTarget;
+use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
+use asap_ir::types::AccuracyTarget;
 use asap_control_lower::{lower_promql, lower_sql, SqlCatalog};
 
 fn col(name: &str, dtype: DataType) -> Column {

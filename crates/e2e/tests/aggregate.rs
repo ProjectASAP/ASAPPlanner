@@ -8,8 +8,8 @@
 //! Single-stat PromQL aggregates always get `output_names: [""]` (no alias)
 //! and `having: None`.
 
-use asap_control_core::intent_algebra::{AggIntent, QueryExpr, Source};
-use asap_control_core::types::AccuracyTarget;
+use asap_ir::intent_algebra::{AggIntent, QueryExpr, Source};
+use asap_ir::types::AccuracyTarget;
 use asap_control_lower::lower_promql;
 use asap_e2e::fixtures::metric_schema;
 

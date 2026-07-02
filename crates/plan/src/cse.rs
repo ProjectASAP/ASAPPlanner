@@ -2,7 +2,7 @@
 //!
 //! Multi-root planning hoists shared sub-DAGs into `LetBinding`s so the cost
 //! model can credit the producer once. Legality is gated by
-//! [`cse_reuse_is_legal`](asap_control_core::intent_algebra::schema::cse_reuse_is_legal): a candidate
+//! [`cse_reuse_is_legal`](asap_ir::intent_algebra::schema::cse_reuse_is_legal): a candidate
 //! sub-DAG only becomes a binding when its output schema has at least one
 //! `unique_keys` set — the load-bearing field for this pass.
 //!
@@ -10,9 +10,9 @@
 //! case. The fully-general algorithm (alpha-equivalence, schema-merge,
 //! nested CSE) is a downstream optimisation, not part of the IR contract.
 
-use asap_control_core::intent_algebra::names::{BindingName, QueryId};
-use asap_control_core::intent_algebra::query_expr::QueryExpr;
-use asap_control_core::intent_algebra::schema::cse_reuse_is_legal;
+use asap_ir::intent_algebra::names::{BindingName, QueryId};
+use asap_ir::intent_algebra::query_expr::QueryExpr;
+use asap_ir::intent_algebra::schema::cse_reuse_is_legal;
 
 /// Multi-root container produced by the CSE pass.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,10 +115,10 @@ pub fn dedupe_subtrees(roots: Vec<(QueryId, QueryExpr)>) -> CseWorkloadPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_control_core::intent_algebra::agg_intent::AggIntent;
-    use asap_control_core::intent_algebra::query_expr::{Source, WindowKind};
-    use asap_control_core::intent_algebra::schema::{Column, DataType, Schema};
-    use asap_control_core::types::AccuracyTarget;
+    use asap_ir::intent_algebra::agg_intent::AggIntent;
+    use asap_ir::intent_algebra::query_expr::{Source, WindowKind};
+    use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
+    use asap_ir::types::AccuracyTarget;
     use std::time::Duration;
 
     fn col(name: &str, dtype: DataType) -> Column {

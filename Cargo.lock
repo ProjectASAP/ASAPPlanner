@@ -303,19 +303,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "asap-control-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "asap-control-lower"
 version = "0.1.0"
 dependencies = [
- "asap-control-core",
+ "asap-ir",
  "datafusion",
  "promql-parser",
  "tokio",
@@ -325,22 +316,31 @@ dependencies = [
 name = "asap-e2e"
 version = "0.1.0"
 dependencies = [
- "asap-control-core",
  "asap-control-lower",
+ "asap-ir",
+]
+
+[[package]]
+name = "asap-ir"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
 name = "asap-plan"
 version = "0.1.0"
 dependencies = [
- "asap-control-core",
+ "asap-ir",
 ]
 
 [[package]]
 name = "asap-sketch"
 version = "0.1.0"
 dependencies = [
- "asap-control-core",
+ "asap-ir",
 ]
 
 [[package]]

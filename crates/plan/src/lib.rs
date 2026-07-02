@@ -1,7 +1,7 @@
 //! `asap-plan` — the cost-aware optimizer layer over the L3 intent algebra.
 //!
-//! This crate sits between the language-agnostic IR ([`asap_control_core`]) and
-//! any runtime: it consumes L3 [`QueryExpr`](asap_control_core::intent_algebra::QueryExpr)
+//! This crate sits between the language-agnostic IR ([`asap_ir`]) and
+//! any runtime: it consumes L3 [`QueryExpr`](asap_ir::intent_algebra::QueryExpr)
 //! trees and makes the cost-aware decisions that L3 deliberately leaves open —
 //! which shared sub-expressions to hoist, which sketch (if any) realises each
 //! approximate intent, and the canonical form both front ends should agree on.
