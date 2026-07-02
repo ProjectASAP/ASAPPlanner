@@ -1,5 +1,5 @@
 use super::sketch::{SummaryKind, SummaryParams};
-use crate::intent_algebra::DataType;
+use asap_control_core::intent_algebra::DataType;
 
 // ── L4 data types ─────────────────────────────────────────────────────────────
 

@@ -1,4 +1,4 @@
-use crate::intent_algebra::ColumnRef;
+use asap_control_core::intent_algebra::ColumnRef;
 
 // ── Summary kind identifiers ───────────────────────────────────────────────────
 

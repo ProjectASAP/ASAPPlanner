@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use super::schema::L4Schema;
 use super::sketch::{SketchQuery, SummaryKind, SummaryParams};
-use crate::intent_algebra::{ColumnId, ColumnRef, QueryExpr};
+use asap_control_core::intent_algebra::{ColumnId, ColumnRef, QueryExpr};
 
 // ── L4 DAG node ───────────────────────────────────────────────────────────────
 
