@@ -19,7 +19,7 @@
 
 use asap_ir::intent_algebra::QueryExpr;
 use asap_ir::types::AccuracyTarget;
-use asap_control_lower::lower_promql;
+use asap_frontend_promql::lower_promql;
 
 fn lo(q: &str) -> QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("{q:?} should lower: {e}"))

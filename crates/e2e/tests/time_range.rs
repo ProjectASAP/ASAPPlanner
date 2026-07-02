@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use asap_ir::intent_algebra::{AggIntent, QueryExpr, Source};
 use asap_ir::types::AccuracyTarget;
-use asap_control_lower::lower_promql;
+use asap_frontend_promql::lower_promql;
 use asap_e2e::fixtures::metric_schema;
 
 fn lower(q: &str) -> QueryExpr {

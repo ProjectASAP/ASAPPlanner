@@ -9,7 +9,7 @@ use asap_ir::intent_algebra::{
     AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, QueryExpr, Source, WindowFuncKind,
 };
 use asap_ir::types::AccuracyTarget;
-use asap_control_lower::{lower_sql, SqlCatalog};
+use asap_frontend_sql::{lower_sql, SqlCatalog};
 
 fn col(name: &str, dtype: DataType) -> Column {
     Column::new(name, dtype, false)

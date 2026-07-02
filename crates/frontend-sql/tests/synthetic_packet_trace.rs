@@ -23,7 +23,7 @@
 use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 use asap_ir::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
 use asap_ir::types::AccuracyTarget;
-use asap_control_lower::{lower_sql, LoweringError, SqlCatalog};
+use asap_frontend_sql::{lower_sql, SqlError as LoweringError, SqlCatalog};
 
 const CORPUS: &str = include_str!("data/synthetic_packet_trace_queries.sql");
 

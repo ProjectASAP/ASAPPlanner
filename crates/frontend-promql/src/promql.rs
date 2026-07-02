@@ -49,7 +49,7 @@ use asap_ir::intent_algebra::relational::{
 };
 use asap_ir::intent_algebra::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Scalar};
 
-use crate::error::LoweringError;
+use crate::error::PromqlError as LoweringError;
 
 type Result<T> = std::result::Result<T, LoweringError>;
 

@@ -1,16 +1,17 @@
 [package]
-name = "asap-control-lower"
+name = "asap-lower"
 version = "0.1.0"
 edition = "2021"
 
+# Thin facade over the two front ends — re-exports `lower_promql` / `lower_sql`
+# (and batch + lowerer + error types) so a caller can depend on one crate for
+# both languages. A caller that needs only one language should depend on the
+# matching `asap-frontend-*` crate directly to avoid pulling the other parser.
 [dependencies]
-asap-ir = { path = "../ir" }
-# Private mirror of GreptimeTeam/promql-parser (Apache-2.0). `main` tracks
-# upstream untouched; the `asap` branch carries our local grammar/function
-# additions (see THIRD_PARTY.md).
-promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", branch = "asap" }
-# SQL front end: parse + plan via DataFusion, then lower its LogicalPlan to L2.
-datafusion = "43"
+asap-frontend-promql = { path = "../frontend-promql" }
+asap-frontend-sql = { path = "../frontend-sql" }
 
 [dev-dependencies]
+# The topk_ir example builds catalog schemas + drives the async SQL path.
+asap-ir = { path = "../ir" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

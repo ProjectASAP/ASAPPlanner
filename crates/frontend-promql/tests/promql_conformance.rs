@@ -37,7 +37,7 @@ use asap_ir::intent_algebra::{
     AggIntent, ArithOp, BinaryOpKind, CompareOp, QueryExpr, Source,
 };
 use asap_ir::types::AccuracyTarget;
-use asap_control_lower::{lower_promql, LoweringError};
+use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
 
 // ── harness helpers ─────────────────────────────────────────────────────────────
 

@@ -303,21 +303,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "asap-control-lower"
+name = "asap-e2e"
+version = "0.1.0"
+dependencies = [
+ "asap-frontend-promql",
+ "asap-ir",
+]
+
+[[package]]
+name = "asap-frontend-promql"
+version = "0.1.0"
+dependencies = [
+ "asap-ir",
+ "promql-parser",
+]
+
+[[package]]
+name = "asap-frontend-sql"
 version = "0.1.0"
 dependencies = [
  "asap-ir",
  "datafusion",
- "promql-parser",
  "tokio",
-]
-
-[[package]]
-name = "asap-e2e"
-version = "0.1.0"
-dependencies = [
- "asap-control-lower",
- "asap-ir",
 ]
 
 [[package]]
@@ -327,6 +334,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "asap-lower"
+version = "0.1.0"
+dependencies = [
+ "asap-frontend-promql",
+ "asap-frontend-sql",
+ "asap-ir",
+ "tokio",
 ]
 
 [[package]]

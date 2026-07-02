@@ -25,7 +25,7 @@ use asap_ir::intent_algebra::{
     ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
 };
 
-use crate::error::LoweringError;
+use crate::error::SqlError as LoweringError;
 
 mod expr;
 mod types;

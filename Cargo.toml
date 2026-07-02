@@ -3,6 +3,8 @@ members = [
     "crates/ir",
     "crates/sketch",
     "crates/plan",
+    "crates/frontend-promql",
+    "crates/frontend-sql",
     "crates/lower",
     "crates/e2e",
 ]
