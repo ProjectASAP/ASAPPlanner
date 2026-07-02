@@ -91,7 +91,7 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
                 go(expr, out);
                 go(child, out);
             }
-            QueryExpr::Scan { .. } | QueryExpr::Ref { .. } => {}
+            QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::Ref { .. } => {}
         }
     }
     go(e, &mut out);
@@ -143,11 +143,12 @@ fn corpus_lowering_is_total_and_fully_parseable() {
         t.unparseable
     );
 
-    // Coverage floor (ratchet, not an exact count): at minimum the
-    // vector-vs-vector comparisons lower. Lifting the scalar-threshold or
-    // nested-function gaps should raise this deliberately.
+    // Coverage floor (ratchet, not an exact count). The scalar-threshold operand
+    // (#35) unblocked the dominant `<vector> <cmp> <scalar>` shape, taking
+    // coverage from ~13 to ~863/949. Remaining gaps are un-implemented functions
+    // (histogram_*, absent, changes-derivatives-with-scalar, without(), …).
     assert!(
-        t.lowered >= 12,
+        t.lowered >= 800,
         "real-world lowering coverage regressed: {t:?}"
     );
 }
@@ -238,19 +239,21 @@ fn all_targets_missing_core_lowers() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn scalar_threshold_comparisons_are_rejected__GAP() {
+fn scalar_threshold_comparisons_lower_to_binaryop_scalar() {
     // ~822/949 corpus queries are `<vector> <cmp> <scalar>`. The numeric
-    // threshold operand has no L2 scalar node, so the whole alert is rejected
-    // (cleanly) — this is the single biggest blocker to lowering real alerts.
-    // All three reject via the bare-scalar-operand path (UnsupportedFeature).
+    // threshold is now a `Scalar` operand of the `BinaryOp` (issue #35) — the
+    // single biggest unblock for real alerts.
     for q in [
         "prometheus_config_last_reload_successful != 1",
         "increase(prometheus_tsdb_compactions_failed_total[1m]) > 0",
         "rate(alertmanager_notifications_failed_total[3m]) > 0.05",
     ] {
+        let QueryExpr::BinaryOp { rhs, .. } = ok(q) else {
+            panic!("expected a BinaryOp for {q:?}");
+        };
         assert!(
-            matches!(rejected(q), LoweringError::UnsupportedFeature(_)),
-            "expected a clean UnsupportedFeature rejection for {q:?}"
+            matches!(rhs.as_ref(), QueryExpr::Scalar(_)),
+            "scalar threshold operand for {q:?}, got {rhs:?}"
         );
     }
 }

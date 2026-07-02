@@ -91,7 +91,7 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
             collect(expr, out);
             collect(child, out);
         }
-        QueryExpr::Scan { .. } | QueryExpr::Ref { .. } => {}
+        QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::Ref { .. } => {}
     }
 }
 
@@ -546,11 +546,34 @@ fn count_maps_to_cardinality_and_inherits_accuracy() {
 }
 
 #[test]
-fn scalar_literal_operand_is_rejected__GAP() {
-    // SEMANTICS (PromQL): `v > 10*1024*1024` filters by a scalar threshold.
-    // We have no scalar/number-literal expression in L2, so a literal operand
-    // is rejected. Common real-world thresholds therefore don't lower yet.
-    let _ = rejected("node_filesystem_avail_bytes > 10*1024*1024");
+fn scalar_literal_operand_lowers_as_binaryop_scalar() {
+    // Issue #35: `<vector> op <scalar>` — the numeric threshold is a `Scalar`
+    // operand of the `BinaryOp`, and constant arithmetic (`10*1024*1024`) is
+    // folded. The output schema is the vector side's.
+    let qe = ok("node_filesystem_avail_bytes > 10*1024*1024");
+    let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
+        panic!("expected a BinaryOp, got {qe:?}");
+    };
+    assert_eq!(*op, BinaryOpKind::Compare(CompareOp::Gt));
+    assert!(matches!(lhs.as_ref(), QueryExpr::Scan { .. }), "vector on the left");
+    assert!(
+        matches!(rhs.as_ref(), QueryExpr::Scalar(v) if (*v - 10_485_760.0).abs() < 1e-6),
+        "folded scalar threshold on the right, got {rhs:?}"
+    );
+    // Schema derivation follows the vector side (a scalar contributes no labels).
+    assert!(qe.output_schema().is_ok());
+}
+
+#[test]
+fn scalar_arithmetic_scales_the_vector() {
+    // `rate(m[5m]) * 100` — a unit conversion. Arithmetic BinaryOp of the vector
+    // with a `Scalar(100)`.
+    let qe = ok("rate(m[5m]) * 100");
+    let QueryExpr::BinaryOp { op, rhs, .. } = &qe else {
+        panic!("expected a BinaryOp, got {qe:?}");
+    };
+    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Mul));
+    assert!(matches!(rhs.as_ref(), QueryExpr::Scalar(v) if (*v - 100.0).abs() < 1e-9));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
