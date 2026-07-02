@@ -205,8 +205,8 @@ impl Schema {
 //    the producer's logic."
 //
 // `cse_reuse_is_legal` is the gatekeeper. The workload-level CSE pass
-// (`intent_algebra::cse::dedupe_subtrees`) consults it before emitting
-// a `LetBinding` to share a producer between ≥2 `Ref` consumers.
+// (`asap_plan::cse::dedupe_subtrees`) consults it before emitting a
+// `LetBinding` to share a producer between ≥2 `Ref` consumers.
 
 use thiserror::Error;
 
