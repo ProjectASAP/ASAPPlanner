@@ -328,6 +328,42 @@ async fn join_predicate_disambiguates_shared_column_name() {
 }
 
 #[tokio::test]
+async fn derived_table_join_disambiguates_via_alias() {
+    // Issue #66: a join over two *derived tables* must bind its keys to distinct
+    // positions. Before the fix the derived output columns lost their qualifier,
+    // so `a.service` and `b.service` both fell back to the first bare `service`
+    // (col 0) — `service = service`, always true → a silent cross product.
+    // Concatenated: a[service,region] ++ b[service,region] → a.service=0, b.service=2.
+    let qe = lower(
+        "SELECT a.region, b.region \
+         FROM (SELECT service, region FROM hosts) a \
+         JOIN (SELECT service, region FROM hosts) b ON a.service = b.service",
+    )
+    .await;
+    let join = find_join(&qe).expect("expected a Join in the tree");
+    assert_eq!(
+        join_eq_columns(join),
+        [0, 2],
+        "derived-table join keys must bind to distinct positions, not both to the first `service`"
+    );
+}
+
+#[tokio::test]
+async fn derived_table_select_star_join_disambiguates_via_alias() {
+    // Same as above but `SELECT *` derived tables (the non-Projection path that
+    // wraps the inner plan in an identity re-qualifying projection).
+    let qe = lower(
+        "SELECT a.region, b.region \
+         FROM (SELECT * FROM hosts) a JOIN (SELECT * FROM hosts) b \
+         ON a.service = b.service",
+    )
+    .await;
+    let join = find_join(&qe).expect("expected a Join in the tree");
+    let [l, r] = join_eq_columns(join);
+    assert_ne!(l, r, "SELECT * derived-table join keys must not collapse to one column");
+}
+
+#[tokio::test]
 async fn self_join_disambiguates_via_aliases() {
     // A self-join shares *every* column name; the alias qualifiers (`a`/`b`) are
     // the only way to tell the two `service` columns apart.

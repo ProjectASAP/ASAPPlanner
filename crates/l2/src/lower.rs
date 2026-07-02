@@ -228,7 +228,11 @@ pub fn convert(
 
         // π — resolve each project item's expression to positional against the
         // child's schema.
-        LQueryExpr::Project { cols, input } => {
+        LQueryExpr::Project {
+            cols,
+            qualifier,
+            input,
+        } => {
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
             let cols = cols
@@ -242,6 +246,7 @@ pub fn convert(
                 .collect::<Result<Vec<_>, _>>()?;
             CQueryExpr::Project {
                 cols,
+                qualifier: qualifier.clone(),
                 child: Box::new(child),
             }
         }
