@@ -168,6 +168,20 @@ fn name_label_selects_the_metric() {
 }
 
 #[test]
+fn name_regex_matcher_is_rejected__GAP() {
+    // A `__name__=~` / `!~` / `!=` matcher selects *across* metric names, which
+    // the single-metric `Source::TimeSeries { metric }` can't represent. It is
+    // rejected (issue #67) rather than silently mislowered to a literal metric
+    // named after the pattern (`{__name__=~"node_.*"}` → `Source("node_.*")`).
+    // Full support needs a wildcard/regex `Source` in the IR.
+    let _ = rejected(r#"{__name__=~"node_.*"}"#);
+    let _ = rejected(r#"{__name__!~"x", job="y"}"#);
+    // Equality still names the metric (regression guard for the fix).
+    let (metric, _) = first_scan(&ok(r#"{__name__="up"}"#));
+    assert_eq!(metric, "up");
+}
+
+#[test]
 fn range_vector_selector_is_time_range() {
     // SEMANTICS: `[5m]` turns an instant vector into a range vector.
     // In L3 this is a dedicated `TimeRange` node (not a streaming `Window`).
