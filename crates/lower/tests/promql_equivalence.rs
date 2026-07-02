@@ -17,8 +17,8 @@
 
 #![allow(non_snake_case)]
 
-use asap_control_core::intent_algebra::QueryExpr;
-use asap_control_core::types::AccuracyTarget;
+use asap_ir::intent_algebra::QueryExpr;
+use asap_ir::types::AccuracyTarget;
 use asap_control_lower::lower_promql;
 
 fn lo(q: &str) -> QueryExpr {

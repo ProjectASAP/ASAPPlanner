@@ -33,10 +33,10 @@
 
 use std::time::Duration;
 
-use asap_control_core::intent_algebra::{
+use asap_ir::intent_algebra::{
     AggIntent, ArithOp, BinaryOpKind, CompareOp, QueryExpr, Source,
 };
-use asap_control_core::types::AccuracyTarget;
+use asap_ir::types::AccuracyTarget;
 use asap_control_lower::{lower_promql, LoweringError};
 
 // ── harness helpers ─────────────────────────────────────────────────────────────

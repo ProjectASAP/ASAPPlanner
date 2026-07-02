@@ -2,11 +2,11 @@
 
 use std::time::Duration;
 
-use asap_control_core::intent_algebra::{
+use asap_ir::intent_algebra::{
     AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, QueryExpr, Source,
 };
-use asap_control_core::types::AccuracyTarget;
-use asap_control_core::workload::{
+use asap_ir::types::AccuracyTarget;
+use asap_ir::workload::{
     BatchEntry, Query, QueryLanguage, QueryRequirements, QueryWorkload,
 };
 
@@ -448,7 +448,7 @@ fn binary_op_with_on_grouping() {
         panic!("expected BinaryOp, got {qe:?}");
     };
     let vm = vector_match.as_ref().expect("vector_match present");
-    use asap_control_core::intent_algebra::VectorMatchKind;
+    use asap_ir::intent_algebra::VectorMatchKind;
     assert_eq!(vm.kind, VectorMatchKind::On);
     assert_eq!(vm.labels, vec!["host".to_string()]);
 }
@@ -666,7 +666,7 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
 
 #[test]
 fn batch_rejects_non_promql_language() {
-    use asap_control_core::workload::SqlDialect;
+    use asap_ir::workload::SqlDialect;
     let workload = QueryWorkload {
         language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
         query_batch: Some(vec![BatchEntry {

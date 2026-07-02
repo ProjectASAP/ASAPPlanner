@@ -2,8 +2,8 @@
 //!
 //! Parses SQL via DataFusion (over the catalog's registered tables), then walks
 //! the unoptimized `LogicalPlan` and emits the language-independent
-//! [`relational::QueryExpr`](asap_control_core::intent_algebra::relational) that
-//! [`convert_root`](asap_control_core::intent_algebra::convert_root) lowers to
+//! [`relational::QueryExpr`](asap_ir::intent_algebra::relational) that
+//! [`convert_root`](asap_ir::intent_algebra::convert_root) lowers to
 //! canonical L3. Positional column identity, accuracy threading, and the
 //! window-over-aggregate fold all happen in that converter — this front end
 //! only interprets SQL semantics into the shared L2 algebra.
@@ -17,11 +17,11 @@ use datafusion::logical_expr::{
 };
 use datafusion::prelude::SessionContext;
 
-use asap_control_core::intent_algebra::relational::{
+use asap_ir::intent_algebra::relational::{
     AggFunc, AggItem, L2ProjectItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
-use asap_control_core::intent_algebra::schema::Schema;
-use asap_control_core::intent_algebra::{
+use asap_ir::intent_algebra::schema::Schema;
+use asap_ir::intent_algebra::{
     ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
 };
 
@@ -36,7 +36,7 @@ use self::expr::df_expr_to_l2;
 use self::types::schema_to_arrow;
 
 /// Lowers SQL strings to the Layer-2 [`relational::QueryExpr`] over a table
-/// [`SqlCatalog`]. Call [`convert_root`](asap_control_core::intent_algebra::convert_root)
+/// [`SqlCatalog`]. Call [`convert_root`](asap_ir::intent_algebra::convert_root)
 /// on the result for canonical L3.
 pub struct SqlLowerer<'a> {
     catalog: &'a SqlCatalog,

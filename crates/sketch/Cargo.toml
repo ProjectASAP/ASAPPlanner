@@ -6,4 +6,4 @@ edition = "2021"
 # The L4 sketch algebra (sketch-bound IR) over the L3 intent algebra.
 # Depends only on the IR crate.
 [dependencies]
-asap-control-core = { path = "../core" }
+asap-ir = { path = "../ir" }

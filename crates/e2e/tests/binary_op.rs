@@ -7,11 +7,11 @@
 
 use std::time::Duration;
 
-use asap_control_core::intent_algebra::{
+use asap_ir::intent_algebra::{
     AggIntent, ArithOp, BinaryOpKind, CompareOp, GroupSide, QueryExpr, Source, VectorGrouping,
     VectorMatch, VectorMatchKind,
 };
-use asap_control_core::types::AccuracyTarget;
+use asap_ir::types::AccuracyTarget;
 use asap_control_lower::lower_promql;
 use asap_e2e::fixtures::metric_schema;
 

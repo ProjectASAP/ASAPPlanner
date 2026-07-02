@@ -26,8 +26,8 @@
 // `__GAP`-suffixed names intentionally SHOUT the documented divergences.
 #![allow(non_snake_case)]
 
-use asap_control_core::intent_algebra::{AggIntent, BinaryOpKind, CompareOp, QueryExpr};
-use asap_control_core::types::AccuracyTarget;
+use asap_ir::intent_algebra::{AggIntent, BinaryOpKind, CompareOp, QueryExpr};
+use asap_ir::types::AccuracyTarget;
 use asap_control_lower::{lower_promql, LoweringError};
 
 const CORPUS: &str = include_str!("data/awesome_prometheus_alerts.txt");

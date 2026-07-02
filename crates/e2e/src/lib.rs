@@ -9,7 +9,7 @@
 //! here derives or computes expected outputs.
 
 pub mod fixtures {
-    use asap_control_core::intent_algebra::schema::{Column, DataType, Schema};
+    use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 
     pub fn ts_col() -> Column {
         Column::new("ts", DataType::Timestamp, false)

@@ -20,9 +20,9 @@
 //! Schema: `packets(srcip, dstip, srcport, dstport, proto, time, pkt_len)`;
 //! flow / 5-tuple = `(srcip, dstip, srcport, dstport, proto)`.
 
-use asap_control_core::intent_algebra::schema::{Column, DataType, Schema};
-use asap_control_core::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
-use asap_control_core::types::AccuracyTarget;
+use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
+use asap_ir::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
+use asap_ir::types::AccuracyTarget;
 use asap_control_lower::{lower_sql, LoweringError, SqlCatalog};
 
 const CORPUS: &str = include_str!("data/synthetic_packet_trace_queries.sql");

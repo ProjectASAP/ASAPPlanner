@@ -1,6 +1,6 @@
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use asap_control_core::intent_algebra::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Scalar};
+use asap_ir::intent_algebra::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Scalar};
 
 use crate::error::LoweringError;
 
