@@ -648,11 +648,59 @@ fn subquery_wraps_inner_query() {
 }
 
 #[test]
-fn over_time_of_subquery_is_rejected__GAP() {
-    // SEMANTICS (PromQL): `max_over_time(rate(...)[1h:])` chains a subquery into
-    // a range-vector function. `extract_matrix` doesn't accept a subquery arg,
-    // so this canonical pattern is rejected today.
-    let _ = rejected("max_over_time(rate(demo_api_request_duration_seconds_count[5m])[1h:])");
+fn over_time_of_subquery_reduces_per_series() {
+    // SEMANTICS (PromQL): `max_over_time(rate(...)[1h:])` chains a sub-query into
+    // a range-vector function — the sub-query evaluates `rate` across a 1h range,
+    // then `max_over_time` takes the max of those samples *per series*. It lowers
+    // to a per-series `Max` reduction over a `Subquery` (issue #27).
+    let qe = ok("max_over_time(rate(demo_api_request_duration_seconds_count[5m])[1h:])");
+    let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+        panic!("expected an Aggregate at the root, got {qe:?}");
+    };
+    assert!(by.is_empty(), "`*_over_time` has no grouping — reduces per series");
+    assert!(matches!(aggs.as_slice(), [AggIntent::Max { .. }]));
+    // The reduction rides directly on the sub-query (the structural range marker
+    // that keeps it label-preserving), which wraps the inner `rate`.
+    assert!(
+        matches!(child.as_ref(), QueryExpr::Subquery { .. }),
+        "the `Max` reduces over a Subquery, got {child:?}"
+    );
+    assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Rate)));
+}
+
+#[test]
+fn quantile_over_time_of_subquery_carries_phi() {
+    // The `quantile_over_time` φ parameter is read from arg 0; the sub-query is
+    // arg 1. It lowers to a per-series `Quantile(φ)` over the `Subquery`.
+    let qe = ok("quantile_over_time(0.9, rate(demo[5m])[1h:])");
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected an Aggregate, got {qe:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.9).abs() < 1e-9));
+    assert!(matches!(child.as_ref(), QueryExpr::Subquery { .. }));
+}
+
+#[test]
+fn aggregation_over_over_time_of_subquery_keeps_labels() {
+    // `sum by (job) (max_over_time(rate(m[5m])[1h:]))` — the inner
+    // `max_over_time` is per-series (label-preserving), so the `job` label
+    // survives for the OUTER cross-series `sum by (job)` to group on. If the
+    // inner `Max` collapsed labels, `job` would not resolve here.
+    let qe = ok("sum by (job) (max_over_time(rate(demo{job=\"api\"}[5m])[1h:]))");
+    let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+        panic!("expected outer Aggregate, got {qe:?}");
+    };
+    assert!(!by.is_empty(), "outer `sum by (job)` groups on a label");
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    // Inner node is the per-series `max_over_time` reduction over the subquery.
+    let QueryExpr::Aggregate { by: inner_by, aggs: inner_aggs, child: inner_child, .. } =
+        child.as_ref()
+    else {
+        panic!("expected inner Aggregate, got {child:?}");
+    };
+    assert!(inner_by.is_empty());
+    assert!(matches!(inner_aggs.as_slice(), [AggIntent::Max { .. }]));
+    assert!(matches!(inner_child.as_ref(), QueryExpr::Subquery { .. }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
