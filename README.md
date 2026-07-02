@@ -39,38 +39,40 @@ runtime coupling.
 
 | Crate | Role | Depends on | ~LOC |
 |---|---|---|---|
-| **`asap-ir`** | L2 relational + L3 canonical IR + L2→L3 converter, binder, resolution, schema, expr, workload types | *(nothing — no query-language deps)* | 3,900 |
+| **`asap-ir`** | **L3 canonical IR only** — `QueryExpr` + `AggIntent` + scalar expr IR + schema + names | *(nothing — no query-language deps)* | 2,300 |
+| `asap-l2` | L2 per-language relational algebra + the L2→L3 converter (`convert_root`, binder, column resolution) | `asap-ir` | 1,600 |
 | `asap-sketch` | L4 sketch-bound IR (`SketchExpr`) | `asap-ir` | 240 |
 | `asap-plan` | optimizer layer — CSE (landed); cost-model / boundary / canonicalize (stubs) | `asap-ir` | 290 |
-| `asap-frontend-promql` | PromQL L1→L2 | `asap-ir`, **promql-parser** | 1,030 |
-| `asap-frontend-sql` | SQL L1→L2 | `asap-ir`, **datafusion** | 1,130 |
+| `asap-frontend-promql` | PromQL L1→L2 | `asap-ir`, `asap-l2`, **promql-parser** | 1,030 |
+| `asap-frontend-sql` | SQL L1→L2 | `asap-ir`, `asap-l2`, **datafusion** | 1,130 |
 | `asap-lower` | facade re-exporting both front ends | the two `frontend-*` crates | 15 |
 | `asap-e2e` | cross-language integration tests | `asap-frontend-promql` | 40 |
 
-Splitting the front ends **quarantines their parsers**: a caller that needs
-only PromQL depends on `asap-frontend-promql` and never compiles DataFusion,
-and vice-versa (verified with `cargo tree`). `asap-lower` is the convenience
-facade for callers that want both.
+Two isolation wins fall out of this:
+- **The front ends quarantine their parsers** — a caller that needs only PromQL depends on `asap-frontend-promql` and never compiles DataFusion, and vice-versa (verified with `cargo tree`). `asap-lower` is the facade for callers that want both.
+- **L3-only consumers stay lean** — `asap-sketch` and `asap-plan` depend on `asap-ir` alone, so they never pull the L2 relational tree, the converter, or the binder (`asap-l2`). Only the front ends, which actually *lower* queries, need `asap-l2`.
 
 ### Directory structure
 
 ```
 crates/
-├── ir/                             # asap-ir — the shared IR (largest crate)
+├── ir/                             # asap-ir — L3 canonical IR (the shared vocabulary)
 │   └── src/
 │       ├── lib.rs
 │       ├── types.rs                #   AccuracyTarget, …
 │       ├── workload.rs             #   QueryWorkload / QueryLanguage / SqlDialect (front-end input)
 │       └── intent_algebra/
-│           ├── relational.rs       #   L2: per-language relational tree the front ends emit
 │           ├── query_expr.rs       #   L3: canonical QueryExpr — the IR everything pivots on
 │           ├── agg_intent.rs       #   L3: AggIntent vocabulary (Sum/Quantile/Rate/TopK/…)
-│           ├── expr_ir.rs          #   scalar expr IR (L2Expr / L3Expr)
-│           ├── lower.rs            #   L2→L3 converter (convert_root)
-│           ├── binder.rs           #   positional name-resolution seed
-│           ├── column_resolution.rs
+│           ├── expr_ir.rs          #   scalar expr IR (L2Expr / L3Expr / ColumnRef)
 │           ├── schema.rs           #   per-edge Schema + unique-keys
-│           └── names.rs
+│           └── names.rs            #   BindingName / QueryId
+├── l2/                             # asap-l2 — L2 relational algebra + L2→L3 converter
+│   └── src/
+│       ├── relational.rs           #   L2: per-language relational tree the front ends emit
+│       ├── lower.rs                #   L2→L3 converter (convert_root)
+│       ├── binder.rs               #   positional name-resolution seed
+│       └── column_resolution.rs
 ├── sketch/                         # asap-sketch — L4 sketch IR: expr / schema / sketch
 ├── plan/                           # asap-plan — optimizer: cse.rs (landed)
 │   └── src/                        #   + cost_model.rs / boundary.rs / canonicalize.rs (stubs)
@@ -83,13 +85,14 @@ crates/
 # deployment-model-* crates, control-proto, and the bin/ entrypoints.
 ```
 
-**Why `asap-ir` holds the most.** L2 (the per-language relational tree) and L3
-(the canonical intent algebra) live in one crate because the **L2→L3 converter
-needs both** — front ends only *emit* L2, they don't own it. Its modules
-(`relational` / `query_expr` / `agg_intent` / `schema` / `binder` / …) are
-cleanly separated and could split into their own crates later if the crate
-grows unwieldy; for now they share one compilation unit to keep the converter's
-tight coupling in-crate.
+**Why L2 and L3 are separate crates.** `asap-ir` is the canonical L3 IR — the
+vocabulary every downstream layer pivots on. The L2 relational tree and the
+L2→L3 converter live in `asap-l2` because only the *front ends* need them: they
+emit L2 and call `convert_root`. Keeping them out of `asap-ir` means the
+optimizer (`asap-plan`), the sketch IR (`asap-sketch`), and any future
+L3-consuming layer compile against a lean core without the converter/binder
+machinery. (The converter co-locates with L2 rather than L3 because it owns the
+L2 tree definition and only *reads* L3.)
 
 *(Planned.)* A new deployment model will land by adding one crate with `rules.rs` (pick L4 rules) + `topology.rs` + an emitter, plus one line in `bin/asap-controller/main.rs` — no changes to the IR crates.
 

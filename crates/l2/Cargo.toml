@@ -1,0 +1,11 @@
+[package]
+name = "asap-l2"
+version = "0.1.0"
+edition = "2021"
+
+# The L2 per-language relational algebra + the L2→L3 converter (convert_root,
+# binder, column resolution). Front ends emit L2 and call convert_root; this
+# crate owns both. Depends only on the L3 IR crate (asap-ir).
+[dependencies]
+asap-ir = { path = "../ir" }
+thiserror = "2"

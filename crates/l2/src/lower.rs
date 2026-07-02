@@ -6,7 +6,7 @@
 //! see the `Aggregate` arm.
 //!
 //! Name resolution is an explicit pass: [`convert_root`] runs the
-//! [`Binder`](super::binder) first to build the complete, self-contained
+//! [`Binder`](crate::binder) first to build the complete, self-contained
 //! schema every `ColumnId` indexes into, so positional resolution downstream
 //! is total.
 
@@ -14,19 +14,19 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::intent_algebra::agg_intent::AggIntent;
-use crate::intent_algebra::binder::Binder;
-use crate::intent_algebra::column_resolution::{
+use asap_ir::intent_algebra::agg_intent::AggIntent;
+use crate::binder::Binder;
+use crate::column_resolution::{
     output_schema_for_aggregate, resolve_column_refs, resolve_expr, ResolveError,
 };
-use crate::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
-use crate::intent_algebra::names::BindingName;
-use crate::intent_algebra::query_expr::{
+use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
+use asap_ir::intent_algebra::names::BindingName;
+use asap_ir::intent_algebra::query_expr::{
     GroupKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, SortKey, Source,
 };
-use crate::intent_algebra::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
-use crate::intent_algebra::schema::{ColumnId, Schema};
-use crate::types::AccuracyTarget;
+use crate::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
+use asap_ir::intent_algebra::schema::{ColumnId, Schema};
+use asap_ir::types::AccuracyTarget;
 
 /// Errors produced while converting a Layer-2 tree to canonical.
 #[derive(Debug, Error)]
@@ -38,7 +38,7 @@ pub enum ConvertError {
     /// Deriving the schema of an already-converted child failed (needed to
     /// resolve positional column references against it).
     #[error("schema derivation failed: {0}")]
-    Schema(#[from] crate::intent_algebra::query_expr::QueryExprError),
+    Schema(#[from] asap_ir::intent_algebra::query_expr::QueryExprError),
     /// Group keys landed on a per-series windowed/range reduction, which must
     /// stay label-preserving (`Aggregate.by` empty). The only PromQL shape that
     /// would do this is a generic `topk by (…)`, whose grouping is routed to
@@ -540,13 +540,13 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent_algebra::agg_intent::AggIntent;
-    use crate::intent_algebra::expr_ir::{CompareOp, L2Expr, L3Expr, L3Scalar};
-    use crate::intent_algebra::query_expr::{JoinKind, QueryExpr as CQueryExpr};
-    use crate::intent_algebra::relational::{
+    use asap_ir::intent_algebra::agg_intent::AggIntent;
+    use asap_ir::intent_algebra::expr_ir::{CompareOp, L2Expr, L3Expr, L3Scalar};
+    use asap_ir::intent_algebra::query_expr::{JoinKind, QueryExpr as CQueryExpr};
+    use crate::relational::{
         AggFunc, AggItem, QueryExpr as LQueryExpr, SourceSpec,
     };
-    use crate::intent_algebra::schema::{Column, DataType, Schema};
+    use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 
     fn col(name: &str, dtype: DataType) -> Column {
         Column::new(name, dtype, false)

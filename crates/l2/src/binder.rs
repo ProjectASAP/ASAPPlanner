@@ -2,7 +2,7 @@
 //!
 //! [`Binder::bind`] produces the complete, self-contained [`Schema`] every
 //! `ColumnId` in the converted canonical tree indexes into. The converter
-//! ([`super::lower::convert`]) then becomes purely structural: it threads the
+//! ([`crate::lower::convert`]) then becomes purely structural: it threads the
 //! Binder's schema and positional resolution downstream is **total**.
 //!
 //! The default [`UsageDerivedCatalog`] knows nothing — every schema is derived
@@ -11,10 +11,10 @@
 //! `SchemaCatalog` is future work; the `Binder` pass does not change when it
 //! lands, only the catalog impl swaps.
 
-use crate::intent_algebra::expr_ir::ColumnRef;
-use crate::intent_algebra::expr_ir::L2Expr;
-use crate::intent_algebra::relational::QueryExpr as LQueryExpr;
-use crate::intent_algebra::schema::{Column, DataType, Schema};
+use asap_ir::intent_algebra::expr_ir::ColumnRef;
+use asap_ir::intent_algebra::expr_ir::L2Expr;
+use crate::relational::QueryExpr as LQueryExpr;
+use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 
 /// The DB / source-schema metadata source — resolves a source (metric /
 /// table) name to its known columns.
@@ -24,7 +24,7 @@ use crate::intent_algebra::schema::{Column, DataType, Schema};
 /// Distinct from `Scan.schema`, which is the *resolved* binding schema this
 /// feeds — the catalog is the input, the schema is the result. Even a
 /// registry-backed PromQL catalog yields an **open** schema
-/// ([`Schema::closed`](super::schema::Schema::closed) `= false`): a metric's
+/// ([`Schema::closed`](asap_ir::intent_algebra::schema::Schema::closed) `= false`): a metric's
 /// labels are per-series and time-varying, so the registry is a superset hint,
 /// not a per-row contract.
 pub trait SchemaCatalog {
@@ -170,9 +170,9 @@ fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent_algebra::expr_ir::ColumnRef;
-    use crate::intent_algebra::relational::{L2SortKey, QueryExpr as LQueryExpr, SourceSpec};
-    use crate::intent_algebra::L2Expr;
+    use asap_ir::intent_algebra::expr_ir::ColumnRef;
+    use crate::relational::{L2SortKey, QueryExpr as LQueryExpr, SourceSpec};
+    use asap_ir::intent_algebra::L2Expr;
 
     fn src(name: &str) -> LQueryExpr {
         LQueryExpr::Source(SourceSpec::new(name))

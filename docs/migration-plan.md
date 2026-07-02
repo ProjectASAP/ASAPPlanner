@@ -5,7 +5,7 @@ Companion to `design.md`. Concrete phase-by-phase plan to get from today's three
 > **Status (reconciled with the landed workspace).** Phases 0–1 (skeleton +
 > the L1–L3 query→IR core) have substantially landed, but **not** as the single
 > `core` crate this plan describes: the core was built and then split by
-> pipeline role into the layer-named stack — `asap-ir`, `asap-sketch`,
+> pipeline role into the layer-named stack — `asap-ir`, `asap-l2`, `asap-sketch`,
 > `asap-plan`, `asap-frontend-promql`, `asap-frontend-sql`, `asap-lower`,
 > `asap-e2e` (see `design.md` §5.1). The L4/L5 framework, runtime, and
 > `deployment-model-*` crates (Phases 2–7) are **not yet built**. The

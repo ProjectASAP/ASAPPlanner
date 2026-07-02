@@ -315,6 +315,7 @@ name = "asap-frontend-promql"
 version = "0.1.0"
 dependencies = [
  "asap-ir",
+ "asap-l2",
  "promql-parser",
 ]
 
@@ -323,6 +324,7 @@ name = "asap-frontend-sql"
 version = "0.1.0"
 dependencies = [
  "asap-ir",
+ "asap-l2",
  "datafusion",
  "tokio",
 ]
@@ -333,6 +335,14 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "asap-l2"
+version = "0.1.0"
+dependencies = [
+ "asap-ir",
  "thiserror",
 ]
 
