@@ -746,6 +746,24 @@ fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2Expr>)> {
             "`offset` / `@` time-shift modifiers have no intent-algebra representation".into(),
         ));
     }
+    // A non-equality `__name__` matcher (`=~` / `!~` / `!=`) selects *across*
+    // metric names. The L3 `Source::TimeSeries { metric }` carries a single
+    // concrete metric name, so there is no representation for a regex/negated
+    // name match — reject rather than mislower it to a literal metric named
+    // after the pattern (issue #67). An equality `__name__` (`{__name__="up"}`)
+    // still names the metric below.
+    if let Some(m) = vs
+        .matchers
+        .matchers
+        .iter()
+        .find(|m| m.name == "__name__" && !matches!(m.op, MatchOp::Equal))
+    {
+        return Err(LoweringError::UnsupportedFeature(format!(
+            "non-equality `__name__` matcher ({}{:?}) selects across metric names, \
+             which has no single-metric L3 representation",
+            m.name, m.op
+        )));
+    }
     let metric = vs.name.clone().unwrap_or_else(|| {
         vs.matchers
             .matchers
