@@ -152,7 +152,7 @@ fn walk(expr: &Expr) -> Result<L2> {
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
         Expr::Call(call) if call.func.name == "histogram_quantile" => walk_histogram_quantile(call),
-        Expr::Call(call) => build(lower_inner_call(call)?, vec![], Outer::None),
+        Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
         // `UnaryExpr` is built only by negation (`Neg`); unary `+` is folded to
@@ -187,6 +187,64 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Extension(_) => Err(LoweringError::UnsupportedFeature(
             "extension expression".into(),
         )),
+    }
+}
+
+/// Lower a bare function call (`rate(m[5m])`, `max_over_time(m[5m])`, …).
+///
+/// The common case routes through the flat `lower_inner_call` template. The one
+/// exception is a `*_over_time`/`quantile_over_time` function applied to a
+/// **sub-query** (`max_over_time(rate(m[5m])[1h:])`): its argument is a
+/// `PromQLSubquery`, not a matrix selector, so the flat template's
+/// `extract_matrix` can't accept it. Lower the sub-query recursively and reduce
+/// it per series (issue #27).
+fn walk_call(call: &Call) -> Result<L2> {
+    if let Some((func, arg_expr)) = over_time_reducer(call)? {
+        if is_subquery(arg_expr) {
+            // `<agg>_over_time(<subquery>)` reduces the sub-query's range vector
+            // *per series* over time — label-preserving, no group keys. The
+            // `PromQLSubquery` child is the structural range marker that confers
+            // per-series semantics on the otherwise cross-series reducer (mirrors
+            // the `TimeRange` marker for `*_over_time(m[w])`). A cross-series
+            // aggregation operator (`sum`/`avg`) over a range vector is a PromQL
+            // type error the parser already rejects, so an `Aggregate` directly
+            // over a `PromQLSubquery` only ever arises here.
+            return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
+        }
+    }
+    build(lower_inner_call(call)?, vec![], Outer::None)
+}
+
+/// The per-series reducer for a `*_over_time` range-vector function together
+/// with the expression in its matrix/sub-query argument slot (`φ` for
+/// `quantile_over_time` is read from arg 0). Returns `None` for any other call,
+/// so non-`*_over_time` functions fall through to the flat template.
+fn over_time_reducer(call: &Call) -> Result<Option<(AggFunc, &Expr)>> {
+    let simple = |f: InnerFunc| -> Result<Option<(AggFunc, &Expr)>> {
+        Ok(Some((inner_func(&f), arg(call, 0)?)))
+    };
+    match call.func.name {
+        "avg_over_time" => simple(InnerFunc::Avg),
+        "min_over_time" => simple(InnerFunc::Min),
+        "max_over_time" => simple(InnerFunc::Max),
+        "sum_over_time" => simple(InnerFunc::Sum),
+        "stddev_over_time" => simple(InnerFunc::StdDev),
+        "stdvar_over_time" => simple(InnerFunc::Variance),
+        "count_over_time" => simple(InnerFunc::Count),
+        "quantile_over_time" => {
+            let phi = quantile_param(num_arg(call, 0)?)?;
+            Ok(Some((inner_func(&InnerFunc::Quantile(phi)), arg(call, 1)?)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// A (parenthesised) PromQL sub-query — `<inst>[range:res]`.
+fn is_subquery(expr: &Expr) -> bool {
+    match expr {
+        Expr::Subquery(_) => true,
+        Expr::Paren(p) => is_subquery(&p.expr),
+        _ => false,
     }
 }
 

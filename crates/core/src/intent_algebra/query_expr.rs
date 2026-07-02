@@ -428,11 +428,18 @@ impl QueryExpr {
 
                 // Per-series range reduction: `rate`/`increase` (is_per_series)
                 // OR any single aggregate whose direct child is a `TimeRange`
-                // (`*_over_time` functions). Both produce one value per series
-                // and are label-preserving — the `TimeRange` child is the
-                // structural marker that confers per-series semantics on
-                // otherwise cross-series intents like `Avg`/`Sum`/`Count`.
-                let is_range_child = matches!(child.as_ref(), QueryExpr::TimeRange { .. });
+                // (`*_over_time` functions) or a `Subquery` (`*_over_time` over a
+                // sub-query, e.g. `max_over_time(rate(m[5m])[1h:])`). All produce
+                // one value per series and are label-preserving — the range child
+                // is the structural marker that confers per-series semantics on
+                // otherwise cross-series intents like `Avg`/`Sum`/`Count`. A
+                // cross-series aggregation operator over a range vector is a
+                // PromQL type error the parser rejects, so an `Aggregate` over a
+                // `Subquery` is only ever this per-series `*_over_time` shape.
+                let is_range_child = matches!(
+                    child.as_ref(),
+                    QueryExpr::TimeRange { .. } | QueryExpr::Subquery { .. }
+                );
                 if by.is_empty() && aggs.len() == 1 && (aggs[0].is_per_series() || is_range_child) {
                     return Ok(per_series_reduction_schema(&in_schema, &aggs[0]));
                 }
