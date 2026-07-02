@@ -1,10 +1,21 @@
 # ASAPController — migration plan
 
-Companion to `asap-controller-design.md`. Concrete phase-by-phase plan to get from today's three-repo mess to the target layout.
+Companion to `design.md`. Concrete phase-by-phase plan to get from today's three-repo mess to the target layout.
+
+> **Status (reconciled with the landed workspace).** Phases 0–1 (skeleton +
+> the L1–L3 query→IR core) have substantially landed, but **not** as the single
+> `core` crate this plan describes: the core was built and then split by
+> pipeline role into the layer-named stack — `asap-ir`, `asap-sketch`,
+> `asap-plan`, `asap-frontend-promql`, `asap-frontend-sql`, `asap-lower`,
+> `asap-e2e` (see `design.md` §5.1). The L4/L5 framework, runtime, and
+> `deployment-model-*` crates (Phases 2–7) are **not yet built**. The
+> `core::<module>` names below are the original plan; read them through the map
+> in `design.md` §6.0. Per-phase "**As landed**" notes flag where reality
+> diverged.
 
 ## Premise
 
-- **Target repo**: `github.com/ProjectASAP/ASAPController` — currently empty.
+- **Target repo**: `github.com/ProjectASAP/ASAPController` — has the landed core (`design.md` §5.1); runtime + deployment-model crates pending.
 - **Sources**: `DataCollector/controller/`, `ASAPQuery-backend/asap-planner-rs/` (the *newer* of the two copies), `asap-fusion/`.
 - **Hard constraint**: ASAPQuery-backend must keep running throughout. `POST /api/v1/streaming-config` contract must not break. OpAMP push to agents must not break.
 - **Soft constraint**: minimise the "big-bang" window. Each phase lands a working state.
@@ -31,6 +42,13 @@ Ordered by risk, lowest first. Each phase is a single PR unless noted.
 **Exit criteria:** `cargo build` green on empty workspace; CI running.
 
 **PR size:** ~200 LOC (boilerplate).
+
+> **As landed.** The workspace exists but the crate set differs from the "7
+> crates" this phase imagined (which were `core` + `runtime` +
+> deployment-models + …). What ships today is the layer-named core split:
+> `ir` / `sketch` / `plan` / `frontend-promql` / `frontend-sql` / `lower` /
+> `e2e`. The `runtime` / `deployment-model-*` / `control-proto` / `bin`
+> members are still to come.
 
 ---
 
@@ -89,6 +107,18 @@ Per design §3, these five layers' infrastructure is query-language-independent 
 
 **PR size:** ~6300 LOC (L1-3 lift ~4000 + L4/L5 framework ~2000 + `Source` sum / `DataModel` generalization ~300). Could split into (a) L1-3 lift + traits + `Source` sum, (b) L4/L5 framework — prefer this if the PR review would otherwise be unwieldy.
 
+> **As landed.** The **L1–L3** half shipped, but as separate crates rather than
+> `core::*` submodules, and as a *slimmed, refactored fork* rather than a
+> verbatim DC lift (see `docs/intent-algebra-reconciliation.md`):
+> `core::query_language`/`logical_plan`/`lower` → the L1→L2 half of
+> `asap-frontend-promql` / `asap-frontend-sql` + the shared L2→L3 `convert_root`
+> in `asap-ir::intent_algebra::lower`; `core::intent_algebra` → `asap-ir`
+> (with the `Source` / `DataModel` generalization); `core::sketch_algebra` →
+> `asap-sketch`. The **L4/L5 framework** (optimizer engine, rule library, cost
+> model, `StageAllocator`, `PhysicalPlanner`, sketch catalogue) is **not built**:
+> `asap-plan` is a placeholder holding workload-level CSE, with `cost_model` /
+> `boundary` / `canonicalize` as stubs.
+
 ---
 
 ### Phase 2 — Runtime extraction: HTTP + store
@@ -113,12 +143,12 @@ Per design §3, these five layers' infrastructure is query-language-independent 
 
 **Scope:** Land `deployment-model-asapfusion` as a thin deployment model that picks rules from core's shared library. Lowest-risk because fusion's existing `SketchConfigRule` maps directly onto core's `BindKllOnQuantile` + `BindCmsOnCount` + `BindHllOnCardinality` that Phase 1 already lifted.
 
-**Decision — where does `deployment-model-asapfusion` live?** Default: **in the `asap-fusion` repo**, as a crate that depends on `asap-control-core` + `asap-control-optimizer`. asap-fusion is a research project with independent release cadence; keeping it in-tree in its own repo preserves that. If the team prefers lockstep, the alternative is `crates/deployment-model-asapfusion/` in ASAPController workspace — architecture is identical either way (see design §8).
+**Decision — where does `deployment-model-asapfusion` live?** Default: **in the `asap-fusion` repo**, as a crate that depends on `asap-ir` + `asap-plan`. asap-fusion is a research project with independent release cadence; keeping it in-tree in its own repo preserves that. If the team prefers lockstep, the alternative is `crates/deployment-model-asapfusion/` in ASAPController workspace — architecture is identical either way (see design §8).
 
 This plan assumes the in-repo-at-asap-fusion placement. If in-workspace is chosen, swap paths accordingly.
 
 **Work:**
-- In `asap-fusion/`: add new crate `deployment-model-asapfusion/` that depends on `asap-control-core`. Move the translator + optimizer + executor here.
+- In `asap-fusion/`: add new crate `deployment-model-asapfusion/` that depends on `asap-ir`. Move the translator + optimizer + executor here.
 - **Fill in `Source::Table` lowering**: Phase 1 stubbed this; now implement the L2 (DataFusion `LogicalPlan`) → L3 (`QueryExpr` with `Source::Table`) lowering pass in `core::lower::datafusion` — or, if fusion prefers, keep the lowering inside the deployment model crate and use the `Source::Table` type directly. Either way, Phase 1's stub becomes concrete.
 - `impl DeploymentModel for ASAPFusionDeploymentModel`:
     - `rules()` picks `BindKllOnQuantile`, `BindCmsOnCount`, `BindHllOnCardinality` from `core::optimizer::rules::*` (drops asap-fusion's `SketchConfigRule` in favor of core's rules).
@@ -251,7 +281,7 @@ This phase is larger than a straight lift because two structural conformance cha
 - Look at any `todo!()` or `#[allow(unused)]` left over from Phase 1's trait stubs.
 - Tighten associated types.
 - Document the stable contract in `docs/design.md`.
-- Publish `asap-control-core` 0.1.0 to a private registry if external users want to depend on it.
+- Publish `asap-ir` 0.1.0 to a private registry if external users want to depend on it.
 
 **Risk:** low — internal cleanup.
 
@@ -310,7 +340,7 @@ These are the questions that will come up mid-migration. Pre-decide as many as p
 
 This is the test of the architecture. Adding a 4th deployment model (e.g. "edge-caching") — typical size ~500-2000 LOC:
 
-1. `cargo new --lib crates/deployment-model-edge-cache` (in ASAPController workspace) OR a new crate in your own repo that depends on `asap-control-core = { git = "...", tag = "v0.1.0" }`.
+1. `cargo new --lib crates/deployment-model-edge-cache` (in ASAPController workspace) OR a new crate in your own repo that depends on `asap-ir = { git = "...", tag = "v0.1.0" }`.
 2. Four files in `src/`:
    - `lib.rs` — `impl DeploymentModel for EdgeCacheDeploymentModel`
    - `rules.rs` — pick rules from `core::optimizer::rules::*` + add deployment-model-specific rules

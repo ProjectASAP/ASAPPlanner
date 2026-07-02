@@ -1,6 +1,6 @@
 # PromQL lowering — positional `ColumnId`, the Binder, and CSE
 
-How `asap-control-lower` turns a PromQL string into the canonical Layer-3
+How `asap-frontend-promql` turns a PromQL string into the canonical Layer-3
 intent algebra, and *why* the IR uses positional column identity, an explicit
 name-resolution pass, and unique-key metadata.
 
@@ -18,7 +18,7 @@ Expr AST                  ← L1
    │  front-end lowering                crates/lower/src/promql.rs
    ▼
 relational::QueryExpr     ← L2 — columns are NAMES (ColumnRef::Named, Aggregate.keys: Vec<String>)
-   │  Binder pass: build Schema +       crates/core/src/intent_algebra/binder.rs
+   │  Binder pass: build Schema +       crates/ir/src/intent_algebra/binder.rs
    │  resolve names → ColumnId           + column_resolution.rs
    ▼
 query_expr::QueryExpr     ← L3 — columns are POSITIONS (Aggregate.by: Vec<ColumnId>)
