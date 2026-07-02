@@ -192,8 +192,12 @@ fn walk(expr: &Expr) -> Result<L2> {
                 input: Box::new(filtered_source(metric, matchers)),
             })
         }
-        Expr::NumberLiteral(_) | Expr::StringLiteral(_) => Err(LoweringError::UnsupportedFeature(
-            "bare scalar/string at top level".into(),
+        // A number literal is a scalar leaf (`v > 5`, or a bare scalar query
+        // `5`). String literals only appear as function args (`label_replace`,
+        // …), which are not supported, so reject them (issue #35).
+        Expr::NumberLiteral(n) => Ok(L2::Scalar(n.val)),
+        Expr::StringLiteral(_) => Err(LoweringError::UnsupportedFeature(
+            "bare string literal".into(),
         )),
         Expr::Extension(_) => Err(LoweringError::UnsupportedFeature(
             "extension expression".into(),
@@ -413,8 +417,8 @@ fn walk_histogram_quantile(call: &Call) -> Result<L2> {
 }
 
 fn walk_binary(bin: &BinaryExpr) -> Result<L2> {
-    let lhs = walk(&bin.lhs)?;
-    let rhs = walk(&bin.rhs)?;
+    let lhs = scalar_or_vector(&bin.lhs)?;
+    let rhs = scalar_or_vector(&bin.rhs)?;
     let op = binop(bin.op.id())?;
     let vector_match = bin.modifier.as_ref().map(|m| {
         let (kind, labels) = match &m.matching {
@@ -881,10 +885,44 @@ fn num_param(agg: &AggregateExpr) -> Result<f64> {
 fn num_expr(expr: &Expr) -> Result<f64> {
     match expr {
         Expr::NumberLiteral(n) => Ok(n.val),
+        Expr::Paren(p) => num_expr(&p.expr),
+        // Constant-fold a pure scalar arithmetic expression — the parser does
+        // not fold `10*1024*1024` / `24 * 3600`. A `modifier` (vector matching)
+        // or a non-arithmetic operator means it is not a pure scalar.
+        Expr::Binary(b) if b.modifier.is_none() => {
+            let (l, r) = (num_expr(&b.lhs)?, num_expr(&b.rhs)?);
+            let id = b.op.id();
+            if id == token::T_ADD {
+                Ok(l + r)
+            } else if id == token::T_SUB {
+                Ok(l - r)
+            } else if id == token::T_MUL {
+                Ok(l * r)
+            } else if id == token::T_DIV {
+                Ok(l / r)
+            } else if id == token::T_MOD {
+                Ok(l % r)
+            } else if id == token::T_POW {
+                Ok(l.powf(r))
+            } else {
+                Err(LoweringError::InvalidParameter(
+                    "non-arithmetic operator in scalar expression".into(),
+                ))
+            }
+        }
         other => Err(LoweringError::InvalidParameter(format!(
-            "expected a numeric literal, got {:?}",
+            "expected a numeric scalar, got {:?}",
             std::mem::discriminant(other)
         ))),
+    }
+}
+
+/// A `BinaryOp` operand: fold a pure-scalar expression (`5`, `10*1024*1024`) to
+/// a `Scalar` leaf, otherwise walk it as a vector (issue #35).
+fn scalar_or_vector(expr: &Expr) -> Result<L2> {
+    match num_expr(expr) {
+        Ok(v) => Ok(L2::Scalar(v)),
+        Err(_) => walk(expr),
     }
 }
 

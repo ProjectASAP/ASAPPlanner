@@ -264,6 +264,11 @@ pub enum QueryExpr {
     /// Reference to a `LetBinding` by name; resolved at plan time.
     Ref { name: BindingName },
 
+    /// A scalar constant leaf — a PromQL number literal or a folded constant
+    /// scalar expression (`10*1024*1024`). Appears as a [`BinaryOp`](Self::BinaryOp)
+    /// operand for `<vector> op <scalar>` thresholds / unit conversions (#35).
+    Scalar(f64),
+
     /// σ — row-level filter. Output schema = child schema.
     Filter {
         pred: Predicate,
@@ -642,7 +647,22 @@ impl QueryExpr {
                 Ok(out)
             }
 
-            QueryExpr::BinaryOp { lhs, .. } => lhs.output_schema_in(scope),
+            // A scalar constant has no series — model it as a single `value`
+            // column so it can sit as a `BinaryOp` operand.
+            QueryExpr::Scalar(_) => Ok(Schema {
+                columns: vec![Column::new("value", DataType::Float64, false)],
+                time_index: None,
+                unique_keys: Vec::new(),
+                closed: true,
+            }),
+
+            // The output shape of `<vector> op <scalar>` (or `<scalar> op
+            // <vector>`) is the vector side's — a scalar operand contributes only
+            // its value, no labels. Prefer the non-`Scalar` side.
+            QueryExpr::BinaryOp { lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
+                (QueryExpr::Scalar(_), r) => r.output_schema_in(scope),
+                (l, _) => l.output_schema_in(scope),
+            },
         }
     }
 }

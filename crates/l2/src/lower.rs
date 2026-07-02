@@ -83,6 +83,8 @@ pub fn convert(
     Ok(match legacy {
         LQueryExpr::Source(spec) => scan(spec, fallback, &[])?,
 
+        LQueryExpr::Scalar(v) => CQueryExpr::Scalar(*v),
+
         LQueryExpr::Ref(name) => CQueryExpr::Ref {
             name: BindingName::new(name.clone()),
         },

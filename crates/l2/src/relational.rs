@@ -133,6 +133,10 @@ pub enum AggFunc {
 pub enum QueryExpr {
     /// A named metric stream or table — the outermost leaf.
     Source(SourceSpec),
+    /// A scalar constant leaf — a PromQL number literal (or a folded constant
+    /// scalar expression like `10*1024*1024`). Appears as a `BinaryOp` operand
+    /// for `<vector> op <scalar>` thresholds / unit conversions (issue #35).
+    Scalar(f64),
     /// Reference to a CTE / let-binding by name. **Reserved**: no front end
     /// emits `Ref`/`LetBinding` yet (CSE runs on L3); the converter arm exists
     /// for forward-compatibility (e.g. PromQL recording rules).
@@ -254,7 +258,7 @@ impl QueryExpr {
     pub fn walk<F: FnMut(&QueryExpr)>(&self, f: &mut F) {
         f(self);
         match self {
-            QueryExpr::Source(_) | QueryExpr::Ref(_) => {}
+            QueryExpr::Source(_) | QueryExpr::Scalar(_) | QueryExpr::Ref(_) => {}
             QueryExpr::Filter { input, .. }
             | QueryExpr::Project { input, .. }
             | QueryExpr::Aggregate { input, .. }
@@ -306,7 +310,7 @@ impl QueryExpr {
             | QueryExpr::SetOp { left, .. }
             | QueryExpr::BinaryOp { lhs: left, .. } => left.leaf_source(),
             QueryExpr::LetBinding { body, .. } => body.leaf_source(),
-            QueryExpr::Ref(_) => None,
+            QueryExpr::Scalar(_) | QueryExpr::Ref(_) => None,
         }
     }
 
