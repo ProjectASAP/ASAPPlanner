@@ -8,12 +8,14 @@
 //! - [`query_expr`] — the canonical, language- and deployment-independent L3
 //!   intent algebra ([`QueryExpr`] + [`AggIntent`]), with positional
 //!   [`ColumnId`] schema flow.
-//! - [`cse`] — workload-level common-sub-expression elimination over L3.
+//!
+//! Workload-level common-sub-expression elimination over L3 lives in the
+//! optimizer layer (`asap-plan`), not here — the IR crate stays free of
+//! cost-aware passes.
 
 pub mod agg_intent;
 pub mod binder;
 pub mod column_resolution;
-pub mod cse;
 pub mod expr_ir;
 pub mod lower;
 pub mod names;
@@ -29,7 +31,6 @@ pub use column_resolution::{
     infer_schema_for_root, infer_source_schema, output_schema_for_aggregate, resolve_column_ref,
     resolve_column_refs, resolve_expr, ResolveError,
 };
-pub use cse::{dedupe_subtrees, CseWorkloadPlan};
 pub use expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L2Expr, L3Expr, L3Scalar};
 pub use lower::{convert, convert_root, ConvertError};
 pub use names::{BindingName, QueryId};

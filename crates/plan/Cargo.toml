@@ -1,0 +1,9 @@
+[package]
+name = "asap-plan"
+version = "0.1.0"
+edition = "2021"
+
+# The cost-aware optimizer layer (L4 decisions) over the L3 intent algebra.
+# Depends only on the IR crate — never on a front end.
+[dependencies]
+asap-control-core = { path = "../core" }

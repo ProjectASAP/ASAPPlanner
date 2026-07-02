@@ -330,6 +330,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "asap-plan"
+version = "0.1.0"
+dependencies = [
+ "asap-control-core",
+]
+
+[[package]]
 name = "async-compression"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
