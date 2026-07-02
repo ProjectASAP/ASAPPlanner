@@ -388,7 +388,14 @@ fn walk_binary(bin: &BinaryExpr) -> Result<L2> {
         let (kind, labels) = match &m.matching {
             Some(LabelModifier::Include(ls)) => (VectorMatchKind::On, ls.labels.clone()),
             Some(LabelModifier::Exclude(ls)) => (VectorMatchKind::Ignoring, ls.labels.clone()),
-            None => (VectorMatchKind::On, vec![]),
+            // No explicit `on(…)`/`ignoring(…)` — the parser attaches a default
+            // modifier to every set op (`and`/`or`/`unless`). The default is
+            // "match on all shared labels", which is exactly `ignoring([])`
+            // (ignore no labels). Representing it as `Ignoring([])` — not
+            // `On([])` — keeps it distinct from an explicit `on()` (match on the
+            // empty label set) while making it correctly equal to an explicit
+            // `ignoring()` (issue #68).
+            None => (VectorMatchKind::Ignoring, vec![]),
         };
         let grouping = match &m.card {
             VectorMatchCardinality::ManyToOne(ls) => Some(VectorGrouping {

@@ -141,6 +141,20 @@ fn rate_and_irate_share_the_same_intent() {
     assert_equiv(&["rate(m[5m])", "irate(m[5m])"]);
 }
 
+#[test]
+fn set_op_default_match_is_ignoring_empty_not_on_empty() {
+    // Issue #68. A set op's *default* matching ("match on all shared labels") is
+    // `ignoring([])`, NOT `on([])`. So:
+    //   - default `a and b` must stay DISTINCT from explicit `a and on() b`
+    //     (which matches on the empty label set), and
+    //   - default `a and b` must EQUAL explicit `a and ignoring() b`
+    //     (ignore no labels ⇒ match on all shared labels).
+    assert_distinct("a and b", "a and on() b");
+    assert_distinct("a or b", "a or on() b");
+    assert_equiv(&["a and b", "a and ignoring() b"]);
+    assert_equiv(&["a unless b", "a unless ignoring() b"]);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. Distinct semantics we cannot faithfully represent are REJECTED, not
 //    silently merged into a wrong intent. (Each previously mislowered.)
