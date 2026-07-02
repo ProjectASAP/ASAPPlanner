@@ -1,42 +1,33 @@
-//! Layers 2–3 of the controller pipeline.
+//! Layer 3 — the canonical intent algebra IR.
 //!
-//! - [`relational`] — the Layer-2 per-language algebra tree the parser front
-//!   ends emit (PromQL / SQL).
-//! - [`lower`] — the L2→L3 converter ([`convert_root`]), which runs the
-//!   [`Binder`] for name resolution and folds single-statistic sketchable
-//!   aggregates into canonical shapes.
 //! - [`query_expr`] — the canonical, language- and deployment-independent L3
 //!   intent algebra ([`QueryExpr`] + [`AggIntent`]), with positional
 //!   [`ColumnId`] schema flow.
+//! - [`agg_intent`] — the L3 aggregation-intent vocabulary.
+//! - [`expr_ir`] — the scalar expression IR ([`L2Expr`] / [`L3Expr`] /
+//!   [`ColumnRef`]) shared by L2 and L3.
+//! - [`schema`] — the per-edge [`Schema`] every L3 node carries.
+//! - [`names`] — binding / query identifiers.
 //!
-//! Workload-level common-sub-expression elimination over L3 lives in the
-//! optimizer layer (`asap-plan`), not here — the IR crate stays free of
-//! cost-aware passes.
+//! The Layer-2 relational tree and the L2→L3 converter (`convert_root`, the
+//! `Binder`, column resolution) live in the `asap-l2` crate — front ends need
+//! them, but L3-only consumers (optimizer, sketch) do not, so they stay out of
+//! this crate. Workload-level CSE lives in `asap-plan`.
 
 pub mod agg_intent;
-pub mod binder;
-pub mod column_resolution;
 pub mod expr_ir;
-pub mod lower;
 pub mod names;
 pub mod query_expr;
-pub mod relational;
 pub mod schema;
 
 pub use agg_intent::{
     agg_accuracy, agg_is_exact, agg_is_mergeable, default_cardinality, default_quantile, AggIntent,
 };
-pub use binder::{Binder, SchemaCatalog, UsageDerivedCatalog};
-pub use column_resolution::{
-    infer_schema_for_root, infer_source_schema, output_schema_for_aggregate, resolve_column_ref,
-    resolve_column_refs, resolve_expr, ResolveError,
-};
 pub use expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L2Expr, L3Expr, L3Scalar};
-pub use lower::{convert, convert_root, ConvertError};
 pub use names::{BindingName, QueryId};
 pub use query_expr::{
-    BinaryOpKind, BindingScope, DataModel, GroupKeys, GroupSide, JoinKind, Predicate,
-    ProjectItem, QueryExpr, QueryExprError, SetOpKind, SortKey, Source, VectorGrouping,
-    VectorMatch, VectorMatchKind, WindowFuncKind, WindowKind,
+    BinaryOpKind, BindingScope, DataModel, GroupKeys, GroupSide, JoinKind, Predicate, ProjectItem,
+    QueryExpr, QueryExprError, SetOpKind, SortKey, Source, VectorGrouping, VectorMatch,
+    VectorMatchKind, WindowFuncKind, WindowKind,
 };
 pub use schema::{cse_reuse_is_legal, Column, ColumnId, CseError, DataType, Schema};

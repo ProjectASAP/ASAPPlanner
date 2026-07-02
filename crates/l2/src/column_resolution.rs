@@ -2,17 +2,17 @@
 //!
 //! The Layer-2 IR uses `ColumnRef` (name-based, optionally table-qualified);
 //! the canonical IR uses positional [`ColumnId`] resolved against a per-node
-//! [`Schema`]. These helpers bridge the two — the [`Binder`](super::binder)
+//! [`Schema`]. These helpers bridge the two — the [`Binder`](crate::binder)
 //! builds the schema, and [`resolve_column_refs`] turns the L2 refs (group
 //! keys, dedup columns) into positional ids, qualifier-aware.
 
 use thiserror::Error;
 
-use crate::intent_algebra::agg_intent::AggIntent;
-use crate::intent_algebra::expr_ir::ColumnRef;
-use crate::intent_algebra::expr_ir::{L2Expr, L3Expr};
-use crate::intent_algebra::relational::QueryExpr;
-use crate::intent_algebra::schema::{Column, ColumnId, DataType, Schema};
+use asap_ir::intent_algebra::agg_intent::AggIntent;
+use asap_ir::intent_algebra::expr_ir::ColumnRef;
+use asap_ir::intent_algebra::expr_ir::{L2Expr, L3Expr};
+use crate::relational::QueryExpr;
+use asap_ir::intent_algebra::schema::{Column, ColumnId, DataType, Schema};
 
 /// Errors returned by the resolution helpers.
 #[derive(Debug, Error, PartialEq, Eq)]

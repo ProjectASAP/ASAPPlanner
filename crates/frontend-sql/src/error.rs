@@ -1,6 +1,6 @@
 use std::fmt;
 
-use asap_ir::intent_algebra::ConvertError;
+use asap_l2::ConvertError;
 
 /// Errors from lowering a SQL query (L1 parse + plan via DataFusion → L2 →
 /// shared L2→L3 convert).

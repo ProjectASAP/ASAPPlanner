@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/ir",
+    "crates/l2",
     "crates/sketch",
     "crates/plan",
     "crates/frontend-promql",

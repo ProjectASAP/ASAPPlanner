@@ -125,7 +125,7 @@ This is what makes the topology a *parameter* rather than an axis of code: the s
 
 This drives the core/deployment model split:
 
-- **The shared infrastructure crates** own all 5 layers. Landed today (§5.1): the front ends (L1→L2), `asap-ir` (L3 IR + converter), `asap-sketch` (L4 IR), and `asap-plan` (L4 optimizer — CSE, with the rule engine + cost model + boundary + canonicalize as stubs). Planned: the L5 stage-allocator framework + `PhysicalPlanner` trait + sketch catalogue. (The original design put all of this in one `core/` crate; §5.1 splits it by role.)
+- **The shared infrastructure crates** own all 5 layers. Landed today (§5.1): the front ends (L1→L2), `asap-l2` (L2 relational + the L2→L3 converter), `asap-ir` (L3 canonical IR), `asap-sketch` (L4 IR), and `asap-plan` (L4 optimizer — CSE, with the rule engine + cost model + boundary + canonicalize as stubs). Planned: the L5 stage-allocator framework + `PhysicalPlanner` trait + sketch catalogue. (The original design put all of this in one `core/` crate; §5.1 splits it by role.)
 - **Each deployment model is a thin crate** that: (1) picks which of core's L4 rules to enable + adds any deployment-model-specific rules, (2) declares its deployment topology (how many stages, where data flows), (3) provides an emitter for its output format. That's usually a few hundred lines, not thousands.
 
 ## 4. Principles
@@ -162,42 +162,46 @@ The workspace is split by pipeline role into a layer-named crate stack. The
 dependency arrows only ever point **up** — `asap-ir` never depends on a front
 end, an optimizer, or a runtime.
 
-```
-asap-ir            L2 relational + L3 canonical IR + converter + binder +
-                   resolution + schema + expr + names + workload types
-   ▲    ▲    ▲
-   │    │    └── asap-sketch          L4 sketch algebra
-   │    │
-   │    └─────── asap-plan            optimizer layer: CSE (landed) +
-   │                                  cost model / boundary / canonicalize (stubs)
-   │
-   ├─ asap-frontend-promql   PromQL L1→L2   (dep: promql-parser only)
-   ├─ asap-frontend-sql      SQL   L1→L2   (dep: datafusion only)
-   │        └── asap-lower   thin facade re-exporting lower_promql / lower_sql
-   ▲
-asap-e2e           integration tests
-```
+Dependency table (clearer than arrows). Every crate depends on `asap-ir`;
+`asap-ir` depends on nothing above it.
+
+| Crate | Role | Depends on |
+|---|---|---|
+| `asap-ir` | **L3 canonical IR only** — `QueryExpr` + `AggIntent` + scalar expr + schema + names | *(nothing)* |
+| `asap-l2` | L2 relational algebra + L2→L3 converter (`convert_root`, binder, resolution) | `asap-ir` |
+| `asap-sketch` | L4 sketch-bound IR | `asap-ir` |
+| `asap-plan` | optimizer — CSE (landed) + stubs | `asap-ir` |
+| `asap-frontend-promql` | PromQL L1→L2 | `asap-ir`, `asap-l2`, promql-parser |
+| `asap-frontend-sql` | SQL L1→L2 | `asap-ir`, `asap-l2`, datafusion |
+| `asap-lower` | facade over both front ends | the two `frontend-*` |
+| `asap-e2e` | integration tests | `asap-frontend-promql` |
 
 ```
 crates/
-  ir/                # L2 relational + L3 canonical IR + L2→L3 converter + binder
-                     #   + column resolution + schema + expr IR + names + workload
-                     #   types.  No query-language dependencies. (crate: asap-ir)
+  ir/                # L3 canonical IR: query_expr + agg_intent + expr_ir +
+                     #   schema + names (+ types, workload). No query-language
+                     #   deps. (crate: asap-ir)
+  l2/                # L2 relational algebra + L2→L3 converter: relational +
+                     #   lower (convert_root) + binder + column_resolution.
+                     #   (crate: asap-l2)
   sketch/            # L4 sketch-bound IR (SketchExpr). (crate: asap-sketch)
   plan/              # optimizer layer: CSE today; cost_model / boundary /
                      #   canonicalize are stubs. (crate: asap-plan)
-  frontend-promql/   # PromQL L1→L2, promql-parser only. (crate: asap-frontend-promql)
-  frontend-sql/      # SQL L1→L2, datafusion only. (crate: asap-frontend-sql)
+  frontend-promql/   # PromQL L1→L2, promql-parser. (crate: asap-frontend-promql)
+  frontend-sql/      # SQL L1→L2, datafusion. (crate: asap-frontend-sql)
   lower/             # facade re-exporting both front ends. (crate: asap-lower)
   e2e/               # cross-language integration tests. (crate: asap-e2e)
 ```
 
-Splitting the front ends **quarantines their parsers**: a caller that needs
-only PromQL depends on `asap-frontend-promql` and never compiles DataFusion,
-and vice-versa (verified with `cargo tree`). This is why the old monolithic
-`LoweringError` was partitioned into `PromqlError` / `SqlError` — a shared
-error embedding `DataFusionError` would have leaked DataFusion into the PromQL
-crate.
+Two isolation wins:
+- **The front ends quarantine their parsers**: a PromQL-only caller depends on
+  `asap-frontend-promql` and never compiles DataFusion, and vice-versa (verified
+  with `cargo tree`). This is why the old monolithic `LoweringError` was
+  partitioned into `PromqlError` / `SqlError` — a shared error embedding
+  `DataFusionError` would have leaked DataFusion into the PromQL crate.
+- **L3-only consumers stay lean**: `asap-sketch` and `asap-plan` depend on
+  `asap-ir` alone and never pull the L2 relational tree / converter / binder
+  (`asap-l2`) — only the front ends, which actually *lower* queries, need it.
 
 **Not yet built** (see §5.2): the L4 optimizer engine + rule library, the L5
 physical framework, the runtime service, the `deployment-model-*` crates, the
@@ -312,8 +316,8 @@ the landed crates (§5.1) as follows:
 | §6 name | Landed crate / module | Status |
 |---|---|---|
 | `core::query_language` (L1) | `asap-frontend-promql`, `asap-frontend-sql` (parse step) | landed (PromQL + SQL; DataFusion/ElasticDSL planned) |
-| `core::logical_plan` (L2) | `asap-ir::intent_algebra::relational` (emitted by the front ends) | landed |
-| `core::lower` (L1→L2→L3) | `asap-frontend-*` (L1→L2) + `asap-ir::intent_algebra::lower` / `convert_root` (L2→L3) | landed, split per language |
+| `core::logical_plan` (L2) | `asap-l2::relational` (emitted by the front ends) | landed |
+| `core::lower` (L1→L2→L3) | `asap-frontend-*` (L1→L2) + `asap-l2::convert_root` (L2→L3, with the binder + column resolution) | landed, split per language |
 | `core::intent_algebra` (L3) | `asap-ir::intent_algebra` | landed |
 | `core::sketch_algebra` (L4 IR) | `asap-sketch` | landed |
 | `core::optimizer` (L4 framework) | `asap-plan` | placeholder (CSE only; engine/rules planned) |

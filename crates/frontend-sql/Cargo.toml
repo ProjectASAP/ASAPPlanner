@@ -7,6 +7,7 @@ edition = "2021"
 # shared L2→L3 converter in asap-ir. Pulls DataFusion only — never promql-parser.
 [dependencies]
 asap-ir = { path = "../ir" }
+asap-l2 = { path = "../l2" }
 datafusion = "43"
 
 [dev-dependencies]

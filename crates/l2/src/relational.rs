@@ -1,17 +1,17 @@
 //! The Layer-2 relational IR — the per-language query algebra the parser
-//! front ends emit, before [`convert_root`](super::lower::convert_root) lowers
-//! it to the canonical L3 [`query_expr::QueryExpr`](super::query_expr::QueryExpr).
+//! front ends emit, before [`convert_root`](crate::lower::convert_root) lowers
+//! it to the canonical L3 [`query_expr::QueryExpr`](asap_ir::intent_algebra::query_expr::QueryExpr).
 //!
 //! Leaf / scalar types (`ColumnRef`, `SortKey`,
 //! `BinaryOpKind`, `VectorMatch`) are owned by `query_expr` and re-used here so
 //! there is one canonical spelling. Filter / having / project expressions use
-//! the shared language-independent [`L3Expr`](super::expr_ir::L3Expr).
+//! the shared language-independent [`L3Expr`](asap_ir::intent_algebra::expr_ir::L3Expr).
 
 use std::time::Duration;
 
-pub use super::expr_ir::{ColumnRef, L2Expr};
-pub use super::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
-use super::schema::Schema;
+pub use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr};
+pub use asap_ir::intent_algebra::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
+use asap_ir::intent_algebra::schema::Schema;
 
 /// SELECT-list item at Layer 2 — a name-based [`L2Expr`] + optional alias.
 /// (`query_expr::ProjectItem` is the positional L3 sibling.)
@@ -35,7 +35,7 @@ pub struct SourceSpec {
     /// Metric name (PromQL) or table name (SQL).
     pub name: String,
     /// Front-end-resolved leaf schema. `Some` for SQL tables (DataFusion knows
-    /// the columns); `None` for PromQL, where the [`Binder`](super::binder)
+    /// the columns); `None` for PromQL, where the [`Binder`](crate::binder)
     /// synthesises a usage-derived schema (the `(ts, value)` floor + referenced
     /// labels). The presence of a schema also selects the L3 `Source` variant:
     /// `Some` → `Source::Table`, `None` → `Source::TimeSeries`.
@@ -71,7 +71,7 @@ pub struct AggItem {
 }
 
 /// Layer-2 aggregate functions. Mapped to canonical [`AggIntent`] by
-/// [`super::lower::convert`].
+/// [`crate::lower::convert`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum AggFunc {
     Count,
@@ -182,13 +182,13 @@ pub enum QueryExpr {
     Merge { inputs: Vec<QueryExpr> },
 
     Join {
-        kind: super::query_expr::JoinKind,
+        kind: asap_ir::intent_algebra::query_expr::JoinKind,
         pred: Option<L2Expr>,
         left: Box<QueryExpr>,
         right: Box<QueryExpr>,
     },
     SetOp {
-        kind: super::query_expr::SetOpKind,
+        kind: asap_ir::intent_algebra::query_expr::SetOpKind,
         all: bool,
         left: Box<QueryExpr>,
         right: Box<QueryExpr>,

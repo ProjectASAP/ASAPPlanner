@@ -1,16 +1,17 @@
 //! PromQL front end: L1 (parse via `promql-parser`) → L2 relational, then the
-//! shared L2→L3 [`convert_root`](asap_ir::intent_algebra::convert_root).
+//! shared L2→L3 [`convert_root`](asap_l2::convert_root).
 //!
 //! Emits the per-language
-//! [`relational::QueryExpr`](asap_ir::intent_algebra::relational); the shared
-//! converter runs the [`Binder`](asap_ir::intent_algebra::Binder) for
+//! [`relational::QueryExpr`](asap_l2::relational); the shared
+//! converter runs the [`Binder`](asap_l2::Binder) for
 //! positional name resolution. Depends on the PromQL parser only — never on the
 //! SQL / DataFusion stack.
 
 pub mod error;
 pub mod promql;
 
-use asap_ir::intent_algebra::{convert_root, QueryExpr};
+use asap_ir::intent_algebra::QueryExpr;
+use asap_l2::convert_root;
 use asap_ir::types::AccuracyTarget;
 use asap_ir::workload::{QueryLanguage, QueryWorkload};
 
