@@ -101,6 +101,31 @@ pub enum AggFunc {
     Increase {
         window: Duration,
     },
+
+    // ── Counter-derivative range functions (issue #44) ───────────────────
+    // Per-series range reductions; the window rides on the enclosing L2
+    // `Window` node (like `*_over_time`), so — unlike `Rate`/`Increase` —
+    // these variants do NOT carry it.
+    /// PromQL `changes(v[w])` → `AggIntent::Changes`.
+    Changes,
+    /// PromQL `delta(v[w])` → `AggIntent::Delta`.
+    Delta,
+    /// PromQL `idelta(v[w])` → `AggIntent::IDelta`.
+    IDelta,
+    /// PromQL `deriv(v[w])` → `AggIntent::Deriv`.
+    Deriv,
+    /// PromQL `resets(v[w])` → `AggIntent::Resets`.
+    Resets,
+    /// PromQL `predict_linear(v[w], t)` → `AggIntent::PredictLinear`.
+    PredictLinear {
+        seconds: f64,
+    },
+    /// PromQL `double_exponential_smoothing(v[w], sf, tf)` (a.k.a.
+    /// `holt_winters`) → `AggIntent::DoubleExpSmoothing`.
+    DoubleExpSmoothing {
+        smoothing: f64,
+        trend: f64,
+    },
 }
 
 /// The Layer-2 relational query IR.

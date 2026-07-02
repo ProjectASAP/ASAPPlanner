@@ -86,6 +86,38 @@ pub enum AggIntent {
     // not in the intent — this keeps the intent vocabulary range-agnostic.
     Rate,
     Increase,
+
+    // ── Counter-derivative / range-vector functions (issue #44) ──────────
+    // All per-series, label-preserving reductions of a single series' range
+    // window to one value; the window rides on the enclosing `TimeRange`.
+    // Each has distinct semantics and is deliberately NOT aliased to
+    // `Rate`/`Increase`/`Count`.
+    /// PromQL `changes(v[w])` — number of times the value changed in the window.
+    Changes,
+    /// PromQL `delta(v[w])` — difference between the first and last sample
+    /// (gauge semantics; not counter-reset-adjusted).
+    Delta,
+    /// PromQL `idelta(v[w])` — difference between the last two samples.
+    IDelta,
+    /// PromQL `deriv(v[w])` — per-second derivative via simple linear
+    /// regression over the window (gauges).
+    Deriv,
+    /// PromQL `resets(v[w])` — number of counter resets in the window.
+    Resets,
+    /// PromQL `predict_linear(v[w], t)` — linear-regression extrapolation of
+    /// the value `t` seconds into the future.
+    PredictLinear {
+        /// The prediction horizon in seconds (the 2nd, scalar argument).
+        seconds: f64,
+    },
+    /// PromQL `double_exponential_smoothing(v[w], sf, tf)` (a.k.a. the legacy
+    /// `holt_winters`) — Holt-Winters double-exponential smoothing.
+    DoubleExpSmoothing {
+        /// Data (level) smoothing factor `sf` ∈ (0, 1).
+        smoothing: f64,
+        /// Trend smoothing factor `tf` ∈ (0, 1).
+        trend: f64,
+    },
 }
 
 impl AggIntent {
@@ -93,7 +125,15 @@ impl AggIntent {
     /// this to skip non-applicable intents (e.g. `Rate` over a tabular source).
     pub fn requires(&self) -> DataModel {
         match self {
-            Self::Rate | Self::Increase => DataModel::TimeSeries,
+            Self::Rate
+            | Self::Increase
+            | Self::Changes
+            | Self::Delta
+            | Self::IDelta
+            | Self::Deriv
+            | Self::Resets
+            | Self::PredictLinear { .. }
+            | Self::DoubleExpSmoothing { .. } => DataModel::TimeSeries,
             _ => DataModel::Any,
         }
     }
@@ -104,7 +144,18 @@ impl AggIntent {
     /// `rate`/`increase` carry their window in the intent. (Cross-series
     /// reductions like `sum`/`avg` over a series set return `false`.)
     pub fn is_per_series(&self) -> bool {
-        matches!(self, Self::Rate | Self::Increase)
+        matches!(
+            self,
+            Self::Rate
+                | Self::Increase
+                | Self::Changes
+                | Self::Delta
+                | Self::IDelta
+                | Self::Deriv
+                | Self::Resets
+                | Self::PredictLinear { .. }
+                | Self::DoubleExpSmoothing { .. }
+        )
     }
 
     /// The positional input column this intent reduces, if it carries one.
@@ -147,6 +198,20 @@ impl AggIntent {
             AggIntent::Cardinality { .. } => col("cardinality", DataType::Int64, false),
             AggIntent::Rate => col("rate", DataType::Float64, false),
             AggIntent::Increase => col("increase", DataType::Float64, false),
+            // Counter-derivative range functions (issue #44) — all yield one
+            // float per series (PromQL values are float64), named after the
+            // function so consumers can locate the column without an alias.
+            AggIntent::Changes => col("changes", DataType::Float64, false),
+            AggIntent::Delta => col("delta", DataType::Float64, false),
+            AggIntent::IDelta => col("idelta", DataType::Float64, false),
+            AggIntent::Deriv => col("deriv", DataType::Float64, false),
+            AggIntent::Resets => col("resets", DataType::Float64, false),
+            AggIntent::PredictLinear { .. } => {
+                col("predict_linear", DataType::Float64, false)
+            }
+            AggIntent::DoubleExpSmoothing { .. } => {
+                col("double_exponential_smoothing", DataType::Float64, false)
+            }
         }
     }
 }
