@@ -575,6 +575,15 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
             smoothing: *smoothing,
             trend: *trend,
         },
+        AggFunc::HistogramCount => AggIntent::HistogramCount,
+        AggFunc::HistogramSum => AggIntent::HistogramSum,
+        AggFunc::HistogramAvg => AggIntent::HistogramAvg,
+        AggFunc::HistogramStdDev => AggIntent::HistogramStdDev,
+        AggFunc::HistogramStdVar => AggIntent::HistogramStdVar,
+        AggFunc::HistogramFraction { lower, upper } => AggIntent::HistogramFraction {
+            lower: *lower,
+            upper: *upper,
+        },
     }
 }
 

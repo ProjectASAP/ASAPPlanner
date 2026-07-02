@@ -163,6 +163,7 @@ fn walk(expr: &Expr) -> Result<L2> {
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
         Expr::Call(call) if call.func.name == "histogram_quantile" => walk_histogram_quantile(call),
+        Expr::Call(call) if is_histogram_accessor(call.func.name) => walk_histogram_accessor(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -414,6 +415,47 @@ fn walk_histogram_quantile(call: &Call) -> Result<L2> {
     let phi = quantile_param(num_arg(call, 0)?)?;
     let inner = walk(arg(call, 1)?)?;
     Ok(outer_aggregate(vec![], AggFunc::Quantile(phi), inner))
+}
+
+/// The native-histogram accessor functions (issue #43) — `histogram_count`,
+/// `histogram_sum`, `histogram_avg`, `histogram_stddev`, `histogram_stdvar`,
+/// `histogram_fraction`. (`histogram_quantile` is handled separately since it
+/// also covers the classic `le`-bucket form.)
+fn is_histogram_accessor(name: &str) -> bool {
+    matches!(
+        name,
+        "histogram_count"
+            | "histogram_sum"
+            | "histogram_avg"
+            | "histogram_stddev"
+            | "histogram_stdvar"
+            | "histogram_fraction"
+    )
+}
+
+/// `histogram_<accessor>(<native-histogram instant vector>)` — a per-series
+/// extraction. Lowers to a per-series `Aggregate{[accessor]}` directly over the
+/// (instant) argument vector, mirroring `histogram_quantile` (issue #43).
+fn walk_histogram_accessor(call: &Call) -> Result<L2> {
+    // `histogram_fraction(lower, upper, v)` reads its bounds from args 0/1 and
+    // the vector from arg 2; the rest take the vector at arg 0.
+    let (func, vec_idx) = match call.func.name {
+        "histogram_count" => (AggFunc::HistogramCount, 0),
+        "histogram_sum" => (AggFunc::HistogramSum, 0),
+        "histogram_avg" => (AggFunc::HistogramAvg, 0),
+        "histogram_stddev" => (AggFunc::HistogramStdDev, 0),
+        "histogram_stdvar" => (AggFunc::HistogramStdVar, 0),
+        "histogram_fraction" => (
+            AggFunc::HistogramFraction {
+                lower: num_arg(call, 0)?,
+                upper: num_arg(call, 1)?,
+            },
+            2,
+        ),
+        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
+    };
+    let inner = walk(arg(call, vec_idx)?)?;
+    Ok(outer_aggregate(vec![], func, inner))
 }
 
 fn walk_binary(bin: &BinaryExpr) -> Result<L2> {

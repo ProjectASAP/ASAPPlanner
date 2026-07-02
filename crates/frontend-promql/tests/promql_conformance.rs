@@ -972,3 +972,40 @@ fn predict_linear_and_double_exp_over_a_subquery_carry_params() {
             if (*smoothing - 0.5).abs() < 1e-9 && (*trend - 0.3).abs() < 1e-9
     )));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// N. Native-histogram accessors            (functions.test; issue #43)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn histogram_accessors_lower_to_per_series_intents() {
+    // `histogram_<accessor>(v)` extracts a float per series from a native
+    // histogram — a per-series `Aggregate{[accessor]}` directly over the
+    // (instant) argument, no grouping. (`histogram_quantile` stays a `Quantile`,
+    // covering the classic `le`-bucket form too — see the histogram section.)
+    for (q, want) in [
+        ("histogram_count(v)", AggIntent::HistogramCount),
+        ("histogram_sum(v)", AggIntent::HistogramSum),
+        ("histogram_avg(v)", AggIntent::HistogramAvg),
+        ("histogram_stddev(v)", AggIntent::HistogramStdDev),
+        ("histogram_stdvar(v)", AggIntent::HistogramStdVar),
+    ] {
+        let qe = ok(q);
+        let QueryExpr::Aggregate { by, aggs, .. } = &qe else {
+            panic!("{q}: expected an Aggregate, got {qe:?}");
+        };
+        assert!(by.is_empty(), "{q}: per-series, no grouping");
+        assert_eq!(aggs.as_slice(), std::slice::from_ref(&want), "{q}: wrong intent");
+    }
+}
+
+#[test]
+fn histogram_fraction_carries_its_bounds() {
+    // `histogram_fraction(lower, upper, v)` — bounds from args 0/1, vector arg 2.
+    let qe = ok("histogram_fraction(0, 0.2, v)");
+    assert!(intents(&qe).iter().any(|i| matches!(
+        i,
+        AggIntent::HistogramFraction { lower, upper }
+            if *lower == 0.0 && (*upper - 0.2).abs() < 1e-9
+    )));
+}

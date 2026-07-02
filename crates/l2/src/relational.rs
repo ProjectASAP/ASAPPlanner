@@ -126,6 +126,23 @@ pub enum AggFunc {
         smoothing: f64,
         trend: f64,
     },
+
+    // ── Native-histogram accessors (issue #43) ───────────────────────────
+    /// PromQL `histogram_count(v)` → `AggIntent::HistogramCount`.
+    HistogramCount,
+    /// PromQL `histogram_sum(v)` → `AggIntent::HistogramSum`.
+    HistogramSum,
+    /// PromQL `histogram_avg(v)` → `AggIntent::HistogramAvg`.
+    HistogramAvg,
+    /// PromQL `histogram_stddev(v)` → `AggIntent::HistogramStdDev`.
+    HistogramStdDev,
+    /// PromQL `histogram_stdvar(v)` → `AggIntent::HistogramStdVar`.
+    HistogramStdVar,
+    /// PromQL `histogram_fraction(lower, upper, v)` → `AggIntent::HistogramFraction`.
+    HistogramFraction {
+        lower: f64,
+        upper: f64,
+    },
 }
 
 /// The Layer-2 relational query IR.
