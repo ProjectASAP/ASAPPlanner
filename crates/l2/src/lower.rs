@@ -136,6 +136,12 @@ pub fn convert(
                             input: win_input,
                             ..
                         } => (win_input, Some(*duration)),
+                        // A `PromQLSubquery` is itself the range context (a range
+                        // function over a sub-query, `f(<inst>[range:res])` —
+                        // issues #42/#55). No separate `TimeRange`, and
+                        // `Rate`/`Increase`'s carried window is subsumed by the
+                        // sub-query's range.
+                        other @ LQueryExpr::PromQLSubquery { .. } => (other, None),
                         other => {
                             let range = match &aggs[0].func {
                                 AggFunc::Rate { window } | AggFunc::Increase { window } => {
@@ -147,12 +153,13 @@ pub fn convert(
                         }
                     };
                 // A counter-derivative range function is per-series over a range
-                // and always arrives under an L2 `Window` from the front ends.
-                // If one reaches here range-less (no `Window`, and unlike
-                // `Rate`/`Increase` it carries no window in its `AggFunc`),
-                // emitting it without a `TimeRange` would silently drop its
-                // window — reject the malformed tree instead (issue #71).
+                // and always arrives under an L2 `Window` (or, for a sub-query
+                // argument, over a `PromQLSubquery` — handled above). If one
+                // reaches here range-less over anything else, emitting it without
+                // a `TimeRange` would silently drop its window — reject the
+                // malformed tree instead (issue #71).
                 if time_range.is_none()
+                    && !matches!(agg_input_l2, LQueryExpr::PromQLSubquery { .. })
                     && matches!(
                         &aggs[0].func,
                         AggFunc::Changes
