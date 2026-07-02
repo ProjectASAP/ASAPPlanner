@@ -1,6 +1,14 @@
 # ASAPController — design
 
-Target repo: **`github.com/ProjectASAP/ASAPController`** (currently empty).
+Repo: **`github.com/ProjectASAP/ASAPController`**.
+
+> **Status (reconciled with the landed workspace).** This document is the
+> *target* design. What exists today is the query→IR core, split into a
+> layer-named crate stack — see **§5.1 Landed layout**. The optimizer /
+> physical / runtime / deployment-model / bin crates described below are
+> **planned**; where a section covers unbuilt pieces it is marked accordingly.
+> The `core::<module>` names used throughout §6 predate the split; **§6.0**
+> maps them to the crates that ship them today.
 
 Merges three existing codebases into one:
 
@@ -117,7 +125,7 @@ This is what makes the topology a *parameter* rather than an axis of code: the s
 
 This drives the core/deployment model split:
 
-- **`crates/core/`** owns all 5 layers of **shared infrastructure**: L1-3 end-to-end (parsers + lowering + intent-only IR), plus L4's rule engine driver + rule library + cost-model traits, plus L5's stage-allocator framework + `PhysicalPlanner` trait + sketch catalogue.
+- **The shared infrastructure crates** own all 5 layers. Landed today (§5.1): the front ends (L1→L2), `asap-ir` (L3 IR + converter), `asap-sketch` (L4 IR), and `asap-plan` (L4 optimizer — CSE, with the rule engine + cost model + boundary + canonicalize as stubs). Planned: the L5 stage-allocator framework + `PhysicalPlanner` trait + sketch catalogue. (The original design put all of this in one `core/` crate; §5.1 splits it by role.)
 - **Each deployment model is a thin crate** that: (1) picks which of core's L4 rules to enable + adds any deployment-model-specific rules, (2) declares its deployment topology (how many stages, where data flows), (3) provides an emitter for its output format. That's usually a few hundred lines, not thousands.
 
 ## 4. Principles
@@ -146,7 +154,63 @@ This is the "extension point for future deployment models" — a new deployment 
 
 If something must be optional (e.g. OpAMP for deployments that don't run OTel collectors), it's a separate crate, not a `cfg` block in core.
 
-## 5. Target repo layout
+## 5. Repo layout
+
+### 5.1 Landed layout (today)
+
+The workspace is split by pipeline role into a layer-named crate stack. The
+dependency arrows only ever point **up** — `asap-ir` never depends on a front
+end, an optimizer, or a runtime.
+
+```
+asap-ir            L2 relational + L3 canonical IR + converter + binder +
+                   resolution + schema + expr + names + workload types
+   ▲    ▲    ▲
+   │    │    └── asap-sketch          L4 sketch algebra
+   │    │
+   │    └─────── asap-plan            optimizer layer: CSE (landed) +
+   │                                  cost model / boundary / canonicalize (stubs)
+   │
+   ├─ asap-frontend-promql   PromQL L1→L2   (dep: promql-parser only)
+   ├─ asap-frontend-sql      SQL   L1→L2   (dep: datafusion only)
+   │        └── asap-lower   thin facade re-exporting lower_promql / lower_sql
+   ▲
+asap-e2e           integration tests
+```
+
+```
+crates/
+  ir/                # L2 relational + L3 canonical IR + L2→L3 converter + binder
+                     #   + column resolution + schema + expr IR + names + workload
+                     #   types.  No query-language dependencies. (crate: asap-ir)
+  sketch/            # L4 sketch-bound IR (SketchExpr). (crate: asap-sketch)
+  plan/              # optimizer layer: CSE today; cost_model / boundary /
+                     #   canonicalize are stubs. (crate: asap-plan)
+  frontend-promql/   # PromQL L1→L2, promql-parser only. (crate: asap-frontend-promql)
+  frontend-sql/      # SQL L1→L2, datafusion only. (crate: asap-frontend-sql)
+  lower/             # facade re-exporting both front ends. (crate: asap-lower)
+  e2e/               # cross-language integration tests. (crate: asap-e2e)
+```
+
+Splitting the front ends **quarantines their parsers**: a caller that needs
+only PromQL depends on `asap-frontend-promql` and never compiles DataFusion,
+and vice-versa (verified with `cargo tree`). This is why the old monolithic
+`LoweringError` was partitioned into `PromqlError` / `SqlError` — a shared
+error embedding `DataFusionError` would have leaked DataFusion into the PromQL
+crate.
+
+**Not yet built** (see §5.2): the L4 optimizer engine + rule library, the L5
+physical framework, the runtime service, the `deployment-model-*` crates, the
+proto crate, and the `bin/` entrypoints. `asap-plan` is the placeholder where
+the optimizer work lands.
+
+### 5.2 Target layout (planned)
+
+The full target the landed stack is growing into — the optimizer/physical
+frameworks, runtime, and per-deployment-model crates are the main additions.
+(Note: the target originally imagined one `core/` crate with submodules;
+the landed layout instead splits those submodules into the separate crates in
+§5.1. §6.0 maps between the two.)
 
 ```
 ASAPController/
@@ -239,6 +303,26 @@ Mashing them into one crate means the union of all their dependencies (sqlparser
 ## 6. Core crate details (layers 1–3 + driver)
 
 Core is not a trait-stubs library. It ships real L1/L2/L3 code lifted from DC's `controller/src/query_parser/` + `controller/src/algebra/` and exposes a small set of traits for L4/L5 plugin points.
+
+### 6.0 `core::<module>` → landed crate map
+
+This section predates the crate split; the `core::<module>` names below map to
+the landed crates (§5.1) as follows:
+
+| §6 name | Landed crate / module | Status |
+|---|---|---|
+| `core::query_language` (L1) | `asap-frontend-promql`, `asap-frontend-sql` (parse step) | landed (PromQL + SQL; DataFusion/ElasticDSL planned) |
+| `core::logical_plan` (L2) | `asap-ir::intent_algebra::relational` (emitted by the front ends) | landed |
+| `core::lower` (L1→L2→L3) | `asap-frontend-*` (L1→L2) + `asap-ir::intent_algebra::lower` / `convert_root` (L2→L3) | landed, split per language |
+| `core::intent_algebra` (L3) | `asap-ir::intent_algebra` | landed |
+| `core::sketch_algebra` (L4 IR) | `asap-sketch` | landed |
+| `core::optimizer` (L4 framework) | `asap-plan` | placeholder (CSE only; engine/rules planned) |
+| `core::cost` | `asap-plan::cost_model` | stub |
+| `core::physical` (L5) | — | planned |
+| `core::pipeline`, `core::emit`, `core::registry`, `core::workload` | `asap-ir::workload` (workload types only); rest planned | partial |
+
+The prose in §6.x describes the intended design; read the crate names through
+this map.
 
 ### `core::query_language` — Layer 1
 
@@ -683,7 +767,7 @@ Deployment models compose rule sets by picking from the shared library + adding 
 
 ```rust
 // in deployment-model-asaplifecycle
-use asap_control_core::optimizer::{RuleEngine, rules::*};
+use asap_plan::optimizer::{RuleEngine, rules::*};
 fn rule_set() -> Vec<Box<dyn OptimizerRule>> {
     vec![
         Box::new(BindKllOnQuantile),
@@ -794,7 +878,7 @@ Deployment models use these pieces:
 
 ```rust
 // in deployment-model-asaplifecycle
-use asap_control_core::physical::{StageAllocator, topology::ThreeStage, Executor};
+use asap_physical::{StageAllocator, topology::ThreeStage, Executor};
 
 impl PhysicalPlanner for LifecyclePlanner {
     type Topology = ThreeStage;
@@ -1182,13 +1266,13 @@ Control plane (ASAPController) and data plane (OTel agents / ASAPQuery-backend /
 Because core owns the L4/L5 infrastructure (not just L1-3), a deployment model crate is small and largely self-contained. That means deployment models can live either:
 
 - **Inside ASAPController workspace** — `crates/deployment-model-<name>/`, lockstep release with core, cross-deployment-model changes are one PR.
-- **In their own downstream repo** — declares `asap-control-core` as a git-tagged dep, releases independently, owns its own CI.
+- **In their own downstream repo** — declares `asap-ir` as a git-tagged dep, releases independently, owns its own CI.
 
 Both produce functionally identical artifacts because they pick from the same `core::optimizer::rules` library and use the same traits. The placement is a **deployment / team-ownership decision**, not an architectural fork.
 
 Default recommendation:
 - **deployment-model-asaplifecycle** and **deployment-model-asapquery** in ASAPController (they share `deployment-model-asapquery`'s YAML emitter via a workspace `path = "../deployment-model-asapquery"` dep — trivial in-workspace).
-- **deployment-model-asapfusion** out-of-tree in `asap-fusion` repo (research project with independent benchmark cadence; depends on `asap-control-core` + `asap-control-optimizer` as published git tags).
+- **deployment-model-asapfusion** out-of-tree in `asap-fusion` repo (research project with independent benchmark cadence; depends on `asap-ir` + `asap-plan` as published git tags).
 
 Future deployment models choose whichever placement fits the team that owns them.
 
@@ -1202,7 +1286,7 @@ With the L4/L5 framework in core, adding a new deployment model is mostly pickin
 
 ```
 crates/deployment-model-edge-cache/                   # or your own repo
-├── Cargo.toml                                 # depends on asap-control-core
+├── Cargo.toml                                 # depends on asap-ir
 ├── src/
 │   ├── lib.rs                                 # impl DeploymentModel for EdgeCacheDeploymentModel
 │   ├── rules.rs                               # pick core rules + add EdgeCacheBindRule
@@ -1256,7 +1340,15 @@ Workspace `Cargo.toml`:
 [workspace]
 resolver = "2"
 members = [
-    "crates/core",
+    # landed today (§5.1)
+    "crates/ir",
+    "crates/sketch",
+    "crates/plan",
+    "crates/frontend-promql",
+    "crates/frontend-sql",
+    "crates/lower",
+    "crates/e2e",
+    # planned
     "crates/runtime",
     "crates/deployment-model-asaplifecycle",
     "crates/deployment-model-asapquery",
@@ -1365,8 +1457,8 @@ Terms that are project-specific or that get conflated. Where the term has a Rust
 
 - **L1 — query language** — Raw query string + parser (PromQL / SQL / DataFusion / ElasticDSL).
 - **L2 — logical plan** — Per-language relational algebra tree (`PromqlLogicalPlan`, `SqlLogicalPlan`, etc.).
-- **L3 — intent algebra** (`QueryExpr`, `core::intent_algebra`) — Symbolic, intent-only IR. No sketch type, no params. `AggIntent` carries accuracy targets only. The "algebra" is the operator surface (`Scan`, `Filter`, `Aggregate`, `Window`, …); the algebra is *intent-only* because no sketches have been bound yet.
-- **L4 — sketch algebra** (`SketchExpr`, `core::sketch_algebra`) — Same DAG shape as L3, but sketches now committed (kind + params). Produced by L4 binding rules; consumed by L5 emitters. Note the naming inversion vs. earlier drafts: "sketch algebra" is L4 (where sketches actually live), not L3.
+- **L3 — intent algebra** (`QueryExpr`, `asap-ir::intent_algebra`) — Symbolic, intent-only IR. No sketch type, no params. `AggIntent` carries accuracy targets only. The "algebra" is the operator surface (`Scan`, `Filter`, `Aggregate`, `Window`, …); the algebra is *intent-only* because no sketches have been bound yet.
+- **L4 — sketch algebra** (`SketchExpr`, `asap-sketch`) — Same DAG shape as L3, but sketches now committed (kind + params). Produced by L4 binding rules; consumed by L5 emitters. Note the naming inversion vs. earlier drafts: "sketch algebra" is L4 (where sketches actually live), not L3.
 - **L5 — physical plan** — Stage-assigned, executor-targeted, ready to serialize. Produced by `PhysicalPlanner`, written out by `PlanEmitter`.
 
 ### Metadata sources (see §6 "DAG schema, DB schema, sketch catalog")
