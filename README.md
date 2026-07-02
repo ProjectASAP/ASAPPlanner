@@ -70,11 +70,11 @@ crates/
 # deployment-model-* crates, control-proto, and the bin/ entrypoints.
 ```
 
-A new deployment model lands by adding one crate with `rules.rs` (pick L4 rules) + `topology.rs` + an emitter, plus one line in `bin/asap-controller/main.rs`. No changes to core or runtime.
+*(Planned.)* A new deployment model will land by adding one crate with `rules.rs` (pick L4 rules) + `topology.rs` + an emitter, plus one line in `bin/asap-controller/main.rs` — no changes to the IR crates.
 
 ## Consumption modes
 
-Three ways downstream can use ASAPController — mix as needed:
+**Today only the Rust-library mode below is available** (depend on `asap-ir` for the IR, or a front-end crate to lower queries). The HTTP-service and CLI modes ship with the runtime + bin crates, which are planned (see `docs/design.md`). Three intended ways downstream can use ASAPController — mix as needed:
 
 | Mode | Use case | How |
 |---|---|---|
@@ -86,9 +86,9 @@ Three ways downstream can use ASAPController — mix as needed:
 
 ASAPController is the **control plane only**. The data plane — OTel collectors, ASAPQuery-backend's query engine, asap-fusion users' DataFusion runtimes — stays in its original repo. Communication is always over wire (OpAMP, HTTP, Prometheus scrape). This boundary is unchanged by the merger.
 
-## Deployment model placement: flexible
+## Deployment model placement: flexible *(planned)*
 
-Because core now owns the L4/L5 infrastructure (not just L1-3), deployment model crates are small and largely self-contained. A deployment model can live either:
+Once the L4/L5 infrastructure lands in the IR/optimizer crates (not just L1-3), deployment model crates will be small and largely self-contained. A deployment model can live either:
 
 - **Inside ASAPController workspace** (lockstep release with core, one-PR cross-deployment-model changes)
 - **In its own downstream repo** (independent release cadence, depends on published `asap-ir`)
