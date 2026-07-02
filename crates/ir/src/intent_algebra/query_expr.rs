@@ -660,6 +660,11 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
     if let Some(vi) = value_idx {
         let mut out = agg.output_column(&columns[vi]);
         out.name = "value".into();
+        // A per-series range reduction produces a PromQL sample value, which is
+        // always `float64` — override the reducer's own output dtype so
+        // `count_over_time` (whose `Count` intent types `Int64`) matches every
+        // other range reducer instead of leaking an `Int64` value column (#69).
+        out.dtype = DataType::Float64;
         columns[vi] = out;
     }
     Schema {

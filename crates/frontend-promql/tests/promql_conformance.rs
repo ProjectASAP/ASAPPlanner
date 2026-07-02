@@ -33,6 +33,7 @@
 
 use std::time::Duration;
 
+use asap_ir::intent_algebra::schema::DataType;
 use asap_ir::intent_algebra::{
     AggIntent, ArithOp, BinaryOpKind, CompareOp, QueryExpr, Source,
 };
@@ -762,6 +763,20 @@ fn unsupported_functions_are_rejected() {
 // ─────────────────────────────────────────────────────────────────────────────
 // M. Counter-derivative range functions     (functions.test; issue #44)
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn count_over_time_value_column_is_float64() {
+    // #69: a per-series range reduction produces a PromQL sample value, which is
+    // always float64. `count_over_time`'s `Count` intent types `Int64`, but the
+    // derived `value` column must be `Float64` like every other range reducer.
+    let schema = ok("count_over_time(m[5m])").output_schema().unwrap();
+    let value = schema
+        .columns
+        .iter()
+        .find(|c| c.name == "value")
+        .expect("value column");
+    assert_eq!(value.dtype, DataType::Float64);
+}
 
 #[test]
 fn counter_derivative_functions_lower_to_distinct_intents() {

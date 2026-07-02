@@ -47,6 +47,13 @@ pub enum ConvertError {
     #[error("group keys on a per-series windowed reduction are unsupported \
              (per-group ranking must use Sort.partition_by — see issue #12)")]
     WindowedReductionKeys,
+    /// A counter-derivative range function (`changes`/`delta`/`deriv`/…) reached
+    /// the converter without an enclosing `Window`, so no range could be
+    /// recovered. Emitting it range-less would silently drop its window, so this
+    /// signals a malformed L2 tree rather than a valid instant aggregate (#71).
+    #[error("counter-derivative range function has no window \
+             (its range would be silently dropped)")]
+    RangelessRangeReduction,
 }
 
 /// Lower a Layer-2 tree to canonical L3, threading `accuracy` onto every
@@ -139,6 +146,26 @@ pub fn convert(
                             (other, range)
                         }
                     };
+                // A counter-derivative range function is per-series over a range
+                // and always arrives under an L2 `Window` from the front ends.
+                // If one reaches here range-less (no `Window`, and unlike
+                // `Rate`/`Increase` it carries no window in its `AggFunc`),
+                // emitting it without a `TimeRange` would silently drop its
+                // window — reject the malformed tree instead (issue #71).
+                if time_range.is_none()
+                    && matches!(
+                        &aggs[0].func,
+                        AggFunc::Changes
+                            | AggFunc::Delta
+                            | AggFunc::IDelta
+                            | AggFunc::Deriv
+                            | AggFunc::Resets
+                            | AggFunc::PredictLinear { .. }
+                            | AggFunc::DoubleExpSmoothing { .. }
+                    )
+                {
+                    return Err(ConvertError::RangelessRangeReduction);
+                }
                 let agg_child_raw = convert(agg_input_l2, fallback, acc)?;
                 let agg_in_schema = agg_child_raw.output_schema()?;
                 let intent = agg_func_to_intent(
@@ -560,6 +587,34 @@ mod tests {
     /// A SQL-shaped `SELECT SUM(bytes), AVG(latency) FROM t` lowers each
     /// reducer onto its own input column (positional), and the derived output
     /// schema types each result off that column (`SUM(bytes:Int64)→Int64`).
+    #[test]
+    fn counter_derivative_without_window_is_rejected() {
+        // A counter-derivative (`Changes`) is per-series over a range and must
+        // arrive under an L2 `Window`. If it reaches the converter range-less
+        // (no `Window`, and unlike `Rate`/`Increase` it carries no window in its
+        // `AggFunc`), emitting it without a `TimeRange` would silently drop its
+        // window — the malformed tree is rejected instead (#71).
+        let schema = Schema::with_time_index(
+            vec![col("ts", DataType::Timestamp), col("value", DataType::Float64)],
+            0,
+            vec![],
+        );
+        let tree = LQueryExpr::Aggregate {
+            keys: vec![],
+            aggs: vec![AggItem {
+                alias: None,
+                func: AggFunc::Changes,
+                col: ColumnRef::SampleValue,
+            }],
+            having: None,
+            input: Box::new(LQueryExpr::Source(SourceSpec::new("m"))), // NO Window
+        };
+        assert!(matches!(
+            convert(&tree, &schema, &AccuracyTarget::Exact),
+            Err(ConvertError::RangelessRangeReduction)
+        ));
+    }
+
     #[test]
     fn multi_column_aggregate_threads_per_agg_col() {
         let schema = Schema::with_time_index(
