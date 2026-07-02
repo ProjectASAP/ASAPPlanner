@@ -69,21 +69,14 @@ pub fn resolve_column_ref(col: &ColumnRef, schema: &Schema) -> Result<ColumnId, 
         ColumnRef::SampleValue => schema
             .column_id("value")
             .or_else(|| {
-                // After an aggregate the sample value is renamed (e.g. "avg");
-                // fall back to the sole non-timestamp column when unambiguous.
-                let non_ts: Vec<ColumnId> = (0..schema.columns.len())
-                    .filter(|&i| Some(i) != schema.time_index)
-                    .collect();
-                (non_ts.len() == 1).then(|| non_ts[0])
-            })
-            .or_else(|| {
-                // A *cross-series* aggregate (`sum by (job) (…)`) emits the group
-                // labels (Utf8) alongside the single numeric value column (e.g.
-                // `[job:Utf8, sum:Float64]`), so the sole-non-ts fallback above is
-                // ambiguous. The PromQL sample value of such a vector is that one
-                // numeric column — the labels are keys, not values. Pick it when
-                // it is the unique non-timestamp numeric column, so an outer
-                // ranking (`topk(k, sum by (job) (…))`) resolves its sort key.
+                // After an aggregate the sample value is renamed (e.g. "avg", or
+                // "sum" alongside group labels in `[job:Utf8, sum:Float64]`).
+                // Fall back to the unique non-timestamp *numeric* column — the
+                // sample value is always numeric, and the labels are keys, not
+                // values. Requiring numeric (rather than "the sole non-ts column
+                // of any type") avoids binding `SampleValue` to a label column in
+                // a `[ts, host:Utf8]`-shaped schema (#70), and still resolves an
+                // outer ranking's sort key (`topk(k, sum by (job) (…))`).
                 let numeric: Vec<ColumnId> = (0..schema.columns.len())
                     .filter(|&i| Some(i) != schema.time_index)
                     .filter(|&i| {
@@ -244,6 +237,25 @@ mod tests {
             Column::new("sum", DataType::Float64, false),
         ]);
         assert_eq!(resolve_column_ref(&ColumnRef::SampleValue, &s), Ok(1));
+    }
+
+    #[test]
+    fn sample_value_does_not_bind_a_label_column() {
+        // `[ts:Timestamp, host:Utf8]` has no `value` column and its sole non-ts
+        // column is a *label* (Utf8), not a sample value. `SampleValue` must not
+        // bind to it (#70) — resolution fails cleanly instead of picking a label.
+        let s = Schema::with_time_index(
+            vec![
+                Column::new("ts", DataType::Timestamp, false),
+                Column::new("host", DataType::Utf8, true),
+            ],
+            0,
+            vec![],
+        );
+        assert!(matches!(
+            resolve_column_ref(&ColumnRef::SampleValue, &s),
+            Err(ResolveError::NoSampleValue { .. })
+        ));
     }
 
     #[test]
