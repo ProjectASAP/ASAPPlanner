@@ -907,11 +907,45 @@ fn counter_derivative_composes_in_binary_ops() {
 }
 
 #[test]
-fn counter_derivative_over_a_subquery_is_rejected__GAP() {
-    // Unlike `*_over_time` (issue #42), the counter-derivative functions do not
-    // yet accept a sub-query argument — only a bare matrix selector. This is
-    // valid PromQL and rejects cleanly (never mislowered); wiring them into the
-    // sub-query path is a follow-up to #42/#44.
-    let _ = rejected("changes(rate(m[5m])[1h:])");
-    let _ = rejected("delta(sum(m)[5m:])");
+fn range_functions_over_a_subquery_reduce_per_series() {
+    // Issue #55 — the whole range-vector family accepts a sub-query argument
+    // (generalizing `*_over_time`, #42): `rate`/`increase`/`irate` and the
+    // counter-derivatives. Each lowers to a per-series `Aggregate{[f]}` directly
+    // over the `Subquery` — the sub-query is the range context, so there is NO
+    // separate `TimeRange` (that would double the range).
+    for (q, want) in [
+        ("rate(sum(m)[5m:])", AggIntent::Rate),
+        ("increase(sum(m)[5m:])", AggIntent::Increase),
+        ("irate(sum(m)[5m:])", AggIntent::Rate), // irate shares the Rate intent
+        ("changes(rate(m[5m])[1h:])", AggIntent::Changes),
+        ("delta(sum(m)[5m:])", AggIntent::Delta),
+        ("deriv(sum(m)[10m:])", AggIntent::Deriv),
+        ("resets(sum(m)[5m:])", AggIntent::Resets),
+    ] {
+        let qe = ok(q);
+        let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+            panic!("{q}: expected an Aggregate, got {qe:?}");
+        };
+        assert!(by.is_empty(), "{q}: per-series, no grouping");
+        assert_eq!(aggs.as_slice(), std::slice::from_ref(&want), "{q}: wrong intent");
+        assert!(
+            matches!(child.as_ref(), QueryExpr::Subquery { .. }),
+            "{q}: reduces directly over the Subquery (no TimeRange), got {child:?}"
+        );
+    }
+}
+
+#[test]
+fn predict_linear_and_double_exp_over_a_subquery_carry_params() {
+    // The scalar params survive the sub-query path.
+    let pl = ok("predict_linear(sum(m)[1h:], 3600)");
+    assert!(intents(&pl)
+        .iter()
+        .any(|i| matches!(i, AggIntent::PredictLinear { seconds } if (*seconds - 3600.0).abs() < 1e-9)));
+    let de = ok("double_exponential_smoothing(sum(m)[10m:], 0.5, 0.3)");
+    assert!(intents(&de).iter().any(|i| matches!(
+        i,
+        AggIntent::DoubleExpSmoothing { smoothing, trend }
+            if (*smoothing - 0.5).abs() < 1e-9 && (*trend - 0.3).abs() < 1e-9
+    )));
 }
