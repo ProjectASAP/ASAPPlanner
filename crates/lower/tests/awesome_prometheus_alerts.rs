@@ -263,27 +263,35 @@ fn absent_function_is_rejected__GAP() {
 }
 
 #[test]
-fn changes_function_is_rejected__GAP() {
-    // `changes(process_start_time_seconds{…}[15m]) > 2` — restart-detection.
-    // `changes` is not a sample count, so it is rejected (not aliased to count).
-    let _ = rejected(
-        r#"changes(process_start_time_seconds{job=~"prometheus|pushgateway|alertmanager"}[15m]) > 2"#,
+fn changes_function_body_lowers_to_changes_intent() {
+    // `changes(process_start_time_seconds{…}[15m])` — restart-detection. Lowers
+    // to the `Changes` intent (issue #44), NOT aliased to a sample count. The
+    // full alert `changes(...) > 2` still needs the scalar-threshold operand
+    // (#35) — pinned by `scalar_threshold_comparisons_are_rejected__GAP`.
+    let qe = ok(
+        r#"changes(process_start_time_seconds{job=~"prometheus|pushgateway|alertmanager"}[15m])"#,
     );
+    assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Changes)));
 }
 
 #[test]
-fn delta_function_is_rejected__GAP() {
-    // `delta(systemd_socket_refused_connections_total[5m]) > 3` — host alerts.
-    let _ = rejected("delta(systemd_socket_refused_connections_total[5m]) > 3");
+fn delta_function_body_lowers_to_delta_intent() {
+    // `delta(systemd_socket_refused_connections_total[5m])` — host alerts.
+    let qe = ok("delta(systemd_socket_refused_connections_total[5m])");
+    assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Delta)));
 }
 
 #[test]
-fn predict_linear_function_is_rejected__GAP() {
-    // The canonical "disk will fill in 24h" alert. `predict_linear` has no
-    // intent representation yet.
-    let _ = rejected(
-        r#"predict_linear(node_filesystem_avail_bytes{fstype!~"^(fuse.*|tmpfs|cifs|nfs)"}[3h], 86400) <= 0 and node_filesystem_avail_bytes > 0"#,
+fn predict_linear_function_body_lowers_with_horizon() {
+    // The canonical "disk will fill in 24h" alert body. `predict_linear` lowers
+    // to `PredictLinear { seconds }` (issue #44); the full `... <= 0 and ...`
+    // alert still needs the scalar operand (#35).
+    let qe = ok(
+        r#"predict_linear(node_filesystem_avail_bytes{fstype!~"^(fuse.*|tmpfs|cifs|nfs)"}[3h], 86400)"#,
     );
+    assert!(intents(&qe)
+        .iter()
+        .any(|i| matches!(i, AggIntent::PredictLinear { seconds } if (*seconds - 86400.0).abs() < 1e-9)));
 }
 
 #[test]

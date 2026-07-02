@@ -23,7 +23,8 @@
 //! | `count_over_time(m[w])` | `Aggregate{[Count], Window{w}}` |
 //! | `rate/irate(m[w])` | `Aggregate{[Rate{w}]}` (no Window) — `irate` shares the `rate` *intent*; the avg-vs-last-two-samples difference is an L4 estimation method |
 //! | `increase(m[w])` | `Aggregate{[Increase{w}]}` (no Window) |
-//! | `changes` / `resets` / `group` / `offset` / `@` | **rejected** — distinct semantics with no intent-algebra representation yet |
+//! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], Window{w}}` — per-series counter-derivative intents (issue #44); `holt_winters` is the legacy alias of `double_exponential_smoothing` |
+//! | `group` / `offset` / `@` | **rejected** — distinct semantics with no intent-algebra representation yet |
 //! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
 //! | `topk(k, count_over_time(…))` | `TopK{k, by}` (heavy-hitter intent) |
@@ -86,6 +87,16 @@ enum InnerFunc {
     Count,
     Rate(Duration),
     Increase(Duration),
+    // Counter-derivative range functions (issue #44). The window rides on the
+    // enclosing L2 `Window` node (like `*_over_time`), so these carry only
+    // their non-window scalar params.
+    Changes,
+    Delta,
+    IDelta,
+    Deriv,
+    Resets,
+    PredictLinear(f64),
+    DoubleExp { smoothing: f64, trend: f64 },
 }
 
 struct Inner {
@@ -480,9 +491,37 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
         "stddev_over_time" => at0(InnerFunc::StdDev),
         "stdvar_over_time" => at0(InnerFunc::Variance),
         "count_over_time" => at0(InnerFunc::Count),
-        // `changes` (value changes) and `resets` (counter resets) are NOT
-        // sample counts — aliasing them to `count_over_time` silently produced
-        // the wrong number. Reject until they have distinct intents.
+        // Counter-derivative range functions (issue #44). Each has its own
+        // intent — `changes` (value-change count) and `resets` (counter-reset
+        // count) are NOT sample counts, so they are not aliased to
+        // `count_over_time`. The window is arg 0's matrix; scalar params follow.
+        "changes" => at0(InnerFunc::Changes),
+        "delta" => at0(InnerFunc::Delta),
+        "idelta" => at0(InnerFunc::IDelta),
+        "deriv" => at0(InnerFunc::Deriv),
+        "resets" => at0(InnerFunc::Resets),
+        "predict_linear" => {
+            let (metric, matchers, window) = extract_matrix(arg(call, 0)?)?;
+            let seconds = num_arg(call, 1)?;
+            Ok(Inner {
+                metric,
+                matchers,
+                window: Some(window),
+                func: Some(InnerFunc::PredictLinear(seconds)),
+            })
+        }
+        // `holt_winters` is the legacy spelling of `double_exponential_smoothing`.
+        "double_exponential_smoothing" | "holt_winters" => {
+            let (metric, matchers, window) = extract_matrix(arg(call, 0)?)?;
+            let smoothing = num_arg(call, 1)?;
+            let trend = num_arg(call, 2)?;
+            Ok(Inner {
+                metric,
+                matchers,
+                window: Some(window),
+                func: Some(InnerFunc::DoubleExp { smoothing, trend }),
+            })
+        }
         other => Err(LoweringError::UnsupportedFunction(other.to_string())),
     }
 }
@@ -647,6 +686,16 @@ fn inner_func(f: &InnerFunc) -> AggFunc {
         InnerFunc::Count => AggFunc::Count,
         InnerFunc::Rate(w) => AggFunc::Rate { window: *w },
         InnerFunc::Increase(w) => AggFunc::Increase { window: *w },
+        InnerFunc::Changes => AggFunc::Changes,
+        InnerFunc::Delta => AggFunc::Delta,
+        InnerFunc::IDelta => AggFunc::IDelta,
+        InnerFunc::Deriv => AggFunc::Deriv,
+        InnerFunc::Resets => AggFunc::Resets,
+        InnerFunc::PredictLinear(s) => AggFunc::PredictLinear { seconds: *s },
+        InnerFunc::DoubleExp { smoothing, trend } => AggFunc::DoubleExpSmoothing {
+            smoothing: *smoothing,
+            trend: *trend,
+        },
     }
 }
 

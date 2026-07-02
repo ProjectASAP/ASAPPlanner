@@ -521,6 +521,19 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
         // Range is on the enclosing TimeRange node; intent carries no window.
         AggFunc::Rate { .. } => AggIntent::Rate,
         AggFunc::Increase { .. } => AggIntent::Increase,
+        // Counter-derivative range functions (issue #44) — the window rides on
+        // the enclosing TimeRange node; scalar params (predict horizon,
+        // smoothing factors) are carried in the intent.
+        AggFunc::Changes => AggIntent::Changes,
+        AggFunc::Delta => AggIntent::Delta,
+        AggFunc::IDelta => AggIntent::IDelta,
+        AggFunc::Deriv => AggIntent::Deriv,
+        AggFunc::Resets => AggIntent::Resets,
+        AggFunc::PredictLinear { seconds } => AggIntent::PredictLinear { seconds: *seconds },
+        AggFunc::DoubleExpSmoothing { smoothing, trend } => AggIntent::DoubleExpSmoothing {
+            smoothing: *smoothing,
+            trend: *trend,
+        },
     }
 }
 

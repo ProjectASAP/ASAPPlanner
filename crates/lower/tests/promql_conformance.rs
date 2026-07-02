@@ -735,15 +735,154 @@ fn unsupported_functions_are_rejected() {
         "timestamp(up)",
         "absent(up)",
         "absent_over_time(up[5m])",
-        "deriv(demo_disk_usage_bytes[1h])",
-        "delta(demo_disk_usage_bytes[1h])",
-        "predict_linear(demo_disk_usage_bytes[4h], 3600)",
         r#"label_replace(up, "host", "$1", "instance", "(.+):.*")"#,
         "clamp_max(go_goroutines, 5)",
-        // changes / resets are NOT sample counts (formerly aliased to Count).
-        "changes(demo_disk_usage_bytes[1h])",
-        "resets(http_requests_total[1h])",
+        // NOTE: changes / delta / deriv / resets / predict_linear /
+        // double_exponential_smoothing now lower to distinct counter-derivative
+        // intents (issue #44) — see section M below.
     ] {
         let _ = rejected(q);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M. Counter-derivative range functions     (functions.test; issue #44)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn counter_derivative_functions_lower_to_distinct_intents() {
+    // Each range function reduces one series' window to one value per series
+    // (label-preserving), riding on a `TimeRange`, and carries its OWN intent —
+    // deliberately not aliased to rate/increase/count.
+    for (q, want) in [
+        ("changes(m[15m])", AggIntent::Changes),
+        ("delta(m[5m])", AggIntent::Delta),
+        ("idelta(m[5m])", AggIntent::IDelta),
+        ("deriv(m[1h])", AggIntent::Deriv),
+        ("resets(m[1h])", AggIntent::Resets),
+    ] {
+        let qe = ok(q);
+        let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+            panic!("expected an Aggregate for {q:?}, got {qe:?}");
+        };
+        assert!(by.is_empty(), "{q}: per-series, no grouping");
+        assert_eq!(aggs.as_slice(), std::slice::from_ref(&want), "{q}: wrong intent");
+        assert!(
+            matches!(child.as_ref(), QueryExpr::TimeRange { .. }),
+            "{q}: reduction rides on a TimeRange, got {child:?}"
+        );
+    }
+}
+
+#[test]
+fn predict_linear_carries_horizon_seconds() {
+    // `predict_linear(v[w], t)` — the 2nd (scalar) arg is the prediction horizon
+    // in seconds; it must be carried in the intent (it changes the result).
+    let qe = ok("predict_linear(node_filesystem_avail_bytes[3h], 86400)");
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected an Aggregate, got {qe:?}");
+    };
+    assert_eq!(aggs.as_slice(), &[AggIntent::PredictLinear { seconds: 86400.0 }]);
+    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+}
+
+#[test]
+fn double_exponential_smoothing_carries_factors_and_holt_winters_is_an_alias() {
+    // Both spellings lower to the same intent carrying the two smoothing factors.
+    let want = AggIntent::DoubleExpSmoothing {
+        smoothing: 0.5,
+        trend: 0.3,
+    };
+    let a = ok("double_exponential_smoothing(m[10m], 0.5, 0.3)");
+    let b = ok("holt_winters(m[10m], 0.5, 0.3)");
+    assert_eq!(intents(&a).as_slice(), std::slice::from_ref(&want));
+    assert_eq!(a, b, "holt_winters is the legacy alias of double_exponential_smoothing");
+}
+
+#[test]
+fn aggregation_over_counter_derivative_keeps_labels() {
+    // A counter-derivative is per-series (label-preserving), so an outer
+    // `sum by (job)` can group on a label the inner `changes` preserved.
+    let qe = ok(r#"sum by (job) (changes(m{job="api"}[15m]))"#);
+    let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+        panic!("expected outer Aggregate, got {qe:?}");
+    };
+    assert!(!by.is_empty(), "outer sum groups on job");
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Changes)));
+    let _ = child;
+}
+
+#[test]
+fn outer_stat_over_counter_derivative_nests_two_levels() {
+    // A cross-series stat over a counter-derivative is a genuine two-level
+    // reduction: the derivative runs per series (inner), the stat aggregates
+    // across series (outer). They must not collapse into one node — and a
+    // grouped outer (`avg by (dc)`) must resolve its key against the labels the
+    // inner reduction preserved, threading any scalar param (predict horizon).
+    let qe = ok("avg by (dc) (predict_linear(m[3h], 3600))");
+    let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+        panic!("expected outer Aggregate, got {qe:?}");
+    };
+    assert!(!by.is_empty(), "outer `avg by (dc)` groups on a label");
+    assert!(matches!(aggs.as_slice(), [AggIntent::Avg { .. }]));
+    let QueryExpr::Aggregate { by: inner_by, aggs: inner_aggs, .. } = child.as_ref() else {
+        panic!("expected inner per-series Aggregate, got {child:?}");
+    };
+    assert!(inner_by.is_empty(), "inner derivative stays per-series");
+    assert_eq!(
+        inner_aggs.as_slice(),
+        std::slice::from_ref(&AggIntent::PredictLinear { seconds: 3600.0 })
+    );
+}
+
+#[test]
+fn topk_over_counter_derivative_is_generic_sort_limit() {
+    // `topk(k, deriv(...))` ranks the per-series derivative values — a generic
+    // `Sort + Limit`, NOT a heavy-hitter `TopK` (that's only `count_over_time`).
+    let qe = ok("topk(3, deriv(m[5m]))");
+    let QueryExpr::Limit { n, child, .. } = &qe else {
+        panic!("expected Limit, got {qe:?}");
+    };
+    assert_eq!(*n, 3);
+    assert!(matches!(child.as_ref(), QueryExpr::Sort { .. }));
+    assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Deriv)));
+    assert!(
+        !intents(&qe).iter().any(|i| matches!(i, AggIntent::TopK { .. })),
+        "counter-derivative topk is generic ranking, not a heavy-hitter sketch"
+    );
+}
+
+#[test]
+fn counter_derivative_composes_in_binary_ops() {
+    // As a vector operand: `delta(a[5m]) / delta(b[5m])` is a BinaryOp of two
+    // per-series Delta reductions.
+    let ratio = ok("delta(a[5m]) / delta(b[5m])");
+    let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &ratio else {
+        panic!("expected BinaryOp, got {ratio:?}");
+    };
+    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Div));
+    assert!(matches!(lhs.as_ref(), QueryExpr::Aggregate { aggs, .. } if aggs.as_slice() == [AggIntent::Delta]));
+    assert!(matches!(rhs.as_ref(), QueryExpr::Aggregate { aggs, .. } if aggs.as_slice() == [AggIntent::Delta]));
+
+    // Under an aggregate over a binary op mixing a counter-derivative with
+    // another per-series function: `sum(rate(m[5m]) + changes(m[5m]))`.
+    let mixed = ok("sum(rate(m[5m]) + changes(m[5m]))");
+    let QueryExpr::Aggregate { aggs, child, .. } = &mixed else {
+        panic!("expected Aggregate, got {mixed:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(child.as_ref(), QueryExpr::BinaryOp { .. }));
+    assert!(intents(&mixed).iter().any(|i| matches!(i, AggIntent::Rate)));
+    assert!(intents(&mixed).iter().any(|i| matches!(i, AggIntent::Changes)));
+}
+
+#[test]
+fn counter_derivative_over_a_subquery_is_rejected__GAP() {
+    // Unlike `*_over_time` (issue #42), the counter-derivative functions do not
+    // yet accept a sub-query argument — only a bare matrix selector. This is
+    // valid PromQL and rejects cleanly (never mislowered); wiring them into the
+    // sub-query path is a follow-up to #42/#44.
+    let _ = rejected("changes(rate(m[5m])[1h:])");
+    let _ = rejected("delta(sum(m)[5m:])");
 }

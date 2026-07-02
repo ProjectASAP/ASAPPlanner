@@ -149,9 +149,12 @@ fn rate_and_irate_share_the_same_intent() {
 #[test]
 fn changes_and_resets_are_not_count_over_time() {
     // PromQL: count_over_time = #samples, changes = #value-changes,
-    // resets = #counter-resets. They previously all collapsed to `Count`.
-    assert_rejected("changes(m[5m])");
-    assert_rejected("resets(m[5m])");
+    // resets = #counter-resets. They previously all collapsed to `Count`; now
+    // each lowers to its own intent (issue #44), so all three are pairwise
+    // distinct L3 rather than being rejected or merged.
+    assert_distinct("changes(m[5m])", "count_over_time(m[5m])");
+    assert_distinct("resets(m[5m])", "count_over_time(m[5m])");
+    assert_distinct("changes(m[5m])", "resets(m[5m])");
 }
 
 #[test]
