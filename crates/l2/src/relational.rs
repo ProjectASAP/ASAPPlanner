@@ -143,8 +143,14 @@ pub enum QueryExpr {
 
     /// π — projection / SELECT list (SQL). Column refs in `cols` resolve by
     /// name against the child schema during conversion.
+    ///
+    /// `qualifier` re-qualifies every output column with a table alias — set for
+    /// a derived table / inline view (`FROM (SELECT …) t`), so an outer `t.col`
+    /// reference resolves to *this* relation and a join over two derived tables
+    /// disambiguates its keys. `None` for an ordinary SELECT list.
     Project {
         cols: Vec<L2ProjectItem>,
+        qualifier: Option<String>,
         input: Box<QueryExpr>,
     },
 

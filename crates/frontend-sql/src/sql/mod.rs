@@ -114,13 +114,44 @@ impl<'a> SqlLowerer<'a> {
                     // A *derived table* / inline view — `FROM (SELECT …) t`, the
                     // SQL counterpart of PromQL function nesting (an aggregate
                     // over an aggregate, a filter over a derived aggregate, …).
-                    // Lower the inner plan recursively; `lower_plan` already
-                    // handles every node a sub-`SELECT` can produce. The alias is
-                    // dropped — a qualified outer reference (`t.col`) resolves by
-                    // bare name against the derived output schema, the same
-                    // `Qualified → bare-name` fallback the converter's column
-                    // resolution already applies for joins (issue #27).
-                    other => self.lower_plan(other),
+                    // Lower the inner plan, then re-qualify its output columns
+                    // with the alias so `t.col` resolves to *this* relation — and,
+                    // critically, so a join over two derived tables disambiguates
+                    // its keys instead of both binding to the first bare-name
+                    // match (issue #66). The inner column *names* are unchanged;
+                    // only the qualifier is stamped.
+                    other => {
+                        let alias_name = alias.alias.to_string();
+                        match self.lower_plan(other)? {
+                            // The derived SELECT list already lowered to a
+                            // Projection — stamp the alias onto it, no extra node.
+                            L2::Project { cols, input, .. } => Ok(L2::Project {
+                                cols,
+                                qualifier: Some(alias_name),
+                                input,
+                            }),
+                            // Otherwise (e.g. `SELECT *` unwrapped to a scan) wrap
+                            // in an identity projection that re-qualifies each
+                            // output column. Names come from the sub-plan's schema.
+                            inner => {
+                                let cols = alias
+                                    .input
+                                    .schema()
+                                    .fields()
+                                    .iter()
+                                    .map(|f| L2ProjectItem {
+                                        alias: Some(f.name().clone()),
+                                        expr: L2Expr::Column(ColumnRef::Named(f.name().clone())),
+                                    })
+                                    .collect();
+                                Ok(L2::Project {
+                                    cols,
+                                    qualifier: Some(alias_name),
+                                    input: Box::new(inner),
+                                })
+                            }
+                        }
+                    }
                 }
             }
             other => Err(LoweringError::UnsupportedFeature(format!(
@@ -300,7 +331,11 @@ impl<'a> SqlLowerer<'a> {
                 _ => df_expr_to_l2(e).map(|expr| L2ProjectItem { expr, alias: None }),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(L2::Project { cols, input })
+        Ok(L2::Project {
+            cols,
+            qualifier: None,
+            input,
+        })
     }
 
     fn lower_aggregate(&self, agg: &logical_expr::Aggregate) -> Result<L2, LoweringError> {

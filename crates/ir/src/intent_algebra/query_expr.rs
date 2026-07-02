@@ -272,6 +272,11 @@ pub enum QueryExpr {
     /// π — column projection.
     Project {
         cols: Vec<ProjectItem>,
+        /// Re-qualifies every output column with this table alias (a derived
+        /// table / inline view). `None` for an ordinary SELECT list. See
+        /// [`relational::QueryExpr::Project`](super::relational).
+        #[serde(default)]
+        qualifier: Option<String>,
         child: Box<QueryExpr>,
     },
 
@@ -515,7 +520,7 @@ impl QueryExpr {
             // is the explicit alias or a derived default. Projection may drop
             // the grouping/time columns, so unique_keys reset and time_index
             // is re-found by name.
-            QueryExpr::Project { cols, child } => {
+            QueryExpr::Project { cols, qualifier, child } => {
                 let in_schema = child.output_schema_in(scope)?;
                 let columns: Vec<Column> = cols
                     .iter()
@@ -526,7 +531,14 @@ impl QueryExpr {
                             .alias
                             .clone()
                             .unwrap_or_else(|| default_proj_name(&item.expr, i, &in_schema));
-                        Column::new(name, dtype, nullable)
+                        let c = Column::new(name, dtype, nullable);
+                        // A derived table re-qualifies its output columns with
+                        // its alias, so `t.col` (and a join over two derived
+                        // tables) resolves to the right relation.
+                        match qualifier {
+                            Some(q) => c.with_table(q),
+                            None => c,
+                        }
                     })
                     .collect();
                 let time_index = columns.iter().position(|c| c.name == "ts");
@@ -787,6 +799,7 @@ mod tests {
             vec![vec![0, 1]],
         );
         let q = QueryExpr::Project {
+            qualifier: None,
             cols: vec![
                 // bare column passthrough keeps its (schema) name + type: host=col 1
                 ProjectItem {
@@ -962,6 +975,7 @@ mod tests {
             vec![],
         );
         let q = QueryExpr::Project {
+            qualifier: None,
             cols: vec![
                 // value=col 1, ts=col 0
                 ProjectItem {
