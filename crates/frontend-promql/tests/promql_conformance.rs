@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use asap_ir::intent_algebra::schema::DataType;
 use asap_ir::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, MathFunc, QueryExpr, Source, TimeFunc,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, MathFunc, QueryExpr, Source, TimeFunc,
 };
 use asap_ir::types::AccuracyTarget;
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
@@ -77,7 +77,8 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         | QueryExpr::Subquery { child, .. }
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::WindowFunc { child, .. }
-        | QueryExpr::Project { child, .. } => collect(child, out),
+        | QueryExpr::Project { child, .. }
+        | QueryExpr::Relabel { child, .. } => collect(child, out),
         QueryExpr::BinaryOp { lhs, rhs, .. } => {
             collect(lhs, out);
             collect(rhs, out);
@@ -777,11 +778,14 @@ fn unsupported_functions_are_rejected() {
     // These parse fine but have no intent-algebra lowering yet. Each must return
     // a clean LoweringError rather than mislower.
     for q in [
-        r#"label_replace(up, "host", "$1", "instance", "(.+):.*")"#,
-        "label_join(up, \"c\", \"-\", \"a\", \"b\")",
+        "mad_over_time(m[5m])",
+        "sort(up)",
+        "sort_desc(up)",
+        r#"sort_by_label(up, "job")"#,
         // NOTE: counter-derivatives (#44), math/trig (#45, §O), presence (#47,
-        // §P) and time/calendar (#46, §Q) functions now lower — see those
-        // sections. Remaining rejects are label_replace/join (#50), etc.
+        // §P), time/calendar (#46, §Q), vector/scalar (#48, §R) and
+        // label_replace/label_join (#50, §T) functions now lower — see those
+        // sections. `info` (#84) is pinned separately in §R.
     ] {
         let _ = rejected(q);
     }
@@ -1369,4 +1373,73 @@ fn limitk_and_limit_ratio_are_rejected__GAP() {
     // (follow-up #86), not mislowered.
     let _ = rejected("limitk(2, http_requests)");
     let _ = rejected("limit_ratio(0.1, http_requests)");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T. Label-rewrite functions: label_replace / label_join   (functions.test; #50)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Descend single-child nodes to the first `Relabel`.
+fn first_relabel(e: &QueryExpr) -> &QueryExpr {
+    match e {
+        QueryExpr::Relabel { .. } => e,
+        QueryExpr::Aggregate { child, .. }
+        | QueryExpr::Filter { child, .. }
+        | QueryExpr::TimeRange { child, .. }
+        | QueryExpr::Window { child, .. } => first_relabel(child),
+        other => panic!("no Relabel reachable from {other:?}"),
+    }
+}
+
+/// True when `value` is a `FunctionCall` with the given name.
+fn is_fn_named(value: &L3Expr, name: &str) -> bool {
+    matches!(value, L3Expr::FunctionCall { name: n, .. } if n == name)
+}
+
+#[test]
+fn label_replace_is_a_relabel_over_the_vector() {
+    // SEMANTICS: `label_replace(v, dst, repl, src, regex)` rewrites the `dst`
+    // label per series from a regex over `src`; the sample value is untouched.
+    let qe = ok(r#"label_replace(up, "host", "$1", "instance", "(.+):.*")"#);
+    let QueryExpr::Relabel { dst, value, child } = &qe else {
+        panic!("expected a Relabel, got {qe:?}");
+    };
+    assert_eq!(dst, "host");
+    // The child is the untouched vector.
+    let (metric, _) = first_scan(child);
+    assert_eq!(metric, "up");
+    // The value expression is a `label_replace` fn reading the `src` label.
+    assert!(is_fn_named(value, "label_replace"));
+    // Output: the child's columns + the synthesized `host` label; value & ts kept.
+    let sch = qe.output_schema().unwrap();
+    assert!(sch.columns.iter().any(|c| c.name == "host"));
+    assert!(sch.columns.iter().any(|c| c.name == "value"));
+    assert!(sch.time_index.is_some(), "the vector's time axis survives");
+}
+
+#[test]
+fn label_join_concatenates_source_labels() {
+    // SEMANTICS: `label_join(v, dst, sep, src…)` joins the source labels with
+    // `sep` into `dst`.
+    let qe = ok(r#"label_join(up, "combined", "-", "job", "instance")"#);
+    let QueryExpr::Relabel { dst, value, .. } = &qe else {
+        panic!("expected a Relabel, got {qe:?}");
+    };
+    assert_eq!(dst, "combined");
+    assert!(is_fn_named(value, "label_join"));
+    let sch = qe.output_schema().unwrap();
+    assert!(sch.columns.iter().any(|c| c.name == "combined"));
+}
+
+#[test]
+fn label_replace_composes_under_an_aggregation() {
+    // `sum by (host) (label_replace(up, "host", "$1", "instance", "(.+):.*"))` —
+    // relabel first, then group by the synthesized label.
+    let qe = ok(r#"sum by (host) (label_replace(up, "host", "$1", "instance", "(.+):.*"))"#);
+    // A Relabel sits below the outer Sum.
+    let relabel = first_relabel(&qe);
+    assert!(matches!(relabel, QueryExpr::Relabel { dst, .. } if dst == "host"));
+    assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
+    let sch = qe.output_schema().unwrap();
+    assert!(sch.columns.iter().any(|c| c.name == "host"));
 }
