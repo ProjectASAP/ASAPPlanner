@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use asap_ir::intent_algebra::schema::DataType;
 use asap_ir::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, MathFunc, QueryExpr, Source,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, MathFunc, QueryExpr, Source, TimeFunc,
 };
 use asap_ir::types::AccuracyTarget;
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
@@ -91,7 +91,7 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
             collect(expr, out);
             collect(child, out);
         }
-        QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::Ref { .. } => {}
+        QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::Ref { .. } => {}
     }
 }
 
@@ -771,11 +771,11 @@ fn unsupported_functions_are_rejected() {
     // These parse fine but have no intent-algebra lowering yet. Each must return
     // a clean LoweringError rather than mislower.
     for q in [
-        "time()",
-        "timestamp(up)",
         r#"label_replace(up, "host", "$1", "instance", "(.+):.*")"#,
-        // NOTE: counter-derivatives (#44) now lower — see section M; the math /
-        // trig family (`abs`/`clamp*`/`ln`/…, #45) lowers — see section O.
+        "label_join(up, \"c\", \"-\", \"a\", \"b\")",
+        // NOTE: counter-derivatives (#44), math/trig (#45, §O), presence (#47,
+        // §P) and time/calendar (#46, §Q) functions now lower — see those
+        // sections. Remaining rejects are label_replace/join (#50), etc.
     ] {
         let _ = rejected(q);
     }
@@ -1125,4 +1125,82 @@ fn absent_keeps_matcher_labels_for_the_synthesized_output() {
         "matcher label `job` kept, got {:?}",
         cols.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Q. Time / calendar functions            (functions.test; issue #46)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn time_lowers_to_the_eval_time_scalar() {
+    // SEMANTICS: `time()` is the query evaluation timestamp as a scalar — a leaf,
+    // not an aggregate over any series.
+    assert!(matches!(ok("time()"), QueryExpr::EvalTime));
+    // …and it is scalar-shaped: a single float `value`, no time index.
+    let sch = ok("time()").output_schema().unwrap();
+    assert_eq!(sch.columns.len(), 1);
+    assert_eq!(sch.columns[0].name, "value");
+    assert!(sch.time_index.is_none());
+}
+
+#[test]
+fn time_minus_vector_is_the_uptime_pattern() {
+    // `time() - process_start_time_seconds` — the canonical uptime expression.
+    // The scalar `time()` broadcasts against the vector; the result takes the
+    // vector's schema.
+    let qe = ok("time() - process_start_time_seconds");
+    let QueryExpr::BinaryOp { lhs, op, .. } = &qe else {
+        panic!("expected a BinaryOp, got {qe:?}");
+    };
+    assert!(matches!(lhs.as_ref(), QueryExpr::EvalTime));
+    assert!(matches!(op, BinaryOpKind::Arith(ArithOp::Sub)));
+    assert!(qe.output_schema().is_ok());
+}
+
+#[test]
+fn calendar_functions_lower_to_time_fn_intents() {
+    // SEMANTICS: each of these is a per-series float transform of its argument's
+    // timestamp (or, for `timestamp`, the sample's own time). functions.test.
+    for (q, want) in [
+        ("timestamp(up)", TimeFunc::Timestamp),
+        ("minute(v)", TimeFunc::Minute),
+        ("hour(v)", TimeFunc::Hour),
+        ("day_of_week(v)", TimeFunc::DayOfWeek),
+        ("day_of_month(v)", TimeFunc::DayOfMonth),
+        ("day_of_year(v)", TimeFunc::DayOfYear),
+        ("month(v)", TimeFunc::Month),
+        ("year(v)", TimeFunc::Year),
+        ("days_in_month(v)", TimeFunc::DaysInMonth),
+    ] {
+        let qe = ok(q);
+        assert!(
+            has(&qe, |i| *i == AggIntent::TimeFn(want)),
+            "{q} → TimeFn({want:?}), got {:?}",
+            intents(&qe)
+        );
+    }
+}
+
+#[test]
+fn no_arg_calendar_function_reads_the_eval_time() {
+    // `day_of_week()` with no argument computes over the evaluation time itself,
+    // so it is a `TimeFn` aggregate whose child is the `EvalTime` scalar.
+    let qe = ok("day_of_week()");
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected an Aggregate, got {qe:?}");
+    };
+    assert!(matches!(
+        aggs.as_slice(),
+        [AggIntent::TimeFn(TimeFunc::DayOfWeek)]
+    ));
+    assert!(matches!(child.as_ref(), QueryExpr::EvalTime));
+}
+
+#[test]
+fn timestamp_composes_under_an_outer_aggregation() {
+    // `sum by (job) (timestamp(up))` — the per-series `timestamp` transform sits
+    // below an ordinary grouped sum. Both intents must appear in the tree.
+    let qe = ok("sum by (job) (timestamp(up))");
+    assert!(has(&qe, |i| *i == AggIntent::TimeFn(TimeFunc::Timestamp)));
+    assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
 }

@@ -169,6 +169,29 @@ pub enum AggIntent {
     /// PromQL `present_over_time(v[w])` — value 1 per series that has any sample
     /// in the range (per-series).
     PresentOverTime,
+
+    /// A time / calendar accessor (issue #46) — `timestamp`, `minute`, `hour`,
+    /// `day_of_week`, … over each sample's timestamp (or, for the no-arg forms,
+    /// over the evaluation time). Label-preserving per-series value transform.
+    /// (`time()` is the evaluation time itself — a `QueryExpr::EvalTime` leaf,
+    /// not this.)
+    TimeFn(TimeFunc),
+}
+
+/// Time / calendar accessor functions (issue #46), evaluated over a timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "fn", rename_all = "snake_case")]
+pub enum TimeFunc {
+    /// `timestamp(v)` — the sample's own timestamp as a value.
+    Timestamp,
+    Minute,
+    Hour,
+    DayOfWeek,
+    DayOfMonth,
+    DayOfYear,
+    Month,
+    Year,
+    DaysInMonth,
 }
 
 /// The element-wise math / trig functions (issue #45). Unary over the sample
@@ -233,7 +256,8 @@ impl AggIntent {
             | Self::HistogramFraction { .. }
             | Self::Absent
             | Self::AbsentOverTime
-            | Self::PresentOverTime => DataModel::TimeSeries,
+            | Self::PresentOverTime
+            | Self::TimeFn(_) => DataModel::TimeSeries,
             _ => DataModel::Any,
         }
     }
@@ -265,6 +289,7 @@ impl AggIntent {
                 | Self::Absent
                 | Self::AbsentOverTime
                 | Self::PresentOverTime
+                | Self::TimeFn(_)
         )
     }
 
@@ -337,6 +362,7 @@ impl AggIntent {
             AggIntent::Absent => col("absent", DataType::Float64, false),
             AggIntent::AbsentOverTime => col("absent_over_time", DataType::Float64, false),
             AggIntent::PresentOverTime => col("present_over_time", DataType::Float64, false),
+            AggIntent::TimeFn(_) => col("value", DataType::Float64, false),
         }
     }
 }

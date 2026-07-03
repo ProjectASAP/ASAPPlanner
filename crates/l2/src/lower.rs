@@ -85,6 +85,8 @@ pub fn convert(
 
         LQueryExpr::Scalar(v) => CQueryExpr::Scalar(*v),
 
+        LQueryExpr::EvalTime => CQueryExpr::EvalTime,
+
         LQueryExpr::Ref(name) => CQueryExpr::Ref {
             name: BindingName::new(name.clone()),
         },
@@ -589,6 +591,7 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
         AggFunc::Absent => AggIntent::Absent,
         AggFunc::AbsentOverTime => AggIntent::AbsentOverTime,
         AggFunc::PresentOverTime => AggIntent::PresentOverTime,
+        AggFunc::TimeFn(f) => AggIntent::TimeFn(*f),
     }
 }
 

@@ -269,6 +269,11 @@ pub enum QueryExpr {
     /// operand for `<vector> op <scalar>` thresholds / unit conversions (#35).
     Scalar(f64),
 
+    /// The query **evaluation time** as a scalar (PromQL `time()`) — a runtime
+    /// value, not a constant. Also the implicit input of the no-argument
+    /// calendar functions (`hour()`, `day_of_week()`, …). Issue #46.
+    EvalTime,
+
     /// σ — row-level filter. Output schema = child schema.
     Filter {
         pred: Predicate,
@@ -649,7 +654,9 @@ impl QueryExpr {
 
             // A scalar constant has no series — model it as a single `value`
             // column so it can sit as a `BinaryOp` operand.
-            QueryExpr::Scalar(_) => Ok(Schema {
+            // Both scalar leaves — a constant and the eval time — are a single
+            // `value` column with no labels.
+            QueryExpr::Scalar(_) | QueryExpr::EvalTime => Ok(Schema {
                 columns: vec![Column::new("value", DataType::Float64, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
@@ -657,10 +664,11 @@ impl QueryExpr {
             }),
 
             // The output shape of `<vector> op <scalar>` (or `<scalar> op
-            // <vector>`) is the vector side's — a scalar operand contributes only
-            // its value, no labels. Prefer the non-`Scalar` side.
+            // <vector>`) is the vector side's — a scalar operand (a constant or
+            // `time()`) contributes only its value, no labels. Prefer the
+            // non-scalar side.
             QueryExpr::BinaryOp { lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
-                (QueryExpr::Scalar(_), r) => r.output_schema_in(scope),
+                (QueryExpr::Scalar(_) | QueryExpr::EvalTime, r) => r.output_schema_in(scope),
                 (l, _) => l.output_schema_in(scope),
             },
         }
