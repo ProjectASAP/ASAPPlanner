@@ -310,10 +310,13 @@ fn sum_without_is_rejected() {
 }
 
 #[test]
-fn group_aggregator_is_rejected() {
+fn group_aggregator_lowers_to_a_distinct_intent() {
     // SEMANTICS (PromQL): `group(v)` returns a constant 1 per group (presence),
-    // NOT a sum. Rather than fold it onto `Sum` (wrong value) we reject it.
-    let _ = rejected("group by (job) (up)");
+    // NOT a sum. It now lowers to a distinct `Group` intent (never folded onto
+    // `Sum`) — see §S. Regression guard that it is not a `Sum`.
+    let qe = ok("group by (job) (up)");
+    assert!(has(&qe, |i| *i == AggIntent::Group));
+    assert!(!has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1277,4 +1280,93 @@ fn info_is_rejected__GAP() {
     // conversion — no intent-algebra representation yet (follow-up #84). Pinned
     // so adding support flips this deliberately.
     let _ = rejected("info(rate(http_requests_total[5m]))");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S. Extended aggregation operators: group / count_values (aggregators.test; #49)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn group_lowers_to_a_constant_group_intent() {
+    // SEMANTICS: `group(v)` yields a constant 1 per group — a distinct intent,
+    // NOT folded onto `sum` (which would return the value sum instead of 1).
+    let qe = ok("group(up)");
+    let QueryExpr::Aggregate { aggs, .. } = &qe else {
+        panic!("expected an Aggregate, got {qe:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Group]));
+    // Output column is the constant-1 `group` value.
+    let sch = qe.output_schema().unwrap();
+    assert!(sch.columns.iter().any(|c| c.name == "group"));
+}
+
+#[test]
+fn group_by_keeps_the_grouping_keys() {
+    // `group by (job) (up)` — the grouping keys ride on `Aggregate.by`.
+    let qe = ok("group by (job) (up)");
+    let sch = qe.output_schema().unwrap();
+    assert!(sch.columns.iter().any(|c| c.name == "job"));
+    assert!(has(&qe, |i| *i == AggIntent::Group));
+}
+
+#[test]
+fn count_values_groups_by_value_and_synthesizes_a_label() {
+    // SEMANTICS: `count_values("l", v)` groups the input series by their sample
+    // value, counts each distinct value, and emits that value as a new label
+    // `l`. The intent carries the label; schema gains a `Utf8` `l` column.
+    let qe = ok(r#"count_values("version", build_version)"#);
+    let QueryExpr::Aggregate { aggs, .. } = &qe else {
+        panic!("expected an Aggregate, got {qe:?}");
+    };
+    assert!(
+        matches!(aggs.as_slice(), [AggIntent::CountValues { label }] if label == "version")
+    );
+    let sch = qe.output_schema().unwrap();
+    let version = sch
+        .columns
+        .iter()
+        .find(|c| c.name == "version")
+        .expect("synthesized `version` label column");
+    assert_eq!(version.dtype, DataType::Utf8, "the value becomes a string label");
+    assert!(
+        sch.columns.iter().any(|c| c.name == "count"),
+        "and a count column"
+    );
+}
+
+#[test]
+fn count_values_accepts_a_parenthesised_label_and_by_grouping() {
+    // `count_values by (job) ((("v")), m)` — nested parens around the string
+    // param, plus `by` grouping. Both survive.
+    let qe = ok(r#"count_values by (job) ((("v")), m)"#);
+    assert!(has(
+        &qe,
+        |i| matches!(i, AggIntent::CountValues { label } if label == "v")
+    ));
+    let sch = qe.output_schema().unwrap();
+    assert!(sch.columns.iter().any(|c| c.name == "job"));
+    assert!(sch.columns.iter().any(|c| c.name == "v"));
+}
+
+#[test]
+fn count_values_label_colliding_with_a_group_key_is_not_duplicated() {
+    // `count_values by (job)("job", v)` — the synthesized label name collides
+    // with a group-by key. PromQL's synthesized label takes precedence; the
+    // output must carry a single `job` column, never two.
+    let qe = ok(r#"count_values by (job) ("job", version)"#);
+    let sch = qe.output_schema().unwrap();
+    let jobs = sch.columns.iter().filter(|c| c.name == "job").count();
+    assert_eq!(jobs, 1, "collision deduped, got {:?}", sch.columns);
+    assert!(sch.columns.iter().any(|c| c.name == "count"));
+}
+
+#[test]
+fn limitk_and_limit_ratio_are_rejected__GAP() {
+    // `limitk`/`limit_ratio` are series-*sampling* operators — they return a
+    // deterministic-but-unordered subset of the input series unchanged. Modeling
+    // them as `topk` (order-by-value + limit) would change *which* series pass
+    // through, so they are cleanly rejected pending a sampling-selection node
+    // (follow-up #86), not mislowered.
+    let _ = rejected("limitk(2, http_requests)");
+    let _ = rejected("limit_ratio(0.1, http_requests)");
 }

@@ -159,6 +159,12 @@ pub enum AggFunc {
     /// PromQL time / calendar accessor (`timestamp`/`hour`/`day_of_week`/…) →
     /// `AggIntent::TimeFn` (issue #46).
     TimeFn(TimeFunc),
+    /// PromQL `group(v)` → `AggIntent::Group` (issue #49).
+    Group,
+    /// PromQL `count_values("l", v)` → `AggIntent::CountValues` (issue #49).
+    CountValues {
+        label: String,
+    },
 }
 
 /// The Layer-2 relational query IR.
