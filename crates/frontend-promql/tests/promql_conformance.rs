@@ -773,8 +773,6 @@ fn unsupported_functions_are_rejected() {
     for q in [
         "time()",
         "timestamp(up)",
-        "absent(up)",
-        "absent_over_time(up[5m])",
         r#"label_replace(up, "host", "$1", "instance", "(.+):.*")"#,
         // NOTE: counter-derivatives (#44) now lower — see section M; the math /
         // trig family (`abs`/`clamp*`/`ln`/…, #45) lowers — see section O.
@@ -1098,4 +1096,33 @@ fn clamp_and_round_carry_their_params() {
 fn pi_lowers_to_a_scalar_constant() {
     // `pi()` is the constant π — a `Scalar` leaf, not a `Math` intent.
     assert!(matches!(ok("pi()"), QueryExpr::Scalar(v) if (v - std::f64::consts::PI).abs() < 1e-12));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P. Presence functions                     (functions.test; issue #47)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn presence_functions_lower_to_presence_intents() {
+    for (q, want) in [
+        (r#"absent(up{job="x"})"#, AggIntent::Absent),
+        ("absent_over_time(m[1h])", AggIntent::AbsentOverTime),
+        ("present_over_time(m[5m])", AggIntent::PresentOverTime),
+    ] {
+        let qe = ok(q);
+        assert!(intents(&qe).contains(&want), "{q}: got {:?}", intents(&qe));
+    }
+}
+
+#[test]
+fn absent_keeps_matcher_labels_for_the_synthesized_output() {
+    // `absent(v)` synthesizes its output labels from `v`'s equality matchers, so
+    // those labels must survive into the schema — here `job` from `{job="x"}`.
+    let qe = ok(r#"absent(up{job="x"})"#);
+    let cols = qe.output_schema().unwrap();
+    assert!(
+        cols.columns.iter().any(|c| c.name == "job"),
+        "matcher label `job` kept, got {:?}",
+        cols.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
 }

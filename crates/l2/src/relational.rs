@@ -150,6 +150,12 @@ pub enum AggFunc {
     /// PromQL element-wise math / trig transform (`abs`/`sqrt`/`clamp_max`/…) →
     /// `AggIntent::Math` (issue #45).
     Math(MathFunc),
+    /// PromQL `absent` → `AggIntent::Absent` (issue #47).
+    Absent,
+    /// PromQL `absent_over_time` → `AggIntent::AbsentOverTime`.
+    AbsentOverTime,
+    /// PromQL `present_over_time` → `AggIntent::PresentOverTime`.
+    PresentOverTime,
 }
 
 /// The Layer-2 relational query IR.
