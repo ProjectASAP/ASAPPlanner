@@ -498,9 +498,14 @@ impl QueryExpr {
                     // `count_values("l", v)` emits TWO columns: the synthesized
                     // `Utf8` label `l` (the stringified sample value it groups
                     // by) and the per-value count. `output_names[i]` still
-                    // overrides the count column's name if set.
+                    // overrides the count column's name if set. If `l` collides
+                    // with a group-by key of the same name, PromQL's synthesized
+                    // label takes precedence — emit a single column, never a
+                    // duplicate.
                     if let AggIntent::CountValues { label } = intent {
-                        out_cols.push(Column::new(label.clone(), DataType::Utf8, false));
+                        if !out_cols.iter().any(|c| c.name == *label) {
+                            out_cols.push(Column::new(label.clone(), DataType::Utf8, false));
+                        }
                         let mut cnt = intent.output_column(&probe);
                         if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
                             cnt.name = name.clone();

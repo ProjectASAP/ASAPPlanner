@@ -1349,6 +1349,18 @@ fn count_values_accepts_a_parenthesised_label_and_by_grouping() {
 }
 
 #[test]
+fn count_values_label_colliding_with_a_group_key_is_not_duplicated() {
+    // `count_values by (job)("job", v)` — the synthesized label name collides
+    // with a group-by key. PromQL's synthesized label takes precedence; the
+    // output must carry a single `job` column, never two.
+    let qe = ok(r#"count_values by (job) ("job", version)"#);
+    let sch = qe.output_schema().unwrap();
+    let jobs = sch.columns.iter().filter(|c| c.name == "job").count();
+    assert_eq!(jobs, 1, "collision deduped, got {:?}", sch.columns);
+    assert!(sch.columns.iter().any(|c| c.name == "count"));
+}
+
+#[test]
 fn limitk_and_limit_ratio_are_rejected__GAP() {
     // `limitk`/`limit_ratio` are series-*sampling* operators — they return a
     // deterministic-but-unordered subset of the input series unchanged. Modeling
