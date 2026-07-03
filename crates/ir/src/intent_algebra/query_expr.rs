@@ -495,6 +495,19 @@ impl QueryExpr {
                 // value probe (PromQL's single-column convention). A non-empty
                 // `output_names[i]` overrides the synthetic output column name.
                 for (i, intent) in aggs.iter().enumerate() {
+                    // `count_values("l", v)` emits TWO columns: the synthesized
+                    // `Utf8` label `l` (the stringified sample value it groups
+                    // by) and the per-value count. `output_names[i]` still
+                    // overrides the count column's name if set.
+                    if let AggIntent::CountValues { label } = intent {
+                        out_cols.push(Column::new(label.clone(), DataType::Utf8, false));
+                        let mut cnt = intent.output_column(&probe);
+                        if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
+                            cnt.name = name.clone();
+                        }
+                        out_cols.push(cnt);
+                        continue;
+                    }
                     let in_col = intent
                         .input_col()
                         .and_then(|id| in_schema.columns.get(id))
@@ -505,7 +518,12 @@ impl QueryExpr {
                     }
                     out_cols.push(out);
                 }
-                let unique_keys = if by.is_empty() {
+                // `count_values` groups by (by-keys ∪ the synthesized value
+                // label), so the by-keys alone are not a unique key — be
+                // conservative and claim none.
+                let has_count_values =
+                    aggs.iter().any(|a| matches!(a, AggIntent::CountValues { .. }));
+                let unique_keys = if by.is_empty() || has_count_values {
                     Vec::new()
                 } else {
                     vec![(0..by.len()).collect()]

@@ -601,6 +601,10 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
         AggFunc::AbsentOverTime => AggIntent::AbsentOverTime,
         AggFunc::PresentOverTime => AggIntent::PresentOverTime,
         AggFunc::TimeFn(f) => AggIntent::TimeFn(*f),
+        AggFunc::Group => AggIntent::Group,
+        AggFunc::CountValues { label } => AggIntent::CountValues {
+            label: label.clone(),
+        },
     }
 }
 

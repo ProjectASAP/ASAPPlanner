@@ -176,6 +176,23 @@ pub enum AggIntent {
     /// (`time()` is the evaluation time itself — a `QueryExpr::EvalTime` leaf,
     /// not this.)
     TimeFn(TimeFunc),
+
+    // ── Extended aggregation operators (issue #49) ───────────────────────
+    /// PromQL `group(v)` — a constant `1` per group ("group presence"). The
+    /// grouping keys ride on the enclosing `Aggregate.by`. Deliberately NOT
+    /// aliased to `Sum`/`Count`: the output value is always 1, independent of
+    /// the input values (folding it onto `Sum` would change the result).
+    Group,
+    /// PromQL `count_values("l", v)` — group the input series by their sample
+    /// *value* and count each distinct value, emitting that value as a new
+    /// label `l`. Output = one series per distinct value, with labels
+    /// `by-keys ∪ {l}` and value = the count. Unlike every other reducer this
+    /// adds a synthesized `Utf8` label column, so `Aggregate` schema derivation
+    /// special-cases it (two output columns, not one).
+    CountValues {
+        /// The name of the synthesized label carrying the stringified value.
+        label: String,
+    },
 }
 
 /// Time / calendar accessor functions (issue #46), evaluated over a timestamp.
@@ -363,6 +380,12 @@ impl AggIntent {
             AggIntent::AbsentOverTime => col("absent_over_time", DataType::Float64, false),
             AggIntent::PresentOverTime => col("present_over_time", DataType::Float64, false),
             AggIntent::TimeFn(_) => col("value", DataType::Float64, false),
+            // `group` — constant 1 per group.
+            AggIntent::Group => col("group", DataType::Float64, false),
+            // `count_values` — the *value* column (the per-value count). The
+            // synthesized `label` column is added alongside it by `Aggregate`
+            // schema derivation, which special-cases this intent.
+            AggIntent::CountValues { .. } => col("count", DataType::Int64, false),
         }
     }
 }
@@ -403,6 +426,8 @@ pub fn agg_is_exact(op: &AggIntent) -> bool {
             | AggIntent::Avg { .. }
             | AggIntent::Min { .. }
             | AggIntent::Max { .. }
+            | AggIntent::Group
+            | AggIntent::CountValues { .. }
     )
 }
 

@@ -33,6 +33,7 @@
 //! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
 //! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
+//! | `group(v)` / `count_values("l", v)` | `Aggregate{[Group]}` (constant 1) / `Aggregate{[CountValues{l}]}` (group-by-value + count, new label `l`) — issue #49; `limitk`/`limit_ratio` series sampling → #86 |
 //! | `topk(k, count_over_time(…))` | `TopK{k, by}` (heavy-hitter intent) |
 //! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
 //! | `m{f}` | `Filter(Source)` |
@@ -68,6 +69,9 @@ enum Outer {
     None,
     Plain(OuterIntent),
     Count,
+    /// `count_values("l", v)` — group by value + count, emitting the value as a
+    /// new label `l` (issue #49).
+    CountValues { label: String },
     TopK { k: u64, descending: bool },
 }
 
@@ -80,6 +84,8 @@ enum OuterIntent {
     StdDev,
     Variance,
     Quantile(f64),
+    /// `group(v)` — constant 1 per group (issue #49).
+    Group,
 }
 
 #[derive(Debug, Clone)]
@@ -355,11 +361,14 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
         Outer::Plain(OuterIntent::Sum)
     } else if op == token::T_GROUP {
         // `group(v)` yields a constant 1 per group (presence), not a sum of
-        // values. Folding it onto `Sum` changed the result; reject until a
-        // distinct group-presence intent exists.
-        return Err(LoweringError::UnsupportedAggregateOp(
-            "`group` (constant-1 presence) is not `sum`; no distinct intent yet".into(),
-        ));
+        // values — a distinct intent, never folded onto `Sum` (issue #49).
+        Outer::Plain(OuterIntent::Group)
+    } else if op == token::T_COUNT_VALUES {
+        // `count_values("l", v)` groups by sample value and counts, emitting the
+        // value as a new label `l` (the string parameter) — issue #49.
+        Outer::CountValues {
+            label: str_param(agg)?,
+        }
     } else if op == token::T_AVG {
         Outer::Plain(OuterIntent::Avg)
     } else if op == token::T_MIN {
@@ -394,6 +403,9 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L
         Outer::None => child,
         Outer::Plain(intent) => outer_aggregate(keys, outer_func(&intent), child),
         Outer::Count => outer_aggregate(keys, AggFunc::CountDistinct, child),
+        Outer::CountValues { label } => {
+            outer_aggregate(keys, AggFunc::CountValues { label }, child)
+        }
         Outer::TopK { k, descending } => {
             let sorted = L2::Sort {
                 keys: vec![L2SortKey {
@@ -849,6 +861,17 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
                 outer_aggregate(keys, AggFunc::CountDistinct, inner_agg)
             }
         }),
+        Outer::CountValues { label } => {
+            let func = AggFunc::CountValues { label };
+            Ok(match &inner.func {
+                None => windowed_aggregate(inner, keys, func),
+                Some(f) => {
+                    let inner_f = inner_func(f);
+                    let inner_agg = windowed_aggregate(inner, vec![], inner_f);
+                    outer_aggregate(keys, func, inner_agg)
+                }
+            })
+        }
         Outer::TopK { k, descending } => {
             // Heavy-hitter only when ranking by frequency (`count`): that is a
             // first-class aggregate intent → `TopK`. Any other ranking (topk
@@ -999,6 +1022,28 @@ fn outer_func(o: &OuterIntent) -> AggFunc {
         OuterIntent::StdDev => AggFunc::StdDev { population: true },
         OuterIntent::Variance => AggFunc::Variance { population: true },
         OuterIntent::Quantile(q) => AggFunc::Quantile(*q),
+        OuterIntent::Group => AggFunc::Group,
+    }
+}
+
+/// A `count_values` string parameter (the synthesized label name). PromQL wraps
+/// it in a `StringLiteral`, possibly parenthesised (`count_values((("v")), …)`).
+fn str_param(agg: &AggregateExpr) -> Result<String> {
+    fn unwrap_str(expr: &Expr) -> Result<String> {
+        match expr {
+            Expr::StringLiteral(s) => Ok(s.val.clone()),
+            Expr::Paren(p) => unwrap_str(&p.expr),
+            other => Err(LoweringError::InvalidParameter(format!(
+                "`count_values` label must be a string literal, got {:?}",
+                std::mem::discriminant(other)
+            ))),
+        }
+    }
+    match &agg.param {
+        Some(e) => unwrap_str(e),
+        None => Err(LoweringError::MissingArgument(
+            "`count_values` label parameter".into(),
+        )),
     }
 }
 

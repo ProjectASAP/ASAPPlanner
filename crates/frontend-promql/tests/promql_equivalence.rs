@@ -174,9 +174,10 @@ fn changes_and_resets_are_not_count_over_time() {
 #[test]
 fn group_is_not_sum() {
     // PromQL `group` returns a constant 1 per group; it previously collapsed
-    // onto `sum` (sum of values).
-    assert_rejected("group(up)");
-    assert_rejected("group by (job) (up)");
+    // onto `sum` (sum of values). It now lowers to its own `Group` intent
+    // (issue #49) — distinct L3 from `sum`, not merged.
+    assert_distinct("group(up)", "sum(up)");
+    assert_distinct("group by (job) (up)", "sum by (job) (up)");
 }
 
 #[test]
