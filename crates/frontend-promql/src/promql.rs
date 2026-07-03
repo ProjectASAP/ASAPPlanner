@@ -14,8 +14,8 @@
 //! | PromQL | L2 shape (→ canonical via `convert_root`) |
 //! |---|---|
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], Window{w, Filter(Source)}}` |
-//! | `histogram_quantile(φ, sum by (le) (…))` | `Aggregate{[HistogramQuantile(φ)]}` — classic cumulative-bucket interpolation (recognised by the `by (le)` grouping) |
-//! | `histogram_quantile(φ, <native hist>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able) |
+//! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{[HistogramQuantile(φ)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
+//! | `histogram_quantile(φ, <native hist / raw>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target) |
 //! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | `Aggregate{[Histogram*]}` — per-series native-histogram accessors (issue #43) |
 //! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
 //! | `OUTER_op(<any expr>)` (e.g. `max(sum by (job) (rate(m[w])))`, `sum(rate(a[w]) + rate(b[w]))`) | `Aggregate{[OUTER_op]}` over the fully-lowered `<any expr>` — arbitrary function nesting (issue #27) |
@@ -432,7 +432,7 @@ fn walk_histogram(call: &Call) -> Result<L2> {
         //    intent (sketch-able).
         // We can't see sample types at lowering, so the classic form is
         // recognised by its distinctive `by (le)` grouping (issue #43).
-        let func = if groups_by_le(arg_expr) {
+        let func = if is_classic_bucket_arg(arg_expr) {
             AggFunc::HistogramQuantile(phi)
         } else {
             AggFunc::Quantile(phi)
@@ -458,18 +458,48 @@ fn walk_histogram(call: &Call) -> Result<L2> {
     Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
 }
 
-/// Whether `expr` is the classic `histogram_quantile` bucket argument — an
-/// aggregation grouped by the `le` bucket-boundary label (`sum by (le) (…)`),
-/// which distinguishes the cumulative-bucket form from a native histogram.
-fn groups_by_le(expr: &Expr) -> bool {
+/// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`
+/// argument — as opposed to a native histogram or raw samples. Recognised
+/// structurally, by any of:
+///  - a `by (le)` grouping (`sum by (le) (…)`),
+///  - a selector on a classic `_bucket` metric (`http_request_…_bucket`),
+///  - a selector with an `le` label matcher (`{le="…"}`).
+///
+/// The bucket form must be *interpolated* (`HistogramQuantile`); everything
+/// else is a sketch-able generic `Quantile`. This is a heuristic proxy for the
+/// real signal — the argument's sample type — which isn't visible at lowering;
+/// see the follow-up issue on the discrimination criteria (issue #43).
+fn is_classic_bucket_arg(expr: &Expr) -> bool {
     match expr {
-        Expr::Paren(p) => groups_by_le(&p.expr),
-        Expr::Aggregate(agg) => matches!(
-            &agg.modifier,
-            Some(LabelModifier::Include(ls)) if ls.labels.iter().any(|l| l == "le")
-        ),
+        Expr::Paren(p) => is_classic_bucket_arg(&p.expr),
+        Expr::Unary(u) => is_classic_bucket_arg(&u.expr),
+        Expr::Subquery(s) => is_classic_bucket_arg(&s.expr),
+        Expr::Aggregate(agg) => {
+            matches!(
+                &agg.modifier,
+                Some(LabelModifier::Include(ls)) if ls.labels.iter().any(|l| l == "le")
+            ) || is_classic_bucket_arg(&agg.expr)
+        }
+        Expr::Binary(b) => is_classic_bucket_arg(&b.lhs) || is_classic_bucket_arg(&b.rhs),
+        Expr::Call(c) => c.args.args.iter().any(|a| is_classic_bucket_arg(a)),
+        Expr::VectorSelector(vs) => selector_is_bucket(vs),
+        Expr::MatrixSelector(ms) => selector_is_bucket(&ms.vs),
         _ => false,
     }
+}
+
+/// A classic histogram bucket selector — a `_bucket`-named metric (via bare name
+/// or `__name__` matcher) or an explicit `le` label matcher.
+fn selector_is_bucket(vs: &VectorSelector) -> bool {
+    let name = vs.name.as_deref().or_else(|| {
+        vs.matchers
+            .matchers
+            .iter()
+            .find(|m| m.name == "__name__")
+            .map(|m| m.value.as_str())
+    });
+    name.is_some_and(|n| n.ends_with("_bucket"))
+        || vs.matchers.matchers.iter().any(|m| m.name == "le")
 }
 
 fn walk_binary(bin: &BinaryExpr) -> Result<L2> {

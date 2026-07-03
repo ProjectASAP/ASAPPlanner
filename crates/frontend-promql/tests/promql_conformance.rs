@@ -425,12 +425,13 @@ fn quantile_over_time_is_aggregate_over_time_range() {
 
 #[test]
 fn histogram_quantile_over_rate() {
-    // SEMANTICS: φ-quantile estimated from bucket rates.
+    // φ-quantile from bucket rates. The `_bucket` metric marks the classic
+    // cumulative-bucket form → `HistogramQuantile` (even without `sum by (le)`).
     let qe = ok("histogram_quantile(0.9, rate(demo_api_request_duration_seconds_bucket[5m]))");
     let QueryExpr::Aggregate { aggs, .. } = &qe else {
-        panic!("expected Aggregate{{Quantile}}, got {qe:?}");
+        panic!("expected Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.9).abs() < 1e-9));
+    assert!(matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.9).abs() < 1e-9));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
 }
 
@@ -980,22 +981,33 @@ fn predict_linear_and_double_exp_over_a_subquery_carry_params() {
 
 #[test]
 fn histogram_quantile_classic_bucket_vs_native() {
-    // Two lowerings of `histogram_quantile(φ, …)`: the classic `le`-bucket form
-    // (grouped by `le`) → the exact bucket-interpolation `HistogramQuantile`
-    // intent; a native-histogram argument → the generic (sketch-able) `Quantile`.
-    let classic = ok("histogram_quantile(0.9, sum by (le) (rate(x_bucket[5m])))");
-    assert!(
-        has(&classic, |i| matches!(i, AggIntent::HistogramQuantile { q } if (*q - 0.9).abs() < 1e-9)),
-        "classic le-bucket form → HistogramQuantile"
-    );
-    assert!(!has(&classic, |i| matches!(i, AggIntent::Quantile { .. })));
-
-    let native = ok("histogram_quantile(0.9, my_native_histogram)");
-    assert!(
-        has(&native, |i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)),
-        "native form → generic Quantile"
-    );
-    assert!(!has(&native, |i| matches!(i, AggIntent::HistogramQuantile { .. })));
+    // Two lowerings of `histogram_quantile(φ, …)`: the classic cumulative-bucket
+    // form → exact `HistogramQuantile`; a native-histogram / raw-samples argument
+    // → the generic (sketch-able) `Quantile`. The classic form is recognised by
+    // `by (le)`, a `_bucket` metric, or an `le` matcher (issue #43).
+    for classic in [
+        "histogram_quantile(0.9, sum by (le) (rate(x_bucket[5m])))",
+        "histogram_quantile(0.9, rate(x_bucket[5m]))",            // bare _bucket metric
+        r#"histogram_quantile(0.9, rate(x{le="0.5"}[5m]))"#,      // le matcher
+    ] {
+        let qe = ok(classic);
+        assert!(
+            has(&qe, |i| matches!(i, AggIntent::HistogramQuantile { q } if (*q - 0.9).abs() < 1e-9)),
+            "classic bucket form → HistogramQuantile: {classic}"
+        );
+        assert!(!has(&qe, |i| matches!(i, AggIntent::Quantile { .. })), "{classic}");
+    }
+    for native in [
+        "histogram_quantile(0.9, my_native_histogram)",
+        "histogram_quantile(0.9, request_duration_seconds)",     // raw samples (your extension)
+    ] {
+        let qe = ok(native);
+        assert!(
+            has(&qe, |i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)),
+            "native/raw form → generic Quantile: {native}"
+        );
+        assert!(!has(&qe, |i| matches!(i, AggIntent::HistogramQuantile { .. })), "{native}");
+    }
 }
 
 #[test]
