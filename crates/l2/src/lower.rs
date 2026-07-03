@@ -87,6 +87,15 @@ pub fn convert(
 
         LQueryExpr::EvalTime => CQueryExpr::EvalTime,
 
+        // `vector(s)` / `scalar(v)` — the type-conversion bridges. Convert the
+        // child through the same fallback schema and wrap it (issue #48).
+        LQueryExpr::VectorFromScalar(inner) => {
+            CQueryExpr::VectorFromScalar(Box::new(convert(inner, fallback, acc)?))
+        }
+        LQueryExpr::ScalarFromVector(inner) => {
+            CQueryExpr::ScalarFromVector(Box::new(convert(inner, fallback, acc)?))
+        }
+
         LQueryExpr::Ref(name) => CQueryExpr::Ref {
             name: BindingName::new(name.clone()),
         },
