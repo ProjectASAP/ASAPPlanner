@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use asap_ir::intent_algebra::schema::DataType;
 use asap_ir::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, QueryExpr, Source,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, MathFunc, QueryExpr, Source,
 };
 use asap_ir::types::AccuracyTarget;
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
@@ -776,10 +776,8 @@ fn unsupported_functions_are_rejected() {
         "absent(up)",
         "absent_over_time(up[5m])",
         r#"label_replace(up, "host", "$1", "instance", "(.+):.*")"#,
-        "clamp_max(go_goroutines, 5)",
-        // NOTE: changes / delta / deriv / resets / predict_linear /
-        // double_exponential_smoothing now lower to distinct counter-derivative
-        // intents (issue #44) — see section M below.
+        // NOTE: counter-derivatives (#44) now lower — see section M; the math /
+        // trig family (`abs`/`clamp*`/`ln`/…, #45) lowers — see section O.
     ] {
         let _ = rejected(q);
     }
@@ -1041,4 +1039,63 @@ fn histogram_fraction_carries_its_bounds() {
         AggIntent::HistogramFraction { lower, upper }
             if *lower == 0.0 && (*upper - 0.2).abs() < 1e-9
     )));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// O. Math / trig scalar-transform functions (functions.test; issue #45)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn math_functions_lower_to_per_series_math_intents() {
+    // Each `f(v)` is a per-series element-wise value transform — a per-series
+    // `Aggregate{[Math(f)]}` over the (instant) argument, no grouping.
+    for (q, want) in [
+        ("abs(v)", MathFunc::Abs),
+        ("ceil(v)", MathFunc::Ceil),
+        ("floor(v)", MathFunc::Floor),
+        ("sqrt(v)", MathFunc::Sqrt),
+        ("ln(v)", MathFunc::Ln),
+        ("log2(v)", MathFunc::Log2),
+        ("sgn(v)", MathFunc::Sgn),
+        ("sin(v)", MathFunc::Sin),
+        ("atanh(v)", MathFunc::Atanh),
+        ("deg(v)", MathFunc::Deg),
+        ("rad(v)", MathFunc::Rad),
+    ] {
+        let qe = ok(q);
+        let QueryExpr::Aggregate { by, aggs, .. } = &qe else {
+            panic!("{q}: expected an Aggregate, got {qe:?}");
+        };
+        assert!(by.is_empty(), "{q}: per-series, no grouping");
+        assert!(
+            matches!(aggs.as_slice(), [AggIntent::Math(m)] if *m == want),
+            "{q}: wrong intent, got {aggs:?}"
+        );
+    }
+}
+
+#[test]
+fn clamp_and_round_carry_their_params() {
+    assert!(intents(&ok("clamp(v, 0, 100)")).iter().any(
+        |i| matches!(i, AggIntent::Math(MathFunc::Clamp { min, max }) if *min == 0.0 && *max == 100.0)
+    ));
+    assert!(intents(&ok("clamp_min(v, 1)"))
+        .iter()
+        .any(|i| matches!(i, AggIntent::Math(MathFunc::ClampMin { min }) if *min == 1.0)));
+    assert!(intents(&ok("clamp_max(v, 5)"))
+        .iter()
+        .any(|i| matches!(i, AggIntent::Math(MathFunc::ClampMax { max }) if *max == 5.0)));
+    // `round(v)` defaults the step to 1; `round(v, 5)` reads it.
+    assert!(intents(&ok("round(v)"))
+        .iter()
+        .any(|i| matches!(i, AggIntent::Math(MathFunc::Round { to_nearest }) if *to_nearest == 1.0)));
+    assert!(intents(&ok("round(v, 5)"))
+        .iter()
+        .any(|i| matches!(i, AggIntent::Math(MathFunc::Round { to_nearest }) if *to_nearest == 5.0)));
+}
+
+#[test]
+fn pi_lowers_to_a_scalar_constant() {
+    // `pi()` is the constant π — a `Scalar` leaf, not a `Math` intent.
+    assert!(matches!(ok("pi()"), QueryExpr::Scalar(v) if (v - std::f64::consts::PI).abs() < 1e-12));
 }

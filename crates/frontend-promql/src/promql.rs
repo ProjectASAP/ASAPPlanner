@@ -49,6 +49,7 @@ use asap_ir::intent_algebra::query_expr::{
 use asap_l2::relational::{
     AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
+use asap_ir::intent_algebra::agg_intent::MathFunc;
 use asap_ir::intent_algebra::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Scalar};
 
 use crate::error::PromqlError as LoweringError;
@@ -165,6 +166,7 @@ fn walk(expr: &Expr) -> Result<L2> {
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
         Expr::Call(call) if call.func.name.starts_with("histogram_") => walk_histogram(call),
+        Expr::Call(call) if is_math_fn(call.func.name) => walk_math(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -456,6 +458,72 @@ fn walk_histogram(call: &Call) -> Result<L2> {
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     };
     Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
+}
+
+/// The element-wise math / trig functions (issue #45).
+fn is_math_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "abs" | "ceil" | "floor" | "exp" | "ln" | "log2" | "log10" | "sqrt" | "sgn" | "sin" | "cos"
+            | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh"
+            | "atanh" | "deg" | "rad" | "pi" | "round" | "clamp" | "clamp_min" | "clamp_max"
+    )
+}
+
+/// A math / trig function — a per-series element-wise value transform, lowered
+/// to a per-series `Aggregate{[Math(f)]}` over the (instant) argument vector.
+/// `pi()` is the constant π, lowered to a `Scalar` leaf (issue #45).
+fn walk_math(call: &Call) -> Result<L2> {
+    if call.func.name == "pi" {
+        return Ok(L2::Scalar(std::f64::consts::PI));
+    }
+    let func = match call.func.name {
+        "abs" => MathFunc::Abs,
+        "ceil" => MathFunc::Ceil,
+        "floor" => MathFunc::Floor,
+        "exp" => MathFunc::Exp,
+        "ln" => MathFunc::Ln,
+        "log2" => MathFunc::Log2,
+        "log10" => MathFunc::Log10,
+        "sqrt" => MathFunc::Sqrt,
+        "sgn" => MathFunc::Sgn,
+        "sin" => MathFunc::Sin,
+        "cos" => MathFunc::Cos,
+        "tan" => MathFunc::Tan,
+        "asin" => MathFunc::Asin,
+        "acos" => MathFunc::Acos,
+        "atan" => MathFunc::Atan,
+        "sinh" => MathFunc::Sinh,
+        "cosh" => MathFunc::Cosh,
+        "tanh" => MathFunc::Tanh,
+        "asinh" => MathFunc::Asinh,
+        "acosh" => MathFunc::Acosh,
+        "atanh" => MathFunc::Atanh,
+        "deg" => MathFunc::Deg,
+        "rad" => MathFunc::Rad,
+        // `round(v)` defaults the step to 1; `round(v, to)` reads arg 1.
+        "round" => MathFunc::Round {
+            to_nearest: if call.args.args.len() >= 2 {
+                num_arg(call, 1)?
+            } else {
+                1.0
+            },
+        },
+        "clamp" => MathFunc::Clamp {
+            min: num_arg(call, 1)?,
+            max: num_arg(call, 2)?,
+        },
+        "clamp_min" => MathFunc::ClampMin {
+            min: num_arg(call, 1)?,
+        },
+        "clamp_max" => MathFunc::ClampMax {
+            max: num_arg(call, 1)?,
+        },
+        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
+    };
+    // The value being transformed is always arg 0 (a vector).
+    let inner = walk(arg(call, 0)?)?;
+    Ok(outer_aggregate(vec![], AggFunc::Math(func), inner))
 }
 
 /// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`

@@ -148,6 +148,52 @@ pub enum AggIntent {
     HistogramQuantile {
         q: f64,
     },
+
+    /// A per-sample element-wise math / trig transform (issue #45) — `abs`,
+    /// `ceil`, `sqrt`, `ln`, `clamp_max`, the trig family, … Label-preserving:
+    /// one value out per input sample. (`pi()` is a constant, lowered to a
+    /// scalar leaf, not this.)
+    Math(MathFunc),
+}
+
+/// The element-wise math / trig functions (issue #45). Unary over the sample
+/// value unless a variant carries scalar params (`clamp*`, `round`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "fn", rename_all = "snake_case")]
+pub enum MathFunc {
+    Abs,
+    Ceil,
+    Floor,
+    Exp,
+    Ln,
+    Log2,
+    Log10,
+    Sqrt,
+    Sgn,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Sinh,
+    Cosh,
+    Tanh,
+    Asinh,
+    Acosh,
+    Atanh,
+    /// `deg(v)` — radians → degrees.
+    Deg,
+    /// `rad(v)` — degrees → radians.
+    Rad,
+    /// `round(v, to_nearest)` — nearest multiple of `to_nearest` (default 1).
+    Round { to_nearest: f64 },
+    /// `clamp(v, min, max)`.
+    Clamp { min: f64, max: f64 },
+    /// `clamp_min(v, min)`.
+    ClampMin { min: f64 },
+    /// `clamp_max(v, max)`.
+    ClampMax { max: f64 },
 }
 
 impl AggIntent {
@@ -197,6 +243,7 @@ impl AggIntent {
                 | Self::HistogramStdDev
                 | Self::HistogramStdVar
                 | Self::HistogramFraction { .. }
+                | Self::Math(_)
         )
     }
 
@@ -265,6 +312,7 @@ impl AggIntent {
             AggIntent::HistogramQuantile { .. } => {
                 col("histogram_quantile", DataType::Float64, false)
             }
+            AggIntent::Math(_) => col("value", DataType::Float64, false),
         }
     }
 }
