@@ -184,13 +184,14 @@ fn kube_replica_mismatch_comparison_lowers() {
 fn histogram_quantile_core_lowers() {
     // GitLab/Sidekiq latency SLOs: `histogram_quantile(0.95, sum(rate(<…>_bucket[5m])) by (le))`
     // (the corpus query is this `> N` thresholded; the body is the canonical
-    // Prometheus latency-percentile pattern). It lowers to the full nested shape:
-    // Quantile over `sum by (le)` over rate over a TimeRange scan.
+    // Prometheus latency-percentile pattern). The `by (le)` grouping marks the
+    // classic bucket form, so it lowers to `HistogramQuantile` (bucket
+    // interpolation) over `sum by (le)` over rate over a TimeRange scan.
     let qe =
         ok("histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))");
     assert!(has(
         &qe,
-        |i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.95).abs() < 1e-9)
+        |i| matches!(i, AggIntent::HistogramQuantile { q } if (*q - 0.95).abs() < 1e-9)
     ));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));

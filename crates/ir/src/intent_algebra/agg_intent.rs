@@ -118,6 +118,36 @@ pub enum AggIntent {
         /// Trend smoothing factor `tf` ∈ (0, 1).
         trend: f64,
     },
+
+    // ── Native-histogram accessors (issue #43) ───────────────────────────
+    // Per-series extractions from a native-histogram instant vector — one
+    // float per series, label-preserving. (Classic `le`-bucket
+    // `histogram_quantile` stays a `Quantile` over the bucketed vector.)
+    /// PromQL `histogram_count(v)` — observation count of each native histogram.
+    HistogramCount,
+    /// PromQL `histogram_sum(v)` — sum of observations.
+    HistogramSum,
+    /// PromQL `histogram_avg(v)` — mean (`sum/count`).
+    HistogramAvg,
+    /// PromQL `histogram_stddev(v)` — standard deviation of observations.
+    HistogramStdDev,
+    /// PromQL `histogram_stdvar(v)` — variance of observations.
+    HistogramStdVar,
+    /// PromQL `histogram_fraction(lower, upper, v)` — fraction of observations
+    /// in `[lower, upper]`.
+    HistogramFraction {
+        lower: f64,
+        upper: f64,
+    },
+    /// PromQL `histogram_quantile(φ, <le-bucketed vector>)` — the φ-quantile
+    /// interpolated from classic cumulative `le` buckets. Distinct from the
+    /// generic [`Quantile`](Self::Quantile) the *native*-histogram form lowers
+    /// to: this is exact bucket interpolation, not a sketch-able quantile, so it
+    /// carries no accuracy target and is a cross-series reduction over `le`
+    /// (issue #43).
+    HistogramQuantile {
+        q: f64,
+    },
 }
 
 impl AggIntent {
@@ -133,7 +163,13 @@ impl AggIntent {
             | Self::Deriv
             | Self::Resets
             | Self::PredictLinear { .. }
-            | Self::DoubleExpSmoothing { .. } => DataModel::TimeSeries,
+            | Self::DoubleExpSmoothing { .. }
+            | Self::HistogramCount
+            | Self::HistogramSum
+            | Self::HistogramAvg
+            | Self::HistogramStdDev
+            | Self::HistogramStdVar
+            | Self::HistogramFraction { .. } => DataModel::TimeSeries,
             _ => DataModel::Any,
         }
     }
@@ -155,6 +191,12 @@ impl AggIntent {
                 | Self::Resets
                 | Self::PredictLinear { .. }
                 | Self::DoubleExpSmoothing { .. }
+                | Self::HistogramCount
+                | Self::HistogramSum
+                | Self::HistogramAvg
+                | Self::HistogramStdDev
+                | Self::HistogramStdVar
+                | Self::HistogramFraction { .. }
         )
     }
 
@@ -211,6 +253,17 @@ impl AggIntent {
             }
             AggIntent::DoubleExpSmoothing { .. } => {
                 col("double_exponential_smoothing", DataType::Float64, false)
+            }
+            AggIntent::HistogramCount => col("histogram_count", DataType::Float64, false),
+            AggIntent::HistogramSum => col("histogram_sum", DataType::Float64, false),
+            AggIntent::HistogramAvg => col("histogram_avg", DataType::Float64, false),
+            AggIntent::HistogramStdDev => col("histogram_stddev", DataType::Float64, false),
+            AggIntent::HistogramStdVar => col("histogram_stdvar", DataType::Float64, false),
+            AggIntent::HistogramFraction { .. } => {
+                col("histogram_fraction", DataType::Float64, false)
+            }
+            AggIntent::HistogramQuantile { .. } => {
+                col("histogram_quantile", DataType::Float64, false)
             }
         }
     }

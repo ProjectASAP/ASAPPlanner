@@ -425,12 +425,13 @@ fn quantile_over_time_is_aggregate_over_time_range() {
 
 #[test]
 fn histogram_quantile_over_rate() {
-    // SEMANTICS: φ-quantile estimated from bucket rates.
+    // φ-quantile from bucket rates. The `_bucket` metric marks the classic
+    // cumulative-bucket form → `HistogramQuantile` (even without `sum by (le)`).
     let qe = ok("histogram_quantile(0.9, rate(demo_api_request_duration_seconds_bucket[5m]))");
     let QueryExpr::Aggregate { aggs, .. } = &qe else {
-        panic!("expected Aggregate{{Quantile}}, got {qe:?}");
+        panic!("expected Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.9).abs() < 1e-9));
+    assert!(matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.9).abs() < 1e-9));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
 }
 
@@ -442,9 +443,10 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
         "histogram_quantile(0.99, sum by(le) (rate(demo_api_request_duration_seconds_bucket[5m])))",
     );
     let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
-        panic!("expected outer Aggregate{{Quantile}}, got {qe:?}");
+        panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { .. }]));
+    // `by (le)` marks the classic cumulative-bucket form → `HistogramQuantile`.
+    assert!(matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { .. }]));
     // `sum by(le)` now survives as a positional Aggregate (by = [2], `le`), over
     // the inner Rate — no name-based Partition.
     let QueryExpr::Aggregate { by, aggs, .. } = child.as_ref() else {
@@ -970,5 +972,73 @@ fn predict_linear_and_double_exp_over_a_subquery_carry_params() {
         i,
         AggIntent::DoubleExpSmoothing { smoothing, trend }
             if (*smoothing - 0.5).abs() < 1e-9 && (*trend - 0.3).abs() < 1e-9
+    )));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// N. Native-histogram accessors            (functions.test; issue #43)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn histogram_quantile_classic_bucket_vs_native() {
+    // Two lowerings of `histogram_quantile(φ, …)`: the classic cumulative-bucket
+    // form → exact `HistogramQuantile`; a native-histogram / raw-samples argument
+    // → the generic (sketch-able) `Quantile`. The classic form is recognised by
+    // `by (le)`, a `_bucket` metric, or an `le` matcher (issue #43).
+    for classic in [
+        "histogram_quantile(0.9, sum by (le) (rate(x_bucket[5m])))",
+        "histogram_quantile(0.9, rate(x_bucket[5m]))",            // bare _bucket metric
+        r#"histogram_quantile(0.9, rate(x{le="0.5"}[5m]))"#,      // le matcher
+    ] {
+        let qe = ok(classic);
+        assert!(
+            has(&qe, |i| matches!(i, AggIntent::HistogramQuantile { q } if (*q - 0.9).abs() < 1e-9)),
+            "classic bucket form → HistogramQuantile: {classic}"
+        );
+        assert!(!has(&qe, |i| matches!(i, AggIntent::Quantile { .. })), "{classic}");
+    }
+    for native in [
+        "histogram_quantile(0.9, my_native_histogram)",
+        "histogram_quantile(0.9, request_duration_seconds)",     // raw samples (your extension)
+    ] {
+        let qe = ok(native);
+        assert!(
+            has(&qe, |i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)),
+            "native/raw form → generic Quantile: {native}"
+        );
+        assert!(!has(&qe, |i| matches!(i, AggIntent::HistogramQuantile { .. })), "{native}");
+    }
+}
+
+#[test]
+fn histogram_accessors_lower_to_per_series_intents() {
+    // `histogram_<accessor>(v)` extracts a float per series from a native
+    // histogram — a per-series `Aggregate{[accessor]}` directly over the
+    // (instant) argument, no grouping. (`histogram_quantile` has its own two
+    // lowerings — see `histogram_quantile_classic_bucket_vs_native`.)
+    for (q, want) in [
+        ("histogram_count(v)", AggIntent::HistogramCount),
+        ("histogram_sum(v)", AggIntent::HistogramSum),
+        ("histogram_avg(v)", AggIntent::HistogramAvg),
+        ("histogram_stddev(v)", AggIntent::HistogramStdDev),
+        ("histogram_stdvar(v)", AggIntent::HistogramStdVar),
+    ] {
+        let qe = ok(q);
+        let QueryExpr::Aggregate { by, aggs, .. } = &qe else {
+            panic!("{q}: expected an Aggregate, got {qe:?}");
+        };
+        assert!(by.is_empty(), "{q}: per-series, no grouping");
+        assert_eq!(aggs.as_slice(), std::slice::from_ref(&want), "{q}: wrong intent");
+    }
+}
+
+#[test]
+fn histogram_fraction_carries_its_bounds() {
+    // `histogram_fraction(lower, upper, v)` — bounds from args 0/1, vector arg 2.
+    let qe = ok("histogram_fraction(0, 0.2, v)");
+    assert!(intents(&qe).iter().any(|i| matches!(
+        i,
+        AggIntent::HistogramFraction { lower, upper }
+            if *lower == 0.0 && (*upper - 0.2).abs() < 1e-9
     )));
 }

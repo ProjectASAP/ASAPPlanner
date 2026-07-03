@@ -14,7 +14,9 @@
 //! | PromQL | L2 shape (→ canonical via `convert_root`) |
 //! |---|---|
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], Window{w, Filter(Source)}}` |
-//! | `histogram_quantile(φ, <expr>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered `<expr>` (preserves any `sum by (le)`/`rate`) |
+//! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{[HistogramQuantile(φ)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
+//! | `histogram_quantile(φ, <native hist / raw>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target) |
+//! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | `Aggregate{[Histogram*]}` — per-series native-histogram accessors (issue #43) |
 //! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
 //! | `OUTER_op(<any expr>)` (e.g. `max(sum by (job) (rate(m[w])))`, `sum(rate(a[w]) + rate(b[w]))`) | `Aggregate{[OUTER_op]}` over the fully-lowered `<any expr>` — arbitrary function nesting (issue #27) |
 //! | `topk(k, <non-count expr>)` / `bottomk(k, <any expr>)` | `Sort{value} → Limit{k}` over the fully-lowered argument |
@@ -162,7 +164,7 @@ fn check_depth(expr: &Expr, budget: usize) -> Result<()> {
 fn walk(expr: &Expr) -> Result<L2> {
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
-        Expr::Call(call) if call.func.name == "histogram_quantile" => walk_histogram_quantile(call),
+        Expr::Call(call) if call.func.name.starts_with("histogram_") => walk_histogram(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -410,10 +412,94 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L
 /// `without`). This handles the canonical
 /// `histogram_quantile(φ, sum by (le) (rate(m_bucket[w])))` pattern, which the
 /// old "extract the matrix and substitute a bare Quantile" path could not.
-fn walk_histogram_quantile(call: &Call) -> Result<L2> {
-    let phi = quantile_param(num_arg(call, 0)?)?;
-    let inner = walk(arg(call, 1)?)?;
-    Ok(outer_aggregate(vec![], AggFunc::Quantile(phi), inner))
+/// The `histogram_*` function family (issues #43, histogram_quantile).
+///
+/// `histogram_quantile(φ, <expr>)` lowers to a `Quantile` over the fully-lowered
+/// argument — it also covers the classic `le`-bucket form (`sum by (le) (…)`).
+/// The native-histogram accessors (`histogram_count`/`sum`/`avg`/`stddev`/
+/// `stdvar`/`fraction`) each extract one float per series, lowering to a
+/// per-series `Aggregate{[accessor]}` directly over the (instant) argument.
+/// `histogram_fraction(lower, upper, v)` reads its bounds from args 0/1 and the
+/// vector from arg 2; the rest take the vector at arg 0.
+fn walk_histogram(call: &Call) -> Result<L2> {
+    if call.func.name == "histogram_quantile" {
+        let phi = quantile_param(num_arg(call, 0)?)?;
+        let arg_expr = arg(call, 1)?;
+        // Two lowerings of `histogram_quantile(φ, …)`:
+        //  - classic `le`-bucket form (`… sum by (le) (rate(x_bucket[5m])) …`) →
+        //    `HistogramQuantile`, exact interpolation over cumulative buckets.
+        //  - native-histogram form (any other argument) → the generic `Quantile`
+        //    intent (sketch-able).
+        // We can't see sample types at lowering, so the classic form is
+        // recognised by its distinctive `by (le)` grouping (issue #43).
+        let func = if is_classic_bucket_arg(arg_expr) {
+            AggFunc::HistogramQuantile(phi)
+        } else {
+            AggFunc::Quantile(phi)
+        };
+        return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
+    }
+    // (histogram_quantile handled above; accessors below)
+    let (func, vec_idx) = match call.func.name {
+        "histogram_count" => (AggFunc::HistogramCount, 0),
+        "histogram_sum" => (AggFunc::HistogramSum, 0),
+        "histogram_avg" => (AggFunc::HistogramAvg, 0),
+        "histogram_stddev" => (AggFunc::HistogramStdDev, 0),
+        "histogram_stdvar" => (AggFunc::HistogramStdVar, 0),
+        "histogram_fraction" => (
+            AggFunc::HistogramFraction {
+                lower: num_arg(call, 0)?,
+                upper: num_arg(call, 1)?,
+            },
+            2,
+        ),
+        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
+    };
+    Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
+}
+
+/// Whether `expr` is a **classic cumulative-bucket** `histogram_quantile`
+/// argument — as opposed to a native histogram or raw samples. Recognised
+/// structurally, by any of:
+///  - a `by (le)` grouping (`sum by (le) (…)`),
+///  - a selector on a classic `_bucket` metric (`http_request_…_bucket`),
+///  - a selector with an `le` label matcher (`{le="…"}`).
+///
+/// The bucket form must be *interpolated* (`HistogramQuantile`); everything
+/// else is a sketch-able generic `Quantile`. This is a heuristic proxy for the
+/// real signal — the argument's sample type — which isn't visible at lowering;
+/// see the follow-up issue on the discrimination criteria (issue #43).
+fn is_classic_bucket_arg(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => is_classic_bucket_arg(&p.expr),
+        Expr::Unary(u) => is_classic_bucket_arg(&u.expr),
+        Expr::Subquery(s) => is_classic_bucket_arg(&s.expr),
+        Expr::Aggregate(agg) => {
+            matches!(
+                &agg.modifier,
+                Some(LabelModifier::Include(ls)) if ls.labels.iter().any(|l| l == "le")
+            ) || is_classic_bucket_arg(&agg.expr)
+        }
+        Expr::Binary(b) => is_classic_bucket_arg(&b.lhs) || is_classic_bucket_arg(&b.rhs),
+        Expr::Call(c) => c.args.args.iter().any(|a| is_classic_bucket_arg(a)),
+        Expr::VectorSelector(vs) => selector_is_bucket(vs),
+        Expr::MatrixSelector(ms) => selector_is_bucket(&ms.vs),
+        _ => false,
+    }
+}
+
+/// A classic histogram bucket selector — a `_bucket`-named metric (via bare name
+/// or `__name__` matcher) or an explicit `le` label matcher.
+fn selector_is_bucket(vs: &VectorSelector) -> bool {
+    let name = vs.name.as_deref().or_else(|| {
+        vs.matchers
+            .matchers
+            .iter()
+            .find(|m| m.name == "__name__")
+            .map(|m| m.value.as_str())
+    });
+    name.is_some_and(|n| n.ends_with("_bucket"))
+        || vs.matchers.matchers.iter().any(|m| m.name == "le")
 }
 
 fn walk_binary(bin: &BinaryExpr) -> Result<L2> {
