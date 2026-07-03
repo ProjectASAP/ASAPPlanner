@@ -584,6 +584,7 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
             lower: *lower,
             upper: *upper,
         },
+        AggFunc::HistogramQuantile(q) => AggIntent::HistogramQuantile { q: *q },
     }
 }
 

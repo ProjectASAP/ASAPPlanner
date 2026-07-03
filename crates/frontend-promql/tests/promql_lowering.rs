@@ -175,9 +175,10 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     // `sum by (le)` aggregate; now the `le` grouping survives into L3.
     let qe = lower(r#"histogram_quantile(0.99, sum by (le) (rate(http_requests_bucket[5m])))"#);
     let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
-        panic!("expected outer Aggregate{{Quantile}}, got {qe:?}");
+        panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.99).abs() < 1e-9));
+    // The `by (le)` grouping marks the classic cumulative-bucket form.
+    assert!(matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.99).abs() < 1e-9));
     // `sum by (le)` survives as a positional Aggregate (by = [2], `le`) over the
     // inner Rate — no name-based Partition.
     let QueryExpr::Aggregate { by, aggs, .. } = child.as_ref() else {

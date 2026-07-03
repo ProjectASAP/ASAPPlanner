@@ -143,6 +143,9 @@ pub enum AggFunc {
         lower: f64,
         upper: f64,
     },
+    /// PromQL classic `histogram_quantile(φ, <le-bucketed vector>)` →
+    /// `AggIntent::HistogramQuantile`.
+    HistogramQuantile(f64),
 }
 
 /// The Layer-2 relational query IR.

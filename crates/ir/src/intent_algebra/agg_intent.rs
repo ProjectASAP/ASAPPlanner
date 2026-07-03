@@ -139,6 +139,15 @@ pub enum AggIntent {
         lower: f64,
         upper: f64,
     },
+    /// PromQL `histogram_quantile(φ, <le-bucketed vector>)` — the φ-quantile
+    /// interpolated from classic cumulative `le` buckets. Distinct from the
+    /// generic [`Quantile`](Self::Quantile) the *native*-histogram form lowers
+    /// to: this is exact bucket interpolation, not a sketch-able quantile, so it
+    /// carries no accuracy target and is a cross-series reduction over `le`
+    /// (issue #43).
+    HistogramQuantile {
+        q: f64,
+    },
 }
 
 impl AggIntent {
@@ -252,6 +261,9 @@ impl AggIntent {
             AggIntent::HistogramStdVar => col("histogram_stdvar", DataType::Float64, false),
             AggIntent::HistogramFraction { .. } => {
                 col("histogram_fraction", DataType::Float64, false)
+            }
+            AggIntent::HistogramQuantile { .. } => {
+                col("histogram_quantile", DataType::Float64, false)
             }
         }
     }

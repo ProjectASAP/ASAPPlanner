@@ -442,9 +442,10 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
         "histogram_quantile(0.99, sum by(le) (rate(demo_api_request_duration_seconds_bucket[5m])))",
     );
     let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
-        panic!("expected outer Aggregate{{Quantile}}, got {qe:?}");
+        panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { .. }]));
+    // `by (le)` marks the classic cumulative-bucket form → `HistogramQuantile`.
+    assert!(matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { .. }]));
     // `sum by(le)` now survives as a positional Aggregate (by = [2], `le`), over
     // the inner Rate — no name-based Partition.
     let QueryExpr::Aggregate { by, aggs, .. } = child.as_ref() else {
@@ -978,11 +979,31 @@ fn predict_linear_and_double_exp_over_a_subquery_carry_params() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn histogram_quantile_classic_bucket_vs_native() {
+    // Two lowerings of `histogram_quantile(φ, …)`: the classic `le`-bucket form
+    // (grouped by `le`) → the exact bucket-interpolation `HistogramQuantile`
+    // intent; a native-histogram argument → the generic (sketch-able) `Quantile`.
+    let classic = ok("histogram_quantile(0.9, sum by (le) (rate(x_bucket[5m])))");
+    assert!(
+        has(&classic, |i| matches!(i, AggIntent::HistogramQuantile { q } if (*q - 0.9).abs() < 1e-9)),
+        "classic le-bucket form → HistogramQuantile"
+    );
+    assert!(!has(&classic, |i| matches!(i, AggIntent::Quantile { .. })));
+
+    let native = ok("histogram_quantile(0.9, my_native_histogram)");
+    assert!(
+        has(&native, |i| matches!(i, AggIntent::Quantile { q, .. } if (*q - 0.9).abs() < 1e-9)),
+        "native form → generic Quantile"
+    );
+    assert!(!has(&native, |i| matches!(i, AggIntent::HistogramQuantile { .. })));
+}
+
+#[test]
 fn histogram_accessors_lower_to_per_series_intents() {
     // `histogram_<accessor>(v)` extracts a float per series from a native
     // histogram — a per-series `Aggregate{[accessor]}` directly over the
-    // (instant) argument, no grouping. (`histogram_quantile` stays a `Quantile`,
-    // covering the classic `le`-bucket form too — see the histogram section.)
+    // (instant) argument, no grouping. (`histogram_quantile` has its own two
+    // lowerings — see `histogram_quantile_classic_bucket_vs_native`.)
     for (q, want) in [
         ("histogram_count(v)", AggIntent::HistogramCount),
         ("histogram_sum(v)", AggIntent::HistogramSum),

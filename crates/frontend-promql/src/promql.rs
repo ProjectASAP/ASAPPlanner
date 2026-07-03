@@ -14,7 +14,9 @@
 //! | PromQL | L2 shape (→ canonical via `convert_root`) |
 //! |---|---|
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], Window{w, Filter(Source)}}` |
-//! | `histogram_quantile(φ, <expr>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered `<expr>` (preserves any `sum by (le)`/`rate`) |
+//! | `histogram_quantile(φ, sum by (le) (…))` | `Aggregate{[HistogramQuantile(φ)]}` — classic cumulative-bucket interpolation (recognised by the `by (le)` grouping) |
+//! | `histogram_quantile(φ, <native hist>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able) |
+//! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | `Aggregate{[Histogram*]}` — per-series native-histogram accessors (issue #43) |
 //! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
 //! | `OUTER_op(<any expr>)` (e.g. `max(sum by (job) (rate(m[w])))`, `sum(rate(a[w]) + rate(b[w]))`) | `Aggregate{[OUTER_op]}` over the fully-lowered `<any expr>` — arbitrary function nesting (issue #27) |
 //! | `topk(k, <non-count expr>)` / `bottomk(k, <any expr>)` | `Sort{value} → Limit{k}` over the fully-lowered argument |
@@ -422,8 +424,22 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L
 fn walk_histogram(call: &Call) -> Result<L2> {
     if call.func.name == "histogram_quantile" {
         let phi = quantile_param(num_arg(call, 0)?)?;
-        return Ok(outer_aggregate(vec![], AggFunc::Quantile(phi), walk(arg(call, 1)?)?));
+        let arg_expr = arg(call, 1)?;
+        // Two lowerings of `histogram_quantile(φ, …)`:
+        //  - classic `le`-bucket form (`… sum by (le) (rate(x_bucket[5m])) …`) →
+        //    `HistogramQuantile`, exact interpolation over cumulative buckets.
+        //  - native-histogram form (any other argument) → the generic `Quantile`
+        //    intent (sketch-able).
+        // We can't see sample types at lowering, so the classic form is
+        // recognised by its distinctive `by (le)` grouping (issue #43).
+        let func = if groups_by_le(arg_expr) {
+            AggFunc::HistogramQuantile(phi)
+        } else {
+            AggFunc::Quantile(phi)
+        };
+        return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
     }
+    // (histogram_quantile handled above; accessors below)
     let (func, vec_idx) = match call.func.name {
         "histogram_count" => (AggFunc::HistogramCount, 0),
         "histogram_sum" => (AggFunc::HistogramSum, 0),
@@ -440,6 +456,20 @@ fn walk_histogram(call: &Call) -> Result<L2> {
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     };
     Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
+}
+
+/// Whether `expr` is the classic `histogram_quantile` bucket argument — an
+/// aggregation grouped by the `le` bucket-boundary label (`sum by (le) (…)`),
+/// which distinguishes the cumulative-bucket form from a native histogram.
+fn groups_by_le(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren(p) => groups_by_le(&p.expr),
+        Expr::Aggregate(agg) => matches!(
+            &agg.modifier,
+            Some(LabelModifier::Include(ls)) if ls.labels.iter().any(|l| l == "le")
+        ),
+        _ => false,
+    }
 }
 
 fn walk_binary(bin: &BinaryExpr) -> Result<L2> {
