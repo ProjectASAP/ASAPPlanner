@@ -162,8 +162,7 @@ fn check_depth(expr: &Expr, budget: usize) -> Result<()> {
 fn walk(expr: &Expr) -> Result<L2> {
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
-        Expr::Call(call) if call.func.name == "histogram_quantile" => walk_histogram_quantile(call),
-        Expr::Call(call) if is_histogram_accessor(call.func.name) => walk_histogram_accessor(call),
+        Expr::Call(call) if call.func.name.starts_with("histogram_") => walk_histogram(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -411,34 +410,20 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L
 /// `without`). This handles the canonical
 /// `histogram_quantile(φ, sum by (le) (rate(m_bucket[w])))` pattern, which the
 /// old "extract the matrix and substitute a bare Quantile" path could not.
-fn walk_histogram_quantile(call: &Call) -> Result<L2> {
-    let phi = quantile_param(num_arg(call, 0)?)?;
-    let inner = walk(arg(call, 1)?)?;
-    Ok(outer_aggregate(vec![], AggFunc::Quantile(phi), inner))
-}
-
-/// The native-histogram accessor functions (issue #43) — `histogram_count`,
-/// `histogram_sum`, `histogram_avg`, `histogram_stddev`, `histogram_stdvar`,
-/// `histogram_fraction`. (`histogram_quantile` is handled separately since it
-/// also covers the classic `le`-bucket form.)
-fn is_histogram_accessor(name: &str) -> bool {
-    matches!(
-        name,
-        "histogram_count"
-            | "histogram_sum"
-            | "histogram_avg"
-            | "histogram_stddev"
-            | "histogram_stdvar"
-            | "histogram_fraction"
-    )
-}
-
-/// `histogram_<accessor>(<native-histogram instant vector>)` — a per-series
-/// extraction. Lowers to a per-series `Aggregate{[accessor]}` directly over the
-/// (instant) argument vector, mirroring `histogram_quantile` (issue #43).
-fn walk_histogram_accessor(call: &Call) -> Result<L2> {
-    // `histogram_fraction(lower, upper, v)` reads its bounds from args 0/1 and
-    // the vector from arg 2; the rest take the vector at arg 0.
+/// The `histogram_*` function family (issues #43, histogram_quantile).
+///
+/// `histogram_quantile(φ, <expr>)` lowers to a `Quantile` over the fully-lowered
+/// argument — it also covers the classic `le`-bucket form (`sum by (le) (…)`).
+/// The native-histogram accessors (`histogram_count`/`sum`/`avg`/`stddev`/
+/// `stdvar`/`fraction`) each extract one float per series, lowering to a
+/// per-series `Aggregate{[accessor]}` directly over the (instant) argument.
+/// `histogram_fraction(lower, upper, v)` reads its bounds from args 0/1 and the
+/// vector from arg 2; the rest take the vector at arg 0.
+fn walk_histogram(call: &Call) -> Result<L2> {
+    if call.func.name == "histogram_quantile" {
+        let phi = quantile_param(num_arg(call, 0)?)?;
+        return Ok(outer_aggregate(vec![], AggFunc::Quantile(phi), walk(arg(call, 1)?)?));
+    }
     let (func, vec_idx) = match call.func.name {
         "histogram_count" => (AggFunc::HistogramCount, 0),
         "histogram_sum" => (AggFunc::HistogramSum, 0),
@@ -454,8 +439,7 @@ fn walk_histogram_accessor(call: &Call) -> Result<L2> {
         ),
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     };
-    let inner = walk(arg(call, vec_idx)?)?;
-    Ok(outer_aggregate(vec![], func, inner))
+    Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
 }
 
 fn walk_binary(bin: &BinaryExpr) -> Result<L2> {
