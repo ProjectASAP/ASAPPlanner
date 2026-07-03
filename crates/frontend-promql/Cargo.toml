@@ -12,3 +12,13 @@ asap-l2 = { path = "../l2" }
 # Private mirror of GreptimeTeam/promql-parser (Apache-2.0). `main` tracks
 # upstream; our `asap` branch carries the local patches.
 promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", branch = "asap" }
+
+# Corpus tests live in domain folders (observability) but must still be declared
+# as test targets — Cargo only auto-discovers `.rs` files directly in `tests/`.
+[[test]]
+name = "awesome_prometheus_alerts"
+path = "tests/observability/awesome_prometheus_alerts.rs"
+
+[[test]]
+name = "promql_corpus"
+path = "tests/observability/promql_corpus.rs"

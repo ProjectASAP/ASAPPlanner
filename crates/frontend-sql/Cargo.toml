@@ -12,3 +12,9 @@ datafusion = "43"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
+
+# Corpus test in a domain folder (data-quality-check); declared explicitly since
+# Cargo only auto-discovers `.rs` files directly in `tests/`.
+[[test]]
+name = "synthetic_packet_trace"
+path = "tests/data_quality_check/synthetic_packet_trace.rs"
