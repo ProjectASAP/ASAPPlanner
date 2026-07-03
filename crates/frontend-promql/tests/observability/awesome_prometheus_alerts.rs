@@ -91,6 +91,9 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
                 go(expr, out);
                 go(child, out);
             }
+            QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
+                go(inner, out)
+            }
             QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::Ref { .. } => {}
         }
     }
@@ -300,9 +303,16 @@ fn predict_linear_function_body_lowers_with_horizon() {
 }
 
 #[test]
-fn vector_literal_is_rejected__GAP() {
-    // `vector(1)` — used in dead-man's-switch ("always firing") alerts.
-    let _ = rejected("vector(1)");
+fn vector_literal_lowers_to_a_labelless_vector() {
+    // `vector(1)` — used in dead-man's-switch ("always firing") alerts. Now
+    // lowers to a `VectorFromScalar` over the scalar `1` (issue #48).
+    let qe = ok("vector(1)");
+    let QueryExpr::VectorFromScalar(inner) = &qe else {
+        panic!("expected VectorFromScalar, got {qe:?}");
+    };
+    assert!(matches!(inner.as_ref(), QueryExpr::Scalar(v) if *v == 1.0));
+    // The result is a vector: it carries a time index (unlike a bare scalar).
+    assert!(qe.output_schema().unwrap().time_index.is_some());
 }
 
 #[test]

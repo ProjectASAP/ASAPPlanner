@@ -274,6 +274,18 @@ pub enum QueryExpr {
     /// calendar functions (`hour()`, `day_of_week()`, …). Issue #46.
     EvalTime,
 
+    /// PromQL `vector(s)` — the scalar→instant-vector bridge. Promotes a
+    /// scalar-typed child to a single label-less series carrying the scalar's
+    /// value at every step. Lets a scalar participate where a vector is required
+    /// (`up or vector(0)` dead-man's-switch). Issue #48.
+    VectorFromScalar(Box<QueryExpr>),
+
+    /// PromQL `scalar(v)` — the instant-vector→scalar bridge. Collapses a
+    /// single-element vector to its value (NaN at runtime if the input is not
+    /// exactly one series). Lets a vector feed a scalar position (`vector` /
+    /// aggregation `k` args, thresholds). Issue #48.
+    ScalarFromVector(Box<QueryExpr>),
+
     /// σ — row-level filter. Output schema = child schema.
     Filter {
         pred: Predicate,
@@ -663,12 +675,37 @@ impl QueryExpr {
                 closed: true,
             }),
 
+            // `vector(s)` yields a label-less instant vector: the (ts, value)
+            // floor and nothing else. `closed` — its full label set (empty) is
+            // known statically (#48).
+            QueryExpr::VectorFromScalar(_) => Ok(Schema {
+                columns: vec![
+                    Column::new("ts", DataType::Timestamp, false),
+                    Column::new("value", DataType::Float64, false),
+                ],
+                time_index: Some(0),
+                unique_keys: Vec::new(),
+                closed: true,
+            }),
+
+            // `scalar(v)` collapses to a single `value`, no time index — the same
+            // scalar shape as a constant or `time()` (#48).
+            QueryExpr::ScalarFromVector(_) => Ok(Schema {
+                columns: vec![Column::new("value", DataType::Float64, false)],
+                time_index: None,
+                unique_keys: Vec::new(),
+                closed: true,
+            }),
+
             // The output shape of `<vector> op <scalar>` (or `<scalar> op
             // <vector>`) is the vector side's — a scalar operand (a constant or
             // `time()`) contributes only its value, no labels. Prefer the
             // non-scalar side.
             QueryExpr::BinaryOp { lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
-                (QueryExpr::Scalar(_) | QueryExpr::EvalTime, r) => r.output_schema_in(scope),
+                (
+                    QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::ScalarFromVector(_),
+                    r,
+                ) => r.output_schema_in(scope),
                 (l, _) => l.output_schema_in(scope),
             },
         }

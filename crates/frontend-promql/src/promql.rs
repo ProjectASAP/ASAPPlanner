@@ -28,7 +28,9 @@
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], Window{w}}` — per-series counter-derivative intents (issue #44); `holt_winters` is the legacy alias of `double_exponential_smoothing` |
 //! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is L4 (issue #47) |
 //! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `Scalar` leaf |
-//! | `group` / `offset` / `@` | **rejected** — distinct semantics with no intent-algebra representation yet |
+//! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `EvalTime` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
+//! | `vector(s)` / `scalar(v)` | `VectorFromScalar` / `ScalarFromVector` — the scalar⇄vector bridges (issue #48) |
+//! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
 //! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
 //! | `topk(k, count_over_time(…))` | `TopK{k, by}` (heavy-hitter intent) |
@@ -171,6 +173,7 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Call(call) if is_math_fn(call.func.name) => walk_math(call),
         Expr::Call(call) if is_presence_fn(call.func.name) => walk_presence(call),
         Expr::Call(call) if is_time_fn(call.func.name) => walk_time(call),
+        Expr::Call(call) if is_typeconv_fn(call.func.name) => walk_typeconv(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -529,6 +532,26 @@ fn walk_presence(call: &Call) -> Result<L2> {
     // arg 0 is the instant vector (`absent`) or range vector (`*_over_time`);
     // `walk` produces a `Window` for the matrix-selector forms.
     Ok(outer_aggregate(vec![], func, walk(arg(call, 0)?)?))
+}
+
+/// The scalar⇄vector type-conversion functions (issue #48). `info` is *not*
+/// here: it is a label-enrichment join against info metrics, not a type
+/// conversion, so it falls through to the `UnsupportedFunction` path (#84).
+fn is_typeconv_fn(name: &str) -> bool {
+    matches!(name, "vector" | "scalar")
+}
+
+/// `vector(s)` — promote a scalar to a label-less instant vector. `scalar(v)`
+/// — collapse a single-element vector to its value. Both are honest bridge
+/// nodes in the IR; the "exactly one element → NaN otherwise" runtime rule of
+/// `scalar` is an L4/runtime concern (issue #48).
+fn walk_typeconv(call: &Call) -> Result<L2> {
+    let inner = walk(arg(call, 0)?)?;
+    Ok(match call.func.name {
+        "vector" => L2::VectorFromScalar(Box::new(inner)),
+        "scalar" => L2::ScalarFromVector(Box::new(inner)),
+        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
+    })
 }
 
 /// The element-wise math / trig functions (issue #45).

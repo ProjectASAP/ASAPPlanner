@@ -173,6 +173,10 @@ pub enum QueryExpr {
     /// The query evaluation time (`time()`), and the implicit input of the
     /// no-arg calendar functions (issue #46).
     EvalTime,
+    /// `vector(s)` — scalar→instant-vector bridge (issue #48).
+    VectorFromScalar(Box<QueryExpr>),
+    /// `scalar(v)` — instant-vector→scalar bridge (issue #48).
+    ScalarFromVector(Box<QueryExpr>),
     /// Reference to a CTE / let-binding by name. **Reserved**: no front end
     /// emits `Ref`/`LetBinding` yet (CSE runs on L3); the converter arm exists
     /// for forward-compatibility (e.g. PromQL recording rules).
@@ -304,6 +308,8 @@ impl QueryExpr {
             | QueryExpr::Sort { input, .. }
             | QueryExpr::Limit { input, .. }
             | QueryExpr::WindowFunc { input, .. }
+            | QueryExpr::VectorFromScalar(input)
+            | QueryExpr::ScalarFromVector(input)
             | QueryExpr::PromQLSubquery { input, .. } => input.walk(f),
             QueryExpr::Merge { inputs } => {
                 for i in inputs {
@@ -340,6 +346,8 @@ impl QueryExpr {
             | QueryExpr::Sort { input, .. }
             | QueryExpr::Limit { input, .. }
             | QueryExpr::WindowFunc { input, .. }
+            | QueryExpr::VectorFromScalar(input)
+            | QueryExpr::ScalarFromVector(input)
             | QueryExpr::PromQLSubquery { input, .. } => input.leaf_source(),
             QueryExpr::Merge { inputs } => inputs.first()?.leaf_source(),
             QueryExpr::Join { left, .. }

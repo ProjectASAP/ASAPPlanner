@@ -91,6 +91,9 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
             collect(expr, out);
             collect(child, out);
         }
+        QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
+            collect(inner, out)
+        }
         QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::Ref { .. } => {}
     }
 }
@@ -1203,4 +1206,75 @@ fn timestamp_composes_under_an_outer_aggregation() {
     let qe = ok("sum by (job) (timestamp(up))");
     assert!(has(&qe, |i| *i == AggIntent::TimeFn(TimeFunc::Timestamp)));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R. Type-conversion functions: vector() / scalar()   (functions.test; issue #48)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn vector_promotes_a_scalar_to_a_vector() {
+    // SEMANTICS: `vector(s)` is the scalar→instant-vector bridge — a label-less
+    // single series carrying the scalar's value.
+    let qe = ok("vector(1)");
+    let QueryExpr::VectorFromScalar(inner) = &qe else {
+        panic!("expected VectorFromScalar, got {qe:?}");
+    };
+    assert!(matches!(inner.as_ref(), QueryExpr::Scalar(v) if *v == 1.0));
+    // Vector-typed: schema has a time index (a scalar leaf has none).
+    let sch = qe.output_schema().unwrap();
+    assert!(sch.time_index.is_some());
+    assert!(sch.columns.iter().any(|c| c.name == "value"));
+}
+
+#[test]
+fn scalar_collapses_a_vector_to_a_scalar() {
+    // SEMANTICS: `scalar(v)` is the instant-vector→scalar bridge.
+    let qe = ok("scalar(node_load1)");
+    let QueryExpr::ScalarFromVector(inner) = &qe else {
+        panic!("expected ScalarFromVector, got {qe:?}");
+    };
+    let (metric, _) = first_scan(inner);
+    assert_eq!(metric, "node_load1");
+    // Scalar-typed: single `value` column, no time index.
+    let sch = qe.output_schema().unwrap();
+    assert!(sch.time_index.is_none());
+    assert_eq!(sch.columns.len(), 1);
+    assert_eq!(sch.columns[0].name, "value");
+}
+
+#[test]
+fn vector_zero_is_a_vector_operand_of_a_set_op() {
+    // `up or vector(0)` — the dead-man's-switch. `or` is a set op between two
+    // vectors, so `vector(0)` must be a vector (a `VectorFromScalar`), never a
+    // folded scalar operand.
+    let qe = ok("up or vector(0)");
+    let QueryExpr::BinaryOp { rhs, op, .. } = &qe else {
+        panic!("expected a BinaryOp, got {qe:?}");
+    };
+    assert_eq!(*op, BinaryOpKind::Or);
+    assert!(matches!(rhs.as_ref(), QueryExpr::VectorFromScalar(_)));
+}
+
+#[test]
+fn scalar_of_a_vector_feeds_a_threshold_comparison() {
+    // `node_load1 > scalar(node_cpu_count)` — `scalar(...)` is a scalar operand,
+    // so the BinaryOp output takes the vector (lhs) side's schema.
+    let qe = ok("node_load1 > scalar(node_cpu_count)");
+    let QueryExpr::BinaryOp { lhs, rhs, .. } = &qe else {
+        panic!("expected a BinaryOp, got {qe:?}");
+    };
+    assert!(matches!(rhs.as_ref(), QueryExpr::ScalarFromVector(_)));
+    // The BinaryOp output schema follows the vector (lhs) side, not the scalar.
+    let (metric, _) = first_scan(lhs);
+    assert_eq!(metric, "node_load1");
+    assert!(qe.output_schema().unwrap().time_index.is_some());
+}
+
+#[test]
+fn info_is_rejected__GAP() {
+    // `info(v)` is a label-enrichment *join* against info metrics, not a type
+    // conversion — no intent-algebra representation yet (follow-up #84). Pinned
+    // so adding support flips this deliberately.
+    let _ = rejected("info(rate(http_requests_total[5m]))");
 }
