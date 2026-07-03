@@ -51,7 +51,7 @@ use asap_ir::intent_algebra::query_expr::{
 use asap_l2::relational::{
     AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
-use asap_ir::intent_algebra::agg_intent::MathFunc;
+use asap_ir::intent_algebra::agg_intent::{MathFunc, TimeFunc};
 use asap_ir::intent_algebra::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Scalar};
 
 use crate::error::PromqlError as LoweringError;
@@ -170,6 +170,7 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Call(call) if call.func.name.starts_with("histogram_") => walk_histogram(call),
         Expr::Call(call) if is_math_fn(call.func.name) => walk_math(call),
         Expr::Call(call) if is_presence_fn(call.func.name) => walk_presence(call),
+        Expr::Call(call) if is_time_fn(call.func.name) => walk_time(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -461,6 +462,52 @@ fn walk_histogram(call: &Call) -> Result<L2> {
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     };
     Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
+}
+
+/// The time / calendar functions (issue #46).
+fn is_time_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "time"
+            | "timestamp"
+            | "minute"
+            | "hour"
+            | "day_of_week"
+            | "day_of_month"
+            | "day_of_year"
+            | "month"
+            | "year"
+            | "days_in_month"
+    )
+}
+
+/// `time()` → the `EvalTime` leaf. `timestamp(v)` and the calendar accessors →
+/// `Aggregate{[TimeFn(f)]}` over the argument vector, or over `EvalTime` for the
+/// no-argument calendar forms (`hour()`, `day_of_week()`, …). Issue #46.
+fn walk_time(call: &Call) -> Result<L2> {
+    if call.func.name == "time" {
+        return Ok(L2::EvalTime);
+    }
+    let func = match call.func.name {
+        "timestamp" => TimeFunc::Timestamp,
+        "minute" => TimeFunc::Minute,
+        "hour" => TimeFunc::Hour,
+        "day_of_week" => TimeFunc::DayOfWeek,
+        "day_of_month" => TimeFunc::DayOfMonth,
+        "day_of_year" => TimeFunc::DayOfYear,
+        "month" => TimeFunc::Month,
+        "year" => TimeFunc::Year,
+        "days_in_month" => TimeFunc::DaysInMonth,
+        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
+    };
+    // A calendar function with no argument reads the evaluation time; otherwise
+    // it maps over each sample's timestamp in the argument vector.
+    let inner = if call.args.args.is_empty() {
+        L2::EvalTime
+    } else {
+        walk(arg(call, 0)?)?
+    };
+    Ok(outer_aggregate(vec![], AggFunc::TimeFn(func), inner))
 }
 
 /// The presence functions (issue #47).

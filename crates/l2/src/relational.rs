@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 pub use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr};
-use asap_ir::intent_algebra::agg_intent::MathFunc;
+use asap_ir::intent_algebra::agg_intent::{MathFunc, TimeFunc};
 pub use asap_ir::intent_algebra::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
 use asap_ir::intent_algebra::schema::Schema;
 
@@ -156,6 +156,9 @@ pub enum AggFunc {
     AbsentOverTime,
     /// PromQL `present_over_time` → `AggIntent::PresentOverTime`.
     PresentOverTime,
+    /// PromQL time / calendar accessor (`timestamp`/`hour`/`day_of_week`/…) →
+    /// `AggIntent::TimeFn` (issue #46).
+    TimeFn(TimeFunc),
 }
 
 /// The Layer-2 relational query IR.
@@ -167,6 +170,9 @@ pub enum QueryExpr {
     /// scalar expression like `10*1024*1024`). Appears as a `BinaryOp` operand
     /// for `<vector> op <scalar>` thresholds / unit conversions (issue #35).
     Scalar(f64),
+    /// The query evaluation time (`time()`), and the implicit input of the
+    /// no-arg calendar functions (issue #46).
+    EvalTime,
     /// Reference to a CTE / let-binding by name. **Reserved**: no front end
     /// emits `Ref`/`LetBinding` yet (CSE runs on L3); the converter arm exists
     /// for forward-compatibility (e.g. PromQL recording rules).
@@ -288,7 +294,7 @@ impl QueryExpr {
     pub fn walk<F: FnMut(&QueryExpr)>(&self, f: &mut F) {
         f(self);
         match self {
-            QueryExpr::Source(_) | QueryExpr::Scalar(_) | QueryExpr::Ref(_) => {}
+            QueryExpr::Source(_) | QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::Ref(_) => {}
             QueryExpr::Filter { input, .. }
             | QueryExpr::Project { input, .. }
             | QueryExpr::Aggregate { input, .. }
@@ -340,7 +346,7 @@ impl QueryExpr {
             | QueryExpr::SetOp { left, .. }
             | QueryExpr::BinaryOp { lhs: left, .. } => left.leaf_source(),
             QueryExpr::LetBinding { body, .. } => body.leaf_source(),
-            QueryExpr::Scalar(_) | QueryExpr::Ref(_) => None,
+            QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::Ref(_) => None,
         }
     }
 

@@ -21,7 +21,7 @@ pub mod query_expr;
 pub mod schema;
 
 pub use agg_intent::{
-    agg_accuracy, agg_is_exact, agg_is_mergeable, default_cardinality, default_quantile, AggIntent, MathFunc,
+    agg_accuracy, agg_is_exact, agg_is_mergeable, default_cardinality, default_quantile, AggIntent, MathFunc, TimeFunc,
 };
 pub use expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L2Expr, L3Expr, L3Scalar};
 pub use names::{BindingName, QueryId};

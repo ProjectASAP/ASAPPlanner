@@ -91,7 +91,7 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
                 go(expr, out);
                 go(child, out);
             }
-            QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::Ref { .. } => {}
+            QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::Ref { .. } => {}
         }
     }
     go(e, &mut out);
