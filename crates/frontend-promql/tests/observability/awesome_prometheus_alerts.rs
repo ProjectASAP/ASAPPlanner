@@ -260,10 +260,11 @@ fn scalar_threshold_comparisons_lower_to_binaryop_scalar() {
 }
 
 #[test]
-fn absent_function_is_rejected__GAP() {
-    // `absent(up{job="prometheus"})` — "job missing" alerts. `absent` has no
-    // intent-algebra representation yet.
-    let _ = rejected(r#"absent(up{job="prometheus"})"#);
+fn absent_function_lowers_to_absent_intent() {
+    // `absent(up{job="prometheus"})` — "job missing" alerts. Lowers to the
+    // `Absent` intent (issue #47); the empty→synthesized-sample logic is L4.
+    let qe = ok(r#"absent(up{job="prometheus"})"#);
+    assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Absent)));
 }
 
 #[test]

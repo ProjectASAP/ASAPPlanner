@@ -26,6 +26,8 @@
 //! | `rate/irate(m[w])` | `Aggregate{[Rate{w}]}` (no Window) — `irate` shares the `rate` *intent*; the avg-vs-last-two-samples difference is an L4 estimation method |
 //! | `increase(m[w])` | `Aggregate{[Increase{w}]}` (no Window) |
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], Window{w}}` — per-series counter-derivative intents (issue #44); `holt_winters` is the legacy alias of `double_exponential_smoothing` |
+//! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is L4 (issue #47) |
+//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `Scalar` leaf |
 //! | `group` / `offset` / `@` | **rejected** — distinct semantics with no intent-algebra representation yet |
 //! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
@@ -167,6 +169,7 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Aggregate(agg) => walk_aggregate(agg),
         Expr::Call(call) if call.func.name.starts_with("histogram_") => walk_histogram(call),
         Expr::Call(call) if is_math_fn(call.func.name) => walk_math(call),
+        Expr::Call(call) if is_presence_fn(call.func.name) => walk_presence(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -458,6 +461,27 @@ fn walk_histogram(call: &Call) -> Result<L2> {
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     };
     Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
+}
+
+/// The presence functions (issue #47).
+fn is_presence_fn(name: &str) -> bool {
+    matches!(name, "absent" | "absent_over_time" | "present_over_time")
+}
+
+/// `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` — lowered
+/// to an `Aggregate{[Absent/…]}` over the (instant or range) argument. The
+/// empty-result → synthesized-1-sample logic is an L4/runtime concern; L3 only
+/// marks the operation (issue #47).
+fn walk_presence(call: &Call) -> Result<L2> {
+    let func = match call.func.name {
+        "absent" => AggFunc::Absent,
+        "absent_over_time" => AggFunc::AbsentOverTime,
+        "present_over_time" => AggFunc::PresentOverTime,
+        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
+    };
+    // arg 0 is the instant vector (`absent`) or range vector (`*_over_time`);
+    // `walk` produces a `Window` for the matrix-selector forms.
+    Ok(outer_aggregate(vec![], func, walk(arg(call, 0)?)?))
 }
 
 /// The element-wise math / trig functions (issue #45).

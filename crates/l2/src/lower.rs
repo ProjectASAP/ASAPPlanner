@@ -586,6 +586,9 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
         },
         AggFunc::HistogramQuantile(q) => AggIntent::HistogramQuantile { q: *q },
         AggFunc::Math(m) => AggIntent::Math(m.clone()),
+        AggFunc::Absent => AggIntent::Absent,
+        AggFunc::AbsentOverTime => AggIntent::AbsentOverTime,
+        AggFunc::PresentOverTime => AggIntent::PresentOverTime,
     }
 }
 

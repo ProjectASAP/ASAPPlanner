@@ -154,6 +154,21 @@ pub enum AggIntent {
     /// one value out per input sample. (`pi()` is a constant, lowered to a
     /// scalar leaf, not this.)
     Math(MathFunc),
+
+    // ── Presence functions (issue #47) ───────────────────────────────────
+    // `absent`/`present_over_time` — the value/emptiness of the argument
+    // determines the output. The empty-result → synthesized-1-sample logic is
+    // an L4/runtime concern; L3 only marks the operation. Modelled as
+    // label-preserving so the argument's (matcher-derived) labels — which
+    // `absent` synthesizes onto its output — stay in the schema.
+    /// PromQL `absent(v)` — a 1-sample vector when the instant vector `v` has no
+    /// matching series, else empty.
+    Absent,
+    /// PromQL `absent_over_time(v[w])` — `absent` over a range vector.
+    AbsentOverTime,
+    /// PromQL `present_over_time(v[w])` — value 1 per series that has any sample
+    /// in the range (per-series).
+    PresentOverTime,
 }
 
 /// The element-wise math / trig functions (issue #45). Unary over the sample
@@ -215,7 +230,10 @@ impl AggIntent {
             | Self::HistogramAvg
             | Self::HistogramStdDev
             | Self::HistogramStdVar
-            | Self::HistogramFraction { .. } => DataModel::TimeSeries,
+            | Self::HistogramFraction { .. }
+            | Self::Absent
+            | Self::AbsentOverTime
+            | Self::PresentOverTime => DataModel::TimeSeries,
             _ => DataModel::Any,
         }
     }
@@ -244,6 +262,9 @@ impl AggIntent {
                 | Self::HistogramStdVar
                 | Self::HistogramFraction { .. }
                 | Self::Math(_)
+                | Self::Absent
+                | Self::AbsentOverTime
+                | Self::PresentOverTime
         )
     }
 
@@ -313,6 +334,9 @@ impl AggIntent {
                 col("histogram_quantile", DataType::Float64, false)
             }
             AggIntent::Math(_) => col("value", DataType::Float64, false),
+            AggIntent::Absent => col("absent", DataType::Float64, false),
+            AggIntent::AbsentOverTime => col("absent_over_time", DataType::Float64, false),
+            AggIntent::PresentOverTime => col("present_over_time", DataType::Float64, false),
         }
     }
 }
