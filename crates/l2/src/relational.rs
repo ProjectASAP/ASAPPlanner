@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 pub use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr};
+use asap_ir::intent_algebra::agg_intent::MathFunc;
 pub use asap_ir::intent_algebra::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
 use asap_ir::intent_algebra::schema::Schema;
 
@@ -146,6 +147,9 @@ pub enum AggFunc {
     /// PromQL classic `histogram_quantile(φ, <le-bucketed vector>)` →
     /// `AggIntent::HistogramQuantile`.
     HistogramQuantile(f64),
+    /// PromQL element-wise math / trig transform (`abs`/`sqrt`/`clamp_max`/…) →
+    /// `AggIntent::Math` (issue #45).
+    Math(MathFunc),
 }
 
 /// The Layer-2 relational query IR.
