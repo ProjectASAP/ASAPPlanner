@@ -11,11 +11,13 @@
 //! pull this lowering machinery.
 
 pub mod binder;
+pub mod canonicalize;
 pub mod column_resolution;
 pub mod lower;
 pub mod relational;
 
 pub use binder::{Binder, SchemaCatalog, UsageDerivedCatalog};
+pub use canonicalize::canonicalize;
 pub use column_resolution::{
     infer_schema_for_root, infer_source_schema, output_schema_for_aggregate, resolve_column_ref,
     resolve_column_refs, resolve_expr, ResolveError,

@@ -175,18 +175,53 @@ async fn single_agg_group_by_keeps_key_in_output_schema() {
 #[tokio::test]
 async fn count_ranked_topk_is_heavy_hitter() {
     // `ORDER BY COUNT(*) DESC LIMIT k` over a single COUNT aggregate is the one
-    // case the heavy-hitter (frequency) sketch is correct for. (The key must
-    // reference the count output directly; an alias would safely fall back to a
-    // generic Sort+Limit.)
+    // case the heavy-hitter (frequency) sketch is correct for. The shared L3
+    // `canonicalize` pass (issue #34) promotes it to the canonical two-level
+    // form: an outer global `TopK` (by: []) over the explicit inner `Count`
+    // grouped by `service`.
     let qe = lower(
         "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 10",
     )
     .await;
     let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
-    assert_eq!(by, &vec![1], "GROUP BY service → col 1");
+    assert!(
+        by.is_empty(),
+        "outer TopK is a global ranking (by: []), got {by:?}"
+    );
     assert!(
         matches!(aggs.as_slice(), [AggIntent::TopK { k: 10, .. }]),
         "count-ranked topk → heavy-hitter TopK, got {aggs:?}"
+    );
+    // The inner child is the explicit Count, grouped by service (col 1).
+    let QueryExpr::Aggregate { child, .. } = &qe else {
+        panic!("expected outer Aggregate, got {qe:?}");
+    };
+    let (inner_by, inner_aggs) = find_aggregate(child).expect("expected inner Count aggregate");
+    assert_eq!(inner_by, &vec![1], "inner Count grouped by service → col 1");
+    assert!(
+        matches!(inner_aggs.as_slice(), [AggIntent::Count { .. }]),
+        "inner aggregate is the explicit Count, got {inner_aggs:?}"
+    );
+}
+
+#[tokio::test]
+async fn count_ranked_topk_via_alias_is_also_heavy_hitter() {
+    // Regression for #20: aliasing `COUNT(*)` in the ORDER BY used to defeat the
+    // SQL front-end gate. The positional `canonicalize` pass now promotes it too,
+    // so the aliased and inline forms produce identical L3.
+    let inline = lower(
+        "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 10",
+    )
+    .await;
+    let aliased = lower(
+        "SELECT service, COUNT(*) AS cnt FROM metrics GROUP BY service ORDER BY cnt DESC LIMIT 10",
+    )
+    .await;
+    assert_eq!(inline, aliased, "aliased count-ranked topk must match the inline form");
+    let (_, aggs) = find_aggregate(&aliased).expect("expected an Aggregate");
+    assert!(
+        matches!(aggs.as_slice(), [AggIntent::TopK { k: 10, .. }]),
+        "aliased count-ranked topk → heavy-hitter TopK, got {aggs:?}"
     );
 }
 
