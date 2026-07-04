@@ -481,81 +481,9 @@ impl QueryExpr {
                     child.as_ref(),
                     QueryExpr::TimeRange { .. } | QueryExpr::Subquery { .. }
                 );
-                if by.is_empty() && aggs.len() == 1 && (aggs[0].is_per_series() || is_range_child) {
-                    return Ok(per_series_reduction_schema(&in_schema, &aggs[0]));
-                }
-
-                let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + aggs.len());
-                for &id in by {
-                    let c =
-                        in_schema
-                            .columns
-                            .get(id)
-                            .ok_or(QueryExprError::InvalidGroupByColumn(
-                                id,
-                                in_schema.columns.len(),
-                            ))?;
-                    out_cols.push(c.clone());
-                }
-                let value_col_idx = in_schema
-                    .column_id("value")
-                    .or_else(|| (0..in_schema.columns.len()).find(|i| !by.contains(i)));
-                let probe = value_col_idx
-                    .and_then(|i| in_schema.columns.get(i))
-                    .cloned()
-                    .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
-                // Each reducer types off its own input column (`SUM(bytes)` vs
-                // `AVG(latency)` in one node); `None` falls back to the sample-
-                // value probe (PromQL's single-column convention). A non-empty
-                // `output_names[i]` overrides the synthetic output column name.
-                for (i, intent) in aggs.iter().enumerate() {
-                    // `count_values("l", v)` emits TWO columns: the synthesized
-                    // `Utf8` label `l` (the stringified sample value it groups
-                    // by) and the per-value count. `output_names[i]` still
-                    // overrides the count column's name if set. If `l` collides
-                    // with a group-by key of the same name, PromQL's synthesized
-                    // label takes precedence — emit a single column, never a
-                    // duplicate.
-                    if let AggIntent::CountValues { label } = intent {
-                        if !out_cols.iter().any(|c| c.name == *label) {
-                            out_cols.push(Column::new(label.clone(), DataType::Utf8, false));
-                        }
-                        let mut cnt = intent.output_column(&probe);
-                        if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
-                            cnt.name = name.clone();
-                        }
-                        out_cols.push(cnt);
-                        continue;
-                    }
-                    let in_col = intent
-                        .input_col()
-                        .and_then(|id| in_schema.columns.get(id))
-                        .unwrap_or(&probe);
-                    let mut out = intent.output_column(in_col);
-                    if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
-                        out.name = name.clone();
-                    }
-                    out_cols.push(out);
-                }
-                // `count_values` groups by (by-keys ∪ the synthesized value
-                // label), so the by-keys alone are not a unique key — be
-                // conservative and claim none.
-                let has_count_values =
-                    aggs.iter().any(|a| matches!(a, AggIntent::CountValues { .. }));
-                let unique_keys = if by.is_empty() || has_count_values {
-                    Vec::new()
-                } else {
-                    vec![(0..by.len()).collect()]
-                };
-                Ok(Schema {
-                    columns: out_cols,
-                    time_index: None,
-                    unique_keys,
-                    // A cross-series aggregate enumerates exactly `by ++ aggs`,
-                    // so its output is closed even over an open input — this is
-                    // where an open schema freezes to closed.
-                    closed: true,
-                })
+                let per_series =
+                    by.is_empty() && aggs.len() == 1 && (aggs[0].is_per_series() || is_range_child);
+                aggregate_output_schema(&in_schema, by, aggs, output_names, per_series)
             }
 
             QueryExpr::LetBinding { name, expr, child } => {
@@ -795,6 +723,95 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
         // completeness (an open scan stays open; a closed one stays closed).
         closed: input.closed,
     }
+}
+
+/// The output schema of an `Aggregate { by, aggs }` over `in_schema` — the
+/// **single** canonical derivation shared by [`QueryExpr::output_schema_in`]'s
+/// `Aggregate` arm and the converter's HAVING-resolution path
+/// (`column_resolution::output_schema_for_aggregate`), so the two can never
+/// drift (issue #41).
+///
+/// `per_series` selects the label-preserving [`per_series_reduction_schema`]
+/// (`rate`/`increase`/`*_over_time`) instead of the cross-series `by ++ aggs`
+/// shape. The caller supplies it because the decision depends on the *child
+/// node* (a `TimeRange`/`Subquery` marker), which this function does not see;
+/// the child-independent part is `by.is_empty() && aggs.len() == 1 &&
+/// aggs[0].is_per_series()`.
+pub fn aggregate_output_schema(
+    in_schema: &Schema,
+    by: &[ColumnId],
+    aggs: &[AggIntent],
+    output_names: &[String],
+    per_series: bool,
+) -> Result<Schema, QueryExprError> {
+    if per_series {
+        debug_assert_eq!(aggs.len(), 1, "a per-series reduction is single-aggregate");
+        return Ok(per_series_reduction_schema(in_schema, &aggs[0]));
+    }
+
+    let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + aggs.len());
+    for &id in by {
+        let c = in_schema
+            .columns
+            .get(id)
+            .ok_or(QueryExprError::InvalidGroupByColumn(id, in_schema.columns.len()))?;
+        out_cols.push(c.clone());
+    }
+    let value_col_idx = in_schema
+        .column_id("value")
+        .or_else(|| (0..in_schema.columns.len()).find(|i| !by.contains(i)));
+    let probe = value_col_idx
+        .and_then(|i| in_schema.columns.get(i))
+        .cloned()
+        .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
+    // Each reducer types off its own input column (`SUM(bytes)` vs `AVG(latency)`
+    // in one node); `None` falls back to the sample-value probe (PromQL's
+    // single-column convention). A non-empty `output_names[i]` overrides the
+    // synthetic output column name.
+    for (i, intent) in aggs.iter().enumerate() {
+        // `count_values("l", v)` emits TWO columns: the synthesized `Utf8` label
+        // `l` (the stringified sample value it groups by) and the per-value
+        // count. If `l` collides with a group-by key of the same name, PromQL's
+        // synthesized label takes precedence — emit a single column, never a
+        // duplicate.
+        if let AggIntent::CountValues { label } = intent {
+            if !out_cols.iter().any(|c| c.name == *label) {
+                out_cols.push(Column::new(label.clone(), DataType::Utf8, false));
+            }
+            let mut cnt = intent.output_column(&probe);
+            if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
+                cnt.name = name.clone();
+            }
+            out_cols.push(cnt);
+            continue;
+        }
+        let in_col = intent
+            .input_col()
+            .and_then(|id| in_schema.columns.get(id))
+            .unwrap_or(&probe);
+        let mut out = intent.output_column(in_col);
+        if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
+            out.name = name.clone();
+        }
+        out_cols.push(out);
+    }
+    // `count_values` groups by (by-keys ∪ the synthesized value label), so the
+    // by-keys alone are not a unique key — be conservative and claim none.
+    let has_count_values = aggs.iter().any(|a| matches!(a, AggIntent::CountValues { .. }));
+    let unique_keys = if by.is_empty() || has_count_values {
+        Vec::new()
+    } else {
+        vec![(0..by.len()).collect()]
+    };
+    Ok(Schema {
+        columns: out_cols,
+        time_index: None,
+        unique_keys,
+        // A cross-series aggregate enumerates exactly `by ++ aggs`, so its output
+        // is closed even over an open input — this is where an open schema
+        // freezes to closed.
+        closed: true,
+    })
 }
 
 /// Infer the `(DataType, nullable)` a scalar [`L3Expr`] produces against an

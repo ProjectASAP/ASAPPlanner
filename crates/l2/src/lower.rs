@@ -274,7 +274,7 @@ pub fn convert(
                 .as_ref()
                 .map(|h| -> Result<Predicate, ConvertError> {
                     let out_schema =
-                        output_schema_for_aggregate(&child_schema, &by, &intents, &output_names);
+                        output_schema_for_aggregate(&child_schema, &by, &intents, &output_names)?;
                     Ok(Predicate(resolve_expr(h, &out_schema)?))
                 })
                 .transpose()?;
