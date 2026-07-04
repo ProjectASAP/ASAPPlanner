@@ -11,6 +11,7 @@ use thiserror::Error;
 use asap_ir::intent_algebra::agg_intent::AggIntent;
 use asap_ir::intent_algebra::expr_ir::ColumnRef;
 use asap_ir::intent_algebra::expr_ir::{L2Expr, L3Expr};
+use asap_ir::intent_algebra::query_expr::{aggregate_output_schema, QueryExprError};
 use crate::relational::QueryExpr;
 use asap_ir::intent_algebra::schema::{Column, ColumnId, DataType, Schema};
 
@@ -169,44 +170,15 @@ pub fn output_schema_for_aggregate(
     by: &[ColumnId],
     aggs: &[AggIntent],
     output_names: &[String],
-) -> Schema {
-    let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + aggs.len());
-    for &id in by {
-        if let Some(c) = input.columns.get(id) {
-            out_cols.push(c.clone());
-        }
-    }
-    let value_col_idx = input
-        .column_id("value")
-        .or_else(|| (0..input.columns.len()).find(|i| !by.contains(i)));
-    let probe = value_col_idx
-        .and_then(|i| input.columns.get(i))
-        .cloned()
-        .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
-    for (i, intent) in aggs.iter().enumerate() {
-        let in_col = intent
-            .input_col()
-            .and_then(|id| input.columns.get(id))
-            .unwrap_or(&probe);
-        let mut out = intent.output_column(in_col);
-        if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
-            out.name = name.clone();
-        }
-        out_cols.push(out);
-    }
-    let unique_keys = if by.is_empty() {
-        Vec::new()
-    } else {
-        vec![(0..by.len()).collect()]
-    };
-    Schema {
-        columns: out_cols,
-        time_index: None,
-        unique_keys,
-        // A cross-series aggregate fully determines its output columns, so the
-        // result is closed even over an open input (mirrors `output_schema_in`).
-        closed: true,
-    }
+) -> Result<Schema, QueryExprError> {
+    // Delegate to the single canonical derivation so HAVING resolution can never
+    // drift from `QueryExpr::output_schema_in` (issue #41). HAVING is SQL-only
+    // and cross-series, but detect the child-independent per-series case anyway
+    // (a lone `rate`/`increase`/`*_over_time` intent) so the two agree on every
+    // shared input — the `TimeRange`/`Subquery` marker the canonical arm also
+    // keys off is not visible here, and never co-occurs with HAVING.
+    let per_series = by.is_empty() && aggs.len() == 1 && aggs[0].is_per_series();
+    aggregate_output_schema(input, by, aggs, output_names, per_series)
 }
 
 #[cfg(test)]
@@ -285,11 +257,63 @@ mod tests {
             .columns
             .push(Column::new("host", DataType::Utf8, false));
         let out =
-            output_schema_for_aggregate(&input, &[2usize], &[AggIntent::Sum { col: None }], &[]);
+            output_schema_for_aggregate(&input, &[2usize], &[AggIntent::Sum { col: None }], &[])
+                .expect("valid group-by column");
         assert_eq!(out.columns.len(), 2); // host, sum
         assert_eq!(out.columns[0].name, "host");
         assert_eq!(out.columns[1].name, "sum");
         assert!(out.time_index.is_none());
         assert_eq!(out.unique_keys, vec![vec![0]]);
+    }
+
+    #[test]
+    fn having_schema_agrees_with_canonical_for_a_per_series_reduction() {
+        // Issue #41: `output_schema_for_aggregate` (HAVING resolution) and the
+        // canonical `QueryExpr::output_schema_in` must produce identical schemas
+        // for the same aggregate. Before the dedup this diverged on a per-series
+        // reduction — the HAVING mirror lacked the per-series branch and would
+        // collapse `[ts, value]` to a single `rate` column.
+        use asap_ir::intent_algebra::query_expr::{QueryExpr as L3, Source};
+        use std::time::Duration;
+
+        let leaf_schema = Schema::with_time_index(
+            vec![
+                Column::new("ts", DataType::Timestamp, false),
+                Column::new("value", DataType::Float64, false),
+            ],
+            0,
+            vec![],
+        );
+        let scan = L3::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: leaf_schema.clone(),
+        };
+        // Aggregate{ by: [], [Rate], child: TimeRange{ Scan } } — a per-series
+        // reduction (label-preserving).
+        let agg = L3::Aggregate {
+            by: Default::default(),
+            aggs: vec![AggIntent::Rate],
+            output_names: vec![],
+            having: None,
+            child: Box::new(L3::TimeRange {
+                range: Duration::from_secs(300),
+                child: Box::new(scan),
+            }),
+        };
+        let canonical = agg.output_schema().expect("canonical schema");
+
+        // The HAVING-resolution derivation gets only the input schema (the
+        // TimeRange passes the leaf schema through).
+        let having_side =
+            output_schema_for_aggregate(&leaf_schema, &[], &[AggIntent::Rate], &[]).unwrap();
+
+        assert_eq!(
+            canonical, having_side,
+            "the two aggregate-schema derivations must agree (issue #41)"
+        );
+        // Sanity: it really is the label-preserving per-series shape, not `[rate]`.
+        assert!(having_side.columns.iter().any(|c| c.name == "value"));
+        assert!(having_side.time_index.is_some());
     }
 }
