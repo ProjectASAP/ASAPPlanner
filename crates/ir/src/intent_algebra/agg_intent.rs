@@ -193,6 +193,24 @@ pub enum AggIntent {
         /// The name of the synthesized label carrying the stringified value.
         label: String,
     },
+
+    // ── Additional range-vector reducers (issue #51) ─────────────────────
+    // All per-series, label-preserving reductions of a single series' range
+    // window to one value; the window rides on the enclosing `TimeRange`.
+    /// PromQL `last_over_time(v[w])` — the most recent sample in the window.
+    LastOverTime,
+    /// PromQL `first_over_time(v[w])` — the oldest sample in the window.
+    FirstOverTime,
+    /// PromQL `mad_over_time(v[w])` — median absolute deviation over the window.
+    MadOverTime,
+    /// PromQL `ts_of_min_over_time(v[w])` — timestamp of the minimum sample.
+    TsOfMinOverTime,
+    /// PromQL `ts_of_max_over_time(v[w])` — timestamp of the maximum sample.
+    TsOfMaxOverTime,
+    /// PromQL `ts_of_first_over_time(v[w])` — timestamp of the first sample.
+    TsOfFirstOverTime,
+    /// PromQL `ts_of_last_over_time(v[w])` — timestamp of the last sample.
+    TsOfLastOverTime,
 }
 
 /// Time / calendar accessor functions (issue #46), evaluated over a timestamp.
@@ -274,7 +292,14 @@ impl AggIntent {
             | Self::Absent
             | Self::AbsentOverTime
             | Self::PresentOverTime
-            | Self::TimeFn(_) => DataModel::TimeSeries,
+            | Self::TimeFn(_)
+            | Self::LastOverTime
+            | Self::FirstOverTime
+            | Self::MadOverTime
+            | Self::TsOfMinOverTime
+            | Self::TsOfMaxOverTime
+            | Self::TsOfFirstOverTime
+            | Self::TsOfLastOverTime => DataModel::TimeSeries,
             _ => DataModel::Any,
         }
     }
@@ -307,6 +332,13 @@ impl AggIntent {
                 | Self::AbsentOverTime
                 | Self::PresentOverTime
                 | Self::TimeFn(_)
+                | Self::LastOverTime
+                | Self::FirstOverTime
+                | Self::MadOverTime
+                | Self::TsOfMinOverTime
+                | Self::TsOfMaxOverTime
+                | Self::TsOfFirstOverTime
+                | Self::TsOfLastOverTime
         )
     }
 
@@ -386,6 +418,18 @@ impl AggIntent {
             // synthesized `label` column is added alongside it by `Aggregate`
             // schema derivation, which special-cases this intent.
             AggIntent::CountValues { .. } => col("count", DataType::Int64, false),
+            // Additional range reducers (issue #51) — one float per series,
+            // named after the function. The `ts_of_*` variants carry a
+            // timestamp-as-float (PromQL values are float64).
+            AggIntent::LastOverTime => col("last_over_time", DataType::Float64, false),
+            AggIntent::FirstOverTime => col("first_over_time", DataType::Float64, false),
+            AggIntent::MadOverTime => col("mad_over_time", DataType::Float64, false),
+            AggIntent::TsOfMinOverTime => col("ts_of_min_over_time", DataType::Float64, false),
+            AggIntent::TsOfMaxOverTime => col("ts_of_max_over_time", DataType::Float64, false),
+            AggIntent::TsOfFirstOverTime => {
+                col("ts_of_first_over_time", DataType::Float64, false)
+            }
+            AggIntent::TsOfLastOverTime => col("ts_of_last_over_time", DataType::Float64, false),
         }
     }
 }

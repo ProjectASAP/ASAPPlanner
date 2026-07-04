@@ -195,6 +195,13 @@ pub fn convert(
                             | AggFunc::Resets
                             | AggFunc::PredictLinear { .. }
                             | AggFunc::DoubleExpSmoothing { .. }
+                            | AggFunc::LastOverTime
+                            | AggFunc::FirstOverTime
+                            | AggFunc::MadOverTime
+                            | AggFunc::TsOfMinOverTime
+                            | AggFunc::TsOfMaxOverTime
+                            | AggFunc::TsOfFirstOverTime
+                            | AggFunc::TsOfLastOverTime
                     )
                 {
                     return Err(ConvertError::RangelessRangeReduction);
@@ -618,6 +625,13 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
         AggFunc::CountValues { label } => AggIntent::CountValues {
             label: label.clone(),
         },
+        AggFunc::LastOverTime => AggIntent::LastOverTime,
+        AggFunc::FirstOverTime => AggIntent::FirstOverTime,
+        AggFunc::MadOverTime => AggIntent::MadOverTime,
+        AggFunc::TsOfMinOverTime => AggIntent::TsOfMinOverTime,
+        AggFunc::TsOfMaxOverTime => AggIntent::TsOfMaxOverTime,
+        AggFunc::TsOfFirstOverTime => AggIntent::TsOfFirstOverTime,
+        AggFunc::TsOfLastOverTime => AggIntent::TsOfLastOverTime,
     }
 }
 

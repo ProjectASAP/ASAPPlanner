@@ -165,6 +165,21 @@ pub enum AggFunc {
     CountValues {
         label: String,
     },
+    // ── Additional range-vector reducers (issue #51) ─────────────────────
+    /// PromQL `last_over_time(v[w])` → `AggIntent::LastOverTime`.
+    LastOverTime,
+    /// PromQL `first_over_time(v[w])` → `AggIntent::FirstOverTime`.
+    FirstOverTime,
+    /// PromQL `mad_over_time(v[w])` → `AggIntent::MadOverTime`.
+    MadOverTime,
+    /// PromQL `ts_of_min_over_time(v[w])` → `AggIntent::TsOfMinOverTime`.
+    TsOfMinOverTime,
+    /// PromQL `ts_of_max_over_time(v[w])` → `AggIntent::TsOfMaxOverTime`.
+    TsOfMaxOverTime,
+    /// PromQL `ts_of_first_over_time(v[w])` → `AggIntent::TsOfFirstOverTime`.
+    TsOfFirstOverTime,
+    /// PromQL `ts_of_last_over_time(v[w])` → `AggIntent::TsOfLastOverTime`.
+    TsOfLastOverTime,
 }
 
 /// The Layer-2 relational query IR.
