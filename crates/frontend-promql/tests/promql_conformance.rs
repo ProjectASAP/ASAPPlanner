@@ -778,14 +778,14 @@ fn unsupported_functions_are_rejected() {
     // These parse fine but have no intent-algebra lowering yet. Each must return
     // a clean LoweringError rather than mislower.
     for q in [
-        "mad_over_time(m[5m])",
-        "sort(up)",
-        "sort_desc(up)",
-        r#"sort_by_label(up, "job")"#,
+        "step()",
+        "range()",
+        r#"histogram_quantiles("le", 0.5, 0.9, x)"#,
         // NOTE: counter-derivatives (#44), math/trig (#45, §O), presence (#47,
-        // §P), time/calendar (#46, §Q), vector/scalar (#48, §R) and
-        // label_replace/label_join (#50, §T) functions now lower — see those
-        // sections. `info` (#84) is pinned separately in §R.
+        // §P), time/calendar (#46, §Q), vector/scalar (#48, §R),
+        // label_replace/label_join (#50, §T) and the extra range reducers +
+        // sort family (#51, §U) now lower — see those sections. `info` (#84),
+        // `min_of`/`max_of` (#89) are pinned in §R / §U.
     ] {
         let _ = rejected(q);
     }
@@ -1442,4 +1442,94 @@ fn label_replace_composes_under_an_aggregation() {
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
     let sch = qe.output_schema().unwrap();
     assert!(sch.columns.iter().any(|c| c.name == "host"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// U. Long-tail: extra range reducers + the sort family     (functions.test; #51)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn extra_over_time_reducers_lower_to_per_series_intents() {
+    // SEMANTICS: each is a per-series reduction of one series' range window to a
+    // single value — a `TimeRange`-wrapped `Aggregate` with the matching intent.
+    for (q, want) in [
+        ("last_over_time(m[5m])", AggIntent::LastOverTime),
+        ("first_over_time(m[5m])", AggIntent::FirstOverTime),
+        ("mad_over_time(m[5m])", AggIntent::MadOverTime),
+        ("ts_of_min_over_time(m[5m])", AggIntent::TsOfMinOverTime),
+        ("ts_of_max_over_time(m[5m])", AggIntent::TsOfMaxOverTime),
+        ("ts_of_first_over_time(m[5m])", AggIntent::TsOfFirstOverTime),
+        ("ts_of_last_over_time(m[5m])", AggIntent::TsOfLastOverTime),
+    ] {
+        let qe = ok(q);
+        assert!(has(&qe, |i| *i == want), "{q}: {:?}", intents(&qe));
+        // Per-series: the range window survives as a `TimeRange`.
+        assert!(
+            matches!(&qe, QueryExpr::Aggregate { child, .. } if matches!(child.as_ref(), QueryExpr::TimeRange { .. })),
+            "{q} keeps its range as a TimeRange"
+        );
+    }
+}
+
+#[test]
+fn last_over_time_composes_under_an_outer_aggregation() {
+    // `sum by (job) (last_over_time(m[5m]))` — per-series last, THEN cross-series
+    // sum. Both intents survive (issue #27's arbitrary nesting).
+    let qe = ok("sum by (job) (last_over_time(m[5m]))");
+    assert!(has(&qe, |i| *i == AggIntent::LastOverTime));
+    assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
+}
+
+#[test]
+fn sort_and_sort_desc_reorder_by_value_without_a_limit() {
+    // SEMANTICS: `sort`/`sort_desc` reorder an instant vector by sample value.
+    // Row-preserving → a bare `Sort` (no `Limit`), ascending / descending.
+    for (q, ascending) in [("sort(http_requests)", true), ("sort_desc(http_requests)", false)] {
+        let qe = ok(q);
+        let QueryExpr::Sort { keys, child, .. } = &qe else {
+            panic!("{q}: expected a Sort, got {qe:?}");
+        };
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].ascending, ascending, "{q}");
+        // No Limit above the Sort — every series is preserved.
+        assert!(!matches!(&qe, QueryExpr::Limit { .. }));
+        // The value column is what it ranks on: descend to the scan.
+        let (metric, _) = first_scan(child);
+        assert_eq!(metric, "http_requests");
+    }
+}
+
+#[test]
+fn sort_by_label_orders_on_each_label_in_turn() {
+    // `sort_by_label(v, "group", "instance", "job")` — one ascending sort key per
+    // label, in argument order; the labels are seeded into the schema.
+    let qe = ok(r#"sort_by_label(http_requests, "group", "instance", "job")"#);
+    let QueryExpr::Sort { keys, .. } = &qe else {
+        panic!("expected a Sort, got {qe:?}");
+    };
+    assert_eq!(keys.len(), 3, "one key per label");
+    assert!(keys.iter().all(|k| k.ascending));
+    let sch = qe.output_schema().unwrap();
+    for label in ["group", "instance", "job"] {
+        assert!(sch.columns.iter().any(|c| c.name == label), "{label} seeded");
+    }
+}
+
+#[test]
+fn sort_by_label_desc_is_descending() {
+    let qe = ok(r#"sort_by_label_desc(http_requests, "instance")"#);
+    let QueryExpr::Sort { keys, .. } = &qe else {
+        panic!("expected a Sort, got {qe:?}");
+    };
+    assert!(keys.iter().all(|k| !k.ascending));
+}
+
+#[test]
+fn min_of_max_of_are_rejected__GAP() {
+    // `min_of`/`max_of` are n-ary *scalar* reducers, almost always nested with
+    // the `step()`/`range()` scalar helpers inside range/offset positions that
+    // are themselves unsupported. They need a scalar-reduction node — deferred
+    // to #89, not mislowered.
+    let _ = rejected("min_of(1, 2, 3)");
+    let _ = rejected("max_of(1, 2)");
 }

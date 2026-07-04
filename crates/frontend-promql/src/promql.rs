@@ -23,6 +23,8 @@
 //! | `avg/min/max/sum_over_time(m[w])` | `Aggregate{[Avg/Min/Max/Sum], Window{w}}` |
 //! | `stddev/stdvar_over_time(m[w])` | `Aggregate{[StdDev/Variance], Window{w}}` |
 //! | `count_over_time(m[w])` | `Aggregate{[Count], Window{w}}` |
+//! | `last/first/mad/ts_of_min/ts_of_max/ts_of_first/ts_of_last_over_time(m[w])` | `Aggregate{[Last/First/Mad/TsOf…OverTime], Window{w}}` — per-series range reducers (issue #51) |
+//! | `sort`/`sort_desc(v)`, `sort_by_label[_desc](v,"l"…)` | `Sort{value \| label…}` (no `Limit`) — row-preserving reorder (issue #51); `min_of`/`max_of` scalar reducers → #89 |
 //! | `rate/irate(m[w])` | `Aggregate{[Rate{w}]}` (no Window) — `irate` shares the `rate` *intent*; the avg-vs-last-two-samples difference is an L4 estimation method |
 //! | `increase(m[w])` | `Aggregate{[Increase{w}]}` (no Window) |
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], Window{w}}` — per-series counter-derivative intents (issue #44); `holt_winters` is the legacy alias of `double_exponential_smoothing` |
@@ -111,6 +113,15 @@ enum InnerFunc {
     Resets,
     PredictLinear(f64),
     DoubleExp { smoothing: f64, trend: f64 },
+    // Additional range-vector reducers (issue #51). Per-series over the window
+    // (like `*_over_time`); the window rides on the enclosing L2 `Window`.
+    LastOverTime,
+    FirstOverTime,
+    MadOverTime,
+    TsOfMinOverTime,
+    TsOfMaxOverTime,
+    TsOfFirstOverTime,
+    TsOfLastOverTime,
 }
 
 struct Inner {
@@ -182,6 +193,7 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Call(call) if is_time_fn(call.func.name) => walk_time(call),
         Expr::Call(call) if is_typeconv_fn(call.func.name) => walk_typeconv(call),
         Expr::Call(call) if is_label_fn(call.func.name) => walk_label(call),
+        Expr::Call(call) if is_sort_fn(call.func.name) => walk_sort(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -283,6 +295,13 @@ fn range_fn_over_subquery(call: &Call) -> Result<Option<L2>> {
         "idelta" => (InnerFunc::IDelta, 0),
         "deriv" => (InnerFunc::Deriv, 0),
         "resets" => (InnerFunc::Resets, 0),
+        "last_over_time" => (InnerFunc::LastOverTime, 0),
+        "first_over_time" => (InnerFunc::FirstOverTime, 0),
+        "mad_over_time" => (InnerFunc::MadOverTime, 0),
+        "ts_of_min_over_time" => (InnerFunc::TsOfMinOverTime, 0),
+        "ts_of_max_over_time" => (InnerFunc::TsOfMaxOverTime, 0),
+        "ts_of_first_over_time" => (InnerFunc::TsOfFirstOverTime, 0),
+        "ts_of_last_over_time" => (InnerFunc::TsOfLastOverTime, 0),
         "predict_linear" => (InnerFunc::PredictLinear(num_arg(call, 1)?), 0),
         "double_exponential_smoothing" | "holt_winters" => (
             InnerFunc::DoubleExp {
@@ -565,6 +584,52 @@ fn walk_typeconv(call: &Call) -> Result<L2> {
         "vector" => L2::VectorFromScalar(Box::new(inner)),
         "scalar" => L2::ScalarFromVector(Box::new(inner)),
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
+    })
+}
+
+/// The instant-vector reordering functions (issue #51).
+fn is_sort_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "sort" | "sort_desc" | "sort_by_label" | "sort_by_label_desc"
+    )
+}
+
+/// `sort`/`sort_desc(v)` reorder an instant vector by sample value;
+/// `sort_by_label`/`sort_by_label_desc(v, "l"…)` reorder by label values. All
+/// lower to a bare `Sort` (no `Limit`) over the vector argument — a faithful,
+/// row-preserving reordering (issue #51).
+fn walk_sort(call: &Call) -> Result<L2> {
+    let input = Box::new(walk(arg(call, 0)?)?);
+    let (by_value, ascending) = match call.func.name {
+        "sort" => (true, true),
+        "sort_desc" => (true, false),
+        "sort_by_label" => (false, true),
+        "sort_by_label_desc" => (false, false),
+        other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
+    };
+    let sort_key = |expr| L2SortKey {
+        expr,
+        ascending,
+        nulls_first: false,
+    };
+    let keys = if by_value {
+        vec![sort_key(L2Expr::Column(ColumnRef::SampleValue))]
+    } else {
+        // `sort_by_label(v, "l1", "l2", …)` — one key per label arg, in order.
+        if call.args.args.len() < 2 {
+            return Err(LoweringError::MissingArgument(
+                "sort_by_label needs at least one label".into(),
+            ));
+        }
+        (1..call.args.args.len())
+            .map(|i| Ok(sort_key(L2Expr::Column(ColumnRef::Named(str_arg(call, i)?)))))
+            .collect::<Result<Vec<_>>>()?
+    };
+    Ok(L2::Sort {
+        keys,
+        partition_by: vec![],
+        input,
     })
 }
 
@@ -858,6 +923,15 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
         "idelta" => at0(InnerFunc::IDelta),
         "deriv" => at0(InnerFunc::Deriv),
         "resets" => at0(InnerFunc::Resets),
+        // Additional range-vector reducers (issue #51) — same windowed
+        // per-series shape as the `*_over_time` family above.
+        "last_over_time" => at0(InnerFunc::LastOverTime),
+        "first_over_time" => at0(InnerFunc::FirstOverTime),
+        "mad_over_time" => at0(InnerFunc::MadOverTime),
+        "ts_of_min_over_time" => at0(InnerFunc::TsOfMinOverTime),
+        "ts_of_max_over_time" => at0(InnerFunc::TsOfMaxOverTime),
+        "ts_of_first_over_time" => at0(InnerFunc::TsOfFirstOverTime),
+        "ts_of_last_over_time" => at0(InnerFunc::TsOfLastOverTime),
         "predict_linear" => {
             let (metric, matchers, window) = extract_matrix(arg(call, 0)?)?;
             let seconds = num_arg(call, 1)?;
@@ -1065,6 +1139,13 @@ fn inner_func(f: &InnerFunc) -> AggFunc {
             smoothing: *smoothing,
             trend: *trend,
         },
+        InnerFunc::LastOverTime => AggFunc::LastOverTime,
+        InnerFunc::FirstOverTime => AggFunc::FirstOverTime,
+        InnerFunc::MadOverTime => AggFunc::MadOverTime,
+        InnerFunc::TsOfMinOverTime => AggFunc::TsOfMinOverTime,
+        InnerFunc::TsOfMaxOverTime => AggFunc::TsOfMaxOverTime,
+        InnerFunc::TsOfFirstOverTime => AggFunc::TsOfFirstOverTime,
+        InnerFunc::TsOfLastOverTime => AggFunc::TsOfLastOverTime,
     }
 }
 
