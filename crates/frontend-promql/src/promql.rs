@@ -30,6 +30,7 @@
 //! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `Scalar` leaf |
 //! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `EvalTime` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
 //! | `vector(s)` / `scalar(v)` | `VectorFromScalar` / `ScalarFromVector` — the scalar⇄vector bridges (issue #48) |
+//! | `label_replace(v,…)` / `label_join(v,…)` | `Relabel{dst, value}` — per-series label rewrite; value unchanged (issue #50) |
 //! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
 //! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
@@ -180,6 +181,7 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Call(call) if is_presence_fn(call.func.name) => walk_presence(call),
         Expr::Call(call) if is_time_fn(call.func.name) => walk_time(call),
         Expr::Call(call) if is_typeconv_fn(call.func.name) => walk_typeconv(call),
+        Expr::Call(call) if is_label_fn(call.func.name) => walk_label(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -564,6 +566,59 @@ fn walk_typeconv(call: &Call) -> Result<L2> {
         "scalar" => L2::ScalarFromVector(Box::new(inner)),
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     })
+}
+
+/// The label-rewrite functions (issue #50).
+fn is_label_fn(name: &str) -> bool {
+    matches!(name, "label_replace" | "label_join")
+}
+
+/// `label_replace(v, dst, replacement, src, regex)` /
+/// `label_join(v, dst, sep, src…)` — per-series label rewrites. Both lower to a
+/// `Relabel` over the fully-lowered vector argument, differing only in the
+/// expression that computes the destination label: `label_replace` a regex
+/// capture-expansion, `label_join` a separator-joined concatenation. Sample
+/// values are untouched; the regex-match-or-passthrough and capture-expansion
+/// are L4/runtime concerns (issue #50).
+fn walk_label(call: &Call) -> Result<L2> {
+    let input = Box::new(walk(arg(call, 0)?)?);
+    match call.func.name {
+        "label_replace" => {
+            let dst = str_arg(call, 1)?;
+            let replacement = str_arg(call, 2)?;
+            let src = str_arg(call, 3)?;
+            let regex = str_arg(call, 4)?;
+            let value = L2Expr::FunctionCall {
+                name: "label_replace".into(),
+                args: vec![
+                    L2Expr::Column(ColumnRef::Named(src)),
+                    L2Expr::Literal(L3Scalar::Utf8(regex)),
+                    L2Expr::Literal(L3Scalar::Utf8(replacement)),
+                ],
+            };
+            Ok(L2::Relabel { dst, value, input })
+        }
+        "label_join" => {
+            // label_join(v, dst, sep, src_1, …, src_n) — needs ≥1 source label.
+            if call.args.args.len() < 4 {
+                return Err(LoweringError::MissingArgument(
+                    "label_join(v, dst, sep, src…) needs at least one source label".into(),
+                ));
+            }
+            let dst = str_arg(call, 1)?;
+            let sep = str_arg(call, 2)?;
+            let mut args = vec![L2Expr::Literal(L3Scalar::Utf8(sep))];
+            for i in 3..call.args.args.len() {
+                args.push(L2Expr::Column(ColumnRef::Named(str_arg(call, i)?)));
+            }
+            let value = L2Expr::FunctionCall {
+                name: "label_join".into(),
+                args,
+            };
+            Ok(L2::Relabel { dst, value, input })
+        }
+        other => Err(LoweringError::UnsupportedFunction(other.to_string())),
+    }
 }
 
 /// The element-wise math / trig functions (issue #45).
@@ -1026,25 +1081,33 @@ fn outer_func(o: &OuterIntent) -> AggFunc {
     }
 }
 
-/// A `count_values` string parameter (the synthesized label name). PromQL wraps
-/// it in a `StringLiteral`, possibly parenthesised (`count_values((("v")), …)`).
-fn str_param(agg: &AggregateExpr) -> Result<String> {
-    fn unwrap_str(expr: &Expr) -> Result<String> {
-        match expr {
-            Expr::StringLiteral(s) => Ok(s.val.clone()),
-            Expr::Paren(p) => unwrap_str(&p.expr),
-            other => Err(LoweringError::InvalidParameter(format!(
-                "`count_values` label must be a string literal, got {:?}",
-                std::mem::discriminant(other)
-            ))),
-        }
+/// Unwrap a (possibly parenthesised) string literal — `count_values` labels and
+/// `label_replace`/`label_join` arguments are all string literals, sometimes
+/// wrapped in parens (`count_values((("v")), …)`).
+fn expr_str(expr: &Expr) -> Result<String> {
+    match expr {
+        Expr::StringLiteral(s) => Ok(s.val.clone()),
+        Expr::Paren(p) => expr_str(&p.expr),
+        other => Err(LoweringError::InvalidParameter(format!(
+            "expected a string literal, got {:?}",
+            std::mem::discriminant(other)
+        ))),
     }
+}
+
+/// A `count_values` string parameter (the synthesized label name).
+fn str_param(agg: &AggregateExpr) -> Result<String> {
     match &agg.param {
-        Some(e) => unwrap_str(e),
+        Some(e) => expr_str(e),
         None => Err(LoweringError::MissingArgument(
             "`count_values` label parameter".into(),
         )),
     }
+}
+
+/// A call's `idx`-th argument as a string literal (`label_replace`/`label_join`).
+fn str_arg(call: &Call, idx: usize) -> Result<String> {
+    expr_str(arg(call, idx)?)
 }
 
 /// Resolve `by(labels)` into a key list. `without(...)` needs the metric's

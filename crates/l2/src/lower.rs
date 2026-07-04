@@ -96,6 +96,19 @@ pub fn convert(
             CQueryExpr::ScalarFromVector(Box::new(convert(inner, fallback, acc)?))
         }
 
+        // ρ — relabel. Resolve the label-value expression positionally against
+        // the child's schema (source labels seeded by the binder), then rewrite
+        // `dst` over the converted child (issue #50).
+        LQueryExpr::Relabel { dst, value, input } => {
+            let child = convert(input, fallback, acc)?;
+            let child_schema = child.output_schema()?;
+            CQueryExpr::Relabel {
+                dst: dst.clone(),
+                value: resolve_expr(value, &child_schema)?,
+                child: Box::new(child),
+            }
+        }
+
         LQueryExpr::Ref(name) => CQueryExpr::Ref {
             name: BindingName::new(name.clone()),
         },

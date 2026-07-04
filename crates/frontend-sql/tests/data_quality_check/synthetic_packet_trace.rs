@@ -85,7 +85,8 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             | QueryExpr::Subquery { child, .. }
             | QueryExpr::Distinct { child, .. }
             | QueryExpr::WindowFunc { child, .. }
-            | QueryExpr::Project { child, .. } => go(child, out),
+            | QueryExpr::Project { child, .. }
+            | QueryExpr::Relabel { child, .. } => go(child, out),
             QueryExpr::BinaryOp { lhs, rhs, .. }
             | QueryExpr::Join { left: lhs, right: rhs, .. }
             | QueryExpr::SetOp { left: lhs, right: rhs, .. } => {

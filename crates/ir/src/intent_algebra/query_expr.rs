@@ -286,6 +286,20 @@ pub enum QueryExpr {
     /// aggregation `k` args, thresholds). Issue #48.
     ScalarFromVector(Box<QueryExpr>),
 
+    /// ρ — a per-series **label rewrite** (PromQL `label_replace` /
+    /// `label_join`). Every input row passes through unchanged except for the
+    /// destination label `dst`, whose new value is computed by `value` — a
+    /// scalar expression over the child's (source) label columns:
+    /// `label_replace` → a `label_replace(src, regex, replacement)` function
+    /// call (regex capture-expansion), `label_join` → a `label_join(sep, srcs…)`
+    /// concatenation. Sample values and the time axis are untouched. Issue #50.
+    Relabel {
+        /// The label written by this rewrite (PromQL `dst_label`).
+        dst: String,
+        value: L3Expr,
+        child: Box<QueryExpr>,
+    },
+
     /// σ — row-level filter. Output schema = child schema.
     Filter {
         pred: Predicate,
@@ -559,6 +573,24 @@ impl QueryExpr {
             | QueryExpr::Limit { child, .. }
             | QueryExpr::Subquery { child, .. }
             | QueryExpr::TimeRange { child, .. } => child.output_schema_in(scope),
+
+            // ρ — relabel preserves every input column and writes one label
+            // `dst` (Utf8): overwritten in place if it already exists, else
+            // appended (nullable — a `label_replace` regex non-match leaves it
+            // unset). The schema stays open (other labels remain runtime-only).
+            // A rewrite can collapse two label sets into one, so row-uniqueness
+            // is no longer provable — drop unique_keys.
+            QueryExpr::Relabel { dst, child, .. } => {
+                let mut out = child.output_schema_in(scope)?;
+                if let Some(existing) = out.columns.iter_mut().find(|c| c.name == *dst) {
+                    existing.dtype = DataType::Utf8;
+                    existing.nullable = true;
+                } else {
+                    out.columns.push(Column::new(dst.clone(), DataType::Utf8, true));
+                }
+                out.unique_keys.clear();
+                Ok(out)
+            }
 
             // π — one output column per projection item. Each item's type is
             // inferred from its expression against the child schema; the name

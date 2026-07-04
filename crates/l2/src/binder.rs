@@ -160,6 +160,11 @@ fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
             partition_by.iter().for_each(|k| push_ref_name(k, &mut out));
         }
         LQueryExpr::Join { pred: Some(p), .. } => named(p, &mut out),
+        // A relabel's source labels are referenced by name inside `value`
+        // (`label_replace(instance, …)`); seed them so they resolve
+        // positionally. `dst` is an output — only seeded if `value` also reads
+        // it (an in-place `label_replace` on the same label).
+        LQueryExpr::Relabel { value, .. } => named(value, &mut out),
         _ => {}
     });
     out.sort();

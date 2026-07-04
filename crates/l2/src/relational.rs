@@ -183,6 +183,14 @@ pub enum QueryExpr {
     VectorFromScalar(Box<QueryExpr>),
     /// `scalar(v)` — instant-vector→scalar bridge (issue #48).
     ScalarFromVector(Box<QueryExpr>),
+    /// ρ — per-series label rewrite (`label_replace` / `label_join`). Writes the
+    /// `dst` label from `value` (a scalar expr over source labels); every other
+    /// column passes through unchanged (issue #50).
+    Relabel {
+        dst: String,
+        value: L2Expr,
+        input: Box<QueryExpr>,
+    },
     /// Reference to a CTE / let-binding by name. **Reserved**: no front end
     /// emits `Ref`/`LetBinding` yet (CSE runs on L3); the converter arm exists
     /// for forward-compatibility (e.g. PromQL recording rules).
@@ -316,6 +324,7 @@ impl QueryExpr {
             | QueryExpr::WindowFunc { input, .. }
             | QueryExpr::VectorFromScalar(input)
             | QueryExpr::ScalarFromVector(input)
+            | QueryExpr::Relabel { input, .. }
             | QueryExpr::PromQLSubquery { input, .. } => input.walk(f),
             QueryExpr::Merge { inputs } => {
                 for i in inputs {
@@ -354,6 +363,7 @@ impl QueryExpr {
             | QueryExpr::WindowFunc { input, .. }
             | QueryExpr::VectorFromScalar(input)
             | QueryExpr::ScalarFromVector(input)
+            | QueryExpr::Relabel { input, .. }
             | QueryExpr::PromQLSubquery { input, .. } => input.leaf_source(),
             QueryExpr::Merge { inputs } => inputs.first()?.leaf_source(),
             QueryExpr::Join { left, .. }
