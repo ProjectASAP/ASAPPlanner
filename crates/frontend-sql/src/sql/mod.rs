@@ -378,17 +378,12 @@ impl<'a> SqlLowerer<'a> {
     }
 
     fn lower_sort(&self, sort: &logical_expr::Sort) -> Result<L2, LoweringError> {
-        // Heavy-hitter TopK only when ranking DESC by a single COUNT aggregate
-        // (the frequency sketch the `TopK` intent represents). Any other
-        // ranking — by a SUM/AVG/… output or a group column — keeps the real
-        // Aggregate under a generic Sort+Limit so its aggregate isn't discarded.
-        if let Some(k) = sort.fetch {
-            if let Some(agg) = find_aggregate(strip_projections_and_aliases(&sort.input)) {
-                if heavy_hitter_topk(sort, agg) {
-                    return self.lower_as_topk(agg, k as u64);
-                }
-            }
-        }
+        // A count-ranked `ORDER BY … LIMIT k` is the frequency heavy-hitter the
+        // `TopK` intent represents, but that promotion now happens in the shared
+        // L3 `canonicalize` pass (issue #34) — the same one both front ends run —
+        // so SQL emits a plain `Sort` (+ `Limit`) here and lets canonicalization
+        // recognise the count-ranked shape positionally. This removes the gate's
+        // alias blind spot (#20).
         let keys = sort
             .expr
             .iter()
@@ -410,19 +405,8 @@ impl<'a> SqlLowerer<'a> {
     }
 
     fn lower_limit(&self, limit: &logical_expr::Limit) -> Result<L2, LoweringError> {
-        // Heavy-hitter TopK only for a count-ranked Limit-over-Sort-over-Aggregate
-        // with no OFFSET (see `lower_sort`). Otherwise fall through to Limit+Sort.
-        if let Some(k) = eval_fetch(&limit.fetch) {
-            if eval_fetch(&limit.skip).unwrap_or(0) == 0 {
-                if let LogicalPlan::Sort(sort) = strip_aliases(&limit.input) {
-                    if let Some(agg) = find_aggregate(strip_projections_and_aliases(&sort.input)) {
-                        if heavy_hitter_topk(sort, agg) {
-                            return self.lower_as_topk(agg, k as u64);
-                        }
-                    }
-                }
-            }
-        }
+        // Count-ranked `LIMIT k` over a `Sort` is promoted to the heavy-hitter
+        // `TopK` by the shared L3 `canonicalize` pass (issue #34), not here.
         Ok(L2::Limit {
             n: eval_fetch(&limit.fetch).unwrap_or(usize::MAX) as u64,
             offset: eval_fetch(&limit.skip).unwrap_or(0) as u64,
@@ -430,18 +414,6 @@ impl<'a> SqlLowerer<'a> {
         })
     }
 
-    fn lower_as_topk(&self, agg: &logical_expr::Aggregate, k: u64) -> Result<L2, LoweringError> {
-        let by = agg
-            .group_expr
-            .iter()
-            .map(expr_to_group_ref)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(L2::TopK {
-            k,
-            by,
-            input: Box::new(self.lower_plan(&agg.input)?),
-        })
-    }
 }
 
 // ── Aggregate / group-key helpers ───────────────────────────────────────────────
@@ -575,53 +547,6 @@ fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
     }
 }
 
-/// True iff `sort` ranks **descending by a single `COUNT` aggregate** of `agg`
-/// — the only shape the heavy-hitter (frequency) `TopK` sketch is correct for.
-///
-/// Requires `agg` to have exactly one aggregate (a plain, non-`DISTINCT`
-/// `COUNT`) and the sole sort key to reference *that* output column (not a
-/// group key, a `SUM`/`AVG`/… output, or a multi-aggregate select). Anything
-/// else stays a generic `Sort` + `Limit` over the real `Aggregate`, mirroring
-/// the PromQL gate (`topk` is heavy-hitter only over `count_over_time`).
-fn heavy_hitter_topk(sort: &logical_expr::Sort, agg: &logical_expr::Aggregate) -> bool {
-    let [key] = sort.expr.as_slice() else {
-        return false;
-    };
-    if key.asc {
-        return false;
-    }
-    if agg.aggr_expr.len() != 1 || !is_count_aggregate(&agg.aggr_expr[0]) {
-        return false;
-    }
-    // The DESC key must rank by the count's output column, not a group key. The
-    // aggregate schema is `[group fields …, aggregate fields …]`, so the single
-    // count output sits at index `group_expr.len()`.
-    let count_name = agg
-        .schema
-        .fields()
-        .get(agg.group_expr.len())
-        .map(|f| f.name().clone());
-    column_name(&key.expr) == count_name
-}
-
-/// The referenced column name of a bare/aliased column expression, else `None`.
-fn column_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Column(c) => Some(c.name.clone()),
-        Expr::Alias(a) => column_name(&a.expr),
-        _ => None,
-    }
-}
-
-/// Whether `expr` is a plain (non-`DISTINCT`) `COUNT` aggregate.
-fn is_count_aggregate(expr: &Expr) -> bool {
-    match expr {
-        Expr::Alias(a) => is_count_aggregate(&a.expr),
-        Expr::AggregateFunction(f) => f.func.name().eq_ignore_ascii_case("count") && !f.distinct,
-        _ => false,
-    }
-}
-
 // ── LogicalPlan navigation helpers ──────────────────────────────────────────────
 
 fn eval_fetch(expr_opt: &Option<Box<Expr>>) -> Option<usize> {
@@ -633,30 +558,6 @@ fn eval_fetch(expr_opt: &Option<Box<Expr>>) -> Option<usize> {
     })
 }
 
-fn strip_aliases(plan: &LogicalPlan) -> &LogicalPlan {
-    match plan {
-        LogicalPlan::SubqueryAlias(a) => strip_aliases(&a.input),
-        _ => plan,
-    }
-}
-
-/// Strip Projection + SubqueryAlias for TopK pattern-matching only.
-fn strip_projections_and_aliases(plan: &LogicalPlan) -> &LogicalPlan {
-    match plan {
-        LogicalPlan::SubqueryAlias(a) => strip_projections_and_aliases(&a.input),
-        LogicalPlan::Projection(p) => strip_projections_and_aliases(&p.input),
-        _ => plan,
-    }
-}
-
-fn find_aggregate(plan: &LogicalPlan) -> Option<&logical_expr::Aggregate> {
-    match plan {
-        LogicalPlan::Aggregate(agg) => Some(agg),
-        LogicalPlan::Projection(p) => find_aggregate(&p.input),
-        LogicalPlan::SubqueryAlias(a) => find_aggregate(&a.input),
-        _ => None,
-    }
-}
 
 /// Map a DataFusion window-function definition to the L3 [`WindowFuncKind`].
 /// `NthValue` is returned with `None`; `lower_window` fills in `n` from args.

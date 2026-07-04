@@ -63,7 +63,10 @@ pub fn convert_root(
     accuracy: &AccuracyTarget,
 ) -> Result<CQueryExpr, ConvertError> {
     let fallback = Binder::new().bind(legacy);
-    convert(legacy, &fallback, accuracy)
+    let l3 = convert(legacy, &fallback, accuracy)?;
+    // Both language front ends end here, so this is the one place to normalize
+    // structural differences between equivalent queries (issue #34).
+    Ok(crate::canonicalize::canonicalize(l3))
 }
 
 /// Convert a Layer-2 tree to canonical L3.
