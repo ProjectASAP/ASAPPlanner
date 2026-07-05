@@ -8,6 +8,7 @@
 //! SQL / DataFusion stack.
 
 pub mod error;
+pub mod histogram;
 pub mod promql;
 
 use asap_ir::intent_algebra::QueryExpr;
@@ -16,6 +17,7 @@ use asap_ir::types::AccuracyTarget;
 use asap_ir::workload::{QueryLanguage, QueryWorkload};
 
 pub use error::PromqlError;
+pub use histogram::{HistogramCatalog, HistogramKind};
 pub use promql::PromqlLowerer;
 
 /// Lower a single PromQL query string to the canonical L3 `QueryExpr`.
@@ -23,10 +25,27 @@ pub use promql::PromqlLowerer;
 /// `accuracy` is threaded onto every approximate intent (`Count`, `Quantile`,
 /// `Cardinality`, `TopK`). The returned tree carries a self-contained `Schema`
 /// on its `Scan`; call [`QueryExpr::output_schema`] for any node's schema.
+///
+/// `histogram_quantile` discrimination uses the structural heuristic; to drive
+/// it from declared sample types instead, use [`lower_promql_with_histograms`].
 pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError> {
     let l2 = PromqlLowerer::lower(query)?;
     let l3 = convert_root(&l2, &accuracy)?;
     Ok(l3)
+}
+
+/// Like [`lower_promql`], but consults `histograms` to decide whether a
+/// `histogram_quantile` argument is sketch-able (generic `Quantile`) or a
+/// classic-bucket interpolation (`HistogramQuantile`) — a type-driven decision
+/// instead of the structural heuristic (issue #79). Metrics absent from the
+/// catalog still fall back to the heuristic.
+pub fn lower_promql_with_histograms(
+    query: &str,
+    accuracy: AccuracyTarget,
+    histograms: HistogramCatalog,
+) -> Result<QueryExpr, PromqlError> {
+    let _guard = histogram::CatalogGuard::install(histograms);
+    lower_promql(query, accuracy)
 }
 
 /// Lower every PromQL batch entry in `workload` to a `QueryExpr`.
