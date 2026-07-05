@@ -678,7 +678,10 @@ fn outer_group_key_absent_from_nested_aggregate_is_dropped() {
     // the query lowers with the provably-absent key dropped, exactly
     // `sum(sum by (group)(…))`.
     let qe = ok(r#"sum(sum by (group)(http_requests{job="api-server"})) by (job)"#);
-    let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        by, aggs, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
     assert!(by.is_empty(), "absent `job` key dropped → global aggregate");
@@ -704,7 +707,11 @@ fn outer_group_key_present_after_inner_aggregate_still_resolves() {
     };
     // Inner output schema is [group, job, sum] (keys in label-column order,
     // labels alphabetical on the scan) → job = col 1.
-    assert_eq!(by, &vec![1], "outer `job` resolves against the inner output");
+    assert_eq!(
+        by,
+        &vec![1],
+        "outer `job` resolves against the inner output"
+    );
     assert_eq!(inner_by.len(), 2);
 }
 

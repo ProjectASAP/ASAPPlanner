@@ -697,3 +697,24 @@ async fn scalar_subquery_in_predicate_is_rejected() {
         "scalar subquery in predicate should be rejected"
     );
 }
+
+#[tokio::test]
+async fn exists_subquery_in_predicate_is_rejected() {
+    // The v1 decision on #27's predicate-subquery question: **reject cleanly**,
+    // for the whole family — scalar (above), IN (the semi-join test), and
+    // EXISTS / NOT EXISTS / NOT IN here, correlated or not. Nothing mislowers:
+    // the subquery predicate is never silently dropped.
+    for q in [
+        // Correlated EXISTS.
+        "SELECT service FROM metrics m WHERE EXISTS \
+         (SELECT 1 FROM hosts h WHERE h.service = m.service)",
+        // NOT EXISTS (anti-join shape).
+        "SELECT service FROM metrics m WHERE NOT EXISTS \
+         (SELECT 1 FROM hosts h WHERE h.service = m.service)",
+        // NOT IN (negated semi-join shape).
+        "SELECT service FROM metrics WHERE service NOT IN (SELECT service FROM hosts)",
+    ] {
+        let res = lower_sql(q, &catalog(), AccuracyTarget::Exact).await;
+        assert!(res.is_err(), "predicate subquery should be rejected: {q}");
+    }
+}
