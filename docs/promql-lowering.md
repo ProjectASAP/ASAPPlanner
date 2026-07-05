@@ -12,14 +12,14 @@ details — Layer 3"). It mirrors the `asapquery-backend` control-plane IR:
 
 ```
 PromQL string
-   │  parse                             promql-parser 0.8
+   │  parse                             promql-parser (ProjectASAP fork, branch asap)
    ▼
 Expr AST                  ← L1
-   │  front-end lowering                crates/lower/src/promql.rs
+   │  front-end lowering                crates/frontend-promql/src/promql.rs
    ▼
 relational::QueryExpr     ← L2 — columns are NAMES (ColumnRef::Named, Aggregate.keys: Vec<String>)
-   │  Binder pass: build Schema +       crates/ir/src/intent_algebra/binder.rs
-   │  resolve names → ColumnId           + column_resolution.rs
+   │  Binder pass: build Schema +       crates/l2/src/binder.rs
+   │  resolve names → ColumnId           + crates/l2/src/column_resolution.rs
    ▼
 query_expr::QueryExpr     ← L3 — columns are POSITIONS (Aggregate.by: Vec<ColumnId>)
                             + a self-contained Schema rides on each Scan
@@ -28,15 +28,17 @@ query_expr::QueryExpr     ← L3 — columns are POSITIONS (Aggregate.by: Vec<Co
 The three layers are **L1 (`Expr AST`) → L2 (`relational::QueryExpr`, names) →
 L3 (`query_expr::QueryExpr`, positions)**. The **Binder is not a layer** — it is
 the pass that sits on the L2→L3 edge, turning names into positional `ColumnId`s.
-`convert_root` (`intent_algebra/lower.rs`) runs it first, then converts the L2
-tree structurally:
+`convert_root` (`crates/l2/src/lower.rs`) runs it first, converts the L2 tree
+structurally, then runs the shared `canonicalize` pass (`crates/l2/src/canonicalize.rs`)
+so both front ends emit one canonical form:
 
 ```rust
 pub fn convert_root(legacy: &LQueryExpr, accuracy: &AccuracyTarget)
     -> Result<CQueryExpr, ConvertError>
 {
-    let schema = Binder::new().bind(legacy);   // ← L2→L3 name resolution, once
-    convert(legacy, &schema, accuracy)          // ← purely structural after this
+    let fallback = Binder::new().bind(legacy);  // ← L2→L3 name resolution, once
+    let l3 = convert(legacy, &fallback, accuracy)?; // ← purely structural
+    Ok(canonicalize(l3))                        // ← shared normalization (#34)
 }
 ```
 
@@ -160,7 +162,7 @@ topk by (service) (10, count_over_time(requests{env="prod"}[1m]))
 ```
 
 This is the heavy-hitter case (`topk` over `count` → one-pass sketch), exercised
-by `topk_over_count_is_heavy_hitter_topk` in `crates/lower/tests/promql_lowering.rs`.
+by `topk_over_count_is_heavy_hitter_topk` in `crates/frontend-promql/tests/promql_lowering.rs`.
 
 ### Stage 1 — L1 parse (`promql-parser`)
 

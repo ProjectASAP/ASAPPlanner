@@ -8,6 +8,18 @@
 > the DataFusion front end emits relational L2. The plan below (ASAP ⇄
 > control_plane) is the *next* step, now unblocked.
 
+> **Reconciliation note (post-reorg; snapshot below is historical).** This doc
+> predates the crate split: `crates/core/src/intent_algebra` is now
+> `crates/ir/src/intent_algebra` (L3), with `relational`/`lower`/`binder`/
+> `column_resolution` in `crates/l2` and `cse` in `crates/plan` (see
+> `design.md` §5.1/§6.0). The line counts and the "CP has 11 intents ASAP
+> lacks" gap are a point-in-time snapshot: the PromQL function-family work
+> (#43–#51) has since grown ASAP's `AggIntent` to ~40 variants, absorbing the
+> CP extras (counter derivatives, presence, `Absent*`, …) and adding families
+> CP never had. Read the tables below as the *evidence that motivated the
+> plan*, not the current state; `crates/ir/src/intent_algebra/agg_intent.rs`
+> is the source of truth.
+
 ASAPController's `crates/core/src/intent_algebra` is a slimmed, refactored fork
 of the canonical L3 IR in `ASAPQuery-backend/control_plane/src/intent_algebra`.
 This is the first concrete step of the L4/L5 consolidation: produce **one**
@@ -86,7 +98,7 @@ Base = control_plane's file unless noted; "port" = bring ASAP's delta onto the C
 ## Cross-cutting (part of the merge, outside `intent_algebra`)
 
 - **`types_v2` → `core::types`** (D3): one home for `AccuracyTarget`, `BindingName`, `QueryId`.
-- **Front-ends**: keep ASAPController's **PromQL + SQL** lowering (CP has PromQL only) and the correctness fixes (`sum(rate)`, `histogram_quantile`, matcher canonicalization) — retarget onto the unified `QueryExpr`. Lives in `crates/lower`.
+- **Front-ends**: keep ASAPController's **PromQL + SQL** lowering (CP has PromQL only) and the correctness fixes (`sum(rate)`, `histogram_quantile`, matcher canonicalization) — retarget onto the unified `QueryExpr`. Lives in `crates/frontend-promql` / `crates/frontend-sql` (with `crates/lower` as the re-export facade).
 - **Tests**: bring the `conformance` / `equivalence` / `corpus` suites onto the unified crate and merge with CP's `lower.rs` / `cse.rs` unit tests. Use the full suite as the acceptance gate.
 
 ## Recommended order

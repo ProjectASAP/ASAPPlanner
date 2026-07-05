@@ -25,9 +25,9 @@ the deployment-model / runtime / bin crates they describe are still planned.
 | Layer | What | Where it lives (today) |
 |---|---|---|
 | 1 | Query-language parsing (PromQL, SQL; DataFusion, ElasticDSL planned) | `asap-frontend-promql`, `asap-frontend-sql` |
-| 2 | Per-language relational algebra tree | `asap-ir::intent_algebra::relational` (emitted by the front ends) |
+| 2 | Per-language relational algebra tree + the shared L2→L3 converter (incl. the post-lowering canonicalization pass both languages run through) | `asap-l2` (emitted by the front ends) |
 | 3 | Intent algebra — language-, deployment-, AND data-model-independent IR (`QueryExpr` + `AggIntent`, intent only — no sketch type, no params). Supports both time-series and tabular data via a `Source` sum inside `Scan`. | `asap-ir::intent_algebra` |
-| 4 | Cost-aware optimizer — CSE + cost model + sketch-vs-exact boundary + canonicalization. Produces the **sketch algebra** IR (sketch-bound: kind + params committed). | optimizer passes in `asap-plan`; sketch-bound IR in `asap-sketch` |
+| 4 | Cost-aware optimizer — CSE + cost model + sketch-vs-exact boundary. Produces the **summary/sketch algebra** IR (sketch-bound: kind + params committed). | optimizer passes in `asap-plan`; sketch-bound IR in `asap-sketch` |
 | 5 | Physical plan — stage allocation + emit to wire format | *planned* (per-deployment-model) |
 
 ### Crates
@@ -39,14 +39,14 @@ runtime coupling.
 
 | Crate | Role | Depends on | ~LOC |
 |---|---|---|---|
-| **`asap-ir`** | **L3 canonical IR only** — `QueryExpr` + `AggIntent` + scalar expr IR + schema + names | *(nothing — no query-language deps)* | 2,300 |
-| `asap-l2` | L2 per-language relational algebra + the L2→L3 converter (`convert_root`, binder, column resolution) | `asap-ir` | 1,600 |
-| `asap-sketch` | L4 sketch-bound IR (`SketchExpr`) | `asap-ir` | 240 |
-| `asap-plan` | optimizer layer — CSE (landed); cost-model / boundary / canonicalize (stubs) | `asap-ir` | 290 |
-| `asap-frontend-promql` | PromQL L1→L2 | `asap-ir`, `asap-l2`, **promql-parser** | 1,030 |
-| `asap-frontend-sql` | SQL L1→L2 | `asap-ir`, `asap-l2`, **datafusion** | 1,130 |
-| `asap-lower` | facade re-exporting both front ends | the two `frontend-*` crates | 15 |
-| `asap-e2e` | cross-language integration tests | `asap-frontend-promql` | 40 |
+| **`asap-ir`** | **L3 canonical IR only** — `QueryExpr` + `AggIntent` + scalar expr IR + schema + names | *(nothing — no query-language deps)* | 2,700 |
+| `asap-l2` | L2 per-language relational algebra + the L2→L3 converter (`convert_root`, binder, column resolution) + the shared post-lowering `canonicalize` pass | `asap-ir` | 2,400 |
+| `asap-sketch` | L4 sketch-bound IR (`SummaryExpr` / `L4Node`; type definitions — the L3→L4 binding pass is #98) | `asap-ir` | 240 |
+| `asap-plan` | optimizer layer — CSE (landed); cost-model / boundary (stubs: #6/#33, #98) | `asap-ir` | 280 |
+| `asap-frontend-promql` | PromQL L1→L2 (+ `HistogramCatalog` sample-type metadata, #79) | `asap-ir`, `asap-l2`, **promql-parser** | 1,900 |
+| `asap-frontend-sql` | SQL L1→L2 | `asap-ir`, `asap-l2`, **datafusion** | 1,100 |
+| `asap-lower` | facade re-exporting both front ends; owns the cross-language equivalence tests (`tests/cross_language.rs`) | the two `frontend-*` crates | 15 |
+| `asap-e2e` | PromQL→L3 integration tests + shared fixtures | `asap-frontend-promql` | 40 |
 
 Two isolation wins fall out of this:
 - **The front ends quarantine their parsers** — a caller that needs only PromQL depends on `asap-frontend-promql` and never compiles DataFusion, and vice-versa (verified with `cargo tree`). `asap-lower` is the facade for callers that want both.
@@ -71,15 +71,16 @@ crates/
 │   └── src/
 │       ├── relational.rs           #   L2: per-language relational tree the front ends emit
 │       ├── lower.rs                #   L2→L3 converter (convert_root)
+│       ├── canonicalize.rs         #   shared post-lowering normalization (heavy-hitter TopK, #34)
 │       ├── binder.rs               #   positional name-resolution seed
 │       └── column_resolution.rs
-├── sketch/                         # asap-sketch — L4 sketch IR: expr / schema / sketch
+├── sketch/                         # asap-sketch — L4 sketch IR: expr / schema / sketch (types only; binding pass = #98)
 ├── plan/                           # asap-plan — optimizer: cse.rs (landed)
-│   └── src/                        #   + cost_model.rs / boundary.rs / canonicalize.rs (stubs)
-├── frontend-promql/                # asap-frontend-promql — promql.rs + error.rs (PromqlError)
+│   └── src/                        #   + cost_model.rs / boundary.rs (stubs)
+├── frontend-promql/                # asap-frontend-promql — promql.rs + histogram.rs (#79) + error.rs
 ├── frontend-sql/                   # asap-frontend-sql — sql/{mod,expr,types}.rs + error.rs (SqlError)
-├── lower/                          # asap-lower — facade (lib.rs re-exports both front ends)
-└── e2e/                            # asap-e2e — cross-language integration tests
+├── lower/                          # asap-lower — facade (re-exports both front ends) + cross-language tests
+└── e2e/                            # asap-e2e — PromQL→L3 integration tests + fixtures
 
 # planned (docs/design.md §5.2): L5 physical framework, runtime service,
 # deployment-model-* crates, control-proto, and the bin/ entrypoints.
