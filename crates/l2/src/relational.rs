@@ -11,7 +11,7 @@ use std::time::Duration;
 
 pub use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr};
 use asap_ir::intent_algebra::agg_intent::{MathFunc, TimeFunc};
-use asap_ir::intent_algebra::query_expr::SampleKind;
+use asap_ir::intent_algebra::query_expr::{InfoMatcher, SampleKind};
 pub use asap_ir::intent_algebra::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
 use asap_ir::intent_algebra::schema::Schema;
 
@@ -214,6 +214,13 @@ pub enum QueryExpr {
         kind: SampleKind,
         input: Box<QueryExpr>,
     },
+    /// `info(v, [selector])` — label-enrichment join against the info metric(s)
+    /// selected by `selector` (issue #84). Passes `input`'s series through,
+    /// enriched at L4 with the info labels.
+    InfoJoin {
+        selector: Vec<InfoMatcher>,
+        input: Box<QueryExpr>,
+    },
     /// Reference to a CTE / let-binding by name. **Reserved**: no front end
     /// emits `Ref`/`LetBinding` yet (CSE runs on L3); the converter arm exists
     /// for forward-compatibility (e.g. PromQL recording rules).
@@ -349,6 +356,7 @@ impl QueryExpr {
             | QueryExpr::ScalarFromVector(input)
             | QueryExpr::Relabel { input, .. }
             | QueryExpr::Sample { input, .. }
+            | QueryExpr::InfoJoin { input, .. }
             | QueryExpr::PromQLSubquery { input, .. } => input.walk(f),
             QueryExpr::Merge { inputs } => {
                 for i in inputs {
@@ -389,6 +397,7 @@ impl QueryExpr {
             | QueryExpr::ScalarFromVector(input)
             | QueryExpr::Relabel { input, .. }
             | QueryExpr::Sample { input, .. }
+            | QueryExpr::InfoJoin { input, .. }
             | QueryExpr::PromQLSubquery { input, .. } => input.leaf_source(),
             QueryExpr::Merge { inputs } => inputs.first()?.leaf_source(),
             QueryExpr::Join { left, .. }

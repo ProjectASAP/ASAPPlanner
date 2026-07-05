@@ -198,6 +198,19 @@ pub enum WindowFuncKind {
     Max,
 }
 
+/// A symbolic label matcher on the **info metric** side of an
+/// [`QueryExpr::InfoJoin`] (issue #84). Unlike a `Scan` predicate it is not
+/// resolved positionally — it references the info metric's labels (`__name__`
+/// picks the metric, the rest constrain data labels), which aren't in the input
+/// vector's schema; L4 applies it against the info metric.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InfoMatcher {
+    pub label: String,
+    /// One of `Eq` / `Ne` / `Regex` / `NotRegex` (PromQL `=`/`!=`/`=~`/`!~`).
+    pub op: CompareOp,
+    pub value: String,
+}
+
 /// Series-sampling selection mode (PromQL `limitk` / `limit_ratio`, issue #86).
 /// A [`QueryExpr::Sample`] keeps a *subset of whole series*, unchanged — it does
 /// not rank or reduce, so it is distinct from `TopK` and from `Sort → Limit`.
@@ -311,6 +324,21 @@ pub enum QueryExpr {
         /// The label written by this rewrite (PromQL `dst_label`).
         dst: String,
         value: L3Expr,
+        child: Box<QueryExpr>,
+    },
+
+    /// PromQL `info(v, [selector])` — left-join **label enrichment** (#84). Each
+    /// series in `child` is enriched with labels from the matching info metric(s)
+    /// (`target_info` by default; `selector`'s `__name__` matchers pick the
+    /// metric(s), the rest constrain the data labels), joined on their shared
+    /// identifying labels. Those join keys are the info metric's identifying
+    /// labels — runtime/metadata-resolved, since an open PromQL schema can't
+    /// enumerate them — so they are NOT carried here; L4 resolves them from the
+    /// info metric's schema. The output keeps `child`'s (open) schema: the
+    /// grafted labels appear at runtime.
+    InfoJoin {
+        #[serde(default)]
+        selector: Vec<InfoMatcher>,
         child: Box<QueryExpr>,
     },
 
@@ -528,6 +556,9 @@ impl QueryExpr {
             // Series sampling keeps a subset of whole series unchanged, so the
             // output schema (and row-uniqueness) is exactly the child's (#86).
             | QueryExpr::Sample { child, .. }
+            // Info enrichment adds runtime info labels — the statically-known
+            // schema is the child's (open), so it passes through (#84).
+            | QueryExpr::InfoJoin { child, .. }
             | QueryExpr::TimeRange { child, .. } => child.output_schema_in(scope),
 
             // ρ — relabel preserves every input column and writes one label

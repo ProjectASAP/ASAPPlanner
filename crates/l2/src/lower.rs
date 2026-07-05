@@ -124,6 +124,14 @@ pub fn convert(
             }
         }
 
+        // `info(v, [selector])` — label enrichment. The selector matchers are
+        // info-metric-side and symbolic (not resolved against the child), so
+        // they copy straight through; L4 resolves the join keys (issue #84).
+        LQueryExpr::InfoJoin { selector, input } => CQueryExpr::InfoJoin {
+            selector: selector.clone(),
+            child: Box::new(convert(input, fallback, acc)?),
+        },
+
         LQueryExpr::Ref(name) => CQueryExpr::Ref {
             name: BindingName::new(name.clone()),
         },

@@ -33,6 +33,7 @@
 //! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `EvalTime` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
 //! | `vector(s)` / `scalar(v)` | `VectorFromScalar` / `ScalarFromVector` — the scalar⇄vector bridges (issue #48) |
 //! | `label_replace(v,…)` / `label_join(v,…)` | `Relabel{dst, value}` — per-series label rewrite; value unchanged (issue #50) |
+//! | `info(v, [selector])` | `InfoJoin{selector}` — label-enrichment join against the info metric(s); join keys resolved at L4 (issue #84) |
 //! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
 //! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
@@ -59,7 +60,9 @@ use asap_l2::relational::{
     AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
 use asap_ir::intent_algebra::agg_intent::{MathFunc, TimeFunc};
-use asap_ir::intent_algebra::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Scalar, SampleKind};
+use asap_ir::intent_algebra::{
+    ArithOp, ColumnRef, CompareOp, InfoMatcher, L2Expr, L3Scalar, SampleKind,
+};
 
 use crate::error::PromqlError as LoweringError;
 
@@ -202,6 +205,7 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Call(call) if is_scalar_reducer_fn(call.func.name) => {
             Ok(L2::Scalar(num_expr(expr)?))
         }
+        Expr::Call(call) if call.func.name == "info" => walk_info(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -655,6 +659,48 @@ fn walk_sort(call: &Call) -> Result<L2> {
         partition_by: vec![],
         input,
     })
+}
+
+/// `info(v, [selector])` — a label-enrichment join. Lowers the input vector and
+/// wraps it in an `InfoJoin` carrying the (optional) data-label selector's
+/// matchers; the actual join against the info metric — on shared identifying
+/// labels — is resolved at L4 (issue #84).
+fn walk_info(call: &Call) -> Result<L2> {
+    let input = Box::new(walk(arg(call, 0)?)?);
+    let selector = match call.args.args.get(1) {
+        Some(sel) => info_selector(sel)?,
+        None => Vec::new(), // default: enrich from `target_info`
+    };
+    Ok(L2::InfoJoin { selector, input })
+}
+
+/// Extract the `info` data-label selector's matchers. Unlike an ordinary
+/// selector these are **info-metric-side** and may carry regex / multiple
+/// `__name__` matchers (which pick the info metric(s)), so they bypass the
+/// single-metric `vs_parts` restriction and are kept symbolic.
+fn info_selector(expr: &Expr) -> Result<Vec<InfoMatcher>> {
+    match expr {
+        Expr::VectorSelector(vs) => Ok(vs
+            .matchers
+            .matchers
+            .iter()
+            .map(|m| InfoMatcher {
+                label: m.name.clone(),
+                op: match &m.op {
+                    MatchOp::Equal => CompareOp::Eq,
+                    MatchOp::NotEqual => CompareOp::Ne,
+                    MatchOp::Re(_) => CompareOp::Regex,
+                    MatchOp::NotRe(_) => CompareOp::NotRegex,
+                },
+                value: m.value.clone(),
+            })
+            .collect()),
+        Expr::Paren(p) => info_selector(&p.expr),
+        other => Err(LoweringError::UnsupportedFeature(format!(
+            "`info` data-label selector must be a label-matcher set, got {:?}",
+            std::mem::discriminant(other)
+        ))),
+    }
 }
 
 /// The label-rewrite functions (issue #50).

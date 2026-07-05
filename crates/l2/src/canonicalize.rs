@@ -71,6 +71,7 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
         | TimeRange { child, .. }
         | WindowFunc { child, .. }
         | Sample { child, .. }
+        | InfoJoin { child, .. }
         | Sort { child, .. }
         | Limit { child, .. } => vec![child.as_mut()],
         LetBinding { expr, child, .. } => vec![expr.as_mut(), child.as_mut()],
