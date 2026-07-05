@@ -197,6 +197,11 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Call(call) if is_typeconv_fn(call.func.name) => walk_typeconv(call),
         Expr::Call(call) if is_label_fn(call.func.name) => walk_label(call),
         Expr::Call(call) if is_sort_fn(call.func.name) => walk_sort(call),
+        // A bare `min_of`/`max_of(consts…)` scalar query folds to a `Scalar`
+        // leaf; a non-constant argument makes `num_expr` fail → rejected (#89).
+        Expr::Call(call) if is_scalar_reducer_fn(call.func.name) => {
+            Ok(L2::Scalar(num_expr(expr)?))
+        }
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
@@ -1433,11 +1438,38 @@ fn num_expr(expr: &Expr) -> Result<f64> {
                 ))
             }
         }
+        // `min_of`/`max_of` are n-ary *scalar* reducers (issue #89). Fold them
+        // when every argument is itself a constant scalar — this is the only
+        // form the intent algebra can hold (there is no scalar min/max node). A
+        // non-constant argument (`min_of(step(), 1s)`) fails the recursive fold
+        // and propagates the error, so it stays rejected. `f64::min`/`max`
+        // ignore NaN, matching PromQL's `min`/`max` NaN semantics.
+        Expr::Call(c) if is_scalar_reducer_fn(c.func.name) => {
+            let reduce = if c.func.name == "min_of" {
+                f64::min
+            } else {
+                f64::max
+            };
+            c.args
+                .args
+                .iter()
+                .map(|a| num_expr(a))
+                .reduce(|acc, v| Ok(reduce(acc?, v?)))
+                .ok_or_else(|| {
+                    LoweringError::MissingArgument(format!("{} needs an argument", c.func.name))
+                })?
+        }
         other => Err(LoweringError::InvalidParameter(format!(
             "expected a numeric scalar, got {:?}",
             std::mem::discriminant(other)
         ))),
     }
+}
+
+/// The n-ary scalar min/max reducers, foldable when all arguments are constant
+/// scalars (issue #89).
+fn is_scalar_reducer_fn(name: &str) -> bool {
+    matches!(name, "min_of" | "max_of")
 }
 
 /// A `BinaryOp` operand: fold a pure-scalar expression (`5`, `10*1024*1024`) to
