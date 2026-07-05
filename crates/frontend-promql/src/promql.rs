@@ -36,7 +36,8 @@
 //! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
 //! | `OUTER by (dims) (…)` | `Aggregate.keys = dims` (→ positional `Aggregate.by` in L3; generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[CountDistinct], …}` (→ `Cardinality`) |
-//! | `group(v)` / `count_values("l", v)` | `Aggregate{[Group]}` (constant 1) / `Aggregate{[CountValues{l}]}` (group-by-value + count, new label `l`) — issue #49; `limitk`/`limit_ratio` series sampling → #86 |
+//! | `group(v)` / `count_values("l", v)` | `Aggregate{[Group]}` (constant 1) / `Aggregate{[CountValues{l}]}` (group-by-value + count, new label `l`) — issue #49 |
+//! | `limitk(k, v)` / `limit_ratio(r, v)` | `Sample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series kept unchanged (issue #86) |
 //! | `topk(k, count_over_time(…))` | `TopK{k, by}` (heavy-hitter intent) |
 //! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
 //! | `m{f}` | `Filter(Source)` |
@@ -58,7 +59,7 @@ use asap_l2::relational::{
     AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
 use asap_ir::intent_algebra::agg_intent::{MathFunc, TimeFunc};
-use asap_ir::intent_algebra::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Scalar};
+use asap_ir::intent_algebra::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Scalar, SampleKind};
 
 use crate::error::PromqlError as LoweringError;
 
@@ -76,6 +77,8 @@ enum Outer {
     /// new label `l` (issue #49).
     CountValues { label: String },
     TopK { k: u64, descending: bool },
+    /// `limitk`/`limit_ratio` — series-sampling selection (issue #86).
+    Sample { kind: SampleKind },
 }
 
 #[derive(Debug, Clone)]
@@ -390,6 +393,16 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
         Outer::CountValues {
             label: str_param(agg)?,
         }
+    } else if op == token::T_LIMITK {
+        // `limitk(k, v)` — up to k series per group (issue #86).
+        Outer::Sample {
+            kind: SampleKind::LimitK(count_param(agg)? as usize),
+        }
+    } else if op == token::T_LIMIT_RATIO {
+        // `limit_ratio(r, v)` — an r-fraction of series per group (issue #86).
+        Outer::Sample {
+            kind: SampleKind::LimitRatio(ratio_param(agg)?),
+        }
     } else if op == token::T_AVG {
         Outer::Plain(OuterIntent::Avg)
     } else if op == token::T_MIN {
@@ -427,6 +440,11 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L
         Outer::CountValues { label } => {
             outer_aggregate(keys, AggFunc::CountValues { label }, child)
         }
+        Outer::Sample { kind } => L2::Sample {
+            keys,
+            kind,
+            input: Box::new(child),
+        },
         Outer::TopK { k, descending } => {
             let sorted = L2::Sort {
                 keys: vec![L2SortKey {
@@ -1054,6 +1072,21 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
                 }
             })
         }
+        Outer::Sample { kind } => {
+            // Series sampling selects whole series unchanged — like generic
+            // `topk`, a range-vector argument reduces per series first (label-
+            // preserving), a bare selector is sampled directly; neither is
+            // wrapped in a reducing aggregate (issue #86).
+            let base = match inner.func.as_ref().map(inner_func) {
+                Some(func) => windowed_aggregate(inner, vec![], func),
+                None => filtered_source(inner.metric, inner.matchers),
+            };
+            Ok(L2::Sample {
+                keys,
+                kind,
+                input: Box::new(base),
+            })
+        }
         Outer::TopK { k, descending } => {
             // Heavy-hitter only when ranking by frequency (`count`): that is a
             // first-class aggregate intent → `TopK`. Any other ranking (topk
@@ -1428,6 +1461,20 @@ fn count_param(agg: &AggregateExpr) -> Result<u64> {
             "topk/bottomk k must be a non-negative integer, got {v}"
         )))
     }
+}
+
+/// `limit_ratio` ratio parameter — a finite value; Prometheus clamps it to
+/// `[-1, 1]` (a negative ratio selects the complementary fraction). A non-finite
+/// ratio (`limit_ratio(NaN, …)`) or a dynamic one (`time() % 17/17`, which
+/// `num_param` can't fold) is rejected (issue #86).
+fn ratio_param(agg: &AggregateExpr) -> Result<f64> {
+    let r = num_param(agg)?;
+    if !r.is_finite() {
+        return Err(LoweringError::InvalidParameter(format!(
+            "limit_ratio ratio must be finite, got {r}"
+        )));
+    }
+    Ok(r.clamp(-1.0, 1.0))
 }
 
 /// Quantile φ — must be a finite value in `[0, 1]`. Rejects NaN/∞ and

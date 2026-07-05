@@ -143,6 +143,8 @@ fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
             }
         }
         LQueryExpr::TopK { by, .. } => by.iter().for_each(|k| push_ref_name(k, &mut out)),
+        // `limitk`/`limit_ratio` grouping keys resolve positionally (issue #86).
+        LQueryExpr::Sample { keys, .. } => keys.iter().for_each(|k| push_ref_name(k, &mut out)),
         LQueryExpr::Filter { pred, .. } => named(pred, &mut out),
         LQueryExpr::Project { cols, .. } => {
             for item in cols {

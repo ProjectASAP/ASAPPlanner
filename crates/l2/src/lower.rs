@@ -112,6 +112,18 @@ pub fn convert(
             }
         }
 
+        // Series sampling (`limitk`/`limit_ratio`) — resolve the grouping keys
+        // positionally, pass the sampled child through unchanged (issue #86).
+        LQueryExpr::Sample { keys, kind, input } => {
+            let child = convert(input, fallback, acc)?;
+            let child_schema = child.output_schema()?;
+            CQueryExpr::Sample {
+                by: resolve_column_refs(keys, &child_schema)?.into(),
+                kind: *kind,
+                child: Box::new(child),
+            }
+        }
+
         LQueryExpr::Ref(name) => CQueryExpr::Ref {
             name: BindingName::new(name.clone()),
         },
