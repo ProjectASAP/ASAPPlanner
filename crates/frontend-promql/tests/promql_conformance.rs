@@ -1573,11 +1573,35 @@ fn sort_by_label_desc_is_descending() {
 }
 
 #[test]
-fn min_of_max_of_are_rejected__GAP() {
-    // `min_of`/`max_of` are n-ary *scalar* reducers, almost always nested with
-    // the `step()`/`range()` scalar helpers inside range/offset positions that
-    // are themselves unsupported. They need a scalar-reduction node — deferred
-    // to #89, not mislowered.
-    let _ = rejected("min_of(1, 2, 3)");
-    let _ = rejected("max_of(1, 2)");
+fn min_of_max_of_fold_constant_scalars() {
+    // `min_of`/`max_of` are n-ary scalar reducers. When every argument is a
+    // constant they constant-fold to a `Scalar` leaf, just like scalar
+    // arithmetic (#35) — the only form the intent algebra can hold (#89).
+    assert!(matches!(ok("min_of(3, 5)"), QueryExpr::Scalar(v) if v == 3.0));
+    assert!(matches!(ok("max_of(3, 5)"), QueryExpr::Scalar(v) if v == 5.0));
+    assert!(matches!(ok("min_of(-2, -5)"), QueryExpr::Scalar(v) if v == -5.0));
+    // Nested folds and use as a threshold operand.
+    assert!(matches!(ok("max_of(min_of(2, 3), 10)"), QueryExpr::Scalar(v) if v == 10.0));
+    let qe = ok("up > max_of(1, 2)");
+    let QueryExpr::BinaryOp { rhs, .. } = &qe else {
+        panic!("{qe:?}")
+    };
+    assert!(matches!(rhs.as_ref(), QueryExpr::Scalar(v) if *v == 2.0));
+}
+
+#[test]
+fn min_of_max_of_ignore_nan_like_the_min_max_aggregators() {
+    // A NaN argument is skipped (Prometheus `min`/`max` NaN semantics).
+    assert!(matches!(ok("max_of(3, NaN)"), QueryExpr::Scalar(v) if v == 3.0));
+    assert!(matches!(ok("min_of(NaN, 3)"), QueryExpr::Scalar(v) if v == 3.0));
+}
+
+#[test]
+fn non_constant_min_of_max_of_is_rejected__GAP() {
+    // A dynamic argument (`step()` — itself unsupported, #89) can't be folded to
+    // a constant and there is no scalar min/max node, so it stays rejected
+    // rather than mislowered. These forms also only appear inside unsupported
+    // dynamic range / offset positions in the corpus.
+    let _ = rejected("min_of(step(), 1s)");
+    let _ = rejected("max_of(min_of(step() + 1, 1h), 1ms)");
 }
