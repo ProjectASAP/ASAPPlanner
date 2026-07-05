@@ -79,7 +79,8 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         | QueryExpr::WindowFunc { child, .. }
         | QueryExpr::Project { child, .. }
         | QueryExpr::Relabel { child, .. }
-        | QueryExpr::Sample { child, .. } => collect(child, out),
+        | QueryExpr::Sample { child, .. }
+        | QueryExpr::InfoJoin { child, .. } => collect(child, out),
         QueryExpr::BinaryOp { lhs, rhs, .. } => {
             collect(lhs, out);
             collect(rhs, out);
@@ -1280,11 +1281,46 @@ fn scalar_of_a_vector_feeds_a_threshold_comparison() {
 }
 
 #[test]
-fn info_is_rejected__GAP() {
-    // `info(v)` is a label-enrichment *join* against info metrics, not a type
-    // conversion — no intent-algebra representation yet (follow-up #84). Pinned
-    // so adding support flips this deliberately.
-    let _ = rejected("info(rate(http_requests_total[5m]))");
+fn info_lowers_to_a_label_enrichment_join() {
+    // `info(v, [selector])` is a label-enrichment *join* against the info
+    // metric(s) — it lowers to an `InfoJoin` over the (unchanged) input vector
+    // (issue #84). The value/time axis pass through; the enriched labels are
+    // runtime, so the schema stays the child's.
+    let qe = ok("info(rate(http_requests_total[5m]))");
+    let QueryExpr::InfoJoin { selector, child } = &qe else {
+        panic!("expected an InfoJoin, got {qe:?}");
+    };
+    assert!(selector.is_empty(), "no selector → default target_info");
+    // The child is the untouched input (a per-series rate reduction here).
+    assert!(has(child, |i| *i == AggIntent::Rate));
+    assert!(qe.output_schema().unwrap().time_index.is_some());
+}
+
+#[test]
+fn info_selector_carries_the_info_side_matchers() {
+    // `info(v, {__name__=~".+_info", data=~".+"})` — the selector picks the info
+    // metric(s) via `__name__` and constrains the data labels. Regex / `__name__`
+    // matchers are kept symbolically (not run through the single-metric selector
+    // path).
+    let qe = ok(r#"info(build_info, {__name__=~".+_info", another_data=~".+"})"#);
+    let QueryExpr::InfoJoin { selector, .. } = &qe else {
+        panic!("expected an InfoJoin, got {qe:?}");
+    };
+    assert_eq!(selector.len(), 2, "both selector matchers kept: {selector:?}");
+    assert!(selector.iter().any(|m| m.label == "__name__" && m.op == CompareOp::Regex));
+    assert!(selector.iter().any(|m| m.label == "another_data"));
+}
+
+#[test]
+fn info_composes_under_an_aggregation_and_rejects_time_shift() {
+    // `sum(info(m))` — enrichment first, then a cross-series sum over it.
+    assert!(has(&ok("sum(info(node_uname_info))"), |i| matches!(
+        i,
+        AggIntent::Sum { .. }
+    )));
+    // `offset` / `@` on the input still have no representation → rejected.
+    let _ = rejected("info(metric @ 60)");
+    let _ = rejected("info(metric offset 1m)");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
