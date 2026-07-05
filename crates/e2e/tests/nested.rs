@@ -175,6 +175,33 @@ fn q27_max_over_sum_by_job_over_rate() {
     );
 }
 
+// #53 — outer group key provably absent from the nested aggregate's output.
+//   The inner `sum by (group)` freezes the schema to the closed `[group, sum]`,
+//   which lacks `job`; PromQL groups every series under the empty label value
+//   and omits it from the output, so the outer `by (job)` lowers as a global
+//   aggregate (the absent key is dropped, not rejected).
+//   Scan schema: [ts(0), value(1), group(2), job(3)] (labels alphabetical).
+#[test]
+fn q53_outer_group_key_absent_from_nested_aggregate() {
+    let scan = QueryExpr::Scan {
+        source: Source::TimeSeries {
+            metric: "http_requests".into(),
+        },
+        predicates: vec![Predicate(L3Expr::Compare {
+            left: Box::new(L3Expr::Column(3)),
+            op: CompareOp::Eq,
+            right: Box::new(L3Expr::Literal(L3Scalar::Utf8("api-server".into()))),
+        })],
+        schema: metric_schema(&["group", "job"]),
+    };
+    let inner = agg(vec![2], AggIntent::Sum { col: None }, scan);
+    let expected = agg(vec![], AggIntent::Sum { col: None }, inner);
+    assert_eq!(
+        lower(r#"sum(sum by (group)(http_requests{job="api-server"})) by (job)"#),
+        expected
+    );
+}
+
 // #24 — sum by job over rate over a filtered scan
 //   same schema [ts, value, job, status]; rate is label-preserving,
 //   so outer sum by job still finds job at col 2

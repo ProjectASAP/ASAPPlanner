@@ -669,6 +669,46 @@ fn outer_aggregate_over_nested_aggregate_nests() {
 }
 
 #[test]
+fn outer_group_key_absent_from_nested_aggregate_is_dropped() {
+    // SEMANTICS (PromQL, issue #53): aggregating `by` a label that no input
+    // series carries is valid — every series lands in one group and the
+    // (empty) label is omitted from the output. Here the inner `sum by (group)`
+    // collapses `job` away (its closed output schema is `[group, sum]`), so the
+    // outer `by (job)` groups everything into a single global partition:
+    // the query lowers with the provably-absent key dropped, exactly
+    // `sum(sum by (group)(…))`.
+    let qe = ok(r#"sum(sum by (group)(http_requests{job="api-server"})) by (job)"#);
+    let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+        panic!("expected outer Aggregate, got {qe:?}");
+    };
+    assert!(by.is_empty(), "absent `job` key dropped → global aggregate");
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    let QueryExpr::Aggregate { by, .. } = child.as_ref() else {
+        panic!("expected inner `sum by (group)` Aggregate, got {child:?}");
+    };
+    assert_eq!(by, &vec![2], "inner grouping on `group` survives");
+}
+
+#[test]
+fn outer_group_key_present_after_inner_aggregate_still_resolves() {
+    // The counterpart guard for #53: when the outer key IS in the inner
+    // aggregate's output (`by (job)` over `sum by (job, group)`), it must keep
+    // resolving positionally — the absent-key drop only fires on provable
+    // absence, never on a resolvable key.
+    let qe = ok("sum(sum by (job, group)(http_requests)) by (job)");
+    let QueryExpr::Aggregate { by, child, .. } = &qe else {
+        panic!("expected outer Aggregate, got {qe:?}");
+    };
+    let QueryExpr::Aggregate { by: inner_by, .. } = child.as_ref() else {
+        panic!("expected inner Aggregate, got {child:?}");
+    };
+    // Inner output schema is [group, job, sum] (keys in label-column order,
+    // labels alphabetical on the scan) → job = col 1.
+    assert_eq!(by, &vec![1], "outer `job` resolves against the inner output");
+    assert_eq!(inner_by.len(), 2);
+}
+
+#[test]
 fn aggregate_over_binary_op_nests() {
     // `sum(rate(a[5m]) + rate(b[5m]))` — an aggregate whose argument is a binary
     // op over two range vectors. The old template only accepted a single inner
