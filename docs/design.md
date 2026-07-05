@@ -125,7 +125,7 @@ This is what makes the topology a *parameter* rather than an axis of code: the s
 
 This drives the core/deployment model split:
 
-- **The shared infrastructure crates** own all 5 layers. Landed today (§5.1): the front ends (L1→L2), `asap-l2` (L2 relational + the L2→L3 converter), `asap-ir` (L3 canonical IR), `asap-sketch` (L4 IR), and `asap-plan` (L4 optimizer — CSE, with the rule engine + cost model + boundary + canonicalize as stubs). Planned: the L5 stage-allocator framework + `PhysicalPlanner` trait + sketch catalogue. (The original design put all of this in one `core/` crate; §5.1 splits it by role.)
+- **The shared infrastructure crates** own all 5 layers. Landed today (§5.1): the front ends (L1→L2), `asap-l2` (L2 relational + the L2→L3 converter), `asap-ir` (L3 canonical IR), `asap-sketch` (L4 IR), and `asap-plan` (L4 optimizer — CSE + the L3→L4 `bind` pass + the sketch-vs-exact `boundary` decision (#98), with the rule engine + cost model as stubs). Planned: the L5 stage-allocator framework + `PhysicalPlanner` trait + sketch catalogue. (The original design put all of this in one `core/` crate; §5.1 splits it by role.)
 - **Each deployment model is a thin crate** that: (1) picks which of core's L4 rules to enable + adds any deployment-model-specific rules, (2) declares its deployment topology (how many stages, where data flows), (3) provides an emitter for its output format. That's usually a few hundred lines, not thousands.
 
 ## 4. Principles
@@ -185,10 +185,11 @@ crates/
                      #   lower (convert_root) + canonicalize (shared post-
                      #   lowering normalization, #34) + binder +
                      #   column_resolution. (crate: asap-l2)
-  sketch/            # L4 sketch-bound IR (SummaryExpr / L4Node; types only —
-                     #   the L3→L4 binding pass is #98). (crate: asap-sketch)
-  plan/              # optimizer layer: CSE today; cost_model / boundary are
-                     #   stubs (#6/#33, #98). (crate: asap-plan)
+  sketch/            # L4 sketch-bound IR (SummaryExpr / L4Node; constructed by
+                     #   asap-plan's bind pass, #98). (crate: asap-sketch)
+  plan/              # optimizer layer: CSE + the L3→L4 bind pass + the
+                     #   sketch-vs-exact boundary (#98); cost_model is a
+                     #   stub (#6/#33). (crate: asap-plan)
   frontend-promql/   # PromQL L1→L2, promql-parser; + histogram.rs sample-type
                      #   metadata (#79). (crate: asap-frontend-promql)
   frontend-sql/      # SQL L1→L2, datafusion. (crate: asap-frontend-sql)
@@ -324,7 +325,7 @@ the landed crates (§5.1) as follows:
 | `core::lower` (L1→L2→L3) | `asap-frontend-*` (L1→L2) + `asap-l2::convert_root` (L2→L3, with the binder + column resolution) | landed, split per language |
 | `core::intent_algebra` (L3) | `asap-ir::intent_algebra` | landed |
 | `core::sketch_algebra` (L4 IR) | `asap-sketch` | landed |
-| `core::optimizer` (L4 framework) | `asap-plan` | placeholder (CSE only; engine/rules planned) |
+| `core::optimizer` (L4 framework) | `asap-plan` | partial (CSE + the L3→L4 `bind` pass + `boundary`, #98; rule engine planned) |
 | `core::cost` | `asap-plan::cost_model` | stub |
 | `core::physical` (L5) | — | planned |
 | `core::pipeline`, `core::emit`, `core::registry`, `core::workload` | `asap-ir::workload` (workload types only); rest planned | partial |
@@ -626,7 +627,7 @@ impl AggIntent {
 
 ### `asap-sketch` — Layer 4 IR (`SketchExpr`; **shipped as `SummaryExpr` / `L4Node`**)
 
-> **Naming note (code vs this doc).** The landed crate is `asap-sketch` (`crates/sketch/`), and it names this IR `SummaryExpr` wrapped in `L4Node { expr, schema: L4Schema }`, with variants `Logical` / `SummaryAgg` / `SummaryJoin` / `SummarySubtract` / `SummaryDelete` / `SummaryEstimate` / `SummaryMerge` plus `SummaryKind` / `SummaryParams` ("summary" covers both sketches and exact accumulators). This section keeps the original `SketchExpr` spelling for continuity; read `Sketch*` ≙ `Summary*`. The type definitions are landed; the L3→L4 binding pass that constructs them is tracked by #98.
+> **Naming note (code vs this doc).** The landed crate is `asap-sketch` (`crates/sketch/`), and it names this IR `SummaryExpr` wrapped in `L4Node { expr, schema: L4Schema }`, with variants `Logical` / `SummaryAgg` / `SummaryJoin` / `SummarySubtract` / `SummaryDelete` / `SummaryEstimate` / `SummaryMerge` plus `SummaryKind` / `SummaryParams` ("summary" covers both sketches and exact accumulators). This section keeps the original `SketchExpr` spelling for continuity; read `Sketch*` ≙ `Summary*`. The type definitions are landed, and the L3→L4 binding pass that constructs them landed in `asap-plan` (#98): `asap_plan::bind` walks the L3 tree and `asap_plan::boundary` makes the per-intent sketch-vs-exact decision (`AggIntent → SummaryKind + SummaryParams`, sized to the `AccuracyTarget`). The general rule engine that rewrites *through* logical parents is still tracked by #6/#33 — `bind` fires on the aggregate spine and conservatively leaves anything under an unrewritten logical operator as `Logical(…)`.
 
 L4 binding rules consume L3 `QueryExpr` (in `asap-ir::intent_algebra`) and produce the sketch-bound L4 IR (in `asap-sketch`). This is the IR L5 emitters consume. The two-IR split — intent-only L3 (`QueryExpr`) and sketch-bound L4, in two separate crates — gives L4 rule application a clean type signature: `fn apply(&QueryExpr, &Constraints) -> Option<SketchExpr>`, and the boundary cannot be silently violated.
 
@@ -1479,7 +1480,7 @@ Terms that are project-specific or that get conflated. Where the term has a Rust
 - **L1 — query language** — Raw query string + parser (PromQL / SQL / DataFusion / ElasticDSL).
 - **L2 — logical plan** — Per-language relational algebra tree (`PromqlLogicalPlan`, `SqlLogicalPlan`, etc.).
 - **L3 — intent algebra** (`QueryExpr`, `asap-ir::intent_algebra`) — Symbolic, intent-only IR. No sketch type, no params. `AggIntent` carries accuracy targets only. The "algebra" is the operator surface (`Scan`, `Filter`, `Aggregate`, `Window`, …); the algebra is *intent-only* because no sketches have been bound yet.
-- **L4 — sketch algebra** (`SummaryExpr` / `L4Node` in `asap-sketch`; this doc's prose says `SketchExpr` — see the naming note in §6) — Same DAG shape as L3, but sketches now committed (kind + params). Produced by L4 binding rules (#98); consumed by L5 emitters. Note the naming inversion vs. earlier drafts: "sketch algebra" is L4 (where sketches actually live), not L3.
+- **L4 — sketch algebra** (`SummaryExpr` / `L4Node` in `asap-sketch`; this doc's prose says `SketchExpr` — see the naming note in §6) — Same DAG shape as L3, but sketches now committed (kind + params). Produced by the L3→L4 binding pass (`asap_plan::bind`, #98); consumed by L5 emitters. Note the naming inversion vs. earlier drafts: "sketch algebra" is L4 (where sketches actually live), not L3.
 - **L5 — physical plan** — Stage-assigned, executor-targeted, ready to serialize. Produced by `PhysicalPlanner`, written out by `PlanEmitter`.
 
 ### Metadata sources (see §6 "DAG schema, DB schema, sketch catalog")

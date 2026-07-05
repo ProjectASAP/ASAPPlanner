@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 # The cost-aware optimizer layer (L4 decisions) over the L3 intent algebra.
-# Depends only on the IR crate — never on a front end.
+# Consumes L3 (asap-ir) and produces the sketch-bound L4 IR (asap-sketch) —
+# never depends on a front end.
 [dependencies]
 asap-ir = { path = "../ir" }
+asap-sketch = { path = "../sketch" }
+thiserror = "2"

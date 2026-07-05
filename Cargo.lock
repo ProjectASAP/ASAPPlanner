@@ -308,6 +308,8 @@ version = "0.1.0"
 dependencies = [
  "asap-frontend-promql",
  "asap-ir",
+ "asap-plan",
+ "asap-sketch",
 ]
 
 [[package]]
@@ -361,6 +363,8 @@ name = "asap-plan"
 version = "0.1.0"
 dependencies = [
  "asap-ir",
+ "asap-sketch",
+ "thiserror",
 ]
 
 [[package]]

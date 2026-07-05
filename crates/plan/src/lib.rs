@@ -15,16 +15,23 @@
 //!
 //! ## Status
 //!
-//! A **placeholder** with one real occupant, [`cse`] (workload-level
-//! common-sub-expression elimination). The remaining modules are intentional
-//! stubs marking where the optimizer work lands:
+//! Three real occupants and one stub:
 //!
-//! - [`cost_model`] — cost traits + the model CSE credits a shared producer
-//!   against (issues #6, #33).
-//! - [`boundary`] — the per-node sketch-vs-exact (accuracy) decision, part of
-//!   the L3→L4 binding (issue #98).
+//! - [`cse`] — workload-level common-sub-expression elimination.
+//! - [`boundary`] — the per-intent sketch-vs-exact (accuracy) decision:
+//!   `AggIntent → SummaryKind + SummaryParams` sized to the `AccuracyTarget`
+//!   (issue #98).
+//! - [`bind`] — the L3→L4 binding pass: walks a `QueryExpr` tree, fires the
+//!   [`boundary`] decision per node, and emits the sketch-bound
+//!   [`SummaryExpr`](asap_sketch::SummaryExpr) DAG (issue #98).
+//! - [`cost_model`] — stub: cost traits + the model CSE credits a shared
+//!   producer against (issues #6, #33).
 
 pub mod cse;
 
+pub mod bind;
 pub mod boundary;
 pub mod cost_model;
+
+pub use bind::{bind, bind_in, BindError};
+pub use boundary::{realize, sketch_candidates, Realization};
