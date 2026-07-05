@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use asap_ir::intent_algebra::schema::DataType;
 use asap_ir::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, MathFunc, QueryExpr, Source, TimeFunc,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, MathFunc, QueryExpr, SampleKind, Source, TimeFunc,
 };
 use asap_ir::types::AccuracyTarget;
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
@@ -78,7 +78,8 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::WindowFunc { child, .. }
         | QueryExpr::Project { child, .. }
-        | QueryExpr::Relabel { child, .. } => collect(child, out),
+        | QueryExpr::Relabel { child, .. }
+        | QueryExpr::Sample { child, .. } => collect(child, out),
         QueryExpr::BinaryOp { lhs, rhs, .. } => {
             collect(lhs, out);
             collect(rhs, out);
@@ -1365,14 +1366,61 @@ fn count_values_label_colliding_with_a_group_key_is_not_duplicated() {
 }
 
 #[test]
-fn limitk_and_limit_ratio_are_rejected__GAP() {
-    // `limitk`/`limit_ratio` are series-*sampling* operators — they return a
-    // deterministic-but-unordered subset of the input series unchanged. Modeling
-    // them as `topk` (order-by-value + limit) would change *which* series pass
-    // through, so they are cleanly rejected pending a sampling-selection node
-    // (follow-up #86), not mislowered.
-    let _ = rejected("limitk(2, http_requests)");
-    let _ = rejected("limit_ratio(0.1, http_requests)");
+fn limitk_and_limit_ratio_lower_to_series_sampling() {
+    // `limitk`/`limit_ratio` are series-*sampling* selection — a subset of whole
+    // series kept unchanged (NOT a ranking), so they lower to the dedicated
+    // `Sample` node, never `topk`'s `Sort → Limit` (issue #86).
+    assert!(matches!(
+        ok("limitk(2, http_requests)"),
+        QueryExpr::Sample { kind: SampleKind::LimitK(2), .. }
+    ));
+    assert!(matches!(
+        ok("limit_ratio(0.1, http_requests)"),
+        QueryExpr::Sample { kind: SampleKind::LimitRatio(r), .. } if (r - 0.1).abs() < 1e-9
+    ));
+    // Series-preserving: the output schema equals the input's (ts, value).
+    let sch = ok("limitk(2, http_requests)").output_schema().unwrap();
+    assert!(sch.columns.iter().any(|c| c.name == "value"));
+    assert!(sch.time_index.is_some());
+}
+
+#[test]
+fn limit_ratio_keeps_a_negative_ratio_and_clamps_out_of_range() {
+    // A negative ratio selects the complementary fraction — it must survive, not
+    // be normalised away. Out-of-range magnitudes clamp to [-1, 1] (Prometheus).
+    assert!(matches!(
+        ok("limit_ratio(-0.5, http_requests)"),
+        QueryExpr::Sample { kind: SampleKind::LimitRatio(r), .. } if (r + 0.5).abs() < 1e-9
+    ));
+    assert!(matches!(
+        ok("limit_ratio(1.1, http_requests)"),
+        QueryExpr::Sample { kind: SampleKind::LimitRatio(r), .. } if (r - 1.0).abs() < 1e-9
+    ));
+}
+
+#[test]
+fn limitk_by_carries_the_grouping_and_composes_in_a_set_op() {
+    // `limitk by (group)` samples per group; the grouping label is seeded.
+    let qe = ok("limitk by (group) (2, http_requests)");
+    let QueryExpr::Sample { by, .. } = &qe else {
+        panic!("expected a Sample, got {qe:?}");
+    };
+    assert!(!by.is_empty(), "grouped sampling keeps its `by` keys");
+    // `count(limitk(2, v) and v)` — the surviving series' identity matters, so
+    // the Sample must be preserved under the set op (it must lower, not reject).
+    assert!(has(
+        &ok("count(limitk(2, http_requests) and http_requests)"),
+        |i| matches!(i, AggIntent::Cardinality { .. })
+    ));
+}
+
+#[test]
+fn dynamic_and_non_finite_sample_params_are_rejected() {
+    // A dynamic k/ratio (not a compile-time constant) or a NaN can't be a static
+    // `Sample` param — rejected rather than mislowered.
+    let _ = rejected("limitk(NaN, http_requests)");
+    let _ = rejected("limitk(scalar(foo), http_requests)");
+    let _ = rejected("limit_ratio(time() % 17 / 17, http_requests)");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

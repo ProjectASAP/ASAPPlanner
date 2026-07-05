@@ -198,6 +198,20 @@ pub enum WindowFuncKind {
     Max,
 }
 
+/// Series-sampling selection mode (PromQL `limitk` / `limit_ratio`, issue #86).
+/// A [`QueryExpr::Sample`] keeps a *subset of whole series*, unchanged — it does
+/// not rank or reduce, so it is distinct from `TopK` and from `Sort → Limit`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SampleKind {
+    /// `limitk(k, v)` — up to `k` series per group. Which series survive is
+    /// deterministic across evaluations but otherwise unspecified (no ordering).
+    LimitK(usize),
+    /// `limit_ratio(r, v)` — a deterministic `r`-fraction of series per group.
+    /// `r ∈ [-1, 1]`; a negative `r` selects the complementary fraction.
+    LimitRatio(f64),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SortKey {
     pub expr: L3Expr,
@@ -297,6 +311,17 @@ pub enum QueryExpr {
         /// The label written by this rewrite (PromQL `dst_label`).
         dst: String,
         value: L3Expr,
+        child: Box<QueryExpr>,
+    },
+
+    /// Series-sampling **selection** — PromQL `limitk` / `limit_ratio` (#86).
+    /// Keeps a subset of whole series per `by` group (empty = global), passing
+    /// each surviving series through unchanged. Not a ranking (`TopK`) and not a
+    /// reduction: the output schema equals the child's.
+    Sample {
+        #[serde(default)]
+        by: GroupKeys,
+        kind: SampleKind,
         child: Box<QueryExpr>,
     },
 
@@ -500,6 +525,9 @@ impl QueryExpr {
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }
             | QueryExpr::Subquery { child, .. }
+            // Series sampling keeps a subset of whole series unchanged, so the
+            // output schema (and row-uniqueness) is exactly the child's (#86).
+            | QueryExpr::Sample { child, .. }
             | QueryExpr::TimeRange { child, .. } => child.output_schema_in(scope),
 
             // ρ — relabel preserves every input column and writes one label
