@@ -468,16 +468,17 @@ fn walk_histogram(call: &Call) -> Result<L2> {
         let phi = quantile_param(num_arg(call, 0)?)?;
         let arg_expr = arg(call, 1)?;
         // Two lowerings of `histogram_quantile(φ, …)`:
-        //  - classic `le`-bucket form (`… sum by (le) (rate(x_bucket[5m])) …`) →
-        //    `HistogramQuantile`, exact interpolation over cumulative buckets.
-        //  - native-histogram form (any other argument) → the generic `Quantile`
-        //    intent (sketch-able).
-        // We can't see sample types at lowering, so the classic form is
-        // recognised by its distinctive `by (le)` grouping (issue #43).
-        let func = if is_classic_bucket_arg(arg_expr) {
-            AggFunc::HistogramQuantile(phi)
-        } else {
+        //  - classic `le`-bucket form → `HistogramQuantile`, exact interpolation
+        //    over cumulative buckets (not sketch-able).
+        //  - native-histogram / raw-samples form → the generic `Quantile` intent
+        //    (sketch-able).
+        // The true signal is the argument's sample type: a declared
+        // `HistogramKind` (issue #79) drives the choice when available, else we
+        // fall back to the structural `by (le)`/`_bucket` heuristic (issue #43).
+        let func = if histogram_arg_is_sketchable(arg_expr) {
             AggFunc::Quantile(phi)
+        } else {
+            AggFunc::HistogramQuantile(phi)
         };
         return Ok(outer_aggregate(vec![], func, walk(arg_expr)?));
     }
@@ -763,6 +764,58 @@ fn walk_math(call: &Call) -> Result<L2> {
 /// else is a sketch-able generic `Quantile`. This is a heuristic proxy for the
 /// real signal — the argument's sample type — which isn't visible at lowering;
 /// see the follow-up issue on the discrimination criteria (issue #43).
+/// Whether `histogram_quantile(φ, arg)` lowers to the sketch-able generic
+/// `Quantile` (`true`) or exact classic-bucket interpolation (`false`).
+///
+/// Metadata wins: if any metric referenced in `arg` has a declared
+/// [`HistogramKind`](crate::histogram::HistogramKind), that decides it (issue
+/// #79) — this fixes both the false-positive (a `…_bucket`-named non-histogram
+/// declared `RawSamples`) and the false-negative (a suffix-less classic
+/// histogram declared `ClassicBucket`) of the structural heuristic. With no
+/// declaration, fall back to the structural `by (le)`/`_bucket` heuristic.
+fn histogram_arg_is_sketchable(arg: &Expr) -> bool {
+    let mut metrics = Vec::new();
+    collect_metric_names(arg, &mut metrics);
+    for metric in &metrics {
+        if let Some(kind) = crate::histogram::current_kind_of(metric) {
+            return kind.is_sketchable();
+        }
+    }
+    !is_classic_bucket_arg(arg)
+}
+
+/// Collect the metric names of every vector/matrix selector reachable in `expr`
+/// (for the metadata lookup in [`histogram_arg_is_sketchable`]). Skips
+/// name-less selectors like `{le="…"}`.
+fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::VectorSelector(vs) => {
+            if let Ok((metric, _)) = vs_parts(vs) {
+                if !metric.is_empty() {
+                    out.push(metric);
+                }
+            }
+        }
+        Expr::MatrixSelector(ms) => {
+            if let Ok((metric, _)) = vs_parts(&ms.vs) {
+                if !metric.is_empty() {
+                    out.push(metric);
+                }
+            }
+        }
+        Expr::Paren(p) => collect_metric_names(&p.expr, out),
+        Expr::Unary(u) => collect_metric_names(&u.expr, out),
+        Expr::Subquery(s) => collect_metric_names(&s.expr, out),
+        Expr::Aggregate(a) => collect_metric_names(&a.expr, out),
+        Expr::Binary(b) => {
+            collect_metric_names(&b.lhs, out);
+            collect_metric_names(&b.rhs, out);
+        }
+        Expr::Call(c) => c.args.args.iter().for_each(|a| collect_metric_names(a, out)),
+        _ => {}
+    }
+}
+
 fn is_classic_bucket_arg(expr: &Expr) -> bool {
     match expr {
         Expr::Paren(p) => is_classic_bucket_arg(&p.expr),
