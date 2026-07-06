@@ -355,30 +355,42 @@ fn subquery_range(expr: &Expr) -> Option<Duration> {
 }
 
 fn walk_aggregate(agg: &AggregateExpr) -> Result<L2> {
-    let keys = resolve_group(agg)?;
+    let (keys, without) = resolve_group(agg)?;
     let outer = outer_kind(agg)?;
+
+    // `without(...)` grouping is modelled only for the reducing aggregations
+    // (sum/avg/count/…), whose grouping lives on an `Aggregate` node. `topk`/
+    // `bottomk` (→ `Sort.partition_by`) and `limitk`/`limit_ratio` (→ `Sample`)
+    // would need without-partitioning too; reject rather than silently lower
+    // them as a `by` grouping (issue #39).
+    if without && matches!(outer, Outer::TopK { .. } | Outer::Sample { .. }) {
+        return Err(LoweringError::UnsupportedFeature(
+            "`without(...)` is only supported on reducing aggregations, not \
+             topk/bottomk/limitk"
+                .into(),
+        ));
+    }
 
     // Fast path — the argument is a bare selector or a single range-vector
     // function (`rate`/`increase`/`*_over_time`). `lower_inner` lowers it via the
     // flat selector/call template, which also recognises the heavy-hitter
     // `topk(k, count_over_time(...))` shape. This is the common two-level case
     // (`sum by (job) (rate(m[5m]))`).
-    if let Ok(inner) = lower_inner(&agg.expr) {
-        return build(inner, keys, outer);
-    }
-
+    //
     // General nesting — the argument is itself a composite expression: another
-    // aggregate (`max(sum by (job) (rate(m[5m])))`), a binary op
-    // (`sum(rate(a[5m]) + rate(b[5m]))`), a sub-query, or a function lowered
-    // elsewhere (`sum(histogram_quantile(0.9, …))`). Lower it recursively with
-    // the same `walk` used at the top level, then wrap it in the outer
-    // aggregation. This is the path that lifts the old two-level limit to
-    // arbitrary function nesting (issue #27) — a negated argument (`sum(-m)`)
-    // lowers here too (#36). If the inner expression is itself unsupported (e.g.
-    // an `offset` modifier), `walk` surfaces that error, so a genuinely
-    // unsupported query is still cleanly rejected rather than mislowered.
-    let child = walk(&agg.expr)?;
-    build_over_subtree(outer, keys, child)
+    // aggregate (`max(sum by (job) (rate(m[5m])))`), a binary op, a sub-query, or
+    // a function lowered elsewhere. Lower it recursively with the same `walk`
+    // used at the top level, then wrap it in the outer aggregation (issue #27; a
+    // negated argument `sum(-m)` lowers here too, #36). A genuinely unsupported
+    // inner expression surfaces its own error rather than being mislowered.
+    //
+    // Either way, `mark_without` flips the resulting outer `Aggregate` to the
+    // exclusion form when the modifier was `without(...)`.
+    let built = match lower_inner(&agg.expr) {
+        Ok(inner) => build(inner, keys, outer)?,
+        Err(_) => build_over_subtree(outer, keys, walk(&agg.expr)?)?,
+    };
+    Ok(mark_without(built, without))
 }
 
 /// Map an `AggregateExpr`'s operator (`sum`/`avg`/`topk`/…) to the [`Outer`]
@@ -449,6 +461,30 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
 /// (handled in `build`); over a general subtree, `topk`/`bottomk` is a generic
 /// order-by-value + limit — the same `Sort{partition_by} → Limit` pair `build`
 /// emits for any non-heavy-hitter ranking.
+/// Flip the outer `Aggregate` produced for a `without(...)` grouping into the
+/// exclusion form. The reducing-aggregation `build` paths place that aggregate
+/// at the root; `walk_aggregate` has already rejected the non-aggregate outers
+/// (topk/limitk), so a `without` grouping always has an `Aggregate` here (issue
+/// #39). A no-op when the modifier was `by`.
+fn mark_without(l2: L2, without: bool) -> L2 {
+    match l2 {
+        L2::Aggregate {
+            keys,
+            aggs,
+            having,
+            input,
+            ..
+        } if without => L2::Aggregate {
+            keys,
+            without: true,
+            aggs,
+            having,
+            input,
+        },
+        other => other,
+    }
+}
+
 fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L2> {
     Ok(match outer {
         // `walk_aggregate` always passes a real aggregator; `None` can't occur.
@@ -1222,6 +1258,7 @@ fn windowed_aggregate(inner: Inner, keys: Vec<ColumnRef>, func: AggFunc) -> L2 {
     };
     L2::Aggregate {
         keys,
+        without: false,
         aggs: vec![AggItem {
             // None alias → the converter keeps PromQL's intent-keyed output
             // names ("sum", "quantile_0_99", …) instead of overriding them.
@@ -1240,6 +1277,7 @@ fn windowed_aggregate(inner: Inner, keys: Vec<ColumnRef>, func: AggFunc) -> L2 {
 fn outer_aggregate(keys: Vec<ColumnRef>, func: AggFunc, input: L2) -> L2 {
     L2::Aggregate {
         keys,
+        without: false,
         aggs: vec![AggItem {
             // None alias → the converter keeps PromQL's intent-keyed output
             // names ("sum", "quantile_0_99", …) instead of overriding them.
@@ -1343,27 +1381,25 @@ fn str_arg(call: &Call, idx: usize) -> Result<String> {
     expr_str(arg(call, idx)?)
 }
 
-/// Resolve `by(labels)` into a key list. `without(...)` needs the metric's
-/// full label set, which the usage-derived schema model doesn't carry, so it
-/// is rejected (a registry-backed `SchemaCatalog` would lift this).
-fn resolve_group(agg: &AggregateExpr) -> Result<Vec<ColumnRef>> {
+/// Resolve an aggregation's grouping modifier into a `(keys, without)` pair.
+///
+/// `by(labels)` → the kept labels, `without = false`. `without(labels)` → the
+/// **excluded** labels, `without = true`: the kept set (the complement) can't be
+/// enumerated under an open usage-derived schema, so it is deferred to the
+/// runtime and only the excluded positions are carried (issue #39). Both forms
+/// canonicalise their label set (sort + dedup) so equivalent groupings lower
+/// identically. PromQL labels have no table qualifier → `ColumnRef::Named`.
+fn resolve_group(agg: &AggregateExpr) -> Result<(Vec<ColumnRef>, bool)> {
+    let canon = |labels: &[String]| -> Vec<ColumnRef> {
+        let mut keys = labels.to_vec();
+        keys.sort();
+        keys.dedup();
+        keys.into_iter().map(ColumnRef::Named).collect()
+    };
     match &agg.modifier {
-        None => Ok(vec![]),
-        Some(LabelModifier::Include(ls)) => {
-            // Grouping labels are a set: `by (a, b)` ≡ `by (b, a)`. Canonicalise
-            // so equivalent groupings lower to identical keys. PromQL labels have
-            // no table qualifier → `ColumnRef::Named`.
-            let mut keys = ls.labels.clone();
-            keys.sort();
-            keys.dedup();
-            Ok(keys.into_iter().map(ColumnRef::Named).collect())
-        }
-        Some(LabelModifier::Exclude(_)) => Err(LoweringError::UnsupportedFeature(
-            "`without(...)` grouping requires a registry-backed catalog of the \
-             metric's label set (the usage-derived schema can't enumerate the \
-             complement)"
-                .into(),
-        )),
+        None => Ok((vec![], false)),
+        Some(LabelModifier::Include(ls)) => Ok((canon(&ls.labels), false)),
+        Some(LabelModifier::Exclude(ls)) => Ok((canon(&ls.labels), true)),
     }
 }
 

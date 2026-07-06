@@ -11,7 +11,7 @@ use thiserror::Error;
 use asap_ir::intent_algebra::agg_intent::AggIntent;
 use asap_ir::intent_algebra::expr_ir::ColumnRef;
 use asap_ir::intent_algebra::expr_ir::{L2Expr, L3Expr};
-use asap_ir::intent_algebra::query_expr::{aggregate_output_schema, QueryExprError};
+use asap_ir::intent_algebra::query_expr::{aggregate_output_schema, GroupKeys, QueryExprError};
 use crate::relational::QueryExpr;
 use asap_ir::intent_algebra::schema::{Column, ColumnId, DataType, Schema};
 
@@ -194,17 +194,19 @@ pub fn resolve_expr(expr: &L2Expr, schema: &Schema) -> Result<L3Expr, ResolveErr
 /// via [`resolve_column_refs`], which surfaces `NotFound`).
 pub fn output_schema_for_aggregate(
     input: &Schema,
-    by: &[ColumnId],
+    by: &GroupKeys,
     aggs: &[AggIntent],
     output_names: &[String],
 ) -> Result<Schema, QueryExprError> {
     // Delegate to the single canonical derivation so HAVING resolution can never
     // drift from `QueryExpr::output_schema_in` (issue #41). HAVING is SQL-only
-    // and cross-series, but detect the child-independent per-series case anyway
-    // (a lone `rate`/`increase`/`*_over_time` intent) so the two agree on every
-    // shared input — the `TimeRange`/`Subquery` marker the canonical arm also
-    // keys off is not visible here, and never co-occurs with HAVING.
-    let per_series = by.is_empty() && aggs.len() == 1 && aggs[0].is_per_series();
+    // and cross-series (SQL has no `without`), but detect the child-independent
+    // per-series case anyway (a lone `rate`/`increase`/`*_over_time` intent) so
+    // the two agree on every shared input — the `TimeRange`/`Subquery` marker the
+    // canonical arm also keys off is not visible here, and never co-occurs with
+    // HAVING.
+    let per_series =
+        by.is_empty() && !by.is_without() && aggs.len() == 1 && aggs[0].is_per_series();
     aggregate_output_schema(input, by, aggs, output_names, per_series)
 }
 
@@ -325,9 +327,13 @@ mod tests {
         input
             .columns
             .push(Column::new("host", DataType::Utf8, false));
-        let out =
-            output_schema_for_aggregate(&input, &[2usize], &[AggIntent::Sum { col: None }], &[])
-                .expect("valid group-by column");
+        let out = output_schema_for_aggregate(
+            &input,
+            &GroupKeys::by(vec![2]),
+            &[AggIntent::Sum { col: None }],
+            &[],
+        )
+        .expect("valid group-by column");
         assert_eq!(out.columns.len(), 2); // host, sum
         assert_eq!(out.columns[0].name, "host");
         assert_eq!(out.columns[1].name, "sum");
@@ -375,7 +381,8 @@ mod tests {
         // The HAVING-resolution derivation gets only the input schema (the
         // TimeRange passes the leaf schema through).
         let having_side =
-            output_schema_for_aggregate(&leaf_schema, &[], &[AggIntent::Rate], &[]).unwrap();
+            output_schema_for_aggregate(&leaf_schema, &GroupKeys::none(), &[AggIntent::Rate], &[])
+                .unwrap();
 
         assert_eq!(
             canonical, having_side,

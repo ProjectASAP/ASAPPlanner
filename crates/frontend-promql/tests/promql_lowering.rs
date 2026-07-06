@@ -521,16 +521,26 @@ fn scan_columns(e: &QueryExpr) -> Vec<String> {
     }
 }
 
-// ── without is unsupported (no label registry) ──────────────────────────────────
+// ── without(...) grouping (issue #39) ───────────────────────────────────────────
 
 #[test]
-fn without_grouping_is_unsupported() {
-    let err = lower_promql(
-        "sum without (instance) (rate(m[5m]))",
-        AccuracyTarget::Exact,
-    )
-    .unwrap_err();
-    assert!(format!("{err}").contains("without"), "got {err}");
+fn without_grouping_lowers_to_the_exclusion_form() {
+    // `sum without (instance) (rate(m[5m]))` — a cross-series reduction over the
+    // per-series rate, grouped by every label except `instance`. The excluded
+    // label is stored positionally (the Binder seeds it), the grouping is the
+    // `without` form, and the output schema stays open.
+    let qe = lower("sum without (instance) (rate(m[5m]))");
+    let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+        panic!("expected an Aggregate, got {qe:?}");
+    };
+    assert!(by.is_without());
+    assert_eq!(by.keys().len(), 1, "excluded `instance`");
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    // The inner per-series rate is preserved (label-preserving) under the outer
+    // cross-series `without` reduction.
+    assert!(matches!(child.as_ref(), QueryExpr::Aggregate { aggs, .. }
+        if matches!(aggs.as_slice(), [AggIntent::Rate])));
+    assert!(!qe.output_schema().unwrap().closed);
 }
 
 // ── parameter validation (reject rather than silently truncate/garble) ──────────

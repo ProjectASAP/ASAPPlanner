@@ -245,8 +245,13 @@ pub enum QueryExpr {
     /// γ + α — GROUP BY (`keys`) followed by aggregate functions. Keys are
     /// `ColumnRef` (not bare strings) so a table-qualified key (`b.k`) resolves
     /// to the correct join side, matching the scalar-predicate path.
+    ///
+    /// `without` distinguishes PromQL `without(labels)` (group by every label
+    /// *except* `keys`) from `by(labels)` (group by exactly `keys`). SQL GROUP
+    /// BY and every non-PromQL producer set it `false` (issue #39).
     Aggregate {
         keys: Vec<ColumnRef>,
+        without: bool,
         aggs: Vec<AggItem>,
         having: Option<L2Expr>,
         input: Box<QueryExpr>,

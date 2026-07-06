@@ -371,6 +371,8 @@ impl<'a> SqlLowerer<'a> {
             .collect::<Result<Vec<_>, LoweringError>>()?;
         Ok(L2::Aggregate {
             keys,
+            // SQL `GROUP BY` is always an inclusion list — there is no `without`.
+            without: false,
             aggs,
             having: None,
             input,

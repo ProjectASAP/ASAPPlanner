@@ -325,11 +325,31 @@ fn avg_min_max_stddev_stdvar_quantile_aggregators() {
 }
 
 #[test]
-fn sum_without_is_rejected() {
-    // SEMANTICS: `without(instance)` = group by all labels EXCEPT instance.
-    // We can't enumerate a metric's full label set (usage-derived schema), so
-    // the complement is rejected rather than silently mis-grouped.
-    let e = rejected("sum without(instance) (node_filesystem_size_bytes)");
+fn sum_without_groups_by_the_complement() {
+    // SEMANTICS (issue #39): `without(instance)` = group by all labels EXCEPT
+    // instance. The complement can't be enumerated under the open usage-derived
+    // schema, so the excluded label is stored and the kept set is deferred to
+    // the runtime: the grouping is the exclusion form and the output schema
+    // stays OPEN (unlike `by`, which freezes to closed).
+    let qe = ok("sum without(instance) (node_filesystem_size_bytes)");
+    let QueryExpr::Aggregate { by, aggs, .. } = &qe else {
+        panic!("expected an Aggregate, got {qe:?}");
+    };
+    assert!(by.is_without(), "the grouping is the `without` exclusion form");
+    assert_eq!(by.keys().len(), 1, "the one excluded label (instance)");
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(
+        !qe.output_schema().unwrap().closed,
+        "a `without` result keeps an open schema (kept label set is runtime-only)"
+    );
+}
+
+#[test]
+fn without_on_topk_is_rejected() {
+    // `without(...)` is modelled only for reducing aggregations; on topk/bottomk
+    // (a ranking, not a reduction) it would need without-partitioning, so it is
+    // rejected rather than silently lowered as a `by` (issue #39).
+    let e = rejected("topk without (job) (3, http_requests_total)");
     assert!(format!("{e}").contains("without"), "got {e}");
 }
 

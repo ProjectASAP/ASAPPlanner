@@ -104,9 +104,14 @@ Why isolate this instead of resolving inline during lowering:
   label sets are open-ended. A registry-backed `SchemaCatalog` is future work,
   and the Binder pass does not change when it lands — only the catalog impl
   swaps.
-- **It is the natural home for resolution-policy errors.** `without(...)` is
-  rejected here: a usage-derived schema can't enumerate "all labels *except*
-  these," so the error belongs in binding, not smeared across lowering.
+- **It is the natural home for resolution-policy errors.** A usage-derived
+  schema can't enumerate a metric's full label set, so any operator needing the
+  *complement* of a label set defers to it. `without(labels)` (issue #39) is the
+  worked example: it can't list "all labels *except* these" at lowering time, so
+  the excluded labels are seeded + resolved positionally and the grouping is
+  carried as [`GroupKeys::without`](../crates/ir/src/intent_algebra/query_expr.rs)
+  — the kept (complement) set stays open and is resolved by the runtime, and the
+  aggregate's output schema stays open rather than freezing to closed.
 
 ### Binary-op sides bind independently — with inherited keys
 
@@ -187,13 +192,14 @@ mislowered) — each row is pinned by a named test.
 | Nested sub-queries (range fn over range fn over range fn; default resolution) | `max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])` (Prometheus docs example) | `nested_subquery_from_prometheus_docs`; e2e `q27_nested_subquery_prometheus_docs_example` |
 | Outer group key absent from a nested aggregate's (closed) output (#53) | `sum(sum by (k)(m)) by (j)` — `j` provably absent → dropped per PromQL's absent-label grouping semantics | `outer_group_key_absent_from_nested_aggregate_is_dropped`; e2e `q53_outer_group_key_absent_from_nested_aggregate` |
 | Unary negation, anywhere in a nest (#36) | `sum(-m)` → `expr * -1` (`Mul` against `Scalar(-1)`); `-(const)` folds to a negated `Scalar` | `unary_negation_lowers_as_multiply_by_minus_one`; e2e `q36_sum_of_negation_nests` |
+| `without(...)` grouping on a reducing aggregation (#39) | `sum without (instance) (…)` → `GroupKeys::without`; the complement stays open, deferred to runtime | `sum_without_groups_by_the_complement`; e2e `q39_sum_without_instance_over_rate` |
 | SQL derived tables / inline views (#29) | `SELECT … FROM (SELECT … GROUP BY …) t`, incl. aggregate-over-aggregate | `derived_table_aggregate_over_aggregate_nests` (`sql_lowering.rs`) |
 
 ### Rejected cleanly
 
 | Shape | Why | Pinned by |
 |---|---|---|
-| `without(...)` grouping | a usage-derived (open) schema can't enumerate the label complement (issue #39) | binder rejection (see "Why the Binder is its own pass") |
+| `without(...)` on `topk`/`bottomk`/`limitk` (#39) | only reducing aggregations model `without`; a ranking/sampling would need without-partitioning, so reject rather than silently treat as `by` | `without_on_topk_is_rejected` |
 | SQL subquery-valued **predicate** expressions — scalar `x > (SELECT …)`, `IN (SELECT …)`, `EXISTS` / `NOT EXISTS` / `NOT IN`, correlated or not | the v1 decision on #27's open question: these need a subquery node in the L2 expression IR + a correlated-vs-uncorrelated representation choice; rejected until that lands (derived tables in `FROM` are the supported nesting shape) | `scalar_subquery_in_predicate_is_rejected`, `semi_join_is_rejected_not_mislowered`, `exists_subquery_in_predicate_is_rejected` (`sql_lowering.rs`) |
 
 The dividing line: **relational** nesting (an operator tree in `FROM` / a
