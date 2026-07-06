@@ -44,17 +44,19 @@
 //! | `m{f}` | `Filter(Source)` |
 //! | `a OP b` | `BinaryOp{vector_match}` |
 //! | `expr[r:res]` | `PromQLSubquery{r, res}` |
+//! | `<selector> offset <d>` / `<selector> @ <ts>`/`start()`/`end()` | `TimeShift{shift}` over the selector's `Scan` — pass-through schema; a ranged selector shifts under its `TimeRange` (issue #40) |
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use promql_parser::label::{MatchOp, Matcher};
 use promql_parser::parser::{
-    self, token, AggregateExpr, BinaryExpr, Call, Expr, LabelModifier, VectorMatchCardinality,
-    VectorSelector,
+    self, token, AggregateExpr, AtModifier, BinaryExpr, Call, Expr, LabelModifier, Offset,
+    VectorMatchCardinality, VectorSelector,
 };
 
 use asap_ir::intent_algebra::query_expr::{
-    BinaryOpKind, GroupSide, VectorGrouping, VectorMatch, VectorMatchKind,
+    AtModifier as L3AtModifier, BinaryOpKind, GroupSide, TimeShift, VectorGrouping, VectorMatch,
+    VectorMatchKind,
 };
 use asap_l2::relational::{
     AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec,
@@ -137,6 +139,8 @@ struct Inner {
     matchers: Vec<L2Expr>,
     window: Option<Duration>,
     func: Option<InnerFunc>,
+    /// `offset` / `@` on the selector, carried to the `Source` (issue #40).
+    shift: TimeShift,
 }
 
 /// Maximum PromQL expression nesting depth the walker accepts. Real queries
@@ -233,15 +237,15 @@ fn walk(expr: &Expr) -> Result<L2> {
             input: Box::new(walk(&sq.expr)?),
         }),
         Expr::VectorSelector(vs) => {
-            let (metric, matchers) = vs_parts(vs)?;
-            Ok(filtered_source(metric, matchers))
+            let (metric, matchers, shift) = vs_parts(vs)?;
+            Ok(filtered_source(metric, matchers, shift))
         }
         Expr::MatrixSelector(ms) => {
-            let (metric, matchers) = vs_parts(&ms.vs)?;
+            let (metric, matchers, shift) = vs_parts(&ms.vs)?;
             Ok(L2::Window {
                 duration: ms.range,
                 slide: None,
-                input: Box::new(filtered_source(metric, matchers)),
+                input: Box::new(filtered_source(metric, matchers, shift)),
             })
         }
         // A number literal is a scalar leaf (`v > 5`, or a bare scalar query
@@ -904,14 +908,14 @@ fn histogram_arg_is_sketchable(arg: &Expr) -> bool {
 fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
     match expr {
         Expr::VectorSelector(vs) => {
-            if let Ok((metric, _)) = vs_parts(vs) {
+            if let Ok((metric, ..)) = vs_parts(vs) {
                 if !metric.is_empty() {
                     out.push(metric);
                 }
             }
         }
         Expr::MatrixSelector(ms) => {
-            if let Ok((metric, _)) = vs_parts(&ms.vs) {
+            if let Ok((metric, ..)) = vs_parts(&ms.vs) {
                 if !metric.is_empty() {
                     out.push(metric);
                 }
@@ -1008,21 +1012,23 @@ fn walk_binary(bin: &BinaryExpr) -> Result<L2> {
 fn lower_inner(expr: &Expr) -> Result<Inner> {
     match expr {
         Expr::VectorSelector(vs) => {
-            let (metric, matchers) = vs_parts(vs)?;
+            let (metric, matchers, shift) = vs_parts(vs)?;
             Ok(Inner {
                 metric,
                 matchers,
                 window: None,
                 func: None,
+                shift,
             })
         }
         Expr::MatrixSelector(ms) => {
-            let (metric, matchers) = vs_parts(&ms.vs)?;
+            let (metric, matchers, shift) = vs_parts(&ms.vs)?;
             Ok(Inner {
                 metric,
                 matchers,
                 window: Some(ms.range),
                 func: None,
+                shift,
             })
         }
         Expr::Paren(p) => lower_inner(&p.expr),
@@ -1037,41 +1043,45 @@ fn lower_inner(expr: &Expr) -> Result<Inner> {
 fn lower_inner_call(call: &Call) -> Result<Inner> {
     let name = call.func.name;
     let at0 = |func: InnerFunc| -> Result<Inner> {
-        let (metric, matchers, window) = extract_matrix(arg(call, 0)?)?;
+        let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
         Ok(Inner {
             metric,
             matchers,
             window: Some(window),
             func: Some(func),
+            shift,
         })
     };
     match name {
         "rate" | "irate" => {
-            let (metric, matchers, window) = extract_matrix(arg(call, 0)?)?;
+            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
             Ok(Inner {
                 metric,
                 matchers,
                 window: Some(window),
                 func: Some(InnerFunc::Rate(window)),
+                shift,
             })
         }
         "increase" => {
-            let (metric, matchers, window) = extract_matrix(arg(call, 0)?)?;
+            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
             Ok(Inner {
                 metric,
                 matchers,
                 window: Some(window),
                 func: Some(InnerFunc::Increase(window)),
+                shift,
             })
         }
         "quantile_over_time" => {
             let phi = quantile_param(num_arg(call, 0)?)?;
-            let (metric, matchers, window) = extract_matrix(arg(call, 1)?)?;
+            let (metric, matchers, window, shift) = extract_matrix(arg(call, 1)?)?;
             Ok(Inner {
                 metric,
                 matchers,
                 window: Some(window),
                 func: Some(InnerFunc::Quantile(phi)),
+                shift,
             })
         }
         "avg_over_time" => at0(InnerFunc::Avg),
@@ -1100,18 +1110,19 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
         "ts_of_first_over_time" => at0(InnerFunc::TsOfFirstOverTime),
         "ts_of_last_over_time" => at0(InnerFunc::TsOfLastOverTime),
         "predict_linear" => {
-            let (metric, matchers, window) = extract_matrix(arg(call, 0)?)?;
+            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
             let seconds = num_arg(call, 1)?;
             Ok(Inner {
                 metric,
                 matchers,
                 window: Some(window),
                 func: Some(InnerFunc::PredictLinear(seconds)),
+                shift,
             })
         }
         // `holt_winters` is the legacy spelling of `double_exponential_smoothing`.
         "double_exponential_smoothing" | "holt_winters" => {
-            let (metric, matchers, window) = extract_matrix(arg(call, 0)?)?;
+            let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
             let smoothing = num_arg(call, 1)?;
             let trend = num_arg(call, 2)?;
             Ok(Inner {
@@ -1119,6 +1130,7 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
                 matchers,
                 window: Some(window),
                 func: Some(InnerFunc::DoubleExp { smoothing, trend }),
+                shift,
             })
         }
         other => Err(LoweringError::UnsupportedFunction(other.to_string())),
@@ -1130,7 +1142,7 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
 fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
     match outer {
         Outer::None => match &inner.func {
-            None => Ok(filtered_source(inner.metric, inner.matchers)),
+            None => Ok(filtered_source(inner.metric, inner.matchers, inner.shift)),
             Some(f) => {
                 let func = inner_func(f);
                 Ok(windowed_aggregate(inner, keys, func))
@@ -1175,7 +1187,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
             // wrapped in a reducing aggregate (issue #86).
             let base = match inner.func.as_ref().map(inner_func) {
                 Some(func) => windowed_aggregate(inner, vec![], func),
-                None => filtered_source(inner.metric, inner.matchers),
+                None => filtered_source(inner.metric, inner.matchers, inner.shift),
             };
             Ok(L2::Sample {
                 keys,
@@ -1221,7 +1233,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
                 // `Sort.partition_by` can rank within each group (issue #12).
                 let base = match inner.func.as_ref().map(inner_func) {
                     Some(func) => windowed_aggregate(inner, vec![], func),
-                    None => filtered_source(inner.metric, inner.matchers),
+                    None => filtered_source(inner.metric, inner.matchers, inner.shift),
                 };
                 let sorted = L2::Sort {
                     keys: vec![L2SortKey {
@@ -1247,7 +1259,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
 fn windowed_aggregate(inner: Inner, keys: Vec<ColumnRef>, func: AggFunc) -> L2 {
     let skip_window = matches!(func, AggFunc::Rate { .. } | AggFunc::Increase { .. });
     let window = inner.window;
-    let base = filtered_source(inner.metric, inner.matchers);
+    let base = filtered_source(inner.metric, inner.matchers, inner.shift);
     let input = match window {
         Some(w) if !skip_window => L2::Window {
             duration: w,
@@ -1290,8 +1302,8 @@ fn outer_aggregate(keys: Vec<ColumnRef>, func: AggFunc, input: L2) -> L2 {
     }
 }
 
-fn filtered_source(metric: String, matchers: Vec<L2Expr>) -> L2 {
-    let source = L2::Source(SourceSpec::new(metric));
+fn filtered_source(metric: String, matchers: Vec<L2Expr>, shift: TimeShift) -> L2 {
+    let source = L2::Source(SourceSpec::new(metric).with_shift(shift));
     if matchers.is_empty() {
         source
     } else {
@@ -1405,15 +1417,7 @@ fn resolve_group(agg: &AggregateExpr) -> Result<(Vec<ColumnRef>, bool)> {
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
-fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2Expr>)> {
-    // `offset` / `@` shift the evaluation/lookback time. The intent algebra has
-    // no representation for either, so silently lowering them (as if absent)
-    // would change the query's meaning. Reject rather than mislower.
-    if vs.offset.is_some() || vs.at.is_some() {
-        return Err(LoweringError::UnsupportedFeature(
-            "`offset` / `@` time-shift modifiers have no intent-algebra representation".into(),
-        ));
-    }
+fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2Expr>, TimeShift)> {
     // A non-equality `__name__` matcher (`=~` / `!~` / `!=`) selects *across*
     // metric names. The L3 `Source::TimeSeries { metric }` carries a single
     // concrete metric name, so there is no representation for a regex/negated
@@ -1451,7 +1455,46 @@ fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2Expr>)> {
         .collect();
     ms.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.value.cmp(&b.value)));
     let matchers = ms.into_iter().map(matcher_to_l3expr).collect();
-    Ok((metric, matchers))
+    let shift = time_shift(vs.offset.as_ref(), vs.at.as_ref())?;
+    Ok((metric, matchers, shift))
+}
+
+/// Convert the parser's `offset` / `@` modifiers into a [`TimeShift`] (issue
+/// #40). Offset is signed milliseconds; `@ <ts>` (parser seconds → ms) becomes
+/// an absolute anchor, `@ start()`/`@ end()` the range bounds.
+fn time_shift(offset: Option<&Offset>, at: Option<&AtModifier>) -> Result<TimeShift> {
+    let offset_ms = match offset {
+        None => 0,
+        Some(Offset::Pos(d)) => duration_ms(*d)?,
+        Some(Offset::Neg(d)) => -duration_ms(*d)?,
+    };
+    let at = match at {
+        None => None,
+        Some(AtModifier::Start) => Some(L3AtModifier::Start),
+        Some(AtModifier::End) => Some(L3AtModifier::End),
+        Some(AtModifier::At(t)) => Some(L3AtModifier::Timestamp(system_time_ms(*t)?)),
+    };
+    Ok(TimeShift { offset_ms, at })
+}
+
+/// A `Duration` as `i64` milliseconds, rejecting an overflow rather than
+/// silently truncating a pathologically large `offset`.
+fn duration_ms(d: Duration) -> Result<i64> {
+    i64::try_from(d.as_millis()).map_err(|_| {
+        LoweringError::InvalidParameter("offset duration overflows i64 milliseconds".into())
+    })
+}
+
+/// A `SystemTime` (`@ <ts>`) as `i64` milliseconds since the Unix epoch, signed
+/// so pre-epoch anchors (the parser permits them) are preserved.
+fn system_time_ms(t: SystemTime) -> Result<i64> {
+    let ms = match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_millis()),
+        Err(e) => i64::try_from(e.duration().as_millis()).map(|ms| -ms),
+    };
+    ms.map_err(|_| {
+        LoweringError::InvalidParameter("`@` timestamp overflows i64 milliseconds".into())
+    })
 }
 
 fn matcher_to_l3expr(m: &Matcher) -> L2Expr {
@@ -1468,11 +1511,11 @@ fn matcher_to_l3expr(m: &Matcher) -> L2Expr {
     }
 }
 
-fn extract_matrix(expr: &Expr) -> Result<(String, Vec<L2Expr>, Duration)> {
+fn extract_matrix(expr: &Expr) -> Result<(String, Vec<L2Expr>, Duration, TimeShift)> {
     match expr {
         Expr::MatrixSelector(ms) => {
-            let (metric, matchers) = vs_parts(&ms.vs)?;
-            Ok((metric, matchers, ms.range))
+            let (metric, matchers, shift) = vs_parts(&ms.vs)?;
+            Ok((metric, matchers, ms.range, shift))
         }
         Expr::Paren(p) => extract_matrix(&p.expr),
         // A range-vector function argument must be a (parenthesised) matrix

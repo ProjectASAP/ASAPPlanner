@@ -35,7 +35,8 @@ use std::time::Duration;
 
 use asap_ir::intent_algebra::schema::DataType;
 use asap_ir::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, MathFunc, QueryExpr, SampleKind, Source, TimeFunc,
+    AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, L3Expr, MathFunc, QueryExpr,
+    SampleKind, Source, TimeFunc,
 };
 use asap_ir::types::AccuracyTarget;
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
@@ -71,6 +72,7 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         }
         QueryExpr::Window { child, .. }
         | QueryExpr::TimeRange { child, .. }
+        | QueryExpr::TimeShift { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -116,6 +118,7 @@ fn first_scan(e: &QueryExpr) -> (String, usize) {
         }
         QueryExpr::Window { child, .. }
         | QueryExpr::TimeRange { child, .. }
+        | QueryExpr::TimeShift { child, .. }
         | QueryExpr::Aggregate { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
@@ -143,6 +146,7 @@ fn negates_via_scalar(e: &QueryExpr) -> bool {
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
         | QueryExpr::TimeRange { child, .. }
+        | QueryExpr::TimeShift { child, .. }
         | QueryExpr::Subquery { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Project { child, .. } => negates_via_scalar(child),
@@ -987,18 +991,68 @@ fn nested_subquery_from_prometheus_docs() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn offset_modifier_is_rejected() {
-    // SEMANTICS (PromQL): `offset 5m` shifts the lookback 5m into the past. The
-    // intent algebra can't represent it, so we reject rather than silently drop
-    // it (which would change the query's meaning).
-    let _ = rejected("http_requests_total offset 5m");
+fn offset_modifier_lowers_to_a_time_shift() {
+    // SEMANTICS (PromQL, issue #40): `offset 5m` shifts the lookback 5m into the
+    // past — a `TimeShift` wrapper over the selector (signed ms; a negative
+    // offset shifts forward). Schema is unchanged (the shift only moves *when*).
+    let qe = ok("http_requests_total offset 5m");
+    let QueryExpr::TimeShift { shift, child } = &qe else {
+        panic!("expected a TimeShift, got {qe:?}");
+    };
+    assert_eq!(shift.offset_ms, 300_000);
+    assert!(shift.at.is_none());
+    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
+
+    // `offset -5m` shifts forward → negative ms.
+    let QueryExpr::TimeShift { shift, .. } = &ok("http_requests_total offset -5m") else {
+        panic!("expected a TimeShift");
+    };
+    assert_eq!(shift.offset_ms, -300_000);
 }
 
 #[test]
-fn at_modifier_is_rejected() {
-    // SEMANTICS (PromQL): `@ <ts>` pins the evaluation time. Rejected for the
-    // same reason as `offset`.
-    let _ = rejected("http_requests_total @ 1609746000");
+fn at_modifier_lowers_to_a_time_shift() {
+    // SEMANTICS (PromQL, issue #40): `@ <ts>` pins the evaluation to an absolute
+    // instant (PromQL seconds → IR milliseconds); `@ start()` / `@ end()` anchor
+    // to the query range bounds.
+    let QueryExpr::TimeShift { shift, .. } = &ok("http_requests_total @ 1609746000") else {
+        panic!("expected a TimeShift for `@ <ts>`");
+    };
+    assert_eq!(shift.at, Some(AtModifier::Timestamp(1_609_746_000_000)));
+    assert_eq!(shift.offset_ms, 0);
+
+    let QueryExpr::TimeShift { shift, .. } = &ok("http_requests_total @ start()") else {
+        panic!("expected a TimeShift for `@ start()`");
+    };
+    assert_eq!(shift.at, Some(AtModifier::Start));
+
+    // Offset and `@` compose: `@ end() offset 5m` carries both.
+    let qe = ok("http_requests_total @ end() offset 5m");
+    let QueryExpr::TimeShift { shift, .. } = &qe else {
+        panic!("expected a TimeShift, got {qe:?}");
+    };
+    assert_eq!(shift.at, Some(AtModifier::End));
+    assert_eq!(shift.offset_ms, 300_000);
+}
+
+#[test]
+fn offset_on_a_ranged_selector_wraps_inside_the_time_range() {
+    // `rate(m[5m] offset 1h)` — the offset is on the ranged selector, so the
+    // `TimeShift` sits *under* the `TimeRange` (the 5m window is taken at the
+    // shifted time), and the whole thing under the per-series `Rate` (#40).
+    let qe = ok("rate(http_requests_total[5m] offset 1h)");
+    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+        panic!("expected the rate Aggregate, got {qe:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Rate]));
+    let QueryExpr::TimeRange { child, .. } = child.as_ref() else {
+        panic!("expected a TimeRange under rate, got {child:?}");
+    };
+    let QueryExpr::TimeShift { shift, child } = child.as_ref() else {
+        panic!("expected a TimeShift under the TimeRange, got {child:?}");
+    };
+    assert_eq!(shift.offset_ms, 3_600_000);
+    assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1542,15 +1596,16 @@ fn info_selector_carries_the_info_side_matchers() {
 }
 
 #[test]
-fn info_composes_under_an_aggregation_and_rejects_time_shift() {
+fn info_composes_under_an_aggregation_and_over_a_time_shift() {
     // `sum(info(m))` — enrichment first, then a cross-series sum over it.
     assert!(has(&ok("sum(info(node_uname_info))"), |i| matches!(
         i,
         AggIntent::Sum { .. }
     )));
-    // `offset` / `@` on the input still have no representation → rejected.
-    let _ = rejected("info(metric @ 60)");
-    let _ = rejected("info(metric offset 1m)");
+    // `offset` / `@` on the input now lower to a `TimeShift` under the info-join
+    // (issue #40) — the enrichment composes over the shifted selector.
+    assert!(matches!(ok("info(metric @ 60)"), QueryExpr::InfoJoin { .. }));
+    assert!(matches!(ok("info(metric offset 1m)"), QueryExpr::InfoJoin { .. }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1700,6 +1755,7 @@ fn first_relabel(e: &QueryExpr) -> &QueryExpr {
         QueryExpr::Aggregate { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::TimeRange { child, .. }
+        | QueryExpr::TimeShift { child, .. }
         | QueryExpr::Window { child, .. } => first_relabel(child),
         other => panic!("no Relabel reachable from {other:?}"),
     }

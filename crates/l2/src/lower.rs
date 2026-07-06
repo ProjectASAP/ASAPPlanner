@@ -604,10 +604,20 @@ fn scan(
         .iter()
         .map(|e| -> Result<Predicate, ConvertError> { Ok(Predicate(resolve_expr(e, &schema)?)) })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(CQueryExpr::Scan {
+    let scan = CQueryExpr::Scan {
         source,
         predicates,
         schema,
+    };
+    // A non-identity `offset`/`@` lifts into a `TimeShift` wrapper over the scan;
+    // an unshifted selector stays a bare `Scan` (issue #40).
+    Ok(if spec.shift.is_identity() {
+        scan
+    } else {
+        CQueryExpr::TimeShift {
+            shift: spec.shift,
+            child: Box::new(scan),
+        }
     })
 }
 

@@ -27,8 +27,9 @@ pub use agg_intent::{
 pub use expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L2Expr, L3Expr, L3Scalar};
 pub use names::{BindingName, QueryId};
 pub use query_expr::{
-    aggregate_output_schema, BinaryOpKind, BindingScope, DataModel, GroupKeys, GroupSide,
-    InfoMatcher, JoinKind, Predicate, ProjectItem, QueryExpr, QueryExprError, SampleKind, SetOpKind,
-    SortKey, Source, VectorGrouping, VectorMatch, VectorMatchKind, WindowFuncKind, WindowKind,
+    aggregate_output_schema, AtModifier, BinaryOpKind, BindingScope, DataModel, GroupKeys,
+    GroupSide, InfoMatcher, JoinKind, Predicate, ProjectItem, QueryExpr, QueryExprError, SampleKind,
+    SetOpKind, SortKey, Source, TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
+    WindowFuncKind, WindowKind,
 };
 pub use schema::{cse_reuse_is_legal, Column, ColumnId, CseError, DataType, Schema};
