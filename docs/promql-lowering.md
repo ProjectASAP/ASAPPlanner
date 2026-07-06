@@ -172,13 +172,13 @@ mislowered) — each row is pinned by a named test.
 | Range function over a sub-query (#42) | `max_over_time(rate(m[5m])[1h:])` | `over_time_of_subquery_reduces_per_series` |
 | Nested sub-queries (range fn over range fn over range fn; default resolution) | `max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])` (Prometheus docs example) | `nested_subquery_from_prometheus_docs`; e2e `q27_nested_subquery_prometheus_docs_example` |
 | Outer group key absent from a nested aggregate's (closed) output (#53) | `sum(sum by (k)(m)) by (j)` — `j` provably absent → dropped per PromQL's absent-label grouping semantics | `outer_group_key_absent_from_nested_aggregate_is_dropped`; e2e `q53_outer_group_key_absent_from_nested_aggregate` |
+| Unary negation, anywhere in a nest (#36) | `sum(-m)` → `expr * -1` (`Mul` against `Scalar(-1)`); `-(const)` folds to a negated `Scalar` | `unary_negation_lowers_as_multiply_by_minus_one`; e2e `q36_sum_of_negation_nests` |
 | SQL derived tables / inline views (#29) | `SELECT … FROM (SELECT … GROUP BY …) t`, incl. aggregate-over-aggregate | `derived_table_aggregate_over_aggregate_nests` (`sql_lowering.rs`) |
 
 ### Rejected cleanly
 
 | Shape | Why | Pinned by |
 |---|---|---|
-| Unary negation anywhere in a nest — `sum(-m)` | no scalar-negate in the L2 PromQL path yet (issue #36) | `unary_negation_is_rejected__GAP` |
 | `without(...)` grouping | a usage-derived (open) schema can't enumerate the label complement (issue #39) | binder rejection (see "Why the Binder is its own pass") |
 | SQL subquery-valued **predicate** expressions — scalar `x > (SELECT …)`, `IN (SELECT …)`, `EXISTS` / `NOT EXISTS` / `NOT IN`, correlated or not | the v1 decision on #27's open question: these need a subquery node in the L2 expression IR + a correlated-vs-uncorrelated representation choice; rejected until that lands (derived tables in `FROM` are the supported nesting shape) | `scalar_subquery_in_predicate_is_rejected`, `semi_join_is_rejected_not_mislowered`, `exists_subquery_in_predicate_is_rejected` (`sql_lowering.rs`) |
 
