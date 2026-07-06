@@ -24,7 +24,7 @@
 //! column) it is oblivious to whether the count was aliased in the source, which
 //! is exactly the SQL alias gap (#20) the old front-end gate missed.
 
-use asap_ir::intent_algebra::agg_intent::AggIntent;
+use asap_ir::intent_algebra::agg_intent::{is_frequency_heavy_hitter, AggIntent};
 use asap_ir::intent_algebra::expr_ir::{CompareOp, L3Scalar};
 use asap_ir::intent_algebra::query_expr::{
     GroupKeys, Predicate, QueryExpr, SortKey, WindowFuncKind,
@@ -96,7 +96,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     else {
         return None;
     };
-    // A single DESC ordering key.
+    // A single ordering key on a column.
     let QueryExpr::Sort {
         keys,
         partition_by,
@@ -107,7 +107,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     };
     let [SortKey {
         expr: L3Expr::Column(sort_col),
-        ascending: false,
+        ascending,
         ..
     }] = keys.as_slice()
     else {
@@ -127,7 +127,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
         other => (other, *sort_col),
     };
 
-    // Exactly one `Count` aggregate, and the DESC key must rank by *its* output
+    // Exactly one `Count` aggregate, and the key must rank by *its* output
     // column — the count sits at index `by.len()` (after the group keys).
     let QueryExpr::Aggregate { by, aggs, .. } = agg_expr else {
         return None;
@@ -136,6 +136,14 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
         return None;
     };
     if ranked_col != by.len() {
+        return None;
+    }
+    // The heavy-hitter decision (descending + ranks-by-count) is the shared rule
+    // both front ends' promotions consult, so an ascending count-ranked limit
+    // (`ORDER BY COUNT(*) ASC LIMIT k` = bottom-k) stays a generic Sort+Limit
+    // exactly as PromQL `bottomk(k, count_over_time(…))` does (issue #38). The
+    // aggregate matched above is a `Count`, so `ranks_by_count` is settled true.
+    if !is_frequency_heavy_hitter(!ascending, true) {
         return None;
     }
 
@@ -328,6 +336,9 @@ mod tests {
 
     #[test]
     fn does_not_promote_ascending_sort() {
+        // Ascending = bottom-k: the shared `is_frequency_heavy_hitter` rule
+        // rejects it (needs descending), so it stays a generic Sort+Limit — the
+        // same call PromQL `bottomk` makes (issue #38).
         let asc = vec![SortKey { expr: L3Expr::Column(1), ascending: true, nulls_first: false }];
         let q = limit(5, 0, sort(asc, count_by_service()));
         assert!(!is_topk_over_count(&canonicalize(q)));

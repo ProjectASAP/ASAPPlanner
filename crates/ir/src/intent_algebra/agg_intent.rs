@@ -450,6 +450,30 @@ fn quantile_suffix(q: f64) -> String {
 
 // ── AggIntent helpers ────────────────────────────────────────────────────────
 
+/// The single rule that decides whether a top-k ranking is the frequency
+/// **heavy-hitter** that [`AggIntent::TopK`] represents, as opposed to a generic
+/// order-by-value `Sort + Limit`.
+///
+/// A ranking qualifies iff it takes the **top** k — `descending` (bottom-k, and
+/// any ascending `ORDER BY … LIMIT`, never do) — **and** ranks by a `Count`.
+/// Both places that make this decision consult this one predicate so they cannot
+/// drift (issue #38):
+///
+/// - the PromQL front-end gate, on `topk(k, count_over_time(…))` — where
+///   `descending` is the `topk`-vs-`bottomk` choice and `ranks_by_count` is
+///   "the inner range function is `count_over_time`";
+/// - the shared L3 canonicalize promotion, on a
+///   `Limit { Sort { … Aggregate([Count]) } }` — where `descending` is the sort
+///   key's direction and `ranks_by_count` is "the ranked aggregate is a `Count`".
+///
+/// The two detectors recognise different *shapes* (a per-series
+/// `count_over_time` vs. a cross-series `GROUP BY … COUNT`), which is why the
+/// shape-matching stays language-specific; only this heavy-hitter *decision* is
+/// shared.
+pub fn is_frequency_heavy_hitter(descending: bool, ranks_by_count: bool) -> bool {
+    descending && ranks_by_count
+}
+
 /// Two instances of this aggregation can be merged
 /// (`agg(A ∪ B) = combine(agg(A), agg(B))`). `Avg` / `StdDev` / `Variance`
 /// need richer partial state than a single value, so they are not mergeable.
@@ -562,6 +586,15 @@ mod tests {
         }));
         assert!(agg_is_exact(&AggIntent::Min { col: None }));
         assert!(!agg_is_exact(&default_cardinality()));
+    }
+
+    #[test]
+    fn frequency_heavy_hitter_rule() {
+        // Heavy-hitter iff descending AND ranks-by-count (#38).
+        assert!(is_frequency_heavy_hitter(true, true)); // top-k of a count
+        assert!(!is_frequency_heavy_hitter(false, true)); // bottom-k of a count
+        assert!(!is_frequency_heavy_hitter(true, false)); // top-k of a non-count
+        assert!(!is_frequency_heavy_hitter(false, false));
     }
 
     #[test]

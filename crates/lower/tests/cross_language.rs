@@ -117,6 +117,27 @@ async fn non_count_ranked_topk_stays_generic_in_both_languages() {
     assert!(heavy_hitter(&p).is_none(), "value-ranked topk is not a count heavy-hitter: {p:?}");
 }
 
+#[tokio::test]
+async fn ascending_count_ranked_topk_stays_generic_in_both_languages() {
+    // The symmetric bottom-k case (issue #38): ranking by a count but taking the
+    // *bottom* k is NOT a frequency heavy-hitter — the shared decision rule
+    // (`is_frequency_heavy_hitter`) requires descending. Both front ends must
+    // make the same call: SQL `ORDER BY COUNT(*) ASC LIMIT k` and PromQL
+    // `bottomk(k, count_over_time(…))` both stay a generic Sort+Limit, never a
+    // TopK. This pins the two count-ranked detectors to agree on direction.
+    let s = sql(
+        "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) ASC LIMIT 5",
+    )
+    .await;
+    let p = promql("bottomk(5, count_over_time(http_requests_total[5m]))");
+
+    assert!(heavy_hitter(&s).is_none(), "SQL ASC count-limit is not a heavy-hitter: {s:?}");
+    assert!(heavy_hitter(&p).is_none(), "PromQL bottomk-count is not a heavy-hitter: {p:?}");
+    // Both are the generic order-by-value + limit shape.
+    assert!(matches!(&s, QueryExpr::Limit { .. }), "SQL stays a Limit: {s:?}");
+    assert!(matches!(&p, QueryExpr::Limit { .. }), "PromQL stays a Limit: {p:?}");
+}
+
 /// Descend through a leading `Project` (the derived-table SELECT list).
 fn strip_project(qe: &QueryExpr) -> &QueryExpr {
     match qe {
