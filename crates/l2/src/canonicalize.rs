@@ -24,7 +24,7 @@
 //! column) it is oblivious to whether the count was aliased in the source, which
 //! is exactly the SQL alias gap (#20) the old front-end gate missed.
 
-use asap_ir::intent_algebra::agg_intent::{is_frequency_heavy_hitter, AggIntent};
+use asap_ir::intent_algebra::agg_intent::{is_frequency_heavy_hitter, ranking_measure, AggIntent};
 use asap_ir::intent_algebra::expr_ir::{CompareOp, L3Scalar};
 use asap_ir::intent_algebra::query_expr::{
     GroupKeys, Predicate, QueryExpr, SortKey, WindowFuncKind,
@@ -127,25 +127,33 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
         other => (other, *sort_col),
     };
 
-    // Exactly one `Count` aggregate, and the key must rank by *its* output
-    // column — the count sits at index `by.len()` (after the group keys).
+    // Exactly one aggregate, ranked by *its* output column — the measure sits at
+    // index `by.len()` (after the group keys).
     let QueryExpr::Aggregate { by, aggs, .. } = agg_expr else {
         return None;
     };
-    let [AggIntent::Count { accuracy }] = aggs.as_slice() else {
+    let [ranked_agg] = aggs.as_slice() else {
         return None;
     };
     if ranked_col != by.len() {
         return None;
     }
-    // The heavy-hitter decision (descending + ranks-by-count) is the shared rule
-    // both front ends' promotions consult, so an ascending count-ranked limit
-    // (`ORDER BY COUNT(*) ASC LIMIT k` = bottom-k) stays a generic Sort+Limit
-    // exactly as PromQL `bottomk(k, count_over_time(…))` does (issue #38). The
-    // aggregate matched above is a `Count`, so `ranks_by_count` is settled true.
-    if !is_frequency_heavy_hitter(!ascending, true) {
+    // The heavy-hitter decision — descending, over a measure with a realised
+    // heavy-hitter sketch — is the shared rule both front ends' promotions
+    // consult (issue #38). So an ascending count-ranked limit
+    // (`ORDER BY COUNT(*) ASC LIMIT k` = bottom-k) stays generic, exactly as
+    // PromQL `bottomk(k, count_over_time(…))` does; and a `sum`-ranked limit
+    // stays generic too (`WeightedSum` is additive but not yet sketch-realised),
+    // matching today's behaviour until a weighted heavy-hitter lands.
+    if !is_frequency_heavy_hitter(!ascending, ranking_measure(ranked_agg)) {
         return None;
     }
+    // The only realised heavy-hitter measure is unweighted `Frequency`, so the
+    // ranked aggregate is a `Count`; carry its accuracy onto the `TopK`. (When a
+    // weighted-sum heavy-hitter lands, this widens alongside `RankingMeasure`.)
+    let AggIntent::Count { accuracy } = ranked_agg else {
+        return None;
+    };
 
     // Outer heavy-hitter `TopK`, grouped by the ranking's partition (empty for a
     // global `ORDER BY … LIMIT k`; the `by` labels for a partitioned `topk by`),
@@ -360,6 +368,11 @@ mod tests {
 
     #[test]
     fn does_not_promote_non_count_aggregate() {
+        // A `sum`-ranked descending limit classifies as `RankingMeasure::
+        // WeightedSum` — additive, so a weighted heavy-hitter sketch is possible
+        // in principle, but none is realised yet, so it stays a generic
+        // Sort+Limit (issue #38). This pins the reserved-but-not-promoted
+        // contract: flipping it on is a future weighted-sketch change.
         let sum = QueryExpr::Aggregate {
             by: GroupKeys(vec![1]),
             aggs: vec![AggIntent::Sum { col: None }],

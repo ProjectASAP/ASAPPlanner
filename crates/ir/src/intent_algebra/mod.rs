@@ -22,7 +22,7 @@ pub mod schema;
 
 pub use agg_intent::{
     agg_accuracy, agg_is_exact, agg_is_mergeable, default_cardinality, default_quantile,
-    is_frequency_heavy_hitter, AggIntent, MathFunc, TimeFunc,
+    is_frequency_heavy_hitter, ranking_measure, AggIntent, MathFunc, RankingMeasure, TimeFunc,
 };
 pub use expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L2Expr, L3Expr, L3Scalar};
 pub use names::{BindingName, QueryId};

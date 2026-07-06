@@ -59,7 +59,9 @@ use asap_ir::intent_algebra::query_expr::{
 use asap_l2::relational::{
     AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
-use asap_ir::intent_algebra::agg_intent::{is_frequency_heavy_hitter, MathFunc, TimeFunc};
+use asap_ir::intent_algebra::agg_intent::{
+    is_frequency_heavy_hitter, MathFunc, RankingMeasure, TimeFunc,
+};
 use asap_ir::intent_algebra::{
     ArithOp, ColumnRef, CompareOp, InfoMatcher, L2Expr, L3Scalar, SampleKind,
 };
@@ -1148,12 +1150,15 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
         Outer::TopK { k, descending } => {
             // Heavy-hitter only when ranking by frequency (`count`): that is a
             // first-class aggregate intent → `TopK`. Any other ranking (topk
-            // over avg/quantile, all bottomk) is a generic order-by-value +
-            // limit and stays as the `Sort + Limit` operator pair. The
-            // descending-plus-count rule is shared with the L3 canonicalize
-            // promotion so the two cannot drift (issue #38).
-            let heavy_hitter =
-                is_frequency_heavy_hitter(descending, matches!(inner.func, Some(InnerFunc::Count)));
+            // over avg/quantile/rate, a bare selector's raw value, all bottomk)
+            // is a generic order-by-value + limit and stays as the `Sort + Limit`
+            // operator pair. The descending-plus-measure rule is shared with the
+            // L3 canonicalize promotion so the two cannot drift (issue #38).
+            let measure = match inner.func {
+                Some(InnerFunc::Count) => RankingMeasure::Frequency,
+                _ => RankingMeasure::NonAdditive,
+            };
+            let heavy_hitter = is_frequency_heavy_hitter(descending, measure);
             if heavy_hitter {
                 // Preserve the Count intent in L3 so the intent algebra is
                 // explicit about what is being computed. L4 may fuse the Count
