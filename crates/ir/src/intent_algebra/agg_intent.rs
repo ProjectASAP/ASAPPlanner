@@ -470,6 +470,17 @@ fn quantile_suffix(q: f64) -> String {
 /// `count_over_time` vs. a cross-series `GROUP BY … COUNT`), which is why the
 /// shape-matching stays language-specific; only this heavy-hitter *decision* is
 /// shared.
+///
+/// **On `ranks_by_count`.** The sketchable-heavy-hitter line is really the
+/// *additivity* of the ranking measure, not "count" per se: an additive
+/// per-key aggregate (unweighted `count` — and, in principle, a weighted
+/// `sum`) admits a single-pass heavy-hitter sketch (CMS-with-heap /
+/// SpaceSaving), whereas a non-additive measure (`avg` / `quantile` / `min` /
+/// `max`, or a raw sample value) does not and stays a generic `Sort + Limit`.
+/// Today only the unweighted `count` case is realised, so this stays a bool;
+/// when weighted (`sum`-ranked) heavy-hitters land, widen `ranks_by_count`
+/// into a measure classifier and let L4 pick the sketch family (issues
+/// #6/#33) — the additive-vs-not boundary is the axis to generalise along.
 pub fn is_frequency_heavy_hitter(descending: bool, ranks_by_count: bool) -> bool {
     descending && ranks_by_count
 }
