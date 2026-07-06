@@ -152,6 +152,44 @@ plans never read `unique_keys`.
 
 ---
 
+## The nesting contract (issue #27)
+
+Nesting is **structural** at L3: `QueryExpr` is a recursive, box-owned tree and
+every operator accepts an arbitrary child, so "function over subquery" needs no
+special IR. The contract below says which *composite arguments* the front ends
+actually lower today, and which are **cleanly rejected** (never silently
+mislowered) — each row is pinned by a named test.
+
+### Lowers
+
+| Shape | Example | Pinned by |
+|---|---|---|
+| Aggregate over aggregate (any depth) | `max(sum by (job) (rate(m[5m])))` | `outer_aggregate_over_nested_aggregate_nests`; e2e `q27_max_over_sum_by_job_over_rate` |
+| Aggregate over a binary op | `sum(rate(a[5m]) + rate(b[5m]))` | `aggregate_over_binary_op_nests` |
+| Binary op over two arbitrary subtrees | `sum by (j)(rate(a[5m])) / sum by (j)(rate(b[5m]))` | e2e `q25_div_over_complex_subtrees` |
+| Ranking over a nested aggregate (generic top-k) | `topk(3, sum by (i)(rate(m[5m])))` → `Sort → Limit` | `topk_over_nested_aggregate_is_generic_sort_limit` |
+| Heavy-hitter top-k (frequency shape) | `topk(10, count_over_time(m[1m]))` → `AggIntent::TopK` | `topk_over_count_is_heavy_hitter` |
+| Range function over a sub-query (#42) | `max_over_time(rate(m[5m])[1h:])` | `over_time_of_subquery_reduces_per_series` |
+| Nested sub-queries (range fn over range fn over range fn; default resolution) | `max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])` (Prometheus docs example) | `nested_subquery_from_prometheus_docs`; e2e `q27_nested_subquery_prometheus_docs_example` |
+| Outer group key absent from a nested aggregate's (closed) output (#53) | `sum(sum by (k)(m)) by (j)` — `j` provably absent → dropped per PromQL's absent-label grouping semantics | `outer_group_key_absent_from_nested_aggregate_is_dropped`; e2e `q53_outer_group_key_absent_from_nested_aggregate` |
+| SQL derived tables / inline views (#29) | `SELECT … FROM (SELECT … GROUP BY …) t`, incl. aggregate-over-aggregate | `derived_table_aggregate_over_aggregate_nests` (`sql_lowering.rs`) |
+
+### Rejected cleanly
+
+| Shape | Why | Pinned by |
+|---|---|---|
+| Unary negation anywhere in a nest — `sum(-m)` | no scalar-negate in the L2 PromQL path yet (issue #36) | `unary_negation_is_rejected__GAP` |
+| `without(...)` grouping | a usage-derived (open) schema can't enumerate the label complement (issue #39) | binder rejection (see "Why the Binder is its own pass") |
+| SQL subquery-valued **predicate** expressions — scalar `x > (SELECT …)`, `IN (SELECT …)`, `EXISTS` / `NOT EXISTS` / `NOT IN`, correlated or not | the v1 decision on #27's open question: these need a subquery node in the L2 expression IR + a correlated-vs-uncorrelated representation choice; rejected until that lands (derived tables in `FROM` are the supported nesting shape) | `scalar_subquery_in_predicate_is_rejected`, `semi_join_is_rejected_not_mislowered`, `exists_subquery_in_predicate_is_rejected` (`sql_lowering.rs`) |
+
+The dividing line: **relational** nesting (an operator tree in `FROM` / a
+function argument) lowers structurally; **expression-level** subqueries (a
+query embedded inside a scalar predicate) are the one shape with no L2/L3
+representation yet, and they are the only nesting rejections that are not
+tracked by a more specific issue.
+
+---
+
 ## Worked example — one query through L1 → L2 → L3
 
 Four steps: the three layers, plus the Binder pass shown explicitly on the

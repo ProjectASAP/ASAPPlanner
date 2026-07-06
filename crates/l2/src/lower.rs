@@ -17,7 +17,8 @@ use thiserror::Error;
 use asap_ir::intent_algebra::agg_intent::AggIntent;
 use crate::binder::Binder;
 use crate::column_resolution::{
-    output_schema_for_aggregate, resolve_column_refs, resolve_expr, ResolveError,
+    output_schema_for_aggregate, resolve_column_refs, resolve_expr, resolve_group_keys_promql,
+    ResolveError,
 };
 use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
 use asap_ir::intent_algebra::names::BindingName;
@@ -262,7 +263,12 @@ pub fn convert(
                 if time_range.is_some() && !keys.is_empty() {
                     return Err(ConvertError::WindowedReductionKeys);
                 }
-                let by: GroupKeys = resolve_column_refs(keys, &agg_in_schema)?.into();
+                // PromQL absent-label grouping semantics (issue #53): a key
+                // provably absent from a *closed* input schema (e.g. the output
+                // of a nested cross-series aggregate that collapsed the label)
+                // groups every series into one partition and is omitted from
+                // the output — drop it instead of rejecting the query.
+                let by: GroupKeys = resolve_group_keys_promql(keys, &agg_in_schema)?.into();
                 return Ok(CQueryExpr::Aggregate {
                     by,
                     aggs: vec![intent],

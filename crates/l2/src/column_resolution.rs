@@ -101,6 +101,33 @@ pub fn resolve_column_refs(
     cols.iter().map(|c| resolve_column_ref(c, schema)).collect()
 }
 
+/// Resolve PromQL aggregation grouping keys with the language's absent-label
+/// semantics (issue #53): a key not present in a **closed** schema is provably
+/// absent from every row, so all rows carry its empty value, grouping by it is
+/// the identity partition, and Prometheus omits the (empty) label from the
+/// aggregation output — so the key is **dropped** rather than rejected. This
+/// is what makes `sum(sum by (k) (m)) by (j)` lower: the inner cross-series
+/// aggregate freezes the schema to the closed `[k, sum]`, which provably lacks
+/// `j`.
+///
+/// Against an **open** schema an unresolved key is still an error: the label
+/// may exist at runtime, and PromQL leaves seed every referenced label via the
+/// Binder, so an unresolved key over an open schema indicates a resolution bug,
+/// not an absent label. (SQL is unaffected — its `GROUP BY` resolves through
+/// the strict [`resolve_column_refs`], and DataFusion has already validated
+/// the columns anyway.)
+pub fn resolve_group_keys_promql(
+    cols: &[ColumnRef],
+    schema: &Schema,
+) -> Result<Vec<ColumnId>, ResolveError> {
+    cols.iter()
+        .filter_map(|c| match resolve_column_ref(c, schema) {
+            Err(ResolveError::NotFound { .. }) if schema.closed => None,
+            other => Some(other),
+        })
+        .collect()
+}
+
 /// Resolve a Layer-2 [`L2Expr`] (name-based) into a positional [`L3Expr`] by
 /// resolving every column reference against `schema`. Structural otherwise.
 pub fn resolve_expr(expr: &L2Expr, schema: &Schema) -> Result<L3Expr, ResolveError> {
@@ -248,6 +275,48 @@ mod tests {
         let s = infer_source_schema("m");
         let err = resolve_column_ref(&ColumnRef::Named("host".into()), &s).unwrap_err();
         assert!(matches!(err, ResolveError::NotFound { .. }));
+    }
+
+    #[test]
+    fn group_keys_promql_drops_absent_key_in_closed_schema() {
+        // The output of a nested cross-series aggregate: closed `[group, sum]`.
+        // `by (job)` — `job` is provably absent → dropped, not rejected (#53).
+        let s = Schema {
+            columns: vec![
+                Column::new("group", DataType::Utf8, true),
+                Column::new("sum", DataType::Float64, false),
+            ],
+            time_index: None,
+            unique_keys: vec![],
+            closed: true,
+        };
+        assert_eq!(
+            resolve_group_keys_promql(&[ColumnRef::Named("job".into())], &s),
+            Ok(vec![])
+        );
+        // Present keys still resolve positionally; absent ones drop around them.
+        assert_eq!(
+            resolve_group_keys_promql(
+                &[
+                    ColumnRef::Named("job".into()),
+                    ColumnRef::Named("group".into())
+                ],
+                &s
+            ),
+            Ok(vec![0])
+        );
+    }
+
+    #[test]
+    fn group_keys_promql_still_errors_on_open_schema() {
+        // An open schema can't prove absence — an unresolved key there is a
+        // resolution bug (the Binder seeds every referenced label), not an
+        // absent label. Keep the strict error.
+        let open = infer_source_schema("m"); // closed: false
+        assert!(matches!(
+            resolve_group_keys_promql(&[ColumnRef::Named("job".into())], &open),
+            Err(ResolveError::NotFound { .. })
+        ));
     }
 
     #[test]
