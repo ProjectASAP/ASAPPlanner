@@ -108,6 +108,20 @@ Why isolate this instead of resolving inline during lowering:
   rejected here: a usage-derived schema can't enumerate "all labels *except*
   these," so the error belongs in binding, not smeared across lowering.
 
+### Binary-op sides bind independently — with inherited keys
+
+Each side of a `BinaryOp` re-runs the Binder against its **own** sub-tree
+(`convert_root` per side), because the two branches may scan different metrics
+with different label sets and each side's columns must bind to positions in its
+own leaf — not the other's. But a side must still see label names referenced by
+an **enclosing** node: `sum by (__name__)(a or b)` (or `sum by (job)(a or b)`)
+groups by a key that appears in *neither* side's own matchers, and every series
+carries `__name__` (the metric name) regardless (issue #52). So the converter
+seeds those **inherited** names — the enclosing scope's referenced columns minus
+the ones referenced inside the binary op itself, i.e. exactly the ancestor keys —
+into each side via `Binder::bind_with_inherited`. Subtracting the binary op's own
+references is what keeps one side's labels from leaking into the other.
+
 ---
 
 ## Why `unique_keys` / CSE

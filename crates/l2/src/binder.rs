@@ -73,6 +73,16 @@ impl<C: SchemaCatalog> Binder<C> {
     /// per distinct name referenced anywhere in the tree — so positional
     /// `ColumnId` resolution downstream is total.
     pub fn bind(&self, tree: &LQueryExpr) -> Schema {
+        self.bind_with_inherited(tree, &[])
+    }
+
+    /// Like [`bind`](Self::bind), but also seeds `inherited` label names that are
+    /// referenced by an **enclosing** scope rather than by `tree` itself. This is
+    /// how an independently-bound `BinaryOp` side (each side re-binds against its
+    /// own sub-tree) still sees an outer aggregate's group keys — e.g. the
+    /// `__name__` / `job` in `sum by (__name__)(a or b)`, which appear in neither
+    /// side's own matchers (issue #52).
+    pub fn bind_with_inherited(&self, tree: &LQueryExpr, inherited: &[String]) -> Schema {
         let mut columns: Vec<Column> = tree
             .source_name()
             .and_then(|name| self.catalog.columns_for(name))
@@ -85,10 +95,12 @@ impl<C: SchemaCatalog> Binder<C> {
             }
         }
 
-        // Append one column per referenced-but-unknown name (group keys etc.).
-        for name in collect_referenced_columns(tree) {
-            if !columns.iter().any(|c| c.name == name) {
-                columns.push(Column::new(name, DataType::Utf8, true));
+        // Append one column per referenced-but-unknown name (group keys etc.),
+        // plus any inherited-from-enclosing-scope names.
+        let referenced = collect_referenced_columns(tree);
+        for name in referenced.iter().chain(inherited) {
+            if !columns.iter().any(|c| c.name == *name) {
+                columns.push(Column::new(name.clone(), DataType::Utf8, true));
             }
         }
 
@@ -128,7 +140,7 @@ fn push_ref_name(c: &ColumnRef, out: &mut Vec<String>) {
     }
 }
 
-fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
+pub(crate) fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
     fn named(expr: &L2Expr, out: &mut Vec<String>) {
         for c in expr.columns_referenced() {
             push_ref_name(c, out);
@@ -209,6 +221,18 @@ mod tests {
         };
         let schema = Binder::new().bind(&tree);
         assert!(schema.column_id("host").is_some());
+    }
+
+    #[test]
+    fn inherited_names_are_seeded_alongside_referenced() {
+        // A `BinaryOp` side re-binds against its own sub-tree, but must still see
+        // an enclosing aggregate's group key (`__name__` / `job`) that appears in
+        // neither side's own matchers (issue #52). `bind_with_inherited` seeds it.
+        let schema = Binder::new().bind_with_inherited(&src("m"), &["__name__".into()]);
+        assert!(schema.column_id("__name__").is_some());
+        // `bind` (no inheritance) does not conjure it.
+        let plain = Binder::new().bind(&src("m"));
+        assert!(plain.column_id("__name__").is_none());
     }
 
     #[test]

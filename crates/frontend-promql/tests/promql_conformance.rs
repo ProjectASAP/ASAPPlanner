@@ -791,6 +791,34 @@ fn outer_group_key_present_after_inner_aggregate_still_resolves() {
 }
 
 #[test]
+fn outer_group_key_over_binary_op_resolves_on_both_sides() {
+    // Issue #52: an outer aggregate's group key that appears in *neither* side of
+    // a binary op — the metric-name label `__name__`, or a plain `job` — must
+    // still resolve. Each `or` side is bound independently against its own
+    // sub-tree, so the key is seeded as an inherited column on both sides.
+    let qe = ok(r#"sum by (__name__)(metric_a{env="1"} or metric_b{env="2"})"#);
+    let QueryExpr::Aggregate { by, child, .. } = &qe else {
+        panic!("expected outer Aggregate, got {qe:?}");
+    };
+    // `__name__` resolves to a single positional id against the binary op output.
+    assert_eq!(by.len(), 1, "grouped by the one `__name__` key");
+    let QueryExpr::BinaryOp { lhs, rhs, .. } = child.as_ref() else {
+        panic!("expected a BinaryOp child, got {child:?}");
+    };
+    // Both independently-bound sides carry `__name__` at the same position, so
+    // the outer group key is consistent across the union.
+    let (ls, rs) = (lhs.output_schema().unwrap(), rhs.output_schema().unwrap());
+    assert_eq!(ls.column_id("__name__"), rs.column_id("__name__"));
+    assert_eq!(ls.column_id("__name__"), Some(by[0]));
+
+    // The general case (a plain label, not just `__name__`) also lowers.
+    assert!(matches!(
+        ok("sum by (job)(metric_a or metric_b)"),
+        QueryExpr::Aggregate { .. }
+    ));
+}
+
+#[test]
 fn aggregate_over_binary_op_nests() {
     // `sum(rate(a[5m]) + rate(b[5m]))` — an aggregate whose argument is a binary
     // op over two range vectors. The old template only accepted a single inner
