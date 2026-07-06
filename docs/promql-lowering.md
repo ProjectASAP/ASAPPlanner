@@ -170,6 +170,7 @@ mislowered) — each row is pinned by a named test.
 | Ranking over a nested aggregate (generic top-k) | `topk(3, sum by (i)(rate(m[5m])))` → `Sort → Limit` | `topk_over_nested_aggregate_is_generic_sort_limit` |
 | Heavy-hitter top-k (frequency shape) | `topk(10, count_over_time(m[1m]))` → `AggIntent::TopK` | `topk_over_count_is_heavy_hitter` |
 | Range function over a sub-query (#42) | `max_over_time(rate(m[5m])[1h:])` | `over_time_of_subquery_reduces_per_series` |
+| Nested sub-queries (range fn over range fn over range fn; default resolution) | `max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])` (Prometheus docs example) | `nested_subquery_from_prometheus_docs`; e2e `q27_nested_subquery_prometheus_docs_example` |
 | Outer group key absent from a nested aggregate's (closed) output (#53) | `sum(sum by (k)(m)) by (j)` — `j` provably absent → dropped per PromQL's absent-label grouping semantics | `outer_group_key_absent_from_nested_aggregate_is_dropped`; e2e `q53_outer_group_key_absent_from_nested_aggregate` |
 | SQL derived tables / inline views (#29) | `SELECT … FROM (SELECT … GROUP BY …) t`, incl. aggregate-over-aggregate | `derived_table_aggregate_over_aggregate_nests` (`sql_lowering.rs`) |
 

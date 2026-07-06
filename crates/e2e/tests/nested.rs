@@ -232,3 +232,50 @@ fn q24_sum_by_job_over_rate_over_filtered_scan() {
         expected,
     );
 }
+
+// #27 — the nested sub-query example from the Prometheus docs
+//   (https://prometheus.io/docs/prometheus/latest/querying/examples/):
+//     max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])
+//   Two stacked sub-queries feeding range functions; the outer `[10m:]` uses
+//   the default resolution (None). Every level is a per-series reduction, so
+//   the whole spine survives verbatim and the schema stays label-preserving.
+#[test]
+fn q27_nested_subquery_prometheus_docs_example() {
+    let scan = QueryExpr::Scan {
+        source: Source::TimeSeries {
+            metric: "distance_covered_total".into(),
+        },
+        predicates: vec![],
+        schema: metric_schema(&[]),
+    };
+    let rate = agg(
+        vec![],
+        AggIntent::Rate,
+        QueryExpr::TimeRange {
+            range: Duration::from_secs(5),
+            child: Box::new(scan),
+        },
+    );
+    let deriv = agg(
+        vec![],
+        AggIntent::Deriv,
+        QueryExpr::Subquery {
+            range: Duration::from_secs(30),
+            resolution: Some(Duration::from_secs(5)),
+            child: Box::new(rate),
+        },
+    );
+    let expected = agg(
+        vec![],
+        AggIntent::Max { col: None },
+        QueryExpr::Subquery {
+            range: Duration::from_secs(600),
+            resolution: None,
+            child: Box::new(deriv),
+        },
+    );
+    assert_eq!(
+        lower("max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])"),
+        expected,
+    );
+}

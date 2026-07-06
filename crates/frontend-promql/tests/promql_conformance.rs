@@ -799,6 +799,66 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     assert!(matches!(inner_child.as_ref(), QueryExpr::Subquery { .. }));
 }
 
+#[test]
+fn nested_subquery_from_prometheus_docs() {
+    // SEMANTICS (PromQL): the *nested sub-query* example from the official docs
+    // (<https://prometheus.io/docs/prometheus/latest/querying/examples/>):
+    //
+    //   max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])
+    //
+    // Two stacked sub-queries, each feeding a range-vector function; the outer
+    // `[10m:]` uses the **default resolution** (no explicit step). Each level
+    // lowers to its own node, so the whole spine pins as:
+    //
+    //   Max ∘ Subquery{10m, res: None} ∘ Deriv ∘ Subquery{30s, res: 5s}
+    //       ∘ Rate ∘ TimeRange{5s} ∘ Scan
+    //
+    // Every reduction is per-series (no grouping), so the output schema stays
+    // the label-preserving `[ts, value]`.
+    let qe = ok("max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])");
+
+    let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+        panic!("expected `max_over_time` Aggregate at the root, got {qe:?}");
+    };
+    assert!(by.is_empty());
+    assert!(matches!(aggs.as_slice(), [AggIntent::Max { .. }]));
+
+    let QueryExpr::Subquery { range, resolution, child } = child.as_ref() else {
+        panic!("expected the outer `[10m:]` Subquery, got {child:?}");
+    };
+    assert_eq!(*range, Duration::from_secs(600));
+    assert_eq!(*resolution, None, "`[10m:]` keeps the default resolution");
+
+    let QueryExpr::Aggregate { by, aggs, child, .. } = child.as_ref() else {
+        panic!("expected the `deriv` Aggregate, got {child:?}");
+    };
+    assert!(by.is_empty());
+    assert!(matches!(aggs.as_slice(), [AggIntent::Deriv]));
+
+    let QueryExpr::Subquery { range, resolution, child } = child.as_ref() else {
+        panic!("expected the inner `[30s:5s]` Subquery, got {child:?}");
+    };
+    assert_eq!(*range, Duration::from_secs(30));
+    assert_eq!(*resolution, Some(Duration::from_secs(5)));
+
+    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+        panic!("expected the `rate` Aggregate, got {child:?}");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Rate]));
+    let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
+        panic!("expected the `[5s]` TimeRange under rate, got {child:?}");
+    };
+    assert_eq!(*range, Duration::from_secs(5));
+
+    // Per-series end to end: the schema keeps the (ts, value) floor and stays open.
+    let schema = qe.output_schema().expect("schema derivation");
+    assert_eq!(
+        schema.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        vec!["ts", "value"],
+    );
+    assert!(!schema.closed, "per-series chain never freezes the schema");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // K. Time-shift modifiers                  (basics §Offset/@; at_modifier.test)
 // ─────────────────────────────────────────────────────────────────────────────
