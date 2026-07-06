@@ -47,15 +47,6 @@ fn assert_distinct(a: &str, b: &str) {
     );
 }
 
-/// A query whose semantics we can't faithfully represent must be rejected
-/// (never silently mislowered into a different meaning).
-fn assert_rejected(q: &str) {
-    assert!(
-        lower_promql(q, AccuracyTarget::Exact).is_err(),
-        "{q:?} should be rejected, not silently lowered"
-    );
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Equivalence classes the lowering canonicalises to one L3.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,9 +173,18 @@ fn group_is_not_sum() {
 
 #[test]
 fn offset_and_at_are_not_dropped() {
-    // Time-shift modifiers change the query's meaning; they previously lowered
-    // identically to the un-shifted query (silent loss).
-    assert_rejected("http_requests_total offset 5m");
-    assert_rejected("http_requests_total @ 1609746000");
-    assert_rejected("rate(http_requests_total[5m] offset 1h)");
+    // Time-shift modifiers change the query's meaning. They now lower to a
+    // `TimeShift` wrapper (issue #40) — the point is they stay DISTINCT from the
+    // un-shifted query rather than collapsing onto it (the former silent loss).
+    assert_distinct("http_requests_total offset 5m", "http_requests_total");
+    assert_distinct("http_requests_total @ 1609746000", "http_requests_total");
+    assert_distinct(
+        "rate(http_requests_total[5m] offset 1h)",
+        "rate(http_requests_total[5m])",
+    );
+    // Different shifts are also distinct from each other.
+    assert_distinct(
+        "http_requests_total offset 5m",
+        "http_requests_total offset 10m",
+    );
 }

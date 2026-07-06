@@ -11,7 +11,7 @@ use std::time::Duration;
 
 pub use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr};
 use asap_ir::intent_algebra::agg_intent::{MathFunc, TimeFunc};
-use asap_ir::intent_algebra::query_expr::{InfoMatcher, SampleKind};
+use asap_ir::intent_algebra::query_expr::{InfoMatcher, SampleKind, TimeShift};
 pub use asap_ir::intent_algebra::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
 use asap_ir::intent_algebra::schema::Schema;
 
@@ -42,6 +42,11 @@ pub struct SourceSpec {
     /// labels). The presence of a schema also selects the L3 `Source` variant:
     /// `Some` → `Source::Table`, `None` → `Source::TimeSeries`.
     pub schema: Option<Schema>,
+    /// PromQL `offset` / `@` time shift on this selector (issue #40). The
+    /// converter lifts a non-identity shift into an L3 [`TimeShift`] wrapper over
+    /// the `Scan`. `TimeShift::default()` (the identity) for every unshifted
+    /// selector and every SQL table.
+    pub shift: TimeShift,
 }
 
 impl SourceSpec {
@@ -50,6 +55,7 @@ impl SourceSpec {
         Self {
             name: name.into(),
             schema: None,
+            shift: TimeShift::default(),
         }
     }
 
@@ -58,7 +64,14 @@ impl SourceSpec {
         Self {
             name: name.into(),
             schema: Some(schema),
+            shift: TimeShift::default(),
         }
+    }
+
+    /// This PromQL leaf with a time-shift modifier attached (issue #40).
+    pub fn with_shift(mut self, shift: TimeShift) -> Self {
+        self.shift = shift;
+        self
     }
 }
 

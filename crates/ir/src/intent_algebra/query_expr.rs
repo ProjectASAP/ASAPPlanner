@@ -307,6 +307,42 @@ pub struct VectorMatch {
     pub grouping: Option<VectorGrouping>,
 }
 
+/// PromQL `@` modifier — pins a selector's evaluation time to an anchor instead
+/// of the query evaluation time (issue #40).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtModifier {
+    /// `@ start()` — the query range's start instant.
+    Start,
+    /// `@ end()` — the query range's end instant.
+    End,
+    /// `@ <ts>` — an absolute instant, milliseconds since the Unix epoch (may be
+    /// negative). PromQL writes the timestamp in seconds; the front end scales it.
+    Timestamp(i64),
+}
+
+/// PromQL per-selector **time-shift** modifiers — `offset` and `@` (issue #40).
+/// Neither changes a selector's *schema*; both move *when* it is evaluated, so
+/// the shift is a pass-through wrapper ([`QueryExpr::TimeShift`]) over the
+/// selector rather than a new leaf shape. The runtime resolves the anchor and
+/// applies the offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TimeShift {
+    /// `offset <d>` as signed milliseconds — a positive value shifts the
+    /// lookback *back* in time (`offset 5m`), a negative value shifts it
+    /// *forward* (`offset -5m`). `0` = no offset.
+    pub offset_ms: i64,
+    /// `@` anchor; `None` = evaluate at the query time.
+    pub at: Option<AtModifier>,
+}
+
+impl TimeShift {
+    /// Whether this shift is the identity (no `offset`, no `@`) — the state of
+    /// every selector that carries neither modifier.
+    pub fn is_identity(&self) -> bool {
+        self.offset_ms == 0 && self.at.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VectorMatchKind {
     On,
@@ -535,6 +571,19 @@ pub enum QueryExpr {
         child: Box<QueryExpr>,
     },
 
+    /// PromQL `offset` / `@` **time shift** on a selector (issue #40). A
+    /// pass-through wrapper: it moves *when* `child` is evaluated (the runtime
+    /// resolves the `@` anchor and applies the offset) but leaves its schema
+    /// unchanged. Wraps the shifted selector directly — `m offset 1h` →
+    /// `TimeShift { Scan }`; a ranged selector `m[5m] offset 1h` →
+    /// `TimeRange { 5m, TimeShift { Scan } }` (the range is taken at the shifted
+    /// time). Never carries the identity shift (the converter emits a bare
+    /// selector when neither modifier is present).
+    TimeShift {
+        shift: TimeShift,
+        child: Box<QueryExpr>,
+    },
+
     /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …)`.
     /// Output schema = child schema + one column named `output_name` (the name
     /// the enclosing `Project` references). Window frames are not modelled yet.
@@ -631,7 +680,10 @@ impl QueryExpr {
             // Info enrichment adds runtime info labels — the statically-known
             // schema is the child's (open), so it passes through (#84).
             | QueryExpr::InfoJoin { child, .. }
-            | QueryExpr::TimeRange { child, .. } => child.output_schema_in(scope),
+            | QueryExpr::TimeRange { child, .. }
+            // A time shift (`offset`/`@`) moves *when* the child is evaluated,
+            // never its columns — schema passes through (#40).
+            | QueryExpr::TimeShift { child, .. } => child.output_schema_in(scope),
 
             // ρ — relabel preserves every input column and writes one label
             // `dst` (Utf8): overwritten in place if it already exists, else
@@ -1236,6 +1288,54 @@ mod tests {
         assert!(!s.closed, "a `without` result stays open");
         assert!(s.time_index.is_none());
         assert!(s.unique_keys.is_empty(), "kept set unknown → no unique key");
+    }
+
+    #[test]
+    fn time_shift_is_schema_pass_through() {
+        // `offset`/`@` move *when* a selector is evaluated, never its columns —
+        // a `TimeShift` output schema equals its child's (issue #40).
+        let scan_node = scan(
+            vec![
+                col("ts", DataType::Timestamp, false),
+                col("value", DataType::Float64, false),
+                col("job", DataType::Utf8, true),
+            ],
+            Some(0),
+            vec![],
+        );
+        let shifted = QueryExpr::TimeShift {
+            shift: TimeShift {
+                offset_ms: 3_600_000,
+                at: Some(AtModifier::Timestamp(1_609_746_000_000)),
+            },
+            child: Box::new(scan_node.clone()),
+        };
+        assert_eq!(
+            shifted.output_schema().unwrap(),
+            scan_node.output_schema().unwrap(),
+        );
+    }
+
+    #[test]
+    fn time_shift_identity_and_serde() {
+        let offset_only = TimeShift {
+            offset_ms: 1,
+            at: None,
+        };
+        let at_only = TimeShift {
+            offset_ms: 0,
+            at: Some(AtModifier::End),
+        };
+        assert!(TimeShift::default().is_identity());
+        assert!(!offset_only.is_identity());
+        assert!(!at_only.is_identity());
+        // Round-trip the shift + anchor.
+        let s = TimeShift {
+            offset_ms: -300_000,
+            at: Some(AtModifier::Timestamp(60_000)),
+        };
+        let back: TimeShift = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
     }
 
     #[test]

@@ -10,13 +10,13 @@
 
 use std::time::Duration;
 
+use asap_e2e::fixtures::metric_schema;
+use asap_frontend_promql::lower_promql;
 use asap_ir::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, GroupKeys, L3Expr, L3Scalar, Predicate, QueryExpr,
-    Source, VectorMatch, VectorMatchKind,
+    AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, GroupKeys, L3Expr, L3Scalar,
+    Predicate, QueryExpr, Source, TimeShift, VectorMatch, VectorMatchKind,
 };
 use asap_ir::types::AccuracyTarget;
-use asap_frontend_promql::lower_promql;
-use asap_e2e::fixtures::metric_schema;
 
 fn lower(q: &str) -> QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
@@ -275,6 +275,65 @@ fn q39_sum_without_instance_over_rate() {
         lower("sum without (instance) (rate(http_requests_total[5m]))"),
         expected,
     );
+}
+
+// #40 — week-over-week: `rate(m[5m]) - rate(m[5m] offset 1w)`. Only the RHS
+//   selector is time-shifted, so its scan is wrapped in a `TimeShift` under the
+//   `TimeRange`; the LHS is a bare rate. Both sides bound independently.
+#[test]
+fn q40_week_over_week_offset() {
+    let rate_over = |shift: Option<i64>| {
+        let scan = QueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: metric_schema(&[]),
+        };
+        let ranged = match shift {
+            Some(ms) => QueryExpr::TimeShift {
+                shift: TimeShift {
+                    offset_ms: ms,
+                    at: None,
+                },
+                child: Box::new(scan),
+            },
+            None => scan,
+        };
+        agg(
+            vec![],
+            AggIntent::Rate,
+            QueryExpr::TimeRange {
+                range: Duration::from_secs(300),
+                child: Box::new(ranged),
+            },
+        )
+    };
+    let expected = QueryExpr::BinaryOp {
+        op: BinaryOpKind::Arith(ArithOp::Sub),
+        lhs: Box::new(rate_over(None)),
+        rhs: Box::new(rate_over(Some(604_800_000))), // 1w
+        vector_match: None,
+    };
+    assert_eq!(lower("rate(m[5m]) - rate(m[5m] offset 1w)"), expected,);
+}
+
+// #40 — `@` anchor: `up @ 1609746000` pins the eval time to an absolute instant
+//   (seconds → ms); a bare selector wrapped in a `TimeShift` carrying the anchor.
+#[test]
+fn q40_at_modifier_absolute() {
+    let expected = QueryExpr::TimeShift {
+        shift: TimeShift {
+            offset_ms: 0,
+            at: Some(AtModifier::Timestamp(1_609_746_000_000)),
+        },
+        child: Box::new(QueryExpr::Scan {
+            source: Source::TimeSeries {
+                metric: "up".into(),
+            },
+            predicates: vec![],
+            schema: metric_schema(&[]),
+        }),
+    };
+    assert_eq!(lower("up @ 1609746000"), expected);
 }
 
 // #24 — sum by job over rate over a filtered scan

@@ -57,6 +57,7 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             }
             QueryExpr::Window { child, .. }
             | QueryExpr::TimeRange { child, .. }
+            | QueryExpr::TimeShift { child, .. }
             | QueryExpr::Filter { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }

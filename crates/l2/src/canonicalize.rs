@@ -69,6 +69,7 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
         | Distinct { child, .. }
         | Subquery { child, .. }
         | TimeRange { child, .. }
+        | TimeShift { child, .. }
         | WindowFunc { child, .. }
         | Sample { child, .. }
         | InfoJoin { child, .. }
