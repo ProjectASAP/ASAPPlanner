@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use asap_ir::intent_algebra::{
     AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, Predicate, QueryExpr, Source,
+    VectorMatch, VectorMatchKind,
 };
 use asap_ir::types::AccuracyTarget;
 use asap_frontend_promql::lower_promql;
@@ -199,6 +200,46 @@ fn q53_outer_group_key_absent_from_nested_aggregate() {
     assert_eq!(
         lower(r#"sum(sum by (group)(http_requests{job="api-server"})) by (job)"#),
         expected
+    );
+}
+
+// #52 — an outer group key referenced by neither binary-op side (`__name__`)
+//   still resolves. Each `or` side is bound independently against its own
+//   sub-tree, so `__name__` is seeded as an inherited column on both. Each side
+//   references only `env` (its matcher), so its schema is [ts, value, env,
+//   __name__] (referenced `env` first, inherited `__name__` appended) → the
+//   outer `by (__name__)` resolves to col 3 on both sides. The `or` carries the
+//   parser's default `ignoring([])` match modifier.
+#[test]
+fn q52_outer_name_label_over_binary_op() {
+    let side = |metric: &str, env: &str| QueryExpr::Scan {
+        source: Source::TimeSeries {
+            metric: metric.into(),
+        },
+        predicates: vec![Predicate(L3Expr::Compare {
+            left: Box::new(L3Expr::Column(2)), // env
+            op: CompareOp::Eq,
+            right: Box::new(L3Expr::Literal(L3Scalar::Utf8(env.into()))),
+        })],
+        schema: metric_schema(&["env", "__name__"]),
+    };
+    let expected = agg(
+        vec![3], // __name__
+        AggIntent::Sum { col: None },
+        QueryExpr::BinaryOp {
+            op: BinaryOpKind::Or,
+            lhs: Box::new(side("metric_a", "1")),
+            rhs: Box::new(side("metric_b", "2")),
+            vector_match: Some(VectorMatch {
+                kind: VectorMatchKind::Ignoring,
+                labels: vec![],
+                grouping: None,
+            }),
+        },
+    );
+    assert_eq!(
+        lower(r#"sum by (__name__)(metric_a{env="1"} or metric_b{env="2"})"#),
+        expected,
     );
 }
 

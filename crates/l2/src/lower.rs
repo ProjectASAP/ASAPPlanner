@@ -15,7 +15,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use asap_ir::intent_algebra::agg_intent::AggIntent;
-use crate::binder::Binder;
+use crate::binder::{collect_referenced_columns, Binder};
 use crate::column_resolution::{
     output_schema_for_aggregate, resolve_column_refs, resolve_expr, resolve_group_keys_promql,
     ResolveError,
@@ -63,7 +63,19 @@ pub fn convert_root(
     legacy: &LQueryExpr,
     accuracy: &AccuracyTarget,
 ) -> Result<CQueryExpr, ConvertError> {
-    let fallback = Binder::new().bind(legacy);
+    convert_root_with_inherited(legacy, accuracy, &[])
+}
+
+/// [`convert_root`] with label names inherited from an enclosing scope seeded
+/// into the leaf schema. Used when re-binding a `BinaryOp` side, so an outer
+/// aggregate's group keys (`sum by (__name__)(a or b)`) resolve even though they
+/// appear in neither side's own sub-tree (issue #52).
+fn convert_root_with_inherited(
+    legacy: &LQueryExpr,
+    accuracy: &AccuracyTarget,
+    inherited: &[String],
+) -> Result<CQueryExpr, ConvertError> {
+    let fallback = Binder::new().bind_with_inherited(legacy, inherited);
     let l3 = convert(legacy, &fallback, accuracy)?;
     // Both language front ends end here, so this is the one place to normalize
     // structural differences between equivalent queries (issue #34).
@@ -511,18 +523,46 @@ pub fn convert(
             lhs,
             rhs,
             vector_match,
-        } => CQueryExpr::BinaryOp {
-            op: op.clone(),
+        } => {
             // A binary op's two sides may scan different metrics with different
             // label sets, so each branch must resolve against its OWN bound
-            // schema. `convert_root` re-runs the Binder per sub-tree; threading
-            // the parent `schema` (derived from the left leaf only) would bind
-            // the right side's columns to the wrong positions.
-            lhs: Box::new(convert_root(lhs, acc)?),
-            rhs: Box::new(convert_root(rhs, acc)?),
-            vector_match: vector_match.clone(),
-        },
+            // schema — `convert_root` re-runs the Binder per sub-tree; threading
+            // the parent `schema` (a superset over both leaves) would bind the
+            // right side's columns to the wrong positions.
+            //
+            // But an independently-bound side still has to see label names an
+            // *enclosing* node references — e.g. an outer `sum by (__name__)` /
+            // `sum by (job)` over `(a or b)` whose key is in neither side's own
+            // matchers (issue #52). `fallback` carries every name referenced in
+            // this scope; subtract the names referenced *within* the binary op
+            // itself and what remains is exactly the ancestor-referenced set to
+            // inherit — seeding a sibling side's own labels would wrongly leak
+            // them across the two branches.
+            let own = collect_referenced_columns(legacy);
+            let inherited: Vec<String> = inherited_names(fallback)
+                .into_iter()
+                .filter(|n| !own.contains(n))
+                .collect();
+            CQueryExpr::BinaryOp {
+                op: op.clone(),
+                lhs: Box::new(convert_root_with_inherited(lhs, acc, &inherited)?),
+                rhs: Box::new(convert_root_with_inherited(rhs, acc, &inherited)?),
+                vector_match: vector_match.clone(),
+            }
+        }
     })
+}
+
+/// The label names an enclosing scope's schema carries beyond the `(ts, value)`
+/// floor — the set an independently-bound `BinaryOp` side must inherit so an
+/// outer aggregate's group keys still resolve (issue #52).
+fn inherited_names(schema: &Schema) -> Vec<String> {
+    schema
+        .columns
+        .iter()
+        .filter(|c| c.name != "ts" && c.name != "value")
+        .map(|c| c.name.clone())
+        .collect()
 }
 
 /// Build a canonical `Scan`. A schema-bearing [`SourceSpec`] (SQL table) emits
