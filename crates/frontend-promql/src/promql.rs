@@ -210,14 +210,21 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Binary(bin) => walk_binary(bin),
         Expr::Paren(p) => walk(&p.expr),
         // `UnaryExpr` is built only by negation (`Neg`); unary `+` is folded to
-        // identity and `-<literal>` to a negated `NumberLiteral`, so this always
-        // wraps a vector expression whose samples must be sign-flipped. The L2
-        // PromQL path has no scalar/negate node to express that (there's no
-        // `-1 * x`, since `walk` rejects bare scalar operands), so reject it
-        // rather than silently dropping the sign and computing `+expr`.
-        Expr::Unary(_) => Err(LoweringError::UnsupportedFeature(
-            "unary negation (`-expr`): no negate/scalar node in the L2 PromQL path".into(),
-        )),
+        // identity and `-<literal>` to a negated `NumberLiteral`, so this wraps a
+        // sub-expression whose samples must be sign-flipped. Now that a scalar
+        // operand exists (#35), express it as `x * -1` — a constant-foldable
+        // operand (`-(10*1024)`) collapses to a negated `Scalar` leaf; anything
+        // else is a vector, sign-flipped by a `Mul` against `Scalar(-1)`. `Mul`
+        // is commutative, so operand order carries no hazard (#36).
+        Expr::Unary(u) => match num_expr(&u.expr) {
+            Ok(v) => Ok(L2::Scalar(-v)),
+            Err(_) => Ok(L2::BinaryOp {
+                op: BinaryOpKind::Arith(ArithOp::Mul),
+                lhs: Box::new(walk(&u.expr)?),
+                rhs: Box::new(L2::Scalar(-1.0)),
+                vector_match: None,
+            }),
+        },
         Expr::Subquery(sq) => Ok(L2::PromQLSubquery {
             range: sq.range,
             resolution: sq.step,
@@ -364,10 +371,10 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<L2> {
     // elsewhere (`sum(histogram_quantile(0.9, …))`). Lower it recursively with
     // the same `walk` used at the top level, then wrap it in the outer
     // aggregation. This is the path that lifts the old two-level limit to
-    // arbitrary function nesting (issue #27). If the inner expression is itself
-    // unsupported (e.g. unary negation), `walk` surfaces that error, so a
-    // genuinely unsupported query is still cleanly rejected rather than
-    // mislowered.
+    // arbitrary function nesting (issue #27) — a negated argument (`sum(-m)`)
+    // lowers here too (#36). If the inner expression is itself unsupported (e.g.
+    // an `offset` modifier), `walk` surfaces that error, so a genuinely
+    // unsupported query is still cleanly rejected rather than mislowered.
     let child = walk(&agg.expr)?;
     build_over_subtree(outer, keys, child)
 }

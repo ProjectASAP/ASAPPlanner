@@ -16,8 +16,8 @@ pub enum PromqlError {
     UnsupportedFunction(String),
     /// A PromQL aggregation operator (`sum`, `topk`, …) not supported.
     UnsupportedAggregateOp(String),
-    /// A structural feature (offset / `@` / `without` / unary negation) not
-    /// supported in this version.
+    /// A structural feature (offset / `@` / `without`) not supported in this
+    /// version.
     UnsupportedFeature(String),
     /// A required function / aggregator argument was missing.
     MissingArgument(String),

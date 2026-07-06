@@ -226,3 +226,35 @@ fn q21_div_two_sum_by_job() {
         expected,
     );
 }
+
+// #36 — unary negation lowers as `expr * -1`: a Mul BinaryOp of the vector
+//   against Scalar(-1), no vector match. The vector side keeps its schema.
+#[test]
+fn q36_unary_negation_is_multiply_by_minus_one() {
+    let expected = QueryExpr::BinaryOp {
+        op: BinaryOpKind::Arith(ArithOp::Mul),
+        lhs: Box::new(scan("some_metric", &[])),
+        rhs: Box::new(QueryExpr::Scalar(-1.0)),
+        vector_match: None,
+    };
+    assert_eq!(lower("-some_metric"), expected);
+}
+
+// #36 — negation nested inside an aggregate argument (issue #27 nesting):
+//   `sum(-m)` → Aggregate{Sum} over the `m * -1` BinaryOp.
+#[test]
+fn q36_sum_of_negation_nests() {
+    let expected = QueryExpr::Aggregate {
+        by: vec![].into(),
+        aggs: vec![AggIntent::Sum { col: None }],
+        output_names: vec!["".into()],
+        having: None,
+        child: Box::new(QueryExpr::BinaryOp {
+            op: BinaryOpKind::Arith(ArithOp::Mul),
+            lhs: Box::new(scan("node_cpu_seconds_total", &[])),
+            rhs: Box::new(QueryExpr::Scalar(-1.0)),
+            vector_match: None,
+        }),
+    };
+    assert_eq!(lower("sum(-node_cpu_seconds_total)"), expected);
+}

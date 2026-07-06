@@ -129,6 +129,27 @@ fn has<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, pred: F) -> bool {
     intents(e).iter().any(pred)
 }
 
+/// Whether the tree contains a `Mul`-by-`Scalar(-1)` anywhere — the shape unary
+/// negation lowers to (issue #36).
+fn negates_via_scalar(e: &QueryExpr) -> bool {
+    let is_neg_one = |q: &QueryExpr| matches!(q, QueryExpr::Scalar(v) if (*v + 1.0).abs() < 1e-12);
+    match e {
+        QueryExpr::BinaryOp { op, lhs, rhs, .. } => {
+            (*op == BinaryOpKind::Arith(ArithOp::Mul) && (is_neg_one(lhs) || is_neg_one(rhs)))
+                || negates_via_scalar(lhs)
+                || negates_via_scalar(rhs)
+        }
+        QueryExpr::Aggregate { child, .. }
+        | QueryExpr::Sort { child, .. }
+        | QueryExpr::Limit { child, .. }
+        | QueryExpr::TimeRange { child, .. }
+        | QueryExpr::Subquery { child, .. }
+        | QueryExpr::Filter { child, .. }
+        | QueryExpr::Project { child, .. } => negates_via_scalar(child),
+        _ => false,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // A. Selectors & label matchers           (basics §"Instant/Range Vector
 //    Selectors"; selectors.test)
@@ -509,19 +530,73 @@ fn vector_comparison_filters() {
 }
 
 #[test]
-fn unary_negation_is_rejected__GAP() {
-    // SEMANTICS (PromQL): `-expr` flips the sign of every sample (and `-rate(…)`
-    // negates the rate). With no negate/scalar node in the L2 PromQL path we
-    // can't model that, so it's rejected rather than silently lowered as `+expr`
-    // (which would compute the wrong result). `-<literal>` folds into the
-    // literal at parse time and is caught by the bare-scalar rejection instead.
-    let _ = rejected("-rate(http_errors_total[5m])");
-    let _ = rejected("-some_metric");
-    let _ = rejected("-metric_a or -metric_b");
-    // Negation nested inside a larger expression propagates the rejection,
-    // rather than lowering the rest with the inner sign silently dropped.
-    let _ = rejected("http_requests_total - -http_errors_total");
-    let _ = rejected("sum(-node_cpu_seconds_total)");
+fn unary_negation_lowers_as_multiply_by_minus_one() {
+    // SEMANTICS (PromQL, issue #36): `-expr` flips the sign of every sample.
+    // Now that a scalar operand exists (#35), it lowers as `expr * -1` — a `Mul`
+    // BinaryOp of the (label-preserving) vector against `Scalar(-1)`. These are
+    // the five cases the old `__GAP` test pinned as rejected.
+    for q in [
+        "-rate(http_errors_total[5m])",
+        "-some_metric",
+        "-metric_a or -metric_b",
+        "http_requests_total - -http_errors_total",
+        "sum(-node_cpu_seconds_total)",
+    ] {
+        let qe = ok(q);
+        // A `Mul`-by-`-1` against a `Scalar(-1)` appears somewhere in every tree.
+        assert!(negates_via_scalar(&qe), "no `* -1` negation found in {q}: {qe:?}");
+    }
+
+    // `-some_metric` at the root: `Scan * Scalar(-1)`, schema follows the vector.
+    let QueryExpr::BinaryOp { op, lhs, rhs, vector_match } = &ok("-some_metric") else {
+        panic!("expected a BinaryOp for `-some_metric`");
+    };
+    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Mul));
+    assert!(matches!(lhs.as_ref(), QueryExpr::Scan { .. }), "vector on the left");
+    assert!(
+        matches!(rhs.as_ref(), QueryExpr::Scalar(v) if (*v + 1.0).abs() < 1e-12),
+        "negation multiplies by Scalar(-1), got {rhs:?}"
+    );
+    assert!(vector_match.is_none(), "scalar negation carries no vector match");
+    // Label-preserving: the schema is the vector operand's, unchanged.
+    let schema = ok("-some_metric").output_schema().unwrap();
+    assert_eq!(
+        schema.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        vec!["ts", "value"],
+    );
+
+    // `sum(-m)` — the negation lowers inside the aggregate argument (issue #27
+    // nesting), so the outer node is the `Sum` aggregate over the `Mul`.
+    let QueryExpr::Aggregate { aggs, child, .. } = &ok("sum(-node_cpu_seconds_total)") else {
+        panic!("expected an outer Aggregate for `sum(-m)`");
+    };
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(child.as_ref(), QueryExpr::BinaryOp {
+        op: BinaryOpKind::Arith(ArithOp::Mul), ..
+    }));
+}
+
+#[test]
+fn unary_negation_of_constant_folds_to_scalar() {
+    // `-(10*1024*1024)` — the operand is constant-foldable, so negation collapses
+    // to a single negated `Scalar` leaf (no `BinaryOp`), just like a bare literal.
+    assert!(matches!(
+        ok("-(10*1024*1024)"),
+        QueryExpr::Scalar(v) if (v + 10_485_760.0).abs() < 1e-6
+    ));
+}
+
+#[test]
+fn double_unary_negation_nests() {
+    // `- -some_metric` — negation of a negation: `(m * -1) * -1`. Both levels
+    // lower; the value is unchanged but the structure is faithfully nested.
+    let QueryExpr::BinaryOp { op, lhs, .. } = &ok("- -some_metric") else {
+        panic!("expected outer BinaryOp for `- -some_metric`");
+    };
+    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Mul));
+    assert!(matches!(lhs.as_ref(), QueryExpr::BinaryOp {
+        op: BinaryOpKind::Arith(ArithOp::Mul), ..
+    }), "inner negation nests under the outer one");
 }
 
 #[test]
