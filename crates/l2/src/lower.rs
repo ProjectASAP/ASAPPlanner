@@ -166,6 +166,7 @@ pub fn convert(
 
         LQueryExpr::Aggregate {
             keys,
+            without,
             aggs,
             having,
             input,
@@ -280,7 +281,7 @@ pub fn convert(
                 // of a nested cross-series aggregate that collapsed the label)
                 // groups every series into one partition and is omitted from
                 // the output — drop it instead of rejecting the query.
-                let by: GroupKeys = resolve_group_keys_promql(keys, &agg_in_schema)?.into();
+                let by = group_keys(resolve_group_keys_promql(keys, &agg_in_schema)?, *without);
                 return Ok(CQueryExpr::Aggregate {
                     by,
                     aggs: vec![intent],
@@ -296,7 +297,7 @@ pub fn convert(
             // resolves against the derived output schema instead.
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
-            let by: GroupKeys = resolve_column_refs(keys, &child_schema)?.into();
+            let by = group_keys(resolve_column_refs(keys, &child_schema)?, *without);
             let intents: Vec<AggIntent> = aggs
                 .iter()
                 .map(|item| -> Result<AggIntent, ConvertError> {
@@ -553,6 +554,17 @@ pub fn convert(
     })
 }
 
+/// Wrap resolved group-key ids in the `by`/`without` form (issue #39). PromQL
+/// `without(labels)` stores the resolved *excluded* positions; every other
+/// grouping is `by`.
+fn group_keys(ids: Vec<ColumnId>, without: bool) -> GroupKeys {
+    if without {
+        GroupKeys::without(ids)
+    } else {
+        GroupKeys::by(ids)
+    }
+}
+
 /// The label names an enclosing scope's schema carries beyond the `(ts, value)`
 /// floor — the set an independently-bound `BinaryOp` side must inherit so an
 /// outer aggregate's group keys still resolve (issue #52).
@@ -736,6 +748,7 @@ mod tests {
         );
         let tree = LQueryExpr::Aggregate {
             keys: vec![],
+            without: false,
             aggs: vec![AggItem {
                 alias: None,
                 func: AggFunc::Changes,
@@ -764,6 +777,7 @@ mod tests {
         );
         let tree = LQueryExpr::Aggregate {
             keys: vec![],
+            without: false,
             aggs: vec![
                 AggItem {
                     alias: Some("total_bytes".into()),
@@ -814,6 +828,7 @@ mod tests {
         );
         let tree = LQueryExpr::Aggregate {
             keys: vec![],
+            without: false,
             aggs: vec![AggItem {
                 alias: Some("value".into()),
                 func: AggFunc::Sum,
@@ -858,6 +873,7 @@ mod tests {
         };
         let tree = LQueryExpr::Aggregate {
             keys: vec![ColumnRef::Named("region".into())],
+            without: false,
             aggs: vec![
                 AggItem {
                     alias: Some("tot".into()),
@@ -901,6 +917,7 @@ mod tests {
         ]);
         let tree = LQueryExpr::Aggregate {
             keys: vec![ColumnRef::Named("region".into())],
+            without: false,
             aggs: vec![
                 AggItem {
                     alias: Some("tot".into()),

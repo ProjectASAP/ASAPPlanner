@@ -11,8 +11,8 @@
 use std::time::Duration;
 
 use asap_ir::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, Predicate, QueryExpr, Source,
-    VectorMatch, VectorMatchKind,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, GroupKeys, L3Expr, L3Scalar, Predicate, QueryExpr,
+    Source, VectorMatch, VectorMatchKind,
 };
 use asap_ir::types::AccuracyTarget;
 use asap_frontend_promql::lower_promql;
@@ -239,6 +239,40 @@ fn q52_outer_name_label_over_binary_op() {
     );
     assert_eq!(
         lower(r#"sum by (__name__)(metric_a{env="1"} or metric_b{env="2"})"#),
+        expected,
+    );
+}
+
+// #39 — `sum without (instance) (rate(m[5m]))`: a cross-series reduction over
+//   the per-series rate, grouped by every label EXCEPT `instance`. The excluded
+//   label is seeded (referenced) and stored positionally as the `without` form;
+//   the inner rate is label-preserving. Scan schema [ts(0), value(1), instance(2)].
+#[test]
+fn q39_sum_without_instance_over_rate() {
+    let scan = QueryExpr::Scan {
+        source: Source::TimeSeries {
+            metric: "http_requests_total".into(),
+        },
+        predicates: vec![],
+        schema: metric_schema(&["instance"]),
+    };
+    let inner_rate = agg(
+        vec![],
+        AggIntent::Rate,
+        QueryExpr::TimeRange {
+            range: Duration::from_secs(300),
+            child: Box::new(scan),
+        },
+    );
+    let expected = QueryExpr::Aggregate {
+        by: GroupKeys::without(vec![2]), // exclude `instance`
+        aggs: vec![AggIntent::Sum { col: None }],
+        output_names: vec!["".into()],
+        having: None,
+        child: Box::new(inner_rate),
+    };
+    assert_eq!(
+        lower("sum without (instance) (rate(http_requests_total[5m]))"),
         expected,
     );
 }

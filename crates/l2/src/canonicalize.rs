@@ -159,7 +159,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     // global `ORDER BY … LIMIT k`; the `by` labels for a partitioned `topk by`),
     // over the *unchanged* inner `Count` aggregate.
     Some(QueryExpr::Aggregate {
-        by: GroupKeys(partition_by.to_vec()),
+        by: GroupKeys::by(partition_by.to_vec()),
         aggs: vec![AggIntent::TopK {
             k: *k,
             accuracy: accuracy.clone(),
@@ -270,7 +270,7 @@ mod tests {
     /// `Aggregate{ by: [1], [Count] }` over the scan — output cols `[service, count]`.
     fn count_by_service() -> QueryExpr {
         QueryExpr::Aggregate {
-            by: GroupKeys(vec![1]),
+            by: GroupKeys::by(vec![1]),
             aggs: vec![AggIntent::Count {
                 accuracy: AccuracyTarget::Exact,
             }],
@@ -299,7 +299,7 @@ mod tests {
     fn sort(keys: Vec<SortKey>, child: QueryExpr) -> QueryExpr {
         QueryExpr::Sort {
             keys,
-            partition_by: GroupKeys(vec![]),
+            partition_by: GroupKeys::by(vec![]),
             child: Box::new(child),
         }
     }
@@ -374,7 +374,7 @@ mod tests {
         // Sort+Limit (issue #38). This pins the reserved-but-not-promoted
         // contract: flipping it on is a future weighted-sketch change.
         let sum = QueryExpr::Aggregate {
-            by: GroupKeys(vec![1]),
+            by: GroupKeys::by(vec![1]),
             aggs: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
@@ -408,7 +408,7 @@ mod tests {
     /// region, <agg>]` (3 cols), so a ROW_NUMBER over it appends `rn` at index 3.
     fn grouped(agg: AggIntent) -> QueryExpr {
         QueryExpr::Aggregate {
-            by: GroupKeys(vec![1, 2]),
+            by: GroupKeys::by(vec![1, 2]),
             aggs: vec![agg],
             output_names: vec![],
             having: None,
@@ -422,7 +422,7 @@ mod tests {
         let wf = QueryExpr::WindowFunc {
             func: WindowFuncKind::RowNumber,
             args: vec![],
-            partition_by: GroupKeys(vec![2]), // region
+            partition_by: GroupKeys::by(vec![2]), // region
             order_by: vec![SortKey {
                 expr: L3Expr::Column(2), // the aggregate output column
                 ascending: false,
@@ -483,7 +483,7 @@ mod tests {
         let wf = QueryExpr::WindowFunc {
             func: WindowFuncKind::RowNumber,
             args: vec![],
-            partition_by: GroupKeys(vec![2]),
+            partition_by: GroupKeys::by(vec![2]),
             order_by: vec![SortKey { expr: L3Expr::Column(2), ascending: false, nulls_first: true }],
             output_name: "rn".into(),
             child: Box::new(grouped(AggIntent::Count { accuracy: AccuracyTarget::Exact })),

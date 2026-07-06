@@ -32,43 +32,78 @@ pub enum QueryExprError {
 /// Positional grouping keys, shared by every "operate per group" L3 operator:
 /// `Aggregate.by` (reduce per group), `Sort.partition_by` (rank per group —
 /// including generic `topk`/`bottomk`), and `WindowFunc.partition_by` (window
-/// per group). One spelling so grouping has a single home to evolve — e.g. a
-/// future qualified-key or `without(...)` representation (issue #12). Empty =
-/// no grouping (a global operation).
+/// per group). One spelling so grouping has a single home to evolve. Empty
+/// (and `by`) = no grouping (a global operation).
 ///
 /// Heavy-hitter `AggIntent::TopK` carries its grouping here too, via the
 /// enclosing `Aggregate.by` (issue #13) — so reduce, rank, and window groupings
 /// all share this one type.
 ///
-/// `#[serde(transparent)]` so it serialises as a bare array — wire-compatible
-/// with the `Vec<ColumnId>` these fields held before.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct GroupKeys(pub Vec<ColumnId>);
+/// ## `by` vs `without` (issue #39)
+///
+/// The stored [`keys`](Self::keys) are **kept** labels for `by(...)` and
+/// **excluded** labels for `without(...)`. PromQL's `without(labels)` groups by
+/// every label *except* those listed; the complement can't be enumerated at
+/// lowering time under an open (usage-derived) schema, so it is deferred to the
+/// runtime — the excluded positions are stored, the kept set stays open. Only
+/// `Aggregate` ever produces the `without` form; `Sort` / `WindowFunc` /
+/// `Sample` groupings are always `by`.
+///
+/// Serialises as a bare array for the (overwhelmingly common) `by` case —
+/// wire-compatible with the `Vec<ColumnId>` this field held before — and as
+/// `{"without": [...]}` for the exclusion case.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct GroupKeys {
+    keys: Vec<ColumnId>,
+    without: bool,
+}
 
 impl GroupKeys {
     /// An empty key set — a global (ungrouped) operation.
     pub fn none() -> Self {
-        Self(Vec::new())
+        Self::default()
+    }
+    /// `by(keys)` — group by exactly these positional columns.
+    pub fn by(keys: Vec<ColumnId>) -> Self {
+        Self {
+            keys,
+            without: false,
+        }
+    }
+    /// `without(keys)` — group by every label *except* these (issue #39). The
+    /// kept set is runtime-resolved; only the excluded positions are stored.
+    pub fn without(keys: Vec<ColumnId>) -> Self {
+        Self {
+            keys,
+            without: true,
+        }
+    }
+    /// Whether this is a `without(...)` exclusion grouping.
+    pub fn is_without(&self) -> bool {
+        self.without
+    }
+    /// The named keys — kept labels for `by`, excluded labels for `without`.
+    pub fn keys(&self) -> &[ColumnId] {
+        &self.keys
     }
 }
 
 impl std::ops::Deref for GroupKeys {
     type Target = [ColumnId];
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.keys
     }
 }
 
 impl From<Vec<ColumnId>> for GroupKeys {
     fn from(keys: Vec<ColumnId>) -> Self {
-        Self(keys)
+        Self::by(keys)
     }
 }
 
 impl FromIterator<ColumnId> for GroupKeys {
     fn from_iter<I: IntoIterator<Item = ColumnId>>(iter: I) -> Self {
-        Self(iter.into_iter().collect())
+        Self::by(iter.into_iter().collect())
     }
 }
 
@@ -76,15 +111,47 @@ impl<'a> IntoIterator for &'a GroupKeys {
     type Item = &'a ColumnId;
     type IntoIter = std::slice::Iter<'a, ColumnId>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.keys.iter()
     }
 }
 
 /// Compare directly against a `Vec<ColumnId>` so call sites and tests can keep
-/// writing `keys == vec![..]` / `assert_eq!(keys, &vec![..])`.
+/// writing `keys == vec![..]` / `assert_eq!(keys, &vec![..])`. A `without`
+/// grouping never equals a bare `by` list.
 impl PartialEq<Vec<ColumnId>> for GroupKeys {
     fn eq(&self, other: &Vec<ColumnId>) -> bool {
-        &self.0 == other
+        !self.without && &self.keys == other
+    }
+}
+
+/// (De)serialise as a bare array for `by`, or `{"without": [...]}` for the
+/// exclusion form — keeping the `by` wire format identical to the old newtype.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum GroupKeysRepr {
+    By(Vec<ColumnId>),
+    Without { without: Vec<ColumnId> },
+}
+
+impl Serialize for GroupKeys {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.without {
+            GroupKeysRepr::Without {
+                without: self.keys.clone(),
+            }
+            .serialize(serializer)
+        } else {
+            GroupKeysRepr::By(self.keys.clone()).serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GroupKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match GroupKeysRepr::deserialize(deserializer)? {
+            GroupKeysRepr::By(keys) => Self::by(keys),
+            GroupKeysRepr::Without { without } => Self::without(without),
+        })
     }
 }
 
@@ -534,8 +601,13 @@ impl QueryExpr {
                     child.as_ref(),
                     QueryExpr::TimeRange { .. } | QueryExpr::Subquery { .. }
                 );
-                let per_series =
-                    by.is_empty() && aggs.len() == 1 && (aggs[0].is_per_series() || is_range_child);
+                // A `without(...)` grouping is cross-series even when its
+                // exclusion list is empty (`without ()` = group by all labels),
+                // so it never takes the per-series-global path.
+                let per_series = by.is_empty()
+                    && !by.is_without()
+                    && aggs.len() == 1
+                    && (aggs[0].is_per_series() || is_range_child);
                 aggregate_output_schema(&in_schema, by, aggs, output_names, per_series)
             }
 
@@ -798,7 +870,7 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
 /// aggs[0].is_per_series()`.
 pub fn aggregate_output_schema(
     in_schema: &Schema,
-    by: &[ColumnId],
+    by: &GroupKeys,
     aggs: &[AggIntent],
     output_names: &[String],
     per_series: bool,
@@ -808,8 +880,17 @@ pub fn aggregate_output_schema(
         return Ok(per_series_reduction_schema(in_schema, &aggs[0]));
     }
 
+    // `without(excluded)` groups by every label *except* those listed: the kept
+    // labels are the input's label columns minus the excluded positions (and the
+    // ts / sample-value columns), and the schema stays **open** because the full
+    // runtime label set isn't known. The `by(...)` path instead enumerates its
+    // kept columns and freezes to closed (issue #39).
+    if by.is_without() {
+        return without_output_schema(in_schema, by.keys(), aggs, output_names);
+    }
+
     let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + aggs.len());
-    for &id in by {
+    for &id in by.keys() {
         let c = in_schema
             .columns
             .get(id)
@@ -870,6 +951,60 @@ pub fn aggregate_output_schema(
         // is closed even over an open input — this is where an open schema
         // freezes to closed.
         closed: true,
+    })
+}
+
+/// Output schema of a `without(excluded)` aggregate: the kept labels (every
+/// input label column except the `excluded` positions, the time axis, and the
+/// sample-value column) followed by the aggregate output column(s). Unlike the
+/// `by` path this stays **open** — the excluded set is enumerable but the kept
+/// set is not (the runtime carries labels the usage-derived schema never saw),
+/// so the schema can't freeze to closed and claims no unique key (issue #39).
+fn without_output_schema(
+    in_schema: &Schema,
+    excluded: &[ColumnId],
+    aggs: &[AggIntent],
+    output_names: &[String],
+) -> Result<Schema, QueryExprError> {
+    for &id in excluded {
+        if id >= in_schema.columns.len() {
+            return Err(QueryExprError::InvalidGroupByColumn(
+                id,
+                in_schema.columns.len(),
+            ));
+        }
+    }
+    let mut out_cols: Vec<Column> = Vec::new();
+    for (i, col) in in_schema.columns.iter().enumerate() {
+        let is_time = in_schema.time_index == Some(i);
+        let is_value = col.name == "value";
+        if !is_time && !is_value && !excluded.contains(&i) {
+            out_cols.push(col.clone());
+        }
+    }
+    let probe = in_schema
+        .column_id("value")
+        .and_then(|i| in_schema.columns.get(i))
+        .cloned()
+        .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
+    for (i, intent) in aggs.iter().enumerate() {
+        let in_col = intent
+            .input_col()
+            .and_then(|id| in_schema.columns.get(id))
+            .unwrap_or(&probe);
+        let mut out = intent.output_column(in_col);
+        if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
+            out.name = name.clone();
+        }
+        out_cols.push(out);
+    }
+    Ok(Schema {
+        columns: out_cols,
+        time_index: None,
+        unique_keys: Vec::new(),
+        // The kept label set is runtime-only, so — unlike `by` — this does not
+        // freeze the open schema to closed.
+        closed: false,
     })
 }
 
@@ -1036,6 +1171,71 @@ mod tests {
         // projection drops the time axis + unique keys (ts not retained)
         assert!(s.time_index.is_none());
         assert!(s.unique_keys.is_empty());
+    }
+
+    #[test]
+    fn group_keys_by_vs_without_semantics() {
+        let by = GroupKeys::by(vec![1, 2]);
+        let without = GroupKeys::without(vec![1, 2]);
+        assert!(!by.is_without());
+        assert!(without.is_without());
+        // Deref / iteration expose the stored keys regardless of mode.
+        assert_eq!(by.len(), 2);
+        assert_eq!(without.keys(), &[1, 2]);
+        // A `by` compares equal to its bare vec; a `without` never does.
+        assert_eq!(by, vec![1, 2]);
+        assert_ne!(without, vec![1, 2]);
+        assert_ne!(by, without);
+    }
+
+    #[test]
+    fn group_keys_serde_by_is_bare_array_without_is_tagged() {
+        // `by` keeps the pre-#39 bare-array wire format; `without` uses an object.
+        let by = serde_json::to_string(&GroupKeys::by(vec![2, 3])).unwrap();
+        assert_eq!(by, "[2,3]");
+        let without = serde_json::to_string(&GroupKeys::without(vec![2])).unwrap();
+        assert_eq!(without, r#"{"without":[2]}"#);
+        // Round-trip both.
+        for g in [GroupKeys::by(vec![2, 3]), GroupKeys::without(vec![2])] {
+            let json = serde_json::to_string(&g).unwrap();
+            let back: GroupKeys = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, g);
+        }
+    }
+
+    #[test]
+    fn without_aggregate_keeps_open_schema_minus_excluded() {
+        // `sum without (instance) (m)` over `[ts, value, instance, job]`: the
+        // kept labels are the input labels minus the excluded `instance` (and ts
+        // / value), followed by the `sum` column, and the schema stays OPEN
+        // (issue #39). `job` survives; `instance` is dropped.
+        let scan_node = QueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    col("ts", DataType::Timestamp, false),
+                    col("value", DataType::Float64, false),
+                    col("instance", DataType::Utf8, true),
+                    col("job", DataType::Utf8, true),
+                ],
+                0,
+                vec![],
+            ),
+        };
+        let agg = QueryExpr::Aggregate {
+            by: GroupKeys::without(vec![2]), // exclude `instance`
+            aggs: vec![AggIntent::Sum { col: None }],
+            output_names: vec![],
+            having: None,
+            child: Box::new(scan_node),
+        };
+        let s = agg.output_schema().unwrap();
+        let names: Vec<_> = s.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["job", "sum"], "kept `job`, dropped `instance`");
+        assert!(!s.closed, "a `without` result stays open");
+        assert!(s.time_index.is_none());
+        assert!(s.unique_keys.is_empty(), "kept set unknown → no unique key");
     }
 
     #[test]

@@ -46,14 +46,6 @@ fn ok(q: &str) -> QueryExpr {
         .unwrap_or_else(|e| panic!("expected {q:?} to lower, got error: {e}"))
 }
 
-/// Lower, expecting a clean (non-panicking) `LoweringError`.
-fn rejected(q: &str) -> LoweringError {
-    match lower_promql(q, AccuracyTarget::Exact) {
-        Err(e) => e,
-        Ok(tree) => panic!("expected {q:?} to be rejected, but it lowered to: {tree:?}"),
-    }
-}
-
 /// Every `AggIntent` in the tree.
 fn intents(e: &QueryExpr) -> Vec<AggIntent> {
     let mut out = Vec::new();
@@ -319,10 +311,19 @@ fn vector_literal_lowers_to_a_labelless_vector() {
 }
 
 #[test]
-fn without_grouping_is_rejected__GAP() {
+fn without_grouping_lowers_to_the_exclusion_form() {
     // `(min without (cpu) (rate(node_cpu_seconds_total{mode="idle"}[1h]))) > 0.8`
-    // — `without(...)` needs the metric's full label set, which the usage-derived
-    // schema can't enumerate.
-    let _ =
-        rejected(r#"(min without (cpu) (rate(node_cpu_seconds_total{mode="idle"}[1h]))) > 0.8"#);
+    // — `without(...)` groups by every label except the listed ones. The
+    // complement isn't enumerated (open usage-derived schema); the excluded
+    // labels are stored and the kept set is runtime-resolved (issue #39).
+    let qe = ok(r#"(min without (cpu) (rate(node_cpu_seconds_total{mode="idle"}[1h]))) > 0.8"#);
+    // Top level is the `> 0.8` comparison; the `min without (cpu)` is its LHS.
+    let QueryExpr::BinaryOp { lhs, .. } = &qe else {
+        panic!("expected a comparison BinaryOp, got {qe:?}");
+    };
+    let QueryExpr::Aggregate { by, aggs, .. } = lhs.as_ref() else {
+        panic!("expected a `min without` Aggregate on the LHS, got {lhs:?}");
+    };
+    assert!(by.is_without(), "grouping is the exclusion form");
+    assert!(matches!(aggs.as_slice(), [AggIntent::Min { .. }]));
 }
