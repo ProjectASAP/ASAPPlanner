@@ -9,7 +9,7 @@ use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 use asap_ir::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
 use asap_ir::types::AccuracyTarget;
 
-const CORPUS: &str = include_str!("asapquery/data/netflow.sql");
+const CORPUS: &str = include_str!("data/netflow.sql");
 
 fn col(name: &str, dtype: DataType) -> Column {
     Column::new(name, dtype, false)
