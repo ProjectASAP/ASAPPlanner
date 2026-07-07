@@ -1,7 +1,7 @@
-//! Netflow SQL corpus used by the ASAPQuery benchmark path.
+//! Netflow SQL corpus test.
 //!
-//! This is a plain SQL corpus test for the netflow benchmark query families:
-//! one aggregate over a netflow table, a time predicate, optional grouping,
+//! This is a plain SQL corpus test for the netflow query families: one
+//! aggregate over a netflow table, a time predicate, optional grouping,
 //! optional `ORDER BY`/`LIMIT`, plus the nested aggregate shape.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
@@ -100,7 +100,7 @@ const EXPECTED: &[Expected] = &[
 ];
 
 #[tokio::test]
-async fn asapquery_netflow_corpus_lowers_to_expected_intents() {
+async fn netflow_sql_corpus_lowers_to_expected_intents() {
     let queries = queries();
     assert_eq!(
         queries.len(),

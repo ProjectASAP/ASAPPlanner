@@ -1,4 +1,4 @@
-# Netflow SQL corpus used by the ASAPQuery benchmark path.
+# Netflow SQL corpus.
 #
 # Schema in the test:
 #   netflow_table(time, srcip, dstip, srcport, dstport, proto, pkt_len)

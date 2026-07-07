@@ -13,12 +13,12 @@ datafusion = "43"
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
-# Corpus tests in domain folders (data-quality-check, asapquery); declared
+# Corpus tests in domain folders (data-quality-check, netflow); declared
 # explicitly since Cargo only auto-discovers `.rs` files directly in `tests/`.
 [[test]]
 name = "synthetic_packet_trace"
 path = "tests/data_quality_check/synthetic_packet_trace.rs"
 
 [[test]]
-name = "asapquery_netflow"
-path = "tests/asapquery/netflow.rs"
+name = "netflow"
+path = "tests/netflow/netflow.rs"
