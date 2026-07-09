@@ -26,10 +26,11 @@ use crate::types::AccuracyTarget;
 /// carries only `k` + the accuracy target.
 ///
 /// The single-column reducers (`Sum` / `Min` / `Max` / `Avg` / `StdDev` /
-/// `Variance`) carry `col: Option<ColumnId>` — the positional input column
-/// they reduce. `None` is the PromQL convention "the time-series sample
-/// value"; SQL `SUM(bytes), AVG(latency)` sets distinct `Some(id)`s so a
-/// multi-aggregate node binds each reducer to the right column.
+/// `Variance` / `Quantile` / `Cardinality`) carry `col: Option<ColumnId>` — the
+/// positional input column they reduce. `None` is the PromQL convention "the
+/// time-series sample value"; SQL `SUM(bytes), AVG(latency)` sets distinct
+/// `Some(id)`s so a multi-aggregate node binds each reducer to the right
+/// column, and `plan::bind` knows which column to summarise over (issue #115).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AggIntent {
@@ -66,17 +67,28 @@ pub enum AggIntent {
         col: Option<ColumnId>,
         population: bool,
     },
+    /// φ-quantile of `col`. SQL `approx_percentile_cont(col, φ)`; PromQL
+    /// `quantile(φ, …)` leaves `col` as `None` (the sample value).
     Quantile {
+        #[serde(default)]
+        col: Option<ColumnId>,
         q: f64,
         accuracy: AccuracyTarget,
     },
     /// Heavy-hitter top-k to the given accuracy. The group-by keys live on
     /// the enclosing `Aggregate.by`.
+    //
+    // Unlike `Quantile`/`Cardinality`, `TopK` ranks by the *aggregate output*
+    // rather than a base column, so it carries no `col` — see #13 / #25.
     TopK {
         k: usize,
         accuracy: AccuracyTarget,
     },
+    /// Distinct-value count of `col`. SQL `COUNT(DISTINCT col)`; PromQL
+    /// `count_values` leaves `col` as `None` (the sample value).
     Cardinality {
+        #[serde(default)]
+        col: Option<ColumnId>,
         accuracy: AccuracyTarget,
     },
 
@@ -344,14 +356,17 @@ impl AggIntent {
 
     /// The positional input column this intent reduces, if it carries one.
     /// `None` = the synthetic time-series sample value (PromQL) or an
-    /// argument-less aggregate (`Count` / `Cardinality` / `TopK`). Used by
-    /// schema derivation to resolve each reducer's input column.
+    /// argument-less aggregate (`Count` / `TopK`). Used by schema derivation to
+    /// resolve each reducer's input column, and by `plan::bind` to pick the
+    /// column a summary is built over.
     pub fn input_col(&self) -> Option<ColumnId> {
         match self {
             AggIntent::Sum { col }
             | AggIntent::Min { col }
             | AggIntent::Max { col }
             | AggIntent::Avg { col }
+            | AggIntent::Quantile { col, .. }
+            | AggIntent::Cardinality { col, .. }
             | AggIntent::StdDev { col, .. }
             | AggIntent::Variance { col, .. } => *col,
             _ => None,
@@ -549,7 +564,7 @@ pub fn agg_is_exact(op: &AggIntent) -> bool {
 pub fn agg_accuracy(op: &AggIntent) -> f64 {
     match op {
         AggIntent::Quantile { accuracy, .. }
-        | AggIntent::Cardinality { accuracy }
+        | AggIntent::Cardinality { accuracy, .. }
         | AggIntent::Count { accuracy }
         | AggIntent::TopK { accuracy, .. } => accuracy_target_to_f64(accuracy),
         _ => 0.0,
@@ -564,16 +579,19 @@ fn accuracy_target_to_f64(t: &AccuracyTarget) -> f64 {
     }
 }
 
-/// Default `Cardinality` intent — HLL standard error at precision p=14.
+/// Default `Cardinality` intent over the sample value — HLL standard error at
+/// precision p=14.
 pub fn default_cardinality() -> AggIntent {
     AggIntent::Cardinality {
+        col: None,
         accuracy: AccuracyTarget::Epsilon(1.04 / ((1u64 << 14) as f64).sqrt()),
     }
 }
 
-/// Default `Quantile` intent at φ = `q`, `accuracy = ε 0.01`.
+/// Default `Quantile` intent over the sample value at φ = `q`, `accuracy = ε 0.01`.
 pub fn default_quantile(q: f64) -> AggIntent {
     AggIntent::Quantile {
+        col: None,
         q,
         accuracy: AccuracyTarget::Epsilon(0.01),
     }
@@ -602,6 +620,7 @@ mod tests {
         assert_eq!(AggIntent::Sum { col: None }.output_column(&v).name, "sum");
         assert_eq!(
             AggIntent::Quantile {
+                col: None,
                 q: 0.99,
                 accuracy: AccuracyTarget::Epsilon(0.01)
             }
@@ -683,12 +702,49 @@ mod tests {
 
     #[test]
     fn agg_intent_serde_roundtrip() {
-        let v = AggIntent::Quantile {
-            q: 0.99,
-            accuracy: AccuracyTarget::Epsilon(0.01),
-        };
-        let json = serde_json::to_string(&v).unwrap();
-        let back: AggIntent = serde_json::from_str(&json).unwrap();
-        assert_eq!(v, back);
+        for v in [
+            AggIntent::Quantile {
+                col: None,
+                q: 0.99,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            AggIntent::Quantile {
+                col: Some(3),
+                q: 0.99,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            AggIntent::Cardinality {
+                col: Some(2),
+                accuracy: AccuracyTarget::Exact,
+            },
+        ] {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: AggIntent = serde_json::from_str(&json).unwrap();
+            assert_eq!(v, back);
+        }
+    }
+
+    /// `col` is `#[serde(default)]`, so L3 serialized before issue #115 — with
+    /// no `col` key — still deserializes, as the sample-value convention `None`.
+    #[test]
+    fn agg_intent_serde_reads_pre_115_payloads() {
+        let legacy = r#"{"kind":"quantile","q":0.99,"accuracy":"Exact"}"#;
+        assert_eq!(
+            serde_json::from_str::<AggIntent>(legacy).unwrap(),
+            AggIntent::Quantile {
+                col: None,
+                q: 0.99,
+                accuracy: AccuracyTarget::Exact
+            }
+        );
+
+        let legacy = r#"{"kind":"cardinality","accuracy":"Exact"}"#;
+        assert_eq!(
+            serde_json::from_str::<AggIntent>(legacy).unwrap(),
+            AggIntent::Cardinality {
+                col: None,
+                accuracy: AccuracyTarget::Exact
+            }
+        );
     }
 }

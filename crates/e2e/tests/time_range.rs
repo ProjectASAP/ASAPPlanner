@@ -150,6 +150,7 @@ fn q17_quantile_over_time() {
         range_agg(
             300,
             AggIntent::Quantile {
+                col: None,
                 q: 0.99,
                 accuracy: AccuracyTarget::Exact
             },

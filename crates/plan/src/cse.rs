@@ -157,6 +157,7 @@ mod tests {
         let q = QueryExpr::Aggregate {
             by: vec![1].into(),
             aggs: vec![AggIntent::Quantile {
+                col: None,
                 q: 0.99,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             }],
@@ -169,11 +170,40 @@ mod tests {
         assert_eq!(out.roots[0].1, q);
     }
 
+    /// Issue #115: CSE dedupes on `AggIntent` equality. Before `Quantile`
+    /// carried its input column, `median(a)` and `median(b)` compared equal, so
+    /// two aggregates over *different* columns collapsed into one — a wrong
+    /// answer, not just a missed optimisation.
+    #[test]
+    fn quantiles_over_different_columns_do_not_dedupe() {
+        let mk = |col: usize| QueryExpr::Aggregate {
+            by: vec![1].into(),
+            aggs: vec![AggIntent::Quantile {
+                col: Some(col),
+                q: 0.5,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            }],
+            output_names: vec![],
+            having: None,
+            child: Box::new(windowed_scan()),
+        };
+        let (a, b) = (mk(2), mk(3));
+        assert_ne!(a, b, "distinct-column quantiles must not compare equal");
+
+        // The shared scan is still hoisted; the Aggregate roots stay distinct.
+        let out = dedupe_subtrees(vec![(QueryId::new("q1"), a), (QueryId::new("q2"), b)]);
+        assert_ne!(
+            out.roots[0].1, out.roots[1].1,
+            "aggregates over different columns must not collapse"
+        );
+    }
+
     #[test]
     fn dedupe_subtrees_basic() {
         let mk = |q: f64| QueryExpr::Aggregate {
             by: vec![1].into(),
             aggs: vec![AggIntent::Quantile {
+                col: None,
                 q,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             }],

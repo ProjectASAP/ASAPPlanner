@@ -671,10 +671,12 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
             population: *population,
         },
         AggFunc::Quantile(q) => AggIntent::Quantile {
+            col,
             q: *q,
             accuracy: acc.clone(),
         },
         AggFunc::CountDistinct => AggIntent::Cardinality {
+            col,
             accuracy: acc.clone(),
         },
         AggFunc::HeavyHitters { k } => AggIntent::TopK {

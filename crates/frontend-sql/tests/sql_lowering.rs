@@ -718,3 +718,70 @@ async fn exists_subquery_in_predicate_is_rejected() {
         assert!(res.is_err(), "predicate subquery should be rejected: {q}");
     }
 }
+
+// ── Issue #115: Quantile / Cardinality carry their input column ─────────────
+
+#[tokio::test]
+async fn quantile_carries_its_input_column() {
+    // `metrics(ts=0, service=1, latency=2, bytes=3)`. Two quantiles over
+    // different columns must not compare equal — `plan::cse` dedupes on
+    // `AggIntent` equality, so a col-less intent would collapse them.
+    let qe = lower(
+        "SELECT approx_percentile_cont(latency, 0.5), \
+                approx_percentile_cont(bytes, 0.5) FROM metrics",
+    )
+    .await;
+    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        matches!(
+            aggs.as_slice(),
+            [
+                AggIntent::Quantile { col: Some(2), .. },
+                AggIntent::Quantile { col: Some(3), .. }
+            ]
+        ),
+        "quantiles must bind their own column, got {aggs:?}"
+    );
+    assert_ne!(
+        aggs[0], aggs[1],
+        "distinct-column quantiles must not compare equal"
+    );
+}
+
+#[tokio::test]
+async fn count_distinct_carries_its_input_column() {
+    let qe = lower("SELECT COUNT(DISTINCT service), COUNT(DISTINCT bytes) FROM metrics").await;
+    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        matches!(
+            aggs.as_slice(),
+            [
+                AggIntent::Cardinality { col: Some(1), .. },
+                AggIntent::Cardinality { col: Some(3), .. }
+            ]
+        ),
+        "cardinalities must bind their own column, got {aggs:?}"
+    );
+    assert_ne!(
+        aggs[0], aggs[1],
+        "distinct-column cardinalities must not compare equal"
+    );
+}
+
+#[tokio::test]
+async fn quantile_and_count_distinct_over_an_expression_are_rejected() {
+    // A SQL aggregate has no "sample value" to fall back on, so an expression
+    // argument would lower to `col: None` and silently drop the expression.
+    // Reject it, exactly as `SUM(a*b)` is rejected.
+    for q in [
+        "SELECT approx_percentile_cont(bytes * 8, 0.95) FROM metrics",
+        "SELECT COUNT(DISTINCT bytes * 8) FROM metrics",
+        "SELECT approx_distinct(bytes * 8) FROM metrics",
+    ] {
+        let res = lower_sql(q, &catalog(), AccuracyTarget::Exact).await;
+        assert!(
+            res.is_err(),
+            "aggregate over an expression must be rejected: {q}"
+        );
+    }
+}
