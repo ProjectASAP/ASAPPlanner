@@ -67,8 +67,9 @@ pub enum AggIntent {
         col: Option<ColumnId>,
         population: bool,
     },
-    /// φ-quantile of `col`. SQL `approx_percentile_cont(col, φ)`; PromQL
-    /// `quantile(φ, …)` leaves `col` as `None` (the sample value).
+    /// φ-quantile of `col`. SQL `approx_percentile_cont(col, φ)` and
+    /// `median(col)` (φ=0.5); PromQL `quantile(φ, …)` leaves `col` as `None`
+    /// (the sample value).
     Quantile {
         #[serde(default)]
         col: Option<ColumnId>,

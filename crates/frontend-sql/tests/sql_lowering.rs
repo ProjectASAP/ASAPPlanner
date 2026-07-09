@@ -785,3 +785,67 @@ async fn quantile_and_count_distinct_over_an_expression_are_rejected() {
         );
     }
 }
+
+// ── Issue #111: median / approx_median → the φ=0.5 quantile ─────────────────
+
+#[tokio::test]
+async fn median_lowers_to_the_half_quantile() {
+    // `metrics(ts=0, service=1, latency=2, bytes=3)`.
+    for sql in [
+        "SELECT median(latency) FROM metrics",
+        "SELECT approx_median(latency) FROM metrics",
+    ] {
+        let qe = lower(sql).await;
+        let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+        assert!(
+            matches!(
+                aggs.as_slice(),
+                [AggIntent::Quantile { col: Some(2), q, .. }] if (*q - 0.5).abs() < 1e-9
+            ),
+            "{sql} should lower to Quantile(0.5) over latency, got {aggs:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn median_is_the_same_intent_as_an_explicit_half_percentile() {
+    // Two spellings of one intent: CSE should be able to merge them.
+    let m = lower("SELECT median(latency) FROM metrics").await;
+    let p = lower("SELECT approx_percentile_cont(latency, 0.5) FROM metrics").await;
+    let (_, m_aggs) = find_aggregate(&m).expect("expected an Aggregate");
+    let (_, p_aggs) = find_aggregate(&p).expect("expected an Aggregate");
+    assert_eq!(m_aggs, p_aggs);
+}
+
+#[tokio::test]
+async fn median_threads_the_accuracy_target() {
+    // The `approx_` prefix does not decide: the AccuracyTarget does.
+    let qe = lower_sql(
+        "SELECT approx_median(latency) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Epsilon(0.01),
+    )
+    .await
+    .expect("approx_median should lower");
+    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        matches!(
+            aggs.as_slice(),
+            [AggIntent::Quantile { accuracy: AccuracyTarget::Epsilon(e), .. }]
+                if (*e - 0.01).abs() < 1e-12
+        ),
+        "median must carry the workload's accuracy target, got {aggs:?}"
+    );
+}
+
+#[tokio::test]
+async fn median_over_an_expression_is_rejected() {
+    // Inherits the #115 column-binding rule: no column, no intent.
+    let res = lower_sql(
+        "SELECT median(bytes * 8) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await;
+    assert!(res.is_err(), "median over an expression must be rejected");
+}
