@@ -71,6 +71,7 @@ fn q07_count_is_cardinality() {
         agg(
             vec![],
             AggIntent::Cardinality {
+                col: None,
                 accuracy: AccuracyTarget::Exact
             },
             scan("http_requests_total", &[]),
@@ -170,6 +171,7 @@ fn q10_quantile_cross_series() {
         agg(
             vec![],
             AggIntent::Quantile {
+                col: None,
                 q: 0.99,
                 accuracy: AccuracyTarget::Exact
             },

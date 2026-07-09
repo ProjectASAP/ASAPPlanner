@@ -437,9 +437,15 @@ fn lower_agg_item(expr: &Expr) -> Result<AggItem, LoweringError> {
                 )));
             }
             // Value reducers (`reducer_col`) require a real column — `SUM(a*b)`
-            // is rejected, not silently reduced over a probe column.
+            // is rejected, not silently reduced over a probe column. Quantile
+            // and CountDistinct reduce a column too, so they take the same path:
+            // at L3 their `col` is `Option<ColumnId>` where `None` means "the
+            // PromQL sample value", which a SQL query never has. Taking an
+            // expression here would set `col: None` and silently drop it (#115).
             let (func, col) = match name.as_str() {
-                "count" if agg_fn.distinct => (AggFunc::CountDistinct, agg_col_ref(&agg_fn.args)),
+                "count" if agg_fn.distinct => {
+                    (AggFunc::CountDistinct, reducer_col(&name, &agg_fn.args)?)
+                }
                 "count" => (AggFunc::Count, ColumnRef::Wildcard),
                 "sum" => (AggFunc::Sum, reducer_col(&name, &agg_fn.args)?),
                 "min" => (AggFunc::Min, reducer_col(&name, &agg_fn.args)?),
@@ -463,9 +469,9 @@ fn lower_agg_item(expr: &Expr) -> Result<AggItem, LoweringError> {
                 ),
                 "approx_percentile_cont" | "percentile_cont" => (
                     AggFunc::Quantile(extract_percentile_q(&agg_fn.args)?),
-                    agg_col_ref(&agg_fn.args),
+                    reducer_col(&name, &agg_fn.args)?,
                 ),
-                "approx_distinct" => (AggFunc::CountDistinct, agg_col_ref(&agg_fn.args)),
+                "approx_distinct" => (AggFunc::CountDistinct, reducer_col(&name, &agg_fn.args)?),
                 _ => return Err(LoweringError::UnsupportedAggregate(name)),
             };
             Ok(AggItem {
@@ -492,19 +498,10 @@ fn agg_col_name(args: &[Expr]) -> Option<String> {
     args.first().and_then(col_name)
 }
 
-/// The aggregated input column. `COUNT(*)` and non-column arguments yield
-/// `Wildcard`; a bare/aliased/cast column yields its name.
-fn agg_col_ref(args: &[Expr]) -> ColumnRef {
-    match agg_col_name(args) {
-        Some(name) => ColumnRef::Named(name),
-        None => ColumnRef::Wildcard,
-    }
-}
-
 /// The single input column of a value reducer (`SUM`/`MIN`/`MAX`/`AVG`/stddev/
-/// variance). Errors if the argument is not a column: L3 reduces a column, not
-/// an arbitrary expression (`SUM(a*b)`), so silently picking a probe column
-/// would compute the wrong result.
+/// variance/quantile/count-distinct). Errors if the argument is not a column:
+/// L3 reduces a column, not an arbitrary expression (`SUM(a*b)`), so silently
+/// picking a probe column would compute the wrong result.
 fn reducer_col(name: &str, args: &[Expr]) -> Result<ColumnRef, LoweringError> {
     agg_col_name(args).map(ColumnRef::Named).ok_or_else(|| {
         LoweringError::UnsupportedAggregate(format!("{name} over a non-column expression"))

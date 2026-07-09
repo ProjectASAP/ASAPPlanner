@@ -635,6 +635,7 @@ fn count_maps_to_cardinality_and_inherits_accuracy() {
         has(&exact, |i| matches!(
             i,
             AggIntent::Cardinality {
+                col: None,
                 accuracy: AccuracyTarget::Exact
             }
         )),
@@ -647,6 +648,7 @@ fn count_maps_to_cardinality_and_inherits_accuracy() {
         has(&approx, |i| matches!(
             i,
             AggIntent::Cardinality {
+                col: None,
                 accuracy: AccuracyTarget::Epsilon(e)
             } if (*e - 0.01).abs() < 1e-9
         )),

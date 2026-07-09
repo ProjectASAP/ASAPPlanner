@@ -354,6 +354,40 @@ mod tests {
         assert!(matches!(leaf.expr, SummaryExpr::Logical(_)));
     }
 
+    /// Issue #115: the summary is built over the intent's own input column.
+    /// Before `Cardinality`/`Quantile` carried `col`, `summarised_column` always
+    /// fell through to `ColumnRef::SampleValue`, so an HLL was built over the
+    /// wrong column for every SQL `COUNT(DISTINCT c)`.
+    #[test]
+    fn sketch_binds_the_intents_input_column() {
+        // `metric_scan(&["job"])` → columns [ts=0, value=1, job=2].
+        let cases = [
+            (Some(2), ColumnRef::Named("job".into())),
+            (Some(1), ColumnRef::Named("value".into())),
+            // PromQL convention: no column ⇒ the synthetic sample value.
+            (None, ColumnRef::SampleValue),
+        ];
+        for (col, want) in cases {
+            let intent = AggIntent::Cardinality {
+                col,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            };
+            let root = bind(&agg(vec![0], intent, metric_scan(&["job"]))).unwrap();
+            let bound = find_summary_col(&root)
+                .unwrap_or_else(|| panic!("expected a SummaryAgg for col={col:?}"));
+            assert_eq!(bound, want, "wrong summarised column for col={col:?}");
+        }
+    }
+
+    /// The `col` of the first `SummaryAgg` in the tree.
+    fn find_summary_col(node: &L4Node) -> Option<ColumnRef> {
+        match &node.expr {
+            SummaryExpr::SummaryAgg { col, .. } => Some(col.clone()),
+            SummaryExpr::SummaryEstimate { sketch_input, .. } => find_summary_col(sketch_input),
+            _ => None,
+        }
+    }
+
     #[test]
     fn pass_through_intents_stay_logical() {
         // avg is exact but non-mergeable; histogram_quantile (classic
@@ -362,7 +396,7 @@ mod tests {
         for intent in [
             AggIntent::Avg { col: None },
             AggIntent::HistogramQuantile { q: 0.99 },
-            AggIntent::Quantile { q: 0.99, accuracy: AccuracyTarget::Exact },
+            AggIntent::Quantile { col: None, q: 0.99, accuracy: AccuracyTarget::Exact },
         ] {
             let q = agg(vec![2], intent.clone(), metric_scan(&["job"]));
             let root = bind(&q).unwrap();

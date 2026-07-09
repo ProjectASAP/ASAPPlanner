@@ -80,7 +80,7 @@ pub fn realize(intent: &AggIntent) -> Realization {
     match intent {
         // ── Approximate-capable intents — the AccuracyTarget decides ────────
         AggIntent::Quantile { accuracy, .. }
-        | AggIntent::Cardinality { accuracy }
+        | AggIntent::Cardinality { accuracy, .. }
         | AggIntent::Count { accuracy }
         | AggIntent::TopK { accuracy, .. } => match accuracy {
             AccuracyTarget::Exact => exact_realization(intent),
@@ -298,8 +298,8 @@ mod tests {
             (A::Count { accuracy: eps(0.01) }, Sketch(K::Cms)),
             (A::TopK { k: 10, accuracy: eps(0.01) }, Sketch(K::CmsWithHeap)),
             // the same intents at Exact → exact realization
-            (A::Quantile { q: 0.5, accuracy: AccuracyTarget::Exact }, Pass),
-            (A::Cardinality { accuracy: AccuracyTarget::Exact }, Pass),
+            (A::Quantile { col: None, q: 0.5, accuracy: AccuracyTarget::Exact }, Pass),
+            (A::Cardinality { col: None, accuracy: AccuracyTarget::Exact }, Pass),
             (A::Count { accuracy: AccuracyTarget::Exact }, Acc(K::Count)),
             (A::TopK { k: 10, accuracy: AccuracyTarget::Exact }, Pass),
             // exact mergeable accumulators
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn accuracy_target_drives_the_boundary() {
         // Same intent, three targets → three different decisions.
-        let exact = AggIntent::Quantile { q: 0.99, accuracy: AccuracyTarget::Exact };
+        let exact = AggIntent::Quantile { col: None, q: 0.99, accuracy: AccuracyTarget::Exact };
         assert_eq!(realize(&exact), Realization::PassThrough);
 
         let approx = default_quantile(0.99); // ε = 0.01
@@ -380,7 +380,7 @@ mod tests {
             }
         );
 
-        let looser = AggIntent::Quantile { q: 0.99, accuracy: eps(0.05) };
+        let looser = AggIntent::Quantile { col: None, q: 0.99, accuracy: eps(0.05) };
         assert_eq!(
             realize(&looser),
             Realization::Sketch {
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn degenerate_epsilon_saturates_to_tightest_params() {
-        let intent = AggIntent::Quantile { q: 0.99, accuracy: eps(0.0) };
+        let intent = AggIntent::Quantile { col: None, q: 0.99, accuracy: eps(0.0) };
         assert_eq!(
             realize(&intent),
             Realization::Sketch {
