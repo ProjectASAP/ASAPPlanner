@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use datafusion::common::ScalarValue;
+use datafusion::common::{Column as DfColumn, ScalarValue};
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{
     self, Distinct, Expr, JoinType, LogicalPlan, WindowFunctionDefinition,
@@ -339,12 +339,66 @@ impl<'a> SqlLowerer<'a> {
     }
 
     fn lower_aggregate(&self, agg: &logical_expr::Aggregate) -> Result<L2, LoweringError> {
-        let input = Box::new(self.lower_plan(&agg.input)?);
-        let keys = agg
-            .group_expr
+        let input = self.lower_plan(&agg.input)?;
+
+        // `GROUPING SETS`/`ROLLUP`/`CUBE` emit several grouping levels plus a
+        // `__grouping_id` discriminator from one scan. `Aggregate.by` is a
+        // single key set, so there is nothing to lower them onto (issue #118).
+        if let Some(gs) = agg.group_expr.iter().find_map(as_grouping_set) {
+            let kind = match gs {
+                logical_expr::GroupingSet::Rollup(_) => "ROLLUP",
+                logical_expr::GroupingSet::Cube(_) => "CUBE",
+                logical_expr::GroupingSet::GroupingSets(_) => "GROUPING SETS",
+            };
+            return Err(LoweringError::UnsupportedFeature(format!(
+                "multi-level grouping: {kind}"
+            )));
+        }
+
+        // `Aggregate.by` and the reducers index *columns*, so a grouping or
+        // reducer expression (`GROUP BY date_trunc(…)`, `SUM(a * 8)`) has no
+        // slot. Materialize each one as a derived column in a `Project` beneath
+        // the aggregate, then group/reduce over that column (issue #110).
+        let mut derived = DerivedCols::default();
+
+        // DataFusion strips `AS m` from a grouping expression, so the aggregate
+        // schema's field name is what the enclosing Projection references —
+        // the derived column has to carry exactly that name.
+        let group_names: Vec<String> = agg
+            .schema
+            .fields()
             .iter()
-            .map(expr_to_group_ref)
-            .collect::<Result<Vec<_>, _>>()?;
+            .take(agg.group_expr.len())
+            .map(|f| f.name().to_string())
+            .collect();
+
+        let mut keys = Vec::with_capacity(agg.group_expr.len());
+        for (i, e) in agg.group_expr.iter().enumerate() {
+            match unalias(e) {
+                Expr::Column(_) => {
+                    derived.passthrough(e)?;
+                    keys.push(expr_to_group_ref(e)?);
+                }
+                other => {
+                    let name = group_names
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| other.to_string());
+                    derived.materialize(name.clone(), df_expr_to_l2(other)?)?;
+                    keys.push(ColumnRef::Named(name));
+                }
+            }
+        }
+
+        // Reducer arguments get the same treatment; `rewrite_agg` returns the
+        // aggregate with its argument repointed at the derived column.
+        let aggr_expr = agg
+            .aggr_expr
+            .iter()
+            .map(|e| derived.rewrite_agg(e))
+            .collect::<Result<Vec<_>, LoweringError>>()?;
+
+        let input = Box::new(derived.wrap(input)?);
         // DataFusion names the aggregate outputs in its own schema (e.g.
         // "sum(metrics.bytes)") — the same names the enclosing Projection
         // references. The schema is [group fields …, aggregate fields …], so
@@ -357,8 +411,7 @@ impl<'a> SqlLowerer<'a> {
             .skip(agg.group_expr.len())
             .map(|f| f.name().to_string())
             .collect();
-        let aggs = agg
-            .aggr_expr
+        let aggs = aggr_expr
             .iter()
             .enumerate()
             .map(|(i, e)| {
@@ -488,6 +541,134 @@ fn lower_agg_item(expr: &Expr) -> Result<AggItem, LoweringError> {
             })
         }
         _ => Err(LoweringError::UnsupportedAggregate(format!("{expr:?}"))),
+    }
+}
+
+/// Strip `AS alias` wrappers.
+fn unalias(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Alias(a) => unalias(&a.expr),
+        other => other,
+    }
+}
+
+/// The `GroupingSet` inside a grouping expression, if any.
+fn as_grouping_set(expr: &Expr) -> Option<&logical_expr::GroupingSet> {
+    match unalias(expr) {
+        Expr::GroupingSet(gs) => Some(gs),
+        _ => None,
+    }
+}
+
+/// Derived columns materialized in a `Project` beneath an `Aggregate` (#110).
+///
+/// `Aggregate.by` holds positional `ColumnId`s and each reducer holds one input
+/// column, so neither can hold an expression. `GROUP BY date_trunc('minute', t)`
+/// and `SUM(bytes * 8)` are therefore rewritten to group/reduce over a projected
+/// column that carries the expression's value.
+///
+/// The projection also has to carry through the plain columns the aggregate
+/// still references, since a `Project` replaces its child's schema rather than
+/// extending it.
+#[derive(Default)]
+struct DerivedCols {
+    cols: Vec<L2ProjectItem>,
+    /// Whether any column is genuinely derived. Without one the aggregate keeps
+    /// its original child, so trees that lower today keep their exact shape.
+    any: bool,
+    /// First same-name-different-value collision, reported only if the
+    /// projection is actually inserted (see [`Self::wrap`]).
+    collision: Option<String>,
+}
+
+impl DerivedCols {
+    /// Add `alias := expr`, or note a collision if `alias` already means
+    /// something else. `Project` carries one relation qualifier for all its
+    /// columns, so `a.k` and `b.k` cannot both survive it — but that only
+    /// matters when a projection gets inserted at all.
+    fn push(&mut self, alias: String, expr: L2Expr) {
+        let existing = self
+            .cols
+            .iter()
+            .find(|c| c.alias.as_deref() == Some(&alias));
+        match existing {
+            // Same name, same value — one projected column serves both uses.
+            Some(e) if e.expr == expr => {}
+            Some(_) => {
+                self.collision.get_or_insert(alias);
+            }
+            None => self.cols.push(L2ProjectItem {
+                alias: Some(alias),
+                expr,
+            }),
+        }
+    }
+
+    /// A plain column the aggregate references — carried through unchanged.
+    fn passthrough(&mut self, expr: &Expr) -> Result<(), LoweringError> {
+        let Expr::Column(c) = unalias(expr) else {
+            return Ok(());
+        };
+        self.push(c.name.clone(), df_expr_to_l2(expr)?);
+        Ok(())
+    }
+
+    /// A genuinely derived column: `alias` now names `expr`'s value.
+    fn materialize(&mut self, alias: String, expr: L2Expr) -> Result<(), LoweringError> {
+        self.any = true;
+        self.push(alias, expr);
+        Ok(())
+    }
+
+    /// Repoint a reducer's argument at a derived column when it is an
+    /// expression; otherwise carry its plain input column through.
+    fn rewrite_agg(&mut self, expr: &Expr) -> Result<Expr, LoweringError> {
+        let Expr::AggregateFunction(agg_fn) = unalias(expr) else {
+            return Ok(expr.clone());
+        };
+        // `COUNT(*)` reduces no column; `agg_col_name` covers bare/aliased/cast
+        // columns, so `None` here means the argument really is an expression.
+        let counts_rows = agg_fn.func.name().eq_ignore_ascii_case("count") && !agg_fn.distinct;
+        let Some(arg) = agg_fn.args.first() else {
+            return Ok(expr.clone());
+        };
+        if counts_rows {
+            return Ok(expr.clone());
+        }
+        match agg_col_name(&agg_fn.args) {
+            Some(name) => {
+                self.push(name, df_expr_to_l2(arg)?);
+                Ok(expr.clone())
+            }
+            None => {
+                let alias = unalias(arg).to_string();
+                self.materialize(alias.clone(), df_expr_to_l2(arg)?)?;
+                let mut agg_fn = agg_fn.clone();
+                agg_fn.args[0] = Expr::Column(DfColumn::new_unqualified(alias));
+                Ok(Expr::AggregateFunction(agg_fn))
+            }
+        }
+    }
+
+    /// Wrap `input` in the materializing `Project`, or return it untouched when
+    /// nothing needed deriving — so a query that lowers today keeps its exact
+    /// tree, and a name collision that the projection would have flattened only
+    /// matters once the projection exists.
+    fn wrap(self, input: L2) -> Result<L2, LoweringError> {
+        if !self.any {
+            return Ok(input);
+        }
+        if let Some(alias) = self.collision {
+            return Err(LoweringError::UnsupportedFeature(format!(
+                "ambiguous column `{alias}` beneath an expression GROUP BY / \
+                 aggregate — alias the relations apart"
+            )));
+        }
+        Ok(L2::Project {
+            cols: self.cols,
+            qualifier: None,
+            input: Box::new(input),
+        })
     }
 }
 

@@ -61,6 +61,36 @@ fn find_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     }
 }
 
+/// The first `Aggregate` node itself, for tests that need its child.
+fn find_aggregate_node(qe: &QueryExpr) -> Option<&QueryExpr> {
+    match qe {
+        QueryExpr::Aggregate { .. } => Some(qe),
+        QueryExpr::Project { child, .. }
+        | QueryExpr::Filter { child, .. }
+        | QueryExpr::Sort { child, .. }
+        | QueryExpr::Limit { child, .. } => find_aggregate_node(child),
+        _ => None,
+    }
+}
+
+/// The names of the columns the first `Aggregate`'s reducers read, resolved
+/// against its child's schema, plus whether that child is a materializing
+/// `Project` (issue #110).
+fn reducer_input_names(qe: &QueryExpr) -> (Vec<String>, bool) {
+    let QueryExpr::Aggregate { aggs, child, .. } =
+        find_aggregate_node(qe).expect("expected an Aggregate")
+    else {
+        unreachable!()
+    };
+    let schema = child.output_schema().expect("child schema");
+    let names = aggs
+        .iter()
+        .filter_map(|a| a.input_col())
+        .map(|id| schema.columns[id].name.clone())
+        .collect();
+    (names, matches!(**child, QueryExpr::Project { .. }))
+}
+
 /// Find the first `Join` node along the single-child spine.
 fn find_join(qe: &QueryExpr) -> Option<&QueryExpr> {
     match qe {
@@ -258,16 +288,22 @@ async fn distinct_value_reducer_is_rejected_not_dropped() {
 }
 
 #[tokio::test]
-async fn aggregate_over_non_column_expression_is_rejected() {
-    // L3 reduces a column, not an arbitrary expression — SUM(bytes + 1) must be
-    // rejected rather than silently reducing a probe column.
-    let res = lower_sql(
-        "SELECT SUM(bytes + 1) FROM metrics",
-        &catalog(),
-        AccuracyTarget::Exact,
-    )
-    .await;
-    assert!(res.is_err(), "SUM(<expr>) should be rejected");
+async fn aggregate_over_an_expression_reduces_a_derived_column() {
+    // L3 reduces a column, not an arbitrary expression. `SUM(bytes + 1)` used to
+    // be rejected for that reason; since #110 the expression is materialized as
+    // a derived column in a `Project` beneath the aggregate, and reduced there.
+    let qe = lower("SELECT SUM(bytes + 1) FROM metrics").await;
+    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        matches!(aggs.as_slice(), [AggIntent::Sum { col: Some(_) }]),
+        "expected Sum bound to the derived column, got {aggs:?}"
+    );
+    let (names, materialized) = reducer_input_names(&qe);
+    assert!(materialized, "expected a materializing Project");
+    assert!(
+        names[0].contains("bytes") && names[0].contains('1'),
+        "the reduced column should be the projected `bytes + 1`, got {names:?}"
+    );
 }
 
 #[tokio::test]
@@ -769,19 +805,26 @@ async fn count_distinct_carries_its_input_column() {
 }
 
 #[tokio::test]
-async fn quantile_and_count_distinct_over_an_expression_are_rejected() {
+async fn quantile_and_count_distinct_over_an_expression_bind_the_derived_column() {
     // A SQL aggregate has no "sample value" to fall back on, so an expression
-    // argument would lower to `col: None` and silently drop the expression.
-    // Reject it, exactly as `SUM(a*b)` is rejected.
+    // argument must never reach L3 as `col: None` (#115). Since #110 it reaches
+    // L3 as `col: Some(derived)` instead of being rejected.
     for q in [
         "SELECT approx_percentile_cont(bytes * 8, 0.95) FROM metrics",
         "SELECT COUNT(DISTINCT bytes * 8) FROM metrics",
         "SELECT approx_distinct(bytes * 8) FROM metrics",
     ] {
-        let res = lower_sql(q, &catalog(), AccuracyTarget::Exact).await;
+        let qe = lower(q).await;
+        let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
         assert!(
-            res.is_err(),
-            "aggregate over an expression must be rejected: {q}"
+            aggs[0].input_col().is_some(),
+            "{q} must bind a column, never `col: None`, got {aggs:?}"
+        );
+        let (names, materialized) = reducer_input_names(&qe);
+        assert!(materialized, "{q} expected a materializing Project");
+        assert!(
+            names[0].contains("bytes"),
+            "{q} should reduce the projected `bytes * 8`, got {names:?}"
         );
     }
 }
@@ -839,13 +882,151 @@ async fn median_threads_the_accuracy_target() {
 }
 
 #[tokio::test]
-async fn median_over_an_expression_is_rejected() {
-    // Inherits the #115 column-binding rule: no column, no intent.
-    let res = lower_sql(
-        "SELECT median(bytes * 8) FROM metrics",
+async fn median_over_an_expression_binds_the_derived_column() {
+    // Was rejected when filed (#111); supported since #110 materialized the
+    // expression. What must still hold is the #115 rule: never `col: None`.
+    let qe = lower("SELECT median(bytes * 8) FROM metrics").await;
+    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(
+        matches!(aggs.as_slice(), [AggIntent::Quantile { col: Some(_), q, .. }] if (*q - 0.5).abs() < 1e-9),
+        "expected Quantile(0.5) bound to the derived column, got {aggs:?}"
+    );
+}
+
+// ── Issue #110: expression GROUP BY (time bucketing) ────────────────────────
+
+#[tokio::test]
+async fn time_bucketing_group_by_lowers_to_a_derived_key() {
+    // The canonical time-series shape: `GROUP BY date_trunc(...)`. The bucket
+    // expression is materialized beneath the aggregate and grouped on.
+    let qe =
+        lower("SELECT date_trunc('minute', ts) AS m, SUM(bytes) FROM metrics GROUP BY m").await;
+    let node = find_aggregate_node(&qe).expect("expected an Aggregate");
+    let QueryExpr::Aggregate {
+        by, aggs, child, ..
+    } = node
+    else {
+        unreachable!()
+    };
+    assert!(
+        matches!(**child, QueryExpr::Project { .. }),
+        "expected a materializing Project beneath the Aggregate"
+    );
+    let schema = child.output_schema().expect("child schema");
+    assert_eq!(by, &GroupKeys::by(vec![0]));
+    assert!(
+        schema.columns[0].name.contains("date_trunc"),
+        "group key should be the projected bucket, got {:?}",
+        schema.columns[0].name
+    );
+    // The reducer still binds its own column, not the bucket.
+    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { col: Some(1) }]));
+}
+
+#[tokio::test]
+async fn time_bucketing_keeps_the_scan_predicate() {
+    // The projection is inserted above the scan, so a WHERE clause still folds
+    // onto the Scan rather than being stranded.
+    let qe = lower(
+        "SELECT date_trunc('minute', ts) AS m, SUM(bytes) FROM metrics \
+         WHERE bytes > 10 GROUP BY m",
+    )
+    .await;
+    fn scan_has_predicate(qe: &QueryExpr) -> bool {
+        match qe {
+            QueryExpr::Scan { predicates, .. } => !predicates.is_empty(),
+            QueryExpr::Project { child, .. }
+            | QueryExpr::Filter { child, .. }
+            | QueryExpr::Aggregate { child, .. }
+            | QueryExpr::Sort { child, .. }
+            | QueryExpr::Limit { child, .. } => scan_has_predicate(child),
+            _ => false,
+        }
+    }
+    assert!(scan_has_predicate(&qe), "WHERE should stay on the Scan");
+}
+
+#[tokio::test]
+async fn a_plain_group_by_inserts_no_projection() {
+    // Queries that lowered before #110 must keep their exact tree shape — the
+    // projection appears only when something actually needs materializing.
+    for q in [
+        "SELECT service, SUM(bytes) FROM metrics GROUP BY service",
+        "SELECT SUM(bytes) FROM metrics",
+        "SELECT COUNT(*) FROM metrics",
+    ] {
+        let qe = lower(q).await;
+        let QueryExpr::Aggregate { child, .. } =
+            find_aggregate_node(&qe).expect("expected an Aggregate")
+        else {
+            unreachable!()
+        };
+        assert!(
+            !matches!(**child, QueryExpr::Project { .. }),
+            "{q} should not gain a projection"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_shared_expression_is_materialized_once() {
+    let qe = lower("SELECT SUM(bytes * 2), MIN(bytes * 2) FROM metrics").await;
+    let QueryExpr::Aggregate { aggs, child, .. } =
+        find_aggregate_node(&qe).expect("expected an Aggregate")
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        child.output_schema().expect("child schema").columns.len(),
+        1,
+        "the two reducers should share one derived column"
+    );
+    assert_eq!(aggs[0].input_col(), aggs[1].input_col());
+}
+
+#[tokio::test]
+async fn multi_level_grouping_is_rejected() {
+    // ROLLUP/CUBE/GROUPING SETS emit several grouping levels plus a
+    // `__grouping_id` discriminator; `Aggregate.by` is a single key set.
+    for q in [
+        "SELECT service, SUM(bytes) FROM metrics GROUP BY ROLLUP(service)",
+        "SELECT service, SUM(bytes) FROM metrics GROUP BY CUBE(service)",
+        "SELECT service, SUM(bytes) FROM metrics GROUP BY GROUPING SETS ((service), ())",
+    ] {
+        let err = lower_sql(q, &catalog(), AccuracyTarget::Exact)
+            .await
+            .expect_err("multi-level grouping must be rejected");
+        assert!(
+            format!("{err}").contains("multi-level grouping"),
+            "{q} gave {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_ambiguous_passthrough_column_is_rejected_only_when_projecting() {
+    // A `Project` carries one relation qualifier for all its columns, so `a.k`
+    // and `b.k` cannot both survive it. That only matters once a projection is
+    // inserted: without a derived column the join keys resolve as before.
+    let ok = lower_sql(
+        "SELECT m.service, h.service, SUM(m.bytes) FROM metrics m \
+         JOIN hosts h ON m.service = h.service GROUP BY m.service, h.service",
         &catalog(),
         AccuracyTarget::Exact,
     )
     .await;
-    assert!(res.is_err(), "median over an expression must be rejected");
+    assert!(
+        ok.is_ok(),
+        "no derived column ⇒ no projection ⇒ no ambiguity"
+    );
+
+    let err = lower_sql(
+        "SELECT m.service, h.service, SUM(m.bytes * 2) FROM metrics m \
+         JOIN hosts h ON m.service = h.service GROUP BY m.service, h.service",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("ambiguous passthrough must be rejected, not silently resolved");
+    assert!(format!("{err}").contains("ambiguous column"), "got {err}");
 }
