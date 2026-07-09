@@ -16,6 +16,7 @@
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], Window{w, Filter(Source)}}` |
 //! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{[HistogramQuantile(φ)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
 //! | `histogram_quantile(φ, <native hist / raw>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target) |
+//! | `histogram_quantiles(v, "l", φ…)` | `Merge{Relabel{l=φᵢ, <the histogram_quantile(φᵢ, v) branch>}…}` — one branch per φ (issue #109) |
 //! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | `Aggregate{[Histogram*]}` — per-series native-histogram accessors (issue #43) |
 //! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
 //! | `OUTER_op(<any expr>)` (e.g. `max(sum by (job) (rate(m[w])))`, `sum(rate(a[w]) + rate(b[w]))`) | `Aggregate{[OUTER_op]}` over the fully-lowered `<any expr>` — arbitrary function nesting (issue #27) |
@@ -540,6 +541,9 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L
 /// `histogram_fraction(lower, upper, v)` reads its bounds from args 0/1 and the
 /// vector from arg 2; the rest take the vector at arg 0.
 fn walk_histogram(call: &Call) -> Result<L2> {
+    if call.func.name == "histogram_quantiles" {
+        return walk_histogram_quantiles(call);
+    }
     if call.func.name == "histogram_quantile" {
         let phi = quantile_param(num_arg(call, 0)?)?;
         let arg_expr = arg(call, 1)?;
@@ -575,6 +579,103 @@ fn walk_histogram(call: &Call) -> Result<L2> {
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     };
     Ok(outer_aggregate(vec![], func, walk(arg(call, vec_idx)?)?))
+}
+
+/// `histogram_quantiles(v, "label", φ₀, φ₁, …)` — the experimental multi-quantile
+/// form (issue #109). It is `histogram_quantile(φᵢ, v)` fanned out over the
+/// quantiles, each branch's output series tagged with `label = φᵢ`.
+///
+/// Lowers to a `Merge` of one `Relabel`-wrapped quantile branch per φ, reusing
+/// the single-quantile decision — classic `le`-buckets interpolate
+/// (`HistogramQuantile`), native histograms / raw samples take the sketch-able
+/// `Quantile` (issues #43 / #79) — so the two functions cannot diverge.
+///
+/// The vector argument is lowered once per branch. That is a duplicated subtree
+/// by construction; `plan::cse` hoists it back into a single producer.
+///
+/// Each branch aliases its value column to `value` rather than taking the
+/// intent-keyed name (`quantile_0_5`, `quantile_0_9`, …). `Merge` derives its
+/// schema from the first child, so branches that disagree on a column *name*
+/// would make the merged schema silently misdescribe every branch but one. The
+/// quantile is carried by the `label` column, which is exactly where Prometheus
+/// puts it.
+fn walk_histogram_quantiles(call: &Call) -> Result<L2> {
+    let vec_expr = arg(call, 0)?;
+    let label = str_arg(call, 1)?;
+    if call.args.args.len() < 3 {
+        return Err(LoweringError::MissingArgument(
+            "histogram_quantiles(v, label, φ…) needs at least one quantile".into(),
+        ));
+    }
+    // The bucket-vs-native choice is a property of the argument, not of φ.
+    let sketchable = histogram_arg_is_sketchable(vec_expr);
+    let branches = (2..call.args.args.len())
+        .map(|i| {
+            let phi = quantile_param(num_arg(call, i)?)?;
+            let func = if sketchable {
+                AggFunc::Quantile(phi)
+            } else {
+                AggFunc::HistogramQuantile(phi)
+            };
+            let quantile = L2::Aggregate {
+                keys: vec![],
+                without: false,
+                aggs: vec![AggItem {
+                    alias: Some("value".into()),
+                    func,
+                    col: ColumnRef::SampleValue,
+                }],
+                having: None,
+                input: Box::new(walk(vec_expr)?),
+            };
+            Ok(L2::Relabel {
+                dst: label.clone(),
+                value: L2Expr::Literal(L3Scalar::Utf8(open_metrics_float(phi))),
+                input: Box::new(quantile),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(L2::Merge { inputs: branches })
+}
+
+/// Prometheus's `labels.FormatOpenMetricsFloat` — how `histogram_quantiles`
+/// renders each φ into its label value. Go's `%g` shortest round-trip, switching
+/// to exponent form outside `[1e-4, 1e21)`, with `.0` appended when the result
+/// would otherwise look like an integer.
+fn open_metrics_float(v: f64) -> String {
+    // The cases upstream hardcodes.
+    if v == 1.0 {
+        return "1.0".into();
+    }
+    if v == 0.0 {
+        return "0.0".into();
+    }
+    if v == -1.0 {
+        return "-1.0".into();
+    }
+    if v.is_nan() {
+        return "NaN".into();
+    }
+    if v.is_infinite() {
+        return if v.is_sign_positive() { "+Inf" } else { "-Inf" }.into();
+    }
+    let sci = format!("{v:e}");
+    let exp: i32 = sci
+        .split_once('e')
+        .and_then(|(_, e)| e.parse().ok())
+        .unwrap_or(0);
+    if !(-4..21).contains(&exp) {
+        // Go writes a signed, zero-padded two-digit exponent: `1e-05`.
+        let (mantissa, _) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+        let sign = if exp < 0 { '-' } else { '+' };
+        return format!("{mantissa}e{sign}{:02}", exp.abs());
+    }
+    let s = format!("{v}");
+    if s.contains(['e', '.']) {
+        s
+    } else {
+        format!("{s}.0")
+    }
 }
 
 /// The time / calendar functions (issue #46).
