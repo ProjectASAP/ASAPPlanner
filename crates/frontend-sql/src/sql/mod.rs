@@ -471,6 +471,13 @@ fn lower_agg_item(expr: &Expr) -> Result<AggItem, LoweringError> {
                     AggFunc::Quantile(extract_percentile_q(&agg_fn.args)?),
                     reducer_col(&name, &agg_fn.args)?,
                 ),
+                // `median(c)` is the φ=0.5 quantile. As with `approx_distinct` and
+                // `approx_percentile_cont`, the `approx_` prefix does not force an
+                // approximation: the sketch-vs-exact choice is the AccuracyTarget's
+                // (see `plan::boundary`), so both spellings share one intent (#111).
+                "median" | "approx_median" => {
+                    (AggFunc::Quantile(0.5), reducer_col(&name, &agg_fn.args)?)
+                }
                 "approx_distinct" => (AggFunc::CountDistinct, reducer_col(&name, &agg_fn.args)?),
                 _ => return Err(LoweringError::UnsupportedAggregate(name)),
             };
