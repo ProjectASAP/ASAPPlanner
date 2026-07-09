@@ -267,6 +267,7 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
         | QueryExpr::WindowFunc { child, .. }
         | QueryExpr::Relabel { child, .. }
         | QueryExpr::Sample { child, .. }
+        | QueryExpr::TimeShift { child, .. }
         | QueryExpr::InfoJoin { child, .. } => visit(child, f),
         QueryExpr::BinaryOp { lhs, rhs, .. }
         | QueryExpr::Join {
