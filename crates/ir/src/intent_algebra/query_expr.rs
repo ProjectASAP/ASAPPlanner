@@ -521,7 +521,26 @@ pub enum QueryExpr {
         cols: Vec<ColumnId>,
         child: Box<QueryExpr>,
     },
-    /// ⊕ — exact union of sub-results from independent stages / shards.
+    /// ⊕ — exact, n-ary `UNION ALL` of independent branches. Rows are
+    /// concatenated, never deduplicated; SQL's `UNION`/`INTERSECT`/`EXCEPT` are
+    /// [`QueryExpr::SetOp`], not this.
+    ///
+    /// Used for the branches of one query that a single `Aggregate` cannot
+    /// express — PromQL `histogram_quantiles` (one branch per φ, issue #109) and
+    /// SQL `ROLLUP`/`CUBE`/`GROUPING SETS` (one branch per grouping level, issue
+    /// #118) — as well as for sharded / fan-in plans.
+    ///
+    /// **The branches must be union-compatible; nothing here enforces it.** The
+    /// output schema is the *first* child's, so branches that disagree on a
+    /// column name or type leave the merged schema silently misdescribing every
+    /// branch but one. A producer that cannot guarantee compatibility must
+    /// project the branches into a common shape first.
+    ///
+    /// A row may appear in several branches, so no branch's unique key survives
+    /// the union — `unique_keys` is dropped, as in `SetOp`.
+    ///
+    /// Empty children is an error ([`QueryExprError::EmptyMerge`]), not an
+    /// empty relation: there would be no schema to derive.
     Merge { children: Vec<QueryExpr> },
 
     /// Logical join. L4 picks the physical alternative.
@@ -764,10 +783,18 @@ impl QueryExpr {
                 Ok(out)
             }
 
-            QueryExpr::Merge { children } => children
-                .first()
-                .ok_or(QueryExprError::EmptyMerge)
-                .and_then(|c| c.output_schema_in(scope)),
+            // ⊕ — the branches are union-compatible by construction, so the
+            // output shape is the first child's. A row can appear in more than
+            // one branch, so no key of one branch is a key of the union: drop
+            // unique_keys, exactly as `SetOp` does.
+            QueryExpr::Merge { children } => {
+                let mut s = children
+                    .first()
+                    .ok_or(QueryExprError::EmptyMerge)
+                    .and_then(|c| c.output_schema_in(scope))?;
+                s.unique_keys.clear();
+                Ok(s)
+            }
             // Set operations are union-compatible: both sides share the left's
             // column shape, so the output schema is the left's. (Row identity
             // is not preserved across a UNION, so unique_keys are dropped.)
@@ -1205,6 +1232,71 @@ mod tests {
                 closed: true,
             },
         }
+    }
+
+    /// A row can appear in more than one branch, so no branch's unique key is a
+    /// key of the union. `Merge` took the first child's schema verbatim, which
+    /// let a `Distinct`'s key leak out and claim a uniqueness the merged rows do
+    /// not have — `unique_keys` feeds CSE's producer-sharing legality check.
+    #[test]
+    fn merge_drops_the_branches_unique_keys() {
+        let branch = || QueryExpr::Distinct {
+            cols: vec![0],
+            child: Box::new(scan(
+                vec![
+                    col("k", DataType::Utf8, false),
+                    col("v", DataType::Int64, false),
+                ],
+                None,
+                vec![],
+            )),
+        };
+        assert_eq!(
+            branch().output_schema().unwrap().unique_keys,
+            vec![vec![0]],
+            "a Distinct branch does have a unique key on its own"
+        );
+
+        let merged = QueryExpr::Merge {
+            children: vec![branch(), branch()],
+        };
+        let schema = merged.output_schema().unwrap();
+        assert!(
+            schema.unique_keys.is_empty(),
+            "the union of two deduplicated branches is not deduplicated"
+        );
+        // The column shape is still the first branch's.
+        assert_eq!(schema.columns.len(), 2);
+    }
+
+    /// Same rule as `SetOp`, which already dropped them.
+    #[test]
+    fn merge_and_setop_agree_on_unique_keys() {
+        let branch = || QueryExpr::Distinct {
+            cols: vec![0],
+            child: Box::new(scan(vec![col("k", DataType::Utf8, false)], None, vec![])),
+        };
+        let merged = QueryExpr::Merge {
+            children: vec![branch(), branch()],
+        };
+        let setop = QueryExpr::SetOp {
+            kind: SetOpKind::Union,
+            all: true,
+            left: Box::new(branch()),
+            right: Box::new(branch()),
+        };
+        assert_eq!(
+            merged.output_schema().unwrap().unique_keys,
+            setop.output_schema().unwrap().unique_keys,
+        );
+    }
+
+    #[test]
+    fn an_empty_merge_has_no_schema() {
+        assert!(matches!(
+            QueryExpr::Merge { children: vec![] }.output_schema(),
+            Err(QueryExprError::EmptyMerge)
+        ));
     }
 
     #[test]
