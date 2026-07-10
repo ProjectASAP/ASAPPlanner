@@ -1030,3 +1030,29 @@ async fn an_ambiguous_passthrough_column_is_rejected_only_when_projecting() {
     .expect_err("ambiguous passthrough must be rejected, not silently resolved");
     assert!(format!("{err}").contains("ambiguous column"), "got {err}");
 }
+
+// ── Issue #111: array_agg is deliberately not an intent (WONTFIX) ───────────
+
+#[tokio::test]
+async fn array_agg_is_deliberately_rejected() {
+    // Not a coverage gap. `AggIntent` exists so the planner can bind a sketch or
+    // a mergeable accumulator per node; `array_agg` pre-aggregates nothing (its
+    // output is O(input rows)), has no bounded-memory approximate form, and its
+    // partial state *is* the data. An `AggIntent::ArrayAgg` would force every
+    // arm of `plan::boundary::realize` — an exhaustive match — to answer
+    // `PassThrough`. Contrast `median`, which is `Quantile { q: 0.5 }` and does
+    // feed the sketch path.
+    //
+    // This test exists so the rejection reads as a decision rather than a gap.
+    let err = lower_sql(
+        "SELECT array_agg(service) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("array_agg must not lower to an intent");
+    assert!(
+        format!("{err}").contains("unsupported aggregate: array_agg"),
+        "expected a clean UnsupportedAggregate, got {err}"
+    );
+}
