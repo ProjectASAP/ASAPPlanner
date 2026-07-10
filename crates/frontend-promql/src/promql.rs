@@ -55,19 +55,17 @@ use promql_parser::parser::{
     VectorMatchCardinality, VectorSelector,
 };
 
+use asap_ir::intent_algebra::agg_intent::{
+    is_frequency_heavy_hitter, MathFunc, RankingMeasure, TimeFunc,
+};
 use asap_ir::intent_algebra::query_expr::{
     AtModifier as L3AtModifier, BinaryOpKind, GroupSide, TimeShift, VectorGrouping, VectorMatch,
     VectorMatchKind,
 };
-use asap_l2::relational::{
-    AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec,
-};
-use asap_ir::intent_algebra::agg_intent::{
-    is_frequency_heavy_hitter, MathFunc, RankingMeasure, TimeFunc,
-};
 use asap_ir::intent_algebra::{
     ArithOp, ColumnRef, CompareOp, InfoMatcher, L2Expr, L3Scalar, SampleKind,
 };
+use asap_l2::relational::{AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec};
 
 use crate::error::PromqlError as LoweringError;
 
@@ -83,10 +81,17 @@ enum Outer {
     Count,
     /// `count_values("l", v)` — group by value + count, emitting the value as a
     /// new label `l` (issue #49).
-    CountValues { label: String },
-    TopK { k: u64, descending: bool },
+    CountValues {
+        label: String,
+    },
+    TopK {
+        k: u64,
+        descending: bool,
+    },
     /// `limitk`/`limit_ratio` — series-sampling selection (issue #86).
-    Sample { kind: SampleKind },
+    Sample {
+        kind: SampleKind,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -209,9 +214,7 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Call(call) if is_sort_fn(call.func.name) => walk_sort(call),
         // A bare `min_of`/`max_of(consts…)` scalar query folds to a `Scalar`
         // leaf; a non-constant argument makes `num_expr` fail → rejected (#89).
-        Expr::Call(call) if is_scalar_reducer_fn(call.func.name) => {
-            Ok(L2::Scalar(num_expr(expr)?))
-        }
+        Expr::Call(call) if is_scalar_reducer_fn(call.func.name) => Ok(L2::Scalar(num_expr(expr)?)),
         Expr::Call(call) if call.func.name == "info" => walk_info(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
@@ -301,7 +304,11 @@ fn range_fn_over_subquery(call: &Call) -> Result<Option<L2>> {
         } else {
             InnerFunc::Rate(range)
         };
-        return Ok(Some(outer_aggregate(vec![], inner_func(&inner), walk(arg_expr)?)));
+        return Ok(Some(outer_aggregate(
+            vec![],
+            inner_func(&inner),
+            walk(arg_expr)?,
+        )));
     }
 
     // `*_over_time` reducers + counter-derivatives: the func-kind, and the index
@@ -342,7 +349,11 @@ fn range_fn_over_subquery(call: &Call) -> Result<Option<L2>> {
     if !is_subquery(arg_expr) {
         return Ok(None);
     }
-    Ok(Some(outer_aggregate(vec![], inner_func(&inner), walk(arg_expr)?)))
+    Ok(Some(outer_aggregate(
+        vec![],
+        inner_func(&inner),
+        walk(arg_expr)?,
+    )))
 }
 
 /// A (parenthesised) PromQL sub-query — `<inst>[range:res]`.
@@ -801,7 +812,11 @@ fn walk_sort(call: &Call) -> Result<L2> {
             ));
         }
         (1..call.args.args.len())
-            .map(|i| Ok(sort_key(L2Expr::Column(ColumnRef::Named(str_arg(call, i)?)))))
+            .map(|i| {
+                Ok(sort_key(L2Expr::Column(ColumnRef::Named(str_arg(
+                    call, i,
+                )?))))
+            })
             .collect::<Result<Vec<_>>>()?
     };
     Ok(L2::Sort {
@@ -910,9 +925,34 @@ fn walk_label(call: &Call) -> Result<L2> {
 fn is_math_fn(name: &str) -> bool {
     matches!(
         name,
-        "abs" | "ceil" | "floor" | "exp" | "ln" | "log2" | "log10" | "sqrt" | "sgn" | "sin" | "cos"
-            | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh"
-            | "atanh" | "deg" | "rad" | "pi" | "round" | "clamp" | "clamp_min" | "clamp_max"
+        "abs"
+            | "ceil"
+            | "floor"
+            | "exp"
+            | "ln"
+            | "log2"
+            | "log10"
+            | "sqrt"
+            | "sgn"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "sinh"
+            | "cosh"
+            | "tanh"
+            | "asinh"
+            | "acosh"
+            | "atanh"
+            | "deg"
+            | "rad"
+            | "pi"
+            | "round"
+            | "clamp"
+            | "clamp_min"
+            | "clamp_max"
     )
 }
 
@@ -1030,7 +1070,11 @@ fn collect_metric_names(expr: &Expr, out: &mut Vec<String>) {
             collect_metric_names(&b.lhs, out);
             collect_metric_names(&b.rhs, out);
         }
-        Expr::Call(c) => c.args.args.iter().for_each(|a| collect_metric_names(a, out)),
+        Expr::Call(c) => c
+            .args
+            .args
+            .iter()
+            .for_each(|a| collect_metric_names(a, out)),
         _ => {}
     }
 }

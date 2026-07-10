@@ -11,9 +11,9 @@ pub mod error;
 pub mod sql;
 
 use asap_ir::intent_algebra::QueryExpr;
-use asap_l2::convert_root;
 use asap_ir::types::AccuracyTarget;
 use asap_ir::workload::{QueryLanguage, QueryWorkload, SqlDialect};
+use asap_l2::convert_root;
 
 pub use error::SqlError;
 pub use sql::{SqlCatalog, SqlLowerer};

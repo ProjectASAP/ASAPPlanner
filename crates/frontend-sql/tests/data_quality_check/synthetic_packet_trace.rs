@@ -20,10 +20,10 @@
 //! Schema: `packets(srcip, dstip, srcport, dstport, proto, time, pkt_len)`;
 //! flow / 5-tuple = `(srcip, dstip, srcport, dstport, proto)`.
 
+use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError as LoweringError};
 use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 use asap_ir::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
 use asap_ir::types::AccuracyTarget;
-use asap_frontend_sql::{lower_sql, SqlError as LoweringError, SqlCatalog};
 
 const CORPUS: &str = include_str!("data/synthetic_packet_trace_queries.sql");
 
@@ -91,8 +91,16 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             | QueryExpr::Sample { child, .. }
             | QueryExpr::InfoJoin { child, .. } => go(child, out),
             QueryExpr::BinaryOp { lhs, rhs, .. }
-            | QueryExpr::Join { left: lhs, right: rhs, .. }
-            | QueryExpr::SetOp { left: lhs, right: rhs, .. } => {
+            | QueryExpr::Join {
+                left: lhs,
+                right: rhs,
+                ..
+            }
+            | QueryExpr::SetOp {
+                left: lhs,
+                right: rhs,
+                ..
+            } => {
                 go(lhs, out);
                 go(rhs, out);
             }
@@ -104,7 +112,10 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
                 go(inner, out)
             }
-            QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::Ref { .. } => {}
+            QueryExpr::Scan { .. }
+            | QueryExpr::Scalar(_)
+            | QueryExpr::EvalTime
+            | QueryExpr::Ref { .. } => {}
         }
     }
     go(e, &mut out);
@@ -178,7 +189,10 @@ async fn corpus_lowering_is_total_and_fully_supported() {
     assert_eq!(t.total(), 70, "expected 70 DQC queries, got {t:?}");
 
     // Parse/plan every one — the front end accepts 100% of the benchmark SQL.
-    assert_eq!(t.unparseable, 0, "some DQC queries failed to parse/plan: {t:?}");
+    assert_eq!(
+        t.unparseable, 0,
+        "some DQC queries failed to parse/plan: {t:?}"
+    );
 
     // Full-coverage ratchet: today the SQL front end lowers ALL 70. A change
     // that can no longer lower some query trips this deliberately.
@@ -282,9 +296,13 @@ async fn stddev_pop_of_gaps_is_population_stddev() {
     )
     .await;
     assert!(
-        intents(&qe)
-            .iter()
-            .any(|i| matches!(i, AggIntent::StdDev { population: true, .. })),
+        intents(&qe).iter().any(|i| matches!(
+            i,
+            AggIntent::StdDev {
+                population: true,
+                ..
+            }
+        )),
         "STDDEV_POP must lower to a population StdDev intent, got {:?}",
         intents(&qe)
     );

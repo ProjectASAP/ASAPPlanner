@@ -91,13 +91,13 @@ async fn sql_and_promql_heavy_hitter_share_the_canonical_shape() {
 #[tokio::test]
 async fn sql_aliased_and_inline_count_topk_are_identical() {
     // #20: aliasing the COUNT in the ORDER BY must not change the L3.
-    let inline =
-        sql("SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 5")
-            .await;
-    let aliased = sql(
-        "SELECT service, COUNT(*) AS c FROM metrics GROUP BY service ORDER BY c DESC LIMIT 5",
+    let inline = sql(
+        "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 5",
     )
     .await;
+    let aliased =
+        sql("SELECT service, COUNT(*) AS c FROM metrics GROUP BY service ORDER BY c DESC LIMIT 5")
+            .await;
     assert_eq!(inline, aliased);
 }
 
@@ -110,11 +110,17 @@ async fn non_count_ranked_topk_stays_generic_in_both_languages() {
     )
     .await;
     let p = promql("topk(5, http_requests_total)");
-    assert!(heavy_hitter(&s).is_none(), "SUM-ranked is not a heavy-hitter: {s:?}");
+    assert!(
+        heavy_hitter(&s).is_none(),
+        "SUM-ranked is not a heavy-hitter: {s:?}"
+    );
     assert!(
         !matches!(&s, QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::TopK { .. }])),
     );
-    assert!(heavy_hitter(&p).is_none(), "value-ranked topk is not a count heavy-hitter: {p:?}");
+    assert!(
+        heavy_hitter(&p).is_none(),
+        "value-ranked topk is not a count heavy-hitter: {p:?}"
+    );
 }
 
 #[tokio::test]
@@ -125,17 +131,28 @@ async fn ascending_count_ranked_topk_stays_generic_in_both_languages() {
     // make the same call: SQL `ORDER BY COUNT(*) ASC LIMIT k` and PromQL
     // `bottomk(k, count_over_time(…))` both stay a generic Sort+Limit, never a
     // TopK. This pins the two count-ranked detectors to agree on direction.
-    let s = sql(
-        "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) ASC LIMIT 5",
-    )
-    .await;
+    let s =
+        sql("SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) ASC LIMIT 5")
+            .await;
     let p = promql("bottomk(5, count_over_time(http_requests_total[5m]))");
 
-    assert!(heavy_hitter(&s).is_none(), "SQL ASC count-limit is not a heavy-hitter: {s:?}");
-    assert!(heavy_hitter(&p).is_none(), "PromQL bottomk-count is not a heavy-hitter: {p:?}");
+    assert!(
+        heavy_hitter(&s).is_none(),
+        "SQL ASC count-limit is not a heavy-hitter: {s:?}"
+    );
+    assert!(
+        heavy_hitter(&p).is_none(),
+        "PromQL bottomk-count is not a heavy-hitter: {p:?}"
+    );
     // Both are the generic order-by-value + limit shape.
-    assert!(matches!(&s, QueryExpr::Limit { .. }), "SQL stays a Limit: {s:?}");
-    assert!(matches!(&p, QueryExpr::Limit { .. }), "PromQL stays a Limit: {p:?}");
+    assert!(
+        matches!(&s, QueryExpr::Limit { .. }),
+        "SQL stays a Limit: {s:?}"
+    );
+    assert!(
+        matches!(&p, QueryExpr::Limit { .. }),
+        "PromQL stays a Limit: {p:?}"
+    );
 }
 
 /// Descend through a leading `Project` (the derived-table SELECT list).
@@ -152,12 +169,10 @@ async fn sql_rownumber_count_topk_matches_promql_partitioned_heavy_hitter() {
     // COUNT(*) DESC)` — top-5 per region by count (#24). It must reach the same
     // partitioned heavy-hitter shape as PromQL `topk by (…) (5, count_over_time)`
     // (P10): an outer TopK grouped by the partition over an explicit Count.
-    let s8 = sql(
-        "SELECT service, region, cnt FROM (\
+    let s8 = sql("SELECT service, region, cnt FROM (\
             SELECT service, region, COUNT(*) AS cnt, \
                    ROW_NUMBER() OVER (PARTITION BY region ORDER BY COUNT(*) DESC) AS rn \
-            FROM metrics GROUP BY service, region) t WHERE rn <= 5",
-    )
+            FROM metrics GROUP BY service, region) t WHERE rn <= 5")
     .await;
     let (k, by) = heavy_hitter(strip_project(&s8)).expect("S8 is a partitioned heavy-hitter");
     assert_eq!(k, 5);
@@ -173,14 +188,15 @@ async fn sql_rownumber_count_topk_matches_promql_partitioned_heavy_hitter() {
 async fn sql_rownumber_avg_topk_is_a_generic_partitioned_sort_limit() {
     // S9: same idiom ranked by AVG — not a frequency heavy-hitter, so it stays a
     // generic partitioned `Limit{ Sort{ partition_by } }` (mirrors PromQL P9).
-    let s9 = sql(
-        "SELECT service, region, avg_lat FROM (\
+    let s9 = sql("SELECT service, region, avg_lat FROM (\
             SELECT service, region, AVG(latency) AS avg_lat, \
                    ROW_NUMBER() OVER (PARTITION BY region ORDER BY AVG(latency) DESC) AS rn \
-            FROM metrics GROUP BY service, region) t WHERE rn <= 5",
-    )
+            FROM metrics GROUP BY service, region) t WHERE rn <= 5")
     .await;
-    assert!(heavy_hitter(strip_project(&s9)).is_none(), "AVG-ranked is not a heavy-hitter");
+    assert!(
+        heavy_hitter(strip_project(&s9)).is_none(),
+        "AVG-ranked is not a heavy-hitter"
+    );
     let QueryExpr::Limit { child, .. } = strip_project(&s9) else {
         panic!("expected a Limit, got {:?}", strip_project(&s9));
     };
@@ -197,5 +213,8 @@ async fn offset_defeats_heavy_hitter_promotion() {
         "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 5 OFFSET 3",
     )
     .await;
-    assert!(heavy_hitter(&s).is_none(), "OFFSET must not promote to TopK: {s:?}");
+    assert!(
+        heavy_hitter(&s).is_none(),
+        "OFFSET must not promote to TopK: {s:?}"
+    );
 }

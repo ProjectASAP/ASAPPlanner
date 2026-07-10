@@ -273,13 +273,22 @@ pub enum MathFunc {
     /// `rad(v)` — degrees → radians.
     Rad,
     /// `round(v, to_nearest)` — nearest multiple of `to_nearest` (default 1).
-    Round { to_nearest: f64 },
+    Round {
+        to_nearest: f64,
+    },
     /// `clamp(v, min, max)`.
-    Clamp { min: f64, max: f64 },
+    Clamp {
+        min: f64,
+        max: f64,
+    },
     /// `clamp_min(v, min)`.
-    ClampMin { min: f64 },
+    ClampMin {
+        min: f64,
+    },
     /// `clamp_max(v, max)`.
-    ClampMax { max: f64 },
+    ClampMax {
+        max: f64,
+    },
 }
 
 impl AggIntent {
@@ -406,9 +415,7 @@ impl AggIntent {
             AggIntent::IDelta => col("idelta", DataType::Float64, false),
             AggIntent::Deriv => col("deriv", DataType::Float64, false),
             AggIntent::Resets => col("resets", DataType::Float64, false),
-            AggIntent::PredictLinear { .. } => {
-                col("predict_linear", DataType::Float64, false)
-            }
+            AggIntent::PredictLinear { .. } => col("predict_linear", DataType::Float64, false),
             AggIntent::DoubleExpSmoothing { .. } => {
                 col("double_exponential_smoothing", DataType::Float64, false)
             }
@@ -442,9 +449,7 @@ impl AggIntent {
             AggIntent::MadOverTime => col("mad_over_time", DataType::Float64, false),
             AggIntent::TsOfMinOverTime => col("ts_of_min_over_time", DataType::Float64, false),
             AggIntent::TsOfMaxOverTime => col("ts_of_max_over_time", DataType::Float64, false),
-            AggIntent::TsOfFirstOverTime => {
-                col("ts_of_first_over_time", DataType::Float64, false)
-            }
+            AggIntent::TsOfFirstOverTime => col("ts_of_first_over_time", DataType::Float64, false),
             AggIntent::TsOfLastOverTime => col("ts_of_last_over_time", DataType::Float64, false),
         }
     }

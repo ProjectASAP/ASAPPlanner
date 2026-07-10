@@ -17,12 +17,12 @@ use datafusion::logical_expr::{
 };
 use datafusion::prelude::SessionContext;
 
-use asap_l2::relational::{
-    AggFunc, AggItem, L2ProjectItem, L2SortKey, QueryExpr as L2, SourceSpec,
-};
 use asap_ir::intent_algebra::schema::Schema;
 use asap_ir::intent_algebra::{
     ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
+};
+use asap_l2::relational::{
+    AggFunc, AggItem, L2ProjectItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
 
 use crate::error::SqlError as LoweringError;
@@ -468,7 +468,6 @@ impl<'a> SqlLowerer<'a> {
             input: Box::new(self.lower_plan(&limit.input)?),
         })
     }
-
 }
 
 // ── Aggregate / group-key helpers ───────────────────────────────────────────────
@@ -744,7 +743,6 @@ fn eval_fetch(expr_opt: &Option<Box<Expr>>) -> Option<usize> {
         _ => None,
     })
 }
-
 
 /// Map a DataFusion window-function definition to the L3 [`WindowFuncKind`].
 /// `NthValue` is returned with `None`; `lower_window` fills in `n` from args.

@@ -62,9 +62,7 @@ pub const DEFAULT_DELTA: f64 = 0.01;
 pub fn sketch_candidates(intent: &AggIntent) -> &'static [SummaryKind] {
     match intent {
         AggIntent::Quantile { .. } => &[SummaryKind::Kll, SummaryKind::DDSketch],
-        AggIntent::Cardinality { .. } => {
-            &[SummaryKind::Hll, SummaryKind::Theta, SummaryKind::Kmv]
-        }
+        AggIntent::Cardinality { .. } => &[SummaryKind::Hll, SummaryKind::Theta, SummaryKind::Kmv],
         AggIntent::TopK { .. } => &[SummaryKind::CmsWithHeap],
         AggIntent::Count { .. } => &[SummaryKind::Cms],
         _ => &[],
@@ -93,9 +91,7 @@ pub fn realize(intent: &AggIntent) -> Realization {
             accumulator(intent, SummaryKind::MinMax, SummaryParams::MinMax)
         }
         AggIntent::Rate => accumulator(intent, SummaryKind::Rate, SummaryParams::Rate),
-        AggIntent::Increase => {
-            accumulator(intent, SummaryKind::Increase, SummaryParams::Increase)
-        }
+        AggIntent::Increase => accumulator(intent, SummaryKind::Increase, SummaryParams::Increase),
 
         // ── Exact, non-mergeable reducers — richer partial state than a
         //    single value (see `agg_is_mergeable`), so no accumulator form.
@@ -151,9 +147,7 @@ pub fn realize(intent: &AggIntent) -> Realization {
 /// need the full multiset / heap / set) and pass through.
 fn exact_realization(intent: &AggIntent) -> Realization {
     match intent {
-        AggIntent::Count { .. } => {
-            accumulator(intent, SummaryKind::Count, SummaryParams::Count)
-        }
+        AggIntent::Count { .. } => accumulator(intent, SummaryKind::Count, SummaryParams::Count),
         _ => Realization::PassThrough,
     }
 }
@@ -161,7 +155,10 @@ fn exact_realization(intent: &AggIntent) -> Realization {
 fn accumulator(intent: &AggIntent, kind: SummaryKind, params: SummaryParams) -> Realization {
     // An exact accumulator is only sound when partial states merge
     // (`agg(A ∪ B) = combine(agg(A), agg(B))`).
-    debug_assert!(agg_is_mergeable(intent), "accumulator for non-mergeable {intent:?}");
+    debug_assert!(
+        agg_is_mergeable(intent),
+        "accumulator for non-mergeable {intent:?}"
+    );
     Realization::ExactAccumulator { kind, params }
 }
 
@@ -295,13 +292,48 @@ mod tests {
             // approximate-capable, at an ε target → sketch
             (default_quantile(0.99), Sketch(K::Kll)),
             (default_cardinality(), Sketch(K::Hll)),
-            (A::Count { accuracy: eps(0.01) }, Sketch(K::Cms)),
-            (A::TopK { k: 10, accuracy: eps(0.01) }, Sketch(K::CmsWithHeap)),
+            (
+                A::Count {
+                    accuracy: eps(0.01),
+                },
+                Sketch(K::Cms),
+            ),
+            (
+                A::TopK {
+                    k: 10,
+                    accuracy: eps(0.01),
+                },
+                Sketch(K::CmsWithHeap),
+            ),
             // the same intents at Exact → exact realization
-            (A::Quantile { col: None, q: 0.5, accuracy: AccuracyTarget::Exact }, Pass),
-            (A::Cardinality { col: None, accuracy: AccuracyTarget::Exact }, Pass),
-            (A::Count { accuracy: AccuracyTarget::Exact }, Acc(K::Count)),
-            (A::TopK { k: 10, accuracy: AccuracyTarget::Exact }, Pass),
+            (
+                A::Quantile {
+                    col: None,
+                    q: 0.5,
+                    accuracy: AccuracyTarget::Exact,
+                },
+                Pass,
+            ),
+            (
+                A::Cardinality {
+                    col: None,
+                    accuracy: AccuracyTarget::Exact,
+                },
+                Pass,
+            ),
+            (
+                A::Count {
+                    accuracy: AccuracyTarget::Exact,
+                },
+                Acc(K::Count),
+            ),
+            (
+                A::TopK {
+                    k: 10,
+                    accuracy: AccuracyTarget::Exact,
+                },
+                Pass,
+            ),
             // exact mergeable accumulators
             (A::Sum { col: None }, Acc(K::Sum)),
             (A::Min { col: None }, Acc(K::MinMax)),
@@ -310,8 +342,20 @@ mod tests {
             (A::Increase, Acc(K::Increase)),
             // exact but non-mergeable → pass-through
             (A::Avg { col: None }, Pass),
-            (A::StdDev { col: None, population: false }, Pass),
-            (A::Variance { col: None, population: true }, Pass),
+            (
+                A::StdDev {
+                    col: None,
+                    population: false,
+                },
+                Pass,
+            ),
+            (
+                A::Variance {
+                    col: None,
+                    population: true,
+                },
+                Pass,
+            ),
             // classic-bucket histogram_quantile is not re-sketchable (#79)
             (A::HistogramQuantile { q: 0.99 }, Pass),
             // counter-derivative / range-vector functions (#44)
@@ -321,14 +365,26 @@ mod tests {
             (A::Deriv, Pass),
             (A::Resets, Pass),
             (A::PredictLinear { seconds: 60.0 }, Pass),
-            (A::DoubleExpSmoothing { smoothing: 0.5, trend: 0.5 }, Pass),
+            (
+                A::DoubleExpSmoothing {
+                    smoothing: 0.5,
+                    trend: 0.5,
+                },
+                Pass,
+            ),
             // native-histogram accessors (#43)
             (A::HistogramCount, Pass),
             (A::HistogramSum, Pass),
             (A::HistogramAvg, Pass),
             (A::HistogramStdDev, Pass),
             (A::HistogramStdVar, Pass),
-            (A::HistogramFraction { lower: 0.0, upper: 1.0 }, Pass),
+            (
+                A::HistogramFraction {
+                    lower: 0.0,
+                    upper: 1.0,
+                },
+                Pass,
+            ),
             // per-sample transforms (#45, #46) + presence (#47)
             (A::Math(MathFunc::Abs), Pass),
             (A::TimeFn(TimeFunc::Hour), Pass),
@@ -368,7 +424,11 @@ mod tests {
     #[test]
     fn accuracy_target_drives_the_boundary() {
         // Same intent, three targets → three different decisions.
-        let exact = AggIntent::Quantile { col: None, q: 0.99, accuracy: AccuracyTarget::Exact };
+        let exact = AggIntent::Quantile {
+            col: None,
+            q: 0.99,
+            accuracy: AccuracyTarget::Exact,
+        };
         assert_eq!(realize(&exact), Realization::PassThrough);
 
         let approx = default_quantile(0.99); // ε = 0.01
@@ -380,7 +440,11 @@ mod tests {
             }
         );
 
-        let looser = AggIntent::Quantile { col: None, q: 0.99, accuracy: eps(0.05) };
+        let looser = AggIntent::Quantile {
+            col: None,
+            q: 0.99,
+            accuracy: eps(0.05),
+        };
         assert_eq!(
             realize(&looser),
             Realization::Sketch {
@@ -406,33 +470,52 @@ mod tests {
     #[test]
     fn epsilon_delta_sizes_cms_depth() {
         let intent = AggIntent::Count {
-            accuracy: AccuracyTarget::EpsilonDelta { epsilon: 0.001, delta: 0.001 },
+            accuracy: AccuracyTarget::EpsilonDelta {
+                epsilon: 0.001,
+                delta: 0.001,
+            },
         };
         assert_eq!(
             realize(&intent),
             Realization::Sketch {
                 kind: SummaryKind::Cms,
-                params: SummaryParams::Cms { width: 2719, depth: 7 }, // ⌈e/0.001⌉, ⌈ln 1000⌉
+                params: SummaryParams::Cms {
+                    width: 2719,
+                    depth: 7
+                }, // ⌈e/0.001⌉, ⌈ln 1000⌉
             }
         );
         // Epsilon-only falls back to DEFAULT_DELTA → depth 5.
-        let intent = AggIntent::Count { accuracy: eps(0.001) };
+        let intent = AggIntent::Count {
+            accuracy: eps(0.001),
+        };
         assert_eq!(
             realize(&intent),
             Realization::Sketch {
                 kind: SummaryKind::Cms,
-                params: SummaryParams::Cms { width: 2719, depth: 5 },
+                params: SummaryParams::Cms {
+                    width: 2719,
+                    depth: 5
+                },
             }
         );
     }
 
     #[test]
     fn topk_heap_size_tracks_k() {
-        let intent = AggIntent::TopK { k: 25, accuracy: eps(0.01) };
+        let intent = AggIntent::TopK {
+            k: 25,
+            accuracy: eps(0.01),
+        };
         match realize(&intent) {
             Realization::Sketch {
                 kind: SummaryKind::CmsWithHeap,
-                params: SummaryParams::CmsWithHeap { width, depth, heap_size },
+                params:
+                    SummaryParams::CmsWithHeap {
+                        width,
+                        depth,
+                        heap_size,
+                    },
             } => {
                 assert_eq!(heap_size, 25);
                 assert_eq!(width, 272); // ⌈e/0.01⌉
@@ -453,11 +536,16 @@ mod tests {
             &[SummaryKind::Hll, SummaryKind::Theta, SummaryKind::Kmv]
         );
         assert_eq!(
-            sketch_candidates(&AggIntent::TopK { k: 5, accuracy: eps(0.01) }),
+            sketch_candidates(&AggIntent::TopK {
+                k: 5,
+                accuracy: eps(0.01)
+            }),
             &[SummaryKind::CmsWithHeap]
         );
         assert_eq!(
-            sketch_candidates(&AggIntent::Count { accuracy: eps(0.01) }),
+            sketch_candidates(&AggIntent::Count {
+                accuracy: eps(0.01)
+            }),
             &[SummaryKind::Cms]
         );
         assert!(sketch_candidates(&AggIntent::Rate).is_empty());
@@ -465,7 +553,11 @@ mod tests {
 
     #[test]
     fn degenerate_epsilon_saturates_to_tightest_params() {
-        let intent = AggIntent::Quantile { col: None, q: 0.99, accuracy: eps(0.0) };
+        let intent = AggIntent::Quantile {
+            col: None,
+            q: 0.99,
+            accuracy: eps(0.0),
+        };
         assert_eq!(
             realize(&intent),
             Realization::Sketch {

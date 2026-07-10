@@ -252,9 +252,7 @@ mod tests {
 
     fn scan() -> QueryExpr {
         QueryExpr::Scan {
-            source: Source::TimeSeries {
-                metric: "m".into(),
-            },
+            source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
@@ -325,8 +323,14 @@ mod tests {
         // …with a `SELECT service, count` projection between the Sort and the Agg.
         let proj = QueryExpr::Project {
             cols: vec![
-                ProjectItem { alias: None, expr: L3Expr::Column(0) },
-                ProjectItem { alias: Some("c".into()), expr: L3Expr::Column(1) },
+                ProjectItem {
+                    alias: None,
+                    expr: L3Expr::Column(0),
+                },
+                ProjectItem {
+                    alias: Some("c".into()),
+                    expr: L3Expr::Column(1),
+                },
             ],
             qualifier: None,
             child: Box::new(count_by_service()),
@@ -348,7 +352,11 @@ mod tests {
         // Ascending = bottom-k: the shared `is_frequency_heavy_hitter` rule
         // rejects it (needs descending), so it stays a generic Sort+Limit — the
         // same call PromQL `bottomk` makes (issue #38).
-        let asc = vec![SortKey { expr: L3Expr::Column(1), ascending: true, nulls_first: false }];
+        let asc = vec![SortKey {
+            expr: L3Expr::Column(1),
+            ascending: true,
+            nulls_first: false,
+        }];
         let q = limit(5, 0, sort(asc, count_by_service()));
         assert!(!is_topk_over_count(&canonicalize(q)));
     }
@@ -450,7 +458,10 @@ mod tests {
             accuracy: AccuracyTarget::Exact,
         }));
         let out = canonicalize(q);
-        let QueryExpr::Aggregate { by, aggs, child, .. } = &out else {
+        let QueryExpr::Aggregate {
+            by, aggs, child, ..
+        } = &out
+        else {
             panic!("expected outer Aggregate([TopK]), got {out:?}");
         };
         assert!(matches!(aggs.as_slice(), [AggIntent::TopK { k: 5, .. }]));
@@ -469,7 +480,12 @@ mod tests {
             panic!("expected a Limit, got {out:?}");
         };
         assert_eq!(*n, 5);
-        let QueryExpr::Sort { partition_by, child, .. } = child.as_ref() else {
+        let QueryExpr::Sort {
+            partition_by,
+            child,
+            ..
+        } = child.as_ref()
+        else {
             panic!("expected a Sort under the Limit");
         };
         assert_eq!(**partition_by, vec![2], "partitioned by region");
@@ -485,9 +501,15 @@ mod tests {
             func: WindowFuncKind::RowNumber,
             args: vec![],
             partition_by: GroupKeys::by(vec![2]),
-            order_by: vec![SortKey { expr: L3Expr::Column(2), ascending: false, nulls_first: true }],
+            order_by: vec![SortKey {
+                expr: L3Expr::Column(2),
+                ascending: false,
+                nulls_first: true,
+            }],
             output_name: "rn".into(),
-            child: Box::new(grouped(AggIntent::Count { accuracy: AccuracyTarget::Exact })),
+            child: Box::new(grouped(AggIntent::Count {
+                accuracy: AccuracyTarget::Exact,
+            })),
         };
         let q = QueryExpr::Filter {
             pred: Predicate(L3Expr::Compare {
@@ -497,6 +519,9 @@ mod tests {
             }),
             child: Box::new(wf),
         };
-        assert!(matches!(canonicalize(q), QueryExpr::Filter { .. }), "left as a Filter");
+        assert!(
+            matches!(canonicalize(q), QueryExpr::Filter { .. }),
+            "left as a Filter"
+        );
     }
 }

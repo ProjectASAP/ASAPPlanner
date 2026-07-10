@@ -12,9 +12,9 @@ pub mod histogram;
 pub mod promql;
 
 use asap_ir::intent_algebra::QueryExpr;
-use asap_l2::convert_root;
 use asap_ir::types::AccuracyTarget;
 use asap_ir::workload::{QueryLanguage, QueryWorkload};
+use asap_l2::convert_root;
 
 pub use error::PromqlError;
 pub use histogram::{HistogramCatalog, HistogramKind};

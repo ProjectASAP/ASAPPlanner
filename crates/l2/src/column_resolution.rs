@@ -8,11 +8,11 @@
 
 use thiserror::Error;
 
+use crate::relational::QueryExpr;
 use asap_ir::intent_algebra::agg_intent::AggIntent;
 use asap_ir::intent_algebra::expr_ir::ColumnRef;
 use asap_ir::intent_algebra::expr_ir::{L2Expr, L3Expr};
 use asap_ir::intent_algebra::query_expr::{aggregate_output_schema, GroupKeys, QueryExprError};
-use crate::relational::QueryExpr;
 use asap_ir::intent_algebra::schema::{Column, ColumnId, DataType, Schema};
 
 /// Errors returned by the resolution helpers.
