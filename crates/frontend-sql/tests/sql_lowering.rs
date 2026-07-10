@@ -7,7 +7,7 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 use asap_ir::intent_algebra::{
-    AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, QueryExpr, Source, WindowFuncKind,
+    AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, L3Scalar, QueryExpr, Source, WindowFuncKind,
 };
 use asap_ir::types::AccuracyTarget;
 
@@ -539,18 +539,110 @@ async fn aggregate_over_join_binds_against_concatenated_schema() {
     );
 }
 
+// ── Issue #111: IN / EXISTS subquery predicates become semi / anti joins ────
+
+/// The first `Join` node's `(kind, predicate, left column count)`.
+fn join_parts(qe: &QueryExpr) -> (&JoinKind, &L3Expr, usize) {
+    let QueryExpr::Join {
+        kind,
+        pred,
+        left,
+        right: _,
+    } = find_join(qe).expect("expected a Join")
+    else {
+        unreachable!()
+    };
+    let left_len = left.output_schema().expect("left schema").columns.len();
+    (kind, &pred.0, left_len)
+}
+
 #[tokio::test]
-async fn semi_join_is_rejected_not_mislowered() {
-    // No L3 counterpart for semi/anti joins yet → reject rather than mislower.
-    let res = lower_sql(
-        "SELECT service FROM metrics WHERE service IN (SELECT service FROM hosts)",
+async fn in_subquery_lowers_to_a_semi_join() {
+    // `metrics(ts, service, latency, bytes)` — service is column 1.
+    let qe =
+        lower("SELECT service FROM metrics WHERE service IN (SELECT service FROM hosts)").await;
+    let (kind, pred, left_len) = join_parts(&qe);
+    assert_eq!(kind, &JoinKind::Semi);
+    assert_eq!(left_len, 4);
+
+    // The predicate resolves against `left ++ right`. Both relations have a
+    // `service` column, so a name-based lookup would bind *both* sides to the
+    // left's — silently making this `service = service`, always true. The key is
+    // projected under a synthetic name to make that impossible.
+    let L3Expr::Compare { left, right, .. } = pred else {
+        panic!("expected a comparison, got {pred:?}");
+    };
+    assert_eq!(**left, L3Expr::Column(1), "outer service");
+    assert_eq!(
+        **right,
+        L3Expr::Column(left_len),
+        "the subquery key, not the outer column again"
+    );
+}
+
+#[tokio::test]
+async fn a_semi_join_outputs_only_the_left_schema() {
+    // The right side is a filter, not a source of columns.
+    let qe =
+        lower("SELECT service FROM metrics WHERE service IN (SELECT service FROM hosts)").await;
+    let join = find_join(&qe).expect("expected a Join");
+    let names: Vec<_> = join
+        .output_schema()
+        .expect("join schema")
+        .columns
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert_eq!(names, ["ts", "service", "latency", "bytes"]);
+}
+
+#[tokio::test]
+async fn a_subquery_key_that_is_an_expression_still_binds() {
+    // `SELECT bytes + 1 …` has no column name of its own; it is projected under
+    // the synthetic key rather than becoming an unreferenceable `col_0`.
+    let qe =
+        lower("SELECT service FROM metrics WHERE bytes IN (SELECT bytes + 1 FROM metrics)").await;
+    assert_eq!(join_parts(&qe).0, &JoinKind::Semi);
+}
+
+#[tokio::test]
+async fn a_multi_column_in_subquery_is_rejected() {
+    let err = lower_sql(
+        "SELECT service FROM metrics WHERE service IN (SELECT service, region FROM hosts)",
         &catalog(),
         AccuracyTarget::Exact,
     )
+    .await
+    .expect_err("IN must select one column");
+    assert!(format!("{err}").contains("exactly one column"), "got {err}");
+}
+
+#[tokio::test]
+async fn an_ordinary_conjunct_still_folds_onto_the_scan() {
+    // The residual filter stays *below* the semi-join, where the converter can
+    // still fold it onto the Scan. A semi-join only drops left rows, so the
+    // orders agree.
+    let qe = lower(
+        "SELECT service FROM metrics WHERE bytes > 10 \
+         AND service IN (SELECT service FROM hosts)",
+    )
     .await;
+    fn scan_has_predicate(qe: &QueryExpr) -> bool {
+        match qe {
+            QueryExpr::Scan { predicates, .. } => !predicates.is_empty(),
+            QueryExpr::Project { child, .. }
+            | QueryExpr::Filter { child, .. }
+            | QueryExpr::Aggregate { child, .. } => scan_has_predicate(child),
+            QueryExpr::Join { left, right, .. } => {
+                scan_has_predicate(left) || scan_has_predicate(right)
+            }
+            _ => false,
+        }
+    }
+    assert_eq!(join_parts(&qe).0, &JoinKind::Semi);
     assert!(
-        res.is_err(),
-        "semi-join / IN-subquery should be rejected in v1"
+        scan_has_predicate(&qe),
+        "WHERE bytes > 10 should reach the Scan"
     );
 }
 
@@ -741,24 +833,72 @@ async fn scalar_subquery_in_predicate_is_rejected() {
 }
 
 #[tokio::test]
-async fn exists_subquery_in_predicate_is_rejected() {
-    // The v1 decision on #27's predicate-subquery question: **reject cleanly**,
-    // for the whole family — scalar (above), IN (the semi-join test), and
-    // EXISTS / NOT EXISTS / NOT IN here, correlated or not. Nothing mislowers:
-    // the subquery predicate is never silently dropped.
-    for q in [
-        // Correlated EXISTS.
+async fn correlated_exists_lifts_its_correlation_into_the_join() {
+    // `EXISTS (SELECT 1 FROM hosts h WHERE h.service = m.service)` → a semi-join
+    // on `h.service = m.service`. The `SELECT 1` projection is dropped: a
+    // semi-join keeps no right columns, and it would have projected away the
+    // very column the correlation needs.
+    let qe = lower(
         "SELECT service FROM metrics m WHERE EXISTS \
          (SELECT 1 FROM hosts h WHERE h.service = m.service)",
-        // NOT EXISTS (anti-join shape).
+    )
+    .await;
+    let (kind, pred, left_len) = join_parts(&qe);
+    assert_eq!(kind, &JoinKind::Semi);
+    let L3Expr::Compare { left, right, .. } = pred else {
+        panic!("expected the correlation as a comparison, got {pred:?}");
+    };
+    assert_eq!(**left, L3Expr::Column(left_len), "h.service (right side)");
+    assert_eq!(**right, L3Expr::Column(1), "m.service (left side)");
+}
+
+#[tokio::test]
+async fn not_exists_lowers_to_an_anti_join() {
+    let qe = lower(
         "SELECT service FROM metrics m WHERE NOT EXISTS \
          (SELECT 1 FROM hosts h WHERE h.service = m.service)",
-        // NOT IN (negated semi-join shape).
+    )
+    .await;
+    assert_eq!(join_parts(&qe).0, &JoinKind::Anti);
+}
+
+#[tokio::test]
+async fn an_uncorrelated_exists_is_an_unconditional_semi_join() {
+    // No correlation → keep every left row iff the right side has any row.
+    let qe = lower("SELECT service FROM metrics WHERE EXISTS (SELECT 1 FROM hosts)").await;
+    let (kind, pred, _) = join_parts(&qe);
+    assert_eq!(kind, &JoinKind::Semi);
+    assert_eq!(*pred, L3Expr::Literal(L3Scalar::Boolean(true)));
+}
+
+#[tokio::test]
+async fn not_in_subquery_is_rejected_rather_than_mislowered_as_an_anti_join() {
+    // `NOT IN` is *not* an anti-join. Under three-valued logic a single NULL
+    // among the subquery's rows makes `c NOT IN (…)` UNKNOWN for every `c`, so
+    // the query returns nothing — while an anti-join returns every unmatched
+    // left row. Rejecting is the only correct option until the nullability is
+    // proven, and `NOT EXISTS` is the safe spelling.
+    let err = lower_sql(
         "SELECT service FROM metrics WHERE service NOT IN (SELECT service FROM hosts)",
-    ] {
-        let res = lower_sql(q, &catalog(), AccuracyTarget::Exact).await;
-        assert!(res.is_err(), "predicate subquery should be rejected: {q}");
-    }
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("NOT IN must not lower to an anti-join");
+    assert!(format!("{err}").contains("NOT IN"), "got {err}");
+}
+
+#[tokio::test]
+async fn a_correlated_in_subquery_is_rejected() {
+    let err = lower_sql(
+        "SELECT service FROM metrics m WHERE service IN \
+         (SELECT h.service FROM hosts h WHERE h.region = m.service)",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("correlated IN needs both a key match and a correlation");
+    assert!(format!("{err}").contains("correlated IN"), "got {err}");
 }
 
 // ── Issue #115: Quantile / Cardinality carry their input column ─────────────
