@@ -235,6 +235,22 @@ pub enum JoinKind {
     Right,
     Full,
     Cross,
+    /// Left semi-join — each left row that has **at least one** match, once.
+    /// `WHERE c IN (SELECT …)` / `WHERE EXISTS (…)` (issue #111).
+    ///
+    /// Output schema is the **left's alone**; the right side is a filter, not a
+    /// source of columns. The join predicate still resolves against the
+    /// concatenated `left ++ right` schema — its scope is deliberately wider
+    /// than the node's output.
+    Semi,
+    /// Left anti-join — each left row with **no** match. `WHERE NOT EXISTS (…)`.
+    /// Same schema rule as [`JoinKind::Semi`].
+    ///
+    /// Note this is *not* `NOT IN (SELECT …)`: under SQL's three-valued logic a
+    /// NULL on the right makes `NOT IN` yield no rows at all, where an anti-join
+    /// yields every left row. The SQL front end rejects `NOT IN (subquery)`
+    /// rather than lower it here.
+    Anti,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -768,11 +784,22 @@ impl QueryExpr {
             } => {
                 let l = left.output_schema_in(scope)?;
                 let r = right.output_schema_in(scope)?;
+                // Semi / anti joins filter the left side; the right contributes
+                // no columns, so the output is the left's schema unchanged. Row
+                // identity *is* preserved (each left row appears at most once),
+                // but a left row can be dropped, so unique_keys still reset.
+                if matches!(kind, JoinKind::Semi | JoinKind::Anti) {
+                    return Ok(Schema {
+                        unique_keys: Vec::new(),
+                        ..l
+                    });
+                }
                 let (left_null, right_null) = match kind {
                     JoinKind::Left => (false, true),
                     JoinKind::Right => (true, false),
                     JoinKind::Full => (true, true),
                     JoinKind::Inner | JoinKind::Cross => (false, false),
+                    JoinKind::Semi | JoinKind::Anti => unreachable!("handled above"),
                 };
                 let l_len = l.columns.len();
                 let mut columns = Vec::with_capacity(l_len + r.columns.len());

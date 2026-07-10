@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column as DfColumn, ScalarValue};
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{
@@ -70,10 +71,7 @@ impl<'a> SqlLowerer<'a> {
     fn lower_plan(&self, plan: &LogicalPlan) -> Result<L2, LoweringError> {
         match plan {
             LogicalPlan::TableScan(scan) => self.lower_table_scan(scan),
-            LogicalPlan::Filter(filter) => Ok(L2::Filter {
-                pred: df_expr_to_l2(&filter.predicate)?,
-                input: Box::new(self.lower_plan(&filter.input)?),
-            }),
+            LogicalPlan::Filter(filter) => self.lower_filter(filter),
             LogicalPlan::Projection(proj) => self.lower_projection(proj),
             LogicalPlan::Aggregate(agg) => self.lower_aggregate(agg),
             LogicalPlan::Sort(sort) => self.lower_sort(sort),
@@ -159,6 +157,139 @@ impl<'a> SqlLowerer<'a> {
                 other.display()
             ))),
         }
+    }
+
+    /// `WHERE` — a conjunction of ordinary predicates plus, possibly, subquery
+    /// predicates (issue #111).
+    ///
+    /// `c IN (SELECT …)` and `EXISTS (…)` are not expressions over rows; they are
+    /// *joins*. Each such conjunct peels off into a semi- / anti-join above the
+    /// filter's input, and the remaining conjuncts stay as an ordinary `Filter`.
+    ///
+    /// The residual filter is applied **below** the joins, which is where it sat
+    /// before: a semi-join only ever drops left rows, so the two orders agree —
+    /// and keeping `Filter` directly over the `Source` preserves the converter's
+    /// fold of predicates onto the `Scan`.
+    fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<L2, LoweringError> {
+        let mut conjuncts = Vec::new();
+        split_conjunction(&filter.predicate, &mut conjuncts);
+        let (subqueries, residual): (Vec<_>, Vec<_>) = conjuncts
+            .into_iter()
+            .partition(|e| matches!(e, Expr::InSubquery(_) | Expr::Exists(_)));
+
+        let input = self.lower_plan(&filter.input)?;
+        let mut node = match rebuild_conjunction(&residual) {
+            Some(pred) => L2::Filter {
+                pred: df_expr_to_l2(&pred)?,
+                input: Box::new(input),
+            },
+            None => input,
+        };
+        for sq in subqueries {
+            node = match sq {
+                Expr::InSubquery(is) => self.lower_in_subquery(is, node)?,
+                Expr::Exists(ex) => self.lower_exists(ex, node)?,
+                _ => unreachable!("partitioned above"),
+            };
+        }
+        Ok(node)
+    }
+
+    /// `c IN (SELECT k FROM …)` → a semi-join on `c = k` (issue #111).
+    fn lower_in_subquery(
+        &self,
+        is: &logical_expr::expr::InSubquery,
+        left: L2,
+    ) -> Result<L2, LoweringError> {
+        if is.negated {
+            // `NOT IN` is not an anti-join. Under three-valued logic a single
+            // NULL among the subquery's rows makes `c NOT IN (…)` UNKNOWN for
+            // every `c`, so the query returns nothing — while an anti-join
+            // returns every unmatched left row. Reject rather than mislower.
+            return Err(LoweringError::UnsupportedFeature(
+                "NOT IN (subquery): its NULL semantics are not an anti-join".into(),
+            ));
+        }
+        if !is.subquery.outer_ref_columns.is_empty() {
+            return Err(LoweringError::UnsupportedFeature(
+                "correlated IN (subquery)".into(),
+            ));
+        }
+        let inner = is.subquery.subquery.as_ref();
+        let fields = inner.schema().fields();
+        if fields.len() != 1 {
+            return Err(LoweringError::InvalidExpression(format!(
+                "IN (subquery) must select exactly one column, got {}",
+                fields.len()
+            )));
+        }
+        let key = &fields[0];
+        // Project the key under a name the outer relation cannot also carry. The
+        // join predicate resolves against the concatenated `left ++ right`
+        // schema, and a bare `hosts.service` over an unqualified subquery output
+        // falls back to a name lookup that finds the *left's* `service` first —
+        // silently making the predicate `service = service`, i.e. always true.
+        let right = match inner {
+            // Rebuild the subquery's projection with the synthetic alias, so a
+            // computed key (`SELECT bytes + 1 …`) is named rather than becoming
+            // the anonymous `col_0` that nothing can reference.
+            LogicalPlan::Projection(p) if p.expr.len() == 1 => L2::Project {
+                cols: vec![L2ProjectItem {
+                    alias: Some(IN_SUBQUERY_KEY.to_string()),
+                    expr: df_expr_to_l2(unalias(&p.expr[0]))?,
+                }],
+                qualifier: None,
+                input: Box::new(self.lower_plan(&p.input)?),
+            },
+            other => L2::Project {
+                cols: vec![L2ProjectItem {
+                    alias: Some(IN_SUBQUERY_KEY.to_string()),
+                    expr: L2Expr::Column(ColumnRef::Named(key.name().clone())),
+                }],
+                qualifier: None,
+                input: Box::new(self.lower_plan(other)?),
+            },
+        };
+        Ok(L2::Join {
+            kind: JoinKind::Semi,
+            pred: Some(L2Expr::Compare {
+                left: Box::new(df_expr_to_l2(&is.expr)?),
+                op: CompareOp::Eq,
+                right: Box::new(L2Expr::Column(ColumnRef::Named(
+                    IN_SUBQUERY_KEY.to_string(),
+                ))),
+            }),
+            left: Box::new(left),
+            right: Box::new(right),
+        })
+    }
+
+    /// `[NOT] EXISTS (SELECT … WHERE inner.k = outer.k)` → a semi- / anti-join
+    /// on the correlation predicate (issue #111).
+    fn lower_exists(&self, ex: &logical_expr::expr::Exists, left: L2) -> Result<L2, LoweringError> {
+        let kind = if ex.negated {
+            JoinKind::Anti
+        } else {
+            JoinKind::Semi
+        };
+        // A semi-join discards the right side's columns, and `SELECT 1` projects
+        // the correlation columns away — so drop the subquery's projections and
+        // join against what they sit on.
+        let mut inner = ex.subquery.subquery.as_ref();
+        while let LogicalPlan::Projection(p) = inner {
+            inner = &p.input;
+        }
+        // Lift the correlated conjuncts out of the subquery's filter; they are
+        // the join predicate. Whatever is left stays an ordinary inner filter.
+        let (inner, correlation) = split_correlation(inner)?;
+        let right = self.lower_plan(&inner)?;
+        let pred = correlation.map(|e| df_expr_to_l2(&e)).transpose()?;
+        Ok(L2::Join {
+            kind,
+            pred,
+            left: Box::new(left),
+            right: Box::new(right),
+        })
     }
 
     /// Table leaf — carries the catalog's resolved schema so the L2→L3 Binder
@@ -662,6 +793,114 @@ fn lower_agg_item(expr: &Expr) -> Result<AggItem, LoweringError> {
         }
         _ => Err(LoweringError::UnsupportedAggregate(format!("{expr:?}"))),
     }
+}
+
+/// The name an `IN (subquery)`'s key column is projected under, so the join
+/// predicate cannot bind it to a same-named column of the outer relation.
+const IN_SUBQUERY_KEY: &str = "__asap_in_key";
+
+/// Flatten a top-level `AND` chain into its conjuncts.
+fn split_conjunction<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match expr {
+        Expr::BinaryExpr(b) if b.op == logical_expr::Operator::And => {
+            split_conjunction(&b.left, out);
+            split_conjunction(&b.right, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// Re-`AND` the conjuncts, or `None` when there are none left.
+fn rebuild_conjunction(conjuncts: &[&Expr]) -> Option<Expr> {
+    conjuncts
+        .iter()
+        .map(|e| (*e).clone())
+        .reduce(|acc, e| acc.and(e))
+}
+
+/// Split a correlated subquery's plan into `(uncorrelated plan, correlation)`.
+///
+/// The correlation is the conjunction of the filter conjuncts that mention an
+/// outer column, rewritten so `outer_ref(t.c)` becomes a plain `t.c` — it then
+/// resolves against the join's concatenated `left ++ right` schema, like any
+/// other join predicate. Everything else stays an ordinary inner `Filter`.
+///
+/// An outer reference anywhere but a top-level filter conjunct is rejected: it
+/// would need real decorrelation, not a predicate lift.
+fn split_correlation(plan: &LogicalPlan) -> Result<(LogicalPlan, Option<Expr>), LoweringError> {
+    let LogicalPlan::Filter(filter) = plan else {
+        return if plan_has_outer_ref(plan) {
+            Err(LoweringError::UnsupportedFeature(
+                "correlated subquery whose outer reference is not a filter conjunct".into(),
+            ))
+        } else {
+            Ok((plan.clone(), None))
+        };
+    };
+
+    let mut conjuncts = Vec::new();
+    split_conjunction(&filter.predicate, &mut conjuncts);
+    let (correlated, inner): (Vec<_>, Vec<_>) =
+        conjuncts.into_iter().partition(|e| expr_has_outer_ref(e));
+
+    let input = filter.input.as_ref();
+    if plan_has_outer_ref(input) {
+        return Err(LoweringError::UnsupportedFeature(
+            "correlated subquery whose outer reference is below its filter".into(),
+        ));
+    }
+
+    let correlation = rebuild_conjunction(&correlated)
+        .map(|e| strip_outer_refs(&e))
+        .transpose()?;
+    let plan = match rebuild_conjunction(&inner) {
+        Some(pred) => LogicalPlan::Filter(
+            logical_expr::Filter::try_new(pred, filter.input.clone())
+                .map_err(LoweringError::DataFusion)?,
+        ),
+        None => input.clone(),
+    };
+    Ok((plan, correlation))
+}
+
+/// Rewrite `outer_ref(t.c)` to `t.c` so the expression resolves against the
+/// join's concatenated schema.
+fn strip_outer_refs(expr: &Expr) -> Result<Expr, LoweringError> {
+    expr.clone()
+        .transform(|e| {
+            Ok(match e {
+                Expr::OuterReferenceColumn(_, col) => Transformed::yes(Expr::Column(col)),
+                other => Transformed::no(other),
+            })
+        })
+        .map(|t| t.data)
+        .map_err(LoweringError::DataFusion)
+}
+
+fn expr_has_outer_ref(expr: &Expr) -> bool {
+    let mut found = false;
+    expr.apply(|e| {
+        if matches!(e, Expr::OuterReferenceColumn(..)) {
+            found = true;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .expect("infallible visitor");
+    found
+}
+
+fn plan_has_outer_ref(plan: &LogicalPlan) -> bool {
+    let mut found = false;
+    plan.apply(|p| {
+        if p.expressions().iter().any(expr_has_outer_ref) {
+            found = true;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .expect("infallible visitor");
+    found
 }
 
 /// Strip `AS alias` wrappers.
