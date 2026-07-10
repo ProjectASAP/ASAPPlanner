@@ -990,21 +990,180 @@ async fn a_shared_expression_is_materialized_once() {
     assert_eq!(aggs[0].input_col(), aggs[1].input_col());
 }
 
+// ── Issue #118: multi-level grouping expands into one Aggregate per level ───
+
+/// The branches of the first `Merge` along the single-child spine.
+fn merge_branches(qe: &QueryExpr) -> &Vec<QueryExpr> {
+    fn find(qe: &QueryExpr) -> Option<&Vec<QueryExpr>> {
+        match qe {
+            QueryExpr::Merge { children } => Some(children),
+            QueryExpr::Project { child, .. }
+            | QueryExpr::Filter { child, .. }
+            | QueryExpr::Sort { child, .. }
+            | QueryExpr::Limit { child, .. } => find(child),
+            _ => None,
+        }
+    }
+    find(qe).expect("expected a Merge")
+}
+
+/// `(group keys, column names)` of each merged grouping level.
+fn grouping_levels(qe: &QueryExpr) -> Vec<(GroupKeys, Vec<String>)> {
+    merge_branches(qe)
+        .iter()
+        .map(|b| {
+            let QueryExpr::Project { child, .. } = b else {
+                panic!("expected a Project per level, got {b:?}");
+            };
+            let QueryExpr::Aggregate { by, .. } = child.as_ref() else {
+                panic!("expected an Aggregate under the Project, got {child:?}");
+            };
+            let names = b
+                .output_schema()
+                .expect("level schema")
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            (by.clone(), names)
+        })
+        .collect()
+}
+
 #[tokio::test]
-async fn multi_level_grouping_is_rejected() {
-    // ROLLUP/CUBE/GROUPING SETS emit several grouping levels plus a
-    // `__grouping_id` discriminator; `Aggregate.by` is a single key set.
-    for q in [
-        "SELECT service, SUM(bytes) FROM metrics GROUP BY ROLLUP(service)",
-        "SELECT service, SUM(bytes) FROM metrics GROUP BY CUBE(service)",
-        "SELECT service, SUM(bytes) FROM metrics GROUP BY GROUPING SETS ((service), ())",
-    ] {
-        let err = lower_sql(q, &catalog(), AccuracyTarget::Exact)
-            .await
-            .expect_err("multi-level grouping must be rejected");
+async fn rollup_expands_to_one_aggregate_per_prefix() {
+    // ROLLUP(a, b) → (a,b), (a), () — three levels, widest first.
+    let qe =
+        lower("SELECT service, bytes, SUM(latency) FROM metrics GROUP BY ROLLUP(service, bytes)")
+            .await;
+    let levels = grouping_levels(&qe);
+    let keys: Vec<_> = levels.iter().map(|(by, _)| by.clone()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            GroupKeys::by(vec![1, 3]),
+            GroupKeys::by(vec![1]),
+            GroupKeys::none(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn cube_expands_to_the_power_set() {
+    // CUBE(a, b) → (a,b), (a), (b), () — four levels.
+    let qe =
+        lower("SELECT service, bytes, SUM(latency) FROM metrics GROUP BY CUBE(service, bytes)")
+            .await;
+    assert_eq!(grouping_levels(&qe).len(), 4);
+}
+
+#[tokio::test]
+async fn a_mixed_grouping_set_is_normalized_by_datafusion() {
+    // `GROUP BY g, ROLLUP(d)` arrives as one GroupingSets, not a plain key
+    // alongside a grouping set — so there is only one shape to handle.
+    let qe =
+        lower("SELECT service, bytes, SUM(latency) FROM metrics GROUP BY service, ROLLUP(bytes)")
+            .await;
+    assert_eq!(grouping_levels(&qe).len(), 2);
+}
+
+#[tokio::test]
+async fn omitted_grouping_keys_become_typed_nulls() {
+    // Every level must emit every key — as NULL where the level omits it — or
+    // `Merge` (which takes the first child's schema) would misdescribe the rest.
+    // The null is *cast*: a bare Null literal infers as Float64.
+    let qe = lower("SELECT service, SUM(bytes) FROM metrics GROUP BY ROLLUP(service)").await;
+    let levels = grouping_levels(&qe);
+    assert_eq!(levels.len(), 2);
+    for (_, names) in &levels {
+        assert_eq!(
+            names,
+            &["service".to_string(), "sum(metrics.bytes)".to_string()]
+        );
+    }
+
+    // The `()` level projects `service` as a Utf8 null, not a Float64 one.
+    let schema = merge_branches(&qe)[1]
+        .output_schema()
+        .expect("level schema");
+    assert_eq!(schema.columns[0].name, "service");
+    assert_eq!(
+        schema.columns[0].dtype,
+        DataType::Utf8,
+        "the omitted key must keep its declared type"
+    );
+}
+
+#[tokio::test]
+async fn grouping_levels_are_union_compatible() {
+    let qe = lower(
+        "SELECT service, bytes, SUM(latency) FROM metrics GROUP BY GROUPING SETS ((service),(bytes),())",
+    )
+    .await;
+    let shapes: Vec<_> = merge_branches(&qe)
+        .iter()
+        .map(|b| {
+            b.output_schema()
+                .expect("level schema")
+                .columns
+                .iter()
+                .map(|c| (c.name.clone(), c.dtype.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        shapes.windows(2).all(|w| w[0] == w[1]),
+        "levels disagree: {shapes:?}"
+    );
+}
+
+#[tokio::test]
+async fn grouping_function_is_rejected() {
+    // `__grouping_id` is dropped when the levels are expanded. It is observable
+    // only through `GROUPING(col)`, so dropping it loses nothing representable —
+    // this test is what makes that true.
+    let err = lower_sql(
+        "SELECT service, SUM(bytes), GROUPING(service) FROM metrics GROUP BY ROLLUP(service)",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("GROUPING() must be rejected while __grouping_id is dropped");
+    assert!(format!("{err}").contains("grouping"), "got {err}");
+}
+
+#[tokio::test]
+async fn a_non_column_key_inside_a_grouping_set_is_rejected() {
+    // The #110 derived-column machinery covers plain `GROUP BY <expr>`; inside a
+    // grouping set the key also has to be reinstatable as a typed null.
+    let err = lower_sql(
+        "SELECT date_trunc('minute', ts) AS m, SUM(bytes) FROM metrics GROUP BY ROLLUP(m)",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("expression key inside ROLLUP must be rejected");
+    assert!(
+        format!("{err}").contains("non-column key inside a multi-level grouping"),
+        "got {err}"
+    );
+}
+
+#[tokio::test]
+async fn multi_level_grouping_composes_with_a_derived_reducer_argument() {
+    // #110's materializing Project sits beneath every level's Aggregate.
+    let qe = lower("SELECT service, SUM(bytes * 8) FROM metrics GROUP BY ROLLUP(service)").await;
+    for b in merge_branches(&qe) {
+        let QueryExpr::Project { child, .. } = b else {
+            panic!("expected a Project per level");
+        };
+        let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+            panic!("expected an Aggregate");
+        };
+        assert!(matches!(aggs.as_slice(), [AggIntent::Sum { col: Some(_) }]));
         assert!(
-            format!("{err}").contains("multi-level grouping"),
-            "{q} gave {err}"
+            matches!(**child, QueryExpr::Project { .. }),
+            "the derived-column projection should sit under each level"
         );
     }
 }

@@ -17,7 +17,7 @@ use datafusion::logical_expr::{
 };
 use datafusion::prelude::SessionContext;
 
-use asap_ir::intent_algebra::schema::Schema;
+use asap_ir::intent_algebra::schema::{DataType, Schema};
 use asap_ir::intent_algebra::{
     ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
 };
@@ -33,7 +33,7 @@ mod types;
 pub use types::SqlCatalog;
 
 use self::expr::df_expr_to_l2;
-use self::types::schema_to_arrow;
+use self::types::{arrow_to_l3, schema_to_arrow};
 
 /// Lowers SQL strings to the Layer-2 [`relational::QueryExpr`] over a table
 /// [`SqlCatalog`]. Call [`convert_root`](asap_l2::convert_root)
@@ -341,18 +341,11 @@ impl<'a> SqlLowerer<'a> {
     fn lower_aggregate(&self, agg: &logical_expr::Aggregate) -> Result<L2, LoweringError> {
         let input = self.lower_plan(&agg.input)?;
 
-        // `GROUPING SETS`/`ROLLUP`/`CUBE` emit several grouping levels plus a
-        // `__grouping_id` discriminator from one scan. `Aggregate.by` is a
-        // single key set, so there is nothing to lower them onto (issue #118).
+        // `GROUPING SETS`/`ROLLUP`/`CUBE` emit several grouping levels from one
+        // scan. `Aggregate.by` is a single key set, so each level becomes its own
+        // `Aggregate` and they are merged (issue #118).
         if let Some(gs) = agg.group_expr.iter().find_map(as_grouping_set) {
-            let kind = match gs {
-                logical_expr::GroupingSet::Rollup(_) => "ROLLUP",
-                logical_expr::GroupingSet::Cube(_) => "CUBE",
-                logical_expr::GroupingSet::GroupingSets(_) => "GROUPING SETS",
-            };
-            return Err(LoweringError::UnsupportedFeature(format!(
-                "multi-level grouping: {kind}"
-            )));
+            return self.lower_grouping_sets(agg, gs, input);
         }
 
         // `Aggregate.by` and the reducers index *columns*, so a grouping or
@@ -430,6 +423,134 @@ impl<'a> SqlLowerer<'a> {
             having: None,
             input,
         })
+    }
+
+    /// `GROUP BY ROLLUP/CUBE/GROUPING SETS` — multi-level grouping (issue #118).
+    ///
+    /// One scan produces several grouping levels; `Aggregate.by` holds a single
+    /// key set. So each level becomes its own `Aggregate`, and the levels are
+    /// `Merge`d. A level that omits a key still has to *emit* it — as `NULL`, per
+    /// SQL — so each branch is wrapped in a `Project` that reinstates the missing
+    /// keys as typed nulls and restores the canonical column order. That keeps
+    /// the branches union-compatible, which `Merge` requires (it derives its
+    /// schema from the first child).
+    ///
+    /// `Aggregate.child` is duplicated per level. `plan::cse` hoists it back into
+    /// a single producer — the same trade `histogram_quantiles` makes (#109).
+    ///
+    /// DataFusion's `__grouping_id` discriminator is dropped: it only exists to
+    /// tell a subtotal's `NULL` apart from a data `NULL`, which is observable
+    /// solely through `GROUPING(col)` — an aggregate this front end rejects.
+    fn lower_grouping_sets(
+        &self,
+        agg: &logical_expr::Aggregate,
+        gs: &logical_expr::GroupingSet,
+        input: L2,
+    ) -> Result<L2, LoweringError> {
+        // DataFusion normalizes every mixed form (`GROUP BY g, ROLLUP(d)`) into a
+        // single `GroupingSets`, so one grouping expression is the only shape.
+        if agg.group_expr.len() != 1 {
+            return Err(LoweringError::UnsupportedFeature(
+                "a grouping set alongside plain GROUP BY keys".into(),
+            ));
+        }
+
+        // `distinct_expr()` is ordered exactly like the aggregate's leading
+        // schema fields, which is the column order the enclosing Projection
+        // expects. The field after them is `__grouping_id`.
+        let distinct = gs.distinct_expr();
+        for e in &distinct {
+            if !matches!(unalias(e), Expr::Column(_)) {
+                return Err(LoweringError::UnsupportedFeature(format!(
+                    "non-column key inside a multi-level grouping: {e}"
+                )));
+            }
+        }
+        let keys: Vec<(String, DataType)> = agg
+            .schema
+            .fields()
+            .iter()
+            .take(distinct.len())
+            .map(|f| Ok((f.name().to_string(), arrow_to_l3(f.data_type())?)))
+            .collect::<Result<_, LoweringError>>()?;
+
+        let out_names: Vec<String> = agg
+            .schema
+            .fields()
+            .iter()
+            .skip(distinct.len() + 1) // + `__grouping_id`
+            .map(|f| f.name().to_string())
+            .collect();
+
+        // Reducer arguments still materialize as derived columns (#110); the
+        // grouping keys are plain columns, so they only need carrying through.
+        let mut derived = DerivedCols::default();
+        for e in &distinct {
+            derived.passthrough(e)?;
+        }
+        let aggr_expr = agg
+            .aggr_expr
+            .iter()
+            .map(|e| derived.rewrite_agg(e))
+            .collect::<Result<Vec<_>, LoweringError>>()?;
+        let aggs = aggr_expr
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let mut item = lower_agg_item(e)?;
+                if let Some(name) = out_names.get(i) {
+                    item.alias = Some(name.clone());
+                }
+                Ok(item)
+            })
+            .collect::<Result<Vec<_>, LoweringError>>()?;
+        let input = derived.wrap(input)?;
+
+        let branches = expand_grouping_set(gs)
+            .iter()
+            .map(|level| {
+                let level_keys = distinct
+                    .iter()
+                    .filter(|e| level.contains(e))
+                    .map(|e| expr_to_group_ref(e))
+                    .collect::<Result<Vec<_>, LoweringError>>()?;
+                let aggregate = L2::Aggregate {
+                    keys: level_keys,
+                    without: false,
+                    aggs: aggs.clone(),
+                    having: None,
+                    input: Box::new(input.clone()),
+                };
+                // Reinstate omitted keys as typed nulls, in canonical order.
+                let cols = keys
+                    .iter()
+                    .zip(&distinct)
+                    .map(|((name, dtype), e)| L2ProjectItem {
+                        alias: Some(name.clone()),
+                        expr: if level.contains(e) {
+                            L2Expr::Column(ColumnRef::Named(name.clone()))
+                        } else {
+                            L2Expr::Cast {
+                                expr: Box::new(L2Expr::Literal(L3Scalar::Null)),
+                                to: dtype.clone(),
+                                try_cast: false,
+                            }
+                        },
+                    })
+                    .chain(out_names.iter().map(|n| L2ProjectItem {
+                        alias: Some(n.clone()),
+                        expr: L2Expr::Column(ColumnRef::Named(n.clone())),
+                    }))
+                    .collect();
+                Ok(L2::Project {
+                    cols,
+                    qualifier: None,
+                    input: Box::new(aggregate),
+                })
+            })
+            .collect::<Result<Vec<_>, LoweringError>>()?;
+
+        Ok(L2::Merge { inputs: branches })
     }
 
     fn lower_sort(&self, sort: &logical_expr::Sort) -> Result<L2, LoweringError> {
@@ -556,6 +677,35 @@ fn as_grouping_set(expr: &Expr) -> Option<&logical_expr::GroupingSet> {
     match unalias(expr) {
         Expr::GroupingSet(gs) => Some(gs),
         _ => None,
+    }
+}
+
+/// The grouping levels a `GroupingSet` stands for, widest first (issue #118).
+///
+/// `ROLLUP(a, b)` → `(a,b), (a), ()` — the prefixes.
+/// `CUBE(a, b)`   → `(a,b), (a), (b), ()` — the power set.
+/// `GROUPING SETS` is already the explicit list.
+fn expand_grouping_set(gs: &logical_expr::GroupingSet) -> Vec<Vec<Expr>> {
+    match gs {
+        logical_expr::GroupingSet::Rollup(exprs) => (0..=exprs.len())
+            .rev()
+            .map(|n| exprs[..n].to_vec())
+            .collect(),
+        logical_expr::GroupingSet::Cube(exprs) => {
+            // Bitmask descending, so the full set leads and `()` trails.
+            (0..(1u32 << exprs.len()))
+                .rev()
+                .map(|mask| {
+                    exprs
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| mask & (1 << i) != 0)
+                        .map(|(_, e)| e.clone())
+                        .collect()
+                })
+                .collect()
+        }
+        logical_expr::GroupingSet::GroupingSets(sets) => sets.clone(),
     }
 }
 
