@@ -288,9 +288,16 @@ pub enum QueryExpr {
         by: Vec<ColumnRef>,
         input: Box<QueryExpr>,
     },
-    /// ⊕ — merge sub-results from independent branches. **Reserved**: SQL
-    /// `UNION` lowers to `SetOp`; no front end emits `Merge` yet (reserved for
-    /// sharded / fan-in plans).
+    /// ⊕ — n-ary `UNION ALL` of independent branches; rows concatenate, never
+    /// deduplicate. SQL's `UNION` lowers to `SetOp`, not this.
+    ///
+    /// Emitted for the branches of one query that a single `Aggregate` cannot
+    /// express: PromQL `histogram_quantiles` (one branch per φ, issue #109) and
+    /// SQL `ROLLUP`/`CUBE`/`GROUPING SETS` (one branch per grouping level,
+    /// issue #118). Also the shape a sharded / fan-in plan would take.
+    ///
+    /// The branches must be union-compatible — the merged schema is the first
+    /// child's — and the producer is responsible for making them so.
     Merge { inputs: Vec<QueryExpr> },
 
     Join {
