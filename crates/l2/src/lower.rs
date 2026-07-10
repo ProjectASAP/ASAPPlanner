@@ -14,18 +14,18 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use asap_ir::intent_algebra::agg_intent::AggIntent;
 use crate::binder::{collect_referenced_columns, Binder};
 use crate::column_resolution::{
     output_schema_for_aggregate, resolve_column_refs, resolve_expr, resolve_group_keys_promql,
     ResolveError,
 };
+use crate::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
+use asap_ir::intent_algebra::agg_intent::AggIntent;
 use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
 use asap_ir::intent_algebra::names::BindingName;
 use asap_ir::intent_algebra::query_expr::{
     GroupKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, SortKey, Source,
 };
-use crate::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
 use asap_ir::intent_algebra::schema::{ColumnId, Schema};
 use asap_ir::types::AccuracyTarget;
 
@@ -45,15 +45,19 @@ pub enum ConvertError {
     /// would do this is a generic `topk by (…)`, whose grouping is routed to
     /// `Sort.partition_by` instead (issue #12) — so this indicates an
     /// unsupported query shape rather than a path that should silently group.
-    #[error("group keys on a per-series windowed reduction are unsupported \
-             (per-group ranking must use Sort.partition_by — see issue #12)")]
+    #[error(
+        "group keys on a per-series windowed reduction are unsupported \
+             (per-group ranking must use Sort.partition_by — see issue #12)"
+    )]
     WindowedReductionKeys,
     /// A counter-derivative range function (`changes`/`delta`/`deriv`/…) reached
     /// the converter without an enclosing `Window`, so no range could be
     /// recovered. Emitting it range-less would silently drop its window, so this
     /// signals a malformed L2 tree rather than a valid instant aggregate (#71).
-    #[error("counter-derivative range function has no window \
-             (its range would be silently dropped)")]
+    #[error(
+        "counter-derivative range function has no window \
+             (its range would be silently dropped)"
+    )]
     RangelessRangeReduction,
 }
 
@@ -731,12 +735,10 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relational::{AggFunc, AggItem, QueryExpr as LQueryExpr, SourceSpec};
     use asap_ir::intent_algebra::agg_intent::AggIntent;
     use asap_ir::intent_algebra::expr_ir::{CompareOp, L2Expr, L3Expr, L3Scalar};
     use asap_ir::intent_algebra::query_expr::{JoinKind, QueryExpr as CQueryExpr};
-    use crate::relational::{
-        AggFunc, AggItem, QueryExpr as LQueryExpr, SourceSpec,
-    };
     use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 
     fn col(name: &str, dtype: DataType) -> Column {
@@ -754,7 +756,10 @@ mod tests {
         // `AggFunc`), emitting it without a `TimeRange` would silently drop its
         // window — the malformed tree is rejected instead (#71).
         let schema = Schema::with_time_index(
-            vec![col("ts", DataType::Timestamp), col("value", DataType::Float64)],
+            vec![
+                col("ts", DataType::Timestamp),
+                col("value", DataType::Float64),
+            ],
             0,
             vec![],
         );

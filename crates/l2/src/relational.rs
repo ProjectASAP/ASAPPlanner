@@ -9,10 +9,10 @@
 
 use std::time::Duration;
 
-pub use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr};
 use asap_ir::intent_algebra::agg_intent::{MathFunc, TimeFunc};
-use asap_ir::intent_algebra::query_expr::{InfoMatcher, SampleKind, TimeShift};
+pub use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr};
 pub use asap_ir::intent_algebra::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
+use asap_ir::intent_algebra::query_expr::{InfoMatcher, SampleKind, TimeShift};
 use asap_ir::intent_algebra::schema::Schema;
 
 /// SELECT-list item at Layer 2 — a name-based [`L2Expr`] + optional alias.
@@ -360,7 +360,10 @@ impl QueryExpr {
     pub fn walk<F: FnMut(&QueryExpr)>(&self, f: &mut F) {
         f(self);
         match self {
-            QueryExpr::Source(_) | QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::Ref(_) => {}
+            QueryExpr::Source(_)
+            | QueryExpr::Scalar(_)
+            | QueryExpr::EvalTime
+            | QueryExpr::Ref(_) => {}
             QueryExpr::Filter { input, .. }
             | QueryExpr::Project { input, .. }
             | QueryExpr::Aggregate { input, .. }

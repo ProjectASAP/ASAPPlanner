@@ -6,9 +6,7 @@ use asap_ir::intent_algebra::{
     AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, QueryExpr, Source,
 };
 use asap_ir::types::AccuracyTarget;
-use asap_ir::workload::{
-    BatchEntry, Query, QueryLanguage, QueryRequirements, QueryWorkload,
-};
+use asap_ir::workload::{BatchEntry, Query, QueryLanguage, QueryRequirements, QueryWorkload};
 
 use asap_frontend_promql::{lower_promql, lower_promql_batch, PromqlError as LoweringError};
 
@@ -151,7 +149,9 @@ fn histogram_quantile_wraps_inner_in_quantile() {
     let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
         panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.95).abs() < 1e-9));
+    assert!(
+        matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.95).abs() < 1e-9)
+    );
     let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
         panic!("expected inner Aggregate{{Rate}}, got {child:?}");
     };
@@ -179,7 +179,9 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
         panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     // The `by (le)` grouping marks the classic cumulative-bucket form.
-    assert!(matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.99).abs() < 1e-9));
+    assert!(
+        matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.99).abs() < 1e-9)
+    );
     // `sum by (le)` survives as a positional Aggregate (by = [2], `le`) over the
     // inner Rate — no name-based Partition.
     let QueryExpr::Aggregate { by, aggs, .. } = child.as_ref() else {
@@ -530,7 +532,10 @@ fn without_grouping_lowers_to_the_exclusion_form() {
     // label is stored positionally (the Binder seeds it), the grouping is the
     // `without` form, and the output schema stays open.
     let qe = lower("sum without (instance) (rate(m[5m]))");
-    let QueryExpr::Aggregate { by, aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        by, aggs, child, ..
+    } = &qe
+    else {
         panic!("expected an Aggregate, got {qe:?}");
     };
     assert!(by.is_without());

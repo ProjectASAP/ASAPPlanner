@@ -946,7 +946,10 @@ pub fn aggregate_output_schema(
         let c = in_schema
             .columns
             .get(id)
-            .ok_or(QueryExprError::InvalidGroupByColumn(id, in_schema.columns.len()))?;
+            .ok_or(QueryExprError::InvalidGroupByColumn(
+                id,
+                in_schema.columns.len(),
+            ))?;
         out_cols.push(c.clone());
     }
     let value_col_idx = in_schema
@@ -989,7 +992,9 @@ pub fn aggregate_output_schema(
     }
     // `count_values` groups by (by-keys ∪ the synthesized value label), so the
     // by-keys alone are not a unique key — be conservative and claim none.
-    let has_count_values = aggs.iter().any(|a| matches!(a, AggIntent::CountValues { .. }));
+    let has_count_values = aggs
+        .iter()
+        .any(|a| matches!(a, AggIntent::CountValues { .. }));
     let unique_keys = if by.is_empty() || has_count_values {
         Vec::new()
     } else {

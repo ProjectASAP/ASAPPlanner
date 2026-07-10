@@ -49,7 +49,9 @@ fn with_meta(q: &str, catalog: HistogramCatalog) -> &'static str {
 fn heuristic_baseline_is_unchanged_without_a_catalog() {
     // Classic `by (le)`-bucket form → HistogramQuantile; anything else → Quantile.
     assert_eq!(
-        heuristic("histogram_quantile(0.9, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))"),
+        heuristic(
+            "histogram_quantile(0.9, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))"
+        ),
         "HQ"
     );
     assert_eq!(heuristic("histogram_quantile(0.9, native_latency)"), "Q");
@@ -61,7 +63,11 @@ fn declared_classic_bucket_fixes_the_false_negative() {
     // no `le` grouping/matcher: the heuristic wrongly routes it to the
     // sketch-able Quantile. Declaring it `ClassicBucket` corrects it.
     let q = "histogram_quantile(0.9, latency_seconds)";
-    assert_eq!(heuristic(q), "Q", "heuristic mis-routes the suffix-less classic histogram");
+    assert_eq!(
+        heuristic(q),
+        "Q",
+        "heuristic mis-routes the suffix-less classic histogram"
+    );
     assert_eq!(
         with_meta(
             q,
@@ -77,14 +83,24 @@ fn declared_raw_or_native_fixes_the_false_positive() {
     // A metric merely NAMED `…_bucket` that actually holds raw samples / a native
     // histogram: the heuristic wrongly routes it to bucket interpolation.
     let q = "histogram_quantile(0.9, foo_bucket)";
-    assert_eq!(heuristic(q), "HQ", "heuristic mis-routes on the `_bucket` name");
     assert_eq!(
-        with_meta(q, HistogramCatalog::new().with("foo_bucket", HistogramKind::RawSamples)),
+        heuristic(q),
+        "HQ",
+        "heuristic mis-routes on the `_bucket` name"
+    );
+    assert_eq!(
+        with_meta(
+            q,
+            HistogramCatalog::new().with("foo_bucket", HistogramKind::RawSamples)
+        ),
         "Q",
         "raw samples are sketch-able"
     );
     assert_eq!(
-        with_meta(q, HistogramCatalog::new().with("foo_bucket", HistogramKind::Native)),
+        with_meta(
+            q,
+            HistogramCatalog::new().with("foo_bucket", HistogramKind::Native)
+        ),
         "Q",
         "native histograms are sketch-able"
     );
@@ -102,7 +118,10 @@ fn undeclared_metric_falls_back_to_the_heuristic() {
         ),
         "HQ"
     );
-    assert_eq!(with_meta("histogram_quantile(0.9, native_thing)", catalog), "Q");
+    assert_eq!(
+        with_meta("histogram_quantile(0.9, native_thing)", catalog),
+        "Q"
+    );
 }
 
 #[test]

@@ -141,7 +141,9 @@ fn bind_summary_agg(
 /// (named `value` — mirror `per_series_reduction_schema`'s fallback).
 fn summary_col_index(node: &QueryExpr, out_schema: &Schema, by: &[usize]) -> usize {
     let per_series = match node {
-        QueryExpr::Aggregate { by, aggs, child, .. } => {
+        QueryExpr::Aggregate {
+            by, aggs, child, ..
+        } => {
             let is_range_child = matches!(
                 child.as_ref(),
                 QueryExpr::TimeRange { .. } | QueryExpr::Subquery { .. }
@@ -163,7 +165,10 @@ fn summary_col_index(node: &QueryExpr, out_schema: &Schema, by: &[usize]) -> usi
 /// The column fed into the summary: the intent's positional input column
 /// resolved to a name against the child schema, or the PromQL sample value.
 fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
-    match intent.input_col().and_then(|id| child_schema.columns.get(id)) {
+    match intent
+        .input_col()
+        .and_then(|id| child_schema.columns.get(id))
+    {
         Some(c) => match &c.table {
             Some(t) => ColumnRef::Qualified {
                 table: t.clone(),
@@ -259,7 +264,11 @@ mod tests {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let root = bind(&q).unwrap();
 
-        let SummaryExpr::SummaryEstimate { sketch_input, query } = &root.expr else {
+        let SummaryExpr::SummaryEstimate {
+            sketch_input,
+            query,
+        } = &root.expr
+        else {
             panic!("expected SummaryEstimate root, got {:?}", root.expr);
         };
         assert!(matches!(query, SketchQuery::Quantile { q } if *q == 0.99));
@@ -273,7 +282,14 @@ mod tests {
             L4DataType::Primitive(DataType::Utf8)
         );
 
-        let SummaryExpr::SummaryAgg { child, sketch, params, col, by } = &sketch_input.expr else {
+        let SummaryExpr::SummaryAgg {
+            child,
+            sketch,
+            params,
+            col,
+            by,
+        } = &sketch_input.expr
+        else {
             panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
         };
         assert_eq!(sketch, &SummaryKind::Kll);
@@ -294,7 +310,10 @@ mod tests {
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let root = bind(&q).unwrap();
         let SummaryExpr::SummaryAgg { sketch, params, .. } = &root.expr else {
-            panic!("expected bare SummaryAgg (no estimate), got {:?}", root.expr);
+            panic!(
+                "expected bare SummaryAgg (no estimate), got {:?}",
+                root.expr
+            );
         };
         assert_eq!(sketch, &SummaryKind::Sum);
         assert_eq!(params, &SummaryParams::Sum);
@@ -322,7 +341,11 @@ mod tests {
         };
         assert_eq!(sketch, &SummaryKind::Rate);
         assert_eq!(
-            root.schema.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            root.schema
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["ts", "value", "job"],
         );
         assert_eq!(
@@ -347,7 +370,12 @@ mod tests {
             panic!("expected outer SummaryAgg, got {:?}", sketch_input.expr);
         };
         assert_eq!(sketch, &SummaryKind::Kll);
-        let SummaryExpr::SummaryAgg { sketch: inner_kind, child: leaf, .. } = &child.expr else {
+        let SummaryExpr::SummaryAgg {
+            sketch: inner_kind,
+            child: leaf,
+            ..
+        } = &child.expr
+        else {
             panic!("expected inner SummaryAgg, got {:?}", child.expr);
         };
         assert_eq!(inner_kind, &SummaryKind::Sum);
@@ -396,7 +424,11 @@ mod tests {
         for intent in [
             AggIntent::Avg { col: None },
             AggIntent::HistogramQuantile { q: 0.99 },
-            AggIntent::Quantile { col: None, q: 0.99, accuracy: AccuracyTarget::Exact },
+            AggIntent::Quantile {
+                col: None,
+                q: 0.99,
+                accuracy: AccuracyTarget::Exact,
+            },
         ] {
             let q = agg(vec![2], intent.clone(), metric_scan(&["job"]));
             let root = bind(&q).unwrap();
@@ -438,24 +470,37 @@ mod tests {
             having: None,
             child: Box::new(metric_scan(&["job"])),
         };
-        assert!(matches!(bind(&multi).unwrap().expr, SummaryExpr::Logical(_)));
+        assert!(matches!(
+            bind(&multi).unwrap().expr,
+            SummaryExpr::Logical(_)
+        ));
     }
 
     #[test]
     fn topk_binds_cms_with_heap_and_topk_readout() {
         let q = agg(
             vec![2],
-            AggIntent::TopK { k: 5, accuracy: AccuracyTarget::Epsilon(0.01) },
+            AggIntent::TopK {
+                k: 5,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
             metric_scan(&["job"]),
         );
         let root = bind(&q).unwrap();
-        let SummaryExpr::SummaryEstimate { sketch_input, query } = &root.expr else {
+        let SummaryExpr::SummaryEstimate {
+            sketch_input,
+            query,
+        } = &root.expr
+        else {
             panic!("expected estimate root, got {:?}", root.expr);
         };
         assert!(matches!(query, SketchQuery::TopK { k: 5 }));
         assert!(matches!(
             &sketch_input.expr,
-            SummaryExpr::SummaryAgg { sketch: SummaryKind::CmsWithHeap, .. }
+            SummaryExpr::SummaryAgg {
+                sketch: SummaryKind::CmsWithHeap,
+                ..
+            }
         ));
     }
 
@@ -464,7 +509,9 @@ mod tests {
         // SUM(bytes) over a tabular scan: `col` resolves positionally to the
         // named column, not the PromQL sample value.
         let scan = QueryExpr::Scan {
-            source: Source::Table { table_ref: "t".into() },
+            source: Source::Table {
+                table_ref: "t".into(),
+            },
             predicates: vec![],
             schema: Schema {
                 columns: vec![

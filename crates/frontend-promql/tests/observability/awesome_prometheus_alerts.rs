@@ -26,9 +26,9 @@
 // `__GAP`-suffixed names intentionally SHOUT the documented divergences.
 #![allow(non_snake_case)]
 
+use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
 use asap_ir::intent_algebra::{AggIntent, BinaryOpKind, CompareOp, QueryExpr};
 use asap_ir::types::AccuracyTarget;
-use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
 
 const CORPUS: &str = include_str!("data/awesome_prometheus_alerts.txt");
 
@@ -90,7 +90,10 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
                 go(inner, out)
             }
-            QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::Ref { .. } => {}
+            QueryExpr::Scan { .. }
+            | QueryExpr::Scalar(_)
+            | QueryExpr::EvalTime
+            | QueryExpr::Ref { .. } => {}
         }
     }
     go(e, &mut out);
@@ -293,9 +296,9 @@ fn predict_linear_function_body_lowers_with_horizon() {
     let qe = ok(
         r#"predict_linear(node_filesystem_avail_bytes{fstype!~"^(fuse.*|tmpfs|cifs|nfs)"}[3h], 86400)"#,
     );
-    assert!(intents(&qe)
-        .iter()
-        .any(|i| matches!(i, AggIntent::PredictLinear { seconds } if (*seconds - 86400.0).abs() < 1e-9)));
+    assert!(intents(&qe).iter().any(
+        |i| matches!(i, AggIntent::PredictLinear { seconds } if (*seconds - 86400.0).abs() < 1e-9)
+    ));
 }
 
 #[test]

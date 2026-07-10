@@ -11,9 +11,9 @@
 //! `SchemaCatalog` is future work; the `Binder` pass does not change when it
 //! lands, only the catalog impl swaps.
 
+use crate::relational::QueryExpr as LQueryExpr;
 use asap_ir::intent_algebra::expr_ir::ColumnRef;
 use asap_ir::intent_algebra::expr_ir::L2Expr;
-use crate::relational::QueryExpr as LQueryExpr;
 use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 
 /// The DB / source-schema metadata source — resolves a source (metric /
@@ -189,8 +189,8 @@ pub(crate) fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_ir::intent_algebra::expr_ir::ColumnRef;
     use crate::relational::{L2SortKey, QueryExpr as LQueryExpr, SourceSpec};
+    use asap_ir::intent_algebra::expr_ir::ColumnRef;
     use asap_ir::intent_algebra::L2Expr;
 
     fn src(name: &str) -> LQueryExpr {

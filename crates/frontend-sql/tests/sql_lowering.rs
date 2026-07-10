@@ -4,12 +4,12 @@
 //! the relational L2 algebra, and the shared `convert_root` produces positional
 //! canonical L3 (the same converter the PromQL path uses).
 
+use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 use asap_ir::intent_algebra::{
     AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, QueryExpr, Source, WindowFuncKind,
 };
 use asap_ir::types::AccuracyTarget;
-use asap_frontend_sql::{lower_sql, SqlCatalog};
 
 fn col(name: &str, dtype: DataType) -> Column {
     Column::new(name, dtype, false)
@@ -247,7 +247,10 @@ async fn count_ranked_topk_via_alias_is_also_heavy_hitter() {
         "SELECT service, COUNT(*) AS cnt FROM metrics GROUP BY service ORDER BY cnt DESC LIMIT 10",
     )
     .await;
-    assert_eq!(inline, aliased, "aliased count-ranked topk must match the inline form");
+    assert_eq!(
+        inline, aliased,
+        "aliased count-ranked topk must match the inline form"
+    );
     let (_, aggs) = find_aggregate(&aliased).expect("expected an Aggregate");
     assert!(
         matches!(aggs.as_slice(), [AggIntent::TopK { k: 10, .. }]),
@@ -431,7 +434,10 @@ async fn derived_table_select_star_join_disambiguates_via_alias() {
     .await;
     let join = find_join(&qe).expect("expected a Join in the tree");
     let [l, r] = join_eq_columns(join);
-    assert_ne!(l, r, "SELECT * derived-table join keys must not collapse to one column");
+    assert_ne!(
+        l, r,
+        "SELECT * derived-table join keys must not collapse to one column"
+    );
 }
 
 #[tokio::test]

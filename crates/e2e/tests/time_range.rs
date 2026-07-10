@@ -9,10 +9,10 @@
 
 use std::time::Duration;
 
+use asap_e2e::fixtures::metric_schema;
+use asap_frontend_promql::lower_promql;
 use asap_ir::intent_algebra::{AggIntent, QueryExpr, Source};
 use asap_ir::types::AccuracyTarget;
-use asap_frontend_promql::lower_promql;
-use asap_e2e::fixtures::metric_schema;
 
 fn lower(q: &str) -> QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
