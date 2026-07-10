@@ -792,3 +792,122 @@ fn topk_over_bare_selector_ranks_raw_samples() {
     assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
     assert!(!has_intent(&q, |i| matches!(i, AggIntent::Sum { .. })));
 }
+
+// ── Issue #109: histogram_quantiles fans out into one branch per φ ──────────
+
+/// The `(label value, intent)` of each `histogram_quantiles` branch.
+fn quantile_branches(q: &QueryExpr) -> Vec<(String, AggIntent)> {
+    let QueryExpr::Merge { children } = q else {
+        panic!("expected a Merge at the root, got {q:?}");
+    };
+    children
+        .iter()
+        .map(|c| {
+            let QueryExpr::Relabel { value, child, .. } = c else {
+                panic!("expected Relabel per branch, got {c:?}");
+            };
+            let L3Expr::Literal(L3Scalar::Utf8(v)) = value else {
+                panic!("expected a literal label value, got {value:?}");
+            };
+            let QueryExpr::Aggregate { aggs, .. } = child.as_ref() else {
+                panic!("expected an Aggregate under the Relabel, got {child:?}");
+            };
+            (v.clone(), aggs[0].clone())
+        })
+        .collect()
+}
+
+#[test]
+fn histogram_quantiles_fans_out_over_native_histograms() {
+    // Raw / native-histogram argument → the sketch-able `Quantile` intent,
+    // exactly as the single-quantile `histogram_quantile` would choose.
+    let q = lower(r#"histogram_quantiles(testhistogram3, "q", 0, 0.25, 1)"#);
+    let branches = quantile_branches(&q);
+    assert_eq!(branches.len(), 3);
+    let labels: Vec<_> = branches.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["0.0", "0.25", "1.0"],
+        "OpenMetrics float formatting"
+    );
+    for (_, intent) in &branches {
+        assert!(
+            matches!(intent, AggIntent::Quantile { .. }),
+            "native histogram → sketch-able Quantile, got {intent:?}"
+        );
+    }
+}
+
+#[test]
+fn histogram_quantiles_over_classic_buckets_interpolates() {
+    // `_bucket` argument → exact cumulative-bucket interpolation, never a sketch.
+    let q = lower(r#"histogram_quantiles(request_duration_seconds_bucket, "q", 0.5, 0.9)"#);
+    for (_, intent) in quantile_branches(&q) {
+        assert!(
+            matches!(intent, AggIntent::HistogramQuantile { .. }),
+            "classic buckets → HistogramQuantile, got {intent:?}"
+        );
+    }
+}
+
+#[test]
+fn histogram_quantiles_branches_are_union_compatible() {
+    // `Merge` derives its schema from the first child, so every branch must
+    // agree on column names — the φ lives in the label, not the column name.
+    let q = lower(r#"histogram_quantiles(testhistogram3, "q", 0.5, 0.9)"#);
+    let QueryExpr::Merge { children } = &q else {
+        panic!("expected Merge");
+    };
+    let shapes: Vec<Vec<String>> = children
+        .iter()
+        .map(|c| {
+            c.output_schema()
+                .expect("branch schema")
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect()
+        })
+        .collect();
+    assert_eq!(shapes[0], shapes[1], "branches must be union-compatible");
+    assert_eq!(shapes[0], vec!["value".to_string(), "q".to_string()]);
+    assert_eq!(
+        q.output_schema().expect("merged schema").columns.len(),
+        2,
+        "the merged schema describes every branch"
+    );
+}
+
+#[test]
+fn histogram_quantiles_uses_the_given_label_name() {
+    let q = lower(r#"histogram_quantiles(h, "phi", 0.5)"#);
+    let QueryExpr::Merge { children } = &q else {
+        panic!("expected Merge");
+    };
+    let QueryExpr::Relabel { dst, .. } = &children[0] else {
+        panic!("expected Relabel");
+    };
+    assert_eq!(dst, "phi");
+}
+
+#[test]
+fn histogram_quantiles_formats_small_quantiles_like_prometheus() {
+    // `labels.FormatOpenMetricsFloat`: Go's %g, so exponent form below 1e-4.
+    let q = lower(r#"histogram_quantiles(h, "q", 0.00001)"#);
+    assert_eq!(quantile_branches(&q)[0].0, "1e-05");
+}
+
+#[test]
+fn histogram_quantiles_rejects_an_out_of_range_quantile() {
+    // Same rule as `histogram_quantile(φ, …)` — one bad φ fails the whole call.
+    for q in [
+        r#"histogram_quantiles(h, "q", -0.1)"#,
+        r#"histogram_quantiles(h, "q", 1.01)"#,
+        r#"histogram_quantiles(h, "q", 0.5, NaN)"#,
+    ] {
+        assert!(
+            lower_promql(q, AccuracyTarget::Exact).is_err(),
+            "{q} should be rejected"
+        );
+    }
+}

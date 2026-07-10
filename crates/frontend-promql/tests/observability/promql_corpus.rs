@@ -73,7 +73,7 @@ fn lowering_is_total_over_the_entire_corpus() {
 
     // Coverage tripwire: a code change that breaks lowering for a large slice of
     // real PromQL trips this. Current numbers on the private promql-parser `asap`
-    // branch: docs 48 lowered / 1 rejected, testdata 1502 lowered / 86 rejected /
+    // branch: docs 48 lowered / 1 rejected, testdata 1512 lowered / 76 rejected /
     // 235 unparseable. The floors sit ~1% under those, so they guard regressions
     // rather than pin an exact count — ratchet them up as coverage lands.
     //
@@ -84,7 +84,7 @@ fn lowering_is_total_over_the_entire_corpus() {
         "docs lowering coverage regressed: {docs:?}"
     );
     assert!(
-        td.lowered >= 1485,
+        td.lowered >= 1495,
         "testdata lowering coverage regressed: {td:?}"
     );
 }
