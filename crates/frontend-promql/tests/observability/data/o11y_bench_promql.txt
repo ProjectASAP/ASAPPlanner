@@ -1,0 +1,37 @@
+# PromQL query corpus derived from grafana/o11y-bench task-grading rubrics.
+# Source: https://github.com/grafana/o11y-bench (tasks-spec/**/*.yaml, `fact.query`
+#   values where backend == prometheus). Snapshot fetched 2026-07-17; deduplicated.
+# License: AGPL-3.0. Vendoring this corpus verbatim from an AGPL-3.0 source into a
+#   differently-licensed test suite has an open licensing question -- see issue #135.
+#   Do not treat this file's provenance as cleared; it is tracked, not resolved.
+# One real-world PromQL expression per line, pulled from LLM-agent-benchmark grading
+# rubrics (SRE-style incident/investigation queries: error ratios, burn rate, cache
+# lag, retry backlog, capacity). Used by tests/observability/o11y_bench_promql.rs to
+# pin parse + lowering behaviour over real-world queries (totality; no execution).
+(sum by (job) (increase(http_requests_total{status=~"5..",job=~"user-service|order-service|payment-service"}[6h]))) / (sum by (job) (increase(http_requests_total{job=~"user-service|order-service|payment-service"}[6h])))
+histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="order-service"}[5m])) by (le))
+histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job="order-service"}[6h])) by (le))
+max((sum by (job) (rate(http_requests_total{status=~"5..",job=~"user-service|order-service|payment-service"}[6h]))) / (sum by (job) (rate(http_requests_total{job=~"user-service|order-service|payment-service"}[6h]))))
+max_over_time((sum(rate(http_requests_total{job="order-service",status=~"5.."}[5m])) / sum(rate(http_requests_total{job="order-service"}[5m])))[6h:1m])
+max_over_time(histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="user-service"}[5m])) by (le))[12h:1m])
+max_over_time(service_cache_refresh_lag_seconds{job="user-service"}[12h])
+max_over_time(service_retry_queue_depth{job="order-service"}[6h])
+max_over_time(service_retry_queue_depth{job="payment-service"}[6h])
+max_over_time(service_retry_queue_depth{job=~".+"}[6h])
+max_over_time(sum(process_resident_memory_bytes)[6h:1m])
+service_cache_refresh_lag_seconds{job="user-service"}
+sort_desc(sum by (job) (rate(process_cpu_seconds_total{job=~".+"}[6h])))
+sum by (job) (increase(http_requests_total{status=~"5..",job=~".+-service"}[24h])) > 0
+sum by (job) (rate(process_cpu_seconds_total{job=~".+"}[6h]))
+sum(avg_over_time(process_resident_memory_bytes{job=~".+"}[6h]))
+sum(increase(http_requests_total{job="order-service",status=~"5.."}[24h])) / sum(increase(http_requests_total{status=~"5.."}[24h]))
+sum(increase(http_requests_total{job="payment-service",status=~"5.."}[1h] offset 6h)) / sum(increase(http_requests_total{job="payment-service"}[1h] offset 6h))
+sum(increase(http_requests_total{job="payment-service",status=~"5.."}[1h])) / sum(increase(http_requests_total{job="payment-service"}[1h]))
+sum(process_resident_memory_bytes)
+sum(rate(http_requests_total{job="order-service"}[5m] offset 1h))
+sum(rate(http_requests_total{job="order-service"}[5m]))
+sum(rate(http_requests_total{job=~"user-service|order-service|payment-service"}[5m]))
+sum(rate(http_requests_total{status=~"5..",job=~"payment-service|order-service"}[6h])) / sum(rate(http_requests_total{job=~"payment-service|order-service"}[6h]))
+sum(rate(http_requests_total{status=~"5..",job=~"user-service|order-service|payment-service"}[1h])) / sum(rate(http_requests_total{job=~"user-service|order-service|payment-service"}[1h]))
+sum(rate(process_cpu_seconds_total[1h]))
+sum(up)
