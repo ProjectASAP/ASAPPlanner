@@ -138,6 +138,13 @@ pub fn realize(intent: &AggIntent) -> Realization {
         //    output is structural (constant-1 / a synthesized label column),
         //    not a value a summary accumulator carries.
         AggIntent::Group | AggIntent::CountValues { .. } => Realization::PassThrough,
+
+        // ── Extension (deployment-model-specific, issue #131) — core has no
+        //    realization opinion for a shape it doesn't know. The owning
+        //    deployment model is expected to bind it via its own L4 rules
+        //    before this generic boundary pass ever sees it; if one reaches
+        //    here unbound, pass it through rather than guessing.
+        AggIntent::Extension { .. } => Realization::PassThrough,
     }
 }
 
