@@ -28,6 +28,8 @@ use asap_ir::intent_algebra::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_ir::types::AccuracyTarget;
 use asap_sketch::{SummaryKind, SummaryParams};
 
+use crate::cost_model::{CostModel, DefaultCostModel};
+
 /// How an [`AggIntent`] is realised at L4.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Realization {
@@ -73,8 +75,17 @@ pub fn sketch_candidates(intent: &AggIntent) -> &'static [SummaryKind] {
 ///
 /// Exhaustive over the [`AggIntent`] vocabulary — adding a variant without an
 /// explicit realization is a compile error, and the coverage-matrix test pins
-/// each variant's category.
+/// each variant's category. Ranks candidate sketches via
+/// [`DefaultCostModel`] (`asap-plan`'s built-in static preference order,
+/// unchanged); use [`realize_with`] to plug in a deployment-specific
+/// [`CostModel`] instead.
 pub fn realize(intent: &AggIntent) -> Realization {
+    realize_with(intent, &DefaultCostModel)
+}
+
+/// Like [`realize`], but ranks candidate sketches via `cost_model` (see
+/// [`crate::cost_model`]) instead of the built-in static preference order.
+pub fn realize_with(intent: &AggIntent, cost_model: &dyn CostModel) -> Realization {
     match intent {
         // ── Approximate-capable intents — the AccuracyTarget decides ────────
         AggIntent::Quantile { accuracy, .. }
@@ -82,7 +93,7 @@ pub fn realize(intent: &AggIntent) -> Realization {
         | AggIntent::Count { accuracy }
         | AggIntent::TopK { accuracy, .. } => match accuracy {
             AccuracyTarget::Exact => exact_realization(intent),
-            _ => bind_sketch(intent, accuracy),
+            _ => bind_sketch_with(intent, accuracy, cost_model),
         },
 
         // ── Exact mergeable accumulators ─────────────────────────────────────
@@ -169,8 +180,15 @@ fn accumulator(intent: &AggIntent, kind: SummaryKind, params: SummaryParams) -> 
     Realization::ExactAccumulator { kind, params }
 }
 
-/// Bind the preferred candidate sketch, with parameters sized to the target.
-fn bind_sketch(intent: &AggIntent, accuracy: &AccuracyTarget) -> Realization {
+/// Bind the preferred candidate sketch, with parameters sized to the
+/// target, ranking [`sketch_candidates`] via `cost_model` (see
+/// [`crate::cost_model`]) instead of taking the static-order head
+/// unconditionally.
+fn bind_sketch_with(
+    intent: &AggIntent,
+    accuracy: &AccuracyTarget,
+    cost_model: &dyn CostModel,
+) -> Realization {
     let (eps, delta) = match accuracy {
         // Unreachable via `realize` (Exact routes to `exact_realization`);
         // degrade to the tightest parameters if called directly.
@@ -178,10 +196,11 @@ fn bind_sketch(intent: &AggIntent, accuracy: &AccuracyTarget) -> Realization {
         AccuracyTarget::Epsilon(e) => (*e, DEFAULT_DELTA),
         AccuracyTarget::EpsilonDelta { epsilon, delta } => (*epsilon, *delta),
     };
-    let kind = sketch_candidates(intent)
-        .first()
-        .expect("approximate intent has at least one candidate sketch")
-        .clone();
+    let ranked = cost_model.rank_candidates(intent, sketch_candidates(intent));
+    let kind = ranked
+        .into_iter()
+        .next()
+        .expect("approximate intent has at least one candidate sketch");
     let params = match kind {
         SummaryKind::Kll => SummaryParams::Kll { k: kll_k(eps) },
         SummaryKind::Cms => SummaryParams::Cms {

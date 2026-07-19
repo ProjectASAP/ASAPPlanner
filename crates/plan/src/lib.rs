@@ -24,8 +24,10 @@
 //! - [`bind`] — the L3→L4 binding pass: walks a `QueryExpr` tree, fires the
 //!   [`boundary`] decision per node, and emits the sketch-bound
 //!   [`SummaryExpr`](asap_sketch::SummaryExpr) DAG (issue #98).
-//! - [`cost_model`] — stub: cost traits + the model CSE credits a shared
-//!   producer against (issues #6, #33).
+//! - [`cost_model`] — the [`CostModel`](cost_model::CostModel) trait every
+//!   deployment's cost-based sketch selection plugs into (issues #6, #33).
+//!   `asap-plan` itself only ships [`DefaultCostModel`](cost_model::DefaultCostModel),
+//!   which preserves [`boundary`]'s built-in static preference order.
 
 pub mod cse;
 
@@ -33,5 +35,6 @@ pub mod bind;
 pub mod boundary;
 pub mod cost_model;
 
-pub use bind::{bind, bind_in, BindError};
-pub use boundary::{realize, sketch_candidates, Realization};
+pub use bind::{bind, bind_in, bind_in_with, bind_with, BindError};
+pub use boundary::{realize, realize_with, sketch_candidates, Realization};
+pub use cost_model::{CostModel, DefaultCostModel};

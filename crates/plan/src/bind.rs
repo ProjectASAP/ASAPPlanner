@@ -40,7 +40,8 @@ use asap_sketch::{
 };
 use thiserror::Error;
 
-use crate::boundary::{realize, Realization};
+use crate::boundary::{realize_with, Realization};
+use crate::cost_model::{CostModel, DefaultCostModel};
 
 /// Errors from the L3→L4 binding pass.
 #[derive(Debug, Error)]
@@ -50,7 +51,10 @@ pub enum BindError {
     Schema(#[from] QueryExprError),
 }
 
-/// Bind a single query (empty `LetBinding` scope) to the L4 IR.
+/// Bind a single query (empty `LetBinding` scope) to the L4 IR. Ranks
+/// candidate sketches via [`DefaultCostModel`] (`asap-plan`'s built-in
+/// static preference order, unchanged); use [`bind_with`] to plug in a
+/// deployment-specific [`CostModel`] instead.
 pub fn bind(expr: &QueryExpr) -> Result<Rc<L4Node>, BindError> {
     bind_in(expr, &BindingScope::default())
 }
@@ -58,6 +62,21 @@ pub fn bind(expr: &QueryExpr) -> Result<Rc<L4Node>, BindError> {
 /// Bind with an explicit `LetBinding` scope — for roots that reference
 /// CSE-hoisted producers via [`QueryExpr::Ref`].
 pub fn bind_in(expr: &QueryExpr, scope: &BindingScope) -> Result<Rc<L4Node>, BindError> {
+    bind_in_with(expr, scope, &DefaultCostModel)
+}
+
+/// Like [`bind`], but ranks candidate sketches via `cost_model` (see
+/// [`crate::cost_model`]) instead of the built-in static preference order.
+pub fn bind_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L4Node>, BindError> {
+    bind_in_with(expr, &BindingScope::default(), cost_model)
+}
+
+/// Like [`bind_in`], but ranks candidate sketches via `cost_model`.
+pub fn bind_in_with(
+    expr: &QueryExpr,
+    scope: &BindingScope,
+    cost_model: &dyn CostModel,
+) -> Result<Rc<L4Node>, BindError> {
     if let QueryExpr::Aggregate {
         by,
         aggs,
@@ -69,12 +88,16 @@ pub fn bind_in(expr: &QueryExpr, scope: &BindingScope) -> Result<Rc<L4Node>, Bin
         // The bindable shape: exactly one intent, no HAVING. (Multi-intent
         // nodes and HAVING stay logical — see the module docs.)
         if let ([intent], None) = (aggs.as_slice(), having) {
-            match realize(intent) {
+            match realize_with(intent, cost_model) {
                 Realization::Sketch { kind, params } => {
-                    return bind_summary_agg(expr, by, intent, child, kind, params, scope, true)
+                    return bind_summary_agg(
+                        expr, by, intent, child, kind, params, scope, true, cost_model,
+                    )
                 }
                 Realization::ExactAccumulator { kind, params } => {
-                    return bind_summary_agg(expr, by, intent, child, kind, params, scope, false)
+                    return bind_summary_agg(
+                        expr, by, intent, child, kind, params, scope, false, cost_model,
+                    )
                 }
                 Realization::PassThrough => {}
             }
@@ -95,6 +118,7 @@ fn bind_summary_agg(
     params: SummaryParams,
     scope: &BindingScope,
     estimate: bool,
+    cost_model: &dyn CostModel,
 ) -> Result<Rc<L4Node>, BindError> {
     let child_schema = child.output_schema_in(scope)?;
     // The single canonical L3 derivation (per-series vs cross-series, name
@@ -113,7 +137,7 @@ fn bind_summary_agg(
 
     let agg = Rc::new(L4Node {
         expr: SummaryExpr::SummaryAgg {
-            child: bind_in(child, scope)?,
+            child: bind_in_with(child, scope, cost_model)?,
             sketch: kind,
             params,
             col,
@@ -303,6 +327,52 @@ mod tests {
         );
         assert!(matches!(child.expr, SummaryExpr::Logical(ref e)
             if matches!(**e, QueryExpr::Scan { .. })));
+    }
+
+    /// A deployment-supplied [`CostModel`] can override the default KLL
+    /// choice — `bind_with` must actually consult it, not just accept and
+    /// ignore it (issue: cost model interface, see `crate::cost_model`).
+    struct PreferDDSketch;
+
+    impl CostModel for PreferDDSketch {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SummaryKind],
+        ) -> Vec<SummaryKind> {
+            let mut v = candidates.to_vec();
+            if let Some(pos) = v.iter().position(|k| *k == SummaryKind::DDSketch) {
+                let ddsketch = v.remove(pos);
+                v.insert(0, ddsketch);
+            }
+            v
+        }
+    }
+
+    #[test]
+    fn bind_with_custom_cost_model_overrides_default_sketch_choice() {
+        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
+
+        // Default: KLL (see `quantile_binds_kll_wrapped_in_estimate` above).
+        let default_root = bind(&q).unwrap();
+        let SummaryExpr::SummaryEstimate { sketch_input, .. } = &default_root.expr else {
+            panic!("expected SummaryEstimate root, got {:?}", default_root.expr);
+        };
+        let SummaryExpr::SummaryAgg { sketch, .. } = &sketch_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        };
+        assert_eq!(sketch, &SummaryKind::Kll);
+
+        // With `PreferDDSketch`: DDSketch instead, same query.
+        let custom_root = bind_with(&q, &PreferDDSketch).unwrap();
+        let SummaryExpr::SummaryEstimate { sketch_input, .. } = &custom_root.expr else {
+            panic!("expected SummaryEstimate root, got {:?}", custom_root.expr);
+        };
+        let SummaryExpr::SummaryAgg { sketch, params, .. } = &sketch_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        };
+        assert_eq!(sketch, &SummaryKind::DDSketch);
+        assert_eq!(params, &SummaryParams::DDSketch { alpha: 0.01 });
     }
 
     #[test]
