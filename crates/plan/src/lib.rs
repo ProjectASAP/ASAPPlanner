@@ -51,14 +51,21 @@
 //! | **`implement_tree`** — [`bind::implement_tree`] | L3→L4, *whole tree* | walk a whole `QueryExpr` tree, calling [`boundary::implementation_for`] per node, and emit the complete L4 [`SummaryExpr`](asap_sketch::SummaryExpr)/`L4Node` DAG — named after "implementation" too rather than reusing "bind" a second time | [`bind`] |
 //! | **Bind #2** (downstream, not in this crate) | L4→L5 | a *deployment's* own physical binder, additionally deciding **placement** (edge vs. backend, wire format, …) — a genuinely different, deployment-specific decision this crate doesn't model at all | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
 //!
-//! A related, still-open question (tracked alongside issues #6/#33): whether
-//! this crate should also own a **matching** predicate — "does an already
-//! *available* `Implementation` satisfy a *required* one" (e.g.
-//! `Implementation::is_satisfied_by`), the way a database's materialized-view
-//! matching / "answering queries using views" layer does — versus leaving
-//! that entirely to downstream deployments, which today each maintain their
-//! own version (e.g. `control_plane::sketch_algebra::capability::Capability`).
-//! Undecided as of this writing.
+//! A related question (tracked alongside issues #6/#33), now resolved:
+//! whether this crate should also own a **matching** predicate — "does an
+//! already *available* `Implementation` satisfy a *required* one" — the
+//! way a database's materialized-view matching / "answering queries using
+//! views" layer does. It does: [`boundary::Implementation::is_satisfied_by`]
+//! answers exactly that, purely in terms of this crate's own summary
+//! vocabulary (`SummaryKind` family compatibility — e.g. a heap-bearing
+//! top-k sketch also satisfies a bare frequency point-query, but not the
+//! reverse). What it deliberately does **not** do is track an inventory —
+//! *which* `Implementation`s are actually available anywhere is entirely a
+//! downstream deployment's concern (e.g. `control_plane`'s own
+//! `sketch_algebra::capability::Capability`/`is_satisfied_by`, which layers
+//! deployment-specific index-matching semantics, such as
+//! single-vs-multi-population re-aggregation, on top of this crate's
+//! plain family-compatibility answer).
 
 pub mod cse;
 
