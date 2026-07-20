@@ -720,18 +720,52 @@ mod tests {
 
     // ── Implementation::is_satisfied_by ─────────────────────────────────────
 
-    fn sketch(kind: SummaryKind) -> Implementation {
-        Implementation::Sketch {
-            kind,
-            params: SummaryParams::Kll { k: 200 }, // params are irrelevant to matching
+    /// A valid `SummaryParams` for `kind` — `is_satisfied_by` only matches
+    /// on `kind`, never `params`, but the test values should still be
+    /// real, constructible `(kind, params)` pairs rather than nonsense
+    /// combinations (e.g. `Hll` paired with `Kll`'s params) that could
+    /// never arise from real code.
+    fn params_for(kind: &SummaryKind) -> SummaryParams {
+        match kind {
+            SummaryKind::Sum => SummaryParams::Sum,
+            SummaryKind::Count => SummaryParams::Count,
+            SummaryKind::MinMax => SummaryParams::MinMax,
+            SummaryKind::Increase => SummaryParams::Increase,
+            SummaryKind::Rate => SummaryParams::Rate,
+            SummaryKind::Kll => SummaryParams::Kll { k: 200 },
+            SummaryKind::Cms => SummaryParams::Cms {
+                width: 100,
+                depth: 5,
+            },
+            SummaryKind::Hll => SummaryParams::Hll { precision: 14 },
+            SummaryKind::DDSketch => SummaryParams::DDSketch { alpha: 0.01 },
+            SummaryKind::CmsWithHeap => SummaryParams::CmsWithHeap {
+                width: 100,
+                depth: 5,
+                heap_size: 10,
+            },
+            SummaryKind::Kmv => SummaryParams::Kmv { k: 1024 },
+            SummaryKind::Theta => SummaryParams::Theta { k: 1024 },
+            SummaryKind::CountSketch => SummaryParams::CountSketch {
+                width: 100,
+                depth: 5,
+            },
+            SummaryKind::CountSketchWithHeap => SummaryParams::CountSketchWithHeap {
+                width: 100,
+                depth: 5,
+                heap_size: 10,
+            },
         }
     }
 
+    fn sketch(kind: SummaryKind) -> Implementation {
+        let params = params_for(&kind);
+        Implementation::Sketch { kind, params }
+    }
+
     fn accumulator(kind: SummaryKind) -> Implementation {
-        Implementation::ExactAccumulator {
-            kind,
-            params: SummaryParams::Sum, // params are irrelevant to matching
-        }
+        let params = params_for(&kind);
+        Implementation::ExactAccumulator { kind, params }
     }
 
     #[test]
