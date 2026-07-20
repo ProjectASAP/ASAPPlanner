@@ -51,105 +51,43 @@ pub enum Implementation {
     PassThrough,
 }
 
-impl Implementation {
-    /// True when an already-**available** `Implementation` — e.g. a sketch
-    /// instance a downstream deployment already materialized somewhere,
-    /// found via whatever inventory/index that deployment keeps (this
-    /// crate has no concept of an inventory; that bookkeeping is entirely
-    /// the caller's job) — satisfies a **required** `Implementation` (what
-    /// [`implementation_for`]/[`implementation_for_with`] computed for some
-    /// [`AggIntent`]).
-    ///
-    /// This is the query-optimization-literature "materialized view
-    /// matching" / "answering queries using views" question, narrowed to
-    /// this crate's summary vocabulary: not "can I build this from
-    /// scratch" (that's what `implementation_for` answers) but "does
-    /// something that already exists answer this".
-    ///
-    /// `self` is the required side, `available` is the available side.
-    /// Rules:
-    /// - `PassThrough` required is vacuously satisfied by anything — no
-    ///   summary is needed at all, so there is nothing to match.
-    /// - An `ExactAccumulator` is satisfied only by the exact same
-    ///   [`SummaryKind`] — accumulators carry no notion of "family";
-    ///   `Sum` and `MinMax` answer different questions, full stop. (A
-    ///   grouped vs. ungrouped distinction, if a deployment's own
-    ///   vocabulary has one — e.g. "a multi-population accumulator can
-    ///   serve a single-population query via re-aggregation" — is that
-    ///   deployment's own concern: `SummaryKind`'s exact accumulators
-    ///   don't encode grouping at all, it lives on the L4 node's `by`
-    ///   instead, so there is nothing here to subsume.)
-    /// - A `Sketch` is satisfied by an available sketch in the same
-    ///   family (`Kll`/`DDSketch` are interchangeable quantile answers;
-    ///   `Hll`/`Theta`/`Kmv` are interchangeable cardinality answers),
-    ///   with one asymmetric exception: a heap-bearing top-k sketch
-    ///   (`CmsWithHeap`/`CountSketchWithHeap`) also answers a bare
-    ///   frequency point-query (`Cms`/`CountSketch`) — the heap is
-    ///   additional info layered on top of the same underlying matrix —
-    ///   but not the reverse (a heap-less sketch cannot enumerate top-k
-    ///   items it never tracked).
-    pub fn is_satisfied_by(&self, available: &Implementation) -> bool {
-        match (self, available) {
-            (Implementation::PassThrough, _) => true,
-            (
-                Implementation::ExactAccumulator { kind: required, .. },
-                Implementation::ExactAccumulator { kind: have, .. },
-            ) => required == have,
-            (
-                Implementation::Sketch { kind: required, .. },
-                Implementation::Sketch { kind: have, .. },
-            ) => match (
-                summary_family(required.clone()),
-                summary_family(have.clone()),
-            ) {
-                (Some(req_family), Some(have_family)) => req_family.is_satisfied_by(have_family),
-                _ => false,
-            },
-            _ => false,
-        }
-    }
-}
-
-/// The family a [`SummaryKind`] belongs to, for [`Implementation::is_satisfied_by`]
-/// matching. `None` for the exact-accumulator kinds, which aren't grouped
-/// into families (see `is_satisfied_by`'s doc).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SummaryFamily {
-    Quantile,
-    Cardinality,
-    /// Bare per-item frequency point-query — no heavy-hitter heap.
-    Frequency,
-    /// Frequency, augmented with a heavy-hitter heap for top-k extraction.
-    FrequencyTopk,
-}
-
-impl SummaryFamily {
-    /// True when `available` (this family) satisfies `self` (the required
-    /// family). Same family always satisfies; the one asymmetric case is
-    /// `FrequencyTopk` (heap-bearing) satisfying a bare `Frequency`
-    /// requirement — never the reverse.
-    fn is_satisfied_by(self, available: SummaryFamily) -> bool {
-        self == available
-            || (self == SummaryFamily::Frequency && available == SummaryFamily::FrequencyTopk)
-    }
-}
-
-fn summary_family(kind: SummaryKind) -> Option<SummaryFamily> {
-    match kind {
-        SummaryKind::Kll | SummaryKind::DDSketch => Some(SummaryFamily::Quantile),
-        SummaryKind::Hll | SummaryKind::Theta | SummaryKind::Kmv => {
-            Some(SummaryFamily::Cardinality)
-        }
-        SummaryKind::Cms | SummaryKind::CountSketch => Some(SummaryFamily::Frequency),
-        SummaryKind::CmsWithHeap | SummaryKind::CountSketchWithHeap => {
-            Some(SummaryFamily::FrequencyTopk)
-        }
-        SummaryKind::Sum
-        | SummaryKind::Count
-        | SummaryKind::MinMax
-        | SummaryKind::Increase
-        | SummaryKind::Rate => None,
-    }
+/// Does an already-**available** [`Implementation`] — e.g. a sketch
+/// instance a downstream deployment already materialized somewhere, found
+/// via whatever inventory/index that deployment keeps — satisfy a
+/// **required** `Implementation` (what [`implementation_for`]/
+/// [`implementation_for_with`] computed for some [`AggIntent`])?
+///
+/// This is the query-optimization-literature "materialized view matching"
+/// / "answering queries using views" question, narrowed to this crate's
+/// summary vocabulary: not "can I build this from scratch" (that's what
+/// `implementation_for` answers) but "does something that already exists
+/// answer this".
+///
+/// `asap-plan` deliberately ships no implementation of this trait and no
+/// default method body — unlike [`implementation_for`], which decision an
+/// available `Implementation` satisfies a required one is not a fact this
+/// crate can settle on its own. Two real, reasonable answers already
+/// diverge outside this crate:
+///
+/// - A **pure sketch-algebra** answer would say a `Sketch{kind: Kll, ..}`
+///   requirement is satisfied by an available `DDSketch` (both quantile
+///   sketches), and that a heap-bearing top-k sketch also answers a bare
+///   frequency point-query (the heap is additional info on the same
+///   underlying matrix) — but not the reverse.
+/// - A **deployment with its own storage-layout rules** may need more:
+///   e.g. whether a multi-population accumulator can serve a
+///   single-population query via re-aggregation is a fact about that
+///   deployment's storage layout, not about `SummaryKind` at all —
+///   `SummaryKind`'s exact accumulators don't encode grouping (grouping
+///   lives on the L4 node's `by` instead), so there is nothing in this
+///   crate's own vocabulary to subsume.
+///
+/// Implementations are expected to consult `required`/`available`'s
+/// `kind` (and whatever grouping/placement context the deployment tracks
+/// alongside `Implementation`, which this trait's signature doesn't carry
+/// because this crate has no inventory concept to carry it in).
+pub trait Matcher {
+    fn is_satisfied_by(&self, required: &Implementation, available: &Implementation) -> bool;
 }
 
 /// Confidence δ assumed when the target carries only an ε
@@ -716,130 +654,5 @@ mod tests {
                 params: SummaryParams::Kll { k: 65_535 },
             }
         );
-    }
-
-    // ── Implementation::is_satisfied_by ─────────────────────────────────────
-
-    /// A valid `SummaryParams` for `kind` — `is_satisfied_by` only matches
-    /// on `kind`, never `params`, but the test values should still be
-    /// real, constructible `(kind, params)` pairs rather than nonsense
-    /// combinations (e.g. `Hll` paired with `Kll`'s params) that could
-    /// never arise from real code.
-    fn params_for(kind: &SummaryKind) -> SummaryParams {
-        match kind {
-            SummaryKind::Sum => SummaryParams::Sum,
-            SummaryKind::Count => SummaryParams::Count,
-            SummaryKind::MinMax => SummaryParams::MinMax,
-            SummaryKind::Increase => SummaryParams::Increase,
-            SummaryKind::Rate => SummaryParams::Rate,
-            SummaryKind::Kll => SummaryParams::Kll { k: 200 },
-            SummaryKind::Cms => SummaryParams::Cms {
-                width: 100,
-                depth: 5,
-            },
-            SummaryKind::Hll => SummaryParams::Hll { precision: 14 },
-            SummaryKind::DDSketch => SummaryParams::DDSketch { alpha: 0.01 },
-            SummaryKind::CmsWithHeap => SummaryParams::CmsWithHeap {
-                width: 100,
-                depth: 5,
-                heap_size: 10,
-            },
-            SummaryKind::Kmv => SummaryParams::Kmv { k: 1024 },
-            SummaryKind::Theta => SummaryParams::Theta { k: 1024 },
-            SummaryKind::CountSketch => SummaryParams::CountSketch {
-                width: 100,
-                depth: 5,
-            },
-            SummaryKind::CountSketchWithHeap => SummaryParams::CountSketchWithHeap {
-                width: 100,
-                depth: 5,
-                heap_size: 10,
-            },
-        }
-    }
-
-    fn sketch(kind: SummaryKind) -> Implementation {
-        let params = params_for(&kind);
-        Implementation::Sketch { kind, params }
-    }
-
-    fn accumulator(kind: SummaryKind) -> Implementation {
-        let params = params_for(&kind);
-        Implementation::ExactAccumulator { kind, params }
-    }
-
-    #[test]
-    fn same_sketch_kind_satisfies_itself() {
-        assert!(sketch(SummaryKind::Kll).is_satisfied_by(&sketch(SummaryKind::Kll)));
-        assert!(sketch(SummaryKind::Hll).is_satisfied_by(&sketch(SummaryKind::Hll)));
-    }
-
-    #[test]
-    fn same_family_alternate_kind_satisfies() {
-        // Kll / DDSketch are interchangeable quantile answers.
-        assert!(sketch(SummaryKind::Kll).is_satisfied_by(&sketch(SummaryKind::DDSketch)));
-        // Hll / Theta / Kmv are interchangeable cardinality answers.
-        assert!(sketch(SummaryKind::Hll).is_satisfied_by(&sketch(SummaryKind::Theta)));
-        assert!(sketch(SummaryKind::Hll).is_satisfied_by(&sketch(SummaryKind::Kmv)));
-    }
-
-    #[test]
-    fn cross_family_never_satisfies() {
-        assert!(!sketch(SummaryKind::Kll).is_satisfied_by(&sketch(SummaryKind::Hll)));
-        assert!(!sketch(SummaryKind::Hll).is_satisfied_by(&sketch(SummaryKind::Kll)));
-        assert!(!sketch(SummaryKind::Kll).is_satisfied_by(&sketch(SummaryKind::Cms)));
-    }
-
-    #[test]
-    fn heap_bearing_available_satisfies_bare_frequency_required() {
-        // A CmsWithHeap instance already carries the plain CMS matrix, so
-        // it answers a bare frequency point-query too.
-        assert!(sketch(SummaryKind::Cms).is_satisfied_by(&sketch(SummaryKind::CmsWithHeap)));
-        assert!(sketch(SummaryKind::CountSketch)
-            .is_satisfied_by(&sketch(SummaryKind::CountSketchWithHeap)));
-    }
-
-    #[test]
-    fn bare_frequency_available_does_not_satisfy_topk_required() {
-        // The reverse does not hold: a heap-less sketch never tracked the
-        // heavy-hitter heap, so it cannot enumerate top-k items.
-        assert!(!sketch(SummaryKind::CmsWithHeap).is_satisfied_by(&sketch(SummaryKind::Cms)));
-        assert!(!sketch(SummaryKind::CountSketchWithHeap)
-            .is_satisfied_by(&sketch(SummaryKind::CountSketch)));
-    }
-
-    #[test]
-    fn cms_and_count_sketch_are_the_same_frequency_family() {
-        assert!(sketch(SummaryKind::Cms).is_satisfied_by(&sketch(SummaryKind::CountSketch)));
-        assert!(sketch(SummaryKind::CmsWithHeap)
-            .is_satisfied_by(&sketch(SummaryKind::CountSketchWithHeap)));
-    }
-
-    #[test]
-    fn exact_accumulator_requires_the_exact_same_kind() {
-        assert!(accumulator(SummaryKind::Sum).is_satisfied_by(&accumulator(SummaryKind::Sum)));
-        assert!(!accumulator(SummaryKind::Sum).is_satisfied_by(&accumulator(SummaryKind::MinMax)));
-        assert!(
-            !accumulator(SummaryKind::Increase).is_satisfied_by(&accumulator(SummaryKind::Rate))
-        );
-    }
-
-    #[test]
-    fn sketch_and_accumulator_never_satisfy_each_other() {
-        assert!(!sketch(SummaryKind::Kll).is_satisfied_by(&accumulator(SummaryKind::Sum)));
-        assert!(!accumulator(SummaryKind::Sum).is_satisfied_by(&sketch(SummaryKind::Kll)));
-    }
-
-    #[test]
-    fn pass_through_required_is_vacuously_satisfied() {
-        assert!(Implementation::PassThrough.is_satisfied_by(&sketch(SummaryKind::Kll)));
-        assert!(Implementation::PassThrough.is_satisfied_by(&accumulator(SummaryKind::Sum)));
-        assert!(Implementation::PassThrough.is_satisfied_by(&Implementation::PassThrough));
-    }
-
-    #[test]
-    fn pass_through_available_never_satisfies_a_real_requirement() {
-        assert!(!sketch(SummaryKind::Kll).is_satisfied_by(&Implementation::PassThrough));
-        assert!(!accumulator(SummaryKind::Sum).is_satisfied_by(&Implementation::PassThrough));
     }
 }
