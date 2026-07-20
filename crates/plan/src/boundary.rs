@@ -28,6 +28,8 @@ use asap_ir::intent_algebra::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_ir::types::AccuracyTarget;
 use asap_sketch::{SummaryKind, SummaryParams};
 
+use crate::cost_model::{CostModel, DefaultCostModel};
+
 /// How an [`AggIntent`] is realised at L4.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Realization {
@@ -54,12 +56,12 @@ pub enum Realization {
 /// one. `ln(1/0.01) → depth 5`, matching the conventional CMS sizing.
 pub const DEFAULT_DELTA: f64 = 0.01;
 
-/// The sketch families that can serve an intent, most-preferred first.
+/// The summary families that can serve an intent, most-preferred first.
 /// This is the `AggIntent → SummaryKind` map of issue #98; [`realize`] binds
 /// the head of the list. The tail entries are the alternatives a future cost
 /// model (#6/#33) may pick instead — listed here so the candidate set has one
 /// home.
-pub fn sketch_candidates(intent: &AggIntent) -> &'static [SummaryKind] {
+pub fn summary_candidates(intent: &AggIntent) -> &'static [SummaryKind] {
     match intent {
         AggIntent::Quantile { .. } => &[SummaryKind::Kll, SummaryKind::DDSketch],
         AggIntent::Cardinality { .. } => &[SummaryKind::Hll, SummaryKind::Theta, SummaryKind::Kmv],
@@ -73,8 +75,17 @@ pub fn sketch_candidates(intent: &AggIntent) -> &'static [SummaryKind] {
 ///
 /// Exhaustive over the [`AggIntent`] vocabulary — adding a variant without an
 /// explicit realization is a compile error, and the coverage-matrix test pins
-/// each variant's category.
+/// each variant's category. Ranks candidate summaries via
+/// [`DefaultCostModel`] (`asap-plan`'s built-in static preference order,
+/// unchanged); use [`realize_with`] to plug in a deployment-specific
+/// [`CostModel`] instead.
 pub fn realize(intent: &AggIntent) -> Realization {
+    realize_with(intent, &DefaultCostModel)
+}
+
+/// Like [`realize`], but ranks candidate summaries via `cost_model` (see
+/// [`crate::cost_model`]) instead of the built-in static preference order.
+pub fn realize_with(intent: &AggIntent, cost_model: &dyn CostModel) -> Realization {
     match intent {
         // ── Approximate-capable intents — the AccuracyTarget decides ────────
         AggIntent::Quantile { accuracy, .. }
@@ -82,7 +93,7 @@ pub fn realize(intent: &AggIntent) -> Realization {
         | AggIntent::Count { accuracy }
         | AggIntent::TopK { accuracy, .. } => match accuracy {
             AccuracyTarget::Exact => exact_realization(intent),
-            _ => bind_sketch(intent, accuracy),
+            _ => bind_summary_with(intent, accuracy, cost_model),
         },
 
         // ── Exact mergeable accumulators ─────────────────────────────────────
@@ -169,8 +180,15 @@ fn accumulator(intent: &AggIntent, kind: SummaryKind, params: SummaryParams) -> 
     Realization::ExactAccumulator { kind, params }
 }
 
-/// Bind the preferred candidate sketch, with parameters sized to the target.
-fn bind_sketch(intent: &AggIntent, accuracy: &AccuracyTarget) -> Realization {
+/// Bind the preferred candidate summary, with parameters sized to the
+/// target, ranking [`summary_candidates`] via `cost_model` (see
+/// [`crate::cost_model`]) instead of taking the static-order head
+/// unconditionally.
+fn bind_summary_with(
+    intent: &AggIntent,
+    accuracy: &AccuracyTarget,
+    cost_model: &dyn CostModel,
+) -> Realization {
     let (eps, delta) = match accuracy {
         // Unreachable via `realize` (Exact routes to `exact_realization`);
         // degrade to the tightest parameters if called directly.
@@ -178,10 +196,11 @@ fn bind_sketch(intent: &AggIntent, accuracy: &AccuracyTarget) -> Realization {
         AccuracyTarget::Epsilon(e) => (*e, DEFAULT_DELTA),
         AccuracyTarget::EpsilonDelta { epsilon, delta } => (*epsilon, *delta),
     };
-    let kind = sketch_candidates(intent)
-        .first()
-        .expect("approximate intent has at least one candidate sketch")
-        .clone();
+    let ranked = cost_model.rank_candidates(intent, summary_candidates(intent));
+    let kind = ranked
+        .into_iter()
+        .next()
+        .expect("approximate intent has at least one candidate summary");
     let params = match kind {
         SummaryKind::Kll => SummaryParams::Kll { k: kll_k(eps) },
         SummaryKind::Cms => SummaryParams::Cms {
@@ -535,27 +554,27 @@ mod tests {
     #[test]
     fn candidate_lists_match_the_issue_map() {
         assert_eq!(
-            sketch_candidates(&default_quantile(0.5)),
+            summary_candidates(&default_quantile(0.5)),
             &[SummaryKind::Kll, SummaryKind::DDSketch]
         );
         assert_eq!(
-            sketch_candidates(&default_cardinality()),
+            summary_candidates(&default_cardinality()),
             &[SummaryKind::Hll, SummaryKind::Theta, SummaryKind::Kmv]
         );
         assert_eq!(
-            sketch_candidates(&AggIntent::TopK {
+            summary_candidates(&AggIntent::TopK {
                 k: 5,
                 accuracy: eps(0.01)
             }),
             &[SummaryKind::CmsWithHeap]
         );
         assert_eq!(
-            sketch_candidates(&AggIntent::Count {
+            summary_candidates(&AggIntent::Count {
                 accuracy: eps(0.01)
             }),
             &[SummaryKind::Cms]
         );
-        assert!(sketch_candidates(&AggIntent::Rate).is_empty());
+        assert!(summary_candidates(&AggIntent::Rate).is_empty());
     }
 
     #[test]
