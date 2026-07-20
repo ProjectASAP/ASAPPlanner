@@ -52,7 +52,7 @@ pub enum BindError {
 }
 
 /// Bind a single query (empty `LetBinding` scope) to the L4 IR. Ranks
-/// candidate sketches via [`DefaultCostModel`] (`asap-plan`'s built-in
+/// candidate summaries via [`DefaultCostModel`] (`asap-plan`'s built-in
 /// static preference order, unchanged); use [`bind_with`] to plug in a
 /// deployment-specific [`CostModel`] instead.
 pub fn bind(expr: &QueryExpr) -> Result<Rc<L4Node>, BindError> {
@@ -65,13 +65,13 @@ pub fn bind_in(expr: &QueryExpr, scope: &BindingScope) -> Result<Rc<L4Node>, Bin
     bind_in_with(expr, scope, &DefaultCostModel)
 }
 
-/// Like [`bind`], but ranks candidate sketches via `cost_model` (see
+/// Like [`bind`], but ranks candidate summaries via `cost_model` (see
 /// [`crate::cost_model`]) instead of the built-in static preference order.
 pub fn bind_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L4Node>, BindError> {
     bind_in_with(expr, &BindingScope::default(), cost_model)
 }
 
-/// Like [`bind_in`], but ranks candidate sketches via `cost_model`.
+/// Like [`bind_in`], but ranks candidate summaries via `cost_model`.
 pub fn bind_in_with(
     expr: &QueryExpr,
     scope: &BindingScope,
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_with_custom_cost_model_overrides_default_sketch_choice() {
+    fn bind_with_custom_cost_model_overrides_default_summary_choice() {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
 
         // Default: KLL (see `quantile_binds_kll_wrapped_in_estimate` above).

@@ -36,5 +36,5 @@ pub mod boundary;
 pub mod cost_model;
 
 pub use bind::{bind, bind_in, bind_in_with, bind_with, BindError};
-pub use boundary::{realize, realize_with, sketch_candidates, Realization};
+pub use boundary::{realize, realize_with, summary_candidates, Realization};
 pub use cost_model::{CostModel, DefaultCostModel};
