@@ -33,6 +33,13 @@ pub enum SummaryKind {
     Kmv,
     /// Theta sketch (mergeable, set operations + cardinality).
     Theta,
+    /// Count-Sketch (mergeable, balanced/zero-mean-error frequency
+    /// queries — an alternative to CMS's one-sided bias).
+    CountSketch,
+    /// Count-Sketch augmented with a min-heap for top-k / heavy-hitter
+    /// queries — an alternative to `CmsWithHeap` on the Count-Sketch
+    /// substrate.
+    CountSketchWithHeap,
 }
 
 // ── Sketch parameters ─────────────────────────────────────────────────────────
@@ -73,6 +80,15 @@ pub enum SummaryParams {
     },
     Theta {
         k: u32,
+    },
+    CountSketch {
+        width: u32,
+        depth: u32,
+    },
+    CountSketchWithHeap {
+        width: u32,
+        depth: u32,
+        heap_size: u32,
     },
 }
 
