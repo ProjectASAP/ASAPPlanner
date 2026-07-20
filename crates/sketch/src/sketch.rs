@@ -5,7 +5,13 @@ use asap_ir::intent_algebra::ColumnRef;
 /// Identifies a precomputed aggregation family — either an exact accumulator
 /// or an approximate sketch. Used as a type tag in `L4DataType` and as the
 /// binding choice recorded in `SummaryExpr` nodes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `PartialOrd`/`Ord` (derived, by variant declaration order below): a
+/// downstream deployment (ASAPQuery-backend's `control_plane`) needs a
+/// deterministic set of families per metric — e.g. `BTreeSet<SummaryKind>`
+/// — to emit reproducible YAML/JSON config. This crate has no ordering
+/// opinion of its own; the derive just makes one available.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SummaryKind {
     // ── Exact accumulators (no approximation error) ──────────────────────────
     /// Exact sum accumulator (mergeable by addition).
