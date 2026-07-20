@@ -9,7 +9,7 @@
 //! interface every deployment's cost model plugs into, so [`boundary`]'s
 //! summary selection has exactly one extension point instead of forcing
 //! each downstream (ASAPCollector + ASAPQuery-backend, ASAPFusion, …) to
-//! fork [`boundary::bind_summary_with`].
+//! fork [`boundary::implementation_for`].
 //!
 //! "Summary" here is deliberately broader than the classic streaming
 //! sketches [`SummaryKind`] enumerates today (Kll/DDSketch/Hll/Cms/…):
@@ -21,10 +21,12 @@
 //! trait or [`boundary`]'s dispatch is sketch-specific.
 //!
 //! Every entry point that doesn't take an explicit `&dyn CostModel`
-//! ([`realize`](crate::boundary::realize), [`bind`](crate::bind::bind),
-//! [`bind_in`](crate::bind::bind_in)) runs against [`DefaultCostModel`], so
-//! a deployment that never plugs in its own cost model keeps today's
-//! static-preference-order behavior exactly, byte for byte.
+//! ([`implementation_for`](crate::boundary::implementation_for),
+//! [`implement_tree`](crate::bind::implement_tree),
+//! [`implement_tree_in`](crate::bind::implement_tree_in)) runs against
+//! [`DefaultCostModel`], so a deployment that never plugs in its own cost
+//! model keeps today's static-preference-order behavior exactly, byte for
+//! byte.
 
 use asap_ir::intent_algebra::agg_intent::AggIntent;
 use asap_sketch::SummaryKind;
@@ -36,8 +38,8 @@ use asap_sketch::SummaryKind;
 /// intent, in an arbitrary static preference order (issue #98's "one home"
 /// for the candidate set). A `CostModel` re-orders that list under real,
 /// deployment-specific cost knowledge this crate has no way to know about —
-/// [`boundary::bind_summary_with`] binds whichever candidate ends up first after
-/// ranking.
+/// [`boundary::implementation_for_with`] implements whichever candidate ends
+/// up first after ranking.
 pub trait CostModel {
     /// Rank `candidates` (as returned by
     /// [`summary_candidates`](crate::boundary::summary_candidates)) for
@@ -47,9 +49,10 @@ pub trait CostModel {
     /// available in their deployment, but MUST NOT invent a candidate that
     /// wasn't in the input — an unknown [`SummaryKind`] has no
     /// [`SummaryParams`](asap_sketch::SummaryParams) sizing logic in
-    /// [`boundary::bind_summary_with`] and binding it will panic. Returning an
-    /// empty `Vec` means "no candidate is acceptable"; `bind_summary_with` treats
-    /// that the same as `candidates` having been empty to begin with.
+    /// [`boundary::implementation_for_with`] and binding it will panic.
+    /// Returning an empty `Vec` means "no candidate is acceptable";
+    /// `implementation_for_with` treats that the same as `candidates`
+    /// having been empty to begin with.
     fn rank_candidates(&self, intent: &AggIntent, candidates: &[SummaryKind]) -> Vec<SummaryKind>;
 }
 

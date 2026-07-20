@@ -40,12 +40,12 @@ use asap_sketch::{
 };
 use thiserror::Error;
 
-use crate::boundary::{realize_with, Realization};
+use crate::boundary::{implementation_for_with, Implementation};
 use crate::cost_model::{CostModel, DefaultCostModel};
 
 /// Errors from the L3→L4 binding pass.
 #[derive(Debug, Error)]
-pub enum BindError {
+pub enum ImplementError {
     /// L3 schema derivation failed while lifting an edge to `L4Schema`.
     #[error("schema derivation failed during L3→L4 binding: {0}")]
     Schema(#[from] QueryExprError),
@@ -53,30 +53,36 @@ pub enum BindError {
 
 /// Bind a single query (empty `LetBinding` scope) to the L4 IR. Ranks
 /// candidate summaries via [`DefaultCostModel`] (`asap-plan`'s built-in
-/// static preference order, unchanged); use [`bind_with`] to plug in a
+/// static preference order, unchanged); use [`implement_tree_with`] to plug in a
 /// deployment-specific [`CostModel`] instead.
-pub fn bind(expr: &QueryExpr) -> Result<Rc<L4Node>, BindError> {
-    bind_in(expr, &BindingScope::default())
+pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L4Node>, ImplementError> {
+    implement_tree_in(expr, &BindingScope::default())
 }
 
 /// Bind with an explicit `LetBinding` scope — for roots that reference
 /// CSE-hoisted producers via [`QueryExpr::Ref`].
-pub fn bind_in(expr: &QueryExpr, scope: &BindingScope) -> Result<Rc<L4Node>, BindError> {
-    bind_in_with(expr, scope, &DefaultCostModel)
+pub fn implement_tree_in(
+    expr: &QueryExpr,
+    scope: &BindingScope,
+) -> Result<Rc<L4Node>, ImplementError> {
+    implement_tree_in_with(expr, scope, &DefaultCostModel)
 }
 
-/// Like [`bind`], but ranks candidate summaries via `cost_model` (see
+/// Like [`implement_tree`], but ranks candidate summaries via `cost_model` (see
 /// [`crate::cost_model`]) instead of the built-in static preference order.
-pub fn bind_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L4Node>, BindError> {
-    bind_in_with(expr, &BindingScope::default(), cost_model)
+pub fn implement_tree_with(
+    expr: &QueryExpr,
+    cost_model: &dyn CostModel,
+) -> Result<Rc<L4Node>, ImplementError> {
+    implement_tree_in_with(expr, &BindingScope::default(), cost_model)
 }
 
-/// Like [`bind_in`], but ranks candidate summaries via `cost_model`.
-pub fn bind_in_with(
+/// Like [`implement_tree_in`], but ranks candidate summaries via `cost_model`.
+pub fn implement_tree_in_with(
     expr: &QueryExpr,
     scope: &BindingScope,
     cost_model: &dyn CostModel,
-) -> Result<Rc<L4Node>, BindError> {
+) -> Result<Rc<L4Node>, ImplementError> {
     if let QueryExpr::Aggregate {
         by,
         aggs,
@@ -88,18 +94,18 @@ pub fn bind_in_with(
         // The bindable shape: exactly one intent, no HAVING. (Multi-intent
         // nodes and HAVING stay logical — see the module docs.)
         if let ([intent], None) = (aggs.as_slice(), having) {
-            match realize_with(intent, cost_model) {
-                Realization::Sketch { kind, params } => {
+            match implementation_for_with(intent, cost_model) {
+                Implementation::Sketch { kind, params } => {
                     return bind_summary_agg(
                         expr, by, intent, child, kind, params, scope, true, cost_model,
                     )
                 }
-                Realization::ExactAccumulator { kind, params } => {
+                Implementation::ExactAccumulator { kind, params } => {
                     return bind_summary_agg(
                         expr, by, intent, child, kind, params, scope, false, cost_model,
                     )
                 }
-                Realization::PassThrough => {}
+                Implementation::PassThrough => {}
             }
         }
     }
@@ -119,7 +125,7 @@ fn bind_summary_agg(
     scope: &BindingScope,
     estimate: bool,
     cost_model: &dyn CostModel,
-) -> Result<Rc<L4Node>, BindError> {
+) -> Result<Rc<L4Node>, ImplementError> {
     let child_schema = child.output_schema_in(scope)?;
     // The single canonical L3 derivation (per-series vs cross-series, name
     // overrides) already computes the row shape; L4 only retypes the summary
@@ -137,7 +143,7 @@ fn bind_summary_agg(
 
     let agg = Rc::new(L4Node {
         expr: SummaryExpr::SummaryAgg {
-            child: bind_in_with(child, scope, cost_model)?,
+            child: implement_tree_in_with(child, scope, cost_model)?,
             sketch: kind,
             params,
             col,
@@ -211,13 +217,13 @@ fn readout(intent: &AggIntent, col: &ColumnRef) -> SketchQuery {
         AggIntent::Cardinality { .. } => SketchQuery::Cardinality,
         AggIntent::TopK { k, .. } => SketchQuery::TopK { k: *k },
         AggIntent::Count { .. } => SketchQuery::PointCount { key: col.clone() },
-        other => unreachable!("no sketch realization for {other:?} (boundary::realize)"),
+        other => unreachable!("no sketch realization for {other:?} (boundary::implementation_for)"),
     }
 }
 
 /// Wrap an unrewritten L3 subtree, lifting its schema with every column
 /// `L4DataType::Primitive`.
-fn logical(expr: &QueryExpr, scope: &BindingScope) -> Result<Rc<L4Node>, BindError> {
+fn logical(expr: &QueryExpr, scope: &BindingScope) -> Result<Rc<L4Node>, ImplementError> {
     let schema = expr.output_schema_in(scope)?;
     Ok(Rc::new(L4Node {
         expr: SummaryExpr::Logical(Box::new(expr.clone())),
@@ -286,7 +292,7 @@ mod tests {
         // quantile by (job) (m) at ε=0.01 → Estimate(Quantile) over
         // SummaryAgg(Kll{k:200}) over Logical(Scan). job = col 2.
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let root = bind(&q).unwrap();
+        let root = implement_tree(&q).unwrap();
 
         let SummaryExpr::SummaryEstimate {
             sketch_input,
@@ -330,7 +336,7 @@ mod tests {
     }
 
     /// A deployment-supplied [`CostModel`] can override the default KLL
-    /// choice — `bind_with` must actually consult it, not just accept and
+    /// choice — `implement_tree_with` must actually consult it, not just accept and
     /// ignore it (issue: cost model interface, see `crate::cost_model`).
     struct PreferDDSketch;
 
@@ -354,7 +360,7 @@ mod tests {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
 
         // Default: KLL (see `quantile_binds_kll_wrapped_in_estimate` above).
-        let default_root = bind(&q).unwrap();
+        let default_root = implement_tree(&q).unwrap();
         let SummaryExpr::SummaryEstimate { sketch_input, .. } = &default_root.expr else {
             panic!("expected SummaryEstimate root, got {:?}", default_root.expr);
         };
@@ -364,7 +370,7 @@ mod tests {
         assert_eq!(sketch, &SummaryKind::Kll);
 
         // With `PreferDDSketch`: DDSketch instead, same query.
-        let custom_root = bind_with(&q, &PreferDDSketch).unwrap();
+        let custom_root = implement_tree_with(&q, &PreferDDSketch).unwrap();
         let SummaryExpr::SummaryEstimate { sketch_input, .. } = &custom_root.expr else {
             panic!("expected SummaryEstimate root, got {:?}", custom_root.expr);
         };
@@ -378,7 +384,7 @@ mod tests {
     #[test]
     fn exact_sum_binds_accumulator_without_estimate() {
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let root = bind(&q).unwrap();
+        let root = implement_tree(&q).unwrap();
         let SummaryExpr::SummaryAgg { sketch, params, .. } = &root.expr else {
             panic!(
                 "expected bare SummaryAgg (no estimate), got {:?}",
@@ -405,7 +411,7 @@ mod tests {
                 child: Box::new(metric_scan(&["job"])),
             },
         );
-        let root = bind(&q).unwrap();
+        let root = implement_tree(&q).unwrap();
         let SummaryExpr::SummaryAgg { sketch, .. } = &root.expr else {
             panic!("expected SummaryAgg, got {:?}", root.expr);
         };
@@ -431,7 +437,7 @@ mod tests {
         // the nested tree: KLL over an exact Sum accumulator.
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.9), inner);
-        let root = bind(&outer).unwrap();
+        let root = implement_tree(&outer).unwrap();
 
         let SummaryExpr::SummaryEstimate { sketch_input, .. } = &root.expr else {
             panic!("expected estimate root, got {:?}", root.expr);
@@ -470,7 +476,7 @@ mod tests {
                 col,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             };
-            let root = bind(&agg(vec![0], intent, metric_scan(&["job"]))).unwrap();
+            let root = implement_tree(&agg(vec![0], intent, metric_scan(&["job"]))).unwrap();
             let bound = find_summary_col(&root)
                 .unwrap_or_else(|| panic!("expected a SummaryAgg for col={col:?}"));
             assert_eq!(bound, want, "wrong summarised column for col={col:?}");
@@ -501,7 +507,7 @@ mod tests {
             },
         ] {
             let q = agg(vec![2], intent.clone(), metric_scan(&["job"]));
-            let root = bind(&q).unwrap();
+            let root = implement_tree(&q).unwrap();
             assert!(
                 matches!(root.expr, SummaryExpr::Logical(ref e) if **e == q),
                 "expected Logical passthrough for {intent:?}"
@@ -521,7 +527,7 @@ mod tests {
             }),
             child: Box::new(agg(vec![], default_quantile(0.99), metric_scan(&[]))),
         };
-        let root = bind(&q).unwrap();
+        let root = implement_tree(&q).unwrap();
         assert!(matches!(root.expr, SummaryExpr::Logical(ref e) if **e == q));
     }
 
@@ -531,7 +537,10 @@ mod tests {
         if let QueryExpr::Aggregate { having, .. } = &mut q {
             *having = Some(Predicate(L3Expr::Literal(L3Scalar::Boolean(true))));
         }
-        assert!(matches!(bind(&q).unwrap().expr, SummaryExpr::Logical(_)));
+        assert!(matches!(
+            implement_tree(&q).unwrap().expr,
+            SummaryExpr::Logical(_)
+        ));
 
         let multi = QueryExpr::Aggregate {
             by: vec![2].into(),
@@ -541,7 +550,7 @@ mod tests {
             child: Box::new(metric_scan(&["job"])),
         };
         assert!(matches!(
-            bind(&multi).unwrap().expr,
+            implement_tree(&multi).unwrap().expr,
             SummaryExpr::Logical(_)
         ));
     }
@@ -556,7 +565,7 @@ mod tests {
             },
             metric_scan(&["job"]),
         );
-        let root = bind(&q).unwrap();
+        let root = implement_tree(&q).unwrap();
         let SummaryExpr::SummaryEstimate {
             sketch_input,
             query,
@@ -594,7 +603,7 @@ mod tests {
             },
         };
         let q = agg(vec![0], AggIntent::Sum { col: Some(1) }, scan);
-        let root = bind(&q).unwrap();
+        let root = implement_tree(&q).unwrap();
         let SummaryExpr::SummaryAgg { col, .. } = &root.expr else {
             panic!("expected SummaryAgg, got {:?}", root.expr);
         };

@@ -1,7 +1,7 @@
 //! End-to-end query-string → L4 pin (issue #98).
 //!
 //! Drives the full pipeline — PromQL text → L3 `QueryExpr` (`lower_promql`)
-//! → L4 `SummaryExpr` DAG (`asap_plan::bind`) — and pins the sketch-bound
+//! → L4 `SummaryExpr` DAG (`asap_plan::implement_tree`) — and pins the sketch-bound
 //! shape node by node, including the `(SummaryKind, SummaryParams)` committed
 //! on each edge's schema. This is the design doc's §"L4 — sketch algebra"
 //! worked example, running for real.
@@ -11,7 +11,7 @@ use asap_ir::intent_algebra::expr_ir::ColumnRef;
 use asap_ir::intent_algebra::query_expr::QueryExpr;
 use asap_ir::intent_algebra::schema::DataType;
 use asap_ir::types::AccuracyTarget;
-use asap_plan::bind;
+use asap_plan::implement_tree;
 use asap_sketch::{L4DataType, L4Schema, SketchQuery, SummaryExpr, SummaryKind, SummaryParams};
 
 fn dtype<'a>(schema: &'a L4Schema, name: &str) -> &'a L4DataType {
@@ -42,7 +42,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         AccuracyTarget::Epsilon(0.01),
     )
     .expect("lowering failed");
-    let root = bind(&l3).expect("binding failed");
+    let root = implement_tree(&l3).expect("binding failed");
 
     // Root: the sketch readout, back to a plain row shape.
     let SummaryExpr::SummaryEstimate {
@@ -129,7 +129,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
 fn promql_exact_workload_binds_accumulators_not_sketches() {
     let l3 = lower_promql("sum by (job) (http_requests_total)", AccuracyTarget::Exact)
         .expect("lowering failed");
-    let root = bind(&l3).expect("binding failed");
+    let root = implement_tree(&l3).expect("binding failed");
     let SummaryExpr::SummaryAgg {
         sketch, params, by, ..
     } = &root.expr
@@ -147,7 +147,7 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
 
     let l3 =
         lower_promql("avg(http_requests_total)", AccuracyTarget::Exact).expect("lowering failed");
-    let root = bind(&l3).expect("binding failed");
+    let root = implement_tree(&l3).expect("binding failed");
     assert!(
         matches!(root.expr, SummaryExpr::Logical(_)),
         "avg has no mergeable accumulator — stays logical"
