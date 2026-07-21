@@ -242,7 +242,27 @@ fn bind_summary_with(
         .into_iter()
         .next()
         .expect("approximate intent has at least one candidate summary");
-    let params = match kind {
+    let params = cost_model.size_params(kind.clone(), intent, eps, delta);
+    Implementation::Sketch { kind, params }
+}
+
+/// `asap-plan`'s built-in `SummaryParams` sizing, keyed off the resolved
+/// `(eps, delta)` accuracy budget. [`CostModel::size_params`]'s default
+/// body — factored out to a free function so a deployment's own
+/// `CostModel` impl can still delegate to it for the candidates it
+/// doesn't want to resize itself.
+///
+/// Each formula inverts the sketch family's standard error bound to the
+/// smallest parameter satisfying the target, clamped to the family's sane
+/// range. A non-positive ε saturates to the clamp maximum (tightest
+/// allowed).
+pub fn default_size_params(
+    kind: SummaryKind,
+    intent: &AggIntent,
+    eps: f64,
+    delta: f64,
+) -> SummaryParams {
+    match kind {
         SummaryKind::Kll => SummaryParams::Kll { k: kll_k(eps) },
         SummaryKind::Cms => SummaryParams::Cms {
             width: cms_width(eps),
@@ -294,8 +314,7 @@ fn bind_summary_with(
         | SummaryKind::MinMax
         | SummaryKind::Increase
         | SummaryKind::Rate => unreachable!("exact accumulators are not sketch candidates"),
-    };
-    Implementation::Sketch { kind, params }
+    }
 }
 
 // ── Parameter sizing ──────────────────────────────────────────────────────────
