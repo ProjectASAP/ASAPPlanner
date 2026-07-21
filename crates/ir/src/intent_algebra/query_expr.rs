@@ -156,11 +156,44 @@ impl<'de> Deserialize<'de> for GroupKeys {
 }
 
 /// Lifecycle / flush semantics of a streaming time window.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Copy`/`Default`/`Hash`/`Display`/`FromStr` and `#[serde(rename_all =
+/// "snake_case")]` (matching this file's `WindowFuncKind` neighbor) were
+/// added so a downstream backend's own `WindowType`-shaped serving-time
+/// enum (data-plane accumulator config: `Tumbling` default,
+/// `"window_type": "tumbling"` wire format, string round-trip via
+/// `Display`/`FromStr`) could be retired in favor of this type directly,
+/// rather than keeping two independently-maintained enums in sync by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum WindowKind {
+    #[default]
     Tumbling,
     Sliding,
     Session,
+}
+
+impl std::fmt::Display for WindowKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WindowKind::Tumbling => write!(f, "tumbling"),
+            WindowKind::Sliding => write!(f, "sliding"),
+            WindowKind::Session => write!(f, "session"),
+        }
+    }
+}
+
+impl std::str::FromStr for WindowKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "tumbling" => Ok(WindowKind::Tumbling),
+            "sliding" => Ok(WindowKind::Sliding),
+            "session" => Ok(WindowKind::Session),
+            _ => Err(format!("Unknown window kind: '{s}'")),
+        }
+    }
 }
 
 /// Which data model a `Source` / `AggIntent` operates over.
