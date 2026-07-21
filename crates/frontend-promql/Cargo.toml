@@ -22,3 +22,7 @@ path = "tests/observability/awesome_prometheus_alerts.rs"
 [[test]]
 name = "promql_corpus"
 path = "tests/observability/promql_corpus.rs"
+
+[[test]]
+name = "o11y_bench_promql"
+path = "tests/observability/o11y_bench_promql.rs"
