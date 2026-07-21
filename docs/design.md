@@ -50,6 +50,20 @@ DataCollector/controller already documents its query→sketch translation as a 5
 
 **L4 and L5 also have substantial common infrastructure.** Initially we assumed deployment models owned L4/L5 wholesale; on closer inspection what's actually deployment-model-specific is *which rules fire* (L4) and *what topology + output format* (L5) — not the rule engine, not the allocator, not the sketch catalogue. Those frameworks belong in core. This makes deployment models significantly thinner: each becomes a small crate that picks rules from a shared library, declares a deployment topology, and writes an emitter.
 
+### Terminology: bind, implementation, match
+
+"Bind" gets reused informally for several *different* things near L3/L4 — this stack settled on more specific names to keep them apart. Reference source: `crates/plan/src/lib.rs`'s own module doc (`asap-plan`) — that's the version closest to the code and least likely to drift; this table is a pointer to it, not a replacement for it.
+
+| Term | Layer | Meaning | Lives in |
+|---|---|---|---|
+| **Bind #1** | L2 | *Name resolution*: `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → Bind → Optimize" pipeline sense | `asap_l2::binder::Binder` |
+| **Implementation** | L3→L4, *one node* | Choosing a concrete physical realization — a sketch family, an exact accumulator, or pass-through — for one `AggIntent` | `asap_plan::boundary::implementation_for` |
+| **`implement_tree`** | L3→L4, *whole tree* | Walk a whole `QueryExpr` tree, calling `implementation_for` per node, and emit the complete L4 `SummaryExpr`/`L4Node` DAG | `asap_plan::bind::implement_tree` (module is named `bind` for historical reasons; its content is "implementation", not the L2 or L4→L5 senses below) |
+| **Match** | L3→L4-adjacent, but a different question | *"Does an already-**available** `Implementation` satisfy a **required** one?"* — materialized-view matching / "answering queries using views", narrowed to this crate's summary vocabulary. Distinct from `implementation_for`: that answers "how would I build this from scratch"; `Matcher` answers "does something that already exists already answer this". `asap-plan` ships the trait with **no default implementation and no shipped instance** — which `Implementation`s are actually available anywhere (an inventory) is entirely a downstream deployment's concern, the same reason `CostModel` ships no opinionated instance either | `asap_plan::boundary::Matcher` (trait only); reference downstream impl: ASAPQuery-backend's `control_plane::sketch_algebra::capability::Capability::is_satisfied_by` |
+| **Bind #2** | L4→L5 | A *deployment's* own physical binder, additionally deciding **placement** (edge vs. backend, wire format, …) — a genuinely different, deployment-specific decision core doesn't model at all | e.g. ASAPQuery-backend's `control_plane::sketch_algebra::rules::bind_*` |
+
+Both "Implementation" rows are named after Cascades/Volcano query-optimization terminology (an *implementation rule* is logical → physical, as distinct from a *transformation rule*, logical → logical) specifically to avoid becoming a fifth colliding sense of "bind".
+
 ### Sketch binding lives in L4, not L3
 
 A key clarification after cross-checking the three source repos: **L3 is intent-only**. DC's `AggIntent` names *what* to compute (`Quantile(0.99, ε=0.01)`, `Cardinality(δ=0.001)`, …) without committing to a sketch type. Picking KLL vs DDSketch, CMS vs CMS-with-heap, parameter sizes — all of that is L4's job, driven by deployment constraints.
@@ -125,7 +139,7 @@ This is what makes the topology a *parameter* rather than an axis of code: the s
 
 This drives the core/deployment model split:
 
-- **The shared infrastructure crates** own all 5 layers. Landed today (§5.1): the front ends (L1→L2), `asap-l2` (L2 relational + the L2→L3 converter), `asap-ir` (L3 canonical IR), `asap-sketch` (L4 IR), and `asap-plan` (L4 optimizer — CSE + the L3→L4 `bind` pass + the sketch-vs-exact `boundary` decision (#98), with the rule engine + cost model as stubs). Planned: the L5 stage-allocator framework + `PhysicalPlanner` trait + sketch catalogue. (The original design put all of this in one `core/` crate; §5.1 splits it by role.)
+- **The shared infrastructure crates** own all 5 layers. Landed today (§5.1): the front ends (L1→L2), `asap-l2` (L2 relational + the L2→L3 converter), `asap-ir` (L3 canonical IR), `asap-sketch` (L4 IR), and `asap-plan` (L4 optimizer — CSE + the L3→L4 `implement_tree` pass (see §3 terminology) + the sketch-vs-exact `boundary` decision (#98), with the rule engine + cost model as stubs). Planned: the L5 stage-allocator framework + `PhysicalPlanner` trait + sketch catalogue. (The original design put all of this in one `core/` crate; §5.1 splits it by role.)
 - **Each deployment model is a thin crate** that: (1) picks which of core's L4 rules to enable + adds any deployment-model-specific rules, (2) declares its deployment topology (how many stages, where data flows), (3) provides an emitter for its output format. That's usually a few hundred lines, not thousands.
 
 ## 4. Principles
@@ -325,7 +339,7 @@ the landed crates (§5.1) as follows:
 | `core::lower` (L1→L2→L3) | `asap-frontend-*` (L1→L2) + `asap-l2::convert_root` (L2→L3, with the binder + column resolution) | landed, split per language |
 | `core::intent_algebra` (L3) | `asap-ir::intent_algebra` | landed |
 | `core::sketch_algebra` (L4 IR) | `asap-sketch` | landed |
-| `core::optimizer` (L4 framework) | `asap-plan` | partial (CSE + the L3→L4 `bind` pass + `boundary`, #98; rule engine planned) |
+| `core::optimizer` (L4 framework) | `asap-plan` | partial (CSE + the L3→L4 `implement_tree` pass (see §3 terminology) + `boundary`, #98; rule engine planned) |
 | `core::cost` | `asap-plan::cost_model` | stub |
 | `core::physical` (L5) | — | planned |
 | `core::pipeline`, `core::emit`, `core::registry`, `core::workload` | `asap-ir::workload` (workload types only); rest planned | partial |
