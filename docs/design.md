@@ -339,8 +339,8 @@ the landed crates (§5.1) as follows:
 | `core::lower` (L1→L2→L3) | `asap-frontend-*` (L1→L2) + `asap-l2::convert_root` (L2→L3, with the binder + column resolution) | landed, split per language |
 | `core::intent_algebra` (L3) | `asap-ir::intent_algebra` | landed |
 | `core::sketch_algebra` (L4 IR) | `asap-sketch` | landed |
-| `core::optimizer` (L4 framework) | `asap-plan` | partial (CSE + the L3→L4 `implement_tree` pass (see §3 terminology) + `boundary`, #98; rule engine planned) |
-| `core::cost` | `asap-plan::cost_model` | stub |
+| `core::optimizer` (L4 framework) | `asap-plan` | landed, but not as a general rule engine — see §6.4 below for what's actually there vs. the general `OptimizerRule`/`RuleEngine` this section originally sketched (never built; superseded by the narrower `boundary`/`bind`/`CostModel` design, #98) |
+| `core::cost` | `asap-plan::cost_model` | landed (the `CostModel` trait + `DefaultCostModel`; deliberately narrow — see §6.4) |
 | `core::physical` (L5) | — | planned |
 | `core::pipeline`, `core::emit`, `core::registry`, `core::workload` | `asap-ir::workload` (workload types only); rest planned | partial |
 
@@ -767,10 +767,71 @@ Core owns the driver. Deployment models own what goes into each deployment-model
 
 ### `core::optimizer` — Layer 4 framework
 
-Core ships the **rule engine + trait surface + a shared rule library**. Deployment models pick which rules to enable.
+**This section originally sketched a general Cascades-style rule engine
+(`OptimizerRule` + `RuleEngine`, fixed-point rewriting, a shared rule
+library) before any of L4 was implemented.** That design was never
+built — what actually shipped in `asap-plan` (crate `crates/plan`) is
+narrower and more specific to the one decision L4 genuinely needs to
+make (which physical summary realizes an `AggIntent`), plus the
+supporting pieces that decision needs. The old sketch is kept below,
+struck through in spirit, so anyone who remembers it (or finds it in
+git blame) can see explicitly that it was superseded rather than just
+silently vanish — see the real architecture first.
+
+**What's actually there** (see §3 for the "implementation" vs. "bind"
+vs. "match" terminology these use):
+
+- [`boundary::implementation_for`] / [`implementation_for_with`] — the
+  per-node decision (§3's "Implementation" row): `AggIntent →
+  Implementation` (`Sketch { kind, params }` | `ExactAccumulator {
+  kind, params }` | `PassThrough`). Exhaustive over the `AggIntent`
+  vocabulary — a new variant is a compile error until given an explicit
+  realization, so there's no silent fall-through.
+- [`bind::implement_tree`] / [`implement_tree_with`] — walks a whole
+  `QueryExpr` tree calling `implementation_for` per node, emitting the
+  complete L4 `SummaryExpr`/`L4Node` DAG (§3's `implement_tree` row).
+  Deliberately conservative about *where* it looks for a realizable
+  `Aggregate`: a non-`Aggregate` parent (`Filter`, `Window`, ...)
+  wraps the whole subtree as `Logical` rather than rewriting through
+  it — see the note below on what a deployment does about that.
+- [`cost_model::CostModel`] — the **one** pluggable extension point,
+  not a general rule interface: re-ranks the candidate summary
+  families `boundary::summary_candidates` returns for an intent (best
+  choice first), rather than rewriting the tree arbitrarily.
+  `DefaultCostModel` preserves the built-in static preference order;
+  every entry point not given an explicit `&dyn CostModel` runs
+  against it. Deliberately narrow (issues #6, #33) — "summary" already
+  covers non-sketch realizations the day a new `SummaryKind` variant
+  lands, so this one interface is meant to stay the only extension
+  point rather than growing into a second `RuleEngine`.
+- [`cse::dedupe_subtrees`] — workload-level Common Sub-Expression
+  Elimination: hoists sub-DAGs structurally identical across ≥2 query
+  roots into shared `LetBinding`s so the cost model credits a shared
+  producer once. Scoped to the basic "≥2 roots, identical
+  `Aggregate`-child sub-trees" case; alpha-equivalence / schema-merge /
+  nested CSE is explicitly a downstream optimization, not part of the
+  IR contract.
+- [`boundary::Matcher`] — §3's "Match" row: "does an already-available
+  `Implementation` satisfy a required one." Ships as a trait with no
+  default implementation and no shipped instance, same shape and
+  reasoning as `CostModel` — which `Implementation`s are actually
+  available anywhere is an inventory only a downstream deployment has.
+
+**What a deployment does beyond this**: `implement_tree`'s
+conservative stop at non-`Aggregate` nodes, and any additional
+algebraic rewriting beyond summary-candidate ranking (push-downs,
+fusion, dead-code elimination, …), are *not* modeled in `asap-plan` at
+all — they're each deployment's own problem today. ASAPQuery-backend's
+`control_plane` crate is the reference example: its own
+`sketch_algebra::rules::bind_*` modules (§3's "Bind #2") and
+`optimizer::` module implement exactly this kind of deployment-specific
+logic downstream, without `asap-plan` needing to know about it.
+
+<details>
+<summary>Historical sketch (never built) — general rule engine + shared rule library</summary>
 
 ```rust
-// trait (in core)
+// trait (never built)
 pub trait OptimizerRule: Send + Sync {
     fn name(&self) -> &'static str;
     fn category(&self) -> RuleCategory;   // PushDown | Fusion | Elim | Bind | ...
@@ -778,7 +839,7 @@ pub trait OptimizerRule: Send + Sync {
     fn apply(&self, expr: &QueryExpr, c: &DeploymentConstraints) -> Option<QueryExpr>;
 }
 
-// engine (in core) — fixed-point iteration, cycle detection, priority ordering
+// engine (never built) — fixed-point iteration, cycle detection, priority ordering
 pub struct RuleEngine { /* ... */ }
 impl RuleEngine {
     pub fn new(rules: Vec<Box<dyn OptimizerRule>>) -> Self { /* ... */ }
@@ -786,7 +847,7 @@ impl RuleEngine {
         -> Result<Vec<QueryExpr>, OptError>;
 }
 
-// shared rule library (in core::optimizer::rules) — opt-in from deployment models
+// shared rule library (never built) — opt-in from deployment models
 pub mod rules {
     pub struct BindKllOnQuantile;       // AggIntent::Quantile → bind KLL(k by accuracy)
     pub struct BindCmsOnCount;          // AggIntent::Count → bind CMS(w, d)
@@ -798,26 +859,20 @@ pub mod rules {
 }
 ```
 
-Deployment models compose rule sets by picking from the shared library + adding their own:
+`DeploymentConstraints` and the `Executor`/`StageId` registration
+sketch that used to follow this belong to the L5 discussion — see
+`core::physical` below, also never built.
 
-```rust
-// in deployment-model-asaplifecycle
-use asap_plan::optimizer::{RuleEngine, rules::*};
-fn rule_set() -> Vec<Box<dyn OptimizerRule>> {
-    vec![
-        Box::new(BindKllOnQuantile),
-        Box::new(BindCmsOnCount),
-        Box::new(FusionPassthrough),
-        // DC-specific additions:
-        Box::new(StageAwarePushDown),      // pushes ops to edge when possible
-        Box::new(TransmissionCostRewrite), // uses TCO model to defer aggregation
-    ]
-}
-```
-
-Core also ships `DeploymentConstraints` as a trait object; each deployment model supplies a concrete impl with its deployment's memory budgets, network topology, available sketch backends, and the registered `Executor` list (one entry per concrete runtime instance, each tagged with its `StageId`). The executor list is populated from the deployment model's discovery channel — OpAMP for DC lifecycle, static config for single-backend query, the in-process `SessionContext` itself for fusion.
+</details>
 
 ### `core::physical` — Layer 5 framework
+
+**Status: planned, not yet built.** No `asap-physical` crate (or
+equivalent) exists in this workspace today — the sketch below is the
+intended design for L5 (stage allocation + emission), not a
+description of shipped code. §6.0's crate map lists `core::physical`
+as `—` / planned for exactly this reason. Treat the trait/struct names
+below as a target to design against, not an API to depend on.
 
 ```rust
 pub trait PhysicalPlanner {
@@ -932,6 +987,19 @@ impl PhysicalPlanner for LifecyclePlanner {
 ```
 
 ### `core::plan` — shared traits bridging layers
+
+**Status: planned, not yet built — and a naming collision worth
+flagging.** This `core::plan` (a cross-layer `DeploymentModel` trait
+composing L4 rules + L5 topology + emission + constraints) is a
+*different thing* from the real, landed `asap-plan` crate
+(`crates/plan`), which §6.0's crate map lists under `core::optimizer`
+(L4 only — see that section above for what's actually there). Neither
+`DeploymentModel` nor the `OptimizerRule`/`PhysicalPlanner`/
+`PlanEmitter`/`DeploymentConstraints` types it references exist
+anywhere in this workspace today; this section predates the crate
+split and was never reconciled with it. Read as a target design for
+how a deployment model might eventually compose L4+L5+emission, not a
+description of `asap-plan`.
 
 ```rust
 pub trait DeploymentModel {
