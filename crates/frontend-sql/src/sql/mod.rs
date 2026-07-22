@@ -10,18 +10,20 @@
 
 use std::sync::Arc;
 
+use datafusion::catalog_common::MemorySchemaProvider;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column as DfColumn, ScalarValue};
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{
     self, Distinct, Expr, JoinType, LogicalPlan, WindowFunctionDefinition,
 };
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::{SessionConfig, SessionContext};
 
 use asap_ir::intent_algebra::schema::{DataType, Schema};
 use asap_ir::intent_algebra::{
     ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
 };
+use asap_ir::workload::SqlDialect;
 use asap_l2::relational::{
     AggFunc, AggItem, L2ProjectItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
@@ -41,11 +43,25 @@ use self::types::{arrow_to_l3, schema_to_arrow};
 /// on the result for canonical L3.
 pub struct SqlLowerer<'a> {
     catalog: &'a SqlCatalog,
+    dialect: SqlDialect,
 }
 
 impl<'a> SqlLowerer<'a> {
     pub fn new(catalog: &'a SqlCatalog) -> Self {
-        Self { catalog }
+        Self {
+            catalog,
+            dialect: SqlDialect::DataFusionSQL,
+        }
+    }
+
+    /// Parse under a specific SQL dialect (e.g. `ClickhouseSQL`, which maps to
+    /// sqlparser's vendored `ClickHouseDialect` — array-lambda syntax and
+    /// `arr[-1]` indexing parse under it that don't parse generically). This
+    /// only changes *parsing*: ClickHouse-only builtin functions (`uniqExact`,
+    /// `countIf`, …) are still unknown to DataFusion's planner and still fail
+    /// there, and `ElasticSQL` has no vendored parser at all.
+    pub fn with_dialect(catalog: &'a SqlCatalog, dialect: SqlDialect) -> Self {
+        Self { catalog, dialect }
     }
 
     /// Parse + lower a SQL query to Layer-2 relational form.
@@ -59,8 +75,29 @@ impl<'a> SqlLowerer<'a> {
     /// Register the catalog tables (empty Arrow `MemTable`s) so DataFusion can
     /// resolve table/column references during planning.
     fn build_context(&self) -> Result<SessionContext, LoweringError> {
-        let ctx = SessionContext::new();
+        let dialect_name = match &self.dialect {
+            SqlDialect::DataFusionSQL => "generic",
+            SqlDialect::ClickhouseSQL => "ClickHouse",
+            SqlDialect::ElasticSQL => {
+                return Err(LoweringError::UnsupportedDialect("ElasticSQL".into()))
+            }
+        };
+        let config = SessionConfig::new().set_str("datafusion.sql_parser.dialect", dialect_name);
+        let ctx = SessionContext::new_with_config(config);
+        // A catalog key like "bgp.bgp_updates" schema-qualifies the table
+        // (e.g. a ClickHouse database name). DataFusion requires the parent
+        // schema to be registered before a qualified table can be, so create
+        // it on demand.
+        let catalog_provider = ctx.catalog("datafusion").ok_or_else(|| {
+            LoweringError::InvalidExpression("default \"datafusion\" catalog missing".into())
+        })?;
         for (name, schema) in &self.catalog.tables {
+            if let Some((schema_name, _)) = name.split_once('.') {
+                if catalog_provider.schema(schema_name).is_none() {
+                    catalog_provider
+                        .register_schema(schema_name, Arc::new(MemorySchemaProvider::new()))?;
+                }
+            }
             let arrow_schema = Arc::new(schema_to_arrow(schema));
             let mem_table = MemTable::try_new(arrow_schema, vec![])?;
             ctx.register_table(name.as_str(), Arc::new(mem_table))?;

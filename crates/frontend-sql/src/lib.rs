@@ -18,7 +18,8 @@ use asap_l2::convert_root;
 pub use error::SqlError;
 pub use sql::{SqlCatalog, SqlLowerer};
 
-/// Lower a single SQL query string to the canonical L3 `QueryExpr`.
+/// Lower a single SQL query string to the canonical L3 `QueryExpr`, parsed as
+/// `SqlDialect::DataFusionSQL`.
 ///
 /// The `catalog` supplies table schemas (used both to plan the SQL with
 /// DataFusion and to carry positional column identity into L3). `accuracy` is
@@ -28,7 +29,24 @@ pub async fn lower_sql(
     catalog: &SqlCatalog,
     accuracy: AccuracyTarget,
 ) -> Result<QueryExpr, SqlError> {
-    let l2 = SqlLowerer::new(catalog).lower(query).await?;
+    lower_sql_dialect(query, catalog, SqlDialect::DataFusionSQL, accuracy).await
+}
+
+/// Lower a single SQL query string under an explicit [`SqlDialect`].
+///
+/// `ClickhouseSQL` parses via sqlparser's vendored `ClickHouseDialect`
+/// (array-lambda syntax, `arr[-1]` indexing) — it does not teach DataFusion's
+/// planner any ClickHouse-only builtin functions, which still fail to plan.
+/// `ElasticSQL` has no vendored parser and always returns `UnsupportedDialect`.
+pub async fn lower_sql_dialect(
+    query: &str,
+    catalog: &SqlCatalog,
+    dialect: SqlDialect,
+    accuracy: AccuracyTarget,
+) -> Result<QueryExpr, SqlError> {
+    let l2 = SqlLowerer::with_dialect(catalog, dialect)
+        .lower(query)
+        .await?;
     let l3 = convert_root(&l2, &accuracy)?;
     Ok(l3)
 }
@@ -37,7 +55,7 @@ pub async fn lower_sql(
 ///
 /// One `Result` per entry — errors are per-query, not fatal for the batch.
 /// Returns `WrongLanguage` for every entry if the workload is not SQL, and
-/// `UnsupportedDialect` for non-DataFusion SQL dialects.
+/// `UnsupportedDialect` for `ElasticSQL` (no vendored parser).
 pub async fn lower_sql_batch(
     workload: &QueryWorkload,
     catalog: &SqlCatalog,
@@ -58,14 +76,15 @@ pub async fn lower_sql_batch(
             .map(|_| Err(SqlError::WrongLanguage(lang.clone())))
             .collect();
     }
-    if let QueryLanguage::SQL(dialect) = &workload.language {
-        if !matches!(dialect, SqlDialect::DataFusionSQL) {
-            let d = format!("{dialect:?}");
-            return entries
-                .iter()
-                .map(|_| Err(SqlError::UnsupportedDialect(d.clone())))
-                .collect();
-        }
+    let dialect = match &workload.language {
+        QueryLanguage::SQL(d) => d.clone(),
+        _ => SqlDialect::DataFusionSQL,
+    };
+    if matches!(dialect, SqlDialect::ElasticSQL) {
+        return entries
+            .iter()
+            .map(|_| Err(SqlError::UnsupportedDialect("ElasticSQL".into())))
+            .collect();
     }
 
     let mut results = Vec::with_capacity(entries.len());
@@ -75,7 +94,7 @@ pub async fn lower_sql_batch(
             .as_ref()
             .and_then(|r| r.accuracy.clone())
             .unwrap_or(AccuracyTarget::Exact);
-        results.push(lower_sql(&entry.query.0, catalog, accuracy).await);
+        results.push(lower_sql_dialect(&entry.query.0, catalog, dialect.clone(), accuracy).await);
     }
     results
 }
