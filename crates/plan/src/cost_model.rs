@@ -147,7 +147,11 @@ mod tests {
     struct DiscreteKllRungs;
 
     impl CostModel for DiscreteKllRungs {
-        fn rank_candidates(&self, _intent: &AggIntent, candidates: &[SummaryKind]) -> Vec<SummaryKind> {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SummaryKind],
+        ) -> Vec<SummaryKind> {
             candidates.to_vec()
         }
 
