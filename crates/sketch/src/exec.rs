@@ -1,75 +1,8 @@
-//! Serving-time execution model for the L4 IR.
-//!
-//! `asap-sketch` defines the L4 tree ([`L4Node`]/[`SummaryExpr`]);
-//! `asap-plan` builds one from L3 (`asap_plan::bind`). Neither says what it
-//! means to *run* one against already-materialized state at query time —
-//! this module is that shared answer, so deployments don't each reinvent
-//! the walk and merge rules.
-//!
-//! [`SummaryExecutor`] is the trait a deployment implements to plug in its
-//! own storage/lookup/sketch-math/readout; [`execute`] is the generic
-//! recursive walk over `L4Node` that calls into it at the right points.
-//! `asap-sketch` owns the *structural* rules (which nestings are valid,
-//! that a `SummaryMerge`'s children must agree on `(SummaryKind,
-//! SummaryParams)`); the deployment owns everything that requires an
-//! actual sketch-math implementation (this crate has none — see the crate
-//! doc) or actual storage.
-//!
-//! ## Planning-time L4 vs. serving-time L4
-//!
-//! `L4Node` now serves two different operations, not one:
-//!
-//! - **Planning** (`asap_plan::bind`): `QueryExpr -> L4Node`, a *decision* —
-//!   which sketch family/params should answer this intent, made once per
-//!   query shape, symbolically, with no reference to what's actually
-//!   stored anywhere.
-//! - **Serving** (this module): `L4Node -> Value`, a *lookup* — given a
-//!   tree of already-made decisions, resolve each leaf against whatever is
-//!   actually materialized right now, which may be missing, may be
-//!   multiple instances needing a merge, or may disagree on params.
-//!   `ExecError::NoCandidates`/`MergeKindParamsMismatch` exist because
-//!   reality can diverge from the plan in ways planning time never sees.
-//!
-//! ## Nested composition
-//!
-//! `L4Node`'s children are `Rc<L4Node>`, so the tree nests to arbitrary
-//! depth by construction — [`execute`] is plain recursion and needs no
-//! special-casing for "how many levels deep." Two things are worth being
-//! explicit about because they aren't obvious from the type alone:
-//!
-//! - **What can be a `SummaryMerge` child.** Only nodes that produce a
-//!   summary *state* — `SummaryAgg` or another `SummaryMerge` — are valid.
-//!   A `SummaryEstimate` child (or a bare `Logical`) has already collapsed
-//!   to a plain value; merging values isn't the same operation as merging
-//!   sketch states, and isn't what this type models. [`execute`] rejects it
-//!   ([`ExecError::MergeChildNotState`]) rather than silently doing
-//!   something with it.
-//! - **Merge-of-merges preserves the `(kind, params)` invariant
-//!   transitively** — a `SummaryMerge` over two `SummaryMerge` children is
-//!   valid exactly when both sides ultimately agree on the same
-//!   `(SummaryKind, SummaryParams)`, the same rule as a flat merge. This
-//!   falls out of `execute` propagating the agreed `(kind, params)` up
-//!   through `ExecOutcome::State` at every level rather than re-deriving it
-//!   from scratch per node.
-//!
-//! One open question this module deliberately does *not* resolve: whether a
-//! `SummaryAgg` can ever validly sit *above* a `SummaryEstimate` (i.e.
-//! "build a new summary from another summary's already-computed readout,
-//! at query time"). Every materialized-summary store this design has been
-//! checked against (see ASAPQuery-backend's `data_plane`) only serves
-//! summaries built incrementally at *ingest* time from raw samples — there
-//! is no precedent for building one from a query-time-derived scalar. A
-//! `SummaryExecutor` that hits this shape today should treat it as
-//! unsupported (return an error from `find_candidates`) rather than assume
-//! either answer.
-//!
-//! ## What this module does *not* do
-//!
-//! `asap-sketch` has no sketch-math implementation — no KLL/CMS/HLL/DDSketch
-//! algorithm lives in this crate or `asap-plan`. `SummaryExecutor::State`,
-//! `merge_states`, and `readout` are entirely deployment-supplied for that
-//! reason; this module only guarantees they're never called on
-//! (`kind`, `params`) combinations that disagree with each other.
+//! Serving-time execution model for the L4 IR — the counterpart to
+//! `asap_plan::bind`'s planning-time `QueryExpr -> L4Node`. See
+//! `docs/l4node-execution-model.md` for the design (planning vs. serving
+//! L4, the nested-composition rules, the open questions); this module is
+//! the implementation of it.
 
 use asap_ir::intent_algebra::{ColumnId, ColumnRef, QueryExpr};
 
@@ -77,36 +10,21 @@ use crate::expr::{L4Node, SummaryExpr};
 use crate::sketch::{SketchQuery, SummaryKind, SummaryParams};
 
 /// Deployment-supplied backend for executing an [`L4Node`] tree against
-/// materialized state. See the module docs for the split of
-/// responsibilities between this trait and [`execute`].
+/// materialized state — see `docs/l4node-execution-model.md`.
 pub trait SummaryExecutor {
-    /// Opaque reference to one materialized summary instance (e.g. a data
-    /// plane's sid). Cheap to clone — `execute` may hold several at once
-    /// while resolving a `SummaryAgg`'s candidates.
+    /// Reference to one materialized summary instance (e.g. a sid).
     type Handle: Clone;
     /// Decoded, in-memory state for one instance (or an already-merged
-    /// group of instances) — sketch bytes, an exact accumulator, whatever
-    /// the deployment's storage actually holds.
+    /// group of them).
     type State;
-    /// A query answer — deployment-defined shape (one row, one scalar, a
-    /// whole series set).
+    /// A query answer.
     type Value;
-    /// Deployment error type — storage failures, decode failures, etc.
+    /// Deployment error type.
     type Error;
 
-    /// Resolve a `SummaryAgg` leaf to the materialized-instance handles
-    /// that answer it. `child` is the `SummaryAgg`'s own child subtree
-    /// (typically `Logical(Window{Scan{..}})` — implementations recurse
-    /// into it themselves to find the metric/source identity; this module
-    /// does not interpret `QueryExpr` shapes on the deployment's behalf).
-    ///
-    /// Implementations MUST only return handles whose materialized
-    /// `(SummaryKind, SummaryParams)` is exactly `(sketch, params)` — if
-    /// more than one handle is returned, [`execute`] merges them directly
-    /// via [`Self::merge_states`] without re-checking agreement (unlike
-    /// `SummaryMerge`'s children, which *are* re-checked — see the module
-    /// docs). Returning `Ok(vec![])` means "no materialized instance
-    /// found"; `execute` reports that as [`ExecError::NoCandidates`].
+    /// Resolve a `SummaryAgg` leaf to matching materialized-instance
+    /// handles. Must only return handles whose `(SummaryKind,
+    /// SummaryParams)` is exactly `(sketch, params)`.
     fn find_candidates(
         &self,
         sketch: &SummaryKind,
@@ -119,26 +37,18 @@ pub trait SummaryExecutor {
     /// Fetch/decode one handle's raw state.
     fn fetch_state(&self, handle: &Self::Handle) -> Result<Self::State, Self::Error>;
 
-    /// Merge two or more states, all sharing the same `(SummaryKind,
-    /// SummaryParams)` — `execute` never calls this with states it hasn't
-    /// already verified agree (either by `find_candidates`'s own contract,
-    /// for a single `SummaryAgg`'s candidates, or by `execute`'s explicit
-    /// check across `SummaryMerge`'s children).
+    /// Merge two or more same-`(kind, params)` states.
     fn merge_states(&self, states: Vec<Self::State>) -> Result<Self::State, Self::Error>;
 
     /// Read a query out of a built state.
     fn readout(&self, state: &Self::State, query: &SketchQuery) -> Result<Self::Value, Self::Error>;
 
-    /// Handle a `SummaryExpr::Logical` node — nothing was committed for
-    /// this subtree at L4. The deployment decides what that means (exact
-    /// execution, an archive-tier miss, ...); `asap-sketch` has no opinion.
+    /// Handle a `SummaryExpr::Logical` node (nothing committed at L4).
     fn logical(&self, expr: &QueryExpr) -> Result<Self::Value, Self::Error>;
 }
 
-/// Result of executing one [`L4Node`] — either a summary state (still
-/// tagged with the `(kind, params)` it was built as, so a parent
-/// `SummaryMerge`/`SummaryEstimate` can act on it without re-deriving that
-/// information from `L4Schema`) or a final value.
+/// Result of executing one [`L4Node`] — a summary state (tagged with its
+/// `(kind, params)`) or a final value.
 pub enum ExecOutcome<E: SummaryExecutor + ?Sized> {
     State {
         state: E::State,
@@ -152,26 +62,15 @@ pub enum ExecOutcome<E: SummaryExecutor + ?Sized> {
 /// [`SummaryExecutor::Error`].
 #[derive(Debug)]
 pub enum ExecError<Inner> {
-    /// A `SummaryAgg` leaf's [`SummaryExecutor::find_candidates`] returned
-    /// no handles.
+    /// [`SummaryExecutor::find_candidates`] returned no handles.
     NoCandidates,
-    /// A `SummaryMerge` child evaluated to a [`ExecOutcome::Value`] instead
-    /// of a state — only `SummaryAgg`/`SummaryMerge` children are valid
-    /// (see the module docs).
+    /// A `SummaryMerge` child produced a `Value`, not a `State`.
     MergeChildNotState,
-    /// Two `SummaryMerge` children disagreed on `(SummaryKind,
-    /// SummaryParams)` — the child-level equivalent of the plan-time
-    /// invariant `asap-plan`'s binder already enforces within one binding
-    /// pass; re-checked here because a `SummaryMerge`'s children can, in
-    /// principle, be resolved through entirely independent paths (e.g. two
-    /// materialized instances built at different times under different
-    /// catalog defaults) that a single build-time check can't see.
+    /// `SummaryMerge` children disagreed on `(SummaryKind, SummaryParams)`.
     MergeKindParamsMismatch,
     /// A `SummaryMerge` had zero children.
     EmptyMerge,
-    /// `SummaryJoin`/`SummarySubtract`/`SummaryDelete` — no `Bind*` path in
-    /// `asap-plan` produces these yet (see `physical_expr`-adjacent
-    /// deployment docs); unreachable in practice today.
+    /// `SummaryJoin`/`SummarySubtract`/`SummaryDelete` — unreachable today.
     NotYetSupported(&'static str),
     /// The deployment's own error.
     Executor(Inner),
@@ -183,9 +82,7 @@ impl<Inner> From<Inner> for ExecError<Inner> {
     }
 }
 
-/// Recursively execute `node` against `exec`. See the module docs for the
-/// composition/merge rules this enforces generically, independent of any
-/// deployment's storage or sketch-math implementation.
+/// Recursively execute `node` against `exec`.
 pub fn execute<E: SummaryExecutor>(
     node: &L4Node,
     exec: &E,
@@ -251,9 +148,7 @@ pub fn execute<E: SummaryExecutor>(
     }
 }
 
-/// Fold one-or-more same-`(kind, params)` states into one, skipping the
-/// `merge_states` call entirely for the (overwhelmingly common) single-state
-/// case rather than making every executor implement a no-op merge.
+/// Fold one-or-more same-`(kind, params)` states into one.
 fn fold_states<E: SummaryExecutor>(
     mut states: Vec<E::State>,
     exec: &E,
@@ -265,8 +160,7 @@ fn fold_states<E: SummaryExecutor>(
     }
 }
 
-/// Unwrap an [`ExecOutcome::State`], erroring if it was actually a `Value`
-/// (see [`ExecError::MergeChildNotState`]'s doc for why this can happen).
+/// Unwrap an [`ExecOutcome::State`], erroring if it was actually a `Value`.
 #[allow(clippy::type_complexity)]
 fn expect_state<E: SummaryExecutor>(
     outcome: ExecOutcome<E>,
