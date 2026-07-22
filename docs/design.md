@@ -639,90 +639,19 @@ impl AggIntent {
 
 **Why `Rate` and `Increase` survive that argument.** They are not "Sum / Count over a Window with a different name" — they include PromQL's counter-reset adjustment, which is a non-trivial transformation an exact `Sum` does not perform. They earn distinct intent variants because they parameterise different physical operators (delta-set aggregators bind on these intents directly). If a non-PromQL streaming language has the same notion (e.g. SQL `RATE() OVER (RANGE)`), it lowers to the same intent — the intent vocabulary names the operation, not the language.
 
-### `asap-sketch` — Layer 4 IR (`SketchExpr`; **shipped as `SummaryExpr` / `L4Node`**)
+### `asap-sketch` — Layer 4 IR
 
-> **Naming note (code vs this doc).** The landed crate is `asap-sketch` (`crates/sketch/`), and it names this IR `SummaryExpr` wrapped in `L4Node { expr, schema: L4Schema }`, with variants `Logical` / `SummaryAgg` / `SummaryJoin` / `SummarySubtract` / `SummaryDelete` / `SummaryEstimate` / `SummaryMerge` plus `SummaryKind` / `SummaryParams` ("summary" covers both sketches and exact accumulators). This section keeps the original `SketchExpr` spelling for continuity; read `Sketch*` ≙ `Summary*`. The type definitions are landed, and the L3→L4 binding pass that constructs them landed in `asap-plan` (#98): `asap_plan::bind` walks the L3 tree and `asap_plan::boundary` makes the per-intent sketch-vs-exact decision (`AggIntent → SummaryKind + SummaryParams`, sized to the `AccuracyTarget`). The general rule engine that rewrites *through* logical parents is still tracked by #6/#33 — `bind` fires on the aggregate spine and conservatively leaves anything under an unrewritten logical operator as `Logical(…)`.
+The L4 IR itself (`L4Node`/`SummaryExpr`, the per-node schema rules, the
+type-system invariants that make it robust) now lives in
+[`docs/l4node-execution-model.md`](./l4node-execution-model.md) — see its
+"Planning-time L4" section — alongside the serving-time execution model
+that consumes the same IR (#155/#156), rather than duplicated here.
 
-L4 binding rules consume L3 `QueryExpr` (in `asap-ir::intent_algebra`) and produce the sketch-bound L4 IR (in `asap-sketch`). This is the IR L5 emitters consume. The two-IR split — intent-only L3 (`QueryExpr`) and sketch-bound L4, in two separate crates — gives L4 rule application a clean type signature: `fn apply(&QueryExpr, &Constraints) -> Option<SketchExpr>`, and the boundary cannot be silently violated.
-
-```rust
-pub enum SketchExpr {
-    /// Any logical L3 node passes through unchanged when no L4 rule rewrote
-    /// it — a `Filter` doesn't need a sketch counterpart.
-    Logical(QueryExpr),
-
-    /// Sketch aggregation. L4 picked the sketch type and parameters from the
-    /// catalog given the `AggIntent` and `DeploymentConstraints`.
-    SketchAgg {
-        child:  Box<SketchExpr>,
-        sketch: SketchKind,         // Kll, Cms, Hll, DDSketch, CmsWithHeap, …
-        params: SketchParams,       // catalog-validated
-        col:    ColumnRef,
-        by:     Vec<GroupKey>,
-    },
-
-    /// Sketch-aware join (KMV / theta-sketch for join cardinality;
-    /// join-sample for join sampling). Emitted only when a `Bind*OnJoin`
-    /// rule fires — L3 always presents the logical `Join` for L4 to choose.
-    SketchJoin {
-        outer:  Box<SketchExpr>,
-        inner:  Box<SketchExpr>,
-        key:    ColumnRef,
-        sketch: SketchKind,
-        params: SketchParams,
-    },
-
-    /// Subtract one sketch from another. Valid only for sketches with a
-    /// linear-inverse property (CMS, theta, count-based). Lets the planner
-    /// compute "all-A minus all-B" cardinality / count without re-scanning.
-    SketchSubtract { left: Box<SketchExpr>, right: Box<SketchExpr> },
-
-    /// Delete a key from a sketch (CMS update with -1, deletable Bloom
-    /// filter, …). Valid only for deletion-supporting sketches.
-    SketchDelete { sketch_input: Box<SketchExpr>, key: ColumnRef },
-
-    /// Read out a query result from a built sketch. Inverse of `SketchAgg`.
-    /// `query` says what to extract — quantile φ, count for key k, cardinality.
-    SketchEstimate { sketch_input: Box<SketchExpr>, query: SketchQuery },
-
-    /// ⊕ — union of sketches across stages / shards. Distinct from L3
-    /// `Merge` because sketch union has type constraints (same family,
-    /// same params). L5 stage allocator emits this when distributing.
-    SketchMerge { children: Vec<SketchExpr> },
-}
-```
-
-The optimizer's job is to selectively replace logical aggregates / joins with their sketch-bound variants when a binding rule fires; everything else stays inside `SketchExpr::Logical(…)`.
-
-#### Per-node input/output spec for `SketchExpr`
-
-L4 introduces a new field type into `Schema`:
-
-```rust
-pub enum DataType {
-    // … the L3 types (Int64, Float64, Utf8, Map<…>, …) …
-    /// Sketch state. Carries the sketch family + params so the type system
-    /// rejects merges of incompatible sketches at plan time.
-    Sketch(SketchKind, SketchParams),
-}
-```
-
-A "sketch-state schema" is a regular `Schema` whose value-bearing field has a `DataType::Sketch(...)` dtype. Reading rules:
-
-| Node | Input schemas | Output schema |
-|---|---|---|
-| `Logical(qe)` | whatever the inner L3 node `qe` consumes (per the L3 table above) | whatever `qe` produces — straight pass-through |
-| `SketchAgg { child, sketch, params, col, by }` | one input schema; must contain `col` (the column being summarised) and every field referenced in `by` (group keys) | the `by` columns carried over verbatim, followed by one synthetic field of dtype `Sketch(sketch, params)` carrying the partial sketch state per group; `unique_keys = [by]` |
-| `SketchJoin { outer, inner, key, sketch, params }` | two input schemas (outer + inner); both must contain `key` with compatible types | one field of dtype `Sketch(sketch, params)` carrying the join-cardinality / join-sample state — read out by a downstream `SketchEstimate` |
-| `SketchSubtract { left, right }` | two input schemas, each with exactly one `Sketch(s, p)` field; **`s` and `p` must match** between the two inputs (catalog rejects mismatches at plan time); the `s` family must have `subtractable = true` in the catalog | one `Sketch(s, p)` field carrying the subtracted state (same family + params as inputs) |
-| `SketchDelete { sketch_input, key }` | one input schema with a `Sketch(s, p)` field whose catalog entry has `deletable = true`; plus the `key` column to delete | the input schema unchanged in type — sketch state is mutated logically (the key's contribution removed) but the field's `(sketch, params)` signature is preserved |
-| `SketchEstimate { sketch_input, query }` | one input schema with a `Sketch(s, p)` field; `query` (e.g. `Quantile(φ)`, `PointCount(k)`, `Cardinality`) must appear in the catalog entry's `supported_intents` for `s` | a regular row-shaped schema carrying the answer — `Float64` for quantile, `Int64` for count / cardinality, an array of `(key, count)` for top-k. The `Sketch(...)` field type does *not* propagate downstream of an Estimate |
-| `SketchMerge { children }` | N input schemas, each with a `Sketch(s, p)` field; **all N must agree on `(s, p)`**; the `s` family must have `mergeable = true` in the catalog | one `Sketch(s, p)` field carrying the unioned state (same family + params as inputs) |
-
-Two type-system invariants make L4 robust:
-
-1. **Sketch-family mismatch is a plan-time error.** `SketchSubtract` over `Sketch(KLL, …)` and `Sketch(CMS, …)` fails type-checking before L5 ever sees it.
-2. **Catalog capability flags gate which nodes can fire.** `SketchSubtract` requires `subtractable`, `SketchDelete` requires `deletable`, `SketchMerge` requires `mergeable`. The catalog (see §6 `core::physical::sketch_catalog`) is the single source of truth for these flags; binding rules consult it before producing the node.
+L4 binding rules consume L3 `QueryExpr` (`asap-ir::intent_algebra`) and
+produce the sketch-bound L4 IR (`asap-sketch`); this is the IR L5 emitters
+consume. The two-IR split — intent-only L3 and sketch-bound L4, in two
+separate crates — gives L4 rule application a clean type signature and
+means the boundary can't be silently violated.
 
 **Why a `Source` sum instead of two parallel `QueryExpr` trees:** most `QueryExpr` nodes (`Filter`, `Aggregate`) are data-model-agnostic — filter semantics are the same whether the input is a time-series window or a table scan. Only the leaf `Scan` differs. Keeping one tree with a polymorphic leaf means L4 rules like `BindKllOnQuantile` work uniformly across both data models; rules that care about data-model specifics (stage-aware push-down for TS; join-selectivity for tabular) gate on `source.data_model()` + `intent.requires()`.
 
@@ -1562,7 +1491,7 @@ Terms that are project-specific or that get conflated. Where the term has a Rust
 - **L1 — query language** — Raw query string + parser (PromQL / SQL / DataFusion / ElasticDSL).
 - **L2 — logical plan** — Per-language relational algebra tree (`PromqlLogicalPlan`, `SqlLogicalPlan`, etc.).
 - **L3 — intent algebra** (`QueryExpr`, `asap-ir::intent_algebra`) — Symbolic, intent-only IR. No sketch type, no params. `AggIntent` carries accuracy targets only. The "algebra" is the operator surface (`Scan`, `Filter`, `Aggregate`, `Window`, …); the algebra is *intent-only* because no sketches have been bound yet.
-- **L4 — sketch algebra** (`SummaryExpr` / `L4Node` in `asap-sketch`; this doc's prose says `SketchExpr` — see the naming note in §6) — Same DAG shape as L3, but sketches now committed (kind + params). Produced by the L3→L4 binding pass (`asap_plan::bind`, #98); consumed by L5 emitters. Note the naming inversion vs. earlier drafts: "sketch algebra" is L4 (where sketches actually live), not L3.
+- **L4 — sketch algebra** (`SummaryExpr` / `L4Node` in `asap-sketch`; this doc's prose elsewhere still says `SketchExpr` in places — the IR itself moved to [`l4node-execution-model.md`](./l4node-execution-model.md), which uses the shipped names throughout) — Same DAG shape as L3, but sketches now committed (kind + params). Produced by the L3→L4 binding pass (`asap_plan::bind`, #98); consumed by L5 emitters. Note the naming inversion vs. earlier drafts: "sketch algebra" is L4 (where sketches actually live), not L3.
 - **L5 — physical plan** — Stage-assigned, executor-targeted, ready to serialize. Produced by `PhysicalPlanner`, written out by `PlanEmitter`.
 
 ### Metadata sources (see §6 "DAG schema, DB schema, sketch catalog")
