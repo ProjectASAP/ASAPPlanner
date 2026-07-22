@@ -222,8 +222,13 @@ fn readout(intent: &AggIntent, col: &ColumnRef) -> SketchQuery {
 }
 
 /// Wrap an unrewritten L3 subtree, lifting its schema with every column
-/// `L4DataType::Primitive`.
-fn logical(expr: &QueryExpr, scope: &BindingScope) -> Result<Rc<L4Node>, ImplementError> {
+/// `L4DataType::Primitive`. Public so a deployment can force a node it
+/// knows `implement_tree_in_with` would otherwise actively (mis)bind —
+/// e.g. an intent this crate's `boundary::implementation_for` maps to an
+/// accumulator kind the deployment's runtime doesn't actually implement —
+/// through the same fallback this crate's own dispatch uses, without
+/// duplicating the schema-lift logic.
+pub fn logical(expr: &QueryExpr, scope: &BindingScope) -> Result<Rc<L4Node>, ImplementError> {
     let schema = expr.output_schema_in(scope)?;
     Ok(Rc::new(L4Node {
         expr: SummaryExpr::Logical(Box::new(expr.clone())),
