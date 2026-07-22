@@ -179,3 +179,39 @@ its own `data_plane/docs/l4node-plan-executor-design.md` for how
 `asap_sketchlib`) and the deployment-specific concerns this module doesn't
 cover (raw-AST PromQL fallbacks, the `(kind, params)` catalog-drift
 question at scale, rollout).
+
+## What's actually supported today
+
+### `SummaryExpr` operators
+
+| Variant | Planning-time (`asap_plan::bind`) | Serving-time (`exec.rs`) |
+|---|---|---|
+| `Logical` | produced (the fallback for anything not bound) | supported — delegates to `SummaryExecutor::logical` |
+| `SummaryAgg` | produced | supported |
+| `SummaryEstimate` | produced | supported |
+| `SummaryMerge` | **not produced by anything today** — meant to be inserted by an L5 stage allocator on cut edges (design.md), and no allocator does that yet, in this crate or ASAPQuery-backend's `control_plane` | supported (`execute` fully implements the merge-precondition check and recursion — it just has nothing to run against yet) |
+| `SummaryJoin` / `SummarySubtract` / `SummaryDelete` | not produced by any `Bind*` rule | not supported — `execute` returns `ExecError::NotYetSupported` |
+
+### `SummaryKind` (via `boundary::summary_candidates` / `implementation_for`)
+
+All 14 variants are wired into the boundary decision; `DefaultCostModel`
+picks the first column below, a custom `CostModel::rank_candidates` can
+promote the second:
+
+| `AggIntent` | Default | Also a candidate |
+|---|---|---|
+| `Quantile` | `Kll` | `DDSketch` |
+| `Cardinality` | `Hll` | `Theta`, `Kmv` |
+| `Count` (approximate) | `Cms` | `CountSketch` |
+| `TopK` | `CmsWithHeap` | `CountSketchWithHeap` |
+| `Sum` | `Sum` (exact accumulator) | — |
+| `Min` / `Max` | `MinMax` (exact accumulator) | — |
+| `Rate` | `Rate` (exact accumulator) | — |
+| `Increase` | `Increase` (exact accumulator) | — |
+| `Count` (exact) | `Count` (exact accumulator) | — |
+
+`Avg`/`StdDev`/`Variance` and the per-series/range-reducer intents
+(`Changes`, `Delta`, `Deriv`, `HistogramQuantile`, …) have no `SummaryKind`
+at all — `implementation_for` returns `PassThrough` for them by design
+(richer partial state than a single accumulator value, or genuinely
+non-mergeable), so they stay `SummaryExpr::Logical`.
