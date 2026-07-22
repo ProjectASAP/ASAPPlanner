@@ -12,7 +12,72 @@ home in `ASAPController`.
 shape, symbolically — which sketch family and params should answer this
 intent, with no reference to what's actually stored anywhere.
 `docs/design.md`'s "Sketch binding is already committed by L4" describes
-this half, and it's the only half that existed before this doc.
+this half at the architecture level; this section has the IR itself.
+
+### The IR
+
+```rust
+pub struct L4Node {
+    pub expr: SummaryExpr,
+    pub schema: L4Schema,
+}
+
+pub enum SummaryExpr {
+    /// No L4 rule rewrote this L3 node (e.g. `Filter`, `Project`, `Sort`).
+    Logical(Box<QueryExpr>),
+
+    /// Sketch aggregation — `sketch`/`params` chosen from the catalog for
+    /// the `AggIntent` under an `AccuracyTarget`.
+    SummaryAgg {
+        child: Rc<L4Node>,
+        sketch: SummaryKind,
+        params: SummaryParams,
+        col: ColumnRef,      // the column being summarised
+        by: Vec<ColumnId>,   // GROUP BY keys
+    },
+
+    /// Sketch-aware join (KMV/theta for cardinality, join-sample for
+    /// sampling). Emitted only when a `Bind*OnJoin` rule fires.
+    SummaryJoin { outer: Rc<L4Node>, inner: Rc<L4Node>, key: ColumnRef, sketch: SummaryKind, params: SummaryParams },
+
+    /// Subtract one sketch from another — requires catalog `subtractable`.
+    SummarySubtract { left: Rc<L4Node>, right: Rc<L4Node> },
+
+    /// Delete a key from a sketch — requires catalog `deletable`.
+    SummaryDelete { sketch_input: Rc<L4Node>, key: ColumnRef },
+
+    /// Read a value out of a built sketch — inverse of `SummaryAgg`. The
+    /// `Sketch(...)` schema type does not propagate past an estimate.
+    SummaryEstimate { sketch_input: Rc<L4Node>, query: SketchQuery },
+
+    /// Union of sketches — requires catalog `mergeable`; all children must
+    /// agree on `(sketch, params)` (see "Serving-time L4" below for how
+    /// this same requirement re-appears, and why, at query time).
+    SummaryMerge { children: Vec<Rc<L4Node>> },
+}
+```
+
+`L4Schema` extends L3's schema with one new field type,
+`L4DataType::Sketch(SummaryKind, SummaryParams)` — a schema whose
+value-bearing field carries this dtype is a "sketch-state schema." The
+`(kind, params)` pair is the type identity: two sketch-state fields are
+compatible only if both match exactly, which is what lets `SummarySubtract`/
+`SummaryDelete`/`SummaryMerge` reject a family/param mismatch as a
+plan-time type error rather than a runtime one. Per-node schema rule
+summary: `SummaryAgg` outputs `by` verbatim plus one `Sketch(sketch,
+params)` field; `SummaryEstimate` outputs a plain row-shaped schema (the
+sketch field doesn't survive it); `SummarySubtract`/`SummaryMerge` require
+every input's `Sketch(s, p)` to already agree, and the catalog capability
+flag (`subtractable`/`deletable`/`mergeable`) gates whether the node can
+fire at all.
+
+Traversing from the root yields a DAG, not just a tree — shared
+sub-expressions appear as multiple `Rc` references to the same `L4Node`
+(fan-in is otherwise expressed via L3's own `QueryExpr::LetBinding`/`Ref`).
+`asap_plan::bind` only fires on the `Aggregate` spine; anything under an
+unrewritten logical parent stays `Logical(...)` unbound — "rewriting
+through logical parents" is tracked separately (#6/#33), not attempted
+here.
 
 ## Serving-time L4
 
