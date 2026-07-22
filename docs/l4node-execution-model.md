@@ -180,7 +180,7 @@ its own `data_plane/docs/l4node-plan-executor-design.md` for how
 cover (raw-AST PromQL fallbacks, the `(kind, params)` catalog-drift
 question at scale, rollout).
 
-## What's actually supported today
+## Supported operators
 
 ### `SummaryExpr` operators
 
