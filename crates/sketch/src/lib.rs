@@ -7,10 +7,12 @@
 //! [`SummaryParams`]), and [`L4Node`] / [`SummaryExpr`] describe the summary
 //! computation. It depends only on the IR crate.
 
+pub mod exec;
 pub mod expr;
 pub mod schema;
 pub mod sketch;
 
+pub use exec::{execute, ExecError, ExecOutcome, SummaryExecutor};
 pub use expr::{L4Node, SummaryExpr};
 pub use schema::{L4DataType, L4Field, L4Schema};
 pub use sketch::{SketchQuery, SummaryKind, SummaryParams};
