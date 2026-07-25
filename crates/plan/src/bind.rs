@@ -134,7 +134,7 @@ fn bind_summary_agg(
     let state_idx = summary_col_index(node, &out_schema, by);
 
     let col = summarised_column(intent, &child_schema);
-    let query = estimate.then(|| readout(intent, &col));
+    let query = estimate.then(|| readout(intent, &col, cost_model));
 
     let mut state_schema = lift(&out_schema);
     if let Some(field) = state_schema.fields.get_mut(state_idx) {
@@ -211,12 +211,23 @@ fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
 }
 
 /// The `SummaryEstimate` readout for a sketch-bound intent.
-fn readout(intent: &AggIntent, col: &ColumnRef) -> SketchQuery {
+fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> SketchQuery {
     match intent {
         AggIntent::Quantile { q, .. } => SketchQuery::Quantile { q: *q },
         AggIntent::Cardinality { .. } => SketchQuery::Cardinality,
         AggIntent::TopK { k, .. } => SketchQuery::TopK { k: *k },
-        AggIntent::Count { .. } => SketchQuery::PointCount { key: col.clone() },
+        AggIntent::Count { .. } => SketchQuery::PointCount {
+            key: col.clone(),
+            value: None,
+        },
+        // Core doesn't know the shape of a deployment-specific `Extension`
+        // intent, so it can't build its readout either — delegate to the
+        // same `CostModel` that decided (via `realize_extension`) this
+        // intent gets a sketch realization at all. See `readout_extension`'s
+        // doc for the invariant this depends on.
+        AggIntent::Extension { ext_kind, payload } => {
+            cost_model.readout_extension(ext_kind, payload, col)
+        }
         other => unreachable!("no sketch realization for {other:?} (boundary::implementation_for)"),
     }
 }
@@ -384,6 +395,104 @@ mod tests {
         };
         assert_eq!(sketch, &SummaryKind::DDSketch);
         assert_eq!(params, &SummaryParams::DDSketch { alpha: 0.01 });
+    }
+
+    /// A deployment-supplied `CostModel` can realize an `AggIntent::Extension`
+    /// intent as a real sketch instead of the default `PassThrough` (issue
+    /// #150) — `implement_tree_with` must consult `realize_extension` for
+    /// the `Extension` arm, and `readout` must consult `readout_extension`
+    /// to build its `SketchQuery` without panicking.
+    struct FrequencyCostModel;
+
+    impl CostModel for FrequencyCostModel {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SummaryKind],
+        ) -> Vec<SummaryKind> {
+            candidates.to_vec()
+        }
+
+        fn realize_extension(
+            &self,
+            ext_kind: &str,
+            _payload: &serde_json::Value,
+        ) -> crate::boundary::Implementation {
+            if ext_kind == "frequency" {
+                crate::boundary::Implementation::Sketch {
+                    kind: SummaryKind::CountSketch,
+                    params: SummaryParams::CountSketch {
+                        width: 256,
+                        depth: 4,
+                    },
+                }
+            } else {
+                crate::boundary::Implementation::PassThrough
+            }
+        }
+
+        fn readout_extension(
+            &self,
+            ext_kind: &str,
+            payload: &serde_json::Value,
+            _col: &ColumnRef,
+        ) -> SketchQuery {
+            assert_eq!(ext_kind, "frequency");
+            let value = payload["item"].as_str().map(str::to_string);
+            SketchQuery::PointCount {
+                key: ColumnRef::Named("item".into()),
+                value,
+            }
+        }
+    }
+
+    #[test]
+    fn extension_intent_stays_logical_by_default() {
+        // Without a CostModel overriding `realize_extension`, an
+        // `Extension` intent must stay `PassThrough` -- today's behavior,
+        // unchanged.
+        let intent = AggIntent::Extension {
+            ext_kind: "frequency".to_string(),
+            payload: serde_json::json!({ "item": "checkout" }),
+        };
+        let q = agg(vec![], intent, metric_scan(&[]));
+        let root = implement_tree(&q).unwrap();
+        assert!(matches!(root.expr, SummaryExpr::Logical(_)));
+    }
+
+    #[test]
+    fn extension_intent_binds_via_custom_cost_model() {
+        let intent = AggIntent::Extension {
+            ext_kind: "frequency".to_string(),
+            payload: serde_json::json!({ "item": "checkout" }),
+        };
+        let q = agg(vec![], intent, metric_scan(&[]));
+        let root = implement_tree_with(&q, &FrequencyCostModel).unwrap();
+
+        let SummaryExpr::SummaryEstimate {
+            sketch_input,
+            query,
+        } = &root.expr
+        else {
+            panic!("expected SummaryEstimate root, got {:?}", root.expr);
+        };
+        assert!(matches!(
+            query,
+            SketchQuery::PointCount { key: ColumnRef::Named(k), value: Some(v) }
+                if k == "item" && v == "checkout"
+        ));
+
+        let SummaryExpr::SummaryAgg { sketch, params, .. } = &sketch_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        };
+        assert_eq!(sketch, &SummaryKind::CountSketch);
+        assert_eq!(
+            params,
+            &SummaryParams::CountSketch {
+                width: 256,
+                depth: 4
+            }
+        );
     }
 
     #[test]

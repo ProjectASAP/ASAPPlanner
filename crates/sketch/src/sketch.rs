@@ -105,8 +105,18 @@ pub enum SummaryParams {
 pub enum SketchQuery {
     /// Extract the value at quantile rank `q` ∈ (0, 1].
     Quantile { q: f64 },
-    /// Estimated count / frequency for a specific key.
-    PointCount { key: ColumnRef },
+    /// Estimated count / frequency. `key` names which column is being
+    /// queried (`ColumnRef::SampleValue` for the bare bucket total, with
+    /// `value: None`); a `Named`/`Qualified` `key` paired with
+    /// `value: Some(v)` is a per-item point lookup (e.g.
+    /// `count(cms_metric{item="checkout"})` — `key` is `item`, `value` is
+    /// `"checkout"`). `value` is carried here rather than resolved by the
+    /// `SummaryExecutor` from a `Filter` predicate because `readout`'s
+    /// trait signature has no tree access — see `CostModel::readout_extension`.
+    PointCount {
+        key: ColumnRef,
+        value: Option<String>,
+    },
     /// Estimated number of distinct elements.
     Cardinality,
     /// Top-k most frequent (key, count) pairs.
