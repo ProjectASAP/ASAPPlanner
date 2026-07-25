@@ -4,6 +4,8 @@
 //! L4, the nested-composition rules, the open questions); this module is
 //! the implementation of it.
 
+use std::collections::BTreeMap;
+
 use asap_ir::intent_algebra::{ColumnId, ColumnRef, QueryExpr};
 
 use crate::expr::{L4Node, SummaryExpr};
@@ -21,10 +23,22 @@ pub trait SummaryExecutor {
     type Value;
     /// Deployment error type.
     type Error;
+    /// Opaque per-group identity for a `SummaryAgg`'s `by` columns — e.g.
+    /// a label-value map for a PromQL/time-series deployment. `Ord` so
+    /// `execute` can fold same-group handles/states deterministically;
+    /// `Default` for the ungrouped case (`by` empty, or a `Logical` leaf,
+    /// which has no grouping concept at all) — every outcome is always a
+    /// per-group list, and the ungrouped case is simply a list of one
+    /// entry under `GroupKey::default()`.
+    type GroupKey: Clone + Ord + Default;
 
     /// Resolve a `SummaryAgg` leaf to matching materialized-instance
-    /// handles. Must only return handles whose `(SummaryKind,
-    /// SummaryParams)` is exactly `(sketch, params)`.
+    /// handles, each tagged with the group (per `by`) it belongs to. Must
+    /// only return handles whose `(SummaryKind, SummaryParams)` is
+    /// exactly `(sketch, params)`. When `by` is empty there is exactly
+    /// one group — every returned handle should share one
+    /// deployment-chosen `GroupKey` (e.g. `GroupKey::default()`).
+    #[allow(clippy::type_complexity)]
     fn find_candidates(
         &self,
         sketch: &SummaryKind,
@@ -32,30 +46,32 @@ pub trait SummaryExecutor {
         col: &ColumnRef,
         by: &[ColumnId],
         child: &L4Node,
-    ) -> Result<Vec<Self::Handle>, Self::Error>;
+    ) -> Result<Vec<(Self::GroupKey, Self::Handle)>, Self::Error>;
 
     /// Fetch/decode one handle's raw state.
     fn fetch_state(&self, handle: &Self::Handle) -> Result<Self::State, Self::Error>;
 
-    /// Merge two or more same-`(kind, params)` states.
+    /// Merge two or more same-`(kind, params)`, same-group states.
     fn merge_states(&self, states: Vec<Self::State>) -> Result<Self::State, Self::Error>;
 
-    /// Read a query out of a built state.
-    fn readout(&self, state: &Self::State, query: &SketchQuery) -> Result<Self::Value, Self::Error>;
+    /// Read a query out of one group's built state.
+    fn readout(&self, state: &Self::State, query: &SketchQuery)
+        -> Result<Self::Value, Self::Error>;
 
     /// Handle a `SummaryExpr::Logical` node (nothing committed at L4).
+    /// Ungrouped by construction — `Logical` defers entirely to the
+    /// deployment, which decides for itself whether/how the underlying
+    /// `QueryExpr` groups.
     fn logical(&self, expr: &QueryExpr) -> Result<Self::Value, Self::Error>;
 }
 
-/// Result of executing one [`L4Node`] — a summary state (tagged with its
-/// `(kind, params)`) or a final value.
+/// Result of executing one [`L4Node`] — one summary state per group
+/// (tagged with the shared `(kind, params)`), or one final value per
+/// group. Always a list, even when there's exactly one (ungrouped) group
+/// — see [`SummaryExecutor::GroupKey`].
 pub enum ExecOutcome<E: SummaryExecutor + ?Sized> {
-    State {
-        state: E::State,
-        kind: SummaryKind,
-        params: SummaryParams,
-    },
-    Value(E::Value),
+    State(Vec<(E::GroupKey, E::State, SummaryKind, SummaryParams)>),
+    Value(Vec<(E::GroupKey, E::Value)>),
 }
 
 /// Errors [`execute`] itself can raise, on top of the deployment's own
@@ -66,7 +82,12 @@ pub enum ExecError<Inner> {
     NoCandidates,
     /// A `SummaryMerge` child produced a `Value`, not a `State`.
     MergeChildNotState,
-    /// `SummaryMerge` children disagreed on `(SummaryKind, SummaryParams)`.
+    /// `SummaryMerge` children disagreed on `(SummaryKind, SummaryParams)`
+    /// — checked globally across every group from every child, not just
+    /// within one group, because `(kind, params)` agreement is a
+    /// planning-time property of the `SummaryMerge` node itself (fixed
+    /// before any group value is known), not something that can validly
+    /// vary per group.
     MergeKindParamsMismatch,
     /// A `SummaryMerge` had zero children.
     EmptyMerge,
@@ -88,7 +109,10 @@ pub fn execute<E: SummaryExecutor>(
     exec: &E,
 ) -> Result<ExecOutcome<E>, ExecError<E::Error>> {
     match &node.expr {
-        SummaryExpr::Logical(qe) => Ok(ExecOutcome::Value(exec.logical(qe)?)),
+        SummaryExpr::Logical(qe) => Ok(ExecOutcome::Value(vec![(
+            E::GroupKey::default(),
+            exec.logical(qe)?,
+        )])),
 
         SummaryExpr::SummaryAgg {
             child,
@@ -97,25 +121,41 @@ pub fn execute<E: SummaryExecutor>(
             col,
             by,
         } => {
-            let handles = exec.find_candidates(sketch, params, col, by, child)?;
-            if handles.is_empty() {
+            let tagged = exec.find_candidates(sketch, params, col, by, child)?;
+            if tagged.is_empty() {
                 return Err(ExecError::NoCandidates);
             }
-            let states = handles
-                .iter()
-                .map(|h| exec.fetch_state(h))
-                .collect::<Result<Vec<_>, _>>()?;
-            let state = fold_states(states, exec)?;
-            Ok(ExecOutcome::State {
-                state,
-                kind: sketch.clone(),
-                params: params.clone(),
-            })
+            // Group by `GroupKey` first (a `SummaryAgg` may see several
+            // handles for the same group, e.g. cross-host instances of
+            // the same metric/group-by value that need folding), then
+            // fold each group's handles independently — a group's state
+            // must never be combined with another group's.
+            let mut by_group: BTreeMap<E::GroupKey, Vec<E::Handle>> = BTreeMap::new();
+            for (key, handle) in tagged {
+                by_group.entry(key).or_default().push(handle);
+            }
+            let mut out = Vec::with_capacity(by_group.len());
+            for (key, handles) in by_group {
+                let states = handles
+                    .iter()
+                    .map(|h| exec.fetch_state(h))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let state = fold_states(states, exec)?;
+                out.push((key, state, sketch.clone(), params.clone()));
+            }
+            Ok(ExecOutcome::State(out))
         }
 
-        SummaryExpr::SummaryEstimate { sketch_input, query } => {
-            let (state, _kind, _params) = expect_state(execute(sketch_input, exec)?)?;
-            Ok(ExecOutcome::Value(exec.readout(&state, query)?))
+        SummaryExpr::SummaryEstimate {
+            sketch_input,
+            query,
+        } => {
+            let groups = expect_state(execute(sketch_input, exec)?)?;
+            let mut out = Vec::with_capacity(groups.len());
+            for (key, state, _kind, _params) in groups {
+                out.push((key, exec.readout(&state, query)?));
+            }
+            Ok(ExecOutcome::Value(out))
         }
 
         SummaryExpr::SummaryMerge { children } => {
@@ -123,23 +163,36 @@ pub fn execute<E: SummaryExecutor>(
                 return Err(ExecError::EmptyMerge);
             }
             let mut agreed: Option<(SummaryKind, SummaryParams)> = None;
-            let mut states = Vec::with_capacity(children.len());
+            // Collect every child's (group -> state) pairs first, so a
+            // group present in only some children still gets folded from
+            // whatever states exist for it (mirrors today's per-(group,
+            // window) ExactAgg merge: fold whatever's present, don't
+            // require every child to cover every group).
+            let mut by_group: BTreeMap<E::GroupKey, Vec<E::State>> = BTreeMap::new();
             for child in children {
-                let (state, kind, params) = expect_state(execute(child, exec)?)?;
-                match &agreed {
-                    None => agreed = Some((kind, params)),
-                    Some((k, p)) if *k == kind && *p == params => {}
-                    Some(_) => return Err(ExecError::MergeKindParamsMismatch),
+                let groups = expect_state(execute(child, exec)?)?;
+                for (key, state, kind, params) in groups {
+                    match &agreed {
+                        None => agreed = Some((kind, params)),
+                        Some((k, p)) if *k == kind && *p == params => {}
+                        Some(_) => return Err(ExecError::MergeKindParamsMismatch),
+                    }
+                    by_group.entry(key).or_default().push(state);
                 }
-                states.push(state);
             }
+            // `children` non-empty => at least one child produced a
+            // `State` outcome (checked above) => that outcome had at
+            // least one group (a `SummaryAgg`/`SummaryMerge` never
+            // produces an empty group list — `SummaryAgg` errors via
+            // `NoCandidates` first, and `SummaryMerge` recursively bottoms
+            // out at a `SummaryAgg`) => `agreed` is always `Some` here.
             let (kind, params) = agreed.expect("checked non-empty above");
-            let merged = fold_states(states, exec)?;
-            Ok(ExecOutcome::State {
-                state: merged,
-                kind,
-                params,
-            })
+            let mut out = Vec::with_capacity(by_group.len());
+            for (key, states) in by_group {
+                let merged = fold_states(states, exec)?;
+                out.push((key, merged, kind.clone(), params.clone()));
+            }
+            Ok(ExecOutcome::State(out))
         }
 
         SummaryExpr::SummaryJoin { .. } => Err(ExecError::NotYetSupported("SummaryJoin")),
@@ -148,7 +201,7 @@ pub fn execute<E: SummaryExecutor>(
     }
 }
 
-/// Fold one-or-more same-`(kind, params)` states into one.
+/// Fold one-or-more same-`(kind, params)`, same-group states into one.
 fn fold_states<E: SummaryExecutor>(
     mut states: Vec<E::State>,
     exec: &E,
@@ -160,13 +213,14 @@ fn fold_states<E: SummaryExecutor>(
     }
 }
 
-/// Unwrap an [`ExecOutcome::State`], erroring if it was actually a `Value`.
+/// Unwrap an [`ExecOutcome::State`], erroring if it was actually a
+/// `Value`.
 #[allow(clippy::type_complexity)]
 fn expect_state<E: SummaryExecutor>(
     outcome: ExecOutcome<E>,
-) -> Result<(E::State, SummaryKind, SummaryParams), ExecError<E::Error>> {
+) -> Result<Vec<(E::GroupKey, E::State, SummaryKind, SummaryParams)>, ExecError<E::Error>> {
     match outcome {
-        ExecOutcome::State { state, kind, params } => Ok((state, kind, params)),
+        ExecOutcome::State(groups) => Ok(groups),
         ExecOutcome::Value(_) => Err(ExecError::MergeChildNotState),
     }
 }
@@ -182,9 +236,7 @@ mod tests {
 
     fn scan() -> QueryExpr {
         QueryExpr::Scan {
-            source: Source::TimeSeries {
-                metric: "m".into(),
-            },
+            source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
@@ -233,7 +285,10 @@ mod tests {
 
     fn estimate_node(sketch_input: Rc<L4Node>, query: SketchQuery) -> Rc<L4Node> {
         Rc::new(L4Node {
-            expr: SummaryExpr::SummaryEstimate { sketch_input, query },
+            expr: SummaryExpr::SummaryEstimate {
+                sketch_input,
+                query,
+            },
             schema: lift(vec!["value"]),
         })
     }
@@ -245,13 +300,20 @@ mod tests {
         })
     }
 
-    /// Trivial in-memory executor for exercising `execute`'s tree-walking
-    /// and merge-precondition logic — `State`/`Value` are just `f64`s, and
-    /// `merge_states` is `sum`, so tests can assert on concrete numbers
-    /// without any real sketch-math dependency.
+    /// Trivial in-memory executor for exercising `execute`'s tree-walking,
+    /// grouping, and merge-precondition logic — `State`/`Value` are just
+    /// `f64`s, `GroupKey` is `String` (empty string = the ungrouped
+    /// default), and `merge_states` is `sum`, so tests can assert on
+    /// concrete numbers without any real sketch-math dependency.
+    ///
+    /// `find_candidates` intentionally ignores `sketch`/`params`/`by`/
+    /// `child` and returns every registered handle tagged with its own
+    /// registered group — real deployments filter on those; these tests
+    /// only exercise `execute`'s own tree-walking and grouping/merge
+    /// logic, not a real candidate search.
     struct MockExecutor {
-        /// handle -> raw value.
-        values: RefCell<HashMap<u64, f64>>,
+        /// handle -> (group, value).
+        values: RefCell<HashMap<u64, (String, f64)>>,
         next_handle: RefCell<u64>,
     }
 
@@ -263,12 +325,20 @@ mod tests {
             }
         }
 
-        /// Register one materialized instance, returning its handle.
+        /// Register one materialized instance under the default
+        /// (ungrouped) group, returning its handle.
         fn register(&self, value: f64) -> u64 {
+            self.register_grouped("", value)
+        }
+
+        /// Register one materialized instance under an explicit group.
+        fn register_grouped(&self, group: &str, value: f64) -> u64 {
             let mut h = self.next_handle.borrow_mut();
             let handle = *h;
             *h += 1;
-            self.values.borrow_mut().insert(handle, value);
+            self.values
+                .borrow_mut()
+                .insert(handle, (group.to_string(), value));
             handle
         }
     }
@@ -278,6 +348,7 @@ mod tests {
         type State = f64;
         type Value = f64;
         type Error = String;
+        type GroupKey = String;
 
         fn find_candidates(
             &self,
@@ -286,15 +357,20 @@ mod tests {
             _col: &ColumnRef,
             _by: &[ColumnId],
             _child: &L4Node,
-        ) -> Result<Vec<Self::Handle>, Self::Error> {
-            Ok(self.values.borrow().keys().copied().collect())
+        ) -> Result<Vec<(Self::GroupKey, Self::Handle)>, Self::Error> {
+            Ok(self
+                .values
+                .borrow()
+                .iter()
+                .map(|(h, (g, _))| (g.clone(), *h))
+                .collect())
         }
 
         fn fetch_state(&self, handle: &Self::Handle) -> Result<Self::State, Self::Error> {
             self.values
                 .borrow()
                 .get(handle)
-                .copied()
+                .map(|(_, v)| *v)
                 .ok_or_else(|| "unknown handle".to_string())
         }
 
@@ -302,7 +378,11 @@ mod tests {
             Ok(states.into_iter().sum())
         }
 
-        fn readout(&self, state: &Self::State, _query: &SketchQuery) -> Result<Self::Value, Self::Error> {
+        fn readout(
+            &self,
+            state: &Self::State,
+            _query: &SketchQuery,
+        ) -> Result<Self::Value, Self::Error> {
             Ok(*state)
         }
 
@@ -319,6 +399,13 @@ mod tests {
         (SummaryKind::Sum, SummaryParams::Sum)
     }
 
+    /// Extract the single (ungrouped) output's value, asserting there's
+    /// exactly one group -- the shape every pre-grouping test expects.
+    fn only<T>(v: Vec<(String, T)>) -> T {
+        assert_eq!(v.len(), 1, "expected exactly one (ungrouped) output group");
+        v.into_iter().next().unwrap().1
+    }
+
     #[test]
     fn single_agg_reads_out_directly() {
         let exec = MockExecutor::new();
@@ -331,7 +418,7 @@ mod tests {
         let ExecOutcome::Value(v) = execute(&tree, &exec).unwrap() else {
             panic!("expected a value");
         };
-        assert_eq!(v, 7.0);
+        assert_eq!(only(v), 7.0);
     }
 
     #[test]
@@ -347,7 +434,7 @@ mod tests {
         let ExecOutcome::Value(v) = execute(&tree, &exec).unwrap() else {
             panic!("expected a value");
         };
-        assert_eq!(v, 7.0); // MockExecutor::merge_states sums
+        assert_eq!(only(v), 7.0); // MockExecutor::merge_states sums
     }
 
     #[test]
@@ -357,7 +444,7 @@ mod tests {
         let ExecOutcome::Value(v) = execute(&tree, &exec).unwrap() else {
             panic!("expected a value");
         };
-        assert_eq!(v, -1.0);
+        assert_eq!(only(v), -1.0);
     }
 
     #[test]
@@ -377,7 +464,7 @@ mod tests {
         // returns every registered handle -- the point of this test is
         // that `execute` actually reaches both levels (no panic/short
         // circuit on the nested SummaryAgg), not the specific value.
-        assert_eq!(v, 10.0);
+        assert_eq!(only(v), 10.0);
     }
 
     #[test]
@@ -387,9 +474,10 @@ mod tests {
         let a = agg_node(kind.clone(), params.clone(), logical_node());
         let b = agg_node(kind, params, logical_node());
         // Each SummaryAgg independently pulls every registered handle from
-        // the shared MockExecutor (2 handles), so the merge sees two
-        // already-summed inputs. Register after building the tree so each
-        // `find_candidates` call sees the same two handles.
+        // the shared MockExecutor (2 handles, same default group), so the
+        // merge sees two already-summed inputs. Register after building
+        // the tree so each `find_candidates` call sees the same two
+        // handles.
         exec.register(1.0);
         exec.register(2.0);
         let merged = merge_node(vec![a, b]);
@@ -399,7 +487,7 @@ mod tests {
         };
         // Each child sums to 3.0 (1.0 + 2.0); the outer merge sums the two
         // children's results: 3.0 + 3.0.
-        assert_eq!(v, 6.0);
+        assert_eq!(only(v), 6.0);
     }
 
     #[test]
@@ -428,7 +516,10 @@ mod tests {
         let tree = estimate_node(merged, SketchQuery::Cardinality);
         match execute(&tree, &exec) {
             Err(ExecError::MergeKindParamsMismatch) => {}
-            other => panic!("expected MergeKindParamsMismatch, got a different outcome: {}", other.is_ok()),
+            other => panic!(
+                "expected MergeKindParamsMismatch, got a different outcome: {}",
+                other.is_ok()
+            ),
         }
     }
 
@@ -443,7 +534,10 @@ mod tests {
         let tree = estimate_node(merged, SketchQuery::Cardinality);
         match execute(&tree, &exec) {
             Err(ExecError::MergeChildNotState) => {}
-            other => panic!("expected MergeChildNotState, got a different outcome: {}", other.is_ok()),
+            other => panic!(
+                "expected MergeChildNotState, got a different outcome: {}",
+                other.is_ok()
+            ),
         }
     }
 
@@ -457,7 +551,63 @@ mod tests {
         );
         match execute(&tree, &exec) {
             Err(ExecError::NoCandidates) => {}
-            other => panic!("expected NoCandidates, got a different outcome: {}", other.is_ok()),
+            other => panic!(
+                "expected NoCandidates, got a different outcome: {}",
+                other.is_ok()
+            ),
         }
+    }
+
+    #[test]
+    fn grouped_summary_agg_produces_one_series_per_group() {
+        // The gap ASAPController#159 flagged: `quantile by (zone) (m)`
+        // must produce one output series per zone, not one series
+        // merging every zone's sketches together.
+        let exec = MockExecutor::new();
+        exec.register_grouped("us-east", 3.0);
+        exec.register_grouped("us-west", 4.0);
+        let (kind, params) = sum();
+        let tree = estimate_node(
+            agg_node(kind, params, logical_node()),
+            SketchQuery::Cardinality,
+        );
+        let ExecOutcome::Value(mut v) = execute(&tree, &exec).unwrap() else {
+            panic!("expected a value");
+        };
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            v,
+            vec![("us-east".to_string(), 3.0), ("us-west".to_string(), 4.0)]
+        );
+    }
+
+    #[test]
+    fn grouped_summary_merge_folds_within_group_not_across() {
+        // Two children (e.g. edge + gateway tiers of the same SummaryAgg
+        // shape) each see both groups' handles; the merge must fold
+        // us-east's two values together and us-west's two values
+        // together, WITHOUT ever mixing a us-east state into us-west's
+        // output or vice versa.
+        let exec = MockExecutor::new();
+        let (kind, params) = sum();
+        let a = agg_node(kind.clone(), params.clone(), logical_node());
+        let b = agg_node(kind, params, logical_node());
+        exec.register_grouped("us-east", 1.0);
+        exec.register_grouped("us-west", 10.0);
+        let merged = merge_node(vec![a, b]);
+        let tree = estimate_node(merged, SketchQuery::Cardinality);
+        let ExecOutcome::Value(mut v) = execute(&tree, &exec).unwrap() else {
+            panic!("expected a value");
+        };
+        v.sort_by(|x, y| x.0.cmp(&y.0));
+        // us-east: both children see the one us-east handle (1.0) -> each
+        // child's us-east state is 1.0 -> merge sums the two children:
+        // 1.0 + 1.0 = 2.0. Same for us-west: 10.0 + 10.0 = 20.0. Neither
+        // group's value (2.0, 20.0) equals the cross-group sum (11.0) --
+        // proves the merge didn't mix groups.
+        assert_eq!(
+            v,
+            vec![("us-east".to_string(), 2.0), ("us-west".to_string(), 20.0)]
+        );
     }
 }

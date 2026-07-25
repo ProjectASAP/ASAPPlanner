@@ -108,9 +108,11 @@ pub trait SummaryExecutor {
     type State;           // decoded sketch/accumulator bytes
     type Value;            // a query answer
     type Error;
+    type GroupKey: Clone + Ord + Default;   // e.g. a label-value map
 
     fn find_candidates(&self, sketch: &SummaryKind, params: &SummaryParams,
-        col: &ColumnRef, by: &[ColumnId], child: &L4Node) -> Result<Vec<Self::Handle>, Self::Error>;
+        col: &ColumnRef, by: &[ColumnId], child: &L4Node)
+        -> Result<Vec<(Self::GroupKey, Self::Handle)>, Self::Error>;
     fn fetch_state(&self, handle: &Self::Handle) -> Result<Self::State, Self::Error>;
     fn merge_states(&self, states: Vec<Self::State>) -> Result<Self::State, Self::Error>;
     fn readout(&self, state: &Self::State, query: &SketchQuery) -> Result<Self::Value, Self::Error>;
@@ -127,6 +129,27 @@ further down, typically inside a `Logical(Window{Scan{..}})` leaf. Walking
 down to find it is deployment-specific `QueryExpr`-shape knowledge
 (mirrors how a real store's edge-fact extraction already works); `execute`
 doesn't interpret it.
+
+**Grouping (`by`).** `SummaryAgg` carries `by: Vec<ColumnId>` (the GROUP BY
+columns), but `execute` has no schema-level knowledge of what a "group
+value" looks like for a given deployment — that's `find_candidates`'s job:
+it tags every handle it returns with the `GroupKey` (an opaque,
+deployment-chosen type) that handle belongs to. `execute` groups those
+tagged handles itself before folding (`fold_states`/`merge_states` only
+ever combine same-group states), and every `ExecOutcome` — `State` or
+`Value` — is a per-group list, never a single bare value. The ungrouped
+case (`by` empty, or a `Logical` leaf, which has no grouping concept at
+all) is simply a list of one entry under `GroupKey::default()`, not a
+different shape — callers don't need to special-case it.
+`SummaryMerge`'s `(SummaryKind, SummaryParams)` agreement check stays
+*global* across every group from every child (it's a planning-time
+property of the node, fixed before any group value is known); the actual
+state-folding happens *within* each group independently, never across
+groups. First landed narrower (a single ungrouped value per tree) in #155;
+broadened to this shape in response to #159 once a real
+consumer (`data_plane`'s grouped PromQL queries — `sum by (zone)`,
+`quantile by (zone)(...)`, the common case, not an edge case) showed the
+original shape would have silently merged every group's state together.
 
 ### Nested composition
 
