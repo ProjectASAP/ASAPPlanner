@@ -192,11 +192,13 @@ pub fn implementation_for_with(intent: &AggIntent, cost_model: &dyn CostModel) -
         AggIntent::Group | AggIntent::CountValues { .. } => Implementation::PassThrough,
 
         // ── Extension (deployment-model-specific, issue #131) — core has no
-        //    realization opinion for a shape it doesn't know. The owning
-        //    deployment model is expected to bind it via its own L4 rules
-        //    before this generic boundary pass ever sees it; if one reaches
-        //    here unbound, pass it through rather than guessing.
-        AggIntent::Extension { .. } => Implementation::PassThrough,
+        //    realization opinion for a shape it doesn't know, so it defers
+        //    entirely to the `CostModel` (issue #150): `realize_extension`
+        //    defaults to `PassThrough`, preserving today's behavior for
+        //    every deployment that doesn't override it.
+        AggIntent::Extension { ext_kind, payload } => {
+            cost_model.realize_extension(ext_kind, payload)
+        }
     }
 }
 

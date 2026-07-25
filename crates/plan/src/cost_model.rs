@@ -29,7 +29,10 @@
 //! byte.
 
 use asap_ir::intent_algebra::agg_intent::AggIntent;
-use asap_sketch::{SummaryKind, SummaryParams};
+use asap_ir::intent_algebra::expr_ir::ColumnRef;
+use asap_sketch::{SketchQuery, SummaryKind, SummaryParams};
+
+use crate::boundary::Implementation;
 
 /// Ranks the candidate summary families for one [`AggIntent`], best choice
 /// first.
@@ -75,6 +78,39 @@ pub trait CostModel {
         delta: f64,
     ) -> SummaryParams {
         crate::boundary::default_size_params(kind, intent, eps, delta)
+    }
+
+    /// Realize an `AggIntent::Extension { ext_kind, payload }` — a
+    /// deployment-specific intent shape core has no realization opinion
+    /// for (issue #131). `boundary::implementation_for_with` consults this
+    /// for every `Extension` node instead of hardcoding `PassThrough`
+    /// (issue #150). Default: `PassThrough` — preserves today's behavior
+    /// for every deployment that doesn't override this, exactly like
+    /// `size_params`'s default-delegates pattern above.
+    fn realize_extension(&self, _ext_kind: &str, _payload: &serde_json::Value) -> Implementation {
+        Implementation::PassThrough
+    }
+
+    /// Build the `SummaryEstimate` readout for an `Extension` intent this
+    /// same `CostModel` realized as `Implementation::Sketch` via
+    /// [`realize_extension`](Self::realize_extension). Only ever called
+    /// when `realize_extension` returned `Sketch` for the same
+    /// `(ext_kind, payload)` — `bind::readout` has no other way to build a
+    /// `SketchQuery` for a shape core doesn't know. A deployment that
+    /// overrides `realize_extension` to return `Sketch` for some
+    /// `ext_kind` MUST also override this for that same `ext_kind`, or
+    /// this default panics loudly (rather than silently misinterpreting
+    /// `payload`) the first time that intent is actually read out.
+    fn readout_extension(
+        &self,
+        ext_kind: &str,
+        _payload: &serde_json::Value,
+        _col: &ColumnRef,
+    ) -> SketchQuery {
+        unimplemented!(
+            "CostModel::realize_extension returned Sketch for ext_kind={ext_kind:?} but \
+             readout_extension wasn't overridden to match"
+        )
     }
 }
 
