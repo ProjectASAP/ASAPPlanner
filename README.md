@@ -11,12 +11,11 @@ This repo merges three previously-separate projects into a single workspace with
 ## Status
 
 **Early implementation.** The workspace builds and is organized into a
-layer-named crate stack (the query→sketch pipeline reads top-to-bottom). The
-two docs below are the broader design + migration plan the code is following;
-the deployment-model / runtime / bin crates they describe are still planned.
-
-- [`docs/design.md`](docs/design.md) — target architecture, repo layout, extension points, wire contracts.
-- [`docs/migration-plan.md`](docs/migration-plan.md) — phase-by-phase plan to land the merger without disrupting any running deployment.
+layer-named crate stack (the query→sketch pipeline reads top-to-bottom).
+[`docs/design.md`](docs/design.md) is the design index the code is
+following — an overview of the L1-L5 pipeline, linking into a dedicated
+doc per layer; the deployment-model / runtime / bin crates it describes
+are still planned.
 
 ## Architecture (summary)
 
@@ -82,8 +81,8 @@ crates/
 ├── lower/                          # asap-lower — facade (re-exports both front ends) + cross-language tests
 └── e2e/                            # asap-e2e — PromQL→L3 integration tests + fixtures
 
-# planned (docs/design.md §5.2): L5 physical framework, runtime service,
-# deployment-model-* crates, control-proto, and the bin/ entrypoints.
+# planned (see docs/l5-physical-plan.md): L5 physical framework, runtime
+# service, deployment-model-* crates, control-proto, and the bin/ entrypoints.
 ```
 
 **Why L2 and L3 are separate crates.** `asap-ir` is the canonical L3 IR — the
@@ -156,10 +155,10 @@ copies the snippet. Keep credentials in `gh` (or git's keychain helper) instead.
 
 ## Key design references
 
-- 5-layer pipeline: `docs/design.md` §3
-- Core internals (L1-3 + L4 framework + L5 framework): `docs/design.md` §6
-- Deployment model internals (each's rules + topology + emitter): `docs/design.md` §8
-- Extension point for future deployment models: `docs/design.md` §9
-- Consumption modes + dependency isolation: `docs/design.md` §11
-- Open questions (incl. L2-tree contract, deployment model placement): `docs/design.md` §12
-- Phase-by-phase migration: `docs/migration-plan.md`
+- 5-layer pipeline overview + glossary: [`docs/design.md`](docs/design.md)
+- Per-layer detail: [`docs/l1-query-language.md`](docs/l1-query-language.md),
+  [`docs/l2-logical-plan.md`](docs/l2-logical-plan.md),
+  [`docs/l3-intent-algebra.md`](docs/l3-intent-algebra.md),
+  [`docs/l4-summary-bound-ir.md`](docs/l4-summary-bound-ir.md) (also covers
+  serving-time execution), [`docs/l5-physical-plan.md`](docs/l5-physical-plan.md)
+- Consumption modes + dependency isolation: "Consumption modes" above
