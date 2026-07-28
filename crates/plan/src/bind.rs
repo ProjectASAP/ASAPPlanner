@@ -33,7 +33,7 @@ use std::rc::Rc;
 
 use asap_ir::intent_algebra::agg_intent::AggIntent;
 use asap_ir::intent_algebra::expr_ir::ColumnRef;
-use asap_ir::intent_algebra::query_expr::{BindingScope, QueryExpr, QueryExprError};
+use asap_ir::intent_algebra::query_expr::{BindingScope, QueryExpr, QueryExprError, Reduction};
 use asap_ir::intent_algebra::schema::Schema;
 use asap_sketch::{
     L4DataType, L4Field, L4Node, L4Schema, SketchQuery, SummaryExpr, SummaryKind, SummaryParams,
@@ -84,7 +84,7 @@ pub fn implement_tree_in_with(
     cost_model: &dyn CostModel,
 ) -> Result<Rc<L4Node>, ImplementError> {
     if let QueryExpr::Aggregate {
-        by,
+        reduction,
         aggs,
         having,
         child,
@@ -97,12 +97,12 @@ pub fn implement_tree_in_with(
             match implementation_for_with(intent, cost_model) {
                 Implementation::Sketch { kind, params } => {
                     return bind_summary_agg(
-                        expr, by, intent, child, kind, params, scope, true, cost_model,
+                        expr, reduction, intent, child, kind, params, scope, true, cost_model,
                     )
                 }
                 Implementation::ExactAccumulator { kind, params } => {
                     return bind_summary_agg(
-                        expr, by, intent, child, kind, params, scope, false, cost_model,
+                        expr, reduction, intent, child, kind, params, scope, false, cost_model,
                     )
                 }
                 Implementation::PassThrough => {}
@@ -117,7 +117,7 @@ pub fn implement_tree_in_with(
 #[allow(clippy::too_many_arguments)]
 fn bind_summary_agg(
     node: &QueryExpr,
-    by: &[usize],
+    reduction: &Reduction,
     intent: &AggIntent,
     child: &QueryExpr,
     kind: SummaryKind,
@@ -129,9 +129,16 @@ fn bind_summary_agg(
     let child_schema = child.output_schema_in(scope)?;
     // The single canonical L3 derivation (per-series vs cross-series, name
     // overrides) already computes the row shape; L4 only retypes the summary
-    // state column.
+    // state column. `reduction` (read directly, not re-derived — issue #165)
+    // settles both the schema shape and, downstream of this PR, the
+    // `by`-emptiness ambiguity a bare `Vec<ColumnId>` alone can't (issue #163).
+    let per_series = matches!(reduction, Reduction::PerEntity);
+    let by: Vec<usize> = reduction
+        .group_keys()
+        .map(|g| g.to_vec())
+        .unwrap_or_default();
     let out_schema = node.output_schema_in(scope)?;
-    let state_idx = summary_col_index(node, &out_schema, by);
+    let state_idx = summary_col_index(&out_schema, &by, per_series);
 
     let col = summarised_column(intent, &child_schema);
     let query = estimate.then(|| readout(intent, &col, cost_model));
@@ -147,7 +154,7 @@ fn bind_summary_agg(
             sketch: kind,
             params,
             col,
-            by: by.to_vec(),
+            by,
         },
         schema: state_schema,
     });
@@ -169,19 +176,9 @@ fn bind_summary_agg(
 /// cross-series output is `by ++ [agg]` (the column after the keys);
 /// a per-series reduction keeps every label and replaces the sample value
 /// (named `value` — mirror `per_series_reduction_schema`'s fallback).
-fn summary_col_index(node: &QueryExpr, out_schema: &Schema, by: &[usize]) -> usize {
-    let per_series = match node {
-        QueryExpr::Aggregate {
-            by, aggs, child, ..
-        } => {
-            let is_range_child = matches!(
-                child.as_ref(),
-                QueryExpr::TimeRange { .. } | QueryExpr::Subquery { .. }
-            );
-            by.is_empty() && aggs.len() == 1 && (aggs[0].is_per_series() || is_range_child)
-        }
-        _ => false,
-    };
+/// `per_series` is the caller's already-read `Reduction` (issue #165) —
+/// this never re-derives it, so it can't disagree with the caller.
+fn summary_col_index(out_schema: &Schema, by: &[usize], per_series: bool) -> usize {
     if per_series {
         out_schema
             .column_id("value")
@@ -285,9 +282,22 @@ mod tests {
         }
     }
 
+    /// A cross-series reduction, grouped by `by` (possibly empty — a
+    /// genuine full reduction, never "no grouping concept").
     fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
         QueryExpr::Aggregate {
-            by: by.into(),
+            reduction: Reduction::by(by),
+            aggs: vec![intent],
+            output_names: vec![],
+            having: None,
+            child: Box::new(child),
+        }
+    }
+
+    /// A per-entity reduction: no grouping concept at all (issue #165).
+    fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
+        QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
             aggs: vec![intent],
             output_names: vec![],
             having: None,
@@ -517,8 +527,7 @@ mod tests {
     fn per_series_rate_keeps_labels_and_retypes_value() {
         // rate(m[5m]) — per-series: every label survives; the sample value
         // column becomes the Rate accumulator state.
-        let q = agg(
-            vec![],
+        let q = agg_per_entity(
             AggIntent::Rate,
             QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
@@ -657,7 +666,7 @@ mod tests {
         ));
 
         let multi = QueryExpr::Aggregate {
-            by: vec![2].into(),
+            reduction: Reduction::by(vec![2]),
             aggs: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,

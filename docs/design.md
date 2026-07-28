@@ -403,7 +403,7 @@ pub enum QueryExpr {
     /// γ + α — GROUP BY + aggregate intents, with optional HAVING.
     /// `aggs` carry `AggIntent`; concrete sketch / non-sketch operator
     /// is chosen by L4 and lives in the L4-extended IR (`SketchExpr`).
-    Aggregate { child: Box<QueryExpr>, by: GroupKeys,
+    Aggregate { child: Box<QueryExpr>, reduction: Reduction,
                 aggs: Vec<AggIntent>, having: Option<Predicate> },
 
     // ── Time / streaming windows ──────────────────────────────────────────
@@ -416,7 +416,7 @@ pub enum QueryExpr {
 
     // ── Distributed-execution structure ───────────────────────────────────
     // There is no `Partition` node (issue #12). Grouping has one home per
-    // concept: a reducing GROUP BY → `Aggregate.by`; per-group *ranking*
+    // concept: a reducing GROUP BY → `Aggregate.reduction`; per-group *ranking*
     // (split without reduce) → `Sort.partition_by` (below); a parallel/sharding
     // split is physical and lives in L5's stage allocator, not the symbolic IR.
     // All three carry the same `GroupKeys` type — a newtype over the positional

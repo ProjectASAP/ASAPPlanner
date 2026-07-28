@@ -205,7 +205,9 @@ async fn corpus_lowering_matches_the_pinned_per_query_outcome() {
 
 fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
-        QueryExpr::Aggregate { by, aggs, .. } => Some((by, aggs)),
+        QueryExpr::Aggregate {
+            reduction, aggs, ..
+        } => Some((reduction.expect_reduce(), aggs)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }

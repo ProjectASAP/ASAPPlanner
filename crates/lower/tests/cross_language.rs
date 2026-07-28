@@ -53,7 +53,10 @@ fn promql(q: &str) -> QueryExpr {
 /// `by`) over an inner `Aggregate([Count])`. Returns `(k, outer_by)`.
 fn heavy_hitter(qe: &QueryExpr) -> Option<(usize, GroupKeys)> {
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = qe
     else {
         return None;
@@ -66,7 +69,8 @@ fn heavy_hitter(qe: &QueryExpr) -> Option<(usize, GroupKeys)> {
     let QueryExpr::Aggregate { aggs: inner, .. } = child.as_ref() else {
         return None;
     };
-    matches!(inner.as_slice(), [AggIntent::Count { .. }]).then(|| (*k, by.clone()))
+    matches!(inner.as_slice(), [AggIntent::Count { .. }])
+        .then(|| (*k, reduction.expect_reduce().clone()))
 }
 
 #[tokio::test]

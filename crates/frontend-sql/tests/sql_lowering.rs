@@ -7,7 +7,8 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 use asap_ir::intent_algebra::{
-    AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, L3Scalar, QueryExpr, Source, WindowFuncKind,
+    AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, L3Scalar, QueryExpr, Reduction, Source,
+    WindowFuncKind,
 };
 use asap_ir::types::AccuracyTarget;
 
@@ -49,7 +50,9 @@ async fn lower(sql: &str) -> QueryExpr {
 /// Find the first `Aggregate` node along the single-child spine.
 fn find_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
-        QueryExpr::Aggregate { by, aggs, .. } => Some((by, aggs)),
+        QueryExpr::Aggregate {
+            reduction, aggs, ..
+        } => Some((reduction.expect_reduce(), aggs)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Window { child, .. }
@@ -1049,7 +1052,10 @@ async fn time_bucketing_group_by_lowers_to_a_derived_key() {
         lower("SELECT date_trunc('minute', ts) AS m, SUM(bytes) FROM metrics GROUP BY m").await;
     let node = find_aggregate_node(&qe).expect("expected an Aggregate");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = node
     else {
         unreachable!()
@@ -1059,7 +1065,7 @@ async fn time_bucketing_group_by_lowers_to_a_derived_key() {
         "expected a materializing Project beneath the Aggregate"
     );
     let schema = child.output_schema().expect("child schema");
-    assert_eq!(by, &GroupKeys::by(vec![0]));
+    assert_eq!(reduction, &Reduction::by(vec![0]));
     assert!(
         schema.columns[0].name.contains("date_trunc"),
         "group key should be the projected bucket, got {:?}",
@@ -1155,7 +1161,7 @@ fn grouping_levels(qe: &QueryExpr) -> Vec<(GroupKeys, Vec<String>)> {
             let QueryExpr::Project { child, .. } = b else {
                 panic!("expected a Project per level, got {b:?}");
             };
-            let QueryExpr::Aggregate { by, .. } = child.as_ref() else {
+            let QueryExpr::Aggregate { reduction, .. } = child.as_ref() else {
                 panic!("expected an Aggregate under the Project, got {child:?}");
             };
             let names = b
@@ -1165,7 +1171,7 @@ fn grouping_levels(qe: &QueryExpr) -> Vec<(GroupKeys, Vec<String>)> {
                 .iter()
                 .map(|c| c.name.clone())
                 .collect();
-            (by.clone(), names)
+            (reduction.expect_reduce().clone(), names)
         })
         .collect()
 }
