@@ -72,3 +72,60 @@ infrastructure that every deployment reads from, rather than something
 each deployment reinvents independently — though which summary
 families and parameter ranges are actually registered is itself
 deployment policy.
+
+## Interface
+
+Speculative — nothing here is built (see this doc's status note at the
+top). Kept as a concrete target to design against, not as an API to
+depend on:
+
+```rust
+pub trait PhysicalPlanner {
+    type Topology: TopologyDescriptor;
+    type Output;
+    fn lower(&self, l4: Rc<L4Node>, t: &Self::Topology) -> Result<Self::Output, PlanError>;
+}
+
+pub trait TopologyDescriptor {
+    fn stages(&self) -> &[StageDescriptor];
+    fn edges(&self) -> &[StageEdge];
+}
+
+pub struct StageId(pub String);   // "edge" / "gateway" / "backend" / "in-process"
+
+pub struct Executor {
+    pub id: ExecutorId,
+    pub stage: StageId,
+    pub capabilities: ExecutorCaps,   // memory budget, available summary backends, network neighbours
+    pub address: ExecutorAddr,        // OpAMP agent / HTTP endpoint / in-process handle
+}
+
+// Stage-level allocation: given an L4 tree + a topology, decide which
+// nodes land on which stage, subject to deployment constraints.
+// Per-executor fan-out is the deployment model's own PhysicalPlanner,
+// using the executor list from DeploymentConstraints::executors().
+pub struct StageAllocator;
+impl StageAllocator {
+    pub fn allocate<T: TopologyDescriptor>(
+        &self, l4: Rc<L4Node>, topology: &T, c: &DeploymentConstraints,
+    ) -> Result<Vec<StageAssignment>, PlanError>;
+}
+```
+
+A deployment model implements `PhysicalPlanner`, delegating the
+stage-level decision to `StageAllocator` and handling its own
+per-executor fan-out on top:
+
+```rust
+impl PhysicalPlanner for LifecyclePlanner {
+    type Topology = ThreeStage;
+    type Output = Vec<(ExecutorId, ExecutorPlan)>;
+    fn lower(&self, l4: Rc<L4Node>, t: &ThreeStage) -> Result<Self::Output, PlanError> {
+        let assignments = StageAllocator.allocate(l4, t, &self.constraints)?;
+        let executors: &[Executor] = self.constraints.executors();
+        // deployment-specific post-processing (cost accounting, backend
+        // push preparation, ...) happens here.
+        Ok(/* ... */)
+    }
+}
+```

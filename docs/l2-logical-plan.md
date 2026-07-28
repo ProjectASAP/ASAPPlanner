@@ -86,3 +86,35 @@ row): an already-cataloged source can carry a real one through
 unchanged, while a usage-derived schema has no way to prove one, and so
 never gets one. Why a unique key matters is covered in
 [`l3-intent-algebra.md`](./l3-intent-algebra.md#unique-keys-and-cross-query-sharing).
+
+## Interface
+
+The one real extension point at this layer is the schema source a
+front end's leaves resolve against:
+
+```rust
+pub trait SchemaCatalog {
+    fn columns_for(&self, source: &str) -> Option<Vec<Column>>;
+}
+
+pub struct Binder<C: SchemaCatalog = UsageDerivedCatalog> { .. }
+impl<C: SchemaCatalog> Binder<C> {
+    pub fn bind(&self, tree: &QueryExpr) -> Schema;
+}
+```
+
+The default `Binder` (`UsageDerivedCatalog`) implements this by always
+returning `None` — a schema built purely from what the query happens to
+reference. A catalog-backed language (or a future registry-backed one)
+implements `columns_for` to return a real, closed column set instead;
+nothing about `Binder` itself has to change for that swap.
+
+The L2 → L3 step every front end shares:
+
+```rust
+pub fn convert_root(legacy: &QueryExpr, accuracy: &AccuracyTarget) -> Result<QueryExpr, ConvertError>;
+```
+
+Takes L2's per-language tree in, returns L3's canonical tree out —
+binding, structural conversion, and canonicalization in one call, so no
+front end can reach L3 through any other path.

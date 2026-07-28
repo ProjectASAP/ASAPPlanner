@@ -151,3 +151,71 @@ key, sharing is unsound and each consumer must recompute independently
 — which is why a source with no way to prove a key (an open,
 usage-derived schema) can never participate in this kind of sharing,
 while a source with a declared key from an external catalog can.
+
+## Interface
+
+The canonical `QueryExpr` is one Rust enum covering the whole relational
+vocabulary — a representative slice, not the full list:
+
+```rust
+pub enum QueryExpr {
+    Scan { source: Source, predicates: Vec<Predicate>, schema: Schema },
+    Filter { pred: Predicate, child: Box<QueryExpr> },
+    Project { cols: Vec<ProjectItem>, qualifier: Option<String>, child: Box<QueryExpr> },
+    Aggregate {
+        reduction: Reduction,
+        aggs: Vec<AggIntent>,
+        output_names: Vec<String>,
+        having: Option<Predicate>,
+        child: Box<QueryExpr>,
+    },
+    Window { .. }, Distinct { .. }, Merge { .. }, Join { .. }, SetOp { .. },
+    Sort { .. }, Limit { .. }, LetBinding { .. }, Ref { .. },
+    Subquery { .. }, TimeRange { .. }, TimeShift { .. }, WindowFunc { .. },
+    BinaryOp { .. },
+    // .. plus scalar/vector bridges and a small number of
+    // language-specific extension points with no general equivalent yet
+}
+```
+
+The two small types this doc's design principles turn on, in full:
+
+```rust
+pub enum Reduction {
+    Reduce(GroupKeys),
+    PerEntity,
+}
+
+pub struct GroupKeys { /* private fields */ }
+impl GroupKeys {
+    pub fn by(keys: Vec<ColumnId>) -> Self;       // keep these columns
+    pub fn without(keys: Vec<ColumnId>) -> Self;  // exclude these columns
+    pub fn is_without(&self) -> bool;
+    pub fn keys(&self) -> &[ColumnId];
+}
+```
+
+`AggIntent` — again a representative slice:
+
+```rust
+pub enum AggIntent {
+    Count { accuracy: AccuracyTarget },
+    Sum { col: Option<ColumnId> },
+    Quantile { col: Option<ColumnId>, q: f64, accuracy: AccuracyTarget },
+    TopK { k: usize, accuracy: AccuracyTarget },
+    Cardinality { col: Option<ColumnId>, accuracy: AccuracyTarget },
+    Rate, Increase, Changes, Delta, IDelta, Deriv, Resets,  // counter-derivative family
+    // .. native-histogram accessors, per-sample transforms, Extension
+}
+```
+
+And the schema every edge in the tree carries:
+
+```rust
+pub struct Schema {
+    pub columns: Vec<Column>,
+    pub time_index: Option<ColumnId>,
+    pub unique_keys: Vec<Vec<ColumnId>>,
+    pub closed: bool,
+}
+```

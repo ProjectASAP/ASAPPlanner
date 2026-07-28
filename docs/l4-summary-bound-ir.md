@@ -146,3 +146,104 @@ computation requires richer partial state than a single summary value
 can capture, or whose result is fundamentally non-mergeable across
 partitions, has no summary realization by design — it always stays as
 ordinary logical computation over raw data.
+
+## Interface
+
+The planning-time IR:
+
+```rust
+pub struct L4Node {
+    pub expr: SummaryExpr,
+    pub schema: L4Schema,
+}
+
+pub enum SummaryExpr {
+    Logical(Box<QueryExpr>),
+    SummaryAgg {
+        child: Rc<L4Node>,
+        sketch: SummaryKind,
+        params: SummaryParams,
+        col: ColumnRef,
+        reduction: Reduction,
+    },
+    SummaryJoin { outer: Rc<L4Node>, inner: Rc<L4Node>, key: ColumnRef, sketch: SummaryKind, params: SummaryParams },
+    SummarySubtract { left: Rc<L4Node>, right: Rc<L4Node> },
+    SummaryDelete { sketch_input: Rc<L4Node>, key: ColumnRef },
+    SummaryEstimate { sketch_input: Rc<L4Node>, query: SketchQuery },
+    SummaryMerge { children: Vec<Rc<L4Node>> },
+}
+```
+
+Binding — turning a canonical `QueryExpr` into an `L4Node` tree:
+
+```rust
+pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L4Node>, ImplementError>;
+pub fn implement_tree_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L4Node>, ImplementError>;
+```
+
+The per-intent decision binding drives, and its result type:
+
+```rust
+pub enum Implementation {
+    Sketch { kind: SummaryKind, params: SummaryParams },
+    ExactAccumulator { kind: SummaryKind, params: SummaryParams },
+    PassThrough,
+}
+
+pub fn implementation_for(intent: &AggIntent) -> Implementation;
+```
+
+The one pluggable extension point at this layer — a deployment supplies
+its own `CostModel` to override which summary family is chosen and how
+its parameters are sized, without touching the binding pass itself.
+Every method past the first has a sensible default, so a deployment that
+only wants to reorder candidates doesn't have to implement the rest:
+
+```rust
+pub trait CostModel {
+    fn rank_candidates(&self, intent: &AggIntent, candidates: &[SummaryKind]) -> Vec<SummaryKind>;
+
+    fn size_params(&self, kind: SummaryKind, intent: &AggIntent, eps: f64, delta: f64) -> SummaryParams {
+        /* default: this crate's built-in sizing formulas */
+    }
+    fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Implementation {
+        /* default: PassThrough */
+    }
+    fn readout_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchQuery {
+        /* default: panics -- only reachable if realize_extension was overridden without this */
+    }
+}
+```
+
+Serving-time — the interface a deployment implements to actually answer
+a query against an already-bound `L4Node` tree:
+
+```rust
+pub trait SummaryExecutor {
+    type Handle: Clone;
+    type State;
+    type Value;
+    type Error;
+    type GroupKey: Clone + Ord + Default;
+
+    fn find_candidates(
+        &self,
+        sketch: &SummaryKind,
+        params: &SummaryParams,
+        col: &ColumnRef,
+        reduction: &Reduction,
+        child: &L4Node,
+    ) -> Result<Vec<(Self::GroupKey, Self::Handle)>, Self::Error>;
+
+    fn fetch_state(&self, handle: &Self::Handle) -> Result<Self::State, Self::Error>;
+    fn merge_states(&self, states: Vec<Self::State>) -> Result<Self::State, Self::Error>;
+    fn readout(&self, state: &Self::State, query: &SketchQuery) -> Result<Self::Value, Self::Error>;
+    fn logical(&self, expr: &QueryExpr) -> Result<Self::Value, Self::Error>;
+}
+
+pub fn execute<E: SummaryExecutor>(node: &L4Node, exec: &E) -> Result<ExecOutcome<E>, ExecError<E::Error>>;
+```
+
+`find_candidates`'s `reduction` parameter is exactly the `Reduction`
+this doc's design section already explains — an implementer must branch
+on `Reduce` vs. `PerEntity` there, not guess from an empty key list.
