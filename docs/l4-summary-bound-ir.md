@@ -174,6 +174,16 @@ pub enum SummaryExpr {
 }
 ```
 
+The `sketch`/`sketch_input` field names above predate this doc's own
+"summary" umbrella term (see the top of this doc) — they're kept
+verbatim here because they're the real, current identifiers, not
+because the naming is settled. Renaming them to `summary`/`summary_input`
+is a reasonable follow-up now that "sketch" is understood as one kind of
+summary (alongside exact accumulators), not the whole vocabulary — not
+done in this pass because it's a breaking rename of a type every
+`SummaryExecutor` implementer pattern-matches on, worth landing as its
+own deliberate change rather than a docs-driven side effect.
+
 Binding — turning a canonical `QueryExpr` into an `L4Node` tree:
 
 ```rust
@@ -181,7 +191,16 @@ pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L4Node>, ImplementError>;
 pub fn implement_tree_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L4Node>, ImplementError>;
 ```
 
-The per-intent decision binding drives, and its result type:
+**"Implementation" is the answer to one question: how is this one
+intent actually realized?** It's the return type of the per-intent
+binding decision (`implementation_for`) — for a given `AggIntent`,
+exactly one of: build an approximate sketch (bounded error, sized to
+the accuracy target), build an exact accumulator (zero error, still
+mergeable — see "Choosing a summary for an intent" above), or don't
+summarize at all and evaluate the intent directly over raw data
+(`PassThrough`). It's the same three-way choice this doc's "shape of a
+summary-bound plan" section already describes in prose; this is that
+decision's concrete type:
 
 ```rust
 pub enum Implementation {
@@ -192,6 +211,17 @@ pub enum Implementation {
 
 pub fn implementation_for(intent: &AggIntent) -> Implementation;
 ```
+
+`Sketch` and `ExactAccumulator` carry identical shapes
+(`{kind, params}`) — the split exists because binding needs to know,
+right here, whether the chosen `kind` requires a `SummaryEstimate`
+readout afterward (approximate) or *is* the answer once built (exact —
+no estimate step). Collapsing them into one `Summary { kind, params }`
+variant is possible in principle, but only if that same fact becomes
+recoverable another way — e.g. a `SummaryKind::is_exact()` — since
+today the variant tag *is* how the binder knows which one it has. Worth
+doing together with the `sketch`/`summary` rename above rather than as
+two separate breaking changes to the same call sites.
 
 The one pluggable extension point at this layer — a deployment supplies
 its own `CostModel` to override which summary family is chosen and how

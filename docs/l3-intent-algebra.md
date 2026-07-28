@@ -178,7 +178,23 @@ pub enum QueryExpr {
 }
 ```
 
-The two small types this doc's design principles turn on, in full:
+`reduction` is a field *on* the `Aggregate` variant itself — not a
+separate node in the tree, and not something any other variant carries.
+It answers a question only `Aggregate` ever needs to ask: is this node
+collapsing rows at all, and if so, by which (possibly empty) key set —
+or does it have no grouping concept to begin with. Making that an
+explicit field, rather than something a consumer infers from whether a
+key list happens to be empty, is deliberate: the two cases are easy to
+conflate (both can present as "empty keys") but require opposite
+handling downstream — see [`l4-summary-bound-ir.md`](./l4-summary-bound-ir.md#interface)'s
+`SummaryExecutor::find_candidates` for where that distinction is
+actually load-bearing.
+
+The two small types that field's shape turns on, in full — neither is a
+tree node either; both are plain data reachable only through
+`Aggregate.reduction`, and `GroupKeys` only exists at all when
+`reduction` is `Reduce` (it's meaningless for `PerEntity`, which is
+exactly why it isn't a sibling field instead):
 
 ```rust
 pub enum Reduction {
@@ -195,17 +211,53 @@ impl GroupKeys {
 }
 ```
 
-`AggIntent` — again a representative slice:
+`AggIntent` — the full vocabulary:
 
 ```rust
 pub enum AggIntent {
+    // data-model-agnostic reducers
     Count { accuracy: AccuracyTarget },
     Sum { col: Option<ColumnId> },
+    Min { col: Option<ColumnId> },
+    Max { col: Option<ColumnId> },
+    Avg { col: Option<ColumnId> },
+    StdDev { col: Option<ColumnId>, population: bool },
+    Variance { col: Option<ColumnId>, population: bool },
     Quantile { col: Option<ColumnId>, q: f64, accuracy: AccuracyTarget },
     TopK { k: usize, accuracy: AccuracyTarget },
     Cardinality { col: Option<ColumnId>, accuracy: AccuracyTarget },
-    Rate, Increase, Changes, Delta, IDelta, Deriv, Resets,  // counter-derivative family
-    // .. native-histogram accessors, per-sample transforms, Extension
+
+    // counter-aware streaming derivatives
+    Rate,
+    Increase,
+
+    // further counter-derivative / range-vector functions
+    Changes, Delta, IDelta, Deriv, Resets,
+    PredictLinear { seconds: f64 },
+    DoubleExpSmoothing { smoothing: f64, trend: f64 },
+    LastOverTime, FirstOverTime, MadOverTime,
+    TsOfMinOverTime, TsOfMaxOverTime, TsOfFirstOverTime, TsOfLastOverTime,
+
+    // native-histogram accessors
+    HistogramCount, HistogramSum, HistogramAvg, HistogramStdDev, HistogramStdVar,
+    HistogramFraction { lower: f64, upper: f64 },
+    HistogramQuantile { q: f64 },
+
+    // per-sample transforms
+    Math(MathFunc),
+    TimeFn(TimeFunc),
+
+    // presence
+    Absent, AbsentOverTime, PresentOverTime,
+
+    // extended aggregation operators
+    Group,
+    CountValues { label: String },
+
+    // deployment-specific escape hatch (see "Design rules" above) — core
+    // treats this opaquely; the owning deployment defines and interprets
+    // `payload` itself, keyed by its own `ext_kind` tag
+    Extension { ext_kind: String, payload: serde_json::Value },
 }
 ```
 

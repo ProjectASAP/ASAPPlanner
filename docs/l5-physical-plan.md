@@ -77,7 +77,13 @@ deployment policy.
 
 Speculative — nothing here is built (see this doc's status note at the
 top). Kept as a concrete target to design against, not as an API to
-depend on:
+depend on. Every concrete-looking name below (`StageId`'s example
+values, `Executor`'s addressing, an actual `TopologyDescriptor`) is
+**interface only, in this repo** — ASAPController defines the shape a
+deployment implements against; it never defines, reserves, or ships any
+of the actual values. A deployment names its own stages, addresses its
+own executors, and describes its own topology; nothing here is a fixed
+vocabulary to conform to:
 
 ```rust
 pub trait PhysicalPlanner {
@@ -91,13 +97,20 @@ pub trait TopologyDescriptor {
     fn edges(&self) -> &[StageEdge];
 }
 
-pub struct StageId(pub String);   // "edge" / "gateway" / "backend" / "in-process"
+// `StageId` is an opaque, deployment-chosen string — ASAPController
+// neither defines nor reserves any particular value. "edge" / "gateway"
+// / "backend" / "in-process" below are one deployment's illustrative
+// choice (roughly: close to data ingestion / an intermediate
+// aggregation tier / a centralized serving tier / no network hop at
+// all), not a fixed enum — a different deployment can and should name
+// its own stages differently.
+pub struct StageId(pub String);
 
 pub struct Executor {
     pub id: ExecutorId,
     pub stage: StageId,
     pub capabilities: ExecutorCaps,   // memory budget, available summary backends, network neighbours
-    pub address: ExecutorAddr,        // OpAMP agent / HTTP endpoint / in-process handle
+    pub address: ExecutorAddr,        // OpAMP agent / HTTP endpoint / in-process handle — deployment-defined
 }
 
 // Stage-level allocation: given an L4 tree + a topology, decide which
