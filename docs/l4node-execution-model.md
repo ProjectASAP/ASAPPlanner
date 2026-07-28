@@ -32,8 +32,8 @@ pub enum SummaryExpr {
         child: Rc<L4Node>,
         sketch: SummaryKind,
         params: SummaryParams,
-        col: ColumnRef,      // the column being summarised
-        by: Vec<ColumnId>,   // GROUP BY keys
+        col: ColumnRef,        // the column being summarised
+        reduction: Reduction,  // GROUP BY keys, or "no grouping concept" (#163)
     },
 
     /// Sketch-aware join (KMV/theta for cardinality, join-sample for
@@ -64,9 +64,10 @@ value-bearing field carries this dtype is a "sketch-state schema." The
 compatible only if both match exactly, which is what lets `SummarySubtract`/
 `SummaryDelete`/`SummaryMerge` reject a family/param mismatch as a
 plan-time type error rather than a runtime one. Per-node schema rule
-summary: `SummaryAgg` outputs `by` verbatim plus one `Sketch(sketch,
-params)` field; `SummaryEstimate` outputs a plain row-shaped schema (the
-sketch field doesn't survive it); `SummarySubtract`/`SummaryMerge` require
+summary: `SummaryAgg` outputs its grouping columns verbatim plus one
+`Sketch(sketch, params)` field; `SummaryEstimate` outputs a plain
+row-shaped schema (the sketch field doesn't survive it);
+`SummarySubtract`/`SummaryMerge` require
 every input's `Sketch(s, p)` to already agree, and the catalog capability
 flag (`subtractable`/`deletable`/`mergeable`) gates whether the node can
 fire at all.
@@ -111,7 +112,7 @@ pub trait SummaryExecutor {
     type GroupKey: Clone + Ord + Default;   // e.g. a label-value map
 
     fn find_candidates(&self, sketch: &SummaryKind, params: &SummaryParams,
-        col: &ColumnRef, by: &[ColumnId], child: &L4Node)
+        col: &ColumnRef, reduction: &Reduction, child: &L4Node)
         -> Result<Vec<(Self::GroupKey, Self::Handle)>, Self::Error>;
     fn fetch_state(&self, handle: &Self::Handle) -> Result<Self::State, Self::Error>;
     fn merge_states(&self, states: Vec<Self::State>) -> Result<Self::State, Self::Error>;
@@ -130,26 +131,48 @@ down to find it is deployment-specific `QueryExpr`-shape knowledge
 (mirrors how a real store's edge-fact extraction already works); `execute`
 doesn't interpret it.
 
-**Grouping (`by`).** `SummaryAgg` carries `by: Vec<ColumnId>` (the GROUP BY
-columns), but `execute` has no schema-level knowledge of what a "group
-value" looks like for a given deployment — that's `find_candidates`'s job:
-it tags every handle it returns with the `GroupKey` (an opaque,
-deployment-chosen type) that handle belongs to. `execute` groups those
-tagged handles itself before folding (`fold_states`/`merge_states` only
-ever combine same-group states), and every `ExecOutcome` — `State` or
-`Value` — is a per-group list, never a single bare value. The ungrouped
-case (`by` empty, or a `Logical` leaf, which has no grouping concept at
-all) is simply a list of one entry under `GroupKey::default()`, not a
-different shape — callers don't need to special-case it.
+**Grouping (`reduction`).** `SummaryAgg` carries `reduction: Reduction` —
+the same L3 type (`asap_ir::intent_algebra::Reduction`) the `Aggregate`
+node it was bound from carried (issue #165), reused verbatim rather than
+flattened to a bare `Vec<ColumnId>`. `execute` has no schema-level
+knowledge of what a "group value" looks like for a given deployment —
+that's `find_candidates`'s job: it tags every handle it returns with the
+`GroupKey` (an opaque, deployment-chosen type) that handle belongs to.
+`execute` groups those tagged handles itself before folding
+(`fold_states`/`merge_states` only ever combine same-group states), and
+every `ExecOutcome` — `State` or `Value` — is a per-group list, never a
+single bare value. A `Logical` leaf (which has no grouping concept
+either, but for a different reason — it's deferred entirely to the
+deployment) is simply a list of one entry under `GroupKey::default()`,
+not a different shape — callers don't need to special-case it.
+
+`Reduction` is two variants, not a bare `Vec<ColumnId>` (issue #163):
+`Reduce(by)` is a genuine cross-series reduction — an *empty* `by` still
+means exactly one group, so `find_candidates` must tag every handle it
+returns with one shared `GroupKey` there. `PerEntity` means there is no
+grouping concept for this shape at all (a bare per-series range function
+like `quantile_over_time(...)`, with no aggregation operator and so no
+`by(...)` to begin with) — `find_candidates` must tag every handle with
+its own distinct `GroupKey` there, one per entity, and `execute` must
+never merge across them. Both used to collapse to the same `by: []` on
+`SummaryAgg`, with nothing in the trait able to tell them apart;
+`asap-plan::bind` decides which `Reduction` a node gets once, at L3→L4
+binding, and carries it onto the L4 node unchanged — the same value that
+already decided the node's per-entity-vs-cross-series *schema* — so the
+two can't drift out of sync.
+
 `SummaryMerge`'s `(SummaryKind, SummaryParams)` agreement check stays
 *global* across every group from every child (it's a planning-time
 property of the node, fixed before any group value is known); the actual
 state-folding happens *within* each group independently, never across
 groups. First landed narrower (a single ungrouped value per tree) in #155;
-broadened to this shape in response to #159 once a real
+broadened to a per-`GroupKey` shape in response to #159 once a real
 consumer (`data_plane`'s grouped PromQL queries — `sum by (zone)`,
 `quantile by (zone)(...)`, the common case, not an edge case) showed the
-original shape would have silently merged every group's state together.
+original shape would have silently merged every group's state together;
+`by` was then replaced with `Reduction` in response to #163, once
+implementing `find_candidates` for real showed an empty `by` alone
+couldn't tell a per-entity shape from an explicit full reduction.
 
 ### Nested composition
 

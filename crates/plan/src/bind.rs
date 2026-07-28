@@ -129,9 +129,7 @@ fn bind_summary_agg(
     let child_schema = child.output_schema_in(scope)?;
     // The single canonical L3 derivation (per-series vs cross-series, name
     // overrides) already computes the row shape; L4 only retypes the summary
-    // state column. `reduction` (read directly, not re-derived — issue #165)
-    // settles both the schema shape and, downstream of this PR, the
-    // `by`-emptiness ambiguity a bare `Vec<ColumnId>` alone can't (issue #163).
+    // state column.
     let per_series = matches!(reduction, Reduction::PerEntity);
     let by: Vec<usize> = reduction
         .group_keys()
@@ -148,13 +146,18 @@ fn bind_summary_agg(
         field.dtype = L4DataType::Sketch(kind.clone(), params.clone());
     }
 
+    // `reduction` is carried onto `SummaryAgg` verbatim — not flattened to a
+    // bare `Vec<ColumnId>` — so `SummaryExecutor::find_candidates` can tell
+    // a genuine empty-`by` reduction apart from a per-entity shape with no
+    // grouping concept at all (issue #163). `bind_summary_agg` is the single
+    // place that decides this; nothing downstream re-derives it.
     let agg = Rc::new(L4Node {
         expr: SummaryExpr::SummaryAgg {
             child: implement_tree_in_with(child, scope, cost_model)?,
             sketch: kind,
             params,
             col,
-            by,
+            reduction: reduction.clone(),
         },
         schema: state_schema,
     });
@@ -343,7 +346,7 @@ mod tests {
             sketch,
             params,
             col,
-            by,
+            reduction,
         } = &sketch_input.expr
         else {
             panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
@@ -351,7 +354,7 @@ mod tests {
         assert_eq!(sketch, &SummaryKind::Kll);
         assert_eq!(params, &SummaryParams::Kll { k: 200 });
         assert_eq!(col, &ColumnRef::SampleValue);
-        assert_eq!(by, &vec![2]);
+        assert_eq!(reduction, &Reduction::by(vec![2]));
         // SummaryAgg edge: the state column carries the committed (kind, params).
         assert_eq!(
             field(&sketch_input.schema, "quantile_0_99").dtype,
@@ -552,6 +555,52 @@ mod tests {
             L4DataType::Sketch(SummaryKind::Rate, SummaryParams::Rate)
         );
         assert_eq!(root.schema.time_index, Some(0));
+    }
+
+    /// Issue #163, case 1: a bare per-series range function (e.g.
+    /// `quantile_over_time(...)`) binds to `SummaryAgg { reduction:
+    /// PerEntity, .. }` — proving the L3 `Reduction` this crate already
+    /// computes (issue #165) is carried onto the L4 node verbatim, not
+    /// flattened back into an ambiguous bare `Vec<ColumnId>`.
+    #[test]
+    fn bare_per_series_aggregate_binds_summary_agg_with_per_entity_reduction() {
+        let q = agg_per_entity(
+            default_quantile(0.99),
+            QueryExpr::TimeRange {
+                range: Duration::from_secs(10),
+                child: Box::new(metric_scan(&["job"])),
+            },
+        );
+        let root = implement_tree(&q).unwrap();
+        let SummaryExpr::SummaryEstimate { sketch_input, .. } = &root.expr else {
+            panic!("expected estimate root, got {:?}", root.expr);
+        };
+        let SummaryExpr::SummaryAgg { reduction, .. } = &sketch_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        };
+        assert_eq!(reduction, &Reduction::PerEntity);
+    }
+
+    /// Issue #163, case 2: an aggregation operator explicitly invoked with
+    /// no `by(...)` (e.g. `count(hll_metric)`) binds to `SummaryAgg {
+    /// reduction: Reduce(vec![]), .. }` — byte-identical `by: []` to the
+    /// previous test at the old `Vec<ColumnId>` shape; `reduction` is what
+    /// tells them apart now.
+    #[test]
+    fn explicit_empty_by_aggregate_binds_summary_agg_with_reduce_reduction() {
+        let intent = AggIntent::Cardinality {
+            col: None,
+            accuracy: AccuracyTarget::Epsilon(0.01),
+        };
+        let q = agg(vec![], intent, metric_scan(&["job"]));
+        let root = implement_tree(&q).unwrap();
+        let SummaryExpr::SummaryEstimate { sketch_input, .. } = &root.expr else {
+            panic!("expected estimate root, got {:?}", root.expr);
+        };
+        let SummaryExpr::SummaryAgg { reduction, .. } = &sketch_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        };
+        assert_eq!(reduction, &Reduction::by(vec![]));
     }
 
     #[test]

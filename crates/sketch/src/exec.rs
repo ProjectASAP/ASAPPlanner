@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use asap_ir::intent_algebra::{ColumnId, ColumnRef, QueryExpr};
+use asap_ir::intent_algebra::{ColumnRef, QueryExpr, Reduction};
 
 use crate::expr::{L4Node, SummaryExpr};
 use crate::sketch::{SketchQuery, SummaryKind, SummaryParams};
@@ -23,28 +23,42 @@ pub trait SummaryExecutor {
     type Value;
     /// Deployment error type.
     type Error;
-    /// Opaque per-group identity for a `SummaryAgg`'s `by` columns — e.g.
-    /// a label-value map for a PromQL/time-series deployment. `Ord` so
+    /// Opaque per-group identity for a `SummaryAgg`'s grouping — e.g. a
+    /// label-value map for a PromQL/time-series deployment. `Ord` so
     /// `execute` can fold same-group handles/states deterministically;
-    /// `Default` for the ungrouped case (`by` empty, or a `Logical` leaf,
-    /// which has no grouping concept at all) — every outcome is always a
-    /// per-group list, and the ungrouped case is simply a list of one
-    /// entry under `GroupKey::default()`.
+    /// `Default` for the single-group case (`Reduction::Reduce` with an
+    /// empty `by`, or a `Logical` leaf, which has no grouping concept at
+    /// all) — every outcome is always a per-group list, and the
+    /// single-group case is simply a list of one entry under
+    /// `GroupKey::default()`.
     type GroupKey: Clone + Ord + Default;
 
     /// Resolve a `SummaryAgg` leaf to matching materialized-instance
-    /// handles, each tagged with the group (per `by`) it belongs to. Must
-    /// only return handles whose `(SummaryKind, SummaryParams)` is
-    /// exactly `(sketch, params)`. When `by` is empty there is exactly
-    /// one group — every returned handle should share one
-    /// deployment-chosen `GroupKey` (e.g. `GroupKey::default()`).
+    /// handles, each tagged with the group it belongs to. Must only
+    /// return handles whose `(SummaryKind, SummaryParams)` is exactly
+    /// `(sketch, params)`.
+    ///
+    /// `reduction` (the same [`Reduction`] the L3 `Aggregate` node this
+    /// was bound from carried) tells you which of two shapes to produce —
+    /// the two are **not** interchangeable (issue #163):
+    /// - `Reduction::Reduce(by)`: a genuine cross-series reduction. Tag
+    ///   every returned handle with the `GroupKey` for its `by` values;
+    ///   when `by` is empty there is exactly one group — every handle
+    ///   should share one deployment-chosen `GroupKey` (e.g.
+    ///   `GroupKey::default()`), and they will all be merged together.
+    /// - `Reduction::PerEntity`: there is no grouping concept for this
+    ///   shape at all. Tag every returned handle with its own, distinct
+    ///   `GroupKey` (its full entity/series identity) — handles must
+    ///   never share a `GroupKey` here, since `execute` merges same-group
+    ///   handles together and merging unrelated entities would silently
+    ///   produce a wrong answer.
     #[allow(clippy::type_complexity)]
     fn find_candidates(
         &self,
         sketch: &SummaryKind,
         params: &SummaryParams,
         col: &ColumnRef,
-        by: &[ColumnId],
+        reduction: &Reduction,
         child: &L4Node,
     ) -> Result<Vec<(Self::GroupKey, Self::Handle)>, Self::Error>;
 
@@ -119,9 +133,9 @@ pub fn execute<E: SummaryExecutor>(
             sketch,
             params,
             col,
-            by,
+            reduction,
         } => {
-            let tagged = exec.find_candidates(sketch, params, col, by, child)?;
+            let tagged = exec.find_candidates(sketch, params, col, reduction, child)?;
             if tagged.is_empty() {
                 return Err(ExecError::NoCandidates);
             }
@@ -270,14 +284,27 @@ mod tests {
         })
     }
 
+    /// Builds a `SummaryAgg` with `Reduction::Reduce(vec![])` (an ordinary,
+    /// ungrouped cross-series reduction) — the shape every pre-#163 test in
+    /// this module exercises. Use [`agg_node_with_reduction`] to exercise
+    /// `Reduction` itself.
     fn agg_node(sketch: SummaryKind, params: SummaryParams, child: Rc<L4Node>) -> Rc<L4Node> {
+        agg_node_with_reduction(sketch, params, child, Reduction::by(vec![]))
+    }
+
+    fn agg_node_with_reduction(
+        sketch: SummaryKind,
+        params: SummaryParams,
+        child: Rc<L4Node>,
+        reduction: Reduction,
+    ) -> Rc<L4Node> {
         Rc::new(L4Node {
             expr: SummaryExpr::SummaryAgg {
                 child,
                 sketch,
                 params,
                 col: ColumnRef::SampleValue,
-                by: vec![],
+                reduction,
             },
             schema: lift(vec!["value"]),
         })
@@ -306,11 +333,13 @@ mod tests {
     /// default), and `merge_states` is `sum`, so tests can assert on
     /// concrete numbers without any real sketch-math dependency.
     ///
-    /// `find_candidates` intentionally ignores `sketch`/`params`/`by`/
-    /// `child` and returns every registered handle tagged with its own
-    /// registered group — real deployments filter on those; these tests
-    /// only exercise `execute`'s own tree-walking and grouping/merge
-    /// logic, not a real candidate search.
+    /// `find_candidates` intentionally ignores `sketch`/`params`/
+    /// `reduction`/`child` and returns every registered handle tagged with
+    /// its own registered group — real deployments filter on those; these
+    /// tests only exercise `execute`'s own tree-walking and grouping/merge
+    /// logic, not a real candidate search. See
+    /// `reduction_is_passed_through_to_find_candidates_unmodified` below
+    /// for a test that *does* inspect `reduction`.
     struct MockExecutor {
         /// handle -> (group, value).
         values: RefCell<HashMap<u64, (String, f64)>>,
@@ -355,7 +384,7 @@ mod tests {
             _sketch: &SummaryKind,
             _params: &SummaryParams,
             _col: &ColumnRef,
-            _by: &[ColumnId],
+            _reduction: &Reduction,
             _child: &L4Node,
         ) -> Result<Vec<(Self::GroupKey, Self::Handle)>, Self::Error> {
             Ok(self
@@ -609,5 +638,66 @@ mod tests {
             v,
             vec![("us-east".to_string(), 2.0), ("us-west".to_string(), 20.0)]
         );
+    }
+
+    /// A wiring test for issue #163: `execute` must pass a `SummaryAgg`'s
+    /// `reduction` through to `find_candidates` completely unmodified — not
+    /// re-derive it, not silently drop it in favor of a bare `by` list.
+    /// `MockExecutor` above ignores `reduction` entirely (it isn't testing
+    /// this), so this test uses its own executor that records exactly what
+    /// it received.
+    struct ReductionSpyExecutor {
+        seen: RefCell<Vec<Reduction>>,
+    }
+
+    impl SummaryExecutor for ReductionSpyExecutor {
+        type Handle = u64;
+        type State = f64;
+        type Value = f64;
+        type Error = String;
+        type GroupKey = u32;
+
+        fn find_candidates(
+            &self,
+            _sketch: &SummaryKind,
+            _params: &SummaryParams,
+            _col: &ColumnRef,
+            reduction: &Reduction,
+            _child: &L4Node,
+        ) -> Result<Vec<(Self::GroupKey, Self::Handle)>, Self::Error> {
+            self.seen.borrow_mut().push(reduction.clone());
+            Ok(vec![(0, 0)])
+        }
+
+        fn fetch_state(&self, _handle: &Self::Handle) -> Result<Self::State, Self::Error> {
+            Ok(1.0)
+        }
+
+        fn merge_states(&self, states: Vec<Self::State>) -> Result<Self::State, Self::Error> {
+            Ok(states.into_iter().sum())
+        }
+
+        fn readout(
+            &self,
+            state: &Self::State,
+            _query: &SketchQuery,
+        ) -> Result<Self::Value, Self::Error> {
+            Ok(*state)
+        }
+
+        fn logical(&self, _expr: &QueryExpr) -> Result<Self::Value, Self::Error> {
+            Ok(-1.0)
+        }
+    }
+
+    #[test]
+    fn reduction_is_passed_through_to_find_candidates_unmodified() {
+        let exec = ReductionSpyExecutor {
+            seen: RefCell::new(vec![]),
+        };
+        let (kind, params) = sum();
+        let tree = agg_node_with_reduction(kind, params, logical_node(), Reduction::PerEntity);
+        execute(&tree, &exec).unwrap();
+        assert_eq!(exec.seen.borrow().as_slice(), &[Reduction::PerEntity]);
     }
 }
