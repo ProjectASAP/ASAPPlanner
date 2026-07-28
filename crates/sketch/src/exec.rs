@@ -1,6 +1,6 @@
 //! Serving-time execution model for the L4 IR — the counterpart to
 //! `asap_plan::bind`'s planning-time `QueryExpr -> L4Node`. See
-//! `docs/l4node-execution-model.md` for the design (planning vs. serving
+//! `docs/l4-summary-bound-ir.md` for the design (planning vs. serving
 //! L4, the nested-composition rules, the open questions); this module is
 //! the implementation of it.
 
@@ -12,7 +12,7 @@ use crate::expr::{L4Node, SummaryExpr};
 use crate::sketch::{SketchQuery, SummaryKind, SummaryParams};
 
 /// Deployment-supplied backend for executing an [`L4Node`] tree against
-/// materialized state — see `docs/l4node-execution-model.md`.
+/// materialized state — see `docs/l4-summary-bound-ir.md`.
 pub trait SummaryExecutor {
     /// Reference to one materialized summary instance (e.g. a sid).
     type Handle: Clone;
