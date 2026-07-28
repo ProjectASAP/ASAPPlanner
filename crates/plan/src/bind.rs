@@ -95,15 +95,11 @@ pub fn implement_tree_in_with(
         // nodes and HAVING stay logical — see the module docs.)
         if let ([intent], None) = (aggs.as_slice(), having) {
             match implementation_for_with(intent, cost_model) {
-                Implementation::Sketch { kind, params } => {
+                Implementation::Summary { kind, params } => {
+                    let estimate = !kind.is_exact();
                     return bind_summary_agg(
-                        expr, reduction, intent, child, kind, params, scope, true, cost_model,
-                    )
-                }
-                Implementation::ExactAccumulator { kind, params } => {
-                    return bind_summary_agg(
-                        expr, reduction, intent, child, kind, params, scope, false, cost_model,
-                    )
+                        expr, reduction, intent, child, kind, params, scope, estimate, cost_model,
+                    );
                 }
                 Implementation::PassThrough => {}
             }
@@ -154,7 +150,7 @@ fn bind_summary_agg(
     let agg = Rc::new(L4Node {
         expr: SummaryExpr::SummaryAgg {
             child: implement_tree_in_with(child, scope, cost_model)?,
-            sketch: kind,
+            summary: kind,
             params,
             col,
             reduction: reduction.clone(),
@@ -166,7 +162,7 @@ fn bind_summary_agg(
         // row shape again (the `Sketch(…)` type does not propagate).
         Some(query) => Ok(Rc::new(L4Node {
             expr: SummaryExpr::SummaryEstimate {
-                sketch_input: agg,
+                summary_input: agg,
                 query,
             },
             schema: lift(&out_schema),
@@ -324,7 +320,7 @@ mod tests {
         let root = implement_tree(&q).unwrap();
 
         let SummaryExpr::SummaryEstimate {
-            sketch_input,
+            summary_input,
             query,
         } = &root.expr
         else {
@@ -343,21 +339,21 @@ mod tests {
 
         let SummaryExpr::SummaryAgg {
             child,
-            sketch,
+            summary,
             params,
             col,
             reduction,
-        } = &sketch_input.expr
+        } = &summary_input.expr
         else {
-            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
-        assert_eq!(sketch, &SummaryKind::Kll);
+        assert_eq!(summary, &SummaryKind::Kll);
         assert_eq!(params, &SummaryParams::Kll { k: 200 });
         assert_eq!(col, &ColumnRef::SampleValue);
         assert_eq!(reduction, &Reduction::by(vec![2]));
         // SummaryAgg edge: the state column carries the committed (kind, params).
         assert_eq!(
-            field(&sketch_input.schema, "quantile_0_99").dtype,
+            field(&summary_input.schema, "quantile_0_99").dtype,
             L4DataType::Sketch(SummaryKind::Kll, SummaryParams::Kll { k: 200 })
         );
         assert!(matches!(child.expr, SummaryExpr::Logical(ref e)
@@ -390,23 +386,26 @@ mod tests {
 
         // Default: KLL (see `quantile_binds_kll_wrapped_in_estimate` above).
         let default_root = implement_tree(&q).unwrap();
-        let SummaryExpr::SummaryEstimate { sketch_input, .. } = &default_root.expr else {
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &default_root.expr else {
             panic!("expected SummaryEstimate root, got {:?}", default_root.expr);
         };
-        let SummaryExpr::SummaryAgg { sketch, .. } = &sketch_input.expr else {
-            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        let SummaryExpr::SummaryAgg { summary, .. } = &summary_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
-        assert_eq!(sketch, &SummaryKind::Kll);
+        assert_eq!(summary, &SummaryKind::Kll);
 
         // With `PreferDDSketch`: DDSketch instead, same query.
         let custom_root = implement_tree_with(&q, &PreferDDSketch).unwrap();
-        let SummaryExpr::SummaryEstimate { sketch_input, .. } = &custom_root.expr else {
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &custom_root.expr else {
             panic!("expected SummaryEstimate root, got {:?}", custom_root.expr);
         };
-        let SummaryExpr::SummaryAgg { sketch, params, .. } = &sketch_input.expr else {
-            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        let SummaryExpr::SummaryAgg {
+            summary, params, ..
+        } = &summary_input.expr
+        else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
-        assert_eq!(sketch, &SummaryKind::DDSketch);
+        assert_eq!(summary, &SummaryKind::DDSketch);
         assert_eq!(params, &SummaryParams::DDSketch { alpha: 0.01 });
     }
 
@@ -432,7 +431,7 @@ mod tests {
             _payload: &serde_json::Value,
         ) -> crate::boundary::Implementation {
             if ext_kind == "frequency" {
-                crate::boundary::Implementation::Sketch {
+                crate::boundary::Implementation::Summary {
                     kind: SummaryKind::CountSketch,
                     params: SummaryParams::CountSketch {
                         width: 256,
@@ -483,7 +482,7 @@ mod tests {
         let root = implement_tree_with(&q, &FrequencyCostModel).unwrap();
 
         let SummaryExpr::SummaryEstimate {
-            sketch_input,
+            summary_input,
             query,
         } = &root.expr
         else {
@@ -495,10 +494,13 @@ mod tests {
                 if k == "item" && v == "checkout"
         ));
 
-        let SummaryExpr::SummaryAgg { sketch, params, .. } = &sketch_input.expr else {
-            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        let SummaryExpr::SummaryAgg {
+            summary, params, ..
+        } = &summary_input.expr
+        else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
-        assert_eq!(sketch, &SummaryKind::CountSketch);
+        assert_eq!(summary, &SummaryKind::CountSketch);
         assert_eq!(
             params,
             &SummaryParams::CountSketch {
@@ -512,13 +514,16 @@ mod tests {
     fn exact_sum_binds_accumulator_without_estimate() {
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let root = implement_tree(&q).unwrap();
-        let SummaryExpr::SummaryAgg { sketch, params, .. } = &root.expr else {
+        let SummaryExpr::SummaryAgg {
+            summary, params, ..
+        } = &root.expr
+        else {
             panic!(
                 "expected bare SummaryAgg (no estimate), got {:?}",
                 root.expr
             );
         };
-        assert_eq!(sketch, &SummaryKind::Sum);
+        assert_eq!(summary, &SummaryKind::Sum);
         assert_eq!(params, &SummaryParams::Sum);
         assert_eq!(
             field(&root.schema, "sum").dtype,
@@ -538,10 +543,10 @@ mod tests {
             },
         );
         let root = implement_tree(&q).unwrap();
-        let SummaryExpr::SummaryAgg { sketch, .. } = &root.expr else {
+        let SummaryExpr::SummaryAgg { summary, .. } = &root.expr else {
             panic!("expected SummaryAgg, got {:?}", root.expr);
         };
-        assert_eq!(sketch, &SummaryKind::Rate);
+        assert_eq!(summary, &SummaryKind::Rate);
         assert_eq!(
             root.schema
                 .fields
@@ -572,11 +577,11 @@ mod tests {
             },
         );
         let root = implement_tree(&q).unwrap();
-        let SummaryExpr::SummaryEstimate { sketch_input, .. } = &root.expr else {
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
             panic!("expected estimate root, got {:?}", root.expr);
         };
-        let SummaryExpr::SummaryAgg { reduction, .. } = &sketch_input.expr else {
-            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        let SummaryExpr::SummaryAgg { reduction, .. } = &summary_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
         assert_eq!(reduction, &Reduction::PerEntity);
     }
@@ -594,11 +599,11 @@ mod tests {
         };
         let q = agg(vec![], intent, metric_scan(&["job"]));
         let root = implement_tree(&q).unwrap();
-        let SummaryExpr::SummaryEstimate { sketch_input, .. } = &root.expr else {
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
             panic!("expected estimate root, got {:?}", root.expr);
         };
-        let SummaryExpr::SummaryAgg { reduction, .. } = &sketch_input.expr else {
-            panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        let SummaryExpr::SummaryAgg { reduction, .. } = &summary_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
         assert_eq!(reduction, &Reduction::by(vec![]));
     }
@@ -611,15 +616,15 @@ mod tests {
         let outer = agg(vec![], default_quantile(0.9), inner);
         let root = implement_tree(&outer).unwrap();
 
-        let SummaryExpr::SummaryEstimate { sketch_input, .. } = &root.expr else {
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
             panic!("expected estimate root, got {:?}", root.expr);
         };
-        let SummaryExpr::SummaryAgg { child, sketch, .. } = &sketch_input.expr else {
-            panic!("expected outer SummaryAgg, got {:?}", sketch_input.expr);
+        let SummaryExpr::SummaryAgg { child, summary, .. } = &summary_input.expr else {
+            panic!("expected outer SummaryAgg, got {:?}", summary_input.expr);
         };
-        assert_eq!(sketch, &SummaryKind::Kll);
+        assert_eq!(summary, &SummaryKind::Kll);
         let SummaryExpr::SummaryAgg {
-            sketch: inner_kind,
+            summary: inner_kind,
             child: leaf,
             ..
         } = &child.expr
@@ -659,7 +664,7 @@ mod tests {
     fn find_summary_col(node: &L4Node) -> Option<ColumnRef> {
         match &node.expr {
             SummaryExpr::SummaryAgg { col, .. } => Some(col.clone()),
-            SummaryExpr::SummaryEstimate { sketch_input, .. } => find_summary_col(sketch_input),
+            SummaryExpr::SummaryEstimate { summary_input, .. } => find_summary_col(summary_input),
             _ => None,
         }
     }
@@ -739,7 +744,7 @@ mod tests {
         );
         let root = implement_tree(&q).unwrap();
         let SummaryExpr::SummaryEstimate {
-            sketch_input,
+            summary_input,
             query,
         } = &root.expr
         else {
@@ -747,9 +752,9 @@ mod tests {
         };
         assert!(matches!(query, SketchQuery::TopK { k: 5 }));
         assert!(matches!(
-            &sketch_input.expr,
+            &summary_input.expr,
             SummaryExpr::SummaryAgg {
-                sketch: SummaryKind::CmsWithHeap,
+                summary: SummaryKind::CmsWithHeap,
                 ..
             }
         ));

@@ -46,7 +46,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
 
     // Root: the sketch readout, back to a plain row shape.
     let SummaryExpr::SummaryEstimate {
-        sketch_input,
+        summary_input,
         query,
     } = &root.expr
     else {
@@ -66,15 +66,15 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     // same empty `by: []` (issue #163).
     let SummaryExpr::SummaryAgg {
         child,
-        sketch,
+        summary,
         params,
         col,
         reduction,
-    } = &sketch_input.expr
+    } = &summary_input.expr
     else {
-        panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
+        panic!("expected SummaryAgg, got {:?}", summary_input.expr);
     };
-    assert_eq!(sketch, &SummaryKind::Kll);
+    assert_eq!(summary, &SummaryKind::Kll);
     assert_eq!(params, &SummaryParams::Kll { k: 200 });
     assert_eq!(col, &ColumnRef::SampleValue);
     assert_eq!(
@@ -83,7 +83,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         "global quantile — no group keys, full reduction"
     );
     assert_eq!(
-        dtype(&sketch_input.schema, "quantile_0_99"),
+        dtype(&summary_input.schema, "quantile_0_99"),
         &L4DataType::Sketch(SummaryKind::Kll, SummaryParams::Kll { k: 200 })
     );
 
@@ -92,7 +92,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     // grouping concept at all — every entity stays its own summary.
     let SummaryExpr::SummaryAgg {
         child: leaf,
-        sketch,
+        summary,
         params,
         reduction,
         ..
@@ -100,7 +100,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     else {
         panic!("expected inner SummaryAgg for rate, got {:?}", child.expr);
     };
-    assert_eq!(sketch, &SummaryKind::Rate);
+    assert_eq!(summary, &SummaryKind::Rate);
     assert_eq!(params, &SummaryParams::Rate);
     assert_eq!(reduction, &Reduction::PerEntity);
     assert_eq!(
@@ -140,7 +140,7 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
         .expect("lowering failed");
     let root = implement_tree(&l3).expect("binding failed");
     let SummaryExpr::SummaryAgg {
-        sketch,
+        summary,
         params,
         reduction,
         ..
@@ -148,7 +148,7 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
     else {
         panic!("expected SummaryAgg, got {:?}", root.expr);
     };
-    assert_eq!(sketch, &SummaryKind::Sum);
+    assert_eq!(summary, &SummaryKind::Sum);
     assert_eq!(params, &SummaryParams::Sum);
     assert_eq!(
         reduction,

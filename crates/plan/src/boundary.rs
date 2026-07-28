@@ -33,15 +33,15 @@ use crate::cost_model::{CostModel, DefaultCostModel};
 /// How an [`AggIntent`] is realised at L4.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Implementation {
-    /// An approximate sketch, sized to the intent's [`AccuracyTarget`].
-    Sketch {
-        kind: SummaryKind,
-        params: SummaryParams,
-    },
-    /// An exact **mergeable** accumulator (partial state ≡ the value itself:
-    /// `Sum` / `Count` / `MinMax` / `Rate` / `Increase`). Still a summary —
-    /// it pre-aggregates and merges across stages — just with zero error.
-    ExactAccumulator {
+    /// A summary — either an approximate sketch sized to the intent's
+    /// [`AccuracyTarget`], or an exact **mergeable** accumulator (partial
+    /// state ≡ the value itself: `Sum` / `Count` / `MinMax` / `Rate` /
+    /// `Increase`). `kind.is_exact()` tells the two apart; binding needs
+    /// that fact to decide whether a `SummaryEstimate` readout is needed
+    /// afterward (approximate) or the built state *is* the answer already
+    /// (exact — no estimate step). Either way this is still a summary — it
+    /// pre-aggregates and merges across stages.
+    Summary {
         kind: SummaryKind,
         params: SummaryParams,
     },
@@ -69,7 +69,7 @@ pub enum Implementation {
 /// crate can settle on its own. Two real, reasonable answers already
 /// diverge outside this crate:
 ///
-/// - A **pure sketch-algebra** answer would say a `Sketch{kind: Kll, ..}`
+/// - A **pure sketch-algebra** answer would say a `Summary{kind: Kll, ..}`
 ///   requirement is satisfied by an available `DDSketch` (both quantile
 ///   sketches), and that a heap-bearing top-k sketch also answers a bare
 ///   frequency point-query (the heap is additional info on the same
@@ -220,7 +220,11 @@ fn accumulator(intent: &AggIntent, kind: SummaryKind, params: SummaryParams) -> 
         agg_is_mergeable(intent),
         "accumulator for non-mergeable {intent:?}"
     );
-    Implementation::ExactAccumulator { kind, params }
+    debug_assert!(
+        kind.is_exact(),
+        "accumulator() called with a non-exact kind {kind:?}"
+    );
+    Implementation::Summary { kind, params }
 }
 
 /// Bind the preferred candidate summary, with parameters sized to the
@@ -245,7 +249,7 @@ fn bind_summary_with(
         .next()
         .expect("approximate intent has at least one candidate summary");
     let params = cost_model.size_params(kind.clone(), intent, eps, delta);
-    Implementation::Sketch { kind, params }
+    Implementation::Summary { kind, params }
 }
 
 /// `asap-plan`'s built-in `SummaryParams` sizing, keyed off the resolved
@@ -383,8 +387,8 @@ mod tests {
 
     fn cat(intent: &AggIntent) -> Cat {
         match implementation_for(intent) {
-            Implementation::Sketch { kind, .. } => Cat::Sketch(kind),
-            Implementation::ExactAccumulator { kind, .. } => Cat::Acc(kind),
+            Implementation::Summary { kind, .. } if kind.is_exact() => Cat::Acc(kind),
+            Implementation::Summary { kind, .. } => Cat::Sketch(kind),
             Implementation::PassThrough => Cat::Pass,
         }
     }
@@ -544,7 +548,7 @@ mod tests {
         let approx = default_quantile(0.99); // ε = 0.01
         assert_eq!(
             implementation_for(&approx),
-            Implementation::Sketch {
+            Implementation::Summary {
                 kind: SummaryKind::Kll,
                 params: SummaryParams::Kll { k: 200 }, // design.md worked example
             }
@@ -557,7 +561,7 @@ mod tests {
         };
         assert_eq!(
             implementation_for(&looser),
-            Implementation::Sketch {
+            Implementation::Summary {
                 kind: SummaryKind::Kll,
                 params: SummaryParams::Kll { k: 40 }, // ⌈2/0.05⌉
             }
@@ -570,7 +574,7 @@ mod tests {
         // sizing must invert it back exactly.
         assert_eq!(
             implementation_for(&default_cardinality()),
-            Implementation::Sketch {
+            Implementation::Summary {
                 kind: SummaryKind::Hll,
                 params: SummaryParams::Hll { precision: 14 },
             }
@@ -587,7 +591,7 @@ mod tests {
         };
         assert_eq!(
             implementation_for(&intent),
-            Implementation::Sketch {
+            Implementation::Summary {
                 kind: SummaryKind::Cms,
                 params: SummaryParams::Cms {
                     width: 2719,
@@ -601,7 +605,7 @@ mod tests {
         };
         assert_eq!(
             implementation_for(&intent),
-            Implementation::Sketch {
+            Implementation::Summary {
                 kind: SummaryKind::Cms,
                 params: SummaryParams::Cms {
                     width: 2719,
@@ -618,7 +622,7 @@ mod tests {
             accuracy: eps(0.01),
         };
         match implementation_for(&intent) {
-            Implementation::Sketch {
+            Implementation::Summary {
                 kind: SummaryKind::CmsWithHeap,
                 params:
                     SummaryParams::CmsWithHeap {
@@ -670,7 +674,7 @@ mod tests {
         };
         assert_eq!(
             implementation_for(&intent),
-            Implementation::Sketch {
+            Implementation::Summary {
                 kind: SummaryKind::Kll,
                 params: SummaryParams::Kll { k: 65_535 },
             }

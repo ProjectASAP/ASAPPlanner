@@ -36,7 +36,7 @@ pub trait SummaryExecutor {
     /// Resolve a `SummaryAgg` leaf to matching materialized-instance
     /// handles, each tagged with the group it belongs to. Must only
     /// return handles whose `(SummaryKind, SummaryParams)` is exactly
-    /// `(sketch, params)`.
+    /// `(summary, params)`.
     ///
     /// `reduction` (the same [`Reduction`] the L3 `Aggregate` node this
     /// was bound from carried) tells you which of two shapes to produce —
@@ -55,7 +55,7 @@ pub trait SummaryExecutor {
     #[allow(clippy::type_complexity)]
     fn find_candidates(
         &self,
-        sketch: &SummaryKind,
+        summary: &SummaryKind,
         params: &SummaryParams,
         col: &ColumnRef,
         reduction: &Reduction,
@@ -130,12 +130,12 @@ pub fn execute<E: SummaryExecutor>(
 
         SummaryExpr::SummaryAgg {
             child,
-            sketch,
+            summary,
             params,
             col,
             reduction,
         } => {
-            let tagged = exec.find_candidates(sketch, params, col, reduction, child)?;
+            let tagged = exec.find_candidates(summary, params, col, reduction, child)?;
             if tagged.is_empty() {
                 return Err(ExecError::NoCandidates);
             }
@@ -155,16 +155,16 @@ pub fn execute<E: SummaryExecutor>(
                     .map(|h| exec.fetch_state(h))
                     .collect::<Result<Vec<_>, _>>()?;
                 let state = fold_states(states, exec)?;
-                out.push((key, state, sketch.clone(), params.clone()));
+                out.push((key, state, summary.clone(), params.clone()));
             }
             Ok(ExecOutcome::State(out))
         }
 
         SummaryExpr::SummaryEstimate {
-            sketch_input,
+            summary_input,
             query,
         } => {
-            let groups = expect_state(execute(sketch_input, exec)?)?;
+            let groups = expect_state(execute(summary_input, exec)?)?;
             let mut out = Vec::with_capacity(groups.len());
             for (key, state, _kind, _params) in groups {
                 out.push((key, exec.readout(&state, query)?));
@@ -288,12 +288,12 @@ mod tests {
     /// ungrouped cross-series reduction) — the shape every pre-#163 test in
     /// this module exercises. Use [`agg_node_with_reduction`] to exercise
     /// `Reduction` itself.
-    fn agg_node(sketch: SummaryKind, params: SummaryParams, child: Rc<L4Node>) -> Rc<L4Node> {
-        agg_node_with_reduction(sketch, params, child, Reduction::by(vec![]))
+    fn agg_node(summary: SummaryKind, params: SummaryParams, child: Rc<L4Node>) -> Rc<L4Node> {
+        agg_node_with_reduction(summary, params, child, Reduction::by(vec![]))
     }
 
     fn agg_node_with_reduction(
-        sketch: SummaryKind,
+        summary: SummaryKind,
         params: SummaryParams,
         child: Rc<L4Node>,
         reduction: Reduction,
@@ -301,7 +301,7 @@ mod tests {
         Rc::new(L4Node {
             expr: SummaryExpr::SummaryAgg {
                 child,
-                sketch,
+                summary,
                 params,
                 col: ColumnRef::SampleValue,
                 reduction,
@@ -310,10 +310,10 @@ mod tests {
         })
     }
 
-    fn estimate_node(sketch_input: Rc<L4Node>, query: SketchQuery) -> Rc<L4Node> {
+    fn estimate_node(summary_input: Rc<L4Node>, query: SketchQuery) -> Rc<L4Node> {
         Rc::new(L4Node {
             expr: SummaryExpr::SummaryEstimate {
-                sketch_input,
+                summary_input,
                 query,
             },
             schema: lift(vec!["value"]),
@@ -333,7 +333,7 @@ mod tests {
     /// default), and `merge_states` is `sum`, so tests can assert on
     /// concrete numbers without any real sketch-math dependency.
     ///
-    /// `find_candidates` intentionally ignores `sketch`/`params`/
+    /// `find_candidates` intentionally ignores `summary`/`params`/
     /// `reduction`/`child` and returns every registered handle tagged with
     /// its own registered group — real deployments filter on those; these
     /// tests only exercise `execute`'s own tree-walking and grouping/merge
@@ -381,7 +381,7 @@ mod tests {
 
         fn find_candidates(
             &self,
-            _sketch: &SummaryKind,
+            _summary: &SummaryKind,
             _params: &SummaryParams,
             _col: &ColumnRef,
             _reduction: &Reduction,
@@ -659,7 +659,7 @@ mod tests {
 
         fn find_candidates(
             &self,
-            _sketch: &SummaryKind,
+            _summary: &SummaryKind,
             _params: &SummaryParams,
             _col: &ColumnRef,
             reduction: &Reduction,
