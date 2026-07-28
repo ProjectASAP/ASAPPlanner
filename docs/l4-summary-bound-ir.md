@@ -161,28 +161,24 @@ pub enum SummaryExpr {
     Logical(Box<QueryExpr>),
     SummaryAgg {
         child: Rc<L4Node>,
-        sketch: SummaryKind,
+        summary: SummaryKind,
         params: SummaryParams,
         col: ColumnRef,
         reduction: Reduction,
     },
-    SummaryJoin { outer: Rc<L4Node>, inner: Rc<L4Node>, key: ColumnRef, sketch: SummaryKind, params: SummaryParams },
+    SummaryJoin { outer: Rc<L4Node>, inner: Rc<L4Node>, key: ColumnRef, summary: SummaryKind, params: SummaryParams },
     SummarySubtract { left: Rc<L4Node>, right: Rc<L4Node> },
-    SummaryDelete { sketch_input: Rc<L4Node>, key: ColumnRef },
-    SummaryEstimate { sketch_input: Rc<L4Node>, query: SketchQuery },
+    SummaryDelete { summary_input: Rc<L4Node>, key: ColumnRef },
+    SummaryEstimate { summary_input: Rc<L4Node>, query: SketchQuery },
     SummaryMerge { children: Vec<Rc<L4Node>> },
 }
 ```
 
-The `sketch`/`sketch_input` field names above predate this doc's own
-"summary" umbrella term (see the top of this doc) — they're kept
-verbatim here because they're the real, current identifiers, not
-because the naming is settled. Renaming them to `summary`/`summary_input`
-is a reasonable follow-up now that "sketch" is understood as one kind of
-summary (alongside exact accumulators), not the whole vocabulary — not
-done in this pass because it's a breaking rename of a type every
-`SummaryExecutor` implementer pattern-matches on, worth landing as its
-own deliberate change rather than a docs-driven side effect.
+The `summary`/`summary_input` field names match this doc's own "summary"
+umbrella term (see the top of this doc) directly. An earlier revision of
+this type used `sketch`/`sketch_input`, predating that umbrella term —
+renamed in #170, landed together with the `Implementation` variant merge
+described below.
 
 Binding — turning a canonical `QueryExpr` into an `L4Node` tree:
 
@@ -204,24 +200,21 @@ decision's concrete type:
 
 ```rust
 pub enum Implementation {
-    Sketch { kind: SummaryKind, params: SummaryParams },
-    ExactAccumulator { kind: SummaryKind, params: SummaryParams },
+    Summary { kind: SummaryKind, params: SummaryParams },
     PassThrough,
 }
 
 pub fn implementation_for(intent: &AggIntent) -> Implementation;
 ```
 
-`Sketch` and `ExactAccumulator` carry identical shapes
-(`{kind, params}`) — the split exists because binding needs to know,
-right here, whether the chosen `kind` requires a `SummaryEstimate`
+An earlier revision of this type split `Summary` into two variants,
+`Sketch{kind,params}` and `ExactAccumulator{kind,params}`, carrying
+identical shapes — the split existed only because binding needed to
+know, right here, whether the chosen `kind` requires a `SummaryEstimate`
 readout afterward (approximate) or *is* the answer once built (exact —
-no estimate step). Collapsing them into one `Summary { kind, params }`
-variant is possible in principle, but only if that same fact becomes
-recoverable another way — e.g. a `SummaryKind::is_exact()` — since
-today the variant tag *is* how the binder knows which one it has. Worth
-doing together with the `sketch`/`summary` rename above rather than as
-two separate breaking changes to the same call sites.
+no estimate step). #170 collapsed them into the single `Summary`
+variant above, recovering that same fact from `SummaryKind::is_exact()`
+instead of from the variant tag.
 
 The one pluggable extension point at this layer — a deployment supplies
 its own `CostModel` to override which summary family is chosen and how
@@ -258,7 +251,7 @@ pub trait SummaryExecutor {
 
     fn find_candidates(
         &self,
-        sketch: &SummaryKind,
+        summary: &SummaryKind,
         params: &SummaryParams,
         col: &ColumnRef,
         reduction: &Reduction,
