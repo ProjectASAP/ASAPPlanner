@@ -12,7 +12,9 @@ use crate::relational::QueryExpr;
 use asap_ir::intent_algebra::agg_intent::AggIntent;
 use asap_ir::intent_algebra::expr_ir::ColumnRef;
 use asap_ir::intent_algebra::expr_ir::{L2Expr, L3Expr};
-use asap_ir::intent_algebra::query_expr::{aggregate_output_schema, GroupKeys, QueryExprError};
+use asap_ir::intent_algebra::query_expr::{
+    aggregate_output_schema, GroupKeys, QueryExprError, Reduction,
+};
 use asap_ir::intent_algebra::schema::{Column, ColumnId, DataType, Schema};
 
 /// Errors returned by the resolution helpers.
@@ -201,13 +203,18 @@ pub fn output_schema_for_aggregate(
     // Delegate to the single canonical derivation so HAVING resolution can never
     // drift from `QueryExpr::output_schema_in` (issue #41). HAVING is SQL-only
     // and cross-series (SQL has no `without`), but detect the child-independent
-    // per-series case anyway (a lone `rate`/`increase`/`*_over_time` intent) so
-    // the two agree on every shared input — the `TimeRange`/`Subquery` marker the
+    // per-entity case anyway (a lone `rate`/`increase`/`*_over_time` intent) so
+    // the two agree on every shared input — the range-window child marker the
     // canonical arm also keys off is not visible here, and never co-occurs with
     // HAVING.
-    let per_series =
+    let per_entity =
         by.is_empty() && !by.is_without() && aggs.len() == 1 && aggs[0].is_per_series();
-    aggregate_output_schema(input, by, aggs, output_names, per_series)
+    let reduction = if per_entity {
+        Reduction::PerEntity
+    } else {
+        Reduction::Reduce(by.clone())
+    };
+    aggregate_output_schema(input, &reduction, aggs, output_names)
 }
 
 #[cfg(test)]
@@ -364,10 +371,10 @@ mod tests {
             predicates: vec![],
             schema: leaf_schema.clone(),
         };
-        // Aggregate{ by: [], [Rate], child: TimeRange{ Scan } } — a per-series
-        // reduction (label-preserving).
+        // Aggregate{ reduction: PerEntity, [Rate], child: TimeRange{ Scan } } —
+        // a per-series reduction (label-preserving).
         let agg = L3::Aggregate {
-            by: Default::default(),
+            reduction: Reduction::PerEntity,
             aggs: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,

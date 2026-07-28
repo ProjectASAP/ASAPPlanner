@@ -192,7 +192,9 @@ impl AggKind {
 
 fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
-        QueryExpr::Aggregate { by, aggs, .. } => Some((by, aggs)),
+        QueryExpr::Aggregate {
+            reduction, aggs, ..
+        } => Some((reduction.expect_reduce(), aggs)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Window { child, .. }
@@ -229,8 +231,11 @@ fn aggregate_by_with(
     let expected_by = GroupKeys::by(by.to_vec());
     let mut found = false;
     visit(qe, &mut |node| {
-        if let QueryExpr::Aggregate { by, aggs, .. } = node {
-            found |= *by == expected_by && aggs.iter().any(&pred);
+        if let QueryExpr::Aggregate {
+            reduction, aggs, ..
+        } = node
+        {
+            found |= *reduction.expect_reduce() == expected_by && aggs.iter().any(&pred);
         }
     });
     found

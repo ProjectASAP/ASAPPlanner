@@ -14,7 +14,7 @@
 //! generic `topk` path); this pass promotes that shape to the canonical
 //!
 //! ```text
-//! Aggregate { by: <partition>, aggs: [TopK{k}],
+//! Aggregate { reduction: Reduce(<partition>), aggs: [TopK{k}],
 //!             child: Aggregate { aggs: [Count], … } }
 //! ```
 //!
@@ -27,7 +27,7 @@
 use asap_ir::intent_algebra::agg_intent::{is_frequency_heavy_hitter, ranking_measure, AggIntent};
 use asap_ir::intent_algebra::expr_ir::{CompareOp, L3Scalar};
 use asap_ir::intent_algebra::query_expr::{
-    GroupKeys, Predicate, QueryExpr, SortKey, WindowFuncKind,
+    Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind,
 };
 use asap_ir::intent_algebra::L3Expr;
 
@@ -129,8 +129,16 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     };
 
     // Exactly one aggregate, ranked by *its* output column — the measure sits at
-    // index `by.len()` (after the group keys).
-    let QueryExpr::Aggregate { by, aggs, .. } = agg_expr else {
+    // index `by.len()` (after the group keys). A `PerEntity` reduction has no
+    // `by` to rank a measure against — this shape can't be heavy-hitter
+    // promoted, so it's a non-match rather than an error.
+    let QueryExpr::Aggregate {
+        reduction, aggs, ..
+    } = agg_expr
+    else {
+        return None;
+    };
+    let Reduction::Reduce(by) = reduction else {
         return None;
     };
     let [ranked_agg] = aggs.as_slice() else {
@@ -160,7 +168,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     // global `ORDER BY … LIMIT k`; the `by` labels for a partitioned `topk by`),
     // over the *unchanged* inner `Count` aggregate.
     Some(QueryExpr::Aggregate {
-        by: GroupKeys::by(partition_by.to_vec()),
+        reduction: Reduction::by(partition_by.to_vec()),
         aggs: vec![AggIntent::TopK {
             k: *k,
             accuracy: accuracy.clone(),
@@ -246,7 +254,7 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_ir::intent_algebra::query_expr::{ProjectItem, Source};
+    use asap_ir::intent_algebra::query_expr::{GroupKeys, ProjectItem, Source};
     use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
     use asap_ir::types::AccuracyTarget;
 
@@ -269,7 +277,7 @@ mod tests {
     /// `Aggregate{ by: [1], [Count] }` over the scan — output cols `[service, count]`.
     fn count_by_service() -> QueryExpr {
         QueryExpr::Aggregate {
-            by: GroupKeys::by(vec![1]),
+            reduction: Reduction::by(vec![1]),
             aggs: vec![AggIntent::Count {
                 accuracy: AccuracyTarget::Exact,
             }],
@@ -383,7 +391,7 @@ mod tests {
         // Sort+Limit (issue #38). This pins the reserved-but-not-promoted
         // contract: flipping it on is a future weighted-sketch change.
         let sum = QueryExpr::Aggregate {
-            by: GroupKeys::by(vec![1]),
+            reduction: Reduction::by(vec![1]),
             aggs: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
@@ -417,7 +425,7 @@ mod tests {
     /// region, <agg>]` (3 cols), so a ROW_NUMBER over it appends `rn` at index 3.
     fn grouped(agg: AggIntent) -> QueryExpr {
         QueryExpr::Aggregate {
-            by: GroupKeys::by(vec![1, 2]),
+            reduction: Reduction::by(vec![1, 2]),
             aggs: vec![agg],
             output_names: vec![],
             having: None,
@@ -459,10 +467,16 @@ mod tests {
         }));
         let out = canonicalize(q);
         let QueryExpr::Aggregate {
-            by, aggs, child, ..
+            reduction,
+            aggs,
+            child,
+            ..
         } = &out
         else {
             panic!("expected outer Aggregate([TopK]), got {out:?}");
+        };
+        let Reduction::Reduce(by) = reduction else {
+            panic!("expected a Reduce grouping, got {reduction:?}");
         };
         assert!(matches!(aggs.as_slice(), [AggIntent::TopK { k: 5, .. }]));
         assert_eq!(**by, vec![2], "outer TopK partitioned by region");

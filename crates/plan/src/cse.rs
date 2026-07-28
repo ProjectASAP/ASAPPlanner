@@ -87,13 +87,13 @@ pub fn dedupe_subtrees(roots: Vec<(QueryId, QueryExpr)>) -> CseWorkloadPlan {
     for (qid, root) in roots {
         let new_root = match root {
             QueryExpr::Aggregate {
-                by,
+                reduction,
                 aggs,
                 output_names,
                 having,
                 child,
             } if *child == shared_expr => QueryExpr::Aggregate {
-                by,
+                reduction,
                 aggs,
                 output_names,
                 having,
@@ -116,7 +116,7 @@ pub fn dedupe_subtrees(roots: Vec<(QueryId, QueryExpr)>) -> CseWorkloadPlan {
 mod tests {
     use super::*;
     use asap_ir::intent_algebra::agg_intent::AggIntent;
-    use asap_ir::intent_algebra::query_expr::{Source, WindowKind};
+    use asap_ir::intent_algebra::query_expr::{Reduction, Source, WindowKind};
     use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
     use asap_ir::types::AccuracyTarget;
     use std::time::Duration;
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn dedupe_subtrees_single_root_passthrough() {
         let q = QueryExpr::Aggregate {
-            by: vec![1].into(),
+            reduction: Reduction::by(vec![1]),
             aggs: vec![AggIntent::Quantile {
                 col: None,
                 q: 0.99,
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn quantiles_over_different_columns_do_not_dedupe() {
         let mk = |col: usize| QueryExpr::Aggregate {
-            by: vec![1].into(),
+            reduction: Reduction::by(vec![1]),
             aggs: vec![AggIntent::Quantile {
                 col: Some(col),
                 q: 0.5,
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn dedupe_subtrees_basic() {
         let mk = |q: f64| QueryExpr::Aggregate {
-            by: vec![1].into(),
+            reduction: Reduction::by(vec![1]),
             aggs: vec![AggIntent::Quantile {
                 col: None,
                 q,
@@ -247,7 +247,7 @@ mod tests {
             ),
         };
         let mk = || QueryExpr::Aggregate {
-            by: vec![].into(),
+            reduction: Reduction::by(vec![]),
             aggs: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,

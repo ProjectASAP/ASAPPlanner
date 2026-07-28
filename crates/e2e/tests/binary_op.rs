@@ -10,8 +10,8 @@ use std::time::Duration;
 use asap_e2e::fixtures::metric_schema;
 use asap_frontend_promql::lower_promql;
 use asap_ir::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, GroupSide, QueryExpr, Source, VectorGrouping,
-    VectorMatch, VectorMatchKind,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, GroupSide, QueryExpr, Reduction, Source,
+    VectorGrouping, VectorMatch, VectorMatchKind,
 };
 use asap_ir::types::AccuracyTarget;
 
@@ -31,7 +31,7 @@ fn scan(metric: &str, labels: &[&str]) -> QueryExpr {
 
 fn rate_agg(metric: &str) -> QueryExpr {
     QueryExpr::Aggregate {
-        by: vec![].into(),
+        reduction: Reduction::PerEntity,
         aggs: vec![AggIntent::Rate],
         output_names: vec!["".into()],
         having: None,
@@ -44,7 +44,7 @@ fn rate_agg(metric: &str) -> QueryExpr {
 
 fn sum_by_job(metric: &str) -> QueryExpr {
     QueryExpr::Aggregate {
-        by: vec![2].into(),
+        reduction: Reduction::by(vec![2]),
         aggs: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,
@@ -245,7 +245,7 @@ fn q36_unary_negation_is_multiply_by_minus_one() {
 #[test]
 fn q36_sum_of_negation_nests() {
     let expected = QueryExpr::Aggregate {
-        by: vec![].into(),
+        reduction: Reduction::by(vec![]),
         aggs: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,

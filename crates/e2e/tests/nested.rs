@@ -14,7 +14,7 @@ use asap_e2e::fixtures::metric_schema;
 use asap_frontend_promql::lower_promql;
 use asap_ir::intent_algebra::{
     AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, GroupKeys, L3Expr, L3Scalar,
-    Predicate, QueryExpr, Source, TimeShift, VectorMatch, VectorMatchKind,
+    Predicate, QueryExpr, Reduction, Source, TimeShift, VectorMatch, VectorMatchKind,
 };
 use asap_ir::types::AccuracyTarget;
 
@@ -24,7 +24,17 @@ fn lower(q: &str) -> QueryExpr {
 
 fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
     QueryExpr::Aggregate {
-        by: by.into(),
+        reduction: Reduction::by(by),
+        aggs: vec![intent],
+        output_names: vec!["".into()],
+        having: None,
+        child: Box::new(child),
+    }
+}
+
+fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
+    QueryExpr::Aggregate {
+        reduction: Reduction::PerEntity,
         aggs: vec![intent],
         output_names: vec!["".into()],
         having: None,
@@ -43,8 +53,7 @@ fn q22_sum_by_job_over_rate() {
         predicates: vec![],
         schema: metric_schema(&["job"]),
     };
-    let inner_rate = agg(
-        vec![],
+    let inner_rate = agg_per_entity(
         AggIntent::Rate,
         QueryExpr::TimeRange {
             range: Duration::from_secs(300),
@@ -102,8 +111,7 @@ fn q25_div_over_complex_subtrees() {
     let lhs = agg(
         vec![2],
         AggIntent::Sum { col: None },
-        agg(
-            vec![],
+        agg_per_entity(
             AggIntent::Rate,
             QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
@@ -122,8 +130,7 @@ fn q25_div_over_complex_subtrees() {
     let rhs = agg(
         vec![2],
         AggIntent::Sum { col: None },
-        agg(
-            vec![],
+        agg_per_entity(
             AggIntent::Rate,
             QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
@@ -160,8 +167,7 @@ fn q27_max_over_sum_by_job_over_rate() {
         predicates: vec![],
         schema: metric_schema(&["job"]),
     };
-    let inner_rate = agg(
-        vec![],
+    let inner_rate = agg_per_entity(
         AggIntent::Rate,
         QueryExpr::TimeRange {
             range: Duration::from_secs(300),
@@ -256,8 +262,7 @@ fn q39_sum_without_instance_over_rate() {
         predicates: vec![],
         schema: metric_schema(&["instance"]),
     };
-    let inner_rate = agg(
-        vec![],
+    let inner_rate = agg_per_entity(
         AggIntent::Rate,
         QueryExpr::TimeRange {
             range: Duration::from_secs(300),
@@ -265,7 +270,7 @@ fn q39_sum_without_instance_over_rate() {
         },
     );
     let expected = QueryExpr::Aggregate {
-        by: GroupKeys::without(vec![2]), // exclude `instance`
+        reduction: Reduction::Reduce(GroupKeys::without(vec![2])), // exclude `instance`
         aggs: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,
@@ -298,8 +303,7 @@ fn q40_week_over_week_offset() {
             },
             None => scan,
         };
-        agg(
-            vec![],
+        agg_per_entity(
             AggIntent::Rate,
             QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
@@ -352,8 +356,7 @@ fn q24_sum_by_job_over_rate_over_filtered_scan() {
         })],
         schema: metric_schema(&["job", "status"]),
     };
-    let inner_rate = agg(
-        vec![],
+    let inner_rate = agg_per_entity(
         AggIntent::Rate,
         QueryExpr::TimeRange {
             range: Duration::from_secs(300),
@@ -382,16 +385,14 @@ fn q27_nested_subquery_prometheus_docs_example() {
         predicates: vec![],
         schema: metric_schema(&[]),
     };
-    let rate = agg(
-        vec![],
+    let rate = agg_per_entity(
         AggIntent::Rate,
         QueryExpr::TimeRange {
             range: Duration::from_secs(5),
             child: Box::new(scan),
         },
     );
-    let deriv = agg(
-        vec![],
+    let deriv = agg_per_entity(
         AggIntent::Deriv,
         QueryExpr::Subquery {
             range: Duration::from_secs(30),
@@ -399,8 +400,7 @@ fn q27_nested_subquery_prometheus_docs_example() {
             child: Box::new(rate),
         },
     );
-    let expected = agg(
-        vec![],
+    let expected = agg_per_entity(
         AggIntent::Max { col: None },
         QueryExpr::Subquery {
             range: Duration::from_secs(600),

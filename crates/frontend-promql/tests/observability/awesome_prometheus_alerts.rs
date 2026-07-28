@@ -27,7 +27,7 @@
 #![allow(non_snake_case)]
 
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
-use asap_ir::intent_algebra::{AggIntent, BinaryOpKind, CompareOp, QueryExpr};
+use asap_ir::intent_algebra::{AggIntent, BinaryOpKind, CompareOp, QueryExpr, Reduction};
 use asap_ir::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/awesome_prometheus_alerts.txt");
@@ -230,10 +230,17 @@ fn all_targets_missing_core_lowers() {
     // Prometheus self-monitoring `sum by (job) (up)` (the corpus query is
     // `… == 0`). Cross-series sum grouped positionally on `job`.
     let qe = ok("sum by (job) (up)");
-    let QueryExpr::Aggregate { by, aggs, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        reduction, aggs, ..
+    } = &qe
+    else {
         panic!("expected Aggregate, got {qe:?}");
     };
-    assert_eq!(by, &vec![2], "job grouping → col 2 in [ts, value, job]");
+    assert_eq!(
+        reduction,
+        &Reduction::by(vec![2]),
+        "job grouping → col 2 in [ts, value, job]"
+    );
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
 }
 
@@ -325,9 +332,15 @@ fn without_grouping_lowers_to_the_exclusion_form() {
     let QueryExpr::BinaryOp { lhs, .. } = &qe else {
         panic!("expected a comparison BinaryOp, got {qe:?}");
     };
-    let QueryExpr::Aggregate { by, aggs, .. } = lhs.as_ref() else {
+    let QueryExpr::Aggregate {
+        reduction, aggs, ..
+    } = lhs.as_ref()
+    else {
         panic!("expected a `min without` Aggregate on the LHS, got {lhs:?}");
     };
-    assert!(by.is_without(), "grouping is the exclusion form");
+    assert!(
+        reduction.expect_reduce().is_without(),
+        "grouping is the exclusion form"
+    );
     assert!(matches!(aggs.as_slice(), [AggIntent::Min { .. }]));
 }

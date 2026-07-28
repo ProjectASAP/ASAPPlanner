@@ -10,7 +10,7 @@
 
 use asap_e2e::fixtures::metric_schema;
 use asap_frontend_promql::lower_promql;
-use asap_ir::intent_algebra::{AggIntent, QueryExpr, Source};
+use asap_ir::intent_algebra::{AggIntent, QueryExpr, Reduction, Source};
 use asap_ir::types::AccuracyTarget;
 
 fn lower(q: &str) -> QueryExpr {
@@ -29,7 +29,7 @@ fn scan(metric: &str, labels: &[&str]) -> QueryExpr {
 
 fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
     QueryExpr::Aggregate {
-        by: by.into(),
+        reduction: Reduction::by(by),
         aggs: vec![intent],
         output_names: vec!["".into()],
         having: None,
