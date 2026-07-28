@@ -8,7 +8,7 @@
 
 use asap_frontend_promql::lower_promql;
 use asap_ir::intent_algebra::expr_ir::ColumnRef;
-use asap_ir::intent_algebra::query_expr::QueryExpr;
+use asap_ir::intent_algebra::query_expr::{QueryExpr, Reduction};
 use asap_ir::intent_algebra::schema::DataType;
 use asap_ir::types::AccuracyTarget;
 use asap_plan::implement_tree;
@@ -59,13 +59,17 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         "the Sketch(…) type must not propagate past the estimate"
     );
 
-    // The quantile: KLL committed, k=200 sized from ε=0.01.
+    // The quantile: KLL committed, k=200 sized from ε=0.01. `quantile(...)`
+    // is an aggregation operator with no `by(...)`: a genuine full
+    // reduction, one output row — not to be confused with the inner rate's
+    // per-entity grouping below, even though both once collapsed to the
+    // same empty `by: []` (issue #163).
     let SummaryExpr::SummaryAgg {
         child,
         sketch,
         params,
         col,
-        by,
+        reduction,
     } = &sketch_input.expr
     else {
         panic!("expected SummaryAgg, got {:?}", sketch_input.expr);
@@ -73,19 +77,24 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     assert_eq!(sketch, &SummaryKind::Kll);
     assert_eq!(params, &SummaryParams::Kll { k: 200 });
     assert_eq!(col, &ColumnRef::SampleValue);
-    assert!(by.is_empty(), "global quantile — no group keys");
+    assert_eq!(
+        reduction,
+        &Reduction::by(vec![]),
+        "global quantile — no group keys, full reduction"
+    );
     assert_eq!(
         dtype(&sketch_input.schema, "quantile_0_99"),
         &L4DataType::Sketch(SummaryKind::Kll, SummaryParams::Kll { k: 200 })
     );
 
     // The rate: exact counter-reset-aware accumulator, per-series (labels
-    // and time axis preserved), no estimate wrapper.
+    // and time axis preserved), no estimate wrapper. `rate(...)` has no
+    // grouping concept at all — every entity stays its own summary.
     let SummaryExpr::SummaryAgg {
         child: leaf,
         sketch,
         params,
-        by,
+        reduction,
         ..
     } = &child.expr
     else {
@@ -93,7 +102,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     };
     assert_eq!(sketch, &SummaryKind::Rate);
     assert_eq!(params, &SummaryParams::Rate);
-    assert!(by.is_empty());
+    assert_eq!(reduction, &Reduction::PerEntity);
     assert_eq!(
         dtype(&child.schema, "value"),
         &L4DataType::Sketch(SummaryKind::Rate, SummaryParams::Rate)
@@ -131,14 +140,21 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
         .expect("lowering failed");
     let root = implement_tree(&l3).expect("binding failed");
     let SummaryExpr::SummaryAgg {
-        sketch, params, by, ..
+        sketch,
+        params,
+        reduction,
+        ..
     } = &root.expr
     else {
         panic!("expected SummaryAgg, got {:?}", root.expr);
     };
     assert_eq!(sketch, &SummaryKind::Sum);
     assert_eq!(params, &SummaryParams::Sum);
-    assert_eq!(by, &vec![2], "job is col 2 in [ts, value, job]");
+    assert_eq!(
+        reduction,
+        &Reduction::by(vec![2]),
+        "job is col 2 in [ts, value, job]"
+    );
     assert_eq!(
         dtype(&root.schema, "job"),
         &L4DataType::Primitive(DataType::Utf8),

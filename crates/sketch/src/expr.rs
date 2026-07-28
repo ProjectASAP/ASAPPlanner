@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use super::schema::L4Schema;
 use super::sketch::{SketchQuery, SummaryKind, SummaryParams};
-use asap_ir::intent_algebra::{ColumnId, ColumnRef, QueryExpr};
+use asap_ir::intent_algebra::{ColumnRef, QueryExpr, Reduction};
 
 // ── L4 DAG node ───────────────────────────────────────────────────────────────
 
@@ -36,16 +36,23 @@ pub enum SummaryExpr {
 
     /// Sketch aggregation. L4 chose `sketch` + `params` from the catalog
     /// for `AggIntent` under `DeploymentConstraints`.
-    /// Output schema: `by` columns (verbatim) + one `Sketch(sketch, params)`
-    /// field carrying partial sketch state per group.
+    /// Output schema: grouping columns (verbatim) + one `Sketch(sketch,
+    /// params)` field carrying partial sketch state per group.
     SummaryAgg {
         child: Rc<L4Node>,
         sketch: SummaryKind,
         params: SummaryParams,
         /// The column being summarised (fed into the sketch).
         col: ColumnRef,
-        /// GROUP BY keys (positional) carried through to the output schema.
-        by: Vec<ColumnId>,
+        /// How this aggregation's output rows relate to `child`'s — the
+        /// same [`Reduction`] the L3 `Aggregate` node it was bound from
+        /// carried (issue #165), reused verbatim rather than flattened to
+        /// a bare `Vec<ColumnId>`. `Reduction::Reduce(by)` with an empty
+        /// `by` is a genuine full reduction (merge every candidate into
+        /// one group); `Reduction::PerEntity` has no grouping concept at
+        /// all (never merge across entities) — the two collapsed to the
+        /// same ambiguous `by: []` before this field existed (issue #163).
+        reduction: Reduction,
     },
 
     /// Sketch-aware join (KMV / theta for join-cardinality; join-sample for
