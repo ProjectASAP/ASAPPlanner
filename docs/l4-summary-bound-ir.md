@@ -184,33 +184,39 @@ Per-node validity constraints — each is a summary-catalog fact (see
 "Summary catalog" above) checked at planning time, before this shape ever
 reaches serving-time execution:
 
-- **`Logical`** — none; wraps an arbitrary unrewritten `QueryExpr` subtree.
-- **`SummaryAgg`** — none beyond what `col`'s intent already required
-  (accuracy target compatible with `summary`); this is the leaf every
-  other node's constraints are checked *against*.
-- **`SummaryJoin`** — only emitted where a join-specific summary technique
-  applies (issue-tracked as a future `Bind*OnJoin` rule); no such rule
-  exists in the base design yet, so this variant has no live producer.
-- **`SummarySubtract`** — note this variant carries no `summary` field of
-  its own; the kind is read off `left`/`right`'s own output type instead.
-  That shared kind's catalog entry must set `subtractable`, and `left`
-  and `right` must agree on `(kind, params)` (their output schemas must
-  carry the identical summary type for the operation to type-check).
-- **`SummaryDelete`** — likewise no `summary` field of its own; the kind
-  is `summary_input`'s output type, and that kind's catalog entry must
-  set `deletable`.
-- **`SummaryEstimate`** — `query`'s `SketchQuery` variant must be one
-  `summary_input`'s summary kind actually supports (e.g. a `Quantile`
-  query only makes sense against a quantile-sketch kind) — this isn't a
-  single boolean catalog flag like the two above, since which queries a
-  kind answers is closer to that kind's whole reason for existing.
-- **`SummaryMerge`** — also carries no `summary` field; `children` must be
-  non-empty, every child must itself produce summary *state* (another
-  `SummaryAgg` or `SummaryMerge` — never a `SummaryEstimate` readout or a
-  `Logical` value, which have already collapsed to a plain value), and
-  every child must agree on `(kind, params)`, with that shared kind's
-  catalog entry setting `mergeable`. These are exactly the "Nested
-  composition" rules above, restated per field.
+| Node | `summary` field | Constraint |
+|---|---|---|
+| `Logical` | — | none — wraps an arbitrary unrewritten `QueryExpr` subtree |
+| `SummaryAgg` | own | none beyond `col`'s intent already requiring an accuracy target compatible with `summary`; this is the leaf every other row's constraints are checked *against* |
+| `SummaryJoin` | own | only emitted by a join-specific `Bind*OnJoin` rule — none exist yet in the base design, so this variant has no live producer |
+| `SummarySubtract` | read from `left`/`right` | `left`/`right` agree on `(kind, params)`; that kind's catalog entry sets `subtractable` |
+| `SummaryDelete` | read from `summary_input` | that kind's catalog entry sets `deletable` |
+| `SummaryEstimate` | read from `summary_input` | `query`'s `SketchQuery` variant is one that kind actually supports (not a single boolean flag — closer to that kind's whole reason for existing) |
+| `SummaryMerge` | read from `children`, which must all agree | `children` non-empty; every child produces summary *state*, never a value (see diagram below); that shared kind's catalog entry sets `mergeable` |
+
+The trickiest of these to hold in your head is `SummaryMerge`'s "children
+must produce state, not a value" rule — everything here either produces
+partial summary **state** (still mergeable, not yet read out) or a final
+**value** (already collapsed, e.g. by a readout). Only a state-producing
+node may feed a merge:
+
+```mermaid
+flowchart LR
+    subgraph State["produce summary state"]
+        SA["SummaryAgg"]
+        SM["SummaryMerge"]
+    end
+    subgraph Value["produce a plain value"]
+        SE["SummaryEstimate"]
+        LG["Logical"]
+    end
+    SA -->|"valid merge child"| SM
+    SM -->|"valid merge child (nested)"| SM
+    SA --> SE
+    SM --> SE
+    SE -. "✗ already a value" .-> SM
+    LG -. "✗ already a value" .-> SM
+```
 
 Binding — turning a canonical `QueryExpr` into an `L4Node` tree:
 
