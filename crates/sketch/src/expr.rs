@@ -34,13 +34,13 @@ pub enum SummaryExpr {
     /// with all fields as `L4DataType::Primitive`.
     Logical(Box<QueryExpr>),
 
-    /// Sketch aggregation. L4 chose `sketch` + `params` from the catalog
+    /// Summary aggregation. L4 chose `summary` + `params` from the catalog
     /// for `AggIntent` under `DeploymentConstraints`.
-    /// Output schema: grouping columns (verbatim) + one `Sketch(sketch,
-    /// params)` field carrying partial sketch state per group.
+    /// Output schema: grouping columns (verbatim) + one `Sketch(summary,
+    /// params)` field carrying partial summary state per group.
     SummaryAgg {
         child: Rc<L4Node>,
-        sketch: SummaryKind,
+        summary: SummaryKind,
         params: SummaryParams,
         /// The column being summarised (fed into the sketch).
         col: ColumnRef,
@@ -63,7 +63,7 @@ pub enum SummaryExpr {
         outer: Rc<L4Node>,
         inner: Rc<L4Node>,
         key: ColumnRef,
-        sketch: SummaryKind,
+        summary: SummaryKind,
         params: SummaryParams,
     },
 
@@ -77,16 +77,16 @@ pub enum SummaryExpr {
     /// filter). Catalog flag `deletable` must be true. Output schema =
     /// input schema unchanged in type (same `Sketch(s, p)` field).
     SummaryDelete {
-        sketch_input: Rc<L4Node>,
+        summary_input: Rc<L4Node>,
         key: ColumnRef,
     },
 
-    /// Read out a query result from a built sketch. The `Sketch(…)` field
+    /// Read out a query result from a built summary. The `Sketch(…)` field
     /// type does *not* propagate downstream of an estimate — the output
     /// schema is a regular row-shaped schema (Float64 for quantile, Int64
     /// for count/cardinality, `[(key, count)]` for top-k).
     SummaryEstimate {
-        sketch_input: Rc<L4Node>,
+        summary_input: Rc<L4Node>,
         query: SketchQuery,
     },
 

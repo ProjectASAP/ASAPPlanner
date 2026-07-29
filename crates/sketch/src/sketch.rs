@@ -48,6 +48,21 @@ pub enum SummaryKind {
     CountSketchWithHeap,
 }
 
+impl SummaryKind {
+    /// Is this family an exact accumulator (zero approximation error) rather
+    /// than an approximate sketch? The partial state built for an exact kind
+    /// *is* the answer — no `SummaryEstimate` readout is needed to get a
+    /// value out of it. Used by `asap-plan::boundary::Implementation::Summary`
+    /// to recover, from `kind` alone, the same fact the now-collapsed
+    /// `Sketch`/`ExactAccumulator` variant tags used to carry directly.
+    pub fn is_exact(&self) -> bool {
+        matches!(
+            self,
+            Self::Sum | Self::Count | Self::MinMax | Self::Increase | Self::Rate
+        )
+    }
+}
+
 // ── Sketch parameters ─────────────────────────────────────────────────────────
 
 /// Concrete, catalog-validated parameters for a specific summary instance.
@@ -121,4 +136,41 @@ pub enum SketchQuery {
     Cardinality,
     /// Top-k most frequent (key, count) pairs.
     TopK { k: usize },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_exact_matches_the_enum_declaration_split() {
+        for kind in [
+            SummaryKind::Sum,
+            SummaryKind::Count,
+            SummaryKind::MinMax,
+            SummaryKind::Increase,
+            SummaryKind::Rate,
+        ] {
+            assert!(
+                kind.is_exact(),
+                "{kind:?} is declared as an exact accumulator"
+            );
+        }
+        for kind in [
+            SummaryKind::Kll,
+            SummaryKind::Cms,
+            SummaryKind::Hll,
+            SummaryKind::DDSketch,
+            SummaryKind::CmsWithHeap,
+            SummaryKind::Kmv,
+            SummaryKind::Theta,
+            SummaryKind::CountSketch,
+            SummaryKind::CountSketchWithHeap,
+        ] {
+            assert!(
+                !kind.is_exact(),
+                "{kind:?} is declared as an approximate sketch"
+            );
+        }
+    }
 }
