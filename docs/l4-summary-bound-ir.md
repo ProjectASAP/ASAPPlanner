@@ -308,3 +308,150 @@ pub fn execute<E: SummaryExecutor>(node: &L4Node, exec: &E) -> Result<ExecOutcom
 `find_candidates`'s `reduction` parameter is exactly the `Reduction`
 this doc's design section already explains — an implementer must branch
 on `Reduce` vs. `PerEntity` there, not guess from an empty key list.
+
+### Design proposal: composing exact and summary realizations (#171)
+
+`implementation_for_with` is a single per-intent match — it has no
+visibility into the intent's own child, only the intent itself. That's
+fine as long as an intent's realization never depends on what its child
+bound to. Two real query shapes break that assumption, both filed as
+[#171](https://github.com/ProjectASAP/ASAPController/issues/171):
+
+- **Direction 1** — an outer *exact* fold (`Min`/`Max`/`Avg`/`StdDev`/
+  `Variance`) wraps an inner, independently-realizable summary (e.g.
+  `max by (zone) (quantile_over_time(0.99, m[5m]))`). Today, `Min`/`Max`
+  unconditionally call `accumulator(intent, SummaryKind::MinMax, ..)` —
+  which commits to *building a real, independently-registered `MinMax`
+  accumulator*, something no deployment has a reason to materialize
+  alongside an unrelated `Quantile` sketch. `Avg`/`StdDev`/`Variance` go
+  straight to `PassThrough`, which — per `bind.rs`'s conservative-fallback
+  rule ("a logical parent above a bindable aggregate subsumes it
+  unbound") — swallows the *entire* subtree, including the inner
+  `Quantile` that would otherwise bind fine on its own.
+- **Direction 2** — the mirror image: an outer summary-realizable op
+  (`TopK`, `Count`) wraps an inner *exact* computation (`Rate`,
+  `Increase`) that itself already bound to an exact accumulator
+  (`SummaryAgg { summary: SummaryKind::Rate, .. }`, no `SummaryEstimate` —
+  per `bind.rs`, "the partial state *is* the value"). The outer op wants
+  to build its sketch over that already-computed per-group value, not
+  over raw samples — but `summarised_column` only resolves `col` against
+  an L3 `Schema`, never against another `L4Node`'s own output field, so
+  there's no path to it today.
+
+Both directions are the same underlying gap — the binding decision for
+one node needs to see whether its child already committed to a
+realization — but they don't share a fix, because the two directions
+need different information out of the child.
+
+**Direction 1 fix — a new composition node, not a new accumulator kind.**
+Add a `SummaryExpr` variant that folds over whatever value(s) the child
+already produces, independent of how the child itself bound:
+
+```rust
+SummaryExpr::SummaryFold {
+    child: Rc<L4Node>,
+    fold: FoldOp,       // Min | Max | Avg | StdDev { population: bool } | Variance { population: bool }
+    by: Vec<ColumnRef>,  // this node's own grouping — may be coarser than child's
+},
+```
+
+`bind.rs`'s `implement_tree_in_with` gains one new rule, checked *before*
+falling back to `implementation_for_with`'s per-intent answer: for
+`Min`/`Max`/`Avg`/`StdDev`/`Variance`, bind the child first (as it already
+does for every `Aggregate`); if the child's bound `L4Node` is anything
+other than `SummaryExpr::Logical` — i.e. it independently committed to
+*some* summary realization — emit `SummaryFold` over it instead of
+calling `accumulator()`/`PassThrough` for the outer intent. If the child
+stayed `Logical`, nothing changes: today's `Implementation::{Summary,
+PassThrough}` answer still applies, so this is additive, not a
+replacement.
+
+`SummaryFold` needs no new deployment-supplied `SummaryExecutor` method:
+folding already-materialized per-group scalars by min/max/avg/stddev/
+variance is ordinary, deployment-independent math, exactly the kind of
+thing the doc's "same walk and merge logic for free" principle already
+covers for `execute`'s existing node kinds — `execute` recurses into
+`child` via the existing walk, then folds the resulting rows itself,
+regrouping to `by` when it's coarser than whatever grouping the child
+already produced.
+
+**Direction 2 fix — let an exact accumulator's output stand in for a
+plain column.** Add one constraint to the per-node table: a `SummaryAgg`
+may take another `L4Node` as its effective input column when that node's
+own realization is an *exact* `SummaryAgg` (`kind.is_exact()` — no
+`SummaryEstimate` needed, so "the partial state is the value" already
+holds). `summarised_column` grows a second resolution path: when `child`
+is itself a `SummaryAgg` with an exact kind, resolve `col` to that node's
+own state field by name instead of requiring a plain L3 `Schema` column.
+Composing this way adds exactly the outer sketch's own error and nothing
+more — the exact child contributes zero approximation error of its own —
+which is what makes this safe to bless outright, unlike the approximate-
+child case below.
+
+This also answers, narrowly, the question this doc's "Nested composition"
+section left open ("whether a summary aggregation can validly sit above
+a *readout*"): sitting above an **exact accumulator's own state** is now
+a yes, with zero added error. Sitting above an **approximate sketch's
+estimate** is still a no — that's not a different opinion, it's the same
+question [#172](https://github.com/ProjectASAP/ASAPController/issues/172)
+is about, and it stays unsupported until that issue's error-composition
+model exists. `implement_tree_in_with` should reject (fall back to
+`PassThrough`) an attempt to resolve `col` against an *approximate*
+child's estimate, rather than silently accepting it — see below.
+
+### Design proposal: nested approximate-over-approximate composition (#172)
+
+Once a deployment (or a future extension of the direction-2 fix above)
+wants to sketch over another sketch's *approximate* readout rather than
+an exact accumulator's state, [#172](https://github.com/ProjectASAP/ASAPController/issues/172)'s
+gap applies: `CostModel::size_params` sizes the outer `(eps, delta)` as
+if its input were exact, with no way to know the input already carries
+error from the child. Concretely:
+
+1. **Recover the child's own resolved error bound.** Add
+   `SummaryKind::implied_accuracy(&SummaryParams) -> (f64, f64)` — the
+   inverse of `boundary::default_size_params`'s sizing formulas (e.g.
+   `Kll`: `eps ≈ 2/k`; `Hll`: `eps ≈ 1.04/√(2^p)`; `Cms`: `eps ≈ e/width`,
+   `delta ≈ e^{-depth}`). This is mechanical and symmetric with the
+   sizing math that already exists in `boundary.rs`.
+2. **Thread it into sizing, opt-in.** Extend `CostModel::size_params`
+   with one new parameter:
+
+   ```rust
+   fn size_params(
+       &self,
+       kind: SummaryKind,
+       intent: &AggIntent,
+       eps: f64,
+       delta: f64,
+       child_accuracy: Option<(f64, f64)>,  // NEW — Some((eps, delta)) iff the
+                                             // designated input is itself an
+                                             // approximate summary's estimate
+   ) -> SummaryParams {
+       // default: ignores child_accuracy — byte-identical to today's formulas,
+       // same "sensible default" convention this trait already follows for
+       // every method past `rank_candidates`.
+   }
+   ```
+
+   A deployment that wants real composition can tighten its own target
+   before sizing (e.g. a conservative additive/union-bound `remaining_eps
+   = max(eps - child_eps, floor)`); core doesn't mandate a formula, the
+   same way it doesn't mandate `rank_candidates`' ordering policy.
+3. **Gate it explicitly rather than silently double-approximating.** Add
+   `fn accepts_nested_approx(&self, outer: &AggIntent, child_kind: SummaryKind) -> bool`,
+   defaulting to `false`. Binding an outer approximate summary over an
+   *approximate* child's estimate falls back to `Implementation::PassThrough`
+   unless a deployment overrides this to `true` — the same paired-method
+   pattern `realize_extension`/`readout_extension` already uses (one
+   method unlocks a shape, and overriding it is what states "I'm handling
+   the consequences," rather than the shape silently working half-right).
+   This directly answers the issue's own open question — refuse by
+   default, let a deployment that has actually thought about its combined
+   error budget opt in.
+
+This keeps the exact-child case (#171 direction 2) and the approximate-
+child case (#172) as two different defaults: the former composes for
+free because it adds no error; the latter is refused by default because
+core has no basis for deciding what a deployment's combined accuracy
+budget should be.
