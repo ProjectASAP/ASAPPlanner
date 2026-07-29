@@ -309,149 +309,235 @@ pub fn execute<E: SummaryExecutor>(node: &L4Node, exec: &E) -> Result<ExecOutcom
 this doc's design section already explains — an implementer must branch
 on `Reduce` vs. `PerEntity` there, not guess from an empty key list.
 
-### Design proposal: composing exact and summary realizations (#171)
+### Design proposal: an accuracy algebra for composed summaries (#171, #172, #173)
 
-`implementation_for_with` is a single per-intent match — it has no
-visibility into the intent's own child, only the intent itself. That's
-fine as long as an intent's realization never depends on what its child
-bound to. Two real query shapes break that assumption, both filed as
-[#171](https://github.com/ProjectASAP/ASAPController/issues/171):
+[#171](https://github.com/ProjectASAP/ASAPController/issues/171) (exact ↔
+summary composition), [#172](https://github.com/ProjectASAP/ASAPController/issues/172)
+(approximate-over-approximate composition), and
+[#173](https://github.com/ProjectASAP/ASAPController/issues/173)
+(multi-dimensional/structured summaries, e.g. QTree-style range trees and
+Hydra-style sketch-of-sketches) are one design question, not three: what
+does it mean to build a summary over the *output* of another summary,
+rather than over raw data? The proposal below is a single algebra that
+answers it once, so a fix doesn't have to be re-derived per issue.
 
-- **Direction 1** — an outer *exact* fold (`Min`/`Max`/`Avg`/`StdDev`/
-  `Variance`) wraps an inner, independently-realizable summary (e.g.
-  `max by (zone) (quantile_over_time(0.99, m[5m]))`). Today, `Min`/`Max`
-  unconditionally call `accumulator(intent, SummaryKind::MinMax, ..)` —
-  which commits to *building a real, independently-registered `MinMax`
-  accumulator*, something no deployment has a reason to materialize
-  alongside an unrelated `Quantile` sketch. `Avg`/`StdDev`/`Variance` go
-  straight to `PassThrough`, which — per `bind.rs`'s conservative-fallback
-  rule ("a logical parent above a bindable aggregate subsumes it
-  unbound") — swallows the *entire* subtree, including the inner
-  `Quantile` that would otherwise bind fine on its own.
-- **Direction 2** — the mirror image: an outer summary-realizable op
-  (`TopK`, `Count`) wraps an inner *exact* computation (`Rate`,
-  `Increase`) that itself already bound to an exact accumulator
-  (`SummaryAgg { summary: SummaryKind::Rate, .. }`, no `SummaryEstimate` —
-  per `bind.rs`, "the partial state *is* the value"). The outer op wants
-  to build its sketch over that already-computed per-group value, not
-  over raw samples — but `summarised_column` only resolves `col` against
-  an L3 `Schema`, never against another `L4Node`'s own output field, so
-  there's no path to it today.
+#### The guarantee every summary kind already makes
 
-Both directions are the same underlying gap — the binding decision for
-one node needs to see whether its child already committed to a
-realization — but they don't share a fix, because the two directions
-need different information out of the child.
+Every `SummaryKind` implicitly satisfies a guarantee of this shape, for
+its build map `β` (raw values → state), readout `ρ` (state → value), and
+the true aggregate function `φ` it approximates (`Sum`, `Count`,
+`Quantile_q`, `Cardinality`, `TopK_k`, …) over a multiset `X`:
 
-**Direction 1 fix — a new composition node, not a new accumulator kind.**
-Add a `SummaryExpr` variant that folds over whatever value(s) the child
-already produces, independent of how the child itself bound:
+```
+Pr[ |ρ(β(X)) − φ(X)| > ε·φ(X) ] ≤ δ                      (G)
+```
+
+with `(ε, δ) = (0, 0)` for the exact accumulators (`Sum`/`Count`/`MinMax`/
+`Rate`/`Increase`) — precisely what `SummaryKind::is_exact()` records. Made
+explicit as a type:
 
 ```rust
+pub struct Accuracy {
+    pub epsilon: f64,
+    pub delta: f64,
+}
+
+impl Accuracy {
+    pub const EXACT: Accuracy = Accuracy { epsilon: 0.0, delta: 0.0 };
+}
+
+impl SummaryKind {
+    /// The (ε, δ) this kind, at these params, actually satisfies for (G) —
+    /// the inverse of `boundary::default_size_params`'s sizing formulas.
+    /// E.g. Kll: ε ≈ 2/k; Hll: ε ≈ 1.04/√(2^p); Cms: ε ≈ e/width, δ ≈ e^(−depth).
+    /// `Accuracy::EXACT` for every kind where `is_exact()` holds.
+    pub fn implied_accuracy(&self, params: &SummaryParams) -> Accuracy { .. }
+}
+```
+
+This is the same abstraction Algebird's `Approximate[T]` monoid packages —
+a confidence interval that composes algebraically *within one chain*. All
+three issues are asking what happens at the boundary where a second
+instance of (G) is layered on top of the *output* of a first, instead of
+being built once over raw `X`.
+
+#### The composition theorem
+
+Let a child summary produce `ṽ = ρ_child(β_child(X))` satisfying (G) with
+`Accuracy A_c = (ε_c, δ_c)` for `φ_child`. Let an outer summary be built
+over `ṽ` as if it were exact input, satisfying (G) with `A_o = (ε_o, δ_o)`
+for `φ_outer`. If `φ_outer` is `L`-Lipschitz in its input (linear
+aggregates like `Sum`/`Count`/CMS-frequency have `L = 1` exactly; rank-based
+aggregates like `Quantile`/`TopK` have `L = 1` under the standard
+assumption that a relative perturbation of each element doesn't move its
+rank by more than a proportional amount — an assumption, not a proof, which
+is why the gate below defaults closed), then by the triangle inequality on
+the two error terms and a union bound on their two failure events:
+
+```
+Pr[ |ρ_outer(β_outer(ṽ)) − φ_outer(φ_child(X))| > (ε_o + L·ε_c)·φ_outer(φ_child(X)) ] ≤ δ_o + δ_c     (G∘)
+```
+
+As an operator on `Accuracy`:
+
+```rust
+impl Accuracy {
+    pub fn compose(outer: Accuracy, child: Accuracy, lipschitz: f64) -> Accuracy {
+        Accuracy {
+            epsilon: outer.epsilon + lipschitz * child.epsilon,
+            delta: outer.delta + child.delta,
+        }
+    }
+}
+```
+
+**#171 direction 2 and #172 are the same formula at two points on one
+axis.** `#171`'s outer-summary-over-inner-exact-accumulator is exactly
+`A_c = Accuracy::EXACT` — `compose` returns `A_o` unchanged, so composing
+over an exact child is free and can be blessed unconditionally. `#172`'s
+outer-summary-over-inner-approximate-sketch is the same formula with
+`A_c.epsilon, A_c.delta > 0` — composing is no longer free, and the
+combined bound must be checked against what the query actually asked for.
+
+#### Interface: letting a summary's input be another summary's output
+
+One new `ColumnRef` variant carries an `Accuracy` alongside the reference,
+so every consumer of `col` can see what it's actually built on without
+re-deriving it:
+
+```rust
+pub enum ColumnRef {
+    Named(String),
+    Qualified { table: String, name: String },
+    SampleValue,
+    FromSummary { node: Rc<L4Node>, accuracy: Accuracy },   // NEW
+}
+```
+
+Constructing `FromSummary` is legal in exactly two cases:
+
+- `accuracy == Accuracy::EXACT` — always allowed (#171 direction 2).
+- `accuracy.epsilon > 0 || accuracy.delta > 0` — allowed only when the
+  deployment's `CostModel` opts in (#172):
+
+  ```rust
+  pub trait CostModel {
+      /// Does this deployment accept building `outer` over a child already
+      /// carrying `child_kind`'s own approximation error? Default `false` —
+      /// refuse rather than silently double-approximate.
+      fn accepts_nested_approx(&self, outer: &AggIntent, child_kind: &SummaryKind) -> bool {
+          false
+      }
+
+      /// Size `kind`'s params so the composed guarantee (G∘) holds against
+      /// `target` (what the query asked for), given the child's own
+      /// resolved `Accuracy` when the input is a `FromSummary` column.
+      /// Solves `target ≥ Accuracy::compose(result, child_accuracy, L)`,
+      /// i.e. `result.epsilon = target.epsilon − L·child_accuracy.epsilon`,
+      /// `result.delta = target.delta − child_accuracy.delta` — rejecting
+      /// if either goes non-positive (no achievable outer accuracy leaves
+      /// enough of the target budget for the child's contribution).
+      fn size_params(
+          &self,
+          kind: SummaryKind,
+          intent: &AggIntent,
+          target: Accuracy,
+          child_accuracy: Option<Accuracy>,   // None over raw/exact input
+      ) -> SummaryParams { .. }
+  }
+  ```
+
+  When `accepts_nested_approx` returns `false` (the default), binding
+  falls back to `Implementation::PassThrough` instead of constructing an
+  unsound `FromSummary` column — the same paired-method shape
+  `realize_extension`/`readout_extension` already uses one layer up.
+
+#### Interface: folding over a child, as a monoid homomorphism
+
+The other half of #171 (an outer *exact fold* over an inner realized
+summary) isn't an accuracy question — the fold itself is exact — it's a
+question of which of `Min`/`Max`/`Avg`/`StdDev`/`Variance` are valid to
+apply directly to a child's already-*collapsed* value, versus which need
+the child's pre-readout state. This is exactly Algebird's `Averaged`/
+moment-monoid distinction: `Avg`/`Variance`/`StdDev` are not associative
+on the scalar output (the average of two averages isn't the true average
+under unequal group sizes) — the monoid lives on the sufficient statistic
+(`Σv`; `Σv, n`; `Σv, Σv², n`), not on the folded scalar itself.
+
+```rust
+pub enum FoldOp {
+    Min,
+    Max,
+    Avg,
+    Variance { population: bool },
+    StdDev { population: bool },
+}
+
+pub enum FoldInput {
+    /// (ℝ, min, +∞) / (ℝ, max, −∞) are commutative monoids on the value
+    /// itself — the child's already-read-out scalar estimate suffices.
+    Value,
+    /// No monoid exists on the scalar average/variance alone — folding
+    /// needs the child's pre-readout sufficient statistic instead.
+    SufficientStatistic,
+}
+
+impl FoldOp {
+    pub fn required_input(&self) -> FoldInput {
+        match self {
+            FoldOp::Min | FoldOp::Max => FoldInput::Value,
+            FoldOp::Avg | FoldOp::Variance { .. } | FoldOp::StdDev { .. } => {
+                FoldInput::SufficientStatistic
+            }
+        }
+    }
+}
+
 SummaryExpr::SummaryFold {
-    child: Rc<L4Node>,
-    fold: FoldOp,       // Min | Max | Avg | StdDev { population: bool } | Variance { population: bool }
-    by: Vec<ColumnRef>,  // this node's own grouping — may be coarser than child's
+    child: Rc<L4Node>,   // a SummaryEstimate/exact state for FoldInput::Value;
+                          // a pre-readout SummaryAgg state for FoldInput::SufficientStatistic
+    fold: FoldOp,
+    by: Vec<ColumnRef>,   // this node's own grouping — may be coarser than child's
 },
 ```
 
-`bind.rs`'s `implement_tree_in_with` gains one new rule, checked *before*
-falling back to `implementation_for_with`'s per-intent answer: for
-`Min`/`Max`/`Avg`/`StdDev`/`Variance`, bind the child first (as it already
-does for every `Aggregate`); if the child's bound `L4Node` is anything
-other than `SummaryExpr::Logical` — i.e. it independently committed to
-*some* summary realization — emit `SummaryFold` over it instead of
-calling `accumulator()`/`PassThrough` for the outer intent. If the child
-stayed `Logical`, nothing changes: today's `Implementation::{Summary,
-PassThrough}` answer still applies, so this is additive, not a
-replacement.
+Because `fold` is always exact, `SummaryFold` carries no `Accuracy` of its
+own — it's transparent to whatever accuracy the child already has.
 
-`SummaryFold` needs no new deployment-supplied `SummaryExecutor` method:
-folding already-materialized per-group scalars by min/max/avg/stddev/
-variance is ordinary, deployment-independent math, exactly the kind of
-thing the doc's "same walk and merge logic for free" principle already
-covers for `execute`'s existing node kinds — `execute` recurses into
-`child` via the existing walk, then folds the resulting rows itself,
-regrouping to `by` when it's coarser than whatever grouping the child
-already produced.
+#### Generalizing to #173: N-ary composition and non-probabilistic accuracy
 
-**Direction 2 fix — let an exact accumulator's output stand in for a
-plain column.** Add one constraint to the per-node table: a `SummaryAgg`
-may take another `L4Node` as its effective input column when that node's
-own realization is an *exact* `SummaryAgg` (`kind.is_exact()` — no
-`SummaryEstimate` needed, so "the partial state is the value" already
-holds). `summarised_column` grows a second resolution path: when `child`
-is itself a `SummaryAgg` with an exact kind, resolve `col` to that node's
-own state field by name instead of requiring a plain L3 `Schema` column.
-Composing this way adds exactly the outer sketch's own error and nothing
-more — the exact child contributes zero approximation error of its own —
-which is what makes this safe to bless outright, unlike the approximate-
-child case below.
+Two changes make the same primitives serve #173 without inventing a
+parallel mechanism when it lands:
 
-This also answers, narrowly, the question this doc's "Nested composition"
-section left open ("whether a summary aggregation can validly sit above
-a *readout*"): sitting above an **exact accumulator's own state** is now
-a yes, with zero added error. Sitting above an **approximate sketch's
-estimate** is still a no — that's not a different opinion, it's the same
-question [#172](https://github.com/ProjectASAP/ASAPController/issues/172)
-is about, and it stays unsupported until that issue's error-composition
-model exists. `implement_tree_in_with` should reject (fall back to
-`PassThrough`) an attempt to resolve `col` against an *approximate*
-child's estimate, rather than silently accepting it — see below.
+- **Hydra's sketch-of-sketches is `FromSummary`/`SummaryFold` with more
+  than one child.** Generalize both to `children: Vec<(Rc<L4Node>, Accuracy)>`
+  combined by some `combine` function (per-dimension sketches feeding one
+  cross-dimension estimate). The composition theorem generalizes the same
+  way a union bound always does:
 
-### Design proposal: nested approximate-over-approximate composition (#172)
+  ```
+  ε_total = ε_outer + Σ_i Lᵢ·εᵢ         δ_total = δ_outer + Σ_i δᵢ
+  ```
 
-Once a deployment (or a future extension of the direction-2 fix above)
-wants to sketch over another sketch's *approximate* readout rather than
-an exact accumulator's state, [#172](https://github.com/ProjectASAP/ASAPController/issues/172)'s
-gap applies: `CostModel::size_params` sizes the outer `(eps, delta)` as
-if its input were exact, with no way to know the input already carries
-error from the child. Concretely:
+  — no new theorem, just summing (G∘)'s per-child term over the children
+  vector instead of a single child.
 
-1. **Recover the child's own resolved error bound.** Add
-   `SummaryKind::implied_accuracy(&SummaryParams) -> (f64, f64)` — the
-   inverse of `boundary::default_size_params`'s sizing formulas (e.g.
-   `Kll`: `eps ≈ 2/k`; `Hll`: `eps ≈ 1.04/√(2^p)`; `Cms`: `eps ≈ e/width`,
-   `delta ≈ e^{-depth}`). This is mechanical and symmetric with the
-   sizing math that already exists in `boundary.rs`.
-2. **Thread it into sizing, opt-in.** Extend `CostModel::size_params`
-   with one new parameter:
+- **QTree-style range trees need a non-probabilistic `Accuracy`.** `(G)`
+  assumes a point estimate with probabilistic error; a range-tree kind's
+  `rangeQuantileBounds`/`rangeSumBounds` return a *deterministic* interval
+  whose half-width shrinks with tree capacity, not a `(ε, δ)` pair. Model
+  it as a second `Accuracy` variant instead of forcing a probabilistic
+  shape onto it:
 
-   ```rust
-   fn size_params(
-       &self,
-       kind: SummaryKind,
-       intent: &AggIntent,
-       eps: f64,
-       delta: f64,
-       child_accuracy: Option<(f64, f64)>,  // NEW — Some((eps, delta)) iff the
-                                             // designated input is itself an
-                                             // approximate summary's estimate
-   ) -> SummaryParams {
-       // default: ignores child_accuracy — byte-identical to today's formulas,
-       // same "sensible default" convention this trait already follows for
-       // every method past `rank_candidates`.
-   }
-   ```
+  ```rust
+  pub enum Accuracy {
+      Probabilistic { epsilon: f64, delta: f64 },
+      Bounded { radius: f64 },   // e.g. a QTree node's interval half-width
+  }
+  ```
 
-   A deployment that wants real composition can tighten its own target
-   before sizing (e.g. a conservative additive/union-bound `remaining_eps
-   = max(eps - child_eps, floor)`); core doesn't mandate a formula, the
-   same way it doesn't mandate `rank_candidates`' ordering policy.
-3. **Gate it explicitly rather than silently double-approximating.** Add
-   `fn accepts_nested_approx(&self, outer: &AggIntent, child_kind: SummaryKind) -> bool`,
-   defaulting to `false`. Binding an outer approximate summary over an
-   *approximate* child's estimate falls back to `Implementation::PassThrough`
-   unless a deployment overrides this to `true` — the same paired-method
-   pattern `realize_extension`/`readout_extension` already uses (one
-   method unlocks a shape, and overriding it is what states "I'm handling
-   the consequences," rather than the shape silently working half-right).
-   This directly answers the issue's own open question — refuse by
-   default, let a deployment that has actually thought about its combined
-   error budget opt in.
-
-This keeps the exact-child case (#171 direction 2) and the approximate-
-child case (#172) as two different defaults: the former composes for
-free because it adds no error; the latter is refused by default because
-core has no basis for deciding what a deployment's combined accuracy
-budget should be.
+  `compose` for two `Bounded` accuracies is `radius_total = radius_outer +
+  L·radius_child` — the same triangle-inequality shape as `(G∘)`, just
+  without a failure probability to union-bound. `FromSummary`/`SummaryFold`
+  don't need to know which variant they're carrying; only `compose` and
+  `size_params` do.
