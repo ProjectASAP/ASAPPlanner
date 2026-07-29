@@ -94,6 +94,15 @@ pub trait PhysicalPlanner {
 
 pub trait TopologyDescriptor {
     fn stages(&self) -> &[StageDescriptor];
+    // A `StageEdge` names a pair of stages data is allowed to flow
+    // between (e.g. "edge → backend" if that deployment's edge tier
+    // ships summaries up to a backend tier) — the topology's connectivity
+    // graph, distinct from which stages merely *exist* (`stages()` above).
+    // `StageAllocator::allocate` only assigns a piece of the plan to move
+    // from one stage to another along an edge this list actually
+    // contains; a `TopologyDescriptor` with no edge between two stages is
+    // how a deployment declares those two stages can't exchange data
+    // directly.
     fn edges(&self) -> &[StageEdge];
 }
 
