@@ -250,7 +250,23 @@ pub enum AggIntent {
     // presence
     Absent, AbsentOverTime, PresentOverTime,
 
-    // extended aggregation operators
+    // extended aggregation operators — grouped by *sample value* rather
+    // than reducing to a single number per group, so both need a schema
+    // shape no other reducer in this list uses:
+    //
+    // - `Group`: emits a constant `1` per group ("does this group have any
+    //   members at all"), independent of the input values — the output
+    //   carries no information about the samples beyond their presence.
+    //   Kept as its own intent rather than folded into `Sum`/`Count`
+    //   because the value has nothing to do with what's being summed or
+    //   counted.
+    // - `CountValues { label }`: groups the input further by each
+    //   distinct *sample value* (not just the usual grouping keys),
+    //   counting how many samples land in each. Since the sample value
+    //   itself becomes part of the output's identity, this is the one
+    //   reducer whose output schema gains a new column (a synthesized
+    //   label named `label`, holding the stringified value) rather than
+    //   just a single retyped aggregate column.
     Group,
     CountValues { label: String },
 
