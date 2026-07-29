@@ -109,6 +109,36 @@ reference. A catalog-backed language (or a future registry-backed one)
 implements `columns_for` to return a real, closed column set instead;
 nothing about `Binder` itself has to change for that swap.
 
+For example, PromQL has no real catalog — a metric's label set is only
+knowable from what the query itself references — so its front end binds
+with the default:
+
+```rust
+// PromQL: `sum by (job) (http_requests_total)`, no catalog available.
+let schema = Binder::default().bind(&tree);
+// -> Schema { columns: [ts, value, job], time_index: Some(0), closed: false }
+//    ("job" was seeded because the query references it; anything the
+//    query never mentions is simply absent from this schema)
+```
+
+SQL has a real, declared catalog, so its front end supplies one instead:
+
+```rust
+struct SqlCatalog { /* wraps a table registry */ }
+impl SchemaCatalog for SqlCatalog {
+    fn columns_for(&self, source: &str) -> Option<Vec<Column>> {
+        // "requests" -> its full declared column list, looked up from
+        // whatever table registry this deployment has, e.g.:
+        // Some(vec![Column::new("host", Utf8, false), Column::new("bytes", Int64, false)])
+        ..
+    }
+}
+let schema = Binder::with_catalog(SqlCatalog { .. }).bind(&tree);
+// -> Schema { columns: [host, bytes], time_index: None, closed: true }
+//    (the catalog's declared columns are used verbatim, regardless of
+//    which ones the query actually references)
+```
+
 The L2 → L3 step every front end shares:
 
 ```rust
