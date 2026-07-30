@@ -117,7 +117,10 @@ already-computed value, at query time." Every design considered so far
 only builds summaries incrementally from raw samples, at ingest time;
 there's no established answer for building one from a
 query-time-derived scalar. A deployment that hits this shape should
-treat it as unsupported rather than assume either answer.
+treat it as unsupported rather than assume either answer. The design
+proposal below narrows exactly which cases of this remain genuinely
+open (see "Pattern D" below) — it is not fully open anymore, but it is
+not fully resolved either.
 
 ### What's out of scope here
 
@@ -309,106 +312,193 @@ pub fn execute<E: SummaryExecutor>(node: &L4Node, exec: &E) -> Result<ExecOutcom
 this doc's design section already explains — an implementer must branch
 on `Reduce` vs. `PerEntity` there, not guess from an empty key list.
 
-### Design proposal: an accuracy algebra for composed summaries
+### Design proposal: three composition patterns, not one algebra
 
-What does it mean to build a summary over the *output* of another
-summary, rather than over raw data? The design below — one guarantee, one
-composition theorem, and three small interfaces built on it — answers
-that question once, in the abstract. The section after it,
-["Which issue this solves"](#which-issue-this-solves), maps each piece
-back to [#171](https://github.com/ProjectASAP/ASAPController/issues/171),
-[#172](https://github.com/ProjectASAP/ASAPController/issues/172), and
-[#173](https://github.com/ProjectASAP/ASAPController/issues/173).
+The starting question was whether there's a single accuracy law for
+"build a summary over another summary's output." There isn't. Surveying
+how real systems actually do this — Exponential Histograms / DGIM
+[Datar-Gionis-Indyk-Motwani, SICOMP'02], UnivMon [SIGCOMM'16], Hydra
+[VLDB'22], and PromSketch [VLDB'25, which builds directly on the first
+three] — shows three structurally distinct composition problems, each
+with its own (or, in one case, no) governing argument. Presenting them
+as one generic algebra would be over-claiming; this section names each
+pattern, scopes it against #171/#172/#173, and is explicit about which
+one has no known solution at all.
 
-#### The guarantee every summary kind already makes
+#### Pattern A — same statistic, across partitions (out of scope here)
 
-Every `SummaryKind` implicitly satisfies a guarantee of this shape, for
-its build map `β` (raw values → state), readout `ρ` (state → value), and
-the true aggregate function `φ` it approximates (`Sum`, `Count`,
-`Quantile_q`, `Cardinality`, `TopK_k`, …) over a multiset `X`:
+Composing the *same* summary kind's state across time/space partitions
+of the *same* underlying data — e.g. merging per-bucket sketches to
+answer a sliding-window range query. DGIM's Theorem 6/7 is the general,
+already-proven law for this, for any function `f` satisfying:
 
 ```
-Pr[ |ρ(β(X)) − φ(X)| > ε·φ(X) ] ≤ δ                      (G)
+P1. f(Bᵢ) ≥ 0
+P2. f(Bᵢ) ≤ poly(|Bᵢ|)
+P3. f(B1+B2) ≥ f(B1)+f(B2)              (sub-additive)
+P4. f(B1+B2) ≤ Cf·(f(B1)+f(B2)), Cf ≥ 1  (weakly super-additive)
+P5. f admits a composable sketch
 ```
 
-with `(ε, δ) = (0, 0)` for the exact accumulators (`Sum`/`Count`/`MinMax`/
-`Rate`/`Increase`) — precisely what `SummaryKind::is_exact()` records.
+giving, when the per-bucket sketch itself carries relative error `ε̂`:
 
-This is already two distinct shapes in the current catalog, not one, and
-the type has to say which: (G) as written bounds a single output value
-against a *norm* on the underlying value vector, and that norm isn't
-uniform across kinds — CMS bounds per-item error against the *L1* norm of
-the whole frequency vector (`‖X‖₁`); `CountSketch`/`CountSketchWithHeap`
-bound it against the *L2* norm of the residual vector instead
-(`boundary.rs`'s own sizing comment already flags this as an unresolved
-refinement) — a tighter but not directly comparable quantity on skewed
-data; KLL/HLL/DDSketch/Theta/Kmv have no underlying vector norm at all, a
-plain pointwise bound. And separately, a structured kind like a QTree-style
-range tree ([#173](https://github.com/ProjectASAP/ASAPController/issues/173))
-doesn't give a probabilistic `(ε, δ)` bound at all — it returns a
-*deterministic* interval whose half-width shrinks with tree capacity.
-`Accuracy` has to represent both shapes:
+```
+Er ≤ (1+ε̂)²·Cf²/k + Cf − 1 + ε̂
+```
+
+(`k` is the bucket-count knob). PromSketch's own EHKLL (`εEHKLL ≤
+2εEH+εKLL`) and EHUniv are both direct instances of this theorem for
+specific `f` (rank-error, and `L2²` respectively) — EHUniv specifically
+tunes `k = O(1/ε²)` so the `Cf²/k` term becomes asymptotically smaller
+than `ε̂`, which is why its headline bound shows a single `ε` rather than
+an explicit sum.
+
+This is real, general, and probably something ASAPController needs
+eventually for windowed/range-vector PromQL queries — but it composes
+the *same* statistic across a partition of *the same data*, which is not
+what #171/#172/#173 ask about (composing *different* statistics along a
+query's data-flow). It's flagged here and left out of scope; it belongs
+in a separate issue, not this design.
+
+#### Pattern B — hash-collision routing (#173's Hydra and QTree cases)
+
+Hydra's "sketch of sketches" hashes *subpopulations* to shared inner
+sketch instances the same way CMS hashes *keys* to shared counters — raw
+data flows directly into whichever inner instance a subpopulation routes
+to; several subpopulations can collide into one. Theorem 2 gives the
+combined bound:
+
+```
+Gi(1 − εUS) ≤ Ĝi ≤ Gi(1 + εUS) + ε·GS       w.p. ≥ 1 − δ
+```
+
+`εUS` is the inner universal sketch's own error; the additive term is
+referenced against `GS`, the **global** total across the whole stream,
+not against `Gi` itself — an asymmetric, non-self-referential shape that
+doesn't fit the same-kind `(ε, δ)`-relative-to-self guarantee every other
+`SummaryKind` in this catalog reports. That's precisely why this isn't a
+composition of two independently-built `L4Node`s: it needs its own
+dedicated `SummaryKind` (its own `w×r` grid, its own `implied_accuracy`
+shaped like Theorem 2), fed directly from raw data, with one readout —
+not a generic combination of already-built children.
+
+QTree-style range trees belong in this pattern too, for a different
+reason: their accuracy isn't a probabilistic `(ε,δ)` bound at all — it's
+a deterministic interval radius that shrinks with tree capacity. Same
+conclusion: its own `SummaryKind`, its own accuracy representation
+(`Accuracy::Bounded { radius }`, alongside the existing `Probabilistic`
+shape every sketch and accumulator already reports), no composition
+primitive needed.
 
 ```rust
-pub enum ErrorNorm {
-    /// Per-item error relative to Σ|x| over the value vector — CMS.
-    L1,
-    /// Per-item error relative to the L2 norm of the (residual) value
-    /// vector — Count-Sketch. Tighter than L1 on skewed data, but not
-    /// directly convertible to it without an explicit, workload-dependent
-    /// constant.
-    L2,
-    /// A single-value guarantee with no underlying vector norm — KLL rank
-    /// error, HLL cardinality error, DDSketch, Theta, Kmv.
-    Pointwise,
-}
-
 pub enum Accuracy {
-    /// (G)'s probabilistic bound, against a specific norm.
     Probabilistic { epsilon: f64, delta: f64, norm: ErrorNorm },
-    /// A deterministic interval half-width — e.g. a QTree node's bound —
-    /// with no failure probability to speak of.
     Bounded { radius: f64 },
 }
 
-impl Accuracy {
-    pub const EXACT: Accuracy = Accuracy::Probabilistic { epsilon: 0.0, delta: 0.0, norm: ErrorNorm::Pointwise };
-}
-
-impl SummaryKind {
-    /// The `Accuracy` this kind, at these params, actually satisfies for
-    /// (G) — the inverse of `boundary::default_size_params`'s sizing
-    /// formulas (e.g. Kll: ε ≈ 2/k; Hll: ε ≈ 1.04/√(2^p); Cms: ε ≈ e/width,
-    /// δ ≈ e^(−depth)). `Accuracy::EXACT` for every kind where
-    /// `is_exact()` holds.
-    pub fn implied_accuracy(&self, params: &SummaryParams) -> Accuracy { .. }
+pub enum ErrorNorm {
+    L1,          // per-item error relative to Σ|x| — CMS
+    L2,          // per-item error relative to the L2 norm of the (residual) value
+                  // vector — Count-Sketch; tighter than L1 on skewed data, not
+                  // directly convertible to it without a workload-dependent factor
+    Pointwise,   // no underlying vector norm — KLL, HLL, DDSketch, Theta, Kmv
 }
 ```
 
-This is the same abstraction Algebird's `Approximate[T]` monoid packages —
-a confidence interval that composes algebraically *within one chain*. The
-open question is what happens at the boundary where a second instance of
-(G) is layered on top of the *output* of a first, instead of being built
-once over raw `X`.
+`#173`'s answer, in full: Hydra and QTree are both new `SummaryKind`
+catalog entries with bespoke accuracy math, not a generalization of the
+mechanism built for #171/#172 below.
 
-#### The composition theorem
+#### Pattern D — heterogeneous sequential nesting (#171, #172)
 
-Let a child summary produce `ṽ = ρ_child(β_child(X))` with `Accuracy A_c`
-for `φ_child`. Let an outer summary be built over `ṽ` as if it were exact
-input, with `Accuracy A_o` for `φ_outer`, where `φ_outer` is `L`-Lipschitz
-with respect to `A_c`'s own representation (its `norm`, if `Probabilistic`;
-plain magnitude, if `Bounded`) — call that pairing a `Sensitivity`:
+This is what the two issues actually describe: an outer `AggIntent`
+built over an inner `AggIntent` of a *different* kind (`TopK` over
+`Rate`; `Max` over `Quantile`; `TopK` over `Cardinality`). None of the
+four papers surveyed instantiate this shape — each avoids it
+structurally (Pattern A merges same-kind state; Pattern B routes raw
+data into a shared inner instance; nothing here ever re-sketches another
+sketch's already-collapsed readout). There is no borrowed theorem for
+this pattern. It splits into three cases by what the inner side actually
+is.
+
+**D1 — inner is exact (composes for free).** If the inner `AggIntent`
+computes something exactly and cheaply from raw data (`Rate`, `Increase`,
+`Delta`, `Deriv`, …), there's no need to reference its *readout* at all
+— the outer summary can be built directly over the inner's exact,
+mergeable **state**, which is definitionally `Accuracy::EXACT`
+(`epsilon = delta = 0`). Composing over it adds zero error by
+definition, so it's allowed unconditionally:
 
 ```rust
-/// `φ_outer`'s sensitivity, valid only against inputs whose error is
-/// already stated in `from`. `None`/mismatched `from` means "no proven
-/// bound for this combination" — composition must refuse, not guess.
-pub struct Sensitivity {
-    pub lipschitz: f64,
-    pub from: ErrorNorm,   // ignored when composing two `Bounded` accuracies
+pub enum ColumnRef {
+    Named(String),
+    Qualified { table: String, name: String },
+    SampleValue,
+    FromSummary { node: Rc<L4Node>, accuracy: Accuracy },   // NEW
+}
+```
+
+`accuracy == Accuracy::EXACT` is always a legal `FromSummary` — this is
+`#171` direction 2 in full.
+
+**D2 — outer is an exact fold over an inner realized summary.** `Min`/
+`Max`/`Avg`/`StdDev`/`Variance` folded over an inner *already-realized*
+summary (`max by (zone) (quantile_over_time(0.99, m[5m]))`) is exact by
+construction on the fold side — the open question is only which of these
+fold operators can consume the inner's collapsed scalar directly versus
+which need its pre-readout sufficient statistic (the same distinction as
+Algebird's `Averaged`/moment monoids: `Avg`/`Variance`/`StdDev` aren't
+associative on the scalar output, only on `(Σv, n)` / `(Σv, Σv², n)`):
+
+```rust
+pub enum FoldOp { Min, Max, Avg, Variance { population: bool }, StdDev { population: bool } }
+
+pub enum FoldInput {
+    Value,                 // Min/Max: the inner's already-read-out scalar suffices
+    SufficientStatistic,   // Avg/Variance/StdDev: needs the inner's pre-readout state
 }
 
+impl FoldOp {
+    pub fn required_input(&self) -> FoldInput {
+        match self {
+            FoldOp::Min | FoldOp::Max => FoldInput::Value,
+            _ => FoldInput::SufficientStatistic,
+        }
+    }
+}
+
+SummaryExpr::SummaryFold { child: Rc<L4Node>, fold: FoldOp, by: Vec<ColumnRef> },
+```
+
+`SummaryFold` carries no `Accuracy` of its own — the fold is exact, so
+it's transparent to whatever accuracy its child already has. This is
+`#171` direction 1 in full.
+
+**D3 — outer approximate over an inner statistic that cannot be computed
+exactly in sub-linear space (the genuinely open part of #172).** `Rate`
+can always be computed inline from raw data (case D1), so it's never
+truly stuck behind an approximate readout. But `Cardinality`/`Quantile`/
+`TopK` as an *inner* statistic have no exact sub-linear form to fall back
+to — `topk(5, count(hll_metric) by (key))` genuinely has no choice but to
+build the outer `TopK` over the inner HLL's approximate estimate. This is
+the actual, narrowed scope of what remains unsolved: not "any nested
+approximation," but specifically *outer sketch over an inner statistic
+that is inherently sketch-only*.
+
+For this case only, the design keeps a composition hook — but labeled
+honestly as a first-principles derivation this design is proposing, not
+a result borrowed from any of the four systems surveyed (none of them
+attempt this shape; Hydra's answer to "I need to combine an
+inherently-approximate inner statistic with an outer one" is to build a
+*single* bespoke `SummaryKind`, per Pattern B, not to compose two):
+
+```rust
+pub struct Sensitivity { pub lipschitz: f64, pub from: ErrorNorm }
+
 impl Accuracy {
+    /// `None` if `child.norm != sensitivity.from` — refuse rather than
+    /// silently apply an unproven `lipschitz` constant across a norm it
+    /// wasn't derived for.
     pub fn compose(outer: Accuracy, child: Accuracy, sensitivity: Sensitivity) -> Option<Accuracy> {
         match (outer, child) {
             (
@@ -419,204 +509,58 @@ impl Accuracy {
                 delta: d_o + d_c,
                 norm,
             }),
-            (Accuracy::Bounded { radius: r_o }, Accuracy::Bounded { radius: r_c }) => {
-                Some(Accuracy::Bounded { radius: r_o + sensitivity.lipschitz * r_c })
-            }
-            _ => None,   // norm mismatch, or a Probabilistic/Bounded pairing
-        }
-    }
-}
-```
-
-For two `Probabilistic` accuracies, by the triangle inequality on the two
-error terms and a union bound on their two failure events:
-
-```
-Pr[ |ρ_outer(β_outer(ṽ)) − φ_outer(φ_child(X))| > (ε_o + L·ε_c)·φ_outer(φ_child(X)) ] ≤ δ_o + δ_c     (G∘)
-```
-
-For two `Bounded` accuracies the same triangle-inequality shape holds on
-the interval radius directly, with no failure probability to union-bound:
-`radius_total = radius_outer + L·radius_child`.
-
-**Why `compose` refuses instead of defaulting to `L = 1`.** Linear
-aggregates (`Sum`/`Count`/`Cms`-frequency) are `(L = 1, from:
-Pointwise-or-L1)`-sensitive — the clean, dimension-free case most
-compositions land in. Rank-based aggregates (`Quantile`/`TopK`) are
-`(L = 1, from: Pointwise)`-sensitive only under the standard assumption
-that a relative perturbation of each element doesn't move its rank by more
-than a proportional amount — an assumption, not a proof. Neither
-`Sensitivity` is valid against an `ErrorNorm::L2` child: composing over a
-`CountSketch`/`CountSketchWithHeap` child needs its own, separately
-justified `Sensitivity { from: L2, .. }` — for a linear outer this is a
-real, derivable (if `√n`-dependent, by Cauchy–Schwarz) bound; for a
-rank-based outer, sensitivity to an L2-bounded noise vector is
-data-dependent (it depends on the local density of values near the query
-rank, not just the aggregate norm bound), so no fixed `L` exists for it at
-all — a deployment enabling that composition is asserting a
-workload-specific bound, not one this crate can derive.
-
-#### Interface: letting a summary's input be another summary's output
-
-One new `ColumnRef` variant carries an `Accuracy` alongside the reference,
-so every consumer of `col` can see what it's actually built on without
-re-deriving it:
-
-```rust
-pub enum ColumnRef {
-    Named(String),
-    Qualified { table: String, name: String },
-    SampleValue,
-    FromSummary { nodes: Vec<Rc<L4Node>>, accuracy: Accuracy },   // NEW
-}
-```
-
-`nodes` is plural: a single already-realized child is the common case
-(`nodes.len() == 1`), but nothing about `compose` or the guarantee above
-is specific to one child — summing `(G∘)`'s per-child term over several
-children is the same union bound, just applied more than once (`ε_total =
-ε_outer + Σᵢ Lᵢ·εᵢ`, `δ_total = δ_outer + Σᵢ δᵢ`).
-
-Constructing `FromSummary` is legal in exactly two cases:
-
-- `accuracy == Accuracy::EXACT` — always allowed, unconditionally.
-- Any non-`EXACT` `accuracy` — allowed only when the deployment's
-  `CostModel` opts in:
-
-  ```rust
-  pub trait CostModel {
-      /// Does this deployment accept building `outer` over input already
-      /// carrying `child_kind`'s own approximation error? Default `false`
-      /// — refuse rather than silently double-approximate.
-      fn accepts_nested_approx(&self, outer: &AggIntent, child_kind: &SummaryKind) -> bool {
-          false
-      }
-
-      /// Size `kind`'s params so the composed guarantee holds against
-      /// `target` (what the query asked for), given the input's own
-      /// resolved `Accuracy` when it's a `FromSummary` column. Solves
-      /// `target == Accuracy::compose(result, child_accuracy, sensitivity)`
-      /// for `result` — e.g. for two `Probabilistic` accuracies,
-      /// `result.epsilon = target.epsilon − L·child_accuracy.epsilon`,
-      /// `result.delta = target.delta − child_accuracy.delta` — rejecting
-      /// if either goes non-positive (no achievable outer accuracy leaves
-      /// enough of the target budget for the child's contribution).
-      fn size_params(
-          &self,
-          kind: SummaryKind,
-          intent: &AggIntent,
-          target: Accuracy,
-          child_accuracy: Option<Accuracy>,   // None over raw/exact input
-      ) -> SummaryParams { .. }
-  }
-  ```
-
-  When `accepts_nested_approx` returns `false` (the default), binding
-  falls back to `Implementation::PassThrough` instead of constructing an
-  unsound `FromSummary` column — the same paired-method shape
-  `realize_extension`/`readout_extension` already uses one layer up.
-
-#### Interface: folding over a child, as a monoid homomorphism
-
-Not every composition is an accuracy question. Folding an *exact* function
-(`Min`/`Max`/`Avg`/`StdDev`/`Variance`) over a child's already-produced
-output is exact by construction — the open question there is which of
-those fold operators are valid to apply directly to a child's
-already-*collapsed* value, versus which need the child's pre-readout
-state. This is exactly Algebird's `Averaged`/moment-monoid distinction:
-`Avg`/`Variance`/`StdDev` are not associative on the scalar output (the
-average of two averages isn't the true average under unequal group sizes)
-— the monoid lives on the sufficient statistic (`Σv`; `Σv, n`; `Σv, Σv²,
-n`), not on the folded scalar itself.
-
-```rust
-pub enum FoldOp {
-    Min,
-    Max,
-    Avg,
-    Variance { population: bool },
-    StdDev { population: bool },
-}
-
-pub enum FoldInput {
-    /// (ℝ, min, +∞) / (ℝ, max, −∞) are commutative monoids on the value
-    /// itself — the child's already-read-out scalar estimate suffices.
-    Value,
-    /// No monoid exists on the scalar average/variance alone — folding
-    /// needs the child's pre-readout sufficient statistic instead.
-    SufficientStatistic,
-}
-
-impl FoldOp {
-    pub fn required_input(&self) -> FoldInput {
-        match self {
-            FoldOp::Min | FoldOp::Max => FoldInput::Value,
-            FoldOp::Avg | FoldOp::Variance { .. } | FoldOp::StdDev { .. } => {
-                FoldInput::SufficientStatistic
-            }
+            _ => None,
         }
     }
 }
 
-SummaryExpr::SummaryFold {
-    children: Vec<Rc<L4Node>>,   // per FoldOp::required_input: already-read-out
-                                  // values, or pre-readout sufficient-statistic state
-    fold: FoldOp,
-    by: Vec<ColumnRef>,          // this node's own grouping — may be coarser than any child's
-},
+pub trait CostModel {
+    /// Does this deployment accept building `outer` over an inner
+    /// statistic that is inherently sketch-only (Cardinality/Quantile/
+    /// TopK as the inner kind)? Default `false` — no known system
+    /// attempts this composition; refuse rather than assume a Lipschitz
+    /// bound nobody has proven for this specific pairing.
+    fn accepts_nested_approx(&self, outer: &AggIntent, child_kind: &SummaryKind) -> bool {
+        false
+    }
+
+    fn size_params(
+        &self,
+        kind: SummaryKind,
+        intent: &AggIntent,
+        target: Accuracy,
+        child_accuracy: Option<Accuracy>,
+    ) -> SummaryParams { .. }
+}
 ```
 
-Because `fold` is always exact, `SummaryFold` carries no `Accuracy` of its
-own — it's transparent to whatever accuracy its children already have.
+`accepts_nested_approx` defaulting to `false` isn't a placeholder pending
+proof — it's the design matching what every real system surveyed
+actually does: none of them build an outer sketch over an inner sketch's
+readout, ever. A deployment that overrides it to `true` is asserting a
+`Sensitivity` it has independently justified for its specific
+`(outer, child_kind)` pair, not relying on anything this design or the
+literature behind it provides.
 
 ### Which issue this solves
 
-The design above is issue-agnostic on purpose; here is what each piece
-answers.
-
-**[#171](https://github.com/ProjectASAP/ASAPController/issues/171) —
-composed exact ↔ summary aggregation, either nesting order.**
-
-- *Direction 1* (an outer exact fold, e.g. `max by (zone)
-  (quantile_over_time(0.99, m[5m]))`, over an inner independently-realized
-  summary) is answered by `SummaryFold`/`FoldOp`. `Min`/`Max` consume the
-  child's scalar estimate directly; `Avg`/`StdDev`/`Variance` consume the
-  child's pre-readout sufficient-statistic state instead, per
-  `required_input`. No new accumulator kind is needed — today's code path
-  (`accumulator(intent, SummaryKind::MinMax, ..)`, which requires a real,
-  independently-materialized `MinMax` instance) is what made this
-  direction look like it needed one.
-- *Direction 2* (an outer summary, e.g. `TopK`, over an inner exact
-  accumulator like `Rate`) is the `FromSummary` interface at
-  `accuracy = Accuracy::EXACT`. `compose`'s `Probabilistic` arm with
-  `A_c = Accuracy::EXACT` returns `A_o` unchanged — composing over an
-  exact child is free, so this case is allowed unconditionally, with no
-  `CostModel` opt-in required.
-
-**[#172](https://github.com/ProjectASAP/ASAPController/issues/172) —
-nested approximate-over-approximate composition has no error-propagation
-model.** This is the `FromSummary` interface at a non-`EXACT` `Accuracy`:
-`compose`'s `Probabilistic` arm with `A_c.epsilon > 0` (or `A_c.delta >
-0`) is the formula this issue asked for — `ε_total = ε_outer + L·ε_child`,
-`δ_total = δ_outer + δ_child` — gated by `CostModel::accepts_nested_approx`
-(default `false`, answering the issue's own open question: refuse to bind
-by default rather than silently double-approximate) and sized by
-`size_params` receiving `child_accuracy` so the *combined* bound, not just
-the outer layer's, is checked against the query's actual target.
-
-**[#173](https://github.com/ProjectASAP/ASAPController/issues/173) —
-multi-dimensional/structured summaries (QTree, Hydra).** Two things fall
-out of the design without extra machinery:
-
-- Hydra's "sketch of sketches" is `FromSummary`/`SummaryFold` with
-  `nodes`/`children` containing more than one entry — the union bound in
-  `compose`'s per-child term already generalizes to a sum over children,
-  so a cross-dimension combiner is the existing interface applied to a
-  vector instead of a single node, not a new mechanism.
-- QTree-style range trees are the `Accuracy::Bounded` variant — a
-  deterministic interval radius rather than a probabilistic `(ε, δ)` pair.
-  `compose`'s `Bounded` arm gives the same triangle-inequality composition
-  without a failure probability to union-bound, so a range-tree kind
-  slots into `FromSummary`/`SummaryFold` the same way a probabilistic
-  sketch does; only `compose` and `size_params` need to know which variant
-  they're holding.
+- **[#171](https://github.com/ProjectASAP/ASAPController/issues/171)** —
+  direction 1 (outer exact fold over inner summary) is Pattern D2,
+  `SummaryFold`/`FoldOp`. Direction 2 (outer summary over inner exact
+  accumulator) is Pattern D1, `FromSummary` at `Accuracy::EXACT`,
+  unconditional.
+- **[#172](https://github.com/ProjectASAP/ASAPController/issues/172)** —
+  Pattern D3 exactly: narrowed from "any nested approximation" to "outer
+  sketch over an inner statistic with no exact sub-linear form." No
+  known system solves this generically; the design keeps a gated,
+  explicitly-unproven `compose`/`accepts_nested_approx` hook rather than
+  either forbidding the shape outright or pretending a borrowed theorem
+  covers it.
+- **[#173](https://github.com/ProjectASAP/ASAPController/issues/173)** —
+  Pattern B. Hydra and QTree are each their own `SummaryKind` with
+  bespoke accuracy math (Theorem 2's shape; a deterministic
+  `Accuracy::Bounded` radius, respectively) fed directly from raw data —
+  not a generalization of `FromSummary`/`SummaryFold`.
+- **Pattern A** (same-statistic windowing, DGIM-grounded) answers none of
+  the three issues directly — it's flagged as a real, separate gap
+  (sliding-window range-vector queries) worth its own future issue.
