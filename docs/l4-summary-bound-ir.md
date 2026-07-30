@@ -338,16 +338,89 @@ is."
    `Increase`, …) has `Accuracy::EXACT` state by construction — composing
    over it adds nothing, unconditionally. Not really a "compound bound"
    at all; it's a bound of zero.
-3. **Heterogeneous, both approximate, inner's *state* is a valid input to
-   the outer's own construction.** The genuinely interesting case, and
-   the subject of the recipe below. `DGIM`/`EH` and `Hydra` are two
-   **worked examples** of this case, not separate unrelated patterns —
-   see the recipe.
-4. **Heterogeneous, both approximate, no known way to run the outer's
-   construction over the inner's state.** Structurally undecidable with
-   what this design can check; stays refused.
+3. **Heterogeneous, both approximate.** The genuinely interesting case —
+   and it splits into **two different mechanisms**, not one, depending on
+   *what the outer is actually built over*:
+   - **3a — over the inner's readout.** The outer consumes the inner's
+     already-collapsed `SummaryEstimate` value as if it were an ordinary
+     (noisy) input. Always *available* — it needs nothing more than the
+     inner's published `(ε, δ)` — but the bound it produces is only as
+     good as a Lipschitz-style sensitivity argument, and is generally
+     loose.
+   - **3b — over the inner's state.** The outer's own construction runs
+     directly on the inner's raw, pre-readout representation. Only
+     available when the outer's construction can actually consume that
+     representation's shape (see the recipe below) — but when it applies,
+     it's tight: `DGIM`/`EH` and `Hydra` are worked examples.
+   Neither subsumes the other: 3a is the fallback when a deployment only
+   has API-level access to the inner's estimate (e.g. it crosses a
+   service boundary and the raw sketch state isn't exposed), or when the
+   outer's construction genuinely can't consume the inner's state shape
+   (3b's step 2 fails). 3b is strictly better *when* it's available.
+4. **Heterogeneous, both approximate, neither 3a nor 3b apply** — 3a
+   always applies in principle (any inner reporting an `(ε,δ)` can be
+   composed via *some* sensitivity argument), so type 4 really means "no
+   sensitivity argument has been justified for 3a, and 3b's step 2
+   fails." Stays refused.
 
-#### The recipe for type 3
+#### Mechanism 3a: composing over the inner's readout
+
+This is an ordinary error-propagation argument, not specific to any of
+the four systems surveyed (none of them need it, since raw data or state
+is always available to them) — but it's the one every deployment
+*always* has available, because it only needs the inner's already-public
+`(ε, δ)`, not its internals. Let the inner produce `ṽ` satisfying
+`Accuracy A_c`, and the outer be built over `ṽ` as if exact, satisfying
+`A_o` under that assumption. If the outer's true function `φ_outer` is
+`L`-Lipschitz with respect to the norm `A_c.norm` is stated in:
+
+```
+Pr[ |ρ_outer(β_outer(ṽ)) − φ_outer(φ_inner(X))| > (ε_o + L·ε_c)·φ_outer(φ_inner(X)) ] ≤ δ_o + δ_c
+```
+
+by the triangle inequality on the two error terms and a union bound on
+their failure events — the same derivation this design used earlier in
+review, now correctly scoped to *only* the readout case rather than
+presented as if it covered everything:
+
+```rust
+pub enum ErrorNorm { L1, L2, Pointwise }   // see Pattern-B discussion above for L1-vs-L2
+
+pub struct Sensitivity { pub lipschitz: f64, pub from: ErrorNorm }
+
+impl Accuracy {
+    /// `None` if `child.norm != sensitivity.from` — refuse rather than
+    /// apply an `L` that was never derived for that norm. `Sensitivity`
+    /// is always a claim the deployment is making about `φ_outer`, not
+    /// something this crate can derive on its own (linear aggregates
+    /// like Sum/Count have a provable `L=1`; rank-based ones like
+    /// Quantile/TopK only have `L≈1` under an unproven local-density
+    /// assumption — see the earlier discussion of why this must be
+    /// opt-in).
+    pub fn compose_over_readout(outer: Accuracy, child: Accuracy, sensitivity: Sensitivity) -> Option<Accuracy> {
+        match (outer, child) {
+            (
+                Accuracy::Probabilistic { epsilon: e_o, delta: d_o, norm },
+                Accuracy::Probabilistic { epsilon: e_c, delta: d_c, norm: child_norm },
+            ) if child_norm == sensitivity.from => Some(Accuracy::Probabilistic {
+                epsilon: e_o + sensitivity.lipschitz * e_c,
+                delta: d_o + d_c,
+                norm,
+            }),
+            _ => None,
+        }
+    }
+}
+```
+
+This bound is real and computable for *any* `(outer, inner)` pair,
+provided a `Sensitivity` is justified — but it's provably looser than 3b
+when 3b is available, because it throws away the inner's actual
+construction and treats it as an opaque noisy scalar. It's the right
+tool when the inner's state genuinely isn't accessible, or as a fallback
+when 3b's step 2 fails.
+
+#### Mechanism 3b: composing over the inner's state (the recipe)
 
 Every sketch in this catalog is built by some randomized construction
 `state = Φ(input)` (a hash-based projection, a compaction tree, …), and
@@ -399,52 +472,63 @@ no shortcut that lets you skip re-examining that argument. The recipe is:
    land on either shape — the recipe produces *a* bound, derived the same
    way, not *the same* bound.
 
-#### Interface consequence: state, not readout, is what a summary can be built on
+#### Interface: two `ColumnRef` variants, one per mechanism
 
 Reusing the state/value distinction this doc's `SummaryMerge` table
-already established (only a state-producing node — `SummaryAgg` or
-`SummaryMerge` — may feed another state-consuming node; `SummaryEstimate`
-and `Logical` have already collapsed to a value and may not):
+already established (`SummaryAgg`/`SummaryMerge` produce state;
+`SummaryEstimate`/`Logical` produce a value), the two mechanisms above
+get two distinct `ColumnRef` variants, so which one a query is using is
+explicit at the type level rather than inferred:
 
 ```rust
 pub enum ColumnRef {
     Named(String),
     Qualified { table: String, name: String },
     SampleValue,
-    FromSummary(Rc<L4Node>),   // NEW — must be a state-producing node
-                                // (SummaryAgg / SummaryMerge), never
-                                // SummaryEstimate / Logical. Same rule
-                                // as SummaryMerge's children, extended
-                                // to this new consumer.
+    FromReadout(Rc<L4Node>),   // NEW — mechanism 3a. Must be a value-
+                                // producing node (SummaryEstimate /
+                                // Logical / an exact SummaryAgg with no
+                                // estimate step).
+    FromState(Rc<L4Node>),     // NEW — mechanism 3b. Must be a state-
+                                // producing node (SummaryAgg /
+                                // SummaryMerge). Same rule
+                                // SummaryMerge's children already use,
+                                // extended to this new consumer.
 }
 ```
 
-This mechanically forbids the "readout, then re-sketch" shape the old
-draft of this design allowed for the type-3 case — the exact shape none
-of the four systems surveyed ever uses. What it does *not* do is supply
-a bound: per the recipe, the bound for a specific `(outer_kind,
-inner_kind)` pair is the deployment's own derivation, done once per pair,
-following steps 1–4 above.
+Neither variant supplies a bound by itself — each routes to the matching
+half of `CostModel`:
 
 ```rust
 pub trait CostModel {
-    /// Has this deployment derived (following steps 1-4 above, or
-    /// equivalent) a bound for building `outer` over a `FromSummary`
-    /// input of `child_kind`? Default `false` — matches every system
-    /// surveyed: none of them build an outer sketch over an inner
-    /// sketch's state without first doing exactly this derivation for
-    /// their specific pair.
-    fn accepts_composed_state(&self, outer: &AggIntent, child_kind: &SummaryKind) -> bool {
+    /// Mechanism 3a. Has this deployment justified a `Sensitivity` for
+    /// building `outer` over a `FromReadout` input of `child_kind`?
+    /// Default `false` — a Lipschitz-style claim about `outer`'s own
+    /// function is always the deployment's to justify, not something
+    /// this crate derives (see `Accuracy::compose_over_readout`).
+    fn accepts_readout_composition(&self, outer: &AggIntent, child_kind: &SummaryKind) -> bool {
         false
     }
+    fn sensitivity_for(&self, outer: &AggIntent, child_kind: &SummaryKind) -> Option<Sensitivity> {
+        None
+    }
 
-    /// Size `kind`'s params given that its input is `child`'s own
-    /// (kind, params) rather than raw data. Only reachable when
-    /// `accepts_composed_state` returned `true` for this pair — the
-    /// deployment's own derivation is what this method encodes; there
-    /// is no default formula to fall back to; two different pairs get
-    /// two different bodies, per the recipe's step 4.
-    fn size_params_composed(
+    /// Mechanism 3b. Has this deployment derived (following the recipe
+    /// above, or equivalent) a bound for building `outer` directly over
+    /// a `FromState` input of `child_kind`? Default `false` — matches
+    /// every system surveyed: none of them build an outer sketch over an
+    /// inner sketch's state without first doing exactly this derivation
+    /// for their specific pair.
+    fn accepts_state_composition(&self, outer: &AggIntent, child_kind: &SummaryKind) -> bool {
+        false
+    }
+    /// No default body: two different `(outer, inner)` pairs get two
+    /// different derivations, per the recipe's step 4. Takes the
+    /// child's concrete `(kind, params)` directly, not an abstracted
+    /// accuracy value — the whole point of 3b is that the derivation is
+    /// specific to *which two constructions* are being composed.
+    fn size_params_from_state(
         &self,
         kind: SummaryKind,
         intent: &AggIntent,
@@ -455,50 +539,58 @@ pub trait CostModel {
 }
 ```
 
-`size_params_composed` deliberately takes the child's concrete `(kind,
-params)`, not an abstracted accuracy summary — the whole point of the
-recipe is that the derivation is specific to *which two constructions*
-are being composed, so the interface shouldn't pretend a
-kind-independent accuracy value could carry enough information to size
-against.
+A deployment facing a genuinely new `(outer, inner)` pair has a real
+choice, not just a closed gate: try 3b first (tighter, needs the
+recipe's step 2 to succeed), fall back to 3a (always computable given a
+justified `Sensitivity`, but looser), or refuse (type 4, the safe
+default either way).
 
-`Accuracy` (`implied_accuracy`, `is_exact`) stays as a **reporting**
-type — what a single, already-built `SummaryKind` guarantees on its own —
-used for type 2 (`Accuracy::EXACT` gates `FromSummary` unconditionally)
-and for a deployment to describe what it derived in step 4. It is not a
-composition primitive; there is no generic `compose()` over it, because
-step 4 established there's nothing generic to compute.
+`Accuracy` (`implied_accuracy`, `is_exact`) stays a **reporting** type —
+what a single, already-built `SummaryKind` guarantees on its own — used
+for type 2 (`Accuracy::EXACT` makes both `FromReadout` and `FromState`
+unconditional) and as the input/output of `compose_over_readout`. It is
+not, by itself, a composition primitive for 3b — 3b's bound comes from
+the recipe, not from any function of two `Accuracy` values.
 
 ### Which issue this solves
 
 - **[#171](https://github.com/ProjectASAP/ASAPController/issues/171)** —
   direction 2 (outer summary over inner exact accumulator, e.g. `TopK`
-  over `Rate`) is compound type 2: `FromSummary` over `Accuracy::EXACT`
-  state, unconditional. Direction 1 (outer exact fold over inner realized
-  summary) is a separate axis from this taxonomy entirely — the fold
-  itself is exact, so it's not a compound-*accuracy* question; it needs
-  its own `SummaryFold`/`FoldOp` node distinguishing which folds
-  (`Min`/`Max`) can consume the inner's already-read-out scalar versus
-  which (`Avg`/`Variance`/`StdDev`, per Algebird's `Averaged`/moment-
-  monoid distinction) need the inner's pre-readout sufficient statistic.
+  over `Rate`) is compound type 2: `FromState`/`FromReadout` over
+  `Accuracy::EXACT`, unconditional either way (state is preferred simply
+  because it's available and free — there's no accuracy reason to
+  prefer one over the other when the inner is exact). Direction 1 (outer
+  exact fold over inner realized summary) is a separate axis from this
+  taxonomy entirely — the fold itself is exact, so it's not a
+  compound-*accuracy* question; it needs its own `SummaryFold`/`FoldOp`
+  node distinguishing which folds (`Min`/`Max`) can consume the inner's
+  already-read-out scalar versus which (`Avg`/`Variance`/`StdDev`, per
+  Algebird's `Averaged`/moment-monoid distinction) need the inner's
+  pre-readout sufficient statistic.
 - **[#172](https://github.com/ProjectASAP/ASAPController/issues/172)** —
-  compound type 3 when a deployment has actually done the steps 1-4
-  derivation for its specific `(outer, inner)` pair (`accepts_composed_
-  state` + `size_params_composed`); compound type 4, and therefore
-  refused, otherwise. This replaces the earlier draft's generic
-  `compose()`/`Sensitivity` mechanism, which implied a bound could be
-  computed from kind-independent accuracy values alone — the DGIM/Hydra
-  worked examples show that's false; the bound is pair-specific and
-  requires redoing the inner construction's own proof, not gluing two
-  numbers together.
+  compound type 3, with a real choice between two mechanisms rather than
+  one closed gate: **3b** (`FromState`/`accepts_state_composition`/
+  `size_params_from_state`) when a deployment has done the recipe's
+  derivation for its specific `(outer, inner)` pair and the outer's
+  construction can actually consume the inner's state shape — tighter,
+  but not always available. **3a** (`FromReadout`/
+  `accepts_readout_composition`/`sensitivity_for`/
+  `compose_over_readout`) as the always-available fallback, given a
+  justified `Sensitivity` — looser, but requires nothing more than the
+  inner's already-public `(ε, δ)`. Type 4 (refused, the default for
+  both) when neither has been justified for the pair in question. This
+  replaces the earlier draft, which only exposed 3b and mechanically
+  forbade 3a outright — 3a is a real, general, always-derivable (given a
+  sensitivity claim) mechanism in its own right, just a looser one; it
+  shouldn't have been designed out.
 - **[#173](https://github.com/ProjectASAP/ASAPController/issues/173)** —
-  Hydra and QTree are each type-3 compositions *already worked out* by
-  their respective papers (Theorem 2; a deterministic range bound) —
-  concrete instances of the recipe above, not a fourth pattern. Each
-  still needs its own dedicated `SummaryKind` in the catalog (Hydra's
-  bound doesn't fit the reporting `Accuracy` shape any single-layer kind
-  uses, being referenced against a *global* total rather than the
-  queried subpopulation's own value) rather than being expressed as a
-  generic `FromSummary` composition — but the *reason* it needs one is
-  now precise: it's a type-3 pair someone has already derived, exactly
-  like DGIM/EH is, not a structurally different kind of problem.
+  Hydra and QTree are each 3b compositions *already worked out* by their
+  respective papers (Theorem 2; a deterministic range bound) — concrete
+  instances of the recipe, not a fourth pattern. Each still needs its own
+  dedicated `SummaryKind` in the catalog (Hydra's bound doesn't fit the
+  reporting `Accuracy` shape any single-layer kind uses, being
+  referenced against a *global* total rather than the queried
+  subpopulation's own value) rather than being expressed as a generic
+  `FromState` composition — but the *reason* it needs one is now
+  precise: it's a 3b pair someone has already derived, exactly like
+  DGIM/EH is, not a structurally different kind of problem.
