@@ -315,7 +315,8 @@ on `Reduce` vs. `PerEntity` there, not guess from an empty key list.
 ### Design proposal: composing summaries — a taxonomy and a recipe, not a formula
 
 There's no single formula for the error bound of "summary built over
-another summary." DGIM [SICOMP'02] and Hydra [VLDB'22] each prove a
+another summary." Exponential Histogram [Datar, Gionis, Indyk, Motwani,
+SICOMP'02] and Hydra [VLDB'22] each prove a
 bound for this shape, and the two bounds have different forms, because
 they come from composing different concentration arguments, not from
 adding two epsilons. What is general is a method. Four compound types,
@@ -335,7 +336,8 @@ by structural relationship:
    - **3b — over the inner's state.** The outer's construction runs
      directly on the inner's raw, pre-readout representation. Only
      available when the outer's construction can consume that
-     representation, but tight when it applies — DGIM/EH and Hydra are
+     representation, but tight when it applies — Exponential Histogram
+     and Hydra are
      worked examples.
    3b is strictly tighter when available; 3a is the fallback when the
    inner's state isn't accessible (e.g. across a service boundary) or 3b
@@ -411,17 +413,17 @@ HLL. There's no shortcut around re-examining that argument:
    shape this converges to — the two worked examples below land on two
    different formulas.
 
-**Worked examples.** DGIM/EH (a sketch built by concatenating other
+**Worked examples.** Exponential Histogram (a sketch built by concatenating other
 sketches' state across time buckets) and Hydra (a sketch that routes
 into other sketches by hash) both follow this recipe:
 
 | | Step 2: does the outer's construction run on the inner's state? | Step 3: the re-derived bound |
 |---|---|---|
-| DGIM / EH | Yes — the outer just concatenates buckets, and any composable sketch's state supports that (property P5). | `(1+ε̂)²Cf²/k + Cf − 1 + ε̂`, from re-running the windowing argument assuming the inner sketch is itself only `(1±ε̂)`-accurate. |
+| Exponential Histogram | Yes — the outer just concatenates buckets, and any composable sketch's state supports that (property P5). | `(1+ε̂)²Cf²/k + Cf − 1 + ε̂`, from re-running the windowing argument assuming the inner sketch is itself only `(1±ε̂)`-accurate. |
 | Hydra | Yes — the outer just needs something hashable to route on, which any sub-population id is. | `Gi(1±εUS) + ε·GS`, from re-running the Markov/Chernoff routing argument treating each cell's inner estimate as noisy. |
 | *Counter-example* | Not always — e.g. KLL's construction needs a stream of orderable items; an HLL's internal registers aren't that, so KLL can't run directly on HLL state. | — (type 4: refused) |
 
-Neither DGIM's nor Hydra's bound came from combining two pre-existing
+Neither Exponential Histogram's nor Hydra's bound came from combining two pre-existing
 formulas — both required redoing the outer's own proof for the two-layer
 construction. A third, novel pair should not be expected to land on
 either shape.
