@@ -312,91 +312,60 @@ pub fn execute<E: SummaryExecutor>(node: &L4Node, exec: &E) -> Result<ExecOutcom
 this doc's design section already explains — an implementer must branch
 on `Reduce` vs. `PerEntity` there, not guess from an empty key list.
 
-### Design proposal: a taxonomy of compound summaries, and a recipe (not a formula) for deriving their bound
+### Design proposal: composing summaries — a taxonomy and a recipe, not a formula
 
-The wrong question is "what's the formula for composing two summaries'
-error bounds." Surveying how real systems actually do this — DGIM
-[SICOMP'02], UnivMon [SIGCOMM'16], Hydra [VLDB'22], PromSketch [VLDB'25]
-— there is no such formula, general or otherwise: `Hydra`'s Theorem 2
-bound and `DGIM`'s Theorem 6/7 bound have genuinely different shapes,
-because they're proved by composing two *different* concentration
-arguments, not by combining two closed-form epsilons. But there **is** a
-general move common to every one of them, and it's the one this doc's
-"Nested composition" section above left as an open question: **never
-compose past a readout.** Every system surveyed builds the outer
-structure directly over the inner's *state* — never over a scalar the
-inner has already collapsed to. That single move is what turns "no
-general formula exists" into "a general *recipe* exists, and here it
-is."
+There's no single formula for the error bound of "summary built over
+another summary." DGIM [SICOMP'02] and Hydra [VLDB'22] each prove a
+bound for this shape, and the two bounds have different forms, because
+they come from composing different concentration arguments, not from
+adding two epsilons. What is general is a method. Four compound types,
+by structural relationship:
 
-#### Four compound types, by structural relationship
-
-1. **Same kind, same config — merge.** Already this doc's `SummaryMerge`:
-   exact at the state level, zero added error, gated only by the
-   catalog's `mergeable` flag. Not a new design question.
-2. **Heterogeneous, inner exact.** The inner `AggIntent` (`Rate`,
-   `Increase`, …) has `Accuracy::EXACT` state by construction — composing
-   over it adds nothing, unconditionally. Not really a "compound bound"
-   at all; it's a bound of zero.
-3. **Heterogeneous, both approximate.** The genuinely interesting case —
-   and it splits into **two different mechanisms**, not one, depending on
-   *what the outer is actually built over*:
+1. **Same kind, same config — merge.** Already `SummaryMerge`: exact at
+   the state level, zero added error, gated by the catalog's `mergeable`
+   flag.
+2. **Heterogeneous, inner exact.** An exact inner (`Rate`, `Increase`, …)
+   has `Accuracy::EXACT` state, so composing over it adds nothing,
+   unconditionally.
+3. **Heterogeneous, both approximate.** Splits into two mechanisms:
    - **3a — over the inner's readout.** The outer consumes the inner's
-     already-collapsed `SummaryEstimate` value as if it were an ordinary
-     (noisy) input. Always *available* — it needs nothing more than the
-     inner's published `(ε, δ)` — but the bound it produces is only as
-     good as a Lipschitz-style sensitivity argument, and is generally
-     loose.
-   - **3b — over the inner's state.** The outer's own construction runs
+     already-collapsed estimate as an ordinary noisy input. Always
+     available — needs only the inner's published `(ε, δ)` — but only as
+     tight as a Lipschitz-style sensitivity argument, generally loose.
+   - **3b — over the inner's state.** The outer's construction runs
      directly on the inner's raw, pre-readout representation. Only
-     available when the outer's construction can actually consume that
-     representation's shape (see the recipe below) — but when it applies,
-     it's tight: `DGIM`/`EH` and `Hydra` are worked examples.
-   Neither subsumes the other: 3a is the fallback when a deployment only
-   has API-level access to the inner's estimate (e.g. it crosses a
-   service boundary and the raw sketch state isn't exposed), or when the
-   outer's construction genuinely can't consume the inner's state shape
-   (3b's step 2 fails). 3b is strictly better *when* it's available.
-4. **Heterogeneous, both approximate, neither 3a nor 3b apply** — 3a
-   always applies in principle (any inner reporting an `(ε,δ)` can be
-   composed via *some* sensitivity argument), so type 4 really means "no
-   sensitivity argument has been justified for 3a, and 3b's step 2
-   fails." Stays refused.
+     available when the outer's construction can consume that
+     representation, but tight when it applies — DGIM/EH and Hydra are
+     worked examples.
+   3b is strictly tighter when available; 3a is the fallback when the
+   inner's state isn't accessible (e.g. across a service boundary) or 3b
+   doesn't apply.
+4. **Neither 3a nor 3b justified for the pair.** Refused by default.
 
-#### Mechanism 3a: composing over the inner's readout
+#### 3a: composing over the inner's readout
 
-This is an ordinary error-propagation argument, not specific to any of
-the four systems surveyed (none of them need it, since raw data or state
-is always available to them) — but it's the one every deployment
-*always* has available, because it only needs the inner's already-public
-`(ε, δ)`, not its internals. Let the inner produce `ṽ` satisfying
-`Accuracy A_c`, and the outer be built over `ṽ` as if exact, satisfying
-`A_o` under that assumption. If the outer's true function `φ_outer` is
-`L`-Lipschitz with respect to the norm `A_c.norm` is stated in:
+An ordinary error-propagation argument. Let the inner produce `ṽ`
+satisfying `Accuracy A_c`, and the outer be built over `ṽ` as if exact,
+satisfying `A_o`. If the outer's true function `φ_outer` is `L`-Lipschitz
+with respect to the norm `A_c` is stated in:
 
 ```
 Pr[ |ρ_outer(β_outer(ṽ)) − φ_outer(φ_inner(X))| > (ε_o + L·ε_c)·φ_outer(φ_inner(X)) ] ≤ δ_o + δ_c
 ```
 
-by the triangle inequality on the two error terms and a union bound on
-their failure events — the same derivation this design used earlier in
-review, now correctly scoped to *only* the readout case rather than
-presented as if it covered everything:
+by the triangle inequality plus a union bound on the two failure events:
 
 ```rust
-pub enum ErrorNorm { L1, L2, Pointwise }   // see Pattern-B discussion above for L1-vs-L2
+pub enum ErrorNorm { L1, L2, Pointwise }
 
 pub struct Sensitivity { pub lipschitz: f64, pub from: ErrorNorm }
 
 impl Accuracy {
-    /// `None` if `child.norm != sensitivity.from` — refuse rather than
-    /// apply an `L` that was never derived for that norm. `Sensitivity`
-    /// is always a claim the deployment is making about `φ_outer`, not
-    /// something this crate can derive on its own (linear aggregates
-    /// like Sum/Count have a provable `L=1`; rank-based ones like
-    /// Quantile/TopK only have `L≈1` under an unproven local-density
-    /// assumption — see the earlier discussion of why this must be
-    /// opt-in).
+    /// `None` on a norm mismatch — refuse rather than apply an `L` that
+    /// was never derived for it. `Sensitivity` is always the
+    /// deployment's own claim (linear aggregates like Sum/Count have a
+    /// provable `L=1`; rank-based ones like Quantile/TopK only have
+    /// `L≈1` under an unproven local-density assumption).
     pub fn compose_over_readout(outer: Accuracy, child: Accuracy, sensitivity: Sensitivity) -> Option<Accuracy> {
         match (outer, child) {
             (
@@ -413,100 +382,64 @@ impl Accuracy {
 }
 ```
 
-This bound is real and computable for *any* `(outer, inner)` pair,
-provided a `Sensitivity` is justified — but it's provably looser than 3b
-when 3b is available, because it throws away the inner's actual
-construction and treats it as an opaque noisy scalar. It's the right
-tool when the inner's state genuinely isn't accessible, or as a fallback
-when 3b's step 2 fails.
+Computable for any pair given a justified `Sensitivity`, but looser than
+3b, since it treats the inner as an opaque noisy scalar.
 
-#### Mechanism 3b: composing over the inner's state (the recipe)
+#### 3b: composing over the inner's state (the recipe)
 
-Every sketch in this catalog is built by some randomized construction
-`state = Φ(input)` (a hash-based projection, a compaction tree, …), and
-its published accuracy bound is proved by a *specific* concentration or
-counting argument applied to that construction — CMS's is a Markov bound
-over hash-collision mass; KLL's is a compaction-invariant argument; HLL's
-is a variance calculation over the max-order-statistic register. There is
-no shortcut that lets you skip re-examining that argument. The recipe is:
+Every sketch here is a randomized construction `state = Φ(input)`, and
+its bound is proved by a specific argument over that construction — a
+Markov bound over hash-collision mass for CMS, a compaction invariant for
+KLL, a variance calculation over the max-order-statistic register for
+HLL. There's no shortcut around re-examining that argument:
 
-1. **Treat the inner's state as the outer's input schema.** Not the
-   inner's readout — the inner's raw, pre-`SummaryEstimate` state, typed
-   the same way this doc already types it (`L4DataType::Sketch(kind,
-   params)`). This is a schema-level move, not a numerical one: it's the
-   difference between `outer built over Σ(inner)` and `outer built over
-   ρ(inner)`.
-2. **Ask whether the outer's own construction algorithm can literally run
-   with the inner's state standing in for its usual raw input.** For
-   `DGIM`/`EH`, the outer (windowing) construction is *bucket
-   concatenation*, and any composable sketch's state supports that by
-   definition (property P5) — always yes. For `Hydra`, the outer
-   (hash-routing) construction just needs *something hashable to route*,
-   which any subpopulation identifier is — always yes, for its specific
-   shape. For an arbitrary `(outer, inner)` pair, this is not automatic —
-   e.g. running CMS's own hash-and-increment construction *again*, over
-   another CMS's counter array treated as a fresh multiset of
-   "(bucket-index, count)" items, is well-defined; running a rank-based
-   KLL construction over an HLL's register array is not obviously
-   meaningful, because KLL's construction needs orderable *items*, and an
-   HLL register isn't one. If this step fails, stop — you're in type 4.
-3. **If step 2 succeeds, re-derive — don't reuse — the outer's own
-   concentration argument against the *composed* randomness.** The
-   composed construction is `Φ_outer ∘ Φ_inner`; the question is whether
-   the specific proof technique `Φ_outer`'s bound normally relies on
-   (independence assumptions, moment bounds, …) still holds when its
-   input distribution is "the output of `Φ_inner`" instead of "raw
-   samples." `DGIM` does exactly this in Theorem 7: the windowing
-   argument (Observation 1/2) is re-run assuming the per-bucket sketch
-   itself only supplies a `(1±ε̂)`-approximate `f`, not an exact one, and
-   the bound `(1+ε̂)²Cf²/k + Cf−1+ε̂` is what falls out. `Hydra` does the
-   same in Theorem 2: the routing argument (Markov on collision mass +
-   Chernoff over independent rows) is re-run treating each cell's
-   universal-sketch estimate as the noisy quantity, giving the
-   asymmetric `Gi(1±εUS) + ε·GS` shape. Neither bound was available by
-   composing two pre-existing formulas — both required redoing their
-   respective single-layer proof against the two-layer construction.
-4. **The resulting bound's *shape* is pair-specific, not universal.**
-   `DGIM`'s is `(1+ε̂)²Cf²/k+Cf−1+ε̂`; `Hydra`'s is `Gi(1±εUS)+ε·GS`.
-   There is no reason to expect a third, novel `(outer, inner)` pair to
-   land on either shape — the recipe produces *a* bound, derived the same
-   way, not *the same* bound.
+1. **Treat the inner's state as the outer's input schema** — the raw,
+   pre-`SummaryEstimate` state (`L4DataType::Sketch(kind, params)`), not
+   the readout. The difference between `outer built over Σ(inner)` and
+   `outer built over ρ(inner)`.
+2. **Check whether the outer's construction can run with the inner's
+   state standing in for raw input.** DGIM/EH's windowing construction
+   just concatenates buckets, which any composable sketch's state
+   supports (property P5) — always yes. Hydra's hash-routing just needs
+   something hashable — always yes for its shape. For an arbitrary pair
+   this isn't automatic: running CMS's hash-and-increment construction
+   over another CMS's counter array (treated as fresh `(bucket, count)`
+   items) is well-defined; running KLL's construction, which needs
+   orderable items, over an HLL's register array is not. If this fails,
+   the pair is type 4.
+3. **If it succeeds, re-derive — don't reuse — the outer's concentration
+   argument against the composed construction `Φ_outer ∘ Φ_inner`.**
+   DGIM's Theorem 7 re-runs its windowing argument assuming the
+   per-bucket sketch is itself only `(1±ε̂)`-accurate, giving
+   `(1+ε̂)²Cf²/k+Cf−1+ε̂`. Hydra's Theorem 2 re-runs its Markov/Chernoff
+   routing argument treating each cell's estimate as noisy, giving the
+   asymmetric `Gi(1±εUS)+ε·GS`. Neither came from combining pre-existing
+   formulas.
+4. **The result is pair-specific, not universal** — a third pair should
+   not be expected to land on either shape above.
 
-#### Interface: two `ColumnRef` variants, one per mechanism
+#### Interface
 
-Reusing the state/value distinction this doc's `SummaryMerge` table
-already established (`SummaryAgg`/`SummaryMerge` produce state;
-`SummaryEstimate`/`Logical` produce a value), the two mechanisms above
-get two distinct `ColumnRef` variants, so which one a query is using is
-explicit at the type level rather than inferred:
+Two `ColumnRef` variants make which mechanism a query uses explicit at
+the type level, reusing the state/value distinction `SummaryMerge`
+already enforces (`SummaryAgg`/`SummaryMerge` produce state;
+`SummaryEstimate`/`Logical` produce a value):
 
 ```rust
 pub enum ColumnRef {
     Named(String),
     Qualified { table: String, name: String },
     SampleValue,
-    FromReadout(Rc<L4Node>),   // NEW — mechanism 3a. Must be a value-
-                                // producing node (SummaryEstimate /
-                                // Logical / an exact SummaryAgg with no
-                                // estimate step).
-    FromState(Rc<L4Node>),     // NEW — mechanism 3b. Must be a state-
-                                // producing node (SummaryAgg /
-                                // SummaryMerge). Same rule
-                                // SummaryMerge's children already use,
-                                // extended to this new consumer.
+    FromReadout(Rc<L4Node>),   // NEW — 3a; must be value-producing
+    FromState(Rc<L4Node>),     // NEW — 3b; must be state-producing
 }
 ```
 
-Neither variant supplies a bound by itself — each routes to the matching
-half of `CostModel`:
+Each routes to its own half of `CostModel`, both defaulting closed:
 
 ```rust
 pub trait CostModel {
-    /// Mechanism 3a. Has this deployment justified a `Sensitivity` for
-    /// building `outer` over a `FromReadout` input of `child_kind`?
-    /// Default `false` — a Lipschitz-style claim about `outer`'s own
-    /// function is always the deployment's to justify, not something
-    /// this crate derives (see `Accuracy::compose_over_readout`).
+    /// 3a: has the deployment justified a Sensitivity for this pair?
     fn accepts_readout_composition(&self, outer: &AggIntent, child_kind: &SummaryKind) -> bool {
         false
     }
@@ -514,20 +447,13 @@ pub trait CostModel {
         None
     }
 
-    /// Mechanism 3b. Has this deployment derived (following the recipe
-    /// above, or equivalent) a bound for building `outer` directly over
-    /// a `FromState` input of `child_kind`? Default `false` — matches
-    /// every system surveyed: none of them build an outer sketch over an
-    /// inner sketch's state without first doing exactly this derivation
-    /// for their specific pair.
+    /// 3b: has the deployment derived a bound for this pair?
     fn accepts_state_composition(&self, outer: &AggIntent, child_kind: &SummaryKind) -> bool {
         false
     }
-    /// No default body: two different `(outer, inner)` pairs get two
-    /// different derivations, per the recipe's step 4. Takes the
-    /// child's concrete `(kind, params)` directly, not an abstracted
-    /// accuracy value — the whole point of 3b is that the derivation is
-    /// specific to *which two constructions* are being composed.
+    /// No default body — each pair gets its own derivation. Takes the
+    /// child's concrete (kind, params), not an abstracted accuracy
+    /// value, since the derivation depends on the specific pair.
     fn size_params_from_state(
         &self,
         kind: SummaryKind,
@@ -539,15 +465,11 @@ pub trait CostModel {
 }
 ```
 
-A deployment facing a genuinely new `(outer, inner)` pair has a real
-choice, not just a closed gate: try 3b first (tighter, needs the
-recipe's step 2 to succeed), fall back to 3a (always computable given a
-justified `Sensitivity`, but looser), or refuse (type 4, the safe
-default either way).
+A deployment facing a new pair has a real choice: try 3b, fall back to
+3a, or refuse.
 
-`Accuracy` (`implied_accuracy`, `is_exact`) stays a **reporting** type —
-what a single, already-built `SummaryKind` guarantees on its own — used
-for type 2 (`Accuracy::EXACT` makes both `FromReadout` and `FromState`
-unconditional) and as the input/output of `compose_over_readout`. It is
-not, by itself, a composition primitive for 3b — 3b's bound comes from
-the recipe, not from any function of two `Accuracy` values.
+`Accuracy` (`implied_accuracy`, `is_exact`) stays a reporting type — what
+a single `SummaryKind` guarantees on its own — used for type 2 and as
+`compose_over_readout`'s input/output. It isn't a composition primitive
+for 3b; 3b's bound comes from the recipe, not from a function of two
+`Accuracy` values.
