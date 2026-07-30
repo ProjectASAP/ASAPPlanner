@@ -393,30 +393,38 @@ Markov bound over hash-collision mass for CMS, a compaction invariant for
 KLL, a variance calculation over the max-order-statistic register for
 HLL. There's no shortcut around re-examining that argument:
 
-1. **Treat the inner's state as the outer's input schema** — the raw,
-   pre-`SummaryEstimate` state (`L4DataType::Sketch(kind, params)`), not
-   the readout. The difference between `outer built over Σ(inner)` and
-   `outer built over ρ(inner)`.
-2. **Check whether the outer's construction can run with the inner's
-   state standing in for raw input.** DGIM/EH's windowing construction
-   just concatenates buckets, which any composable sketch's state
-   supports (property P5) — always yes. Hydra's hash-routing just needs
-   something hashable — always yes for its shape. For an arbitrary pair
-   this isn't automatic: running CMS's hash-and-increment construction
-   over another CMS's counter array (treated as fresh `(bucket, count)`
-   items) is well-defined; running KLL's construction, which needs
-   orderable items, over an HLL's register array is not. If this fails,
-   the pair is type 4.
-3. **If it succeeds, re-derive — don't reuse — the outer's concentration
-   argument against the composed construction `Φ_outer ∘ Φ_inner`.**
-   DGIM's Theorem 7 re-runs its windowing argument assuming the
-   per-bucket sketch is itself only `(1±ε̂)`-accurate, giving
-   `(1+ε̂)²Cf²/k+Cf−1+ε̂`. Hydra's Theorem 2 re-runs its Markov/Chernoff
-   routing argument treating each cell's estimate as noisy, giving the
-   asymmetric `Gi(1±εUS)+ε·GS`. Neither came from combining pre-existing
-   formulas.
-4. **The result is pair-specific, not universal** — a third pair should
-   not be expected to land on either shape above.
+1. **Feed the outer sketch the inner's state, not its answer.** Use the
+   inner's raw, pre-`SummaryEstimate` state — typed here as
+   `L4DataType::Sketch(kind, params)` — as the outer's input, instead of
+   a scalar readout.
+2. **Check the outer's own build procedure can actually run on that
+   state.** Does feeding it the inner's state, instead of raw data, still
+   make sense? This can fail — see the worked examples below for a case
+   where it does and one where it clearly doesn't. If it fails, the pair
+   is type 4: refused.
+3. **If it works, prove a new bound — don't reuse the outer's old one.**
+   The outer's published bound assumed clean raw input; it says nothing
+   about input that's itself another sketch's noisy state. The outer's
+   own proof technique has to be redone against this two-stage
+   construction.
+4. **Expect a different bound for each new pair.** There's no fixed
+   shape this converges to — the two worked examples below land on two
+   different formulas.
+
+**Worked examples.** DGIM/EH (a sketch built by concatenating other
+sketches' state across time buckets) and Hydra (a sketch that routes
+into other sketches by hash) both follow this recipe:
+
+| | Step 2: does the outer's construction run on the inner's state? | Step 3: the re-derived bound |
+|---|---|---|
+| DGIM / EH | Yes — the outer just concatenates buckets, and any composable sketch's state supports that (property P5). | `(1+ε̂)²Cf²/k + Cf − 1 + ε̂`, from re-running the windowing argument assuming the inner sketch is itself only `(1±ε̂)`-accurate. |
+| Hydra | Yes — the outer just needs something hashable to route on, which any sub-population id is. | `Gi(1±εUS) + ε·GS`, from re-running the Markov/Chernoff routing argument treating each cell's inner estimate as noisy. |
+| *Counter-example* | Not always — e.g. KLL's construction needs a stream of orderable items; an HLL's internal registers aren't that, so KLL can't run directly on HLL state. | — (type 4: refused) |
+
+Neither DGIM's nor Hydra's bound came from combining two pre-existing
+formulas — both required redoing the outer's own proof for the two-layer
+construction. A third, novel pair should not be expected to land on
+either shape.
 
 #### Interface
 
