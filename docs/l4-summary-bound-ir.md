@@ -312,255 +312,193 @@ pub fn execute<E: SummaryExecutor>(node: &L4Node, exec: &E) -> Result<ExecOutcom
 this doc's design section already explains — an implementer must branch
 on `Reduce` vs. `PerEntity` there, not guess from an empty key list.
 
-### Design proposal: three composition patterns, not one algebra
+### Design proposal: a taxonomy of compound summaries, and a recipe (not a formula) for deriving their bound
 
-The starting question was whether there's a single accuracy law for
-"build a summary over another summary's output." There isn't. Surveying
-how real systems actually do this — Exponential Histograms / DGIM
-[Datar-Gionis-Indyk-Motwani, SICOMP'02], UnivMon [SIGCOMM'16], Hydra
-[VLDB'22], and PromSketch [VLDB'25, which builds directly on the first
-three] — shows three structurally distinct composition problems, each
-with its own (or, in one case, no) governing argument. Presenting them
-as one generic algebra would be over-claiming; this section names each
-pattern, scopes it against #171/#172/#173, and is explicit about which
-one has no known solution at all.
+The wrong question is "what's the formula for composing two summaries'
+error bounds." Surveying how real systems actually do this — DGIM
+[SICOMP'02], UnivMon [SIGCOMM'16], Hydra [VLDB'22], PromSketch [VLDB'25]
+— there is no such formula, general or otherwise: `Hydra`'s Theorem 2
+bound and `DGIM`'s Theorem 6/7 bound have genuinely different shapes,
+because they're proved by composing two *different* concentration
+arguments, not by combining two closed-form epsilons. But there **is** a
+general move common to every one of them, and it's the one this doc's
+"Nested composition" section above left as an open question: **never
+compose past a readout.** Every system surveyed builds the outer
+structure directly over the inner's *state* — never over a scalar the
+inner has already collapsed to. That single move is what turns "no
+general formula exists" into "a general *recipe* exists, and here it
+is."
 
-#### Pattern A — same statistic, across partitions (out of scope here)
+#### Four compound types, by structural relationship
 
-Composing the *same* summary kind's state across time/space partitions
-of the *same* underlying data — e.g. merging per-bucket sketches to
-answer a sliding-window range query. DGIM's Theorem 6/7 is the general,
-already-proven law for this, for any function `f` satisfying:
+1. **Same kind, same config — merge.** Already this doc's `SummaryMerge`:
+   exact at the state level, zero added error, gated only by the
+   catalog's `mergeable` flag. Not a new design question.
+2. **Heterogeneous, inner exact.** The inner `AggIntent` (`Rate`,
+   `Increase`, …) has `Accuracy::EXACT` state by construction — composing
+   over it adds nothing, unconditionally. Not really a "compound bound"
+   at all; it's a bound of zero.
+3. **Heterogeneous, both approximate, inner's *state* is a valid input to
+   the outer's own construction.** The genuinely interesting case, and
+   the subject of the recipe below. `DGIM`/`EH` and `Hydra` are two
+   **worked examples** of this case, not separate unrelated patterns —
+   see the recipe.
+4. **Heterogeneous, both approximate, no known way to run the outer's
+   construction over the inner's state.** Structurally undecidable with
+   what this design can check; stays refused.
 
-```
-P1. f(Bᵢ) ≥ 0
-P2. f(Bᵢ) ≤ poly(|Bᵢ|)
-P3. f(B1+B2) ≥ f(B1)+f(B2)              (sub-additive)
-P4. f(B1+B2) ≤ Cf·(f(B1)+f(B2)), Cf ≥ 1  (weakly super-additive)
-P5. f admits a composable sketch
-```
+#### The recipe for type 3
 
-giving, when the per-bucket sketch itself carries relative error `ε̂`:
+Every sketch in this catalog is built by some randomized construction
+`state = Φ(input)` (a hash-based projection, a compaction tree, …), and
+its published accuracy bound is proved by a *specific* concentration or
+counting argument applied to that construction — CMS's is a Markov bound
+over hash-collision mass; KLL's is a compaction-invariant argument; HLL's
+is a variance calculation over the max-order-statistic register. There is
+no shortcut that lets you skip re-examining that argument. The recipe is:
 
-```
-Er ≤ (1+ε̂)²·Cf²/k + Cf − 1 + ε̂
-```
+1. **Treat the inner's state as the outer's input schema.** Not the
+   inner's readout — the inner's raw, pre-`SummaryEstimate` state, typed
+   the same way this doc already types it (`L4DataType::Sketch(kind,
+   params)`). This is a schema-level move, not a numerical one: it's the
+   difference between `outer built over Σ(inner)` and `outer built over
+   ρ(inner)`.
+2. **Ask whether the outer's own construction algorithm can literally run
+   with the inner's state standing in for its usual raw input.** For
+   `DGIM`/`EH`, the outer (windowing) construction is *bucket
+   concatenation*, and any composable sketch's state supports that by
+   definition (property P5) — always yes. For `Hydra`, the outer
+   (hash-routing) construction just needs *something hashable to route*,
+   which any subpopulation identifier is — always yes, for its specific
+   shape. For an arbitrary `(outer, inner)` pair, this is not automatic —
+   e.g. running CMS's own hash-and-increment construction *again*, over
+   another CMS's counter array treated as a fresh multiset of
+   "(bucket-index, count)" items, is well-defined; running a rank-based
+   KLL construction over an HLL's register array is not obviously
+   meaningful, because KLL's construction needs orderable *items*, and an
+   HLL register isn't one. If this step fails, stop — you're in type 4.
+3. **If step 2 succeeds, re-derive — don't reuse — the outer's own
+   concentration argument against the *composed* randomness.** The
+   composed construction is `Φ_outer ∘ Φ_inner`; the question is whether
+   the specific proof technique `Φ_outer`'s bound normally relies on
+   (independence assumptions, moment bounds, …) still holds when its
+   input distribution is "the output of `Φ_inner`" instead of "raw
+   samples." `DGIM` does exactly this in Theorem 7: the windowing
+   argument (Observation 1/2) is re-run assuming the per-bucket sketch
+   itself only supplies a `(1±ε̂)`-approximate `f`, not an exact one, and
+   the bound `(1+ε̂)²Cf²/k + Cf−1+ε̂` is what falls out. `Hydra` does the
+   same in Theorem 2: the routing argument (Markov on collision mass +
+   Chernoff over independent rows) is re-run treating each cell's
+   universal-sketch estimate as the noisy quantity, giving the
+   asymmetric `Gi(1±εUS) + ε·GS` shape. Neither bound was available by
+   composing two pre-existing formulas — both required redoing their
+   respective single-layer proof against the two-layer construction.
+4. **The resulting bound's *shape* is pair-specific, not universal.**
+   `DGIM`'s is `(1+ε̂)²Cf²/k+Cf−1+ε̂`; `Hydra`'s is `Gi(1±εUS)+ε·GS`.
+   There is no reason to expect a third, novel `(outer, inner)` pair to
+   land on either shape — the recipe produces *a* bound, derived the same
+   way, not *the same* bound.
 
-(`k` is the bucket-count knob). PromSketch's own EHKLL (`εEHKLL ≤
-2εEH+εKLL`) and EHUniv are both direct instances of this theorem for
-specific `f` (rank-error, and `L2²` respectively) — EHUniv specifically
-tunes `k = O(1/ε²)` so the `Cf²/k` term becomes asymptotically smaller
-than `ε̂`, which is why its headline bound shows a single `ε` rather than
-an explicit sum.
+#### Interface consequence: state, not readout, is what a summary can be built on
 
-This is real, general, and probably something ASAPController needs
-eventually for windowed/range-vector PromQL queries — but it composes
-the *same* statistic across a partition of *the same data*, which is not
-what #171/#172/#173 ask about (composing *different* statistics along a
-query's data-flow). It's flagged here and left out of scope; it belongs
-in a separate issue, not this design.
-
-#### Pattern B — hash-collision routing (#173's Hydra and QTree cases)
-
-Hydra's "sketch of sketches" hashes *subpopulations* to shared inner
-sketch instances the same way CMS hashes *keys* to shared counters — raw
-data flows directly into whichever inner instance a subpopulation routes
-to; several subpopulations can collide into one. Theorem 2 gives the
-combined bound:
-
-```
-Gi(1 − εUS) ≤ Ĝi ≤ Gi(1 + εUS) + ε·GS       w.p. ≥ 1 − δ
-```
-
-`εUS` is the inner universal sketch's own error; the additive term is
-referenced against `GS`, the **global** total across the whole stream,
-not against `Gi` itself — an asymmetric, non-self-referential shape that
-doesn't fit the same-kind `(ε, δ)`-relative-to-self guarantee every other
-`SummaryKind` in this catalog reports. That's precisely why this isn't a
-composition of two independently-built `L4Node`s: it needs its own
-dedicated `SummaryKind` (its own `w×r` grid, its own `implied_accuracy`
-shaped like Theorem 2), fed directly from raw data, with one readout —
-not a generic combination of already-built children.
-
-QTree-style range trees belong in this pattern too, for a different
-reason: their accuracy isn't a probabilistic `(ε,δ)` bound at all — it's
-a deterministic interval radius that shrinks with tree capacity. Same
-conclusion: its own `SummaryKind`, its own accuracy representation
-(`Accuracy::Bounded { radius }`, alongside the existing `Probabilistic`
-shape every sketch and accumulator already reports), no composition
-primitive needed.
-
-```rust
-pub enum Accuracy {
-    Probabilistic { epsilon: f64, delta: f64, norm: ErrorNorm },
-    Bounded { radius: f64 },
-}
-
-pub enum ErrorNorm {
-    L1,          // per-item error relative to Σ|x| — CMS
-    L2,          // per-item error relative to the L2 norm of the (residual) value
-                  // vector — Count-Sketch; tighter than L1 on skewed data, not
-                  // directly convertible to it without a workload-dependent factor
-    Pointwise,   // no underlying vector norm — KLL, HLL, DDSketch, Theta, Kmv
-}
-```
-
-`#173`'s answer, in full: Hydra and QTree are both new `SummaryKind`
-catalog entries with bespoke accuracy math, not a generalization of the
-mechanism built for #171/#172 below.
-
-#### Pattern D — heterogeneous sequential nesting (#171, #172)
-
-This is what the two issues actually describe: an outer `AggIntent`
-built over an inner `AggIntent` of a *different* kind (`TopK` over
-`Rate`; `Max` over `Quantile`; `TopK` over `Cardinality`). None of the
-four papers surveyed instantiate this shape — each avoids it
-structurally (Pattern A merges same-kind state; Pattern B routes raw
-data into a shared inner instance; nothing here ever re-sketches another
-sketch's already-collapsed readout). There is no borrowed theorem for
-this pattern. It splits into three cases by what the inner side actually
-is.
-
-**D1 — inner is exact (composes for free).** If the inner `AggIntent`
-computes something exactly and cheaply from raw data (`Rate`, `Increase`,
-`Delta`, `Deriv`, …), there's no need to reference its *readout* at all
-— the outer summary can be built directly over the inner's exact,
-mergeable **state**, which is definitionally `Accuracy::EXACT`
-(`epsilon = delta = 0`). Composing over it adds zero error by
-definition, so it's allowed unconditionally:
+Reusing the state/value distinction this doc's `SummaryMerge` table
+already established (only a state-producing node — `SummaryAgg` or
+`SummaryMerge` — may feed another state-consuming node; `SummaryEstimate`
+and `Logical` have already collapsed to a value and may not):
 
 ```rust
 pub enum ColumnRef {
     Named(String),
     Qualified { table: String, name: String },
     SampleValue,
-    FromSummary { node: Rc<L4Node>, accuracy: Accuracy },   // NEW
+    FromSummary(Rc<L4Node>),   // NEW — must be a state-producing node
+                                // (SummaryAgg / SummaryMerge), never
+                                // SummaryEstimate / Logical. Same rule
+                                // as SummaryMerge's children, extended
+                                // to this new consumer.
 }
 ```
 
-`accuracy == Accuracy::EXACT` is always a legal `FromSummary` — this is
-`#171` direction 2 in full.
-
-**D2 — outer is an exact fold over an inner realized summary.** `Min`/
-`Max`/`Avg`/`StdDev`/`Variance` folded over an inner *already-realized*
-summary (`max by (zone) (quantile_over_time(0.99, m[5m]))`) is exact by
-construction on the fold side — the open question is only which of these
-fold operators can consume the inner's collapsed scalar directly versus
-which need its pre-readout sufficient statistic (the same distinction as
-Algebird's `Averaged`/moment monoids: `Avg`/`Variance`/`StdDev` aren't
-associative on the scalar output, only on `(Σv, n)` / `(Σv, Σv², n)`):
+This mechanically forbids the "readout, then re-sketch" shape the old
+draft of this design allowed for the type-3 case — the exact shape none
+of the four systems surveyed ever uses. What it does *not* do is supply
+a bound: per the recipe, the bound for a specific `(outer_kind,
+inner_kind)` pair is the deployment's own derivation, done once per pair,
+following steps 1–4 above.
 
 ```rust
-pub enum FoldOp { Min, Max, Avg, Variance { population: bool }, StdDev { population: bool } }
-
-pub enum FoldInput {
-    Value,                 // Min/Max: the inner's already-read-out scalar suffices
-    SufficientStatistic,   // Avg/Variance/StdDev: needs the inner's pre-readout state
-}
-
-impl FoldOp {
-    pub fn required_input(&self) -> FoldInput {
-        match self {
-            FoldOp::Min | FoldOp::Max => FoldInput::Value,
-            _ => FoldInput::SufficientStatistic,
-        }
-    }
-}
-
-SummaryExpr::SummaryFold { child: Rc<L4Node>, fold: FoldOp, by: Vec<ColumnRef> },
-```
-
-`SummaryFold` carries no `Accuracy` of its own — the fold is exact, so
-it's transparent to whatever accuracy its child already has. This is
-`#171` direction 1 in full.
-
-**D3 — outer approximate over an inner statistic that cannot be computed
-exactly in sub-linear space (the genuinely open part of #172).** `Rate`
-can always be computed inline from raw data (case D1), so it's never
-truly stuck behind an approximate readout. But `Cardinality`/`Quantile`/
-`TopK` as an *inner* statistic have no exact sub-linear form to fall back
-to — `topk(5, count(hll_metric) by (key))` genuinely has no choice but to
-build the outer `TopK` over the inner HLL's approximate estimate. This is
-the actual, narrowed scope of what remains unsolved: not "any nested
-approximation," but specifically *outer sketch over an inner statistic
-that is inherently sketch-only*.
-
-For this case only, the design keeps a composition hook — but labeled
-honestly as a first-principles derivation this design is proposing, not
-a result borrowed from any of the four systems surveyed (none of them
-attempt this shape; Hydra's answer to "I need to combine an
-inherently-approximate inner statistic with an outer one" is to build a
-*single* bespoke `SummaryKind`, per Pattern B, not to compose two):
-
-```rust
-pub struct Sensitivity { pub lipschitz: f64, pub from: ErrorNorm }
-
-impl Accuracy {
-    /// `None` if `child.norm != sensitivity.from` — refuse rather than
-    /// silently apply an unproven `lipschitz` constant across a norm it
-    /// wasn't derived for.
-    pub fn compose(outer: Accuracy, child: Accuracy, sensitivity: Sensitivity) -> Option<Accuracy> {
-        match (outer, child) {
-            (
-                Accuracy::Probabilistic { epsilon: e_o, delta: d_o, norm },
-                Accuracy::Probabilistic { epsilon: e_c, delta: d_c, norm: child_norm },
-            ) if child_norm == sensitivity.from => Some(Accuracy::Probabilistic {
-                epsilon: e_o + sensitivity.lipschitz * e_c,
-                delta: d_o + d_c,
-                norm,
-            }),
-            _ => None,
-        }
-    }
-}
-
 pub trait CostModel {
-    /// Does this deployment accept building `outer` over an inner
-    /// statistic that is inherently sketch-only (Cardinality/Quantile/
-    /// TopK as the inner kind)? Default `false` — no known system
-    /// attempts this composition; refuse rather than assume a Lipschitz
-    /// bound nobody has proven for this specific pairing.
-    fn accepts_nested_approx(&self, outer: &AggIntent, child_kind: &SummaryKind) -> bool {
+    /// Has this deployment derived (following steps 1-4 above, or
+    /// equivalent) a bound for building `outer` over a `FromSummary`
+    /// input of `child_kind`? Default `false` — matches every system
+    /// surveyed: none of them build an outer sketch over an inner
+    /// sketch's state without first doing exactly this derivation for
+    /// their specific pair.
+    fn accepts_composed_state(&self, outer: &AggIntent, child_kind: &SummaryKind) -> bool {
         false
     }
 
-    fn size_params(
+    /// Size `kind`'s params given that its input is `child`'s own
+    /// (kind, params) rather than raw data. Only reachable when
+    /// `accepts_composed_state` returned `true` for this pair — the
+    /// deployment's own derivation is what this method encodes; there
+    /// is no default formula to fall back to; two different pairs get
+    /// two different bodies, per the recipe's step 4.
+    fn size_params_composed(
         &self,
         kind: SummaryKind,
         intent: &AggIntent,
-        target: Accuracy,
-        child_accuracy: Option<Accuracy>,
-    ) -> SummaryParams { .. }
+        target_eps: f64,
+        target_delta: f64,
+        child: (&SummaryKind, &SummaryParams),
+    ) -> SummaryParams;
 }
 ```
 
-`accepts_nested_approx` defaulting to `false` isn't a placeholder pending
-proof — it's the design matching what every real system surveyed
-actually does: none of them build an outer sketch over an inner sketch's
-readout, ever. A deployment that overrides it to `true` is asserting a
-`Sensitivity` it has independently justified for its specific
-`(outer, child_kind)` pair, not relying on anything this design or the
-literature behind it provides.
+`size_params_composed` deliberately takes the child's concrete `(kind,
+params)`, not an abstracted accuracy summary — the whole point of the
+recipe is that the derivation is specific to *which two constructions*
+are being composed, so the interface shouldn't pretend a
+kind-independent accuracy value could carry enough information to size
+against.
+
+`Accuracy` (`implied_accuracy`, `is_exact`) stays as a **reporting**
+type — what a single, already-built `SummaryKind` guarantees on its own —
+used for type 2 (`Accuracy::EXACT` gates `FromSummary` unconditionally)
+and for a deployment to describe what it derived in step 4. It is not a
+composition primitive; there is no generic `compose()` over it, because
+step 4 established there's nothing generic to compute.
 
 ### Which issue this solves
 
 - **[#171](https://github.com/ProjectASAP/ASAPController/issues/171)** —
-  direction 1 (outer exact fold over inner summary) is Pattern D2,
-  `SummaryFold`/`FoldOp`. Direction 2 (outer summary over inner exact
-  accumulator) is Pattern D1, `FromSummary` at `Accuracy::EXACT`,
-  unconditional.
+  direction 2 (outer summary over inner exact accumulator, e.g. `TopK`
+  over `Rate`) is compound type 2: `FromSummary` over `Accuracy::EXACT`
+  state, unconditional. Direction 1 (outer exact fold over inner realized
+  summary) is a separate axis from this taxonomy entirely — the fold
+  itself is exact, so it's not a compound-*accuracy* question; it needs
+  its own `SummaryFold`/`FoldOp` node distinguishing which folds
+  (`Min`/`Max`) can consume the inner's already-read-out scalar versus
+  which (`Avg`/`Variance`/`StdDev`, per Algebird's `Averaged`/moment-
+  monoid distinction) need the inner's pre-readout sufficient statistic.
 - **[#172](https://github.com/ProjectASAP/ASAPController/issues/172)** —
-  Pattern D3 exactly: narrowed from "any nested approximation" to "outer
-  sketch over an inner statistic with no exact sub-linear form." No
-  known system solves this generically; the design keeps a gated,
-  explicitly-unproven `compose`/`accepts_nested_approx` hook rather than
-  either forbidding the shape outright or pretending a borrowed theorem
-  covers it.
+  compound type 3 when a deployment has actually done the steps 1-4
+  derivation for its specific `(outer, inner)` pair (`accepts_composed_
+  state` + `size_params_composed`); compound type 4, and therefore
+  refused, otherwise. This replaces the earlier draft's generic
+  `compose()`/`Sensitivity` mechanism, which implied a bound could be
+  computed from kind-independent accuracy values alone — the DGIM/Hydra
+  worked examples show that's false; the bound is pair-specific and
+  requires redoing the inner construction's own proof, not gluing two
+  numbers together.
 - **[#173](https://github.com/ProjectASAP/ASAPController/issues/173)** —
-  Pattern B. Hydra and QTree are each their own `SummaryKind` with
-  bespoke accuracy math (Theorem 2's shape; a deterministic
-  `Accuracy::Bounded` radius, respectively) fed directly from raw data —
-  not a generalization of `FromSummary`/`SummaryFold`.
-- **Pattern A** (same-statistic windowing, DGIM-grounded) answers none of
-  the three issues directly — it's flagged as a real, separate gap
-  (sliding-window range-vector queries) worth its own future issue.
+  Hydra and QTree are each type-3 compositions *already worked out* by
+  their respective papers (Theorem 2; a deterministic range bound) —
+  concrete instances of the recipe above, not a fourth pattern. Each
+  still needs its own dedicated `SummaryKind` in the catalog (Hydra's
+  bound doesn't fit the reporting `Accuracy` shape any single-layer kind
+  uses, being referenced against a *global* total rather than the
+  queried subpopulation's own value) rather than being expressed as a
+  generic `FromSummary` composition — but the *reason* it needs one is
+  now precise: it's a type-3 pair someone has already derived, exactly
+  like DGIM/EH is, not a structurally different kind of problem.
