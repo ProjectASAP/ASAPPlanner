@@ -72,3 +72,82 @@ infrastructure that every deployment reads from, rather than something
 each deployment reinvents independently — though which summary
 families and parameter ranges are actually registered is itself
 deployment policy.
+
+## Interface
+
+Speculative — nothing here is built (see this doc's status note at the
+top). Kept as a concrete target to design against, not as an API to
+depend on. Every concrete-looking name below (`StageId`'s example
+values, `Executor`'s addressing, an actual `TopologyDescriptor`) is
+**interface only, in this repo** — ASAPController defines the shape a
+deployment implements against; it never defines, reserves, or ships any
+of the actual values. A deployment names its own stages, addresses its
+own executors, and describes its own topology; nothing here is a fixed
+vocabulary to conform to:
+
+```rust
+pub trait PhysicalPlanner {
+    type Topology: TopologyDescriptor;
+    type Output;
+    fn lower(&self, l4: Rc<L4Node>, t: &Self::Topology) -> Result<Self::Output, PlanError>;
+}
+
+pub trait TopologyDescriptor {
+    fn stages(&self) -> &[StageDescriptor];
+    // A `StageEdge` names a pair of stages data is allowed to flow
+    // between (e.g. "edge → backend" if that deployment's edge tier
+    // ships summaries up to a backend tier) — the topology's connectivity
+    // graph, distinct from which stages merely *exist* (`stages()` above).
+    // `StageAllocator::allocate` only assigns a piece of the plan to move
+    // from one stage to another along an edge this list actually
+    // contains; a `TopologyDescriptor` with no edge between two stages is
+    // how a deployment declares those two stages can't exchange data
+    // directly.
+    fn edges(&self) -> &[StageEdge];
+}
+
+// `StageId` is an opaque, deployment-chosen string — ASAPController
+// neither defines nor reserves any particular value. "edge" / "gateway"
+// / "backend" / "in-process" below are one deployment's illustrative
+// choice (roughly: close to data ingestion / an intermediate
+// aggregation tier / a centralized serving tier / no network hop at
+// all), not a fixed enum — a different deployment can and should name
+// its own stages differently.
+pub struct StageId(pub String);
+
+pub struct Executor {
+    pub id: ExecutorId,
+    pub stage: StageId,
+    pub capabilities: ExecutorCaps,   // memory budget, available summary backends, network neighbours
+    pub address: ExecutorAddr,        // OpAMP agent / HTTP endpoint / in-process handle — deployment-defined
+}
+
+// Stage-level allocation: given an L4 tree + a topology, decide which
+// nodes land on which stage, subject to deployment constraints.
+// Per-executor fan-out is the deployment model's own PhysicalPlanner,
+// using the executor list from DeploymentConstraints::executors().
+pub struct StageAllocator;
+impl StageAllocator {
+    pub fn allocate<T: TopologyDescriptor>(
+        &self, l4: Rc<L4Node>, topology: &T, c: &DeploymentConstraints,
+    ) -> Result<Vec<StageAssignment>, PlanError>;
+}
+```
+
+A deployment model implements `PhysicalPlanner`, delegating the
+stage-level decision to `StageAllocator` and handling its own
+per-executor fan-out on top:
+
+```rust
+impl PhysicalPlanner for LifecyclePlanner {
+    type Topology = ThreeStage;
+    type Output = Vec<(ExecutorId, ExecutorPlan)>;
+    fn lower(&self, l4: Rc<L4Node>, t: &ThreeStage) -> Result<Self::Output, PlanError> {
+        let assignments = StageAllocator.allocate(l4, t, &self.constraints)?;
+        let executors: &[Executor] = self.constraints.executors();
+        // deployment-specific post-processing (cost accounting, backend
+        // push preparation, ...) happens here.
+        Ok(/* ... */)
+    }
+}
+```

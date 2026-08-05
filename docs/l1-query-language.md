@@ -67,3 +67,28 @@ A front end is expected to cleanly reject a shape it can't yet
 represent — rather than silently mis-lowering it — since a
 resolvable-later gap is one design choice away from becoming a
 correctness bug if it's lowered wrong instead of rejected outright.
+
+## Interface
+
+There is no shared L1 trait — each front end exposes its own free
+functions, differing in language-specific arguments (SQL takes a
+catalog + dialect; PromQL doesn't) but converging on the same return
+type once lowering finishes:
+
+```rust
+// PromQL
+pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError>;
+pub fn lower_promql_batch(workload: &QueryWorkload) -> Vec<Result<QueryExpr, PromqlError>>;
+
+// SQL
+pub async fn lower_sql(query: &str, catalog: &SqlCatalog, accuracy: AccuracyTarget) -> Result<QueryExpr, SqlError>;
+pub async fn lower_sql_dialect(query: &str, catalog: &SqlCatalog, dialect: SqlDialect, accuracy: AccuracyTarget) -> Result<QueryExpr, SqlError>;
+pub async fn lower_sql_batch(workload: &QueryWorkload, catalog: &SqlCatalog) -> Vec<Result<QueryExpr, SqlError>>;
+```
+
+Both converge on the canonical L3 `QueryExpr` — the interface that
+actually matters lives one step down, at the shared L2 → L3 step this
+doc already describes (see [`l2-logical-plan.md`](./l2-logical-plan.md#interface)).
+SQL's extra `catalog`/`dialect` parameters are exactly the schema-source
+asymmetry covered above: SQL supplies its own resolved schema up front;
+PromQL doesn't have one to supply, so it has no equivalent parameter.
