@@ -24,7 +24,7 @@ use asap_ir::intent_algebra::agg_intent::AggIntent;
 use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
 use asap_ir::intent_algebra::names::BindingName;
 use asap_ir::intent_algebra::query_expr::{
-    GroupKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, SortKey, Source,
+    GroupKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, Reduction, SortKey, Source,
 };
 use asap_ir::intent_algebra::schema::{ColumnId, Schema};
 use asap_ir::types::AccuracyTarget;
@@ -263,15 +263,13 @@ pub fn convert(
                     None => agg_child_raw,
                 };
                 // Resolve the group keys positionally against the aggregate's
-                // input so the grouping lives in `Aggregate.by` — the *same*
-                // shape SQL produces. Only for instant (non-range) aggregates:
-                // an instant aggregate (`sum by (job) (m)`) or a cross-series
-                // reduction over a label-preserving `rate`/`increase`.
+                // input so the grouping lives in `Aggregate.reduction` — the
+                // *same* shape SQL produces. Only for instant (non-range)
+                // aggregates: an instant aggregate (`sum by (job) (m)`) or a
+                // cross-series reduction over a label-preserving `rate`/`increase`.
                 //
                 // A range reduction's keys can't go into `by`: this node must stay
-                // a per-series (label-preserving) reduction, and per-series schema
-                // detection in `output_schema_in` keys off `by.is_empty()` — adding
-                // keys here would flip it to a cross-series reduce. So a windowed
+                // a per-entity (label-preserving) reduction. So a windowed
                 // reduction must carry no group keys: the only PromQL shape that
                 // would put keys here is a generic `topk by (…)`, and that routes
                 // its grouping to `Sort.partition_by` instead (issue #12). Any keys
@@ -286,8 +284,27 @@ pub fn convert(
                 // groups every series into one partition and is omitted from
                 // the output — drop it instead of rejecting the query.
                 let by = group_keys(resolve_group_keys_promql(keys, &agg_in_schema)?, *without);
+                // Decide the reduction kind once, right here, rather than
+                // leaving a downstream consumer to re-derive it (issue #165):
+                // a per-entity reduction is a single intent with no grouping
+                // keys at all, whose intent is inherently per-series
+                // (`rate`/`increase`/…) or whose child is a range-window
+                // wrapper (`TimeRange`/`Subquery` — the `*_over_time` family).
+                // `without ()` is still a genuine reduction (groups by every
+                // label), never per-entity, even with an empty exclusion list.
+                let is_range_child = matches!(
+                    agg_child,
+                    CQueryExpr::TimeRange { .. } | CQueryExpr::Subquery { .. }
+                );
+                let per_entity =
+                    by.is_empty() && !by.is_without() && (intent.is_per_series() || is_range_child);
+                let reduction = if per_entity {
+                    Reduction::PerEntity
+                } else {
+                    Reduction::Reduce(by)
+                };
                 return Ok(CQueryExpr::Aggregate {
-                    by,
+                    reduction,
                     aggs: vec![intent],
                     output_names: vec![aggs[0].alias.clone().unwrap_or_default()],
                     having: None,
@@ -322,7 +339,10 @@ pub fn convert(
                 })
                 .transpose()?;
             CQueryExpr::Aggregate {
-                by,
+                // Always a genuine reduction: this branch is multi-intent or
+                // HAVING-bearing, and per-entity reductions are always a
+                // single, HAVING-less intent (handled above).
+                reduction: Reduction::Reduce(by),
                 aggs: intents,
                 output_names,
                 having,
@@ -380,7 +400,9 @@ pub fn convert(
             let child_schema = child.output_schema()?;
             let by: GroupKeys = resolve_column_refs(by, &child_schema)?.into();
             CQueryExpr::Aggregate {
-                by,
+                // A ranking always reduces (a `by`-empty TopK ranks the whole
+                // input into one ordering, never per-entity).
+                reduction: Reduction::Reduce(by),
                 aggs: vec![AggIntent::TopK {
                     k: *k as usize,
                     accuracy: acc.clone(),
@@ -812,8 +834,14 @@ mod tests {
         };
 
         let l3 = convert(&tree, &schema, &AccuracyTarget::Exact).unwrap();
-        let CQueryExpr::Aggregate { by, aggs, .. } = &l3 else {
+        let CQueryExpr::Aggregate {
+            reduction, aggs, ..
+        } = &l3
+        else {
             panic!("expected Aggregate, got {l3:?}");
+        };
+        let Reduction::Reduce(by) = reduction else {
+            panic!("expected a Reduce grouping, got {reduction:?}");
         };
         assert!(by.is_empty());
         // bytes is column 1, latency is column 2 in the input schema.
@@ -908,10 +936,16 @@ mod tests {
         };
         let l3 = convert_root(&tree, &AccuracyTarget::Exact).unwrap();
         let CQueryExpr::Aggregate {
-            by, aggs, child, ..
+            reduction,
+            aggs,
+            child,
+            ..
         } = &l3
         else {
             panic!("expected multi-agg Aggregate, got {l3:?}");
+        };
+        let Reduction::Reduce(by) = reduction else {
+            panic!("expected a Reduce grouping, got {reduction:?}");
         };
         assert_eq!(by, &vec![3], "region is column 3 of the joined schema");
         assert_eq!(

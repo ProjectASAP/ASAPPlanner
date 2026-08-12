@@ -19,7 +19,7 @@
 //!   pre-aggregated bucket counts can't feed a quantile sketch — while the
 //!   generic `Quantile` path (native histograms / raw samples) is.
 //!
-//! [`realize`] is a single exhaustive match over the intent vocabulary, so a
+//! [`implementation_for`] is a single exhaustive match over the intent vocabulary, so a
 //! new `AggIntent` variant fails to compile until it is given an explicit
 //! realization — there is no silent fall-through. The [`bind`](crate::bind)
 //! pass fires it per node over nested trees.
@@ -28,18 +28,20 @@ use asap_ir::intent_algebra::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_ir::types::AccuracyTarget;
 use asap_sketch::{SummaryKind, SummaryParams};
 
+use crate::cost_model::{CostModel, DefaultCostModel};
+
 /// How an [`AggIntent`] is realised at L4.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Realization {
-    /// An approximate sketch, sized to the intent's [`AccuracyTarget`].
-    Sketch {
-        kind: SummaryKind,
-        params: SummaryParams,
-    },
-    /// An exact **mergeable** accumulator (partial state ≡ the value itself:
-    /// `Sum` / `Count` / `MinMax` / `Rate` / `Increase`). Still a summary —
-    /// it pre-aggregates and merges across stages — just with zero error.
-    ExactAccumulator {
+pub enum Implementation {
+    /// A summary — either an approximate sketch sized to the intent's
+    /// [`AccuracyTarget`], or an exact **mergeable** accumulator (partial
+    /// state ≡ the value itself: `Sum` / `Count` / `MinMax` / `Rate` /
+    /// `Increase`). `kind.is_exact()` tells the two apart; binding needs
+    /// that fact to decide whether a `SummaryEstimate` readout is needed
+    /// afterward (approximate) or the built state *is* the answer already
+    /// (exact — no estimate step). Either way this is still a summary — it
+    /// pre-aggregates and merges across stages.
+    Summary {
         kind: SummaryKind,
         params: SummaryParams,
     },
@@ -49,22 +51,63 @@ pub enum Realization {
     PassThrough,
 }
 
+/// Does an already-**available** [`Implementation`] — e.g. a sketch
+/// instance a downstream deployment already materialized somewhere, found
+/// via whatever inventory/index that deployment keeps — satisfy a
+/// **required** `Implementation` (what [`implementation_for`]/
+/// [`implementation_for_with`] computed for some [`AggIntent`])?
+///
+/// This is the query-optimization-literature "materialized view matching"
+/// / "answering queries using views" question, narrowed to this crate's
+/// summary vocabulary: not "can I build this from scratch" (that's what
+/// `implementation_for` answers) but "does something that already exists
+/// answer this".
+///
+/// `asap-plan` deliberately ships no implementation of this trait and no
+/// default method body — unlike [`implementation_for`], which decision an
+/// available `Implementation` satisfies a required one is not a fact this
+/// crate can settle on its own. Two real, reasonable answers already
+/// diverge outside this crate:
+///
+/// - A **pure sketch-algebra** answer would say a `Summary{kind: Kll, ..}`
+///   requirement is satisfied by an available `DDSketch` (both quantile
+///   sketches), and that a heap-bearing top-k sketch also answers a bare
+///   frequency point-query (the heap is additional info on the same
+///   underlying matrix) — but not the reverse.
+/// - A **deployment with its own storage-layout rules** may need more:
+///   e.g. whether a multi-population accumulator can serve a
+///   single-population query via re-aggregation is a fact about that
+///   deployment's storage layout, not about `SummaryKind` at all —
+///   `SummaryKind`'s exact accumulators don't encode grouping (grouping
+///   lives on the L4 node's `by` instead), so there is nothing in this
+///   crate's own vocabulary to subsume.
+///
+/// Implementations are expected to consult `required`/`available`'s
+/// `kind` (and whatever grouping/placement context the deployment tracks
+/// alongside `Implementation`, which this trait's signature doesn't carry
+/// because this crate has no inventory concept to carry it in).
+pub trait Matcher {
+    fn is_satisfied_by(&self, required: &Implementation, available: &Implementation) -> bool;
+}
+
 /// Confidence δ assumed when the target carries only an ε
 /// (`AccuracyTarget::Epsilon`): the (ε, δ)-parameterised sketches (CMS) need
 /// one. `ln(1/0.01) → depth 5`, matching the conventional CMS sizing.
 pub const DEFAULT_DELTA: f64 = 0.01;
 
-/// The sketch families that can serve an intent, most-preferred first.
-/// This is the `AggIntent → SummaryKind` map of issue #98; [`realize`] binds
+/// The summary families that can serve an intent, most-preferred first.
+/// This is the `AggIntent → SummaryKind` map of issue #98; [`implementation_for`] binds
 /// the head of the list. The tail entries are the alternatives a future cost
 /// model (#6/#33) may pick instead — listed here so the candidate set has one
 /// home.
-pub fn sketch_candidates(intent: &AggIntent) -> &'static [SummaryKind] {
+pub fn summary_candidates(intent: &AggIntent) -> &'static [SummaryKind] {
     match intent {
         AggIntent::Quantile { .. } => &[SummaryKind::Kll, SummaryKind::DDSketch],
         AggIntent::Cardinality { .. } => &[SummaryKind::Hll, SummaryKind::Theta, SummaryKind::Kmv],
-        AggIntent::TopK { .. } => &[SummaryKind::CmsWithHeap],
-        AggIntent::Count { .. } => &[SummaryKind::Cms],
+        // Count-Sketch-with-heap is CMS-with-heap's balanced/zero-mean-error
+        // alternative for the same heavy-hitter shape.
+        AggIntent::TopK { .. } => &[SummaryKind::CmsWithHeap, SummaryKind::CountSketchWithHeap],
+        AggIntent::Count { .. } => &[SummaryKind::Cms, SummaryKind::CountSketch],
         _ => &[],
     }
 }
@@ -73,8 +116,17 @@ pub fn sketch_candidates(intent: &AggIntent) -> &'static [SummaryKind] {
 ///
 /// Exhaustive over the [`AggIntent`] vocabulary — adding a variant without an
 /// explicit realization is a compile error, and the coverage-matrix test pins
-/// each variant's category.
-pub fn realize(intent: &AggIntent) -> Realization {
+/// each variant's category. Ranks candidate summaries via
+/// [`DefaultCostModel`] (`asap-plan`'s built-in static preference order,
+/// unchanged); use [`implementation_for_with`] to plug in a deployment-specific
+/// [`CostModel`] instead.
+pub fn implementation_for(intent: &AggIntent) -> Implementation {
+    implementation_for_with(intent, &DefaultCostModel)
+}
+
+/// Like [`implementation_for`], but ranks candidate summaries via `cost_model` (see
+/// [`crate::cost_model`]) instead of the built-in static preference order.
+pub fn implementation_for_with(intent: &AggIntent, cost_model: &dyn CostModel) -> Implementation {
     match intent {
         // ── Approximate-capable intents — the AccuracyTarget decides ────────
         AggIntent::Quantile { accuracy, .. }
@@ -82,7 +134,7 @@ pub fn realize(intent: &AggIntent) -> Realization {
         | AggIntent::Count { accuracy }
         | AggIntent::TopK { accuracy, .. } => match accuracy {
             AccuracyTarget::Exact => exact_realization(intent),
-            _ => bind_sketch(intent, accuracy),
+            _ => bind_summary_with(intent, accuracy, cost_model),
         },
 
         // ── Exact mergeable accumulators ─────────────────────────────────────
@@ -96,13 +148,13 @@ pub fn realize(intent: &AggIntent) -> Realization {
         // ── Exact, non-mergeable reducers — richer partial state than a
         //    single value (see `agg_is_mergeable`), so no accumulator form.
         AggIntent::Avg { .. } | AggIntent::StdDev { .. } | AggIntent::Variance { .. } => {
-            Realization::PassThrough
+            Implementation::PassThrough
         }
 
         // ── Classic-bucket histogram_quantile (#79): exact `le`-bucket
         //    interpolation over pre-aggregated counts — NOT re-sketchable.
         //    (The native/raw form lowers to the generic `Quantile` above.)
-        AggIntent::HistogramQuantile { .. } => Realization::PassThrough,
+        AggIntent::HistogramQuantile { .. } => Implementation::PassThrough,
 
         // ── Per-series transforms and reductions with no sketch realization:
         //    counter-derivatives (#44), math (#45), time/calendar (#46),
@@ -132,12 +184,21 @@ pub fn realize(intent: &AggIntent) -> Realization {
         | AggIntent::TsOfMinOverTime
         | AggIntent::TsOfMaxOverTime
         | AggIntent::TsOfFirstOverTime
-        | AggIntent::TsOfLastOverTime => Realization::PassThrough,
+        | AggIntent::TsOfLastOverTime => Implementation::PassThrough,
 
         // ── Group / count_values (#49): exact per `agg_is_exact`, but their
         //    output is structural (constant-1 / a synthesized label column),
         //    not a value a summary accumulator carries.
-        AggIntent::Group | AggIntent::CountValues { .. } => Realization::PassThrough,
+        AggIntent::Group | AggIntent::CountValues { .. } => Implementation::PassThrough,
+
+        // ── Extension (deployment-model-specific, issue #131) — core has no
+        //    realization opinion for a shape it doesn't know, so it defers
+        //    entirely to the `CostModel` (issue #150): `realize_extension`
+        //    defaults to `PassThrough`, preserving today's behavior for
+        //    every deployment that doesn't override it.
+        AggIntent::Extension { ext_kind, payload } => {
+            cost_model.realize_extension(ext_kind, payload)
+        }
     }
 }
 
@@ -145,37 +206,69 @@ pub fn realize(intent: &AggIntent) -> Realization {
 /// `AccuracyTarget::Exact`. `Count` has a mergeable exact accumulator; exact
 /// quantile / top-k / cardinality have no single-value summary form (they
 /// need the full multiset / heap / set) and pass through.
-fn exact_realization(intent: &AggIntent) -> Realization {
+fn exact_realization(intent: &AggIntent) -> Implementation {
     match intent {
         AggIntent::Count { .. } => accumulator(intent, SummaryKind::Count, SummaryParams::Count),
-        _ => Realization::PassThrough,
+        _ => Implementation::PassThrough,
     }
 }
 
-fn accumulator(intent: &AggIntent, kind: SummaryKind, params: SummaryParams) -> Realization {
+fn accumulator(intent: &AggIntent, kind: SummaryKind, params: SummaryParams) -> Implementation {
     // An exact accumulator is only sound when partial states merge
     // (`agg(A ∪ B) = combine(agg(A), agg(B))`).
     debug_assert!(
         agg_is_mergeable(intent),
         "accumulator for non-mergeable {intent:?}"
     );
-    Realization::ExactAccumulator { kind, params }
+    debug_assert!(
+        kind.is_exact(),
+        "accumulator() called with a non-exact kind {kind:?}"
+    );
+    Implementation::Summary { kind, params }
 }
 
-/// Bind the preferred candidate sketch, with parameters sized to the target.
-fn bind_sketch(intent: &AggIntent, accuracy: &AccuracyTarget) -> Realization {
+/// Bind the preferred candidate summary, with parameters sized to the
+/// target, ranking [`summary_candidates`] via `cost_model` (see
+/// [`crate::cost_model`]) instead of taking the static-order head
+/// unconditionally.
+fn bind_summary_with(
+    intent: &AggIntent,
+    accuracy: &AccuracyTarget,
+    cost_model: &dyn CostModel,
+) -> Implementation {
     let (eps, delta) = match accuracy {
-        // Unreachable via `realize` (Exact routes to `exact_realization`);
+        // Unreachable via `implementation_for` (Exact routes to `exact_realization`);
         // degrade to the tightest parameters if called directly.
         AccuracyTarget::Exact => (f64::MIN_POSITIVE, DEFAULT_DELTA),
         AccuracyTarget::Epsilon(e) => (*e, DEFAULT_DELTA),
         AccuracyTarget::EpsilonDelta { epsilon, delta } => (*epsilon, *delta),
     };
-    let kind = sketch_candidates(intent)
-        .first()
-        .expect("approximate intent has at least one candidate sketch")
-        .clone();
-    let params = match kind {
+    let ranked = cost_model.rank_candidates(intent, summary_candidates(intent));
+    let kind = ranked
+        .into_iter()
+        .next()
+        .expect("approximate intent has at least one candidate summary");
+    let params = cost_model.size_params(kind.clone(), intent, eps, delta);
+    Implementation::Summary { kind, params }
+}
+
+/// `asap-plan`'s built-in `SummaryParams` sizing, keyed off the resolved
+/// `(eps, delta)` accuracy budget. [`CostModel::size_params`]'s default
+/// body — factored out to a free function so a deployment's own
+/// `CostModel` impl can still delegate to it for the candidates it
+/// doesn't want to resize itself.
+///
+/// Each formula inverts the sketch family's standard error bound to the
+/// smallest parameter satisfying the target, clamped to the family's sane
+/// range. A non-positive ε saturates to the clamp maximum (tightest
+/// allowed).
+pub fn default_size_params(
+    kind: SummaryKind,
+    intent: &AggIntent,
+    eps: f64,
+    delta: f64,
+) -> SummaryParams {
+    match kind {
         SummaryKind::Kll => SummaryParams::Kll { k: kll_k(eps) },
         SummaryKind::Cms => SummaryParams::Cms {
             width: cms_width(eps),
@@ -195,18 +288,39 @@ fn bind_sketch(intent: &AggIntent, accuracy: &AccuracyTarget) -> Realization {
                 heap_size: k as u32,
             }
         }
-        // Non-preferred candidates (DDSketch / Theta / Kmv) are only reachable
-        // once a cost model picks them; sized here so that wiring is local.
+        // Non-preferred candidates (DDSketch / Theta / Kmv / CountSketch /
+        // CountSketchWithHeap) are only reachable once a cost model picks
+        // them; sized here so that wiring is local.
         SummaryKind::DDSketch => SummaryParams::DDSketch { alpha: eps },
         SummaryKind::Theta => SummaryParams::Theta { k: kmv_k(eps) },
         SummaryKind::Kmv => SummaryParams::Kmv { k: kmv_k(eps) },
+        // Count-Sketch is CMS's balanced/zero-mean-error alternative —
+        // same (width, depth) shape, sized the same way for now (a
+        // Count-Sketch-specific bound uses an L2-norm error guarantee
+        // rather than CMS's L1-norm one; this is a placeholder pending
+        // that refinement, same status as the other non-preferred
+        // candidates above).
+        SummaryKind::CountSketch => SummaryParams::CountSketch {
+            width: cms_width(eps),
+            depth: cms_depth(delta),
+        },
+        SummaryKind::CountSketchWithHeap => {
+            let k = match intent {
+                AggIntent::TopK { k, .. } => *k,
+                _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
+            };
+            SummaryParams::CountSketchWithHeap {
+                width: cms_width(eps),
+                depth: cms_depth(delta),
+                heap_size: k as u32,
+            }
+        }
         SummaryKind::Sum
         | SummaryKind::Count
         | SummaryKind::MinMax
         | SummaryKind::Increase
         | SummaryKind::Rate => unreachable!("exact accumulators are not sketch candidates"),
-    };
-    Realization::Sketch { kind, params }
+    }
 }
 
 // ── Parameter sizing ──────────────────────────────────────────────────────────
@@ -272,16 +386,16 @@ mod tests {
     }
 
     fn cat(intent: &AggIntent) -> Cat {
-        match realize(intent) {
-            Realization::Sketch { kind, .. } => Cat::Sketch(kind),
-            Realization::ExactAccumulator { kind, .. } => Cat::Acc(kind),
-            Realization::PassThrough => Cat::Pass,
+        match implementation_for(intent) {
+            Implementation::Summary { kind, .. } if kind.is_exact() => Cat::Acc(kind),
+            Implementation::Summary { kind, .. } => Cat::Sketch(kind),
+            Implementation::PassThrough => Cat::Pass,
         }
     }
 
     /// The `AggIntent → SummaryKind` coverage matrix (issue #98): every intent
     /// variant maps to a sketch, an exact accumulator, or an explicit
-    /// pass-through. `realize`'s match is exhaustive, so a new variant cannot
+    /// pass-through. `implementation_for`'s match is exhaustive, so a new variant cannot
     /// compile without a decision; this matrix pins what each decision *is*.
     #[test]
     fn agg_intent_to_summary_kind_coverage_matrix() {
@@ -429,12 +543,12 @@ mod tests {
             q: 0.99,
             accuracy: AccuracyTarget::Exact,
         };
-        assert_eq!(realize(&exact), Realization::PassThrough);
+        assert_eq!(implementation_for(&exact), Implementation::PassThrough);
 
         let approx = default_quantile(0.99); // ε = 0.01
         assert_eq!(
-            realize(&approx),
-            Realization::Sketch {
+            implementation_for(&approx),
+            Implementation::Summary {
                 kind: SummaryKind::Kll,
                 params: SummaryParams::Kll { k: 200 }, // design.md worked example
             }
@@ -446,8 +560,8 @@ mod tests {
             accuracy: eps(0.05),
         };
         assert_eq!(
-            realize(&looser),
-            Realization::Sketch {
+            implementation_for(&looser),
+            Implementation::Summary {
                 kind: SummaryKind::Kll,
                 params: SummaryParams::Kll { k: 40 }, // ⌈2/0.05⌉
             }
@@ -459,8 +573,8 @@ mod tests {
         // `default_cardinality` encodes HLL's standard error at p=14; the
         // sizing must invert it back exactly.
         assert_eq!(
-            realize(&default_cardinality()),
-            Realization::Sketch {
+            implementation_for(&default_cardinality()),
+            Implementation::Summary {
                 kind: SummaryKind::Hll,
                 params: SummaryParams::Hll { precision: 14 },
             }
@@ -476,8 +590,8 @@ mod tests {
             },
         };
         assert_eq!(
-            realize(&intent),
-            Realization::Sketch {
+            implementation_for(&intent),
+            Implementation::Summary {
                 kind: SummaryKind::Cms,
                 params: SummaryParams::Cms {
                     width: 2719,
@@ -490,8 +604,8 @@ mod tests {
             accuracy: eps(0.001),
         };
         assert_eq!(
-            realize(&intent),
-            Realization::Sketch {
+            implementation_for(&intent),
+            Implementation::Summary {
                 kind: SummaryKind::Cms,
                 params: SummaryParams::Cms {
                     width: 2719,
@@ -507,8 +621,8 @@ mod tests {
             k: 25,
             accuracy: eps(0.01),
         };
-        match realize(&intent) {
-            Realization::Sketch {
+        match implementation_for(&intent) {
+            Implementation::Summary {
                 kind: SummaryKind::CmsWithHeap,
                 params:
                     SummaryParams::CmsWithHeap {
@@ -528,27 +642,27 @@ mod tests {
     #[test]
     fn candidate_lists_match_the_issue_map() {
         assert_eq!(
-            sketch_candidates(&default_quantile(0.5)),
+            summary_candidates(&default_quantile(0.5)),
             &[SummaryKind::Kll, SummaryKind::DDSketch]
         );
         assert_eq!(
-            sketch_candidates(&default_cardinality()),
+            summary_candidates(&default_cardinality()),
             &[SummaryKind::Hll, SummaryKind::Theta, SummaryKind::Kmv]
         );
         assert_eq!(
-            sketch_candidates(&AggIntent::TopK {
+            summary_candidates(&AggIntent::TopK {
                 k: 5,
                 accuracy: eps(0.01)
             }),
-            &[SummaryKind::CmsWithHeap]
+            &[SummaryKind::CmsWithHeap, SummaryKind::CountSketchWithHeap]
         );
         assert_eq!(
-            sketch_candidates(&AggIntent::Count {
+            summary_candidates(&AggIntent::Count {
                 accuracy: eps(0.01)
             }),
-            &[SummaryKind::Cms]
+            &[SummaryKind::Cms, SummaryKind::CountSketch]
         );
-        assert!(sketch_candidates(&AggIntent::Rate).is_empty());
+        assert!(summary_candidates(&AggIntent::Rate).is_empty());
     }
 
     #[test]
@@ -559,8 +673,8 @@ mod tests {
             accuracy: eps(0.0),
         };
         assert_eq!(
-            realize(&intent),
-            Realization::Sketch {
+            implementation_for(&intent),
+            Implementation::Summary {
                 kind: SummaryKind::Kll,
                 params: SummaryParams::Kll { k: 65_535 },
             }

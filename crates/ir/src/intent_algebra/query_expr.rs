@@ -2,8 +2,9 @@
 //!
 //! Language- and deployment-independent. Box-owned tree (DAG fan-in is
 //! expressed via `LetBinding` / `Ref`); column identity is **positional**
-//! (`Aggregate.by: GroupKeys`), resolved by the [`Binder`](super::binder)
-//! against the self-contained [`Schema`] carried on each `Scan`.
+//! (`Aggregate.reduction: Reduction`, wrapping `GroupKeys` for the
+//! grouped case), resolved by the [`Binder`](super::binder) against the
+//! self-contained [`Schema`] carried on each `Scan`.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -156,11 +157,44 @@ impl<'de> Deserialize<'de> for GroupKeys {
 }
 
 /// Lifecycle / flush semantics of a streaming time window.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Copy`/`Default`/`Hash`/`Display`/`FromStr` and `#[serde(rename_all =
+/// "snake_case")]` (matching this file's `WindowFuncKind` neighbor) were
+/// added so a downstream backend's own `WindowType`-shaped serving-time
+/// enum (data-plane accumulator config: `Tumbling` default,
+/// `"window_type": "tumbling"` wire format, string round-trip via
+/// `Display`/`FromStr`) could be retired in favor of this type directly,
+/// rather than keeping two independently-maintained enums in sync by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum WindowKind {
+    #[default]
     Tumbling,
     Sliding,
     Session,
+}
+
+impl std::fmt::Display for WindowKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WindowKind::Tumbling => write!(f, "tumbling"),
+            WindowKind::Sliding => write!(f, "sliding"),
+            WindowKind::Session => write!(f, "session"),
+        }
+    }
+}
+
+impl std::str::FromStr for WindowKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "tumbling" => Ok(WindowKind::Tumbling),
+            "sliding" => Ok(WindowKind::Sliding),
+            "session" => Ok(WindowKind::Session),
+            _ => Err(format!("Unknown window kind: '{s}'")),
+        }
+    }
 }
 
 /// Which data model a `Source` / `AggIntent` operates over.
@@ -390,6 +424,57 @@ pub struct ProjectItem {
 
 // ── L3 intent algebra IR ──────────────────────────────────────────────────────
 
+/// What kind of computation an `Aggregate` node performs — orthogonal to
+/// *which* columns it groups by (that's still [`GroupKeys`], inside
+/// `Reduce`). Explicit, decided once by whichever pass constructs the node
+/// (structural, at L2→L3 lowering), rather than inferred downstream from
+/// whether a grouping-key list happens to be empty or from a neighboring
+/// node's shape. See design proposal #165.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Reduction {
+    /// Collapses input rows via `by` — `by`/`without` semantics are exactly
+    /// [`GroupKeys`]'s. May still collapse every row into one (an empty,
+    /// non-`without` `by`) — that's a genuine reduction with zero grouping
+    /// columns, not "no grouping concept."
+    Reduce(GroupKeys),
+    /// No grouping concept at all: preserves one output row per input
+    /// entity (e.g. a per-series windowed computation with no `by(...)`
+    /// clause to begin with, because there's no aggregation operator here
+    /// for such a clause to attach to). Never merges across entities, and
+    /// never collapses an entity's own row structure (e.g. a time axis) —
+    /// unlike `Reduce(GroupKeys::without(vec![]))` ("group by every
+    /// label"), which is still a genuine reduction and does collapse it.
+    PerEntity,
+}
+
+impl Reduction {
+    /// Shorthand for the common case — group by these (possibly empty)
+    /// keys, kept rather than excluded.
+    pub fn by(keys: Vec<ColumnId>) -> Self {
+        Self::Reduce(GroupKeys::by(keys))
+    }
+
+    /// The grouping keys, if this is a genuine reduction — `None` for
+    /// `PerEntity`, which has no grouping-keys concept to report.
+    pub fn group_keys(&self) -> Option<&GroupKeys> {
+        match self {
+            Self::Reduce(by) => Some(by),
+            Self::PerEntity => None,
+        }
+    }
+
+    /// The grouping keys, panicking if this is `PerEntity` — for call sites
+    /// (tests, mostly) that already know, from the shape they built or are
+    /// asserting on, that this must be a genuine reduction. Prefer
+    /// [`group_keys`](Self::group_keys) wherever the caller can't assume that.
+    pub fn expect_reduce(&self) -> &GroupKeys {
+        match self {
+            Self::Reduce(by) => by,
+            Self::PerEntity => panic!("expected Reduction::Reduce, got PerEntity"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum QueryExpr {
     /// Outermost leaf. `schema` is the **binding schema** — the resolved column
@@ -490,7 +575,7 @@ pub enum QueryExpr {
 
     /// γ + α — GROUP BY (positional) + aggregate intents.
     Aggregate {
-        by: GroupKeys,
+        reduction: Reduction,
         aggs: Vec<AggIntent>,
         /// Output column names parallel to `aggs`. A non-empty entry overrides
         /// the synthetic intent-keyed name — SQL threads DataFusion's generated
@@ -663,36 +748,14 @@ impl QueryExpr {
             QueryExpr::Window { child, .. } => child.output_schema_in(scope),
 
             QueryExpr::Aggregate {
-                by,
+                reduction,
                 aggs,
                 output_names,
                 child,
                 ..
             } => {
                 let in_schema = child.output_schema_in(scope)?;
-
-                // Per-series range reduction: `rate`/`increase` (is_per_series)
-                // OR any single aggregate whose direct child is a `TimeRange`
-                // (`*_over_time` functions) or a `Subquery` (`*_over_time` over a
-                // sub-query, e.g. `max_over_time(rate(m[5m])[1h:])`). All produce
-                // one value per series and are label-preserving — the range child
-                // is the structural marker that confers per-series semantics on
-                // otherwise cross-series intents like `Avg`/`Sum`/`Count`. A
-                // cross-series aggregation operator over a range vector is a
-                // PromQL type error the parser rejects, so an `Aggregate` over a
-                // `Subquery` is only ever this per-series `*_over_time` shape.
-                let is_range_child = matches!(
-                    child.as_ref(),
-                    QueryExpr::TimeRange { .. } | QueryExpr::Subquery { .. }
-                );
-                // A `without(...)` grouping is cross-series even when its
-                // exclusion list is empty (`without ()` = group by all labels),
-                // so it never takes the per-series-global path.
-                let per_series = by.is_empty()
-                    && !by.is_without()
-                    && aggs.len() == 1
-                    && (aggs[0].is_per_series() || is_range_child);
-                aggregate_output_schema(&in_schema, by, aggs, output_names, per_series)
+                aggregate_output_schema(&in_schema, reduction, aggs, output_names)
             }
 
             QueryExpr::LetBinding { name, expr, child } => {
@@ -962,29 +1025,30 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
     }
 }
 
-/// The output schema of an `Aggregate { by, aggs }` over `in_schema` — the
-/// **single** canonical derivation shared by [`QueryExpr::output_schema_in`]'s
-/// `Aggregate` arm and the converter's HAVING-resolution path
-/// (`column_resolution::output_schema_for_aggregate`), so the two can never
-/// drift (issue #41).
+/// The output schema of an `Aggregate { reduction, aggs }` over `in_schema` —
+/// the **single** canonical derivation shared by
+/// [`QueryExpr::output_schema_in`]'s `Aggregate` arm and the converter's
+/// HAVING-resolution path (`column_resolution::output_schema_for_aggregate`),
+/// so the two can never drift (issue #41).
 ///
-/// `per_series` selects the label-preserving [`per_series_reduction_schema`]
-/// (`rate`/`increase`/`*_over_time`) instead of the cross-series `by ++ aggs`
-/// shape. The caller supplies it because the decision depends on the *child
-/// node* (a `TimeRange`/`Subquery` marker), which this function does not see;
-/// the child-independent part is `by.is_empty() && aggs.len() == 1 &&
-/// aggs[0].is_per_series()`.
+/// `Reduction::PerEntity` selects the label-preserving
+/// [`per_series_reduction_schema`] (`rate`/`increase`/`*_over_time`) instead
+/// of the cross-series `by ++ aggs` shape. Which one applies is read directly
+/// off `reduction` — decided once, at construction, by whoever built the
+/// `Aggregate` node (issue #165) — not re-derived here from `by`/child shape.
 pub fn aggregate_output_schema(
     in_schema: &Schema,
-    by: &GroupKeys,
+    reduction: &Reduction,
     aggs: &[AggIntent],
     output_names: &[String],
-    per_series: bool,
 ) -> Result<Schema, QueryExprError> {
-    if per_series {
-        debug_assert_eq!(aggs.len(), 1, "a per-series reduction is single-aggregate");
-        return Ok(per_series_reduction_schema(in_schema, &aggs[0]));
-    }
+    let by = match reduction {
+        Reduction::PerEntity => {
+            debug_assert_eq!(aggs.len(), 1, "a per-entity reduction is single-aggregate");
+            return Ok(per_series_reduction_schema(in_schema, &aggs[0]));
+        }
+        Reduction::Reduce(by) => by,
+    };
 
     // `without(excluded)` groups by every label *except* those listed: the kept
     // labels are the input's label columns minus the excluded positions (and the
@@ -1400,7 +1464,7 @@ mod tests {
             ),
         };
         let agg = QueryExpr::Aggregate {
-            by: GroupKeys::without(vec![2]), // exclude `instance`
+            reduction: Reduction::Reduce(GroupKeys::without(vec![2])), // exclude `instance`
             aggs: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
@@ -1478,7 +1542,7 @@ mod tests {
             vec![],
         );
         let rate = QueryExpr::Aggregate {
-            by: vec![].into(),
+            reduction: Reduction::PerEntity,
             aggs: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
@@ -1516,7 +1580,7 @@ mod tests {
             vec![],
         );
         let avg_over_time = QueryExpr::Aggregate {
-            by: vec![].into(),
+            reduction: Reduction::PerEntity,
             aggs: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
@@ -1565,7 +1629,7 @@ mod tests {
         );
 
         let rate = QueryExpr::Aggregate {
-            by: vec![].into(),
+            reduction: Reduction::PerEntity,
             aggs: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
@@ -1577,7 +1641,7 @@ mod tests {
         );
 
         let sum_by_job = QueryExpr::Aggregate {
-            by: vec![2].into(), // `job`
+            reduction: Reduction::by(vec![2]), // `job`
             aggs: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,

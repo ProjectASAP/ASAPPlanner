@@ -224,6 +224,37 @@ pub enum AggIntent {
     TsOfFirstOverTime,
     /// PromQL `ts_of_last_over_time(v[w])` — timestamp of the last sample.
     TsOfLastOverTime,
+
+    /// A deployment-model-specific intent this core vocabulary doesn't
+    /// (and shouldn't) know the shape of. First step toward issue #131
+    /// ("add an explicit registration API for extending query / sketch /
+    /// primitive / data types") applied to L3: rather than growing
+    /// `AggIntent` for every capability a single deployment model needs
+    /// (which would turn this shared vocabulary into a dumping ground —
+    /// core only grows for intents ≥2 deployment models actually use),
+    /// a deployment model that needs something core doesn't have carries
+    /// it here, tagged by its own `kind` string, and owns all
+    /// interpretation of `payload` itself.
+    ///
+    /// Core treats this opaquely: [`AggIntent::requires`] returns
+    /// [`DataModel::Any`], [`AggIntent::is_per_series`] returns `false`,
+    /// [`AggIntent::input_col`] returns `None`, and
+    /// [`AggIntent::output_column`] names the output column after `kind`
+    /// with an unconstrained `Utf8` type — a deployment model that binds
+    /// `Extension` intents is expected to override/re-derive the schema
+    /// itself rather than rely on core's generic guess.
+    Extension {
+        /// Deployment-model-chosen tag, e.g. `"frequency"`. No registry —
+        /// collisions across deployment models are the deployment models'
+        /// problem to avoid (namespace by deployment model name if needed).
+        /// Named `ext_kind`, not `kind` — `kind` is already the enum's own
+        /// internal serde tag field name and would collide.
+        ext_kind: String,
+        /// Opaque to core; the owning deployment model defines and
+        /// (de)serializes its own shape here.
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
 }
 
 /// Time / calendar accessor functions (issue #46), evaluated over a timestamp.
@@ -451,6 +482,11 @@ impl AggIntent {
             AggIntent::TsOfMaxOverTime => col("ts_of_max_over_time", DataType::Float64, false),
             AggIntent::TsOfFirstOverTime => col("ts_of_first_over_time", DataType::Float64, false),
             AggIntent::TsOfLastOverTime => col("ts_of_last_over_time", DataType::Float64, false),
+            // Core doesn't know this intent's real output shape — name
+            // the column after `kind` and leave the type unconstrained.
+            // The owning deployment model is expected to re-derive the
+            // real schema itself rather than rely on this generic guess.
+            AggIntent::Extension { ext_kind, .. } => col(ext_kind, DataType::Utf8, true),
         }
     }
 }

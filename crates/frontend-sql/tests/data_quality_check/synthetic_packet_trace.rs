@@ -122,10 +122,14 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
     out
 }
 
-/// The first `Aggregate`'s `(by, aggs)` along the single-child spine.
+/// The first `Aggregate`'s `(by, aggs)` along the single-child spine. SQL
+/// never lowers to `Reduction::PerEntity` (it has no per-series concept), so
+/// `expect_reduce()` here is a safe, load-bearing assumption for these tests.
 fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
-        QueryExpr::Aggregate { by, aggs, .. } => Some((by, aggs)),
+        QueryExpr::Aggregate {
+            reduction, aggs, ..
+        } => Some((reduction.expect_reduce(), aggs)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Distinct { child, .. }

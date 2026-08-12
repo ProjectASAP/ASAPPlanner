@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use super::schema::L4Schema;
 use super::sketch::{SketchQuery, SummaryKind, SummaryParams};
-use asap_ir::intent_algebra::{ColumnId, ColumnRef, QueryExpr};
+use asap_ir::intent_algebra::{ColumnRef, QueryExpr, Reduction};
 
 // ── L4 DAG node ───────────────────────────────────────────────────────────────
 
@@ -34,18 +34,25 @@ pub enum SummaryExpr {
     /// with all fields as `L4DataType::Primitive`.
     Logical(Box<QueryExpr>),
 
-    /// Sketch aggregation. L4 chose `sketch` + `params` from the catalog
+    /// Summary aggregation. L4 chose `summary` + `params` from the catalog
     /// for `AggIntent` under `DeploymentConstraints`.
-    /// Output schema: `by` columns (verbatim) + one `Sketch(sketch, params)`
-    /// field carrying partial sketch state per group.
+    /// Output schema: grouping columns (verbatim) + one `Sketch(summary,
+    /// params)` field carrying partial summary state per group.
     SummaryAgg {
         child: Rc<L4Node>,
-        sketch: SummaryKind,
+        summary: SummaryKind,
         params: SummaryParams,
         /// The column being summarised (fed into the sketch).
         col: ColumnRef,
-        /// GROUP BY keys (positional) carried through to the output schema.
-        by: Vec<ColumnId>,
+        /// How this aggregation's output rows relate to `child`'s — the
+        /// same [`Reduction`] the L3 `Aggregate` node it was bound from
+        /// carried (issue #165), reused verbatim rather than flattened to
+        /// a bare `Vec<ColumnId>`. `Reduction::Reduce(by)` with an empty
+        /// `by` is a genuine full reduction (merge every candidate into
+        /// one group); `Reduction::PerEntity` has no grouping concept at
+        /// all (never merge across entities) — the two collapsed to the
+        /// same ambiguous `by: []` before this field existed (issue #163).
+        reduction: Reduction,
     },
 
     /// Sketch-aware join (KMV / theta for join-cardinality; join-sample for
@@ -56,7 +63,7 @@ pub enum SummaryExpr {
         outer: Rc<L4Node>,
         inner: Rc<L4Node>,
         key: ColumnRef,
-        sketch: SummaryKind,
+        summary: SummaryKind,
         params: SummaryParams,
     },
 
@@ -70,16 +77,16 @@ pub enum SummaryExpr {
     /// filter). Catalog flag `deletable` must be true. Output schema =
     /// input schema unchanged in type (same `Sketch(s, p)` field).
     SummaryDelete {
-        sketch_input: Rc<L4Node>,
+        summary_input: Rc<L4Node>,
         key: ColumnRef,
     },
 
-    /// Read out a query result from a built sketch. The `Sketch(…)` field
+    /// Read out a query result from a built summary. The `Sketch(…)` field
     /// type does *not* propagate downstream of an estimate — the output
     /// schema is a regular row-shaped schema (Float64 for quantile, Int64
     /// for count/cardinality, `[(key, count)]` for top-k).
     SummaryEstimate {
-        sketch_input: Rc<L4Node>,
+        summary_input: Rc<L4Node>,
         query: SketchQuery,
     },
 

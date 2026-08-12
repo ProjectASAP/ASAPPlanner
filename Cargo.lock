@@ -365,6 +365,7 @@ version = "0.1.0"
 dependencies = [
  "asap-ir",
  "asap-sketch",
+ "serde_json",
  "thiserror",
 ]
 

@@ -37,7 +37,7 @@ use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
 use asap_ir::intent_algebra::schema::DataType;
 use asap_ir::intent_algebra::{
     AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, L3Expr, MathFunc, QueryExpr,
-    SampleKind, Source, TimeFunc,
+    Reduction, SampleKind, Source, TimeFunc,
 };
 use asap_ir::types::AccuracyTarget;
 
@@ -290,14 +290,17 @@ fn sum_by_groups_via_positional_aggregate() {
     // keys appended sorted), so the keys resolve to columns [2, 3].
     let qe = ok("sum by(job, instance) (node_filesystem_size_bytes)");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected positional Aggregate for `by(...)`, got {qe:?}");
     };
     assert_eq!(
-        by,
-        &vec![2, 3],
+        reduction,
+        &Reduction::by(vec![2, 3]),
         "group keys resolve to positional ColumnIds"
     );
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
@@ -339,9 +342,13 @@ fn sum_without_groups_by_the_complement() {
     // the runtime: the grouping is the exclusion form and the output schema
     // stays OPEN (unlike `by`, which freezes to closed).
     let qe = ok("sum without(instance) (node_filesystem_size_bytes)");
-    let QueryExpr::Aggregate { by, aggs, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        reduction, aggs, ..
+    } = &qe
+    else {
         panic!("expected an Aggregate, got {qe:?}");
     };
+    let by = reduction.expect_reduce();
     assert!(
         by.is_without(),
         "the grouping is the `without` exclusion form"
@@ -398,12 +405,15 @@ fn sum_by_of_rate_groups_outer_level() {
     // label-preserving inner Rate. Leaf = [ts, value, instance] → by = [2].
     let qe = ok("sum by(instance) (rate(node_network_receive_bytes_total[5m]))");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected outer Aggregate grouped by instance, got {qe:?}");
     };
-    assert_eq!(by, &vec![2]);
+    assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     // child is the inner per-series Rate aggregate.
     assert!(matches!(
@@ -420,12 +430,15 @@ fn sum_by_of_over_time_groups_outer_level() {
     // name-based Partition). Leaf = [ts, value, instance] → by = [2].
     let qe = ok("sum by(instance) (avg_over_time(node_cpu_seconds_total[5m]))");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected outer Aggregate grouped by instance, got {qe:?}");
     };
-    assert_eq!(by, &vec![2]);
+    assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     // child is the inner per-series reduction: Aggregate{Avg} over TimeRange.
     let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
@@ -514,10 +527,13 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
     ));
     // `sum by(le)` now survives as a positional Aggregate (by = [2], `le`), over
     // the inner Rate — no name-based Partition.
-    let QueryExpr::Aggregate { by, aggs, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        reduction, aggs, ..
+    } = child.as_ref()
+    else {
         panic!("expected `sum by(le)` as a positional Aggregate, got {child:?}");
     };
-    assert_eq!(by, &vec![2]);
+    assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
 }
 
@@ -805,10 +821,17 @@ fn outer_aggregate_over_nested_aggregate_nests() {
         panic!("expected outer Aggregate, got {qe:?}");
     };
     assert!(matches!(aggs.as_slice(), [AggIntent::Max { .. }]));
-    let QueryExpr::Aggregate { by, aggs, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        reduction, aggs, ..
+    } = child.as_ref()
+    else {
         panic!("expected inner `sum by (job)` Aggregate, got {child:?}");
     };
-    assert_eq!(by, &vec![2], "job grouping survives on the inner aggregate");
+    assert_eq!(
+        reduction,
+        &Reduction::by(vec![2]),
+        "job grouping survives on the inner aggregate"
+    );
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)), "rate preserved");
 }
@@ -824,17 +847,28 @@ fn outer_group_key_absent_from_nested_aggregate_is_dropped() {
     // `sum(sum by (group)(…))`.
     let qe = ok(r#"sum(sum by (group)(http_requests{job="api-server"})) by (job)"#);
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
-    assert!(by.is_empty(), "absent `job` key dropped → global aggregate");
+    assert_eq!(
+        reduction,
+        &Reduction::by(vec![]),
+        "absent `job` key dropped → global aggregate"
+    );
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
-    let QueryExpr::Aggregate { by, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate { reduction, .. } = child.as_ref() else {
         panic!("expected inner `sum by (group)` Aggregate, got {child:?}");
     };
-    assert_eq!(by, &vec![2], "inner grouping on `group` survives");
+    assert_eq!(
+        reduction,
+        &Reduction::by(vec![2]),
+        "inner grouping on `group` survives"
+    );
 }
 
 #[test]
@@ -844,20 +878,27 @@ fn outer_group_key_present_after_inner_aggregate_still_resolves() {
     // resolving positionally — the absent-key drop only fires on provable
     // absence, never on a resolvable key.
     let qe = ok("sum(sum by (job, group)(http_requests)) by (job)");
-    let QueryExpr::Aggregate { by, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        reduction, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
-    let QueryExpr::Aggregate { by: inner_by, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        reduction: inner_reduction,
+        ..
+    } = child.as_ref()
+    else {
         panic!("expected inner Aggregate, got {child:?}");
     };
     // Inner output schema is [group, job, sum] (keys in label-column order,
     // labels alphabetical on the scan) → job = col 1.
     assert_eq!(
-        by,
-        &vec![1],
+        reduction,
+        &Reduction::by(vec![1]),
         "outer `job` resolves against the inner output"
     );
-    assert_eq!(inner_by.len(), 2);
+    assert_eq!(inner_reduction.expect_reduce().len(), 2);
 }
 
 #[test]
@@ -867,11 +908,18 @@ fn outer_group_key_over_binary_op_resolves_on_both_sides() {
     // still resolve. Each `or` side is bound independently against its own
     // sub-tree, so the key is seeded as an inherited column on both sides.
     let qe = ok(r#"sum by (__name__)(metric_a{env="1"} or metric_b{env="2"})"#);
-    let QueryExpr::Aggregate { by, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        reduction, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
     // `__name__` resolves to a single positional id against the binary op output.
-    assert_eq!(by.len(), 1, "grouped by the one `__name__` key");
+    assert_eq!(
+        reduction.expect_reduce().len(),
+        1,
+        "grouped by the one `__name__` key"
+    );
     let QueryExpr::BinaryOp { lhs, rhs, .. } = child.as_ref() else {
         panic!("expected a BinaryOp child, got {child:?}");
     };
@@ -879,7 +927,10 @@ fn outer_group_key_over_binary_op_resolves_on_both_sides() {
     // the outer group key is consistent across the union.
     let (ls, rs) = (lhs.output_schema().unwrap(), rhs.output_schema().unwrap());
     assert_eq!(ls.column_id("__name__"), rs.column_id("__name__"));
-    assert_eq!(ls.column_id("__name__"), Some(by[0]));
+    assert_eq!(
+        ls.column_id("__name__"),
+        Some(reduction.expect_reduce().keys()[0])
+    );
 
     // The general case (a plain label, not just `__name__`) also lowers.
     assert!(matches!(
@@ -924,13 +975,17 @@ fn over_time_of_subquery_reduces_per_series() {
     // to a per-series `Max` reduction over a `Subquery` (issue #27).
     let qe = ok("max_over_time(rate(demo_api_request_duration_seconds_count[5m])[1h:])");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected an Aggregate at the root, got {qe:?}");
     };
-    assert!(
-        by.is_empty(),
+    assert_eq!(
+        reduction,
+        &Reduction::PerEntity,
         "`*_over_time` has no grouping — reduces per series"
     );
     assert!(matches!(aggs.as_slice(), [AggIntent::Max { .. }]));
@@ -963,16 +1018,22 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     // inner `Max` collapsed labels, `job` would not resolve here.
     let qe = ok("sum by (job) (max_over_time(rate(demo{job=\"api\"}[5m])[1h:]))");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
-    assert!(!by.is_empty(), "outer `sum by (job)` groups on a label");
+    assert!(
+        matches!(reduction, Reduction::Reduce(by) if !by.is_empty()),
+        "outer `sum by (job)` groups on a label"
+    );
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     // Inner node is the per-series `max_over_time` reduction over the subquery.
     let QueryExpr::Aggregate {
-        by: inner_by,
+        reduction: inner_reduction,
         aggs: inner_aggs,
         child: inner_child,
         ..
@@ -980,7 +1041,7 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     else {
         panic!("expected inner Aggregate, got {child:?}");
     };
-    assert!(inner_by.is_empty());
+    assert_eq!(inner_reduction, &Reduction::PerEntity);
     assert!(matches!(inner_aggs.as_slice(), [AggIntent::Max { .. }]));
     assert!(matches!(inner_child.as_ref(), QueryExpr::Subquery { .. }));
 }
@@ -1004,12 +1065,15 @@ fn nested_subquery_from_prometheus_docs() {
     let qe = ok("max_over_time(deriv(rate(distance_covered_total[5s])[30s:5s])[10m:])");
 
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected `max_over_time` Aggregate at the root, got {qe:?}");
     };
-    assert!(by.is_empty());
+    assert_eq!(reduction, &Reduction::PerEntity);
     assert!(matches!(aggs.as_slice(), [AggIntent::Max { .. }]));
 
     let QueryExpr::Subquery {
@@ -1024,12 +1088,15 @@ fn nested_subquery_from_prometheus_docs() {
     assert_eq!(*resolution, None, "`[10m:]` keeps the default resolution");
 
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = child.as_ref()
     else {
         panic!("expected the `deriv` Aggregate, got {child:?}");
     };
-    assert!(by.is_empty());
+    assert_eq!(reduction, &Reduction::PerEntity);
     assert!(matches!(aggs.as_slice(), [AggIntent::Deriv]));
 
     let QueryExpr::Subquery {
@@ -1188,12 +1255,19 @@ fn counter_derivative_functions_lower_to_distinct_intents() {
     ] {
         let qe = ok(q);
         let QueryExpr::Aggregate {
-            by, aggs, child, ..
+            reduction,
+            aggs,
+            child,
+            ..
         } = &qe
         else {
             panic!("expected an Aggregate for {q:?}, got {qe:?}");
         };
-        assert!(by.is_empty(), "{q}: per-series, no grouping");
+        assert_eq!(
+            reduction,
+            &Reduction::PerEntity,
+            "{q}: per-series, no grouping"
+        );
         assert_eq!(
             aggs.as_slice(),
             std::slice::from_ref(&want),
@@ -1243,12 +1317,18 @@ fn aggregation_over_counter_derivative_keeps_labels() {
     // `sum by (job)` can group on a label the inner `changes` preserved.
     let qe = ok(r#"sum by (job) (changes(m{job="api"}[15m]))"#);
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
-    assert!(!by.is_empty(), "outer sum groups on job");
+    assert!(
+        matches!(reduction, Reduction::Reduce(by) if !by.is_empty()),
+        "outer sum groups on job"
+    );
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Changes)));
     let _ = child;
@@ -1263,22 +1343,32 @@ fn outer_stat_over_counter_derivative_nests_two_levels() {
     // inner reduction preserved, threading any scalar param (predict horizon).
     let qe = ok("avg by (dc) (predict_linear(m[3h], 3600))");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
-    assert!(!by.is_empty(), "outer `avg by (dc)` groups on a label");
+    assert!(
+        matches!(reduction, Reduction::Reduce(by) if !by.is_empty()),
+        "outer `avg by (dc)` groups on a label"
+    );
     assert!(matches!(aggs.as_slice(), [AggIntent::Avg { .. }]));
     let QueryExpr::Aggregate {
-        by: inner_by,
+        reduction: inner_reduction,
         aggs: inner_aggs,
         ..
     } = child.as_ref()
     else {
         panic!("expected inner per-series Aggregate, got {child:?}");
     };
-    assert!(inner_by.is_empty(), "inner derivative stays per-series");
+    assert_eq!(
+        inner_reduction,
+        &Reduction::PerEntity,
+        "inner derivative stays per-series"
+    );
     assert_eq!(
         inner_aggs.as_slice(),
         std::slice::from_ref(&AggIntent::PredictLinear { seconds: 3600.0 })
@@ -1352,12 +1442,19 @@ fn range_functions_over_a_subquery_reduce_per_series() {
     ] {
         let qe = ok(q);
         let QueryExpr::Aggregate {
-            by, aggs, child, ..
+            reduction,
+            aggs,
+            child,
+            ..
         } = &qe
         else {
             panic!("{q}: expected an Aggregate, got {qe:?}");
         };
-        assert!(by.is_empty(), "{q}: per-series, no grouping");
+        assert_eq!(
+            reduction,
+            &Reduction::PerEntity,
+            "{q}: per-series, no grouping"
+        );
         assert_eq!(
             aggs.as_slice(),
             std::slice::from_ref(&want),
@@ -1446,10 +1543,17 @@ fn histogram_accessors_lower_to_per_series_intents() {
         ("histogram_stdvar(v)", AggIntent::HistogramStdVar),
     ] {
         let qe = ok(q);
-        let QueryExpr::Aggregate { by, aggs, .. } = &qe else {
+        let QueryExpr::Aggregate {
+            reduction, aggs, ..
+        } = &qe
+        else {
             panic!("{q}: expected an Aggregate, got {qe:?}");
         };
-        assert!(by.is_empty(), "{q}: per-series, no grouping");
+        assert_eq!(
+            reduction,
+            &Reduction::PerEntity,
+            "{q}: per-series, no grouping"
+        );
         assert_eq!(
             aggs.as_slice(),
             std::slice::from_ref(&want),
@@ -1491,10 +1595,17 @@ fn math_functions_lower_to_per_series_math_intents() {
         ("rad(v)", MathFunc::Rad),
     ] {
         let qe = ok(q);
-        let QueryExpr::Aggregate { by, aggs, .. } = &qe else {
+        let QueryExpr::Aggregate {
+            reduction, aggs, ..
+        } = &qe
+        else {
             panic!("{q}: expected an Aggregate, got {qe:?}");
         };
-        assert!(by.is_empty(), "{q}: per-series, no grouping");
+        assert_eq!(
+            reduction,
+            &Reduction::PerEntity,
+            "{q}: per-series, no grouping"
+        );
         assert!(
             matches!(aggs.as_slice(), [AggIntent::Math(m)] if *m == want),
             "{q}: wrong intent, got {aggs:?}"

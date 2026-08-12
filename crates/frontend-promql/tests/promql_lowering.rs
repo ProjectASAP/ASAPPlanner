@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use asap_ir::intent_algebra::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, QueryExpr, Source,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, QueryExpr, Reduction, Source,
 };
 use asap_ir::types::AccuracyTarget;
 use asap_ir::workload::{BatchEntry, Query, QueryLanguage, QueryRequirements, QueryWorkload};
@@ -59,12 +59,15 @@ fn regex_matcher_lowers_to_regex_compareop() {
 fn quantile_over_time_is_time_range_aggregate() {
     let qe = lower(r#"quantile_over_time(0.99, http_request_duration{env="prod"}[5m])"#);
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected Aggregate, got {qe:?}");
     };
-    assert!(by.is_empty());
+    assert_eq!(reduction, &Reduction::PerEntity);
     assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.99).abs() < 1e-9));
     let QueryExpr::TimeRange { range, child } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
@@ -83,12 +86,15 @@ fn outer_sum_by_over_quantile_over_time_groups_positionally() {
     // names appended sorted) → host = col 2.
     let qe = lower(r#"sum by (host) (quantile_over_time(0.99, latency{service="web"}[5m]))"#);
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected outer Aggregate grouped by host, got {qe:?}");
     };
-    assert_eq!(by, &vec![2]);
+    assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     // Inner: Aggregate{Quantile} over TimeRange (per-series over_time reduction).
     let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
@@ -184,10 +190,13 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     );
     // `sum by (le)` survives as a positional Aggregate (by = [2], `le`) over the
     // inner Rate — no name-based Partition.
-    let QueryExpr::Aggregate { by, aggs, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        reduction, aggs, ..
+    } = child.as_ref()
+    else {
         panic!("expected `sum by (le)` as a positional Aggregate, got {child:?}");
     };
-    assert_eq!(by, &vec![2]);
+    assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
 }
 
@@ -244,12 +253,15 @@ fn sum_by_over_rate_groups_the_outer_sum() {
     // label-preserving inner Rate. Leaf = [ts, value, job] → by = [2].
     let qe = lower("sum by (job) (rate(http_requests_total[5m]))");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected outer Aggregate grouped by job, got {qe:?}");
     };
-    assert_eq!(by, &vec![2]);
+    assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),
@@ -290,12 +302,15 @@ fn outer_count_is_cardinality() {
     // on a positional `Aggregate.by`. Leaf = [ts, value, symbol] → symbol = col 2.
     let qe = lower("count by (symbol) (count_over_time(financial_last_trade_price[5m]))");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected outer Aggregate grouped by symbol, got {qe:?}");
     };
-    assert_eq!(by, &vec![2]);
+    assert_eq!(reduction, &Reduction::by(vec![2]));
     assert!(matches!(aggs.as_slice(), [AggIntent::Cardinality { .. }]));
     // Inner: Aggregate{Count} over TimeRange (per-series count_over_time).
     let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
@@ -312,13 +327,16 @@ fn topk_over_count_is_heavy_hitter_topk() {
     let qe = lower(r#"topk by (service) (10, count_over_time(requests{env="prod"}[1m]))"#);
     // Heavy-hitter: Aggregate{TopK} with grouping resolved to positional ids.
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected Aggregate with TopK, got {qe:?}");
     };
     // `service` is the only group key → resolved to a positional ColumnId.
-    assert_eq!(by.len(), 1);
+    assert_eq!(reduction.expect_reduce().len(), 1);
     assert!(matches!(aggs.as_slice(), [AggIntent::TopK { k: 10, .. }]));
     // The count_over_time under the TopK is a TimeRange-backed aggregate.
     let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
@@ -357,8 +375,8 @@ fn topk_over_avg_is_generic_sort_limit() {
     // Underneath: the label-preserving windowed avg aggregate (by: []), no
     // intervening Partition.
     assert!(
-        matches!(child.as_ref(), QueryExpr::Aggregate { by, aggs, .. }
-            if by.is_empty() && matches!(aggs.as_slice(), [AggIntent::Avg { .. }])),
+        matches!(child.as_ref(), QueryExpr::Aggregate { reduction, aggs, .. }
+            if reduction == &Reduction::PerEntity && matches!(aggs.as_slice(), [AggIntent::Avg { .. }])),
         "expected bare per-series Avg aggregate under Sort, got {child:?}"
     );
 }
@@ -413,12 +431,19 @@ fn topk_count_output_schema_carries_group_key() {
     // [ts, value, service] → TopK groups on service (col 2).
     let qe = lower("topk by (service) (5, count_over_time(m[1m]))");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected Aggregate{{TopK}}, got {qe:?}");
     };
-    assert_eq!(by, &vec![2], "service is col 2 in [ts, value, service]");
+    assert_eq!(
+        reduction,
+        &Reduction::by(vec![2]),
+        "service is col 2 in [ts, value, service]"
+    );
     assert!(matches!(aggs.as_slice(), [AggIntent::TopK { k: 5, .. }]));
     // Inner Count aggregate is visible with its TimeRange child.
     let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
@@ -533,11 +558,15 @@ fn without_grouping_lowers_to_the_exclusion_form() {
     // `without` form, and the output schema stays open.
     let qe = lower("sum without (instance) (rate(m[5m]))");
     let QueryExpr::Aggregate {
-        by, aggs, child, ..
+        reduction,
+        aggs,
+        child,
+        ..
     } = &qe
     else {
         panic!("expected an Aggregate, got {qe:?}");
     };
+    let by = reduction.expect_reduce();
     assert!(by.is_without());
     assert_eq!(by.keys().len(), 1, "excluded `instance`");
     assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
@@ -707,18 +736,22 @@ fn batch_rejects_non_promql_language() {
 
 #[test]
 fn reducing_group_by_lowers_to_aggregate_by() {
-    // Cross-series reduce, no keys → bare `Aggregate { by: [] }`.
+    // Cross-series reduce, no keys → bare `Aggregate { reduction: Reduce([]) }`.
     let q = lower("sum(http_requests_total)");
-    assert!(matches!(q, QueryExpr::Aggregate { ref by, .. } if by.is_empty()));
+    assert!(
+        matches!(q, QueryExpr::Aggregate { ref reduction, .. } if reduction == &Reduction::by(vec![]))
+    );
 
-    // Cross-series reduce grouped by a label → `Aggregate.by`.
+    // Cross-series reduce grouped by a label → `Aggregate.reduction`.
     let q = lower("sum by (job) (http_requests_total)");
-    assert!(matches!(q, QueryExpr::Aggregate { ref by, .. } if by.len() == 1));
+    assert!(matches!(q, QueryExpr::Aggregate { ref reduction, .. }
+        if reduction.expect_reduce().len() == 1));
 
     // Reduce over a label-preserving `rate` grouped by a label → still
-    // `Aggregate.by` (the keys resolve against rate's preserved schema).
+    // `Aggregate.reduction` (the keys resolve against rate's preserved schema).
     let q = lower("sum by (job) (rate(http_requests_total[5m]))");
-    assert!(matches!(q, QueryExpr::Aggregate { ref by, .. } if by.len() == 1));
+    assert!(matches!(q, QueryExpr::Aggregate { ref reduction, .. }
+        if reduction.expect_reduce().len() == 1));
 }
 
 #[test]
@@ -739,7 +772,9 @@ fn generic_topk_grouping_lowers_to_sort_partition_by() {
         panic!("expected Sort, got {child:?}");
     };
     assert_eq!(partition_by, &vec![2], "host is col 2 in [ts, value, host]");
-    assert!(matches!(child.as_ref(), QueryExpr::Aggregate { by, .. } if by.is_empty()));
+    assert!(
+        matches!(child.as_ref(), QueryExpr::Aggregate { reduction, .. } if reduction == &Reduction::PerEntity)
+    );
 }
 
 #[test]
