@@ -53,11 +53,14 @@ physical IR, ready for runtime/execution  ← L4
 tracked in [issue #179](https://github.com/ProjectASAP/ASAPController/issues/179).
 
 Each layer below labels one representation. Its heading names the
-artifact that representation is; the "Job:" line beneath it names the
-pass(es) that produce it. Where a layer bundles more than one pass
-(L1 bundles two: interpret, then resolve+canonicalize) or hosts a pass
-that belongs to serving time instead of planning (L3's `execute` — see
-"Serving-time execution" below), that's called out explicitly.
+artifact that representation is; the pass(es) that produce it are
+named right beneath — a single "Job:" line where a layer runs exactly
+one (L2, L3), a short list where it bundles more than one (L1's
+interpret then resolve+canonicalize; L4's physical-lower, which
+typically delegates part of its own work to ASAPController's shared
+StageAllocator). A pass that belongs to serving time instead of
+planning (L3's `execute` — see "Serving-time execution" below) is
+called out separately from the layer's own Job.
 
 **A note on type names below.** This document's "Interface" sections
 show Rust shapes using this document's own layer numbers (e.g.
@@ -161,25 +164,28 @@ distinct since it runs at request time rather than at planning time.
 
 ## L4 — summary-bound IR → physical IR (physical runtime / data plane)
 
-**Two passes, split by who owns them.**
-- **stage-allocate** (ASAPController-owned, shared code: `StageAllocator`)
-  — given the summary-bound IR, a topology, and deployment constraints,
-  decide which physical *stage* each piece runs at. Generic across
-  deployments.
-- **physical-lower** (deployment-supplied: `PhysicalPlanner::lower`) —
-  per-executor fan-out and final emission into that deployment's own
-  output format. ASAPController defines the contract; the deployment
-  performs this pass and owns its output type.
+**One pass: `physical-lower`** (deployment-supplied:
+`PhysicalPlanner::lower`) — assign each piece of the summary-bound IR
+to a stage + executor, then emit the deployment's own output format.
+ASAPController defines the contract; the deployment performs this pass
+and owns its output type.
+- ASAPController ships `StageAllocator` as shared, generic code for the
+  stage-level half of that decision — given the summary-bound IR, a
+  topology, and deployment constraints, it decides which physical
+  *stage* each piece runs at, the same way for every deployment. A
+  `lower()`
+  implementation typically delegates to it internally as its own first
+  step, keeping only per-executor fan-out and final emission as
+  genuinely deployment-specific.
 - Inputs: which physical stages exist and how they connect (topology),
   and the budgets/capabilities a given deployment offers (deployment
   constraints).
 
 ```mermaid
 flowchart LR
-    L3N["summary-bound IR"] --> SA["stage-allocate\n(ASAPController-owned)"] --> SAO["stage assignments"]
-    SAO --> PP
+    L3N["summary-bound IR"] --> PP
     subgraph PP["deployment's own physical-lower\n(implements a shared interface)"]
-        FO["per-executor fan-out\n+ final emission"]
+        SA["stage-allocate\n(ASAPController-owned,\ntypically delegated to)"] --> FO["per-executor fan-out\n+ final emission"]
     end
     PP --> ART["physical IR\n(deployment-owned type)"]
 ```
@@ -198,8 +204,7 @@ the plan was produced.
 **Job: walk an already-decided summary-bound IR against whatever is
 actually materialized right now, and produce an answer.** Serving has
 its own error cases, separate from planning-time `implement`'s,
-**because**
-reality can diverge from what planning assumed: data might be missing,
+**because** reality can diverge from what planning assumed: data might be missing,
 several instances of the same summary might need merging, instances
 might disagree on parameters.
 - The structural rules — which nestings of a summary-bound IR are
@@ -232,8 +237,10 @@ quick reference.
   the top of this document.
 - **Pass** — the function/algorithm that turns one representation into
   another, or (uniquely, `canonicalize`) rewrites a representation into
-  a normal form of itself. Answers "what happens next." A layer's "Job:"
-  line names its pass(es); a layer heading names what it produces.
+  a normal form of itself. Answers "what happens next." Named right
+  beneath a layer's heading — a "Job:" line where a layer runs exactly
+  one, a short list where it bundles more than one; the heading itself
+  names what the layer produces.
 - **Front end** — The per-language component that elaborates a raw
   query string directly into the canonical shape, with unresolved
   column references (L1's `interpret` pass). One per language. See
