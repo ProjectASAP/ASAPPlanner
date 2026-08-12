@@ -17,7 +17,7 @@ string into a plan, not running it:
 decided — is a separate concern from planning, covered in its own
 "Serving-time execution" section after L5, below.
 
-## L1 — query language (front end)
+## L1 — query language expressions to per-language native representation
 
 **Job: elaborate a raw query string into that language's own native
 representation, independently per language — remaining agnostic to
@@ -34,7 +34,7 @@ flowchart LR
 
 - Doc: [`l1-query-language.md`](./l1-query-language.md)
 
-## L2 — logical plan
+## L2 — per-language native representation to per-language logical plan
 
 **Job: unify every language's L1 representation into one shared
 relational tree (or DAG), and resolve symbolic column references to
@@ -63,7 +63,7 @@ flowchart LR
 
 - Doc: [`l2-logical-plan.md`](./l2-logical-plan.md)
 
-## L3 — intent algebra
+## L3 — per-language logical plan to unified ASAP intent algebra
 
 **Job: specify intent — the computation and its accuracy requirement —
 while remaining agnostic to implementation strategy, which L4 alone
@@ -94,7 +94,7 @@ flowchart LR
 
 - Doc: [`l3-intent-algebra.md`](./l3-intent-algebra.md)
 
-## L4 — summary-bound IR
+## L4 — unified ASAP intent algebra to summary-bound IR
 
 **Job (planning-time only): decide, for each intent, whether and how it
 is answered by a summary rather than by scanning raw data** —
@@ -115,7 +115,7 @@ flowchart LR
 
 - Doc: [`l4-summary-bound-ir.md`](./l4-summary-bound-ir.md)
 
-## L5 — physical plan
+## L5 — summary-bound IR to physical plan for physical runtime (data plane)
 
 **Job: commit to physical execution — assign each piece of an
 already-summary-bound plan to a physical execution mode (e.g. lifecycle
