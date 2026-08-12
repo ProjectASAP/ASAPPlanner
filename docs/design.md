@@ -15,7 +15,7 @@ conflating them into one "layer":
   normal form of *itself* (same type in, same type out — a within-
   representation pass, not a level change).
 
-Four representations, connected by three passes:
+Four representations, connected by the passes below:
 
 ```
 query string
@@ -35,10 +35,17 @@ canonical-shaped tree, unresolved column references
     │        Aggregate{aggs:[TopK]} shape)
     ▼
 unified canonical intent algebra  ← L2
-    │  pass: implement (planning-time binding)
+    │  pass: implement (bind each intent to a summary family + size its
+    │        parameters, or leave it PassThrough to raw data)
     ▼
 summary-bound IR  ← L3
-    │  pass: physical-lower (deployment-supplied)
+    │  pass: stage-allocate (ASAPController-owned: assign each piece to
+    │        a physical stage, given the topology + deployment
+    │        constraints)
+    ▼
+stage assignments
+    │  pass: physical-lower (deployment-supplied: per-executor fan-out
+    │        + final emission — the plan ready for physical execution)
     ▼
 physical IR, ready for runtime/execution  ← L4
   (a deployment's own Output type)
@@ -143,7 +150,7 @@ purely on the intent's own shape.
 
 ```mermaid
 flowchart LR
-    L2N["canonical intent algebra"] --> IT["implement: choose a summary\n(or none) per intent"] --> L3N["summary-bound IR"]
+    L2N["canonical intent algebra"] --> IT["implement: bind intent to summary\n+ size parameters (or none: PassThrough)"] --> L3N["summary-bound IR"]
 ```
 
 **Serving-time `execute` is a separate, runtime concern.** It walks an
@@ -192,7 +199,8 @@ the plan was produced.
 
 **Job: walk an already-decided summary-bound IR against whatever is
 actually materialized right now, and produce an answer.** Serving has
-its own error cases, separate from planning-time binding's, **because**
+its own error cases, separate from planning-time `implement`'s,
+**because**
 reality can diverge from what planning assumed: data might be missing,
 several instances of the same summary might need merging, instances
 might disagree on parameters.
