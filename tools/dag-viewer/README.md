@@ -1,10 +1,7 @@
 # ASAP query DAG viewer
 
 Interactive viewer for the L3 query IR (`QueryExpr`), for manual IR
-review/debugging, eyeballing common shapes across a corpus, and (as a
-client-side proxy, see caveat below) spotting shared sub-DAGs across queries.
-Companion to `crates/ir/src/dag_export.rs` and the `dag_export` example — see
-issue #133 for the motivation.
+review/debugging, eyeballing common shapes across a corpus, and spotting shared sub-DAGs across queries.
 
 ## Generate a graph
 
