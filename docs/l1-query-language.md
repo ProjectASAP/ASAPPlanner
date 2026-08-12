@@ -112,21 +112,19 @@ produced and derives one self-contained schema that every column
 reference indexes into: it seeds columns from whatever catalog is
 available (or a minimal always-present floor if the catalog knows
 nothing), and accounts for any name the query references that the
-catalog didn't already know about. A schema records whether it's a
-*complete* enumeration of a row's columns or an *open* superset a
-runtime row may exceed — different query languages sit at different
-points on that spectrum (a language with no fixed schema, only
-label-like references, versus one with a declared catalog) and binding
-accommodates both, on their own terms.
+catalog didn't already know about.
 
 Why isolate name resolution as its own step, rather than resolving
 inline while interpreting, in pass 1:
 
-- **Everything downstream becomes purely structural and total.** Once
-  a schema exists, later steps work over positions, not names — a
-  column reference can't fail to resolve once binding has already run,
-  so every "column not found"-shaped failure is concentrated in one
-  place.
+- **Everything downstream becomes purely structural and total.** Take
+  those two words literally: *structural* means later steps match on
+  tree shape and column position, never on a name string again — the
+  string comparisons all happened once, here. *Total* is the
+  computer-science sense — a function defined for every input, with no
+  case left unhandled — applied to column resolution: once binding has
+  run, a `ColumnId` is guaranteed to resolve, so "column not found" is
+  a binding-time error, never a surprise several passes downstream.
 - **Schema/catalog policy is swappable independently of interpretation.**
   Binding is generic over where schema information comes from; a
   language with no catalog and a language with a real one both flow
@@ -134,9 +132,9 @@ inline while interpreting, in pass 1:
   supplies.
 - **It's the natural home for resolution-policy questions.** A
   reference to "every column except these" can only be resolved once a
-  schema is known — and for an open schema, the full complement is
-  represented and deferred to serving time, rather than resolved
-  eagerly.
+  schema is known — and for an open schema (see below), the full
+  complement is represented and deferred to serving time, rather than
+  resolved eagerly.
 
 Each independent sub-tree (e.g. either side of a binary operation)
 binds against its own schema, since the two sides may reference
@@ -145,19 +143,28 @@ referenced by an *enclosing* operation (a grouping key mentioned above,
 but not inside, either branch), so an enclosing scope's referenced
 names are threaded down into each side's own binding pass.
 
-### Column identity: two sources of truth
+### Open vs. closed schemas
 
-A scan may arrive in pass 1's output in one of two shapes: schema-less
-(known only by whatever columns a query happens to reference) or
-already schema-carrying (arriving with a declared, complete column set
-from an external catalog). Binding accommodates both:
+Take `sum by (job) (http_requests_total)`. The query tells us
+`http_requests_total` carries a `job` label — but a real series for
+that metric might also carry `instance`, `region`, or any other label
+a target happened to attach, none of which this query mentions.
+Nothing anywhere enumerates PromQL's full label set for a metric ahead
+of time; it's **open** — a superset the runtime data may exceed. Now
+compare `SELECT host, bytes FROM requests` — SQL's `requests` table has
+a declared, complete column list in the catalog: `host` and `bytes`
+are the whole row, guaranteed, nothing more can show up at runtime.
+That's **closed**.
 
-- A **schema-less** source falls back to binding's own usage-derived
-  schema — open, since a runtime row may carry more than what the
-  query referenced.
-- An **already schema-carrying** source keeps its own declared schema
-  as-is — closed, since the catalog is a complete enumeration — and
-  binding's usage-derived fallback goes unused for that source.
+Binding resolves this per source, not per language, since which one
+applies depends on whether a catalog exists for that particular scan:
+
+- A **schema-less** source (PromQL's `http_requests_total`, no
+  catalog available) falls back to binding's own usage-derived schema —
+  open, seeded from exactly the labels the query references.
+- An **already schema-carrying** source (SQL's `requests`, resolved
+  against `SqlCatalog`) keeps its own declared schema as-is — closed —
+  and binding's usage-derived fallback goes unused for that source.
 
 Either way, every column reference downstream resolves to a position
 into *some* schema, uniformly; the difference is only where that
