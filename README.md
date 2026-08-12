@@ -11,17 +11,17 @@ following — an overview of the L1-L5 pipeline, linking into a dedicated
 doc per layer; the deployment-model / runtime / bin crates it describes
 are still planned.
 
-## Architecture (summary)
+## Architecture for control plane in ASAP
 
 **5-layer query→summary pipeline** (see [`docs/design.md`](docs/design.md) for the full design):
 
-| Layer | What | Where it lives (today) |
+| Layer | What | Where it lives |
 |---|---|---|
 | 1 | Query-language parsing (PromQL, SQL; DataFusion, ElasticDSL planned) | `asap-frontend-promql`, `asap-frontend-sql` |
 | 2 | Per-language relational algebra tree + the shared L2→L3 converter (incl. the post-lowering canonicalization pass both languages run through) | `asap-l2` (emitted by the front ends) |
-| 3 | Intent algebra — language-, deployment-, AND data-model-independent IR (`QueryExpr` + `AggIntent`, intent only — no summary type, no params). Supports both time-series and tabular data via a `Source` sum inside `Scan`. | `asap-ir::intent_algebra` |
+| 3 | Intent algebra defined by ASAPController itself — query language and runtime independent IR (intent only — no summary type, no summary params). | `asap-ir::intent_algebra` |
 | 4 | Cost-aware optimizer — CSE + pluggable cost model + the summary-vs-exact accuracy decision (`AggIntent → SummaryKind`, landed). Produces the **summary-bound** IR (kind + params committed), plus the serving-time `SummaryExecutor` interface that answers a query against it. | binding/optimizer passes in `asap-plan`; summary-bound IR + serving-time executor in `asap-sketch` |
-| 5 | Physical plan — stage allocation + emit to wire format | *planned* (per-deployment-model) — see [`docs/l5-physical-plan.md`](docs/l5-physical-plan.md) |
+| 5 | Physical runtime — The controller emits configurations to physical runtime, with the execution environment consider the parallelism, hardware types, lifecycle stages, distributed workers | The implementation of this layer should be in different downstream application repos. |
 
 ### Crates
 
