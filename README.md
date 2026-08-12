@@ -103,3 +103,92 @@ as a git dependency, so Cargo has to be able to clone a private repo.
    cargo build
    ```
 
+## Running
+
+There's no standalone binary yet — the `bin/` + runtime crates are still
+planned (see the "Physical runtime / Data plane" row above). Today the
+workspace is exercised through its test suite and through runnable examples.
+
+**Run the tests:**
+
+```bash
+cargo test --workspace
+```
+
+**Visualize the IR.** `asap-lower` ships an example, `topk_ir`, that lowers a
+batch of PromQL and SQL queries through L1→L2→L3 and pretty-prints the
+resulting `QueryExpr` — the L3 canonical IR (see
+[`docs/l3-intent-algebra.md`](docs/l3-intent-algebra.md)) — as a tree:
+
+```bash
+cargo run -p asap-lower --example topk_ir
+```
+
+For each query it prints the source text followed by its `QueryExpr` tree via
+Rust's `{:#?}` pretty-debug formatting. For example, `topk(5,
+rate(http_requests_total[5m]))` lowers to:
+
+```
+━━━ P3 — topk over rate ━━━
+topk(5, rate(http_requests_total[5m]))
+Limit {
+    n: 5,
+    offset: 0,
+    child: Sort {
+        keys: [
+            SortKey {
+                expr: Column(
+                    1,
+                ),
+                ascending: false,
+                nulls_first: false,
+            },
+        ],
+        partition_by: GroupKeys {
+            keys: [],
+            without: false,
+        },
+        child: Aggregate {
+            reduction: PerEntity,
+            aggs: [
+                Rate,
+            ],
+            output_names: [
+                "",
+            ],
+            having: None,
+            child: TimeRange {
+                range: 300s,
+                child: Scan {
+                    source: TimeSeries {
+                        metric: "http_requests_total",
+                    },
+                    predicates: [],
+                    schema: Schema {
+                        columns: [
+                            Column {
+                                name: "ts",
+                                dtype: Timestamp,
+                                nullable: false,
+                                table: None,
+                            },
+                            Column {
+                                name: "value",
+                                dtype: Float64,
+                                nullable: false,
+                                table: None,
+                            },
+                        ],
+                        time_index: Some(
+                            0,
+                        ),
+                        unique_keys: [],
+                        closed: false,
+                    },
+                },
+            },
+        },
+    },
+}
+```
+
