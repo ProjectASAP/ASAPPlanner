@@ -1,22 +1,21 @@
-# L1 — query language → canonical intent tree
+# L1 — per-language native representation → canonical intent algebra
 
 Per-language front ends, one per supported query language. Each turns a
 raw query string all the way into the canonical intent tree that L2
 (see [`l2-intent-algebra.md`](./l2-intent-algebra.md)) is the vocabulary
-for — there is no separate numbered layer in between. Concretely, a
-front end owns two things:
+for — there is no separate numbered layer in between. That whole
+journey is **two passes**, not one, and this doc is organized around
+that split (see `design.md`'s representation/pass table for the
+project-wide version of this distinction):
 
-- **Its own parser**, producing whatever native shape is most natural
-  for that language (e.g. a parsed AST, or an already-planned
-  relational tree). No shared vocabulary between languages yet, and no
-  summary awareness.
-- **A shared internal pipeline every front end runs through
-  afterward** — interpreting that native shape into one common
-  relational vocabulary, resolving column names to schema positions,
-  and canonicalizing so that semantically equivalent queries (from any
-  supported language) arrive at the same shape. By the time a query
-  leaves this layer, it's already in canonical form; nothing outside L1
-  ever observes the uncanonicalized intermediate.
+- **Pass 1 — parse + interpret**, entirely per-language. Produces the
+  **per-language native representation** — a real intermediate (it
+  crosses a real crate boundary: front-end crates hand it to
+  `asap-l2`), but not a layer of its own, because nothing outside this
+  pipeline ever depends on it as a stable interface. See "Pass 1" below.
+- **Pass 2 — lower**, one shared implementation for every language.
+  Produces the canonical intent tree — L2's vocabulary. See "Pass 2"
+  below.
 
 Front ends never depend on each other: each language's parsing path is
 fully independent, so adding or removing a supported language never
@@ -27,15 +26,6 @@ dialect at this layer — different syntax that still elaborates to the
 same native representation. Dialect differences are purely a parsing
 concern; they never affect what a later layer can plan.
 
-## Parse → lower: converging on one shape
-
-Different front ends can look nothing alike where they start — one may
-begin from a bare AST, another from an already-planned tree — but every
-front end must converge on the *same* intermediate shape, through the
-*same* internal entry point, before canonicalizing into the identical
-final tree. That convergence, not the initial parsing itself, is the
-part that matters at the design level:
-
 ```
 Query string (language A)                Query string (language B)
    │  language A's own parser                │  language B's own parser
@@ -43,10 +33,11 @@ Query string (language A)                Query string (language B)
 language A's native representation         language B's native representation
    │  interpret into shared vocabulary        │  interpret into shared vocabulary
    ▼                                          ▼
-                    shared relational tree — same type for every language
-                    columns are still named references
-                                        │
-                                        │  one shared internal pipeline, for every language:
+        per-language native representation — same type for every language
+        (spans two real types: the third-party parser's own AST, then
+         asap-l2's shared relational tree; columns still named references)
+   ═══════════════ pass 1 done; pass 2 (lower) starts ═══════════════
+                                        │  one shared pass, for every language:
                                         │    1. bind — name → schema-position resolution
                                         │    2. convert — purely structural translation
                                         │    3. canonicalize — shared cross-language normalization
@@ -56,12 +47,35 @@ language A's native representation         language B's native representation
                                               + a self-contained schema on every scan
 ```
 
-Binding is not itself a separate layer — it's one sub-step of this
-internal pipeline. *Why* the canonical form uses positional column
-identity, how binding differs between a schema-less source and a
-catalog-backed one, and what a unique key is for are covered below and
-in [`l2-intent-algebra.md`](./l2-intent-algebra.md) — this section only
-needs to establish that every front end feeds the identical mechanism.
+## Pass 1 — parse + interpret
+
+Different front ends can look nothing alike where they start — one may
+begin from a bare AST, another from an already-planned tree — but every
+front end must converge on the *same* per-language-native-representation
+shape, through the *same* internal entry point, before pass 2 (lower)
+canonicalizes into the identical final tree. That convergence, not the
+initial parsing itself, is the part that matters at the design level.
+
+Every front end's native representation is interpreted into one shared
+relational tree (or DAG) type — not one type per language. Still no
+summary names, no positional column identity yet — those come from
+pass 2's binding step. The tree covers the standard relational
+vocabulary — source scan, filter, projection, aggregation (grouping +
+aggregate functions), windowing, deduplication, heavy-hitter ranking,
+set/join operators, ordering, and named/referenced sub-plans (for
+expressing shared sub-computations) — plus a small number of extension
+points for per-language surface features that don't yet have a general
+relational equivalent. Column references are still symbolic names at
+this point, resolved to positions by binding, in pass 2.
+
+**Why this whole pass's output isn't its own layer.** It's a real
+checkpoint — a genuine crate boundary — but it fails the test a layer
+has to pass: something *outside* this pipeline treating it as a stable
+interface. Nothing does. It only ever appears as a function argument on
+the way to canonical, never persisted, tested independently, or
+round-tripped. Compare L2, which many things depend on directly (this
+pass's own output must conform to it; L3's binding pattern-matches it;
+the DAG-export tooling walks it).
 
 ### The nesting contract
 
@@ -80,23 +94,30 @@ represent — rather than silently mis-lowering it — since a
 resolvable-later gap is one design choice away from becoming a
 correctness bug if it's lowered wrong instead of rejected outright.
 
-## Interpreting into a shared relational vocabulary
+## Pass 2 — lower
 
-Every front end's native representation is interpreted into one shared
-relational tree (or DAG) type — not one type per language. Still no
-summary names, no positional column identity yet — those come from
-binding, next. The tree covers the standard relational vocabulary —
-source scan, filter, projection, aggregation (grouping + aggregate
-functions), windowing, deduplication, heavy-hitter ranking, set/join
-operators, ordering, and named/referenced sub-plans (for expressing
-shared sub-computations) — plus a small number of extension points for
-per-language surface features that don't yet have a general relational
-equivalent. Column references are still symbolic names at this point,
-resolved to positions by binding, below.
+One shared implementation — used by every front end, regardless of
+language — does three things in order: bind names to schema positions,
+translate the tree structurally into the canonical form, then run a
+shared cross-language normalization pass so that semantically
+equivalent queries, from any supported language, arrive at the same
+canonical shape (the vocabulary that shape belongs to is covered in
+[`l2-intent-algebra.md`](./l2-intent-algebra.md)). This ordering
+matters: normalization operates on already-resolved, already-translated
+trees, so it never has to reason about per-language surface syntax.
 
-## Name resolution: binding
+This is genuinely more than renaming column references to positions:
+`canonicalize`, the third step, rewrites real shape differences away —
+e.g. promoting a generic `Limit{Sort{Aggregate([Count])}}` shape (what
+SQL's `ORDER BY count DESC LIMIT k`, and PromQL's non-dedicated `topk`
+path, both produce) to the explicit heavy-hitter `Aggregate{aggs:
+[TopK]}` form (what PromQL's dedicated `topk(k, count_over_time(…))`
+already produces directly) — so that both source shapes converge on one
+canonical tree regardless of which path produced them.
 
-Binding walks the shared relational tree and produces one
+### Name resolution: binding
+
+Binding walks the per-language native representation and produces one
 self-contained schema that every column reference in the resulting
 canonical tree indexes into: it seeds columns from whatever catalog is
 available (or a minimal always-present floor if the catalog knows
@@ -108,11 +129,11 @@ points on that spectrum (a language with no fixed schema, only
 label-like references, versus one with a declared catalog) and binding
 accommodates both without forcing them into the same shape.
 
-Why isolate name resolution as its own pass, rather than resolving
+Why isolate name resolution as its own step, rather than resolving
 inline while translating:
 
 - **Everything downstream becomes purely structural and total.** Once
-  a schema exists, later passes work over positions, not names — a
+  a schema exists, later steps work over positions, not names — a
   column reference can't fail to resolve once binding has already run,
   so every "column not found"-shaped failure is concentrated in one
   place.
@@ -134,34 +155,13 @@ referenced by an *enclosing* operation (a grouping key mentioned above,
 but not inside, either branch), so an enclosing scope's referenced
 names are threaded down into each side's own binding pass.
 
-## The internal lowering step
+### Column identity: two sources of truth
 
-One shared step — used by every front end, regardless of language —
-does three things in order: bind names to schema positions (above),
-translate the tree structurally into the canonical form, then run a
-shared cross-language normalization pass so that semantically
-equivalent queries, from any supported language, arrive at the same
-canonical shape (the vocabulary that shape belongs to is covered in
-[`l2-intent-algebra.md`](./l2-intent-algebra.md)). This ordering
-matters: normalization operates on already-resolved, already-translated
-trees, so it never has to reason about per-language surface syntax.
-
-This step, plus the shared relational vocabulary and binding described
-above, is what used to be split out as its own numbered layer — folded
-in here because none of it needs to be exposed as a separate stage:
-every front end runs through it identically, and nothing outside this
-layer ever observes the intermediate, pre-canonicalization shape. What
-still deserves its own layer is what comes out the other end: the
-canonical intent tree itself, and the vocabulary/rules that make it
-canonical — that's L2.
-
-## Column identity: two sources of truth
-
-A source may arrive at the shared relational tree in one of two shapes:
-schema-less (known only by whatever columns a query happens to
-reference) or already schema-carrying (arriving with a declared,
-complete column set from an external catalog). Binding accommodates
-both:
+A source may arrive at the per-language native representation in one
+of two shapes: schema-less (known only by whatever columns a query
+happens to reference) or already schema-carrying (arriving with a
+declared, complete column set from an external catalog). Binding
+accommodates both:
 
 - A **schema-less** source falls back to binding's own usage-derived
   schema — open, since a runtime row may carry more than what the
@@ -184,8 +184,8 @@ never gets one. Why a unique key matters is covered in
 There is no shared trait for a front end's top-level entry point — each
 exposes its own free functions, differing in language-specific
 arguments (SQL takes a catalog + dialect; PromQL doesn't) but converging
-on the same return type — the canonical `QueryExpr` — once lowering
-finishes:
+on the same return type — the canonical `QueryExpr` — once both passes
+finish:
 
 ```rust
 // PromQL
@@ -202,8 +202,8 @@ SQL's extra `catalog`/`dialect` parameters are exactly the schema-source
 asymmetry covered above: SQL supplies its own resolved schema up front;
 PromQL doesn't have one to supply, so it has no equivalent parameter.
 
-Underneath both, the one real extension point is the schema source a
-front end's leaves resolve against:
+Underneath both, the one real extension point is the schema source
+pass 2's binding step resolves against:
 
 ```rust
 pub trait SchemaCatalog {
@@ -252,13 +252,14 @@ let schema = Binder::with_catalog(SqlCatalog { .. }).bind(&tree);
 //    which ones the query actually references)
 ```
 
-And the internal step every front end shares — wired inside
-`lower_promql`/`lower_sql` above, so no front end can reach the
-canonical form through any other path:
+And pass 2 (lower) itself — wired inside `lower_promql`/`lower_sql`
+above, so no front end can reach the canonical form through any other
+path:
 
 ```rust
 pub fn convert_root(native: &QueryExpr, accuracy: &AccuracyTarget) -> Result<QueryExpr, ConvertError>;
 ```
 
-Takes the shared relational tree in, returns the canonical tree out —
-binding, structural conversion, and canonicalization in one call.
+Takes the per-language native representation in, returns the canonical
+tree out — binding, structural conversion, and canonicalization in one
+call.
