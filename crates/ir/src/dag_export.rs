@@ -223,7 +223,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             )
         }
         QueryExpr::Aggregate {
-            by,
+            reduction,
             aggs,
             output_names,
             having,
@@ -231,7 +231,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({
-                "by": by,
+                "reduction": reduction,
                 "aggs": aggs,
                 "output_names": output_names,
                 "having": having,
@@ -413,7 +413,7 @@ mod tests {
     use super::*;
     use crate::intent_algebra::agg_intent::AggIntent;
     use crate::intent_algebra::expr_ir::{L3Expr, L3Scalar};
-    use crate::intent_algebra::query_expr::{GroupKeys, Predicate};
+    use crate::intent_algebra::query_expr::{GroupKeys, Predicate, Reduction};
     use crate::intent_algebra::schema::{Column, DataType, Schema};
     use crate::types::AccuracyTarget;
 
@@ -450,7 +450,7 @@ mod tests {
         let expr = QueryExpr::Filter {
             pred: Predicate(L3Expr::Literal(L3Scalar::Boolean(true))),
             child: Box::new(QueryExpr::Aggregate {
-                by: GroupKeys::none(),
+                reduction: Reduction::Reduce(GroupKeys::none()),
                 aggs: vec![AggIntent::Count {
                     accuracy: AccuracyTarget::Exact,
                 }],
