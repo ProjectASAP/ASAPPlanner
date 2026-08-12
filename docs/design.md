@@ -7,8 +7,8 @@ conflating them into one "layer":
 
 - **Representation** — "what abstraction level are we at right now?"
   A representation is a concrete shape data sits in at some point —
-  a real type, or (for the one case with no ASAPController-owned type)
-  an interface boundary. Representations don't run; they just *are*.
+  a real type, or (for L4's physical IR) an interface boundary owned
+  by the deployment. Representations don't run; they just *are*.
 - **Pass** — "what processing does the code go through next?" A pass
   is the function/algorithm that turns one representation into
   another — or, for `canonicalize`, rewrites a representation into a
@@ -23,17 +23,16 @@ query string
     │        front end's own translation directly into the canonical
     │        shape — dedicated topk() -> AggIntent::TopK, m[5m] ->
     │        TimeRange, WHERE/matchers -> Scan.predicates, etc. — using
-    │        an unresolved column-reference state, not yet positional)
+    │        a named column-reference state)
     ▼
 canonical-shaped tree, unresolved column references
-    │  pass: resolve (bind names to schema positions, substitute
-    │        throughout — a generic walk, no per-variant structural
-    │        translation left; that moved into interpret, above)
+    │  pass: resolve (bind names to schema positions, substitute them
+    │        throughout the already-canonical-shaped tree)
     ▼
     │  pass: canonicalize (cross-language / cross-phrasing pattern
     │        normalization — e.g. promoting a generic
-    │        Limit{Sort{Aggregate([Count])}} shape a front end had no
-    │        way to recognize as heavy-hitter on its own)
+    │        Limit{Sort{Aggregate([Count])}} shape to the heavy-hitter
+    │        Aggregate{aggs:[TopK]} shape)
     ▼
 unified canonical intent algebra  ← L2
     │  pass: implement (planning-time binding)
@@ -42,77 +41,50 @@ summary-bound IR  ← L3
     │  pass: physical-lower (deployment-supplied)
     ▼
 physical IR, ready for runtime/execution  ← L4
-  (no ASAPController-owned type — a deployment's own Output type)
+  (a deployment's own Output type)
 ```
 
-**This is the target architecture, not the current implementation.**
-Today, each front end still constructs an intermediate, hand-maintained
-relational tree (`asap_l2::relational::QueryExpr`) with its own
-structural shape, and a separate `convert` step structurally translates
-it into canonical form before `resolve`+`canonicalize` run. Review
-found that `convert`'s structural-translation rules are local and
-context-free enough (e.g. relational's dedicated `TopK` node → canonical
-`Aggregate{aggs:[TopK]}`; `Window` → `TimeRange`, unconditionally — no
-context-dependent branching, verified against `convert`'s actual match
-arms) that front ends can produce the canonical shape directly, and the
-relational tree fails the "is this a layer" test below anyway (nothing
-outside `convert_root` depends on it as a stable interface) — so there's
-no reason for it to exist as a separate hand-maintained type. Migration
-tracked in [issue #179](https://github.com/ProjectASAP/ASAPController/issues/179);
-not yet started — this touches ~5,000 LOC across both front ends'
-entire per-construct lowering logic plus `asap-l2`'s binder/
-column-resolution/lower/canonicalize modules, so expect a multi-PR
-migration, not a single-shot rewrite.
+**Status.** This is the design target for L1's passes; implementation
+tracked in [issue #179](https://github.com/ProjectASAP/ASAPController/issues/179).
 
-**L1-L4 below label representations, not passes.** Each heading names
-the artifact that representation *is* — the "Job:" line under it names
-the pass that *produces* it. Where a layer bundles more than one pass
-(L1 bundles two: interpret, then resolve+canonicalize) or hosts a pass that
-isn't part of the planning pipeline at all (L3's serving-time
-`execute` is runtime evaluation, not a pass — see "Serving-time
-execution" below), that's called out explicitly rather than folded
-silently into one description.
+Each layer below labels one representation. Its heading names the
+artifact that representation is; the "Job:" line beneath it names the
+pass(es) that produce it. Where a layer bundles more than one pass
+(L1 bundles two: interpret, then resolve+canonicalize) or hosts a pass
+that belongs to serving time instead of planning (L3's `execute` — see
+"Serving-time execution" below), that's called out explicitly.
 
 **A note on type names below.** This document's "Interface" sections
-show real Rust shapes, but some are written with *this* document's
-layer numbers (e.g. `L2Expr`, `L3Node`) rather than whatever digit the
-implementation currently carries — the implementation predates this
-renumbering and hasn't caught up yet. Treat these as the design target,
-not a guarantee that `grep`-ing the exact identifier finds it today.
+show Rust shapes using this document's own layer numbers (e.g.
+`L2Expr`, `L3Node`) as the design target for those identifiers.
 
 ## L1 — query string → canonical intent algebra
 
-This section covers **two passes**, not one — both internal to L1;
-nothing outside it observes the checkpoint between them.
+Two passes, both internal to L1: interpret, then resolve+canonicalize.
 
 **Pass 1 — interpret.** Each query language owns its own third-party
 parser (`promql-parser`, `sqlparser`), producing that parser's own AST —
-a different Rust type per language, sharing nothing. The front end then
+a different Rust type per language. The front end then
 interprets that AST **directly into the canonical shape** (a dedicated
 `topk()` call becomes `Aggregate{aggs:[AggIntent::TopK]}` directly, a
 range selector `m[5m]` becomes `TimeRange` directly, `WHERE`/label
 matchers become `Scan.predicates` directly) — the same type regardless
-of source language, but with column references left **unresolved**
-(named, not yet positional). Every language-construct-specific
-structural decision belongs here, in the front end that actually knows
-what it's looking at — nothing later in the pipeline has more context
-than the front end did at parse time.
+of source language, but with column references left **named**
+(unresolved). Every language-construct-specific
+structural decision belongs here, in the front end that has full
+context on what it's looking at, at parse time.
 
 **Pass 2 — resolve, then canonicalize.** One shared step, used by every
 front end regardless of language: bind names to schema positions and
-substitute them throughout (a generic walk — no per-variant structural
-translation, since pass 1 already produced the canonical shape), then
-run a cross-language normalization pass so that semantically equivalent
-queries — from any supported language, or differently-phrased within
-the same language — converge on the identical canonical shape.
-`canonicalize` is not redundant with pass 1's per-language shaping: it
-catches exactly the cases a front end *cannot* produce directly because
-its own language has no dedicated syntax for the intent — e.g. SQL's
-`ORDER BY count DESC LIMIT k` has no `topk()`-shaped AST node for the
-SQL front end to translate from; only a pattern-detection pass looking
-at the already-assembled tree can recognize it as the same
-`Aggregate{aggs:[TopK]}` shape PromQL's dedicated `topk()` produces
-directly in pass 1.
+substitute them throughout, then run a cross-language normalization
+pass so that semantically equivalent queries — from any supported
+language, or differently-phrased within the same language — converge
+on the identical canonical shape. `canonicalize` catches the cases
+where a language has no dedicated syntax for an intent — e.g. SQL's
+`ORDER BY count DESC LIMIT k` has no `topk()`-shaped AST node; a
+pattern-detection pass over the already-assembled tree recognizes it as
+the same `Aggregate{aggs:[TopK]}` shape PromQL's dedicated `topk()`
+produces directly in pass 1.
 
 ```mermaid
 flowchart LR
@@ -124,45 +96,30 @@ flowchart LR
     CZ --> L1T["canonical intent algebra\n(same shape for equivalent\nqueries, any source language)"]
 ```
 
-**Why there's no separate "per-language native representation"
-checkpoint here.** An intermediate, pre-canonical shape (today's
-`asap_l2::relational::QueryExpr`) fails the test a layer has to pass:
-something *outside* the pipeline treating it as a stable interface.
-Nothing does — it only ever appears as a function argument on the way
-to canonical, never persisted, tested independently, or round-tripped.
-Compare L2, below, which many things depend on directly (this pass's
-own output must conform to it; L3's binding pattern-matches it; the
-DAG-export tooling walks it) — that's what makes L2 a layer and an
-intermediate pre-canonical shape merely a pass's internal state, not
-worth a separate hand-maintained type. See the migration note above
-([#179](https://github.com/ProjectASAP/ASAPController/issues/179)).
-
 - Doc: [`l1-query-language.md`](./l1-query-language.md)
 
 ## L2 — intent algebra
 
 **Job: define the canonical intent tree's vocabulary — the shape L1's
-passes must produce — expressed declaratively (e.g. "a quantile
-to this accuracy," "the top-k by this ranking"), not committed to any
-particular implementation strategy.** This is the one section with no
-"Job" pass of its own: L2 doesn't transform anything — it's the
-vocabulary/rule set L1's output must conform to, checked by
-construction (every front end's output runs through the same
-`resolve`+`canonicalize`), not by a separate validation step.
+passes produce — expressed declaratively (e.g. "a quantile to this
+accuracy," "the top-k by this ranking"), with implementation
+strategy left to L3.** L2 is the vocabulary/rule set
+L1's output conforms to, enforced by construction: every front end's
+output runs through the same `resolve`+`canonicalize`.
 - The result is a language- and deployment-independent canonical
   intent tree: what to compute, without committing to how. Deployment
   here refers to a physical execution context — e.g. parallelism and
   the lifecycle stage a computation runs at — a different sense of
   "deployment" than the Glossary's "Deployment model" entry below;
   see that entry for the distinction.
-- No summary type or parameters are committed here; that's explicitly
-  deferred to L3, below.
+- Summary type and parameters are committed later, at L3.
 - Row identity (which positions uniquely identify a row — see
   `Schema::unique_keys`) and cross-query sharing of common
   sub-computations are properties of this canonical form. Both depend
   on L1's `canonicalize` pass having already converged
-  semantically-equivalent queries onto the same shape: only structurally-identical sub-trees
-  can be recognized as the same reusable computation.
+  semantically-equivalent queries onto the same shape: only
+  structurally-identical sub-trees can be recognized as the same
+  reusable computation.
 
 ```mermaid
 flowchart LR
@@ -176,26 +133,24 @@ flowchart LR
 
 **Pass: implement (planning-time only).** Decide, for each intent,
 whether and how it is answered by a summary rather than by scanning raw
-data — symbolically picking a summary family and its parameters, with
-no reference to what's actually stored anywhere.
+data — symbolically picking a summary family and its parameters, based
+purely on the intent's own shape.
 - An "implementation" is the concrete realization chosen for one piece
   of intent — e.g. a summary family and its parameters, an exact
   accumulator, or passing through to compute directly from raw data.
-- Agnostic to physical execution (where something runs, how parallel it
-  is) — that's L4's decision alone.
+- Physical execution (where something runs, how parallel it is) is
+  L4's decision alone.
 
 ```mermaid
 flowchart LR
     L2N["canonical intent algebra"] --> IT["implement: choose a summary\n(or none) per intent"] --> L3N["summary-bound IR"]
 ```
 
-**Serving-time `execute` is not a pass in this pipeline.** It's a
-separate, runtime concern: walking an already-produced `L3Node` against
-whatever is actually materialized right now, to answer one query. It
-doesn't produce a new planning representation (no L5 exists) — its
-output is a value, consumed immediately, not a plan artifact handed to
-another layer. Covered in its own "Serving-time execution" section
-below, kept distinct for exactly this reason.
+**Serving-time `execute` is a separate, runtime concern.** It walks an
+already-produced `L3Node` against whatever is actually materialized
+right now, to answer one query, producing a value consumed immediately.
+Covered in its own "Serving-time execution" section below, kept
+distinct since it runs at request time rather than at planning time.
 
 - Doc: [`l3-summary-bound-ir.md`](./l3-summary-bound-ir.md)
 
@@ -208,9 +163,8 @@ below, kept distinct for exactly this reason.
   deployments.
 - **physical-lower** (deployment-supplied: `PhysicalPlanner::lower`) —
   per-executor fan-out and final emission into that deployment's own
-  output format. ASAPController defines the contract; it does not
-  perform this pass itself, and does not define — or own a type for —
-  its output.
+  output format. ASAPController defines the contract; the deployment
+  performs this pass and owns its output type.
 - Inputs: which physical stages exist and how they connect (topology),
   and the budgets/capabilities a given deployment offers (deployment
   constraints).
@@ -230,20 +184,18 @@ flowchart LR
 ## Serving-time execution
 
 Everything above (L1-L4) is the **planning** pipeline: turning a query
-string into a plan, one representation at a time. This section is
-different in kind — it's what actually **answers** a query at request
-time, using whatever plan L1-L4 already decided. Not a fifth
-representation and not a pipeline pass — a runtime evaluator, kept as
-its own interface on purpose: a downstream deployment consumes it
-independently of how the plan was produced.
+string into a plan, one representation at a time. This section covers
+what actually **answers** a query at request time, using whatever plan
+L1-L4 already decided — a runtime evaluator, kept as its own interface
+on purpose: a downstream deployment consumes it independently of how
+the plan was produced.
 
 **Job: walk an already-decided summary-bound IR against whatever is
-actually materialized right now, and produce an answer.** Serving needs
-its own error cases — distinct from anything planning-time binding
-raises — **because** reality can diverge from what planning assumed in
-ways planning time never has to model: data might be missing, several
-instances of the same summary might need merging, instances might
-disagree on parameters.
+actually materialized right now, and produce an answer.** Serving has
+its own error cases, separate from planning-time binding's, **because**
+reality can diverge from what planning assumed: data might be missing,
+several instances of the same summary might need merging, instances
+might disagree on parameters.
 - The structural rules — which nestings of a summary-bound IR are
   valid, what must agree for a merge to be legal — are shared and
   deployment-independent. Storage, summary math, and readout are
@@ -253,7 +205,7 @@ disagree on parameters.
 
 ```mermaid
 flowchart LR
-    L3N["summary-bound IR\n(L3's output, not L4's)"] --> EX["deployment-supplied executor"] --> V["answer\n(a value, not a plan artifact)"]
+    L3N["summary-bound IR\n(L3's output)"] --> EX["deployment-supplied executor"] --> V["answer"]
 ```
 
 - Doc: [`l3-summary-bound-ir.md`](./l3-summary-bound-ir.md) — the
@@ -263,20 +215,19 @@ flowchart LR
 
 Terms that are project-specific, or that get conflated across layers.
 Full detail lives in the layer doc linked from each entry; this is a
-quick reference, not a replacement for it.
+quick reference.
 
 ### Architecture terms
 
 - **Representation** / **layer** — a concrete shape data sits in at
   some point in the pipeline (a real type, or, for L4's output, an
-  interface boundary with no ASAPController-owned type). Answers
-  "what abstraction level are we at." See the representation/pass table
-  at the top of this document.
+  interface boundary owned by the deployment). Answers "what
+  abstraction level are we at." See the representation/pass table at
+  the top of this document.
 - **Pass** — the function/algorithm that turns one representation into
   another, or (uniquely, `canonicalize`) rewrites a representation into
   a normal form of itself. Answers "what happens next." A layer's "Job:"
-  line names its pass(es); a layer heading names what it produces, not
-  what runs.
+  line names its pass(es); a layer heading names what it produces.
 - **Front end** — The per-language component that elaborates a raw
   query string directly into the canonical shape, with unresolved
   column references (L1's `interpret` pass). One per language. See
@@ -292,11 +243,11 @@ quick reference, not a replacement for it.
   [`l3-summary-bound-ir.md`](./l3-summary-bound-ir.md).
 - **Deployment model** — A concrete bundle of (L3 summary choices) +
   (L4 topology) + configuration emission, packaged for one downstream
-  deployment. See [`l4-physical-plan.md`](./l4-physical-plan.md). Not
-  the same sense of "deployment" L2's Job description uses (a physical
-  execution context — parallelism, lifecycle stage) — that's a property
-  a plan runs *under*, this is the packaged product that *implements*
-  L3/L4 for one downstream consumer.
+  deployment. See [`l4-physical-plan.md`](./l4-physical-plan.md). A
+  different sense of "deployment" than L2's Job description uses (a
+  physical execution context — parallelism, lifecycle stage) — this
+  entry is the packaged product that implements L3/L4 for one
+  downstream consumer.
 - **Stage** / **Executor** / **Topology** / **Deployment constraints** —
   L4 concepts: a categorical placement tier, a concrete runtime
   instance, which stages exist and how they connect, and the
