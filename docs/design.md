@@ -39,13 +39,11 @@ unified canonical intent algebra  ← L2
     │        parameters, or leave it PassThrough to raw data)
     ▼
 summary-bound IR  ← L3
-    │  pass: stage-allocate (ASAPController-owned: assign each piece to
-    │        a physical stage, given the topology + deployment
-    │        constraints)
-    ▼
-stage assignments
-    │  pass: physical-lower (deployment-supplied: per-executor fan-out
-    │        + final emission — the plan ready for physical execution)
+    │  pass: physical-lower (deployment-supplied: assign each piece to
+    │        a stage + executor, given the topology + deployment
+    │        constraints — typically delegating the stage-level part to
+    │        ASAPController's own StageAllocator internally — then emit
+    │        the deployment's own output format)
     ▼
 physical IR, ready for runtime/execution  ← L4
   (a deployment's own Output type)
