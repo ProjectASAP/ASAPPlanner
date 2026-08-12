@@ -192,7 +192,3 @@ Limit {
 }
 ```
 
-To visualize a query of your own, edit `crates/lower/examples/topk_ir.rs` (or
-copy it into a new example) and call `lower_promql(query, AccuracyTarget::Exact)`
-or `lower_sql(query, &catalog, AccuracyTarget::Exact).await`, then print the
-returned `QueryExpr` with `{:#?}`.
