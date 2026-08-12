@@ -1,16 +1,10 @@
 # ASAPController
 
-Unified control plane for the ASAP data-lifecycle stack.
-
-This repo merges three previously-separate projects into a single workspace with a shared core and per-deployment-model plugin crates:
-
-- `DataCollector/controller` — end-to-end lifecycle planner (collection → transmission → storage → analytics).
-- `ASAPQuery[-backend]/asap-planner-rs` — analytics-query-only planner (CLI, YAML in → YAML out).
-- `asap-fusion` — DataFusion operator-level rewrite rules with sketch awareness.
+This repo unifies the common parts of Query-to-Primitive/Summary translation and query optimization logic, in ASAP, including ASAPQuery, ASAPFusion, ASAPCollector, ASAPBGP, ASAPWavelets, etc. 
 
 ## Status
 
-**Early implementation.** The workspace builds and is organized into a
+The workspace builds and is organized into a
 layer-named crate stack (the query→summary pipeline reads top-to-bottom).
 [`docs/design.md`](docs/design.md) is the design index the code is
 following — an overview of the L1-L5 pipeline, linking into a dedicated
