@@ -277,3 +277,41 @@ The normalized input meant to sit in front of every query entry point.
 - **Data characteristics** — workload-level facts (series/row count,
   sample rate, wire size, key distribution) used to size summaries
   without running the query.
+
+## End-to-end example
+
+`SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 5`
+
+```mermaid
+flowchart TB
+    Q["query string"]
+
+    subgraph L1["L1"]
+        direction TB
+        A1["Limit{n:5}"] --> A2["Sort{by: cnt DESC}"]
+        A2 --> A3["Aggregate{Reduce([service]), aggs:[Count]}"]
+        A3 --> A4["Scan{metrics}"]
+    end
+
+    subgraph L2["L2"]
+        direction TB
+        B1["Aggregate{Reduce([0]), aggs:[TopK k:5]}"] --> B2["Aggregate{Reduce([0]), aggs:[Count]}"]
+        B2 --> B3["Scan{metrics}"]
+    end
+
+    subgraph L3["L3"]
+        direction TB
+        C1["SummaryAgg{SpaceSaving, k:5}"] --> C2["Logical(Aggregate[Count])"]
+        C2 --> C3["Logical(Scan{metrics})"]
+    end
+
+    subgraph L4["L4"]
+        direction TB
+        D1["stage: backend, executor: backend-3\nSpaceSaving sketch on metrics.service"]
+    end
+
+    Q -->|interpret| A1
+    A1 -.->|resolve + canonicalize| B1
+    B1 -->|implement| C1
+    C1 -->|physical-lower| D1
+```
