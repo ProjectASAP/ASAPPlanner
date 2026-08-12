@@ -1,13 +1,13 @@
 # L2 — intent algebra
 
 The language- and deployment-independent canonical form. Pure intent at
-this layer: no summary types, no summary parameters, no physical
-operator choice — which concrete strategy answers a given piece of
-intent is entirely an L3 decision (see
+this layer — expressing what to compute; summary type, summary
+parameters, and physical operator choice are committed later, entirely
+at L3's discretion (see
 [`l3-summary-bound-ir.md`](./l3-summary-bound-ir.md)). Data-model
-agnostic by design: the same tree shape is meant to cover both
-time-series-style sources and tabular sources, so a source's data model
-is a property of its scan node, not a fork in the tree type.
+agnostic by design: the same tree shape covers both time-series-style
+sources and tabular sources, through a source's data model living on
+its scan node rather than forking the tree type.
 
 ## Design rules
 
