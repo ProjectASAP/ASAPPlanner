@@ -1,10 +1,10 @@
-# L3 — intent algebra
+# L2 — intent algebra
 
 The language- and deployment-independent canonical form. Pure intent at
 this layer: no summary types, no summary parameters, no physical
 operator choice — which concrete strategy answers a given piece of
-intent is entirely an L4 decision (see
-[`l4-summary-bound-ir.md`](./l4-summary-bound-ir.md)). Data-model
+intent is entirely an L3 decision (see
+[`l3-summary-bound-ir.md`](./l3-summary-bound-ir.md)). Data-model
 agnostic by design: the same tree shape is meant to cover both
 time-series-style sources and tabular sources, so a source's data model
 is a property of its scan node, not a fork in the tree type.
@@ -28,7 +28,7 @@ is a property of its scan node, not a fork in the tree type.
    re-summarizable quantile) must be represented as separate intents,
    discriminated by what they actually require to compute — never by
    which language's syntax happened to produce them.
-3. **Intent at L3, summary at L4.** An intent like "a quantile to this
+3. **Intent at L2, summary at L3.** An intent like "a quantile to this
    accuracy" says what to compute; it never says which summary computes
    it.
 4. **A DAG, not a tree.** A producer can have more than one consumer
@@ -101,8 +101,8 @@ version of this idiom.
 
 Everywhere the canonical form names a column — a grouping key, a
 unique key, a designated time column — it is a position into a schema,
-not a string. A layer-2 name means nothing without knowing which
-schema it resolves against and at what offset; a position is settled
+not a string. A pre-bind string name means nothing without knowing
+which schema it resolves against and at what offset; a position is settled
 once, at bind time, and by construction can't fail to resolve for any
 later pass. This also makes the canonical tree self-describing: every
 scan carries its own schema, so any sub-tree's output schema is
@@ -123,9 +123,9 @@ verifiable without consulting the rest of the tree.
 Three distinct kinds of schema-shaped information are easy to conflate
 and shouldn't be: the schema flowing along the canonical tree's own
 edges; the schema of the underlying data source itself (what tables or
-metrics actually exist, consulted only during L1 → L2 name resolution);
-and a catalog of what summaries exist and what they can serve
-(consulted only from L4 onward). Each is read by a different layer, for
+metrics actually exist, consulted only during L1's internal name
+resolution); and a catalog of what summaries exist and what they can
+serve (consulted only from L3 onward). Each is read by a different layer, for
 a different purpose.
 
 ## Unique keys and cross-query sharing
@@ -170,7 +170,7 @@ pub enum QueryExpr {
     ScalarFromVector(Box<QueryExpr>),       // collapse a single-series vector to a scalar
 
     // ── per-row transforms ───────────────────────────────────────────
-    Relabel { dst: String, value: L3Expr, child: Box<QueryExpr> },
+    Relabel { dst: String, value: L2Expr, child: Box<QueryExpr> },
     InfoJoin { selector: Vec<InfoMatcher>, child: Box<QueryExpr> },
     Sample { by: GroupKeys, kind: SampleKind, child: Box<QueryExpr> },
 
@@ -205,7 +205,7 @@ pub enum QueryExpr {
     // ── SQL analytic window functions ────────────────────────────────
     WindowFunc {
         func: WindowFuncKind,
-        args: Vec<L3Expr>,
+        args: Vec<L2Expr>,
         partition_by: GroupKeys,
         order_by: Vec<SortKey>,
         output_name: String,
@@ -225,7 +225,7 @@ or does it have no grouping concept to begin with. Making that an
 explicit field, rather than something a consumer infers from whether a
 key list happens to be empty, is deliberate: the two cases are easy to
 conflate (both can present as "empty keys") but require opposite
-handling downstream — see [`l4-summary-bound-ir.md`](./l4-summary-bound-ir.md#interface)'s
+handling downstream — see [`l3-summary-bound-ir.md`](./l3-summary-bound-ir.md#interface)'s
 `SummaryExecutor::find_candidates` for where that distinction is
 actually load-bearing.
 

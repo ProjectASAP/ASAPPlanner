@@ -1,6 +1,6 @@
-# L4 — summary-bound IR
+# L3 — summary-bound IR
 
-The point where a plan commits to *what* answers each intent that L3's
+The point where a plan commits to *what* answers each intent that L2's
 canonical form deliberately leaves open. "Summary" is the umbrella term
 for whatever answers an intent without re-scanning raw samples —
 concretely, either an approximate sketch (e.g. a quantile sketch, a
@@ -46,7 +46,7 @@ each summarizable node with a decision:
 A summary-bound plan is a DAG, not just a tree — a shared
 sub-computation can appear as more than one reference to the same bound
 node, mirroring the sharing already present in the canonical form (see
-[`l3-intent-algebra.md`](./l3-intent-algebra.md)). Binding only fires
+[`l2-intent-algebra.md`](./l2-intent-algebra.md)). Binding only fires
 where an intent is recognizable in the tree; anything underneath an
 unrewritten (logical) parent stays logical too — extending binding to
 rewrite through a logical parent is a known open design question, not
@@ -124,8 +124,8 @@ not fully resolved either.
 
 ### What's out of scope here
 
-Placement — *which machine* runs a piece of the plan — is L5's concern
-entirely (see [`l5-physical-plan.md`](./l5-physical-plan.md)). This
+Placement — *which machine* runs a piece of the plan — is L4's concern
+entirely (see [`l4-physical-plan.md`](./l4-physical-plan.md)). This
 layer is only about what "answer a query against already-materialized
 summaries" means, on whichever machine ends up doing it. Some
 operations (summary-aware join, subtraction, deletion) have no defined
@@ -155,25 +155,25 @@ ordinary logical computation over raw data.
 The planning-time IR:
 
 ```rust
-pub struct L4Node {
+pub struct L3Node {
     pub expr: SummaryExpr,
-    pub schema: L4Schema,
+    pub schema: L3Schema,
 }
 
 pub enum SummaryExpr {
     Logical(Box<QueryExpr>),
     SummaryAgg {
-        child: Rc<L4Node>,
+        child: Rc<L3Node>,
         summary: SummaryKind,
         params: SummaryParams,
         col: ColumnRef,
         reduction: Reduction,
     },
-    SummaryJoin { outer: Rc<L4Node>, inner: Rc<L4Node>, key: ColumnRef, summary: SummaryKind, params: SummaryParams },
-    SummarySubtract { left: Rc<L4Node>, right: Rc<L4Node> },
-    SummaryDelete { summary_input: Rc<L4Node>, key: ColumnRef },
-    SummaryEstimate { summary_input: Rc<L4Node>, query: SketchQuery },
-    SummaryMerge { children: Vec<Rc<L4Node>> },
+    SummaryJoin { outer: Rc<L3Node>, inner: Rc<L3Node>, key: ColumnRef, summary: SummaryKind, params: SummaryParams },
+    SummarySubtract { left: Rc<L3Node>, right: Rc<L3Node> },
+    SummaryDelete { summary_input: Rc<L3Node>, key: ColumnRef },
+    SummaryEstimate { summary_input: Rc<L3Node>, query: SketchQuery },
+    SummaryMerge { children: Vec<Rc<L3Node>> },
 }
 ```
 
@@ -221,11 +221,11 @@ flowchart LR
     LG -. "✗ already a value" .-> SM
 ```
 
-Binding — turning a canonical `QueryExpr` into an `L4Node` tree:
+Binding — turning a canonical `QueryExpr` into an `L3Node` tree:
 
 ```rust
-pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L4Node>, ImplementError>;
-pub fn implement_tree_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L4Node>, ImplementError>;
+pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L3Node>, ImplementError>;
+pub fn implement_tree_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L3Node>, ImplementError>;
 ```
 
 **"Implementation" is the answer to one question: how is this one
@@ -280,7 +280,7 @@ pub trait CostModel {
 ```
 
 Serving-time — the interface a deployment implements to actually answer
-a query against an already-bound `L4Node` tree:
+a query against an already-bound `L3Node` tree:
 
 ```rust
 pub trait SummaryExecutor {
@@ -296,7 +296,7 @@ pub trait SummaryExecutor {
         params: &SummaryParams,
         col: &ColumnRef,
         reduction: &Reduction,
-        child: &L4Node,
+        child: &L3Node,
     ) -> Result<Vec<(Self::GroupKey, Self::Handle)>, Self::Error>;
 
     fn fetch_state(&self, handle: &Self::Handle) -> Result<Self::State, Self::Error>;
@@ -305,7 +305,7 @@ pub trait SummaryExecutor {
     fn logical(&self, expr: &QueryExpr) -> Result<Self::Value, Self::Error>;
 }
 
-pub fn execute<E: SummaryExecutor>(node: &L4Node, exec: &E) -> Result<ExecOutcome<E>, ExecError<E::Error>>;
+pub fn execute<E: SummaryExecutor>(node: &L3Node, exec: &E) -> Result<ExecOutcome<E>, ExecError<E::Error>>;
 ```
 
 `find_candidates`'s `reduction` parameter is exactly the `Reduction`
@@ -397,7 +397,7 @@ HLL. There's no shortcut around re-examining that argument:
 
 1. **Feed the outer sketch the inner's state, not its answer.** Use the
    inner's raw, pre-`SummaryEstimate` state — typed here as
-   `L4DataType::Sketch(kind, params)` — as the outer's input, instead of
+   `L3DataType::Sketch(kind, params)` — as the outer's input, instead of
    a scalar readout.
 2. **Check the outer's own build procedure can actually run on that
    state.** Does feeding it the inner's state, instead of raw data, still
@@ -440,8 +440,8 @@ pub enum ColumnRef {
     Named(String),
     Qualified { table: String, name: String },
     SampleValue,
-    FromReadout(Rc<L4Node>),   // NEW — 3a; must be value-producing
-    FromState(Rc<L4Node>),     // NEW — 3b; must be state-producing
+    FromReadout(Rc<L3Node>),   // NEW — 3a; must be value-producing
+    FromState(Rc<L3Node>),     // NEW — 3b; must be state-producing
 }
 ```
 
