@@ -15,20 +15,25 @@ conflating them into one "layer":
   normal form of *itself* (same type in, same type out — a within-
   representation pass, not a level change).
 
-Five representations, connected by four passes:
+Four representations, connected by three passes:
 
 ```
 query string
-    │  pass: parse (each language's own third-party parser)
-    │        + interpret (front end's own translation into one shared,
-    │          not-yet-canonical vocabulary)
+    │  pass: interpret (each language's own third-party parser, then the
+    │        front end's own translation directly into the canonical
+    │        shape — dedicated topk() -> AggIntent::TopK, m[5m] ->
+    │        TimeRange, WHERE/matchers -> Scan.predicates, etc. — using
+    │        an unresolved column-reference state, not yet positional)
     ▼
-per-language native representation
-  (spans the raw parser AST and asap-l2's shared-but-uncanonical
-  relational tree; internal to L1, never exposed as its own layer —
-  see "Why this doesn't get its own layer" under L1, below)
-    │  pass: lower (bind + structurally convert + canonicalize,
-    │        one call: convert_root)
+canonical-shaped tree, unresolved column references
+    │  pass: resolve (bind names to schema positions, substitute
+    │        throughout — a generic walk, no per-variant structural
+    │        translation left; that moved into interpret, above)
+    ▼
+    │  pass: canonicalize (cross-language / cross-phrasing pattern
+    │        normalization — e.g. promoting a generic
+    │        Limit{Sort{Aggregate([Count])}} shape a front end had no
+    │        way to recognize as heavy-hitter on its own)
     ▼
 unified canonical intent algebra  ← L2
     │  pass: implement (planning-time binding)
@@ -40,10 +45,29 @@ physical IR, ready for runtime/execution  ← L4
   (no ASAPController-owned type — a deployment's own Output type)
 ```
 
+**This is the target architecture, not the current implementation.**
+Today, each front end still constructs an intermediate, hand-maintained
+relational tree (`asap_l2::relational::QueryExpr`) with its own
+structural shape, and a separate `convert` step structurally translates
+it into canonical form before `resolve`+`canonicalize` run. Review
+found that `convert`'s structural-translation rules are local and
+context-free enough (e.g. relational's dedicated `TopK` node → canonical
+`Aggregate{aggs:[TopK]}`; `Window` → `TimeRange`, unconditionally — no
+context-dependent branching, verified against `convert`'s actual match
+arms) that front ends can produce the canonical shape directly, and the
+relational tree fails the "is this a layer" test below anyway (nothing
+outside `convert_root` depends on it as a stable interface) — so there's
+no reason for it to exist as a separate hand-maintained type. Migration
+tracked in [issue #179](https://github.com/ProjectASAP/ASAPController/issues/179);
+not yet started — this touches ~5,000 LOC across both front ends'
+entire per-construct lowering logic plus `asap-l2`'s binder/
+column-resolution/lower/canonicalize modules, so expect a multi-PR
+migration, not a single-shot rewrite.
+
 **L1-L4 below label representations, not passes.** Each heading names
 the artifact that representation *is* — the "Job:" line under it names
 the pass that *produces* it. Where a layer bundles more than one pass
-(L1 bundles two: parse+interpret, then lower) or hosts a pass that
+(L1 bundles two: interpret, then resolve+canonicalize) or hosts a pass that
 isn't part of the planning pipeline at all (L3's serving-time
 `execute` is runtime evaluation, not a pass — see "Serving-time
 execution" below), that's called out explicitly rather than folded
@@ -56,70 +80,75 @@ implementation currently carries — the implementation predates this
 renumbering and hasn't caught up yet. Treat these as the design target,
 not a guarantee that `grep`-ing the exact identifier finds it today.
 
-## L1 — per-language native representation → canonical intent algebra
+## L1 — query string → canonical intent algebra
 
-This section covers **two passes**, not one — both are internal to L1;
+This section covers **two passes**, not one — both internal to L1;
 nothing outside it observes the checkpoint between them.
 
-**Pass 1 — parse + interpret.** Each query language owns its own
-third-party parser (`promql-parser`, `sqlparser`), producing that
-parser's own AST — a different Rust type per language, sharing nothing.
-The front end then interprets that AST into one shared relational
-vocabulary (filter, project, aggregate, window, sort, limit, join, set
-operations, …) — the same type regardless of source language, but
-still named-column, not yet canonical. Together these produce **the
-per-language native representation** — a real intermediate that spans
-two real types (the third-party AST, then `asap-l2`'s own shared
-relational tree), collapsed into one description here because nothing
-outside this pipeline ever depends on either shape independently: no
-test, tool, or downstream crate reads them as a stable target.
+**Pass 1 — interpret.** Each query language owns its own third-party
+parser (`promql-parser`, `sqlparser`), producing that parser's own AST —
+a different Rust type per language, sharing nothing. The front end then
+interprets that AST **directly into the canonical shape** (a dedicated
+`topk()` call becomes `Aggregate{aggs:[AggIntent::TopK]}` directly, a
+range selector `m[5m]` becomes `TimeRange` directly, `WHERE`/label
+matchers become `Scan.predicates` directly) — the same type regardless
+of source language, but with column references left **unresolved**
+(named, not yet positional). Every language-construct-specific
+structural decision belongs here, in the front end that actually knows
+what it's looking at — nothing later in the pipeline has more context
+than the front end did at parse time.
 
-**Pass 2 — lower.** One shared step, used by every front end regardless
-of language: bind names to schema positions, translate the tree
-structurally into the canonical shape, then run a cross-language
-normalization pass so that semantically equivalent queries — from any
-supported language, or differently-phrased within the same language —
-converge on the identical canonical shape. This is genuinely more than
-renaming column references: `canonicalize` alone rewrites several real
-shape differences away (e.g. promoting a generic
-`Limit{Sort{Aggregate([Count])}}` shape to the explicit heavy-hitter
-`Aggregate{aggs:[TopK]}` form), not just resolved-vs-unresolved column
-identity.
+**Pass 2 — resolve, then canonicalize.** One shared step, used by every
+front end regardless of language: bind names to schema positions and
+substitute them throughout (a generic walk — no per-variant structural
+translation, since pass 1 already produced the canonical shape), then
+run a cross-language normalization pass so that semantically equivalent
+queries — from any supported language, or differently-phrased within
+the same language — converge on the identical canonical shape.
+`canonicalize` is not redundant with pass 1's per-language shaping: it
+catches exactly the cases a front end *cannot* produce directly because
+its own language has no dedicated syntax for the intent — e.g. SQL's
+`ORDER BY count DESC LIMIT k` has no `topk()`-shaped AST node for the
+SQL front end to translate from; only a pattern-detection pass looking
+at the already-assembled tree can recognize it as the same
+`Aggregate{aggs:[TopK]}` shape PromQL's dedicated `topk()` produces
+directly in pass 1.
 
 ```mermaid
 flowchart LR
-    P["Query string (language A)"] --> PA["language A's parser"] --> PR["language A's native representation"]
-    S["Query string (language B)"] --> SA["language B's parser"] --> SR["language B's native representation"]
-    PR --> SH["interpret into shared vocabulary"]
-    SR --> SH
-    SH --> NR["per-language native representation\n(internal checkpoint, not exposed)"]
-    NR --> LO["lower: bind + convert + canonicalize"]
-    LO --> L1T["canonical intent algebra\n(same shape for equivalent\nqueries, any source language)"]
+    P["Query string (language A)"] --> PA["language A's parser"] --> IA["interpret directly\ninto canonical shape\n(unresolved refs)"]
+    S["Query string (language B)"] --> SA["language B's parser"] --> IB["interpret directly\ninto canonical shape\n(unresolved refs)"]
+    IA --> RS["resolve: bind + substitute refs"]
+    IB --> RS
+    RS --> CZ["canonicalize"]
+    CZ --> L1T["canonical intent algebra\n(same shape for equivalent\nqueries, any source language)"]
 ```
 
-**Why "per-language native representation" doesn't get its own layer.**
-It's a real checkpoint — a genuine crate boundary (front-end crates hand
-it to `asap-l2`) — but it fails the test a layer has to pass: something
-*outside* this pipeline treating it as a stable interface. Nothing does.
-It only ever appears as a function argument on the way to canonical,
-never persisted, tested independently, or round-tripped. Compare L2,
-below, which many things depend on directly (L1's output must conform
-to it; L3's binding pattern-matches it; the DAG-export tooling walks
-it) — that's what makes L2 a layer and this merely a pass's internal
-state.
+**Why there's no separate "per-language native representation"
+checkpoint here.** An intermediate, pre-canonical shape (today's
+`asap_l2::relational::QueryExpr`) fails the test a layer has to pass:
+something *outside* the pipeline treating it as a stable interface.
+Nothing does — it only ever appears as a function argument on the way
+to canonical, never persisted, tested independently, or round-tripped.
+Compare L2, below, which many things depend on directly (this pass's
+own output must conform to it; L3's binding pattern-matches it; the
+DAG-export tooling walks it) — that's what makes L2 a layer and an
+intermediate pre-canonical shape merely a pass's internal state, not
+worth a separate hand-maintained type. See the migration note above
+([#179](https://github.com/ProjectASAP/ASAPController/issues/179)).
 
 - Doc: [`l1-query-language.md`](./l1-query-language.md)
 
 ## L2 — intent algebra
 
 **Job: define the canonical intent tree's vocabulary — the shape L1's
-`lower` pass must produce — expressed declaratively (e.g. "a quantile
+passes must produce — expressed declaratively (e.g. "a quantile
 to this accuracy," "the top-k by this ranking"), not committed to any
 particular implementation strategy.** This is the one section with no
 "Job" pass of its own: L2 doesn't transform anything — it's the
 vocabulary/rule set L1's output must conform to, checked by
-construction (every `lower` call runs the same `canonicalize`), not by
-a separate validation step.
+construction (every front end's output runs through the same
+`resolve`+`canonicalize`), not by a separate validation step.
 - The result is a language- and deployment-independent canonical
   intent tree: what to compute, without committing to how. Deployment
   here refers to a physical execution context — e.g. parallelism and
@@ -131,13 +160,13 @@ a separate validation step.
 - Row identity (which positions uniquely identify a row — see
   `Schema::unique_keys`) and cross-query sharing of common
   sub-computations are properties of this canonical form. Both depend
-  on L1's `lower` pass having already converged semantically-equivalent
-  queries onto the same shape: only structurally-identical sub-trees
+  on L1's `canonicalize` pass having already converged
+  semantically-equivalent queries onto the same shape: only structurally-identical sub-trees
   can be recognized as the same reusable computation.
 
 ```mermaid
 flowchart LR
-    L1T["canonical intent tree\n(from L1's lower pass)"] --> V["intent vocabulary\n+ design rules"]
+    L1T["canonical intent tree\n(from L1)"] --> V["intent vocabulary\n+ design rules"]
     V --> L2G["governs what a valid\nL1 output looks like"]
 ```
 
@@ -249,11 +278,11 @@ quick reference, not a replacement for it.
   line names its pass(es); a layer heading names what it produces, not
   what runs.
 - **Front end** — The per-language component that elaborates a raw
-  query string into that language's own native representation (parse +
-  interpret, the first half of L1). One per language. See
+  query string directly into the canonical shape, with unresolved
+  column references (L1's `interpret` pass). One per language. See
   [`l1-query-language.md`](./l1-query-language.md).
 - **Bind** — Name resolution: mapping a symbolic column reference to a
-  schema position. Part of L1's `lower` pass. See
+  schema position. Part of L1's `resolve` pass. See
   [`l1-query-language.md`](./l1-query-language.md).
 - **Summary** — Umbrella term for whatever answers a piece of intent
   without re-scanning raw samples: an approximate sketch or an exact
