@@ -115,80 +115,50 @@ workspace is exercised through its test suite and through runnable examples.
 cargo test --workspace
 ```
 
-**Visualize the IR.** `asap-lower` ships an example, `topk_ir`, that lowers a
-batch of PromQL and SQL queries through L1→L2→L3 and pretty-prints the
+**Visualize the IR.** `asap-lower` ships an example, `dag_export`, that lowers
+one or more `--sql`/`--promql` queries through L1→L2→L3 and flattens each
 resulting `QueryExpr` — the L3 canonical IR (see
-[`docs/l3-intent-algebra.md`](docs/l3-intent-algebra.md)) — as a tree:
+[`docs/l3-intent-algebra.md`](docs/l3-intent-algebra.md)) — into a generic
+node/edge graph, printed as JSON:
 
 ```bash
-cargo run -p asap-lower --example topk_ir
+cargo run -p asap-lower --example dag_export -- \
+  --promql "sum by (service) (rate(http_requests_total[5m]))" --name q1 \
+  > /tmp/dag.json
 ```
 
-For each query it prints the source text followed by its `QueryExpr` tree via
-Rust's `{:#?}` pretty-debug formatting. For example, `topk(5,
-rate(http_requests_total[5m]))` lowers to:
+`--name` is optional (defaults to `q<n>`); repeat `--sql`/`--promql` to pack
+several queries into one file. Each node carries a `kind`, a short `label`,
+its own fields under `detail`, `children` ids, and a bottom-up structural
+`hash` so identical subtrees (e.g. a `Scan` shared across two queries) can be
+spotted by comparing hashes. The query above exports as:
 
-```
-━━━ P3 — topk over rate ━━━
-topk(5, rate(http_requests_total[5m]))
-Limit {
-    n: 5,
-    offset: 0,
-    child: Sort {
-        keys: [
-            SortKey {
-                expr: Column(
-                    1,
-                ),
-                ascending: false,
-                nulls_first: false,
-            },
+```json
+{
+  "queries": [
+    {
+      "name": "q1",
+      "graph": {
+        "nodes": [
+          { "id": 0, "kind": "Scan", "label": "Scan(http_requests_total)", "children": [], "detail": { "source": { "TimeSeries": { "metric": "http_requests_total" } }, "predicates": [], "schema": { "...": "..." } } },
+          { "id": 1, "kind": "TimeRange", "label": "TimeRange(300s)", "children": [0], "detail": { "range": { "secs": 300, "nanos": 0 } } },
+          { "id": 2, "kind": "Aggregate", "label": "Aggregate(1 aggs)", "children": [1], "detail": { "reduction": "PerEntity", "aggs": [{ "kind": "rate" }], "output_names": [""], "having": null } },
+          { "id": 3, "kind": "Aggregate", "label": "Aggregate(1 aggs)", "children": [2], "detail": { "reduction": { "Reduce": [2] }, "aggs": [{ "kind": "sum", "col": null }], "output_names": [""], "having": null } }
         ],
-        partition_by: GroupKeys {
-            keys: [],
-            without: false,
-        },
-        child: Aggregate {
-            reduction: PerEntity,
-            aggs: [
-                Rate,
-            ],
-            output_names: [
-                "",
-            ],
-            having: None,
-            child: TimeRange {
-                range: 300s,
-                child: Scan {
-                    source: TimeSeries {
-                        metric: "http_requests_total",
-                    },
-                    predicates: [],
-                    schema: Schema {
-                        columns: [
-                            Column {
-                                name: "ts",
-                                dtype: Timestamp,
-                                nullable: false,
-                                table: None,
-                            },
-                            Column {
-                                name: "value",
-                                dtype: Float64,
-                                nullable: false,
-                                table: None,
-                            },
-                        ],
-                        time_index: Some(
-                            0,
-                        ),
-                        unique_keys: [],
-                        closed: false,
-                    },
-                },
-            },
-        },
-    },
+        "root": 3
+      }
+    }
+  ]
 }
 ```
 
+(`schema` and each node's `hash` elided above for width — the real output
+prints both in full.) Drop
+that JSON onto [`tools/dag-viewer/index.html`](tools/dag-viewer/index.html) —
+a self-contained offline page (open the file directly, or `python3 -m
+http.server` from `tools/dag-viewer/` if your browser blocks local module
+loads) — to browse it as an interactive DAG: click a node for its full
+`detail` in a side panel, switch between queries via tabs, and toggle
+highlighting of structurally-identical nodes shared across queries. See
+[`tools/dag-viewer/README.md`](tools/dag-viewer/README.md) for the shared-
+subtree-highlighting caveat (it's a client-side hash proxy, not real CSE).

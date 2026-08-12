@@ -12,6 +12,8 @@ asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
 
 [dev-dependencies]
-# The topk_ir example builds catalog schemas + drives the async SQL path.
+# The topk_ir / dag_export examples build catalog schemas + drive the async
+# SQL path, and dag_export prints its JSON output via serde_json.
 asap-ir = { path = "../ir" }
+serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

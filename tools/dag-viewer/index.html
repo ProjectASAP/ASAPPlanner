@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>ASAP query DAG viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="dagre.min.js"></script>
+<script src="cytoscape.min.js"></script>
+<script src="cytoscape-dagre.js"></script>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1b1f24;
+    --muted: #6b7280;
+    --panel: #f6f7f9;
+    --border: #d9dce1;
+    --accent: #2563eb;
+    --shared: #d97706;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --fg: #e6e8eb;
+      --muted: #9aa1ab;
+      --panel: #1d2025;
+      --border: #333740;
+      --accent: #5b8def;
+      --shared: #f2a93b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin: 0;
+    white-space: nowrap;
+  }
+  #dropzone {
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 0.35rem 0.8rem;
+    font-size: 0.8rem;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  #dropzone.dragover { border-color: var(--accent); color: var(--accent); }
+  #fileInput { display: none; }
+  #clearBtn {
+    font-size: 0.8rem;
+    padding: 0.35rem 0.7rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    cursor: pointer;
+  }
+  label.toggle {
+    font-size: 0.8rem;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    white-space: nowrap;
+  }
+  #tabs {
+    display: flex;
+    gap: 0.25rem;
+    overflow-x: auto;
+    padding: 0.4rem 0.75rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    padding: 0.4rem 0.8rem;
+    font-size: 0.82rem;
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    background: var(--panel);
+    color: var(--muted);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .tab.active { color: var(--fg); background: var(--bg); font-weight: 600; }
+  #main {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+  #cy { flex: 1; min-width: 0; }
+  #empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 0.9rem;
+    text-align: center;
+    padding: 2rem;
+  }
+  #sidepanel {
+    width: 340px;
+    flex-shrink: 0;
+    border-left: 1px solid var(--border);
+    background: var(--panel);
+    padding: 0.8rem;
+    overflow-y: auto;
+    font-size: 0.8rem;
+  }
+  #sidepanel h2 {
+    font-size: 0.85rem;
+    margin: 0 0 0.4rem;
+  }
+  #sidepanel .kind {
+    display: inline-block;
+    font-size: 0.7rem;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 0.05rem 0.4rem;
+    margin-bottom: 0.5rem;
+  }
+  #sidepanel .shared-note {
+    color: var(--shared);
+    font-size: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+  #sidepanel pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.5rem;
+    margin: 0;
+  }
+  #sidepanel .placeholder { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ASAP query DAG viewer</h1>
+  <div id="dropzone">Drop WorkloadGraph JSON here, or click to choose file(s)</div>
+  <input id="fileInput" type="file" accept="application/json" multiple />
+  <button id="clearBtn">Clear all</button>
+  <label class="toggle">
+    <input id="highlightToggle" type="checkbox" checked />
+    Highlight shared subtrees
+  </label>
+</header>
+
+<div id="tabs"></div>
+
+<div id="main">
+  <div id="empty">
+    Load one or more JSON files produced by
+    <code>cargo run -p asap-lower --example dag_export -- --sql "..." --name q1 &gt; dag.json</code>
+    to get started.
+  </div>
+  <div id="cy" style="display:none"></div>
+  <div id="sidepanel" style="display:none">
+    <div class="placeholder">Click a node to inspect it.</div>
+  </div>
+</div>
+
+<script>
+cytoscape.use(window.cytoscapeDagre);
+
+// ── State ────────────────────────────────────────────────────────────────
+// queries: [{ name, graph: { nodes, root } }], flattened across every loaded
+// file (a later file whose query name collides with an earlier one is kept
+// distinct by suffixing the file index).
+let queries = [];
+let activeIndex = -1;
+let cy = null;
+let highlightOn = true;
+
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const clearBtn = document.getElementById('clearBtn');
+const highlightToggle = document.getElementById('highlightToggle');
+const tabsEl = document.getElementById('tabs');
+const cyEl = document.getElementById('cy');
+const emptyEl = document.getElementById('empty');
+const sidepanel = document.getElementById('sidepanel');
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  loadFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', (e) => loadFiles(e.target.files));
+clearBtn.addEventListener('click', () => {
+  queries = [];
+  activeIndex = -1;
+  render();
+});
+highlightToggle.addEventListener('change', () => {
+  highlightOn = highlightToggle.checked;
+  applyHighlighting();
+});
+
+function loadFiles(fileList) {
+  const files = Array.from(fileList || []);
+  let pending = files.length;
+  if (pending === 0) return;
+  files.forEach((file, fileIdx) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const incoming = parsed.queries || [];
+        const existingNames = new Set(queries.map((q) => q.name));
+        incoming.forEach((q) => {
+          let name = q.name;
+          if (existingNames.has(name)) name = `${q.name} (${file.name})`;
+          existingNames.add(name);
+          queries.push({ name, graph: q.graph });
+        });
+      } catch (err) {
+        alert(`Failed to parse ${file.name}: ${err.message}`);
+      }
+      pending -= 1;
+      if (pending === 0) {
+        if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
+        render();
+      }
+    };
+    reader.readAsText(file);
+  });
+  fileInput.value = '';
+}
+
+// ── Shared-subtree hashes across all loaded queries ─────────────────────
+// Map<hash, Set<queryName>> — a node's hash is "shared" once it shows up
+// under >= 2 distinct query names (this is a client-side structural-equality
+// proxy for real CSE output; see crates/ir/src/dag_export.rs).
+function computeHashOwners() {
+  const owners = new Map();
+  for (const q of queries) {
+    const seenInThisQuery = new Set();
+    for (const node of q.graph.nodes) {
+      if (seenInThisQuery.has(node.hash)) continue;
+      seenInThisQuery.add(node.hash);
+      if (!owners.has(node.hash)) owners.set(node.hash, new Set());
+      owners.get(node.hash).add(q.name);
+    }
+  }
+  return owners;
+}
+
+function render() {
+  tabsEl.innerHTML = '';
+  if (queries.length === 0) {
+    emptyEl.style.display = 'flex';
+    cyEl.style.display = 'none';
+    sidepanel.style.display = 'none';
+    cy = null;
+    return;
+  }
+  emptyEl.style.display = 'none';
+  cyEl.style.display = 'block';
+  sidepanel.style.display = 'block';
+
+  queries.forEach((q, i) => {
+    const tab = document.createElement('div');
+    tab.className = 'tab' + (i === activeIndex ? ' active' : '');
+    tab.textContent = q.name;
+    tab.addEventListener('click', () => { activeIndex = i; render(); });
+    tabsEl.appendChild(tab);
+  });
+
+  renderGraph(queries[activeIndex]);
+}
+
+function renderGraph(query) {
+  const elements = [];
+  for (const node of query.graph.nodes) {
+    elements.push({
+      data: { id: String(node.id), label: `${node.kind}\n${node.label}`, node },
+    });
+  }
+  for (const node of query.graph.nodes) {
+    for (const childId of node.children) {
+      elements.push({
+        data: {
+          id: `e-${node.id}-${childId}`,
+          source: String(node.id),
+          target: String(childId),
+        },
+      });
+    }
+  }
+
+  cy = cytoscape({
+    container: cyEl,
+    elements,
+    style: [
+      {
+        selector: 'node',
+        style: {
+          'shape': 'round-rectangle',
+          'background-color': '#64748b',
+          'label': 'data(label)',
+          'color': '#fff',
+          'text-wrap': 'wrap',
+          'text-valign': 'center',
+          'text-halign': 'center',
+          'font-size': 10,
+          'width': 'label',
+          'height': 'label',
+          'padding': '8px',
+          'border-width': 0,
+        },
+      },
+      {
+        selector: 'node.shared',
+        style: {
+          'border-width': 3,
+          'border-color': '#d97706',
+          'background-color': '#7c8896',
+        },
+      },
+      {
+        selector: 'node:selected',
+        style: {
+          'border-width': 3,
+          'border-color': '#2563eb',
+        },
+      },
+      {
+        selector: 'edge',
+        style: {
+          'width': 1.5,
+          'line-color': '#9aa1ab',
+          'target-arrow-color': '#9aa1ab',
+          'target-arrow-shape': 'triangle',
+          'curve-style': 'bezier',
+        },
+      },
+    ],
+    layout: { name: 'dagre', rankDir: 'TB', nodeSep: 30, rankSep: 60 },
+  });
+
+  cy.on('tap', 'node', (evt) => showDetail(evt.target.data('node'), query));
+  cy.on('tap', (evt) => { if (evt.target === cy) clearDetail(); });
+
+  applyHighlighting();
+  clearDetail();
+}
+
+function applyHighlighting() {
+  if (!cy) return;
+  const owners = computeHashOwners();
+  cy.nodes().forEach((n) => {
+    const node = n.data('node');
+    const sharedWith = owners.get(node.hash);
+    const isShared = highlightOn && sharedWith && sharedWith.size > 1;
+    n.toggleClass('shared', isShared);
+  });
+}
+
+function clearDetail() {
+  sidepanel.innerHTML = '<div class="placeholder">Click a node to inspect it.</div>';
+}
+
+function showDetail(node, query) {
+  const owners = computeHashOwners();
+  const sharedWith = Array.from(owners.get(node.hash) || []).filter((n) => n !== query.name);
+
+  const sharedHtml = sharedWith.length
+    ? `<div class="shared-note">Structurally identical to a node also present in: ${sharedWith
+        .map(escapeHtml)
+        .join(', ')}</div>`
+    : '';
+
+  sidepanel.innerHTML = `
+    <span class="kind">${escapeHtml(node.kind)}</span>
+    <h2>${escapeHtml(node.label)}</h2>
+    ${sharedHtml}
+    <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
+  `;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+render();
+</script>
+</body>
+</html>

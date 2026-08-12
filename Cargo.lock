@@ -355,6 +355,7 @@ dependencies = [
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-ir",
+ "serde_json",
  "tokio",
 ]
 
