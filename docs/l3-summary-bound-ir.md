@@ -1,6 +1,6 @@
-# L4 — summary-bound IR
+# L3 — summary-bound IR
 
-The point where a plan commits to *what* answers each intent that L3's
+The point where a plan commits to *what* answers each intent that L2's
 canonical form deliberately leaves open. "Summary" is the umbrella term
 for whatever answers an intent without re-scanning raw samples —
 concretely, either an approximate sketch (e.g. a quantile sketch, a
@@ -9,13 +9,13 @@ accumulator (e.g. sum, count, min/max, rate, increase). New primitive
 classes are meant to slot in as additional summary kinds, not as a new
 IR or a new translation layer.
 
-This layer has two distinct halves, deliberately kept separate:
-**planning-time** binding (deciding, symbolically, which summary
-answers which intent) and **serving-time** execution (actually
-resolving that decision against whatever is materialized right now).
-They're covered in turn below.
+This layer has two distinct halves, kept separate on purpose:
+**planning-time** `implement` (deciding, symbolically, which summary
+answers which intent) and **serving-time** `execute` (resolving that
+decision against whatever is materialized right now). They're covered
+in turn below.
 
-## Planning-time: binding
+## Planning-time: implement
 
 A decision, made once per query shape, symbolically: given an intent
 and its accuracy requirement, which summary family and parameters
@@ -46,11 +46,11 @@ each summarizable node with a decision:
 A summary-bound plan is a DAG, not just a tree — a shared
 sub-computation can appear as more than one reference to the same bound
 node, mirroring the sharing already present in the canonical form (see
-[`l3-intent-algebra.md`](./l3-intent-algebra.md)). Binding only fires
+[`l2-intent-algebra.md`](./l2-intent-algebra.md)). Binding only fires
 where an intent is recognizable in the tree; anything underneath an
-unrewritten (logical) parent stays logical too — extending binding to
-rewrite through a logical parent is a known open design question, not
-attempted by the base design.
+unrewritten (logical) parent stays logical too — extending `implement`
+to rewrite through a logical parent is a known open design question,
+left to a deployment that has a real need for it.
 
 Each bound node's output schema extends the canonical schema with one
 new possibility: a field whose type *is* a built summary (identified by
@@ -63,10 +63,10 @@ as a planning-time error rather than a runtime one.
 
 A lookup, done on every query: resolve each leaf of an already-bound
 plan against whatever summaries are actually materialized right now.
-Reality can diverge from what planning assumed — data might be missing,
-several instances of the same summary might need merging, instances
-might disagree on parameters — so serving needs its own error cases,
-distinct from anything planning-time binding can raise.
+Serving has its own error cases, separate from planning-time
+`implement`'s, because reality can diverge from what planning assumed:
+data might be missing, several instances of the same summary might need
+merging, instances might disagree on parameters.
 
 ### Split of responsibility
 
@@ -111,28 +111,25 @@ expected — e.g. a two-stage precompute pipeline where one tier streams
 a per-group reduction and another tier builds a richer summary over
 that stream is a real, intended shape.
 
-**Deliberately left open:** whether a summary aggregation can validly
-sit above a *readout* — "build a new summary from another summary's
+**Open question:** whether a summary aggregation can validly sit above
+a *readout* — "build a new summary from another summary's
 already-computed value, at query time." Every design considered so far
-only builds summaries incrementally from raw samples, at ingest time;
-there's no established answer for building one from a
-query-time-derived scalar. A deployment that hits this shape should
-treat it as unsupported rather than assume either answer. The design
-proposal below narrows exactly which cases of this remain genuinely
-open (see "Pattern D" below) — it is not fully open anymore, but it is
-not fully resolved either.
+builds summaries incrementally from raw samples, at ingest time; a
+query-time-derived scalar is a genuinely different input this design
+hasn't addressed. A deployment that hits this shape should treat it as
+unsupported until it's resolved. The design proposal below narrows the
+question considerably (see "Pattern D" below) without fully resolving it.
 
-### What's out of scope here
+### Scope: L3 vs. L4
 
-Placement — *which machine* runs a piece of the plan — is L5's concern
-entirely (see [`l5-physical-plan.md`](./l5-physical-plan.md)). This
-layer is only about what "answer a query against already-materialized
+Placement — *which machine* runs a piece of the plan — is L4's concern
+entirely (see [`l4-physical-plan.md`](./l4-physical-plan.md)). This
+layer covers what "answer a query against already-materialized
 summaries" means, on whichever machine ends up doing it. Some
 operations (summary-aware join, subtraction, deletion) have no defined
-execution behavior yet, because no binding rule produces them yet in
-the base design — a deployment should add that behavior only once it
-has a real need for the shape, rather than speculatively guessing the
-right one now.
+execution behavior yet — the base design produces them only once a
+deployment defines an `implement` rule for the shape it actually needs,
+rather than speculating ahead of a real use case.
 
 ## Choosing a summary for an intent
 
@@ -142,7 +139,7 @@ deployment can supply its own ranking to prefer an alternative family
 where one exists (e.g. an alternative quantile sketch, an alternative
 cardinality sketch). This ranking is the one general-purpose extension
 point in this layer — a deployment customizes *which* summary is
-chosen, without touching how binding or execution works structurally.
+chosen, independently of how `implement` or `execute` work structurally.
 
 Not every intent has a summary counterpart. An intent whose accurate
 computation requires richer partial state than a single summary value
@@ -155,25 +152,25 @@ ordinary logical computation over raw data.
 The planning-time IR:
 
 ```rust
-pub struct L4Node {
+pub struct L3Node {
     pub expr: SummaryExpr,
-    pub schema: L4Schema,
+    pub schema: L3Schema,
 }
 
 pub enum SummaryExpr {
     Logical(Box<QueryExpr>),
     SummaryAgg {
-        child: Rc<L4Node>,
+        child: Rc<L3Node>,
         summary: SummaryKind,
         params: SummaryParams,
         col: ColumnRef,
         reduction: Reduction,
     },
-    SummaryJoin { outer: Rc<L4Node>, inner: Rc<L4Node>, key: ColumnRef, summary: SummaryKind, params: SummaryParams },
-    SummarySubtract { left: Rc<L4Node>, right: Rc<L4Node> },
-    SummaryDelete { summary_input: Rc<L4Node>, key: ColumnRef },
-    SummaryEstimate { summary_input: Rc<L4Node>, query: SketchQuery },
-    SummaryMerge { children: Vec<Rc<L4Node>> },
+    SummaryJoin { outer: Rc<L3Node>, inner: Rc<L3Node>, key: ColumnRef, summary: SummaryKind, params: SummaryParams },
+    SummarySubtract { left: Rc<L3Node>, right: Rc<L3Node> },
+    SummaryDelete { summary_input: Rc<L3Node>, key: ColumnRef },
+    SummaryEstimate { summary_input: Rc<L3Node>, query: SketchQuery },
+    SummaryMerge { children: Vec<Rc<L3Node>> },
 }
 ```
 
@@ -221,16 +218,16 @@ flowchart LR
     LG -. "✗ already a value" .-> SM
 ```
 
-Binding — turning a canonical `QueryExpr` into an `L4Node` tree:
+`implement` — turning a canonical `QueryExpr` into an `L3Node` tree:
 
 ```rust
-pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L4Node>, ImplementError>;
-pub fn implement_tree_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L4Node>, ImplementError>;
+pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L3Node>, ImplementError>;
+pub fn implement_tree_with(expr: &QueryExpr, cost_model: &dyn CostModel) -> Result<Rc<L3Node>, ImplementError>;
 ```
 
 **"Implementation" is the answer to one question: how is this one
 intent actually realized?** It's the return type of the per-intent
-binding decision (`implementation_for`) — for a given `AggIntent`,
+`implement` decision (`implementation_for`) — for a given `AggIntent`,
 exactly one of: build an approximate sketch (bounded error, sized to
 the accuracy target), build an exact accumulator (zero error, still
 mergeable — see "Choosing a summary for an intent" above), or don't
@@ -250,7 +247,7 @@ pub fn implementation_for(intent: &AggIntent) -> Implementation;
 
 An earlier revision of this type split `Summary` into two variants,
 `Sketch{kind,params}` and `ExactAccumulator{kind,params}`, carrying
-identical shapes — the split existed only because binding needed to
+identical shapes — the split existed only because `implement` needed to
 know, right here, whether the chosen `kind` requires a `SummaryEstimate`
 readout afterward (approximate) or *is* the answer once built (exact —
 no estimate step). #170 collapsed them into the single `Summary`
@@ -259,7 +256,7 @@ instead of from the variant tag.
 
 The one pluggable extension point at this layer — a deployment supplies
 its own `CostModel` to override which summary family is chosen and how
-its parameters are sized, without touching the binding pass itself.
+its parameters are sized, independently of the `implement` pass itself.
 Every method past the first has a sensible default, so a deployment that
 only wants to reorder candidates doesn't have to implement the rest:
 
@@ -280,7 +277,7 @@ pub trait CostModel {
 ```
 
 Serving-time — the interface a deployment implements to actually answer
-a query against an already-bound `L4Node` tree:
+a query against an already-bound `L3Node` tree:
 
 ```rust
 pub trait SummaryExecutor {
@@ -296,7 +293,7 @@ pub trait SummaryExecutor {
         params: &SummaryParams,
         col: &ColumnRef,
         reduction: &Reduction,
-        child: &L4Node,
+        child: &L3Node,
     ) -> Result<Vec<(Self::GroupKey, Self::Handle)>, Self::Error>;
 
     fn fetch_state(&self, handle: &Self::Handle) -> Result<Self::State, Self::Error>;
@@ -305,7 +302,7 @@ pub trait SummaryExecutor {
     fn logical(&self, expr: &QueryExpr) -> Result<Self::Value, Self::Error>;
 }
 
-pub fn execute<E: SummaryExecutor>(node: &L4Node, exec: &E) -> Result<ExecOutcome<E>, ExecError<E::Error>>;
+pub fn execute<E: SummaryExecutor>(node: &L3Node, exec: &E) -> Result<ExecOutcome<E>, ExecError<E::Error>>;
 ```
 
 `find_candidates`'s `reduction` parameter is exactly the `Reduction`
@@ -397,7 +394,7 @@ HLL. There's no shortcut around re-examining that argument:
 
 1. **Feed the outer sketch the inner's state, not its answer.** Use the
    inner's raw, pre-`SummaryEstimate` state — typed here as
-   `L4DataType::Sketch(kind, params)` — as the outer's input, instead of
+   `L3DataType::Sketch(kind, params)` — as the outer's input, instead of
    a scalar readout.
 2. **Check the outer's own build procedure can actually run on that
    state.** Does feeding it the inner's state, instead of raw data, still
@@ -440,8 +437,8 @@ pub enum ColumnRef {
     Named(String),
     Qualified { table: String, name: String },
     SampleValue,
-    FromReadout(Rc<L4Node>),   // NEW — 3a; must be value-producing
-    FromState(Rc<L4Node>),     // NEW — 3b; must be state-producing
+    FromReadout(Rc<L3Node>),   // NEW — 3a; must be value-producing
+    FromState(Rc<L3Node>),     // NEW — 3b; must be state-producing
 }
 ```
 
