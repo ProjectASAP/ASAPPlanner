@@ -25,18 +25,18 @@ query string
     │        TimeRange, WHERE/matchers -> Scan.predicates, etc. — using
     │        a named column-reference state)
     ▼
-canonical-shaped tree, unresolved column references
-    │  pass: resolve (bind names to schema positions, substitute them
+per-language AST/DAG, unresolved column references ← L1
+    │  pass': resolve (bind names to schema positions, substitute them
     │        throughout the already-canonical-shaped tree)
     ▼
-    │  pass: canonicalize (cross-language / cross-phrasing pattern
+    │  pass'': canonicalize (cross-language / cross-phrasing pattern
     │        normalization — e.g. promoting a generic
     │        Limit{Sort{Aggregate([Count])}} shape to the heavy-hitter
     │        Aggregate{aggs:[TopK]} shape)
     ▼
 unified canonical intent algebra  ← L2
     │  pass: implement (bind each intent to a summary family + size its
-    │        parameters, or leave it PassThrough to raw data)
+    │        parameters, or leave it PassThrough to raw data; considering the set of summary candidates mapping to aggregation intent, CSE)
     ▼
 summary-bound IR  ← L3
     │  pass: physical-lower (deployment-supplied: assign each piece to
@@ -49,23 +49,8 @@ physical IR, ready for runtime/execution  ← L4
   (a deployment's own Output type)
 ```
 
-**Status.** This is the design target for L1's passes; implementation
-tracked in [issue #179](https://github.com/ProjectASAP/ASAPController/issues/179).
-
-Each layer below labels one representation. Its heading names the
-artifact that representation is; the pass(es) that produce it are
-named right beneath — a single "Job:" line where a layer runs exactly
-one (L2, L3), a short list where it bundles more than one (L1's
-interpret then resolve+canonicalize; L4's physical-lower, which
-typically delegates part of its own work to ASAPController's shared
-StageAllocator). A pass that belongs to serving time instead of
-planning (L3's `execute` — see "Serving-time execution" below) is
-called out separately from the layer's own Job.
-
-**A note on type names below.** This document's "Interface" sections
-show Rust shapes using this document's own layer numbers (e.g.
-`L2Expr`, `L3Node`) as the design target for those identifiers.
-
+ 
+ 
 ## L1 — query string → canonical intent algebra
 
 Two passes, both internal to L1: interpret, then resolve+canonicalize.
