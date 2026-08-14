@@ -50,6 +50,13 @@ DistinctCount(field)
 Additional measures can be added when there is a stable semantic distinction and a
 meaningful summary implementation.
 
+**Fields** (real implementation — differs from the sketch above, see #185):
+- `reduction` — whether this is a genuine cross-entity reduction (`Reduce(GroupKeys)`) or a per-entity pass-through with no grouping concept at all (`PerEntity`).
+- `aggs` — the aggregate intents to compute (`Sum`, `Rate`, `HistogramQuantile`, ...).
+- `output_names` — output column name per entry in `aggs`; overrides the synthetic default when non-empty.
+- `having` — an optional post-aggregation filter predicate (SQL `HAVING`).
+- `child` — the input being aggregated.
+
 ## Time-related nodes
 
 
@@ -61,6 +68,10 @@ Represents a range of time. Kept different from `Filter` to treat time as an exp
 rate(http_requests_total[5m])
 ```
 
+**Fields:**
+- `range` — how far back to look (the PromQL `[5m]` duration).
+- `child` — the input the range applies to.
+
 ### TimeShift
 
 PromQL `offset` / `@` time shift on a selector — a pass-through wrapper that moves *when*
@@ -69,6 +80,10 @@ the child is evaluated but leaves its schema unchanged.
 ```promql
 up offset 5m
 ```
+
+**Fields:**
+- `shift` — the offset/`@` anchor to apply (moves *when* `child` is evaluated).
+- `child` — the selector being shifted.
 
 ### Subquery
 
@@ -79,6 +94,11 @@ given step resolution.
 ```promql
 avg_over_time(up[5m:1m])
 ```
+
+**Fields:**
+- `range` — how far back the sub-query evaluates.
+- `resolution` — the step between evaluated points; `None` defers to the default step.
+- `child` — the instant-vector expression being re-evaluated over the range.
 
 ## Relational nodes
 
@@ -94,6 +114,11 @@ Scan(
 
 PromQL metric selection and SQL `FROM` clauses can both map into `Scan` when they denote
 the same logical data domain.
+
+**Fields:**
+- `source` — the logical data source (a table name or PromQL metric selector).
+- `predicates` — row-level filters pushed all the way down to this scan.
+- `schema` — the binding schema every positional column reference in the tree resolves against.
 
 ### Filter
 
@@ -118,6 +143,10 @@ the predicate sits over something a scan can't absorb, e.g. a post-aggregate col
 SELECT * FROM (SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip) t WHERE cnt > 10
 ```
 
+**Fields:**
+- `pred` — the row-level predicate to apply.
+- `child` — the input being filtered.
+
 ### Project
 
 π — column projection (SQL `SELECT` list). No PromQL equivalent: PromQL never subsets
@@ -126,6 +155,11 @@ columns, so this node is SQL-only in practice today.
 ```sql
 SELECT srcip, dstip FROM packets
 ```
+
+**Fields:**
+- `cols` — the output column list (expression + optional alias per column).
+- `qualifier` — a table alias re-qualifying every output column, for a derived table; `None` for an ordinary `SELECT` list.
+- `child` — the input being projected.
 
 ### BinaryOp
 
@@ -136,6 +170,12 @@ a vector and a scalar, or two scalars.
 up > 1
 ```
 
+**Fields:**
+- `op` — the arithmetic/comparison/boolean operator.
+- `lhs` — the left operand.
+- `rhs` — the right operand.
+- `vector_match` — PromQL vector-matching modifiers (`on`/`ignoring`, `group_left`/`group_right`); `None` outside PromQL.
+
 ### Sort
 
 Generic order-by for non-heavy-hitter cases. `partition_by` makes the ordering per-group —
@@ -145,6 +185,11 @@ the home for PromQL `topk by (...)`/SQL `... OVER (PARTITION BY ...)`-style grou
 sort_desc(up)
 ```
 
+**Fields:**
+- `keys` — the ordering columns/expressions and direction.
+- `partition_by` — grouping keys that make the ordering per-group instead of global; empty = a single global order.
+- `child` — the input being ordered.
+
 ### Limit
 
 Caps the row count, with an offset. SQL `LIMIT n [OFFSET o]`; also paired with `Sort` for
@@ -153,6 +198,11 @@ PromQL's generic (non-heavy-hitter) `topk`/`bottomk`.
 ```promql
 topk(3, up)
 ```
+
+**Fields:**
+- `n` — the maximum number of rows to keep.
+- `offset` — how many leading rows to skip first.
+- `child` — the input being capped.
 
 ### Distinct
 
@@ -164,6 +214,10 @@ multiple rows.
 SELECT DISTINCT srcip, dstip FROM packets
 ```
 
+**Fields:**
+- `cols` — the columns to dedup on; empty = dedup on every column.
+- `child` — the input being deduplicated.
+
 ### Join
 
 Logical join; the physical strategy (hash/merge/broadcast) is picked at L4. SQL `JOIN`.
@@ -171,6 +225,12 @@ Logical join; the physical strategy (hash/merge/broadcast) is picked at L4. SQL 
 ```sql
 SELECT u.prefix FROM bgp_updates u JOIN bgp_rib_state r ON u.prefix = r.prefix
 ```
+
+**Fields:**
+- `kind` — the join type (inner/left/right/full/semi/anti).
+- `pred` — the join condition.
+- `left` — the left input.
+- `right` — the right input.
 
 ### SetOp
 
@@ -180,6 +240,12 @@ concatenation. `UNION` (dedup) further wraps a `SetOp` in a `Distinct`; `UNION A
 ```sql
 SELECT srcip FROM packets UNION ALL SELECT dstip FROM packets
 ```
+
+**Fields:**
+- `kind` — which set operation (union/intersect/except).
+- `all` — whether duplicates are kept (`ALL`) or removed.
+- `left` — the left branch.
+- `right` — the right branch.
 
 ### Merge
 
@@ -193,6 +259,9 @@ grouping level).
 histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0.9)
 ```
 
+**Fields:**
+- `children` — the union-compatible branches to concatenate; must be non-empty.
+
 ## PromQL-specific nodes
 
 ### Scalar
@@ -203,6 +272,8 @@ Appears as a `BinaryOp` operand for `<vector> op <scalar>` thresholds and unit c
 ```promql
 up > 1
 ```
+
+**Fields:** a single unnamed `f64` — the constant value.
 
 ### EvalTime
 
@@ -223,6 +294,8 @@ patterns (`up or vector(0)`).
 vector(1)
 ```
 
+**Fields:** a single unnamed child `QueryExpr` — the scalar-typed expression being promoted to a vector.
+
 ### ScalarFromVector
 
 The instant-vector→scalar bridge — PromQL `scalar(v)`. Collapses a single-element vector to
@@ -231,6 +304,8 @@ its value (NaN at runtime if the input isn't exactly one series).
 ```promql
 scalar(up)
 ```
+
+**Fields:** a single unnamed child `QueryExpr` — the single-series vector being collapsed to a scalar.
 
 ### Relabel
 
@@ -242,6 +317,11 @@ child's label columns.
 label_replace(up, "foo", "$1", "bar", "(.*)")
 ```
 
+**Fields:**
+- `dst` — the label being written.
+- `value` — the scalar expression computing the new label value from the child's labels.
+- `child` — the input series being relabeled.
+
 ### InfoJoin
 
 PromQL `info(v, [selector])` — left-join label enrichment. Each series in the child is
@@ -250,6 +330,10 @@ enriched with labels from the matching info metric(s) (`target_info` by default)
 ```promql
 info(up)
 ```
+
+**Fields:**
+- `selector` — matchers picking which info metric(s) to enrich from; empty = the default `target_info`.
+- `child` — the input series being enriched.
 
 ### Sample
 
@@ -261,6 +345,11 @@ equals the child's.
 limitk(3, up)
 ```
 
+**Fields:**
+- `by` — grouping keys the sample is taken within; empty = a global sample.
+- `kind` — the sampling strategy (`LimitK`/`LimitRatio`) and its parameter.
+- `child` — the input series being sampled.
+
 ## SQL-specific nodes
 
 ### WindowFunc
@@ -271,3 +360,11 @@ schema is the child schema plus one new column for the window expression's resul
 ```sql
 SELECT srcip, LAG(time) OVER (PARTITION BY srcip ORDER BY time) FROM packets
 ```
+
+**Fields:**
+- `func` — the window function (e.g. `LAG`, `RANK`).
+- `args` — the function's operand expressions; empty for rank-only functions.
+- `partition_by` — grouping keys the window is computed within.
+- `order_by` — the ordering the window function reads.
+- `output_name` — the name of the new output column.
+- `child` — the input the window function is computed over.
