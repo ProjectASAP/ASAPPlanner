@@ -1,19 +1,19 @@
 //! The Layer-2 relational IR — the per-language query algebra the parser
 //! front ends emit, before [`convert_root`](crate::lower::convert_root) lowers
-//! it to the canonical L3 [`query_expr::QueryExpr`](asap_ir::intent_algebra::query_expr::QueryExpr).
+//! it to the canonical L3 [`query_expr::QueryExpr`](asap_types::intent_algebra::query_expr::QueryExpr).
 //!
 //! Leaf / scalar types (`ColumnRef`, `SortKey`,
 //! `BinaryOpKind`, `VectorMatch`) are owned by `query_expr` and re-used here so
 //! there is one canonical spelling. Filter / having / project expressions use
-//! the shared language-independent [`L3Expr`](asap_ir::intent_algebra::expr_ir::L3Expr).
+//! the shared language-independent [`L3Expr`](asap_types::intent_algebra::expr_ir::L3Expr).
 
 use std::time::Duration;
 
-use asap_ir::intent_algebra::agg_intent::{MathFunc, TimeFunc};
-pub use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr};
-pub use asap_ir::intent_algebra::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
-use asap_ir::intent_algebra::query_expr::{InfoMatcher, SampleKind, TimeShift};
-use asap_ir::intent_algebra::schema::Schema;
+use asap_types::intent_algebra::agg_intent::{MathFunc, TimeFunc};
+pub use asap_types::intent_algebra::expr_ir::{ColumnRef, L2Expr};
+pub use asap_types::intent_algebra::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
+use asap_types::intent_algebra::query_expr::{InfoMatcher, SampleKind, TimeShift};
+use asap_types::intent_algebra::schema::Schema;
 
 /// SELECT-list item at Layer 2 — a name-based [`L2Expr`] + optional alias.
 /// (`query_expr::ProjectItem` is the positional L3 sibling.)
@@ -296,13 +296,13 @@ pub enum QueryExpr {
     Merge { inputs: Vec<QueryExpr> },
 
     Join {
-        kind: asap_ir::intent_algebra::query_expr::JoinKind,
+        kind: asap_types::intent_algebra::query_expr::JoinKind,
         pred: Option<L2Expr>,
         left: Box<QueryExpr>,
         right: Box<QueryExpr>,
     },
     SetOp {
-        kind: asap_ir::intent_algebra::query_expr::SetOpKind,
+        kind: asap_types::intent_algebra::query_expr::SetOpKind,
         all: bool,
         left: Box<QueryExpr>,
         right: Box<QueryExpr>,

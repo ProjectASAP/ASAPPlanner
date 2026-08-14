@@ -19,14 +19,14 @@ use datafusion::logical_expr::{
 };
 use datafusion::prelude::{SessionConfig, SessionContext};
 
-use asap_ir::intent_algebra::schema::{DataType, Schema};
-use asap_ir::intent_algebra::{
-    ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
-};
-use asap_ir::workload::SqlDialect;
 use asap_l2::relational::{
     AggFunc, AggItem, L2ProjectItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
+use asap_types::intent_algebra::schema::{DataType, Schema};
+use asap_types::intent_algebra::{
+    ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
+};
+use asap_types::workload::SqlDialect;
 
 use crate::error::SqlError as LoweringError;
 

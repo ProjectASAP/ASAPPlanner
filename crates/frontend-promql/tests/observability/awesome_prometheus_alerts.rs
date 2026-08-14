@@ -27,8 +27,8 @@
 #![allow(non_snake_case)]
 
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
-use asap_ir::intent_algebra::{AggIntent, BinaryOpKind, CompareOp, QueryExpr, Reduction};
-use asap_ir::types::AccuracyTarget;
+use asap_types::intent_algebra::{AggIntent, BinaryOpKind, CompareOp, QueryExpr, Reduction};
+use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/awesome_prometheus_alerts.txt");
 

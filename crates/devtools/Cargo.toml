@@ -1,0 +1,19 @@
+[package]
+name = "asap-devtools"
+version = "0.1.0"
+edition = "2021"
+
+# Thin facade over the two front ends — re-exports `lower_promql` / `lower_sql`
+# (and batch + lowerer + error types) so a caller can depend on one crate for
+# both languages. A caller that needs only one language should depend on the
+# matching `asap-frontend-*` crate directly to avoid pulling the other parser.
+[dependencies]
+asap-frontend-promql = { path = "../frontend-promql" }
+asap-frontend-sql = { path = "../frontend-sql" }
+
+# Used by the show_ir / dag_export / variant_coverage bins (catalog schemas,
+# async SQL path, JSON output) and by the topk_ir / canonical_examples
+# examples. Regular deps, not dev-deps: `[[bin]]` targets can't see dev-deps.
+asap-types = { path = "../types" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

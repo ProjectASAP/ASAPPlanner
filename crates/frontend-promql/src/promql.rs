@@ -55,17 +55,17 @@ use promql_parser::parser::{
     VectorMatchCardinality, VectorSelector,
 };
 
-use asap_ir::intent_algebra::agg_intent::{
+use asap_l2::relational::{AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec};
+use asap_types::intent_algebra::agg_intent::{
     is_frequency_heavy_hitter, MathFunc, RankingMeasure, TimeFunc,
 };
-use asap_ir::intent_algebra::query_expr::{
+use asap_types::intent_algebra::query_expr::{
     AtModifier as L3AtModifier, BinaryOpKind, GroupSide, TimeShift, VectorGrouping, VectorMatch,
     VectorMatchKind,
 };
-use asap_ir::intent_algebra::{
+use asap_types::intent_algebra::{
     ArithOp, ColumnRef, CompareOp, InfoMatcher, L2Expr, L3Scalar, SampleKind,
 };
-use asap_l2::relational::{AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec};
 
 use crate::error::PromqlError as LoweringError;
 

@@ -30,10 +30,10 @@
 //! coverage so a regression (or a future improvement) is visible, not silent.
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
-use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
-use asap_ir::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
-use asap_ir::types::AccuracyTarget;
-use asap_ir::workload::SqlDialect;
+use asap_types::intent_algebra::schema::{Column, DataType, Schema};
+use asap_types::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
+use asap_types::types::AccuracyTarget;
+use asap_types::workload::SqlDialect;
 use datafusion::error::DataFusionError;
 
 const CORPUS: &str = include_str!("data/bgp_analytics.sql");

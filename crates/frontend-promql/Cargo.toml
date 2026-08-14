@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 # PromQL front end: L1 (parse) → L2 relational, then the shared L2→L3 converter
-# in asap-ir. Pulls the PromQL parser only — never DataFusion.
+# in asap-types. Pulls the PromQL parser only — never DataFusion.
 [dependencies]
-asap-ir = { path = "../ir" }
+asap-types = { path = "../types" }
 asap-l2 = { path = "../l2" }
 
 # Private mirror of GreptimeTeam/promql-parser (Apache-2.0). `main` tracks

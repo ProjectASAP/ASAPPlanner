@@ -12,9 +12,9 @@
 //! lands, only the catalog impl swaps.
 
 use crate::relational::QueryExpr as LQueryExpr;
-use asap_ir::intent_algebra::expr_ir::ColumnRef;
-use asap_ir::intent_algebra::expr_ir::L2Expr;
-use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
+use asap_types::intent_algebra::expr_ir::ColumnRef;
+use asap_types::intent_algebra::expr_ir::L2Expr;
+use asap_types::intent_algebra::schema::{Column, DataType, Schema};
 
 /// The DB / source-schema metadata source — resolves a source (metric /
 /// table) name to its known columns.
@@ -24,7 +24,7 @@ use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
 /// Distinct from `Scan.schema`, which is the *resolved* binding schema this
 /// feeds — the catalog is the input, the schema is the result. Even a
 /// registry-backed PromQL catalog yields an **open** schema
-/// ([`Schema::closed`](asap_ir::intent_algebra::schema::Schema::closed) `= false`): a metric's
+/// ([`Schema::closed`](asap_types::intent_algebra::schema::Schema::closed) `= false`): a metric's
 /// labels are per-series and time-varying, so the registry is a superset hint,
 /// not a per-row contract.
 pub trait SchemaCatalog {
@@ -190,8 +190,8 @@ pub(crate) fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::relational::{L2SortKey, QueryExpr as LQueryExpr, SourceSpec};
-    use asap_ir::intent_algebra::expr_ir::ColumnRef;
-    use asap_ir::intent_algebra::L2Expr;
+    use asap_types::intent_algebra::expr_ir::ColumnRef;
+    use asap_types::intent_algebra::L2Expr;
 
     fn src(name: &str) -> LQueryExpr {
         LQueryExpr::Source(SourceSpec::new(name))

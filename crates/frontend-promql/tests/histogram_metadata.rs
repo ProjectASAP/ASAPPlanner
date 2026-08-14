@@ -8,8 +8,8 @@
 use asap_frontend_promql::{
     lower_promql, lower_promql_with_histograms, HistogramCatalog, HistogramKind,
 };
-use asap_ir::intent_algebra::{AggIntent, QueryExpr};
-use asap_ir::types::AccuracyTarget;
+use asap_types::intent_algebra::{AggIntent, QueryExpr};
+use asap_types::types::AccuracyTarget;
 
 /// The histogram/quantile intent kind in the lowered tree: `"HQ"` for the
 /// classic-bucket `HistogramQuantile`, `"Q"` for the sketch-able `Quantile`.

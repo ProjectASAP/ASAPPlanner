@@ -5,12 +5,12 @@
 //! canonical L3 (the same converter the PromQL path uses).
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
-use asap_ir::intent_algebra::{
+use asap_types::intent_algebra::schema::{Column, DataType, Schema};
+use asap_types::intent_algebra::{
     AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, L3Scalar, QueryExpr, Reduction, Source,
     WindowFuncKind,
 };
-use asap_ir::types::AccuracyTarget;
+use asap_types::types::AccuracyTarget;
 
 fn col(name: &str, dtype: DataType) -> Column {
     Column::new(name, dtype, false)

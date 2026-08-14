@@ -1,12 +1,11 @@
 [workspace]
 members = [
-    "crates/ir",
+    "crates/types",
     "crates/l2",
-    "crates/sketch",
-    "crates/plan",
+    "crates/aware-mapping",
     "crates/frontend-promql",
     "crates/frontend-sql",
-    "crates/lower",
-    "crates/e2e",
+    "crates/devtools",
+    "crates/integration-tests",
 ]
 resolver = "2"

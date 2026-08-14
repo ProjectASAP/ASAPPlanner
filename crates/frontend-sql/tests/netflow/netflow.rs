@@ -5,9 +5,9 @@
 //! optional `ORDER BY`/`LIMIT`, plus the nested aggregate shape.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
-use asap_ir::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
-use asap_ir::types::AccuracyTarget;
+use asap_types::intent_algebra::schema::{Column, DataType, Schema};
+use asap_types::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
+use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/netflow.sql");
 

@@ -19,7 +19,7 @@
 //! broke, not statistical noise.
 
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
-use asap_ir::types::AccuracyTarget;
+use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/o11y_bench_promql.txt");
 
