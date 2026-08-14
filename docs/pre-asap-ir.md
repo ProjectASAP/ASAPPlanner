@@ -142,7 +142,7 @@ renaming it to `measures` to match this doc.)
   )
   ```
 
- ## Rules/Invariants
+**Rules/Invariants**
 
 1. A filtering predicate will be passed to at the lowest node (closer to the leaves) in the AST/DAG that can express it — `Scan.predicates`,
    then `Aggregate.having`, then `Filter` as the fallback — so its constraint is visible at
