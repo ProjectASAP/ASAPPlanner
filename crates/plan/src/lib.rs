@@ -15,9 +15,8 @@
 //!
 //! ## Status
 //!
-//! Three real occupants and one stub:
+//! Two real occupants and one stub:
 //!
-//! - [`cse`] — workload-level common-sub-expression elimination.
 //! - [`boundary`] — the per-intent sketch-vs-exact (accuracy) decision:
 //!   `AggIntent → SummaryKind + SummaryParams` sized to the `AccuracyTarget`
 //!   (issue #98). [`boundary::implementation_for`] is the per-node decision;
@@ -68,15 +67,11 @@
 //! `sketch_algebra::capability::Capability`/`is_satisfied_by` is the
 //! reference downstream implementation.
 
-pub mod cse;
-
 pub mod bind;
 pub mod boundary;
 pub mod cost_model;
 
-pub use bind::{
-    implement_tree, implement_tree_in, implement_tree_in_with, implement_tree_with, ImplementError,
-};
+pub use bind::{implement_tree, implement_tree_with, ImplementError};
 pub use boundary::{
     implementation_for, implementation_for_with, summary_candidates, Implementation, Matcher,
 };

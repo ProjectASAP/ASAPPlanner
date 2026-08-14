@@ -25,8 +25,7 @@ pub struct L4Node {
 /// `Logical(Box<QueryExpr>)`.
 ///
 /// Traversing from the root node yields a DAG; shared sub-expressions appear
-/// as multiple `Rc` references to the same `L4Node` (L3 fan-in is expressed
-/// via `QueryExpr`'s own `LetBinding`/`Ref`).
+/// as multiple `Rc` references to the same `L4Node`.
 #[derive(Debug, Clone)]
 pub enum SummaryExpr {
     /// Any L3 node that no L4 rule rewrote (e.g. `Filter`, `Project`, `Sort`).

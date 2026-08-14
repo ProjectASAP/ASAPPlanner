@@ -909,8 +909,9 @@ async fn a_correlated_in_subquery_is_rejected() {
 #[tokio::test]
 async fn quantile_carries_its_input_column() {
     // `metrics(ts=0, service=1, latency=2, bytes=3)`. Two quantiles over
-    // different columns must not compare equal — `plan::cse` dedupes on
-    // `AggIntent` equality, so a col-less intent would collapse them.
+    // different columns must not compare equal — a workload-level dedupe pass
+    // would compare on `AggIntent` equality, so a col-less intent would
+    // collapse them.
     let qe = lower(
         "SELECT approx_percentile_cont(latency, 0.5), \
                 approx_percentile_cont(bytes, 0.5) FROM metrics",

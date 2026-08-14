@@ -83,17 +83,10 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
                 go(rhs, out);
             }
             QueryExpr::Merge { children } => children.iter().for_each(|c| go(c, out)),
-            QueryExpr::LetBinding { expr, child, .. } => {
-                go(expr, out);
-                go(child, out);
-            }
             QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
                 go(inner, out)
             }
-            QueryExpr::Scan { .. }
-            | QueryExpr::Scalar(_)
-            | QueryExpr::EvalTime
-            | QueryExpr::Ref { .. } => {}
+            QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
         }
     }
     go(e, &mut out);

@@ -22,7 +22,6 @@ use crate::column_resolution::{
 use crate::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
 use asap_ir::intent_algebra::agg_intent::AggIntent;
 use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
-use asap_ir::intent_algebra::names::BindingName;
 use asap_ir::intent_algebra::query_expr::{
     GroupKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, Reduction, SortKey, Source,
 };
@@ -149,10 +148,6 @@ pub fn convert(
             child: Box::new(convert(input, fallback, acc)?),
         },
 
-        LQueryExpr::Ref(name) => CQueryExpr::Ref {
-            name: BindingName::new(name.clone()),
-        },
-
         // Fold label matchers / pushed-down predicates directly onto the Scan
         // when the immediate child is a `Source`; otherwise emit a `Filter`.
         // Predicate column refs resolve positionally against the input schema.
@@ -178,7 +173,7 @@ pub fn convert(
             // Single-statistic aggregate (no HAVING) over a *time-series* leaf
             // fuses into the canonical shape: a `Window` input becomes
             // `Window { Aggregate { by: [] } }` (a per-series, label-preserving
-            // reduction — see `output_schema_in`'s `Window` arm). GROUP BY keys
+            // reduction — see `output_schema`'s `Window` arm). GROUP BY keys
             // resolve *positionally* into `Aggregate.by` — the same shape SQL
             // produces — whenever they're in scope: an instant selector, or a
             // label-preserving per-series `rate`/`increase`/`*_over_time`. A
@@ -490,12 +485,6 @@ pub fn convert(
             n: *n as usize,
             offset: *offset as usize,
             child: Box::new(convert(input, fallback, acc)?),
-        },
-
-        LQueryExpr::LetBinding { name, expr, body } => CQueryExpr::LetBinding {
-            name: BindingName::new(name.clone()),
-            expr: Box::new(convert(expr, fallback, acc)?),
-            child: Box::new(convert(body, fallback, acc)?),
         },
 
         LQueryExpr::PromQLSubquery {

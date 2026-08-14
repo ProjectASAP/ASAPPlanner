@@ -9,10 +9,7 @@
 //! structural hash per node, so a caller with several exported queries can
 //! spot identical subtrees (a shared `Scan`, a repeated `Aggregate` shape,
 //! …) by comparing hashes rather than re-implementing `QueryExpr: PartialEq`
-//! structural comparison client-side. This is a proxy for real CSE output
-//! (`asap_plan::cse::dedupe_subtrees`), not a replacement for it — that pass
-//! isn't wired into any end-to-end multi-root pipeline today, so its
-//! `bindings`/`Ref` shape isn't something an exported single query exposes.
+//! structural comparison client-side.
 
 use serde::Serialize;
 use std::hash::{Hash, Hasher};
@@ -31,7 +28,7 @@ pub struct DagNode {
     pub label: String,
     pub detail: serde_json::Value,
     /// Child node ids, in the variant's field order (e.g. `Join` is
-    /// `[left, right]`, `LetBinding` is `[expr, child]`).
+    /// `[left, right]`).
     pub children: Vec<u32>,
     /// Bottom-up structural hash: two nodes hash equally iff their `kind`,
     /// `detail`, and (recursively) their children's hashes all match.
@@ -124,7 +121,7 @@ fn source_label(source: &Source) -> String {
 /// (children pushed before their parent), and return the id of the pushed
 /// root node. Exhaustive over every `QueryExpr` variant — a new variant
 /// fails to compile here until this match is extended, matching the rest of
-/// the IR's exhaustive-match style (e.g. `output_schema_in`, `plan::cse`).
+/// the IR's exhaustive-match style (e.g. `output_schema`).
 fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
     match expr {
         QueryExpr::Scan {
@@ -139,16 +136,6 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
                 "schema": schema,
             });
             push_node(nodes, "Scan", label, detail, vec![])
-        }
-        QueryExpr::Ref { name } => {
-            let detail = serde_json::json!({ "name": name });
-            push_node(
-                nodes,
-                "Ref",
-                format!("Ref({})", name.as_str()),
-                detail,
-                vec![],
-            )
         }
         QueryExpr::Scalar(v) => {
             let detail = serde_json::json!({ "value": v });
@@ -329,21 +316,6 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "n": n, "offset": offset });
             push_node(nodes, "Limit", format!("Limit({n})"), detail, vec![c])
-        }
-        QueryExpr::LetBinding { name, expr, child } => {
-            // Two children with asymmetric roles: `expr` (the bound producer)
-            // and `child` (the body); order is [expr, child] so an index into
-            // `children` always means the same thing across `LetBinding` nodes.
-            let e = build(expr, nodes);
-            let c = build(child, nodes);
-            let detail = serde_json::json!({ "name": name });
-            push_node(
-                nodes,
-                "LetBinding",
-                format!("LetBinding({})", name.as_str()),
-                detail,
-                vec![e, c],
-            )
         }
         QueryExpr::Subquery {
             range,

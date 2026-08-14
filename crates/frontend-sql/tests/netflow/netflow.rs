@@ -293,14 +293,7 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
                 visit(child, f);
             }
         }
-        QueryExpr::LetBinding { expr, child, .. } => {
-            visit(expr, f);
-            visit(child, f);
-        }
         QueryExpr::VectorFromScalar(child) | QueryExpr::ScalarFromVector(child) => visit(child, f),
-        QueryExpr::Scan { .. }
-        | QueryExpr::Scalar(_)
-        | QueryExpr::EvalTime
-        | QueryExpr::Ref { .. } => {}
+        QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
     }
 }

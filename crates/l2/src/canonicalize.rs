@@ -59,7 +59,7 @@ fn canon(expr: &mut QueryExpr) {
 fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
     use QueryExpr::*;
     match expr {
-        Scan { .. } | Ref { .. } | Scalar(_) | EvalTime => vec![],
+        Scan { .. } | Scalar(_) | EvalTime => vec![],
         VectorFromScalar(c) | ScalarFromVector(c) => vec![c.as_mut()],
         Relabel { child, .. }
         | Filter { child, .. }
@@ -75,7 +75,6 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
         | InfoJoin { child, .. }
         | Sort { child, .. }
         | Limit { child, .. } => vec![child.as_mut()],
-        LetBinding { expr, child, .. } => vec![expr.as_mut(), child.as_mut()],
         Merge { children } => children.iter_mut().collect(),
         Join { left, right, .. } | SetOp { left, right, .. } => {
             vec![left.as_mut(), right.as_mut()]

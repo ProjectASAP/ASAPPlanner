@@ -601,8 +601,9 @@ fn walk_histogram(call: &Call) -> Result<L2> {
 /// (`HistogramQuantile`), native histograms / raw samples take the sketch-able
 /// `Quantile` (issues #43 / #79) — so the two functions cannot diverge.
 ///
-/// The vector argument is lowered once per branch. That is a duplicated subtree
-/// by construction; `plan::cse` hoists it back into a single producer.
+/// The vector argument is lowered once per branch, duplicating the subtree —
+/// a future workload-level reuse pass could hoist it back into a single
+/// producer.
 ///
 /// Each branch aliases its value column to `value` rather than taking the
 /// intent-keyed name (`quantile_0_5`, `quantile_0_9`, …). `Merge` derives its
