@@ -237,22 +237,6 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
                 vec![c],
             )
         }
-        QueryExpr::Window {
-            kind,
-            size,
-            slide,
-            child,
-        } => {
-            let c = build(child, nodes);
-            let detail = serde_json::json!({ "kind": kind, "size": size, "slide": slide });
-            push_node(
-                nodes,
-                "Window",
-                format!("Window({kind:?})"),
-                detail,
-                vec![c],
-            )
-        }
         QueryExpr::Distinct { cols, child } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "cols": cols });

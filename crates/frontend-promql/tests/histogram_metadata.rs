@@ -24,8 +24,7 @@ fn quantile_kind(qe: &QueryExpr) -> &'static str {
                     _ => None,
                 })
                 .or_else(|| walk(child)),
-            QueryExpr::Window { child, .. }
-            | QueryExpr::TimeRange { child, .. }
+            QueryExpr::TimeRange { child, .. }
             | QueryExpr::Filter { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }

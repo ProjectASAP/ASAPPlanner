@@ -197,7 +197,6 @@ fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
         } => Some((reduction.expect_reduce(), aggs)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
-        | QueryExpr::Window { child, .. }
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -263,7 +262,6 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Window { child, .. }
         | QueryExpr::TimeRange { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }

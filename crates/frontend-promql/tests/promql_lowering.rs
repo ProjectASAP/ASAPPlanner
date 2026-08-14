@@ -516,8 +516,7 @@ fn collect_intents(e: &QueryExpr, out: &mut Vec<AggIntent>) {
             out.extend(aggs.iter().cloned());
             collect_intents(child, out);
         }
-        QueryExpr::Window { child, .. }
-        | QueryExpr::TimeRange { child, .. }
+        QueryExpr::TimeRange { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. } => collect_intents(child, out),
@@ -539,7 +538,6 @@ fn scan_columns(e: &QueryExpr) -> Vec<String> {
     match e {
         QueryExpr::Scan { schema, .. } => schema.columns.iter().map(|c| c.name.clone()).collect(),
         QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Window { child, .. }
         | QueryExpr::TimeRange { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
@@ -666,8 +664,7 @@ fn scan_schema_carries_ts_value_and_group_keys() {
     fn find_scan(n: &QueryExpr) -> &QueryExpr {
         match n {
             QueryExpr::Scan { .. } => n,
-            QueryExpr::Window { child, .. }
-            | QueryExpr::TimeRange { child, .. }
+            QueryExpr::TimeRange { child, .. }
             | QueryExpr::Aggregate { child, .. }
             | QueryExpr::Filter { child, .. } => find_scan(child),
             other => panic!("unexpected node {other:?}"),

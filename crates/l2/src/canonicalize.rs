@@ -65,7 +65,6 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
         | Filter { child, .. }
         | Project { child, .. }
         | Aggregate { child, .. }
-        | Window { child, .. }
         | Distinct { child, .. }
         | Subquery { child, .. }
         | TimeRange { child, .. }

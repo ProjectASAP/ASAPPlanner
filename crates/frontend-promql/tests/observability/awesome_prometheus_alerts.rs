@@ -55,8 +55,7 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
                 out.extend(aggs.iter().cloned());
                 go(child, out);
             }
-            QueryExpr::Window { child, .. }
-            | QueryExpr::TimeRange { child, .. }
+            QueryExpr::TimeRange { child, .. }
             | QueryExpr::TimeShift { child, .. }
             | QueryExpr::Filter { child, .. }
             | QueryExpr::Sort { child, .. }
