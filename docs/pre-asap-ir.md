@@ -69,7 +69,7 @@ list of aggregate intents (`aggs`).
   flag, not just a plain list:
   - `by(keys)` — group by exactly these columns (SQL `GROUP BY`, PromQL `by(...)`).
   - `without(keys)` — group by every column *except* these (PromQL `without(...)`); the
-    excluded positions are stored but the kept set stays open, resolved at runtime against
+    excluded columns are stored but the kept set stays open (because PromQL is schemaless), resolved at runtime against
     the actual input schema.
   - `none()` — an empty key set, i.e. a global (ungrouped) reduction. This is different from `PerEntity` below. 
 
