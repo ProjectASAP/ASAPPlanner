@@ -84,7 +84,8 @@ list of aggregate intents (`aggs`).
   ```
 - **`PerEntity`** — no merging across rows: each input entity keeps its own output row (the
   value is still recomputed by the agg intent, e.g. `Rate`), for a computation with no
-  `by(...)` clause to attach to. E.g. PromQL `rate(http_requests_total[5m])`, which has one rate value
+  `by(...)` clause to attach to. `PerEntity` is different from `by` for all columns, because in PromQL, it is schemaless and you don't know all columns beforehand.
+   E.g. PromQL `rate(http_requests_total[5m])`, which has one rate value
   per input series:
 
   ```text
