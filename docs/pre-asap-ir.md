@@ -57,7 +57,7 @@ list of aggregate intents (`aggs`).
 
 #### Grouping
 
-Grouping is not a bare list of dimensions; it's `Aggregate.reduction`, a `Reduction`, one of:
+Grouping refers to `Aggregate.reduction`, a `Reduction`, one of the following types, which is more than just SQL GroupBy. 
 
 - **`Reduce(GroupKeys)`** — a genuine cross-entity reduction: group by some columns, or group
   by every column *except* some listed ones. `GroupKeys` holds positional column references
@@ -67,8 +67,7 @@ Grouping is not a bare list of dimensions; it's `Aggregate.reduction`, a `Reduct
   - `without(keys)` — group by every column *except* these (PromQL `without(...)`); the
     excluded positions are stored but the kept set stays open, resolved at runtime against
     the actual input schema.
-  - `none()` — an empty key set, i.e. a global (ungrouped) reduction — still a genuine
-    reduction with zero grouping columns, not "no grouping concept."
+  - `none()` — an empty key set, i.e. a global (ungrouped) reduction. This is different from `PerEntity` below. 
 
   ```text
   Aggregate(
@@ -81,7 +80,7 @@ Grouping is not a bare list of dimensions; it's `Aggregate.reduction`, a `Reduct
   ```
 - **`PerEntity`** — no merging across rows: each input entity keeps its own output row (the
   value is still recomputed by the agg intent, e.g. `Rate`), for a computation with no
-  `by(...)` clause to attach to. E.g. PromQL `rate(http_requests_total[5m])` — one rate value
+  `by(...)` clause to attach to. E.g. PromQL `rate(http_requests_total[5m])`, which has one rate value
   per input series:
 
   ```text
