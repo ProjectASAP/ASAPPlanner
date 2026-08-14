@@ -27,6 +27,6 @@ pub use query_expr::{
     aggregate_output_schema, AtModifier, BinaryOpKind, DataModel, GroupKeys, GroupSide,
     InfoMatcher, JoinKind, Predicate, ProjectItem, QueryExpr, QueryExprError, Reduction,
     SampleKind, SetOpKind, SortKey, Source, TimeShift, VectorGrouping, VectorMatch,
-    VectorMatchKind, WindowFuncKind, WindowKind,
+    VectorMatchKind, WindowFuncKind,
 };
 pub use schema::{Column, ColumnId, DataType, Schema};

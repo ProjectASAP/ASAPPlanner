@@ -151,47 +151,6 @@ impl<'de> Deserialize<'de> for GroupKeys {
     }
 }
 
-/// Lifecycle / flush semantics of a streaming time window.
-///
-/// `Copy`/`Default`/`Hash`/`Display`/`FromStr` and `#[serde(rename_all =
-/// "snake_case")]` (matching this file's `WindowFuncKind` neighbor) were
-/// added so a downstream backend's own `WindowType`-shaped serving-time
-/// enum (data-plane accumulator config: `Tumbling` default,
-/// `"window_type": "tumbling"` wire format, string round-trip via
-/// `Display`/`FromStr`) could be retired in favor of this type directly,
-/// rather than keeping two independently-maintained enums in sync by hand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum WindowKind {
-    #[default]
-    Tumbling,
-    Sliding,
-    Session,
-}
-
-impl std::fmt::Display for WindowKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WindowKind::Tumbling => write!(f, "tumbling"),
-            WindowKind::Sliding => write!(f, "sliding"),
-            WindowKind::Session => write!(f, "session"),
-        }
-    }
-}
-
-impl std::str::FromStr for WindowKind {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "tumbling" => Ok(WindowKind::Tumbling),
-            "sliding" => Ok(WindowKind::Sliding),
-            "session" => Ok(WindowKind::Session),
-            _ => Err(format!("Unknown window kind: '{s}'")),
-        }
-    }
-}
-
 /// Which data model a `Source` / `AggIntent` operates over.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataModel {
@@ -582,16 +541,6 @@ pub enum QueryExpr {
         child: Box<QueryExpr>,
     },
 
-    /// ψ — tumbling / sliding / session window over the time axis. Window
-    /// over Aggregate is the canonical windowed-aggregate shape.
-    Window {
-        kind: WindowKind,
-        size: Duration,
-        #[serde(default)]
-        slide: Option<Duration>,
-        child: Box<QueryExpr>,
-    },
-
     /// δ — SQL `DISTINCT` / row deduplication. Positional like every other L3
     /// column reference; empty = dedup on all columns (`SELECT DISTINCT *`).
     Distinct {
@@ -665,8 +614,7 @@ pub enum QueryExpr {
 
     /// Temporal range selection — "look back `range` of history for this
     /// computation." Used for all range-vector functions: `rate`, `increase`,
-    /// `*_over_time`. The range is distinct from both a streaming `Window`
-    /// (which is for query-repetition) and a row-level `Filter`.
+    /// `*_over_time`. The range is distinct from a row-level `Filter`.
     ///
     /// Structural marker: an `Aggregate` whose direct child is a `TimeRange`
     /// is a *per-series* reduction (label-preserving); one whose child is a
@@ -720,12 +668,6 @@ impl QueryExpr {
     pub fn output_schema(&self) -> Result<Schema, QueryExprError> {
         match self {
             QueryExpr::Scan { schema, .. } => Ok(schema.clone()),
-
-            // ψ — streaming window (tumbling / sliding / session) for query
-            // repetition. Does not change the column schema; passes through.
-            // Per-series range reductions (`rate`, `*_over_time`) now use the
-            // `TimeRange` node instead, so this arm is a simple pass-through.
-            QueryExpr::Window { child, .. } => child.output_schema(),
 
             QueryExpr::Aggregate {
                 reduction,

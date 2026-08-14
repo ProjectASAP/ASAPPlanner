@@ -70,8 +70,7 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
             out.extend(aggs.iter().cloned());
             collect(child, out);
         }
-        QueryExpr::Window { child, .. }
-        | QueryExpr::TimeRange { child, .. }
+        QueryExpr::TimeRange { child, .. }
         | QueryExpr::TimeShift { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
@@ -112,8 +111,7 @@ fn first_scan(e: &QueryExpr) -> (String, usize) {
             };
             (name, predicates.len())
         }
-        QueryExpr::Window { child, .. }
-        | QueryExpr::TimeRange { child, .. }
+        QueryExpr::TimeRange { child, .. }
         | QueryExpr::TimeShift { child, .. }
         | QueryExpr::Aggregate { child, .. }
         | QueryExpr::Filter { child, .. }
@@ -211,8 +209,8 @@ fn name_regex_matcher_is_rejected__GAP() {
 
 #[test]
 fn range_vector_selector_is_time_range() {
-    // SEMANTICS: `[5m]` turns an instant vector into a range vector.
-    // In L3 this is a dedicated `TimeRange` node (not a streaming `Window`).
+    // SEMANTICS: `[5m]` turns an instant vector into a range vector,
+    // represented in L3 as a dedicated `TimeRange` node.
     let qe = ok("node_cpu_seconds_total[5m]");
     let QueryExpr::TimeRange { range, .. } = &qe else {
         panic!("expected TimeRange for a range-vector selector, got {qe:?}");
@@ -2010,8 +2008,7 @@ fn first_relabel(e: &QueryExpr) -> &QueryExpr {
         QueryExpr::Aggregate { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::TimeRange { child, .. }
-        | QueryExpr::TimeShift { child, .. }
-        | QueryExpr::Window { child, .. } => first_relabel(child),
+        | QueryExpr::TimeShift { child, .. } => first_relabel(child),
         other => panic!("no Relabel reachable from {other:?}"),
     }
 }

@@ -55,7 +55,6 @@ fn find_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
         } => Some((reduction.expect_reduce(), aggs)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
-        | QueryExpr::Window { child, .. }
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -101,7 +100,6 @@ fn find_join(qe: &QueryExpr) -> Option<&QueryExpr> {
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Window { child, .. }
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -116,7 +114,6 @@ fn find_filter(qe: &QueryExpr) -> Option<&QueryExpr> {
         QueryExpr::Filter { .. } => Some(qe),
         QueryExpr::Project { child, .. }
         | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Window { child, .. }
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -656,7 +653,6 @@ fn find_windowfunc(qe: &QueryExpr) -> Option<&QueryExpr> {
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Window { child, .. }
         | QueryExpr::Distinct { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
@@ -727,7 +723,6 @@ fn all_intents(qe: &QueryExpr) -> Vec<AggIntent> {
             }
             QueryExpr::Project { child, .. }
             | QueryExpr::Filter { child, .. }
-            | QueryExpr::Window { child, .. }
             | QueryExpr::Distinct { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }

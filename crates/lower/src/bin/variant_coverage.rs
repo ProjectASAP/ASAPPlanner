@@ -24,7 +24,6 @@ const ALL_VARIANTS: &[&str] = &[
     "Filter",
     "Project",
     "Aggregate",
-    "Window",
     "Distinct",
     "Merge",
     "Join",
@@ -79,10 +78,6 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
         }
         QueryExpr::Aggregate { child, .. } => {
             seen.insert("Aggregate");
-            walk(child, seen);
-        }
-        QueryExpr::Window { child, .. } => {
-            seen.insert("Window");
             walk(child, seen);
         }
         QueryExpr::Distinct { child, .. } => {
