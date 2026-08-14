@@ -603,8 +603,9 @@ impl<'a> SqlLowerer<'a> {
     /// the branches union-compatible, which `Merge` requires (it derives its
     /// schema from the first child).
     ///
-    /// `Aggregate.child` is duplicated per level. `plan::cse` hoists it back into
-    /// a single producer — the same trade `histogram_quantiles` makes (#109).
+    /// `Aggregate.child` is duplicated per level — the same trade
+    /// `histogram_quantiles` makes (#109); a future workload-level reuse pass
+    /// could hoist it back into a single producer.
     ///
     /// DataFusion's `__grouping_id` discriminator is dropped: it only exists to
     /// tell a subtotal's `NULL` apart from a data `NULL`, which is observable

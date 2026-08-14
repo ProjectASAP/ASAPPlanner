@@ -22,8 +22,7 @@
 //!
 //! Every entry point that doesn't take an explicit `&dyn CostModel`
 //! ([`implementation_for`](crate::boundary::implementation_for),
-//! [`implement_tree`](crate::bind::implement_tree),
-//! [`implement_tree_in`](crate::bind::implement_tree_in)) runs against
+//! [`implement_tree`](crate::bind::implement_tree)) runs against
 //! [`DefaultCostModel`], so a deployment that never plugs in its own cost
 //! model keeps today's static-preference-order behavior exactly, byte for
 //! byte.

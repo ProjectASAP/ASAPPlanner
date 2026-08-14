@@ -33,7 +33,7 @@ use std::rc::Rc;
 
 use asap_ir::intent_algebra::agg_intent::AggIntent;
 use asap_ir::intent_algebra::expr_ir::ColumnRef;
-use asap_ir::intent_algebra::query_expr::{BindingScope, QueryExpr, QueryExprError, Reduction};
+use asap_ir::intent_algebra::query_expr::{QueryExpr, QueryExprError, Reduction};
 use asap_ir::intent_algebra::schema::Schema;
 use asap_sketch::{
     L4DataType, L4Field, L4Node, L4Schema, SketchQuery, SummaryExpr, SummaryKind, SummaryParams,
@@ -51,36 +51,18 @@ pub enum ImplementError {
     Schema(#[from] QueryExprError),
 }
 
-/// Bind a single query (empty `LetBinding` scope) to the L4 IR. Ranks
-/// candidate summaries via [`DefaultCostModel`] (`asap-plan`'s built-in
-/// static preference order, unchanged); use [`implement_tree_with`] to plug in a
-/// deployment-specific [`CostModel`] instead.
+/// Bind a single query to the L4 IR. Ranks candidate summaries via
+/// [`DefaultCostModel`] (`asap-plan`'s built-in static preference order,
+/// unchanged); use [`implement_tree_with`] to plug in a deployment-specific
+/// [`CostModel`] instead.
 pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L4Node>, ImplementError> {
-    implement_tree_in(expr, &BindingScope::default())
-}
-
-/// Bind with an explicit `LetBinding` scope — for roots that reference
-/// CSE-hoisted producers via [`QueryExpr::Ref`].
-pub fn implement_tree_in(
-    expr: &QueryExpr,
-    scope: &BindingScope,
-) -> Result<Rc<L4Node>, ImplementError> {
-    implement_tree_in_with(expr, scope, &DefaultCostModel)
+    implement_tree_with(expr, &DefaultCostModel)
 }
 
 /// Like [`implement_tree`], but ranks candidate summaries via `cost_model` (see
 /// [`crate::cost_model`]) instead of the built-in static preference order.
 pub fn implement_tree_with(
     expr: &QueryExpr,
-    cost_model: &dyn CostModel,
-) -> Result<Rc<L4Node>, ImplementError> {
-    implement_tree_in_with(expr, &BindingScope::default(), cost_model)
-}
-
-/// Like [`implement_tree_in`], but ranks candidate summaries via `cost_model`.
-pub fn implement_tree_in_with(
-    expr: &QueryExpr,
-    scope: &BindingScope,
     cost_model: &dyn CostModel,
 ) -> Result<Rc<L4Node>, ImplementError> {
     if let QueryExpr::Aggregate {
@@ -98,14 +80,14 @@ pub fn implement_tree_in_with(
                 Implementation::Summary { kind, params } => {
                     let estimate = !kind.is_exact();
                     return bind_summary_agg(
-                        expr, reduction, intent, child, kind, params, scope, estimate, cost_model,
+                        expr, reduction, intent, child, kind, params, estimate, cost_model,
                     );
                 }
                 Implementation::PassThrough => {}
             }
         }
     }
-    logical(expr, scope)
+    logical(expr)
 }
 
 /// Emit `SummaryAgg` (recursively binding the child), plus the
@@ -118,11 +100,10 @@ fn bind_summary_agg(
     child: &QueryExpr,
     kind: SummaryKind,
     params: SummaryParams,
-    scope: &BindingScope,
     estimate: bool,
     cost_model: &dyn CostModel,
 ) -> Result<Rc<L4Node>, ImplementError> {
-    let child_schema = child.output_schema_in(scope)?;
+    let child_schema = child.output_schema()?;
     // The single canonical L3 derivation (per-series vs cross-series, name
     // overrides) already computes the row shape; L4 only retypes the summary
     // state column.
@@ -131,7 +112,7 @@ fn bind_summary_agg(
         .group_keys()
         .map(|g| g.to_vec())
         .unwrap_or_default();
-    let out_schema = node.output_schema_in(scope)?;
+    let out_schema = node.output_schema()?;
     let state_idx = summary_col_index(&out_schema, &by, per_series);
 
     let col = summarised_column(intent, &child_schema);
@@ -149,7 +130,7 @@ fn bind_summary_agg(
     // place that decides this; nothing downstream re-derives it.
     let agg = Rc::new(L4Node {
         expr: SummaryExpr::SummaryAgg {
-            child: implement_tree_in_with(child, scope, cost_model)?,
+            child: implement_tree_with(child, cost_model)?,
             summary: kind,
             params,
             col,
@@ -235,8 +216,8 @@ fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> S
 /// accumulator kind the deployment's runtime doesn't actually implement —
 /// through the same fallback this crate's own dispatch uses, without
 /// duplicating the schema-lift logic.
-pub fn logical(expr: &QueryExpr, scope: &BindingScope) -> Result<Rc<L4Node>, ImplementError> {
-    let schema = expr.output_schema_in(scope)?;
+pub fn logical(expr: &QueryExpr) -> Result<Rc<L4Node>, ImplementError> {
+    let schema = expr.output_schema()?;
     Ok(Rc::new(L4Node {
         expr: SummaryExpr::Logical(Box::new(expr.clone())),
         schema: lift(&schema),

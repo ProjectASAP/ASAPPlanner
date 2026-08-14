@@ -92,17 +92,10 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
             collect(right, out);
         }
         QueryExpr::Merge { children } => children.iter().for_each(|c| collect(c, out)),
-        QueryExpr::LetBinding { expr, child, .. } => {
-            collect(expr, out);
-            collect(child, out);
-        }
         QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
             collect(inner, out)
         }
-        QueryExpr::Scan { .. }
-        | QueryExpr::Scalar(_)
-        | QueryExpr::EvalTime
-        | QueryExpr::Ref { .. } => {}
+        QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
     }
 }
 

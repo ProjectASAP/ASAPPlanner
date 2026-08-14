@@ -14,7 +14,6 @@ use std::collections::BTreeSet;
 
 const ALL_VARIANTS: &[&str] = &[
     "Scan",
-    "Ref",
     "Scalar",
     "EvalTime",
     "VectorFromScalar",
@@ -32,7 +31,6 @@ const ALL_VARIANTS: &[&str] = &[
     "SetOp",
     "Sort",
     "Limit",
-    "LetBinding",
     "Subquery",
     "TimeRange",
     "TimeShift",
@@ -44,9 +42,6 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
     match e {
         QueryExpr::Scan { .. } => {
             seen.insert("Scan");
-        }
-        QueryExpr::Ref { .. } => {
-            seen.insert("Ref");
         }
         QueryExpr::Scalar(_) => {
             seen.insert("Scalar");
@@ -114,11 +109,6 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
         }
         QueryExpr::Limit { child, .. } => {
             seen.insert("Limit");
-            walk(child, seen);
-        }
-        QueryExpr::LetBinding { expr, child, .. } => {
-            seen.insert("LetBinding");
-            walk(expr, seen);
             walk(child, seen);
         }
         QueryExpr::Subquery { child, .. } => {

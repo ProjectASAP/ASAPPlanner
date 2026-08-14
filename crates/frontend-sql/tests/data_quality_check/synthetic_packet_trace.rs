@@ -105,17 +105,10 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
                 go(rhs, out);
             }
             QueryExpr::Merge { children } => children.iter().for_each(|c| go(c, out)),
-            QueryExpr::LetBinding { expr, child, .. } => {
-                go(expr, out);
-                go(child, out);
-            }
             QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
                 go(inner, out)
             }
-            QueryExpr::Scan { .. }
-            | QueryExpr::Scalar(_)
-            | QueryExpr::EvalTime
-            | QueryExpr::Ref { .. } => {}
+            QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
         }
     }
     go(e, &mut out);
@@ -152,9 +145,6 @@ fn has_window_func(qe: &QueryExpr) -> bool {
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
         | QueryExpr::Subquery { child, .. } => has_window_func(child),
-        QueryExpr::LetBinding { expr, child, .. } => {
-            has_window_func(expr) || has_window_func(child)
-        }
         _ => false,
     }
 }

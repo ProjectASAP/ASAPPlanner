@@ -1,12 +1,10 @@
 //! The canonical Layer-3 intent algebra IR.
 //!
-//! Language- and deployment-independent. Box-owned tree (DAG fan-in is
-//! expressed via `LetBinding` / `Ref`); column identity is **positional**
+//! Language- and deployment-independent. Box-owned tree; column identity is **positional**
 //! (`Aggregate.reduction: Reduction`, wrapping `GroupKeys` for the
 //! grouped case), resolved by the [`Binder`](super::binder) against the
 //! self-contained [`Schema`] carried on each `Scan`.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -14,14 +12,11 @@ use thiserror::Error;
 
 use super::agg_intent::AggIntent;
 use super::expr_ir::{ArithOp, CompareOp, L3Expr, L3Scalar};
-use super::names::BindingName;
 use super::schema::{Column, ColumnId, DataType, Schema};
 
 /// Errors from schema derivation over a canonical tree.
 #[derive(Debug, Error)]
 pub enum QueryExprError {
-    #[error("unresolved ref: {0}")]
-    UnresolvedRef(String),
     #[error("by-column id {0} out of range (input has {1} columns)")]
     InvalidGroupByColumn(ColumnId, usize),
     #[error("Merge requires at least one child")]
@@ -492,9 +487,6 @@ pub enum QueryExpr {
         predicates: Vec<Predicate>,
         schema: Schema,
     },
-    /// Reference to a `LetBinding` by name; resolved at plan time.
-    Ref { name: BindingName },
-
     /// A scalar constant leaf — a PromQL number literal or a folded constant
     /// scalar expression (`10*1024*1024`). Appears as a [`BinaryOp`](Self::BinaryOp)
     /// operand for `<vector> op <scalar>` thresholds / unit conversions (#35).
@@ -663,13 +655,6 @@ pub enum QueryExpr {
         child: Box<QueryExpr>,
     },
 
-    /// SQL `WITH name AS (expr) … child`; PromQL recording-rule binding.
-    LetBinding {
-        name: BindingName,
-        expr: Box<QueryExpr>,
-        child: Box<QueryExpr>,
-    },
-
     /// PromQL sub-query (`<expr>[range:resolution]`). Logical pass-through.
     Subquery {
         range: Duration,
@@ -731,13 +716,8 @@ pub enum QueryExpr {
 }
 
 impl QueryExpr {
-    /// Output schema of the root of a single query (empty binding scope).
+    /// Output schema of the root of a canonical tree.
     pub fn output_schema(&self) -> Result<Schema, QueryExprError> {
-        self.output_schema_in(&BindingScope::default())
-    }
-
-    /// Output schema given an explicit `LetBinding` scope.
-    pub fn output_schema_in(&self, scope: &BindingScope) -> Result<Schema, QueryExprError> {
         match self {
             QueryExpr::Scan { schema, .. } => Ok(schema.clone()),
 
@@ -745,7 +725,7 @@ impl QueryExpr {
             // repetition. Does not change the column schema; passes through.
             // Per-series range reductions (`rate`, `*_over_time`) now use the
             // `TimeRange` node instead, so this arm is a simple pass-through.
-            QueryExpr::Window { child, .. } => child.output_schema_in(scope),
+            QueryExpr::Window { child, .. } => child.output_schema(),
 
             QueryExpr::Aggregate {
                 reduction,
@@ -754,19 +734,9 @@ impl QueryExpr {
                 child,
                 ..
             } => {
-                let in_schema = child.output_schema_in(scope)?;
+                let in_schema = child.output_schema()?;
                 aggregate_output_schema(&in_schema, reduction, aggs, output_names)
             }
-
-            QueryExpr::LetBinding { name, expr, child } => {
-                let bound = expr.output_schema_in(scope)?;
-                let extended = scope.with(name.clone(), bound);
-                child.output_schema_in(&extended)
-            }
-            QueryExpr::Ref { name } => scope
-                .lookup(name)
-                .cloned()
-                .ok_or_else(|| QueryExprError::UnresolvedRef(name.as_str().into())),
 
             QueryExpr::Filter { child, .. }
             | QueryExpr::Sort { child, .. }
@@ -781,7 +751,7 @@ impl QueryExpr {
             | QueryExpr::TimeRange { child, .. }
             // A time shift (`offset`/`@`) moves *when* the child is evaluated,
             // never its columns — schema passes through (#40).
-            | QueryExpr::TimeShift { child, .. } => child.output_schema_in(scope),
+            | QueryExpr::TimeShift { child, .. } => child.output_schema(),
 
             // ρ — relabel preserves every input column and writes one label
             // `dst` (Utf8): overwritten in place if it already exists, else
@@ -790,7 +760,7 @@ impl QueryExpr {
             // A rewrite can collapse two label sets into one, so row-uniqueness
             // is no longer provable — drop unique_keys.
             QueryExpr::Relabel { dst, child, .. } => {
-                let mut out = child.output_schema_in(scope)?;
+                let mut out = child.output_schema()?;
                 if let Some(existing) = out.columns.iter_mut().find(|c| c.name == *dst) {
                     existing.dtype = DataType::Utf8;
                     existing.nullable = true;
@@ -807,7 +777,7 @@ impl QueryExpr {
             // the grouping/time columns, so unique_keys reset and time_index
             // is re-found by name.
             QueryExpr::Project { cols, qualifier, child } => {
-                let in_schema = child.output_schema_in(scope)?;
+                let in_schema = child.output_schema()?;
                 let columns: Vec<Column> = cols
                     .iter()
                     .enumerate()
@@ -838,7 +808,7 @@ impl QueryExpr {
             }
 
             QueryExpr::Distinct { cols, child } => {
-                let mut out = child.output_schema_in(scope)?;
+                let mut out = child.output_schema()?;
                 // Deduplicating on `cols` makes them a unique key of the result.
                 if !cols.is_empty() {
                     out.add_unique_key(cols.clone());
@@ -854,7 +824,7 @@ impl QueryExpr {
                 let mut s = children
                     .first()
                     .ok_or(QueryExprError::EmptyMerge)
-                    .and_then(|c| c.output_schema_in(scope))?;
+                    .and_then(|c| c.output_schema())?;
                 s.unique_keys.clear();
                 Ok(s)
             }
@@ -862,7 +832,7 @@ impl QueryExpr {
             // column shape, so the output schema is the left's. (Row identity
             // is not preserved across a UNION, so unique_keys are dropped.)
             QueryExpr::SetOp { left, .. } => {
-                let mut s = left.output_schema_in(scope)?;
+                let mut s = left.output_schema()?;
                 s.unique_keys.clear();
                 Ok(s)
             }
@@ -872,8 +842,8 @@ impl QueryExpr {
             QueryExpr::Join {
                 kind, left, right, ..
             } => {
-                let l = left.output_schema_in(scope)?;
-                let r = right.output_schema_in(scope)?;
+                let l = left.output_schema()?;
+                let r = right.output_schema()?;
                 // Semi / anti joins filter the left side; the right contributes
                 // no columns, so the output is the left's schema unchanged. Row
                 // identity *is* preserved (each left row appears at most once),
@@ -918,7 +888,7 @@ impl QueryExpr {
                 child,
                 ..
             } => {
-                let mut out = child.output_schema_in(scope)?;
+                let mut out = child.output_schema()?;
                 // First operand's (dtype, nullable) from the child schema, owned
                 // so the borrow ends before we append.
                 let arg = args.first().and_then(|a| match a {
@@ -988,8 +958,8 @@ impl QueryExpr {
                 (
                     QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::ScalarFromVector(_),
                     r,
-                ) => r.output_schema_in(scope),
-                (l, _) => l.output_schema_in(scope),
+                ) => r.output_schema(),
+                (l, _) => l.output_schema(),
             },
         }
     }
@@ -1027,7 +997,7 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
 
 /// The output schema of an `Aggregate { reduction, aggs }` over `in_schema` —
 /// the **single** canonical derivation shared by
-/// [`QueryExpr::output_schema_in`]'s `Aggregate` arm and the converter's
+/// [`QueryExpr::output_schema`]'s `Aggregate` arm and the converter's
 /// HAVING-resolution path (`column_resolution::output_schema_for_aggregate`),
 /// so the two can never drift (issue #41).
 ///
@@ -1247,26 +1217,6 @@ fn default_proj_name(expr: &L3Expr, idx: usize, schema: &Schema) -> String {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| format!("col_{idx}")),
         _ => format!("col_{idx}"),
-    }
-}
-
-/// Lexical scope for `LetBinding` / `Ref` resolution.
-#[derive(Debug, Default, Clone)]
-pub struct BindingScope {
-    bindings: HashMap<String, Schema>,
-}
-
-impl BindingScope {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn with(&self, name: BindingName, schema: Schema) -> Self {
-        let mut bindings = self.bindings.clone();
-        bindings.insert(name.as_str().into(), schema);
-        Self { bindings }
-    }
-    pub fn lookup(&self, name: &BindingName) -> Option<&Schema> {
-        self.bindings.get(name.as_str())
     }
 }
 

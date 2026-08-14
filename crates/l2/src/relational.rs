@@ -234,11 +234,6 @@ pub enum QueryExpr {
         selector: Vec<InfoMatcher>,
         input: Box<QueryExpr>,
     },
-    /// Reference to a CTE / let-binding by name. **Reserved**: no front end
-    /// emits `Ref`/`LetBinding` yet (CSE runs on L3); the converter arm exists
-    /// for forward-compatibility (e.g. PromQL recording rules).
-    Ref(String),
-
     /// σ — row-level filter (WHERE / PromQL label matchers).
     Filter { pred: L2Expr, input: Box<QueryExpr> },
 
@@ -328,14 +323,6 @@ pub enum QueryExpr {
         input: Box<QueryExpr>,
     },
 
-    /// **Reserved**: see [`Ref`](Self::Ref) — no front end emits `LetBinding`
-    /// yet (DAG fan-in / CSE is expressed on L3).
-    LetBinding {
-        name: String,
-        expr: Box<QueryExpr>,
-        body: Box<QueryExpr>,
-    },
-
     /// PromQL sub-query syntax: `<expr>[range:resolution]`.
     PromQLSubquery {
         range: Duration,
@@ -367,10 +354,7 @@ impl QueryExpr {
     pub fn walk<F: FnMut(&QueryExpr)>(&self, f: &mut F) {
         f(self);
         match self {
-            QueryExpr::Source(_)
-            | QueryExpr::Scalar(_)
-            | QueryExpr::EvalTime
-            | QueryExpr::Ref(_) => {}
+            QueryExpr::Source(_) | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
             QueryExpr::Filter { input, .. }
             | QueryExpr::Project { input, .. }
             | QueryExpr::Aggregate { input, .. }
@@ -401,10 +385,6 @@ impl QueryExpr {
                 left.walk(f);
                 right.walk(f);
             }
-            QueryExpr::LetBinding { expr, body, .. } => {
-                expr.walk(f);
-                body.walk(f);
-            }
         }
     }
 
@@ -431,8 +411,7 @@ impl QueryExpr {
             QueryExpr::Join { left, .. }
             | QueryExpr::SetOp { left, .. }
             | QueryExpr::BinaryOp { lhs: left, .. } => left.leaf_source(),
-            QueryExpr::LetBinding { body, .. } => body.leaf_source(),
-            QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::Ref(_) => None,
+            QueryExpr::Scalar(_) | QueryExpr::EvalTime => None,
         }
     }
 
