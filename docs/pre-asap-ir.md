@@ -149,10 +149,8 @@ renaming it to `measures` to match this doc.)
   sitting above a bindable aggregate falls back to logical, whatever its predicate is about
   — not by inspecting what the predicate needs.
 
-  What actually happens today: the SQL front end doesn't populate `having` from a real
-  `HAVING` clause yet, so the query above currently lowers to the *other* shape —
-  `Filter { pred: cnt > 10, child: Aggregate { having: None, ... } }`. `having` is exercised
-  only by hand-built L2/L3 trees today, not by parsed SQL.
+  The SQL front end doesn't populate `having` from a real `HAVING` clause yet, though — see
+  #201.
 - `child` — the input being aggregated.
 
 ## Time-related nodes
