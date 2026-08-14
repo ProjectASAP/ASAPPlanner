@@ -3,7 +3,7 @@
 The goal of the pre-ASAP IR is represent operations from different query languages in a single representation, and make it easier to analyze how/where ASAP primitives can be used.
 Only operations that are semantically relevant to answering the query and selecting an ASAP primitive need to become first-class nodes here.
 
-Design principles:
+## Design principles
 
 1. Expose the query semantics that affect summary applicability, correctness, and cost.
 2. If an operation changes presentation but does not change the semantic summary intent, it does not need to be represented.
