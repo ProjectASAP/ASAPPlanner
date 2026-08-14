@@ -200,6 +200,19 @@ is required.
 
 // MS: After that, the goal should be to clearly write what the pre-ASAP and post-ASAP IRs are. The list of nodes
 
+# Dev tools
+
+`crates/lower` ships debugging binaries and examples for poking at the lowering pipeline. Binaries (`cargo run -p asap-lower --bin <name>`):
+
+- **`show_ir`** — prints pre-ASAP IRs for ad-hoc SQL/PromQL queries from a file or stdin, `sql>`/`promql>` prefixed
+- **`dag_export`** — dumps pre-ASAP IRs for given `--sql`/`--promql` queries for `tools/dag-viewer`.
+- **`variant_coverage`** — parses and canonicalizes every query corpus in the repo to pre-ASAP IR and reports which `QueryExpr` variants get exercised.
+
+Examples (`cargo run -p asap-lower --example <name>`):
+
+- **`topk_ir`** — prints pre-ASAP IR for a hardcoded set of topk-shaped SQL/PromQL queries
+- **`canonical_examples`** — prints pre-ASAP IR for one canonical query per `QueryExpr` variant, and custom join/set-op/distinct/CTE probes, to eyeball their shape.
+
 # Design principles
 
 ## 1. Normalize semantics, not syntax
