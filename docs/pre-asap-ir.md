@@ -139,17 +139,9 @@ renaming it to `measures` to match this doc.)
   )
   ```
 
-  That's not the same shape as an ordinary `Filter` wrapping an `Aggregate` (see `Filter`'s
-  derived-table example above, which filters this *same* `cnt > 10` predicate but as a
-  separate node). Both shapes end up not sketch-bound today, but for different reasons:
+  > Note: There is a design principle on whether we group the constraints into one node in the pre ASAP common IR, or we want to analyze the constraints during pre -> post ASAP IR translation. Here, the Filter, scan.prediate, or aggregate.having are different levels of filtering predicates, and we prefer to enforce pushing down the constraints of filtering predicates to the lowest layer in the tree or DAG it belongs to, to be clear about the constraints of a potential intent, which should be considered when pre-ASAP IR translates to post-ASAP IR with summary bound. 
 
-  - With `having` set, the binder can tell *why* just by looking at the `Aggregate` node
-    itself: the predicate needs the aggregate's exact value, not a sketch's estimate, so it
-    doesn't try to sketch it. (A multi-measure `aggs` blocks sketching the same way.)
-  - With a wrapping `Filter`, the binder isn't reasoning about the predicate at all — it has
-    a blanket rule that any `Filter` directly above an `Aggregate` blocks sketching that
-    `Aggregate`, full stop. It would give up the exact same way even for a `Filter` whose
-    predicate has nothing to do with the aggregate's output.
+ 
 
   The SQL front end doesn't populate `having` from a real `HAVING` clause yet, though — see
   #201.
