@@ -7,11 +7,11 @@ are selected.
 
 
 ```text
-L2 Intent
+Pre-ASAP common IR
     │
     │ implement
     ▼
-Summary-bound IR
+Post-ASAP Summary-bound IR
 ```
 
 An implementation is the concrete realization chosen for an intent, for example:
