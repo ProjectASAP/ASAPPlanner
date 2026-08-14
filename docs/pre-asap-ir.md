@@ -8,6 +8,10 @@ Design principles:
 1. Expose the query semantics that affect summary applicability, correctness, and cost.
 2. If an operation changes presentation but does not change the semantic summary intent, it does not need to be represented.
 3. Equivalent SQL, PromQL, and future-language queries should produce the same intent shape.
+4. A filtering predicate lives at the lowest node that can express it — `Scan.predicates`,
+   then `Aggregate.having`, then `Filter` as the fallback — so its constraint is visible at
+   the node it actually applies to, not behind an opaque wrapper, once pre-ASAP IR translates
+   to post-ASAP IR with summary binding.
 
 The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of important enum types below.
 
@@ -139,12 +143,14 @@ renaming it to `measures` to match this doc.)
   )
   ```
 
-  > Note: There is a design principle on whether we group the constraints into one node in the pre ASAP common IR, or we want to analyze the constraints during pre -> post ASAP IR translation. Here, the Filter, scan.prediate, or aggregate.having are different levels of filtering predicates, and we prefer to enforce pushing down the constraints of filtering predicates to the lowest layer in the tree or DAG it belongs to, to be clear about the constraints of a potential intent, which should be considered when pre-ASAP IR translates to post-ASAP IR with summary bound. 
+  This follows design principle 4 (predicates push down to the lowest node that can express
+  them) — see `Filter`'s note below for the full placement rule and a worked example of when
+  a predicate genuinely stays a separate `Filter` instead.
 
- 
-
-  The SQL front end doesn't populate `having` from a real `HAVING` clause yet, though — see
-  #201.
+  Neither direction of that push-down is enforced yet: the SQL front end doesn't populate
+  `having` from a real `HAVING` clause (#201), and canonicalization doesn't fold an existing
+  `Filter { child: Aggregate { having: None, .. } }` into `Aggregate { having: Some(..), .. }`
+  either (#204).
 - `child` — the input being aggregated.
 
 ## Time-related nodes
@@ -206,7 +212,8 @@ the same logical data domain.
 
 **Fields:**
 - `source` — the logical data source (a table name or PromQL metric selector).
-- `predicates` — row-level filters pushed all the way down to this scan.
+- `predicates` — row-level filters pushed all the way down to this scan (design principle 4);
+  enforced structurally at lowering time — a `Filter` directly over a `Scan` never survives.
 - `schema` — the binding schema every positional column reference in the tree resolves against.
 
 ### Filter
@@ -224,12 +231,21 @@ Filters are first-class because they can change which summaries are applicable. 
 for an entire dataset is not necessarily sufficient to answer the same intent under an
 arbitrary predicate.
 
-Note: a `WHERE`/label-matcher predicate that pushes all the way onto a base table scan
-lands in `Scan.predicates` instead of a separate `Filter` node — `Filter` only survives when
-the predicate sits over something a scan can't absorb, e.g. a post-aggregate column:
+Note (design principle 4): a predicate pushes down to the lowest node that can express it. A
+`WHERE`/label-matcher predicate directly on a base table scan lands in `Scan.predicates`, not
+a `Filter` node. A predicate directly over an enclosing `Aggregate`'s own output — SQL
+`HAVING`, or an equivalent derived-table `WHERE` — belongs in that `Aggregate`'s `having`
+field instead (see `Aggregate`'s `having` field above), not a `Filter`:
 
 ```sql
 SELECT * FROM (SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip) t WHERE cnt > 10
+```
+
+`Filter` genuinely survives once neither applies — e.g. a predicate over a computed column
+that's neither a base scan column nor an aggregate output:
+
+```sql
+SELECT * FROM (SELECT srcip, bytes_in + bytes_out AS total FROM packets) t WHERE total > 500
 ```
 
 **Fields:**
