@@ -13,10 +13,18 @@ The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of import
 
 ## Node index
 
+Grouped to match the sections below — common relational nodes first, then the nodes specific
+to one source language.
+
+**[Aggregation-related nodes](#aggregation-related-nodes)**
 - [`Aggregate`](#aggregate) — collapses input rows into fewer output rows via grouping dimensions and measures.
+
+**[Time-related nodes](#time-related-nodes)**
 - [`TimeRange`](#timerange) — a range-vector lookback over the time axis (PromQL `[5m]`).
 - [`TimeShift`](#timeshift) — shifts *when* a selector is evaluated (PromQL `offset`/`@`).
 - [`Subquery`](#subquery) — re-evaluates an instant-vector expression over a range at a given step.
+
+**[Relational nodes](#relational-nodes)** — common to both SQL and PromQL
 - [`Scan`](#scan) — identifies the logical data source.
 - [`Filter`](#filter) — restricts rows using a predicate.
 - [`Project`](#project) — column projection (SQL `SELECT` list).
@@ -27,6 +35,8 @@ The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of import
 - [`Join`](#join) — logical join of two inputs.
 - [`SetOp`](#setop) — SQL's typed set operations (`UNION`/`INTERSECT`/`EXCEPT`).
 - [`Merge`](#merge) — exact, untyped `UNION ALL` of union-compatible branches.
+
+**[PromQL-specific nodes](#promql-specific-nodes)**
 - [`Scalar`](#scalar) — a scalar constant leaf.
 - [`EvalTime`](#evaltime) — the query evaluation time as a scalar (PromQL `time()`).
 - [`VectorFromScalar`](#vectorfromscalar) — promotes a scalar to a label-less instant vector.
@@ -34,6 +44,8 @@ The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of import
 - [`Relabel`](#relabel) — per-series label rewrite (PromQL `label_replace`/`label_join`).
 - [`InfoJoin`](#infojoin) — left-join label enrichment from an info metric.
 - [`Sample`](#sample) — keeps a subset of whole series, not a reduction.
+
+**[SQL-specific nodes](#sql-specific-nodes)**
 - [`WindowFunc`](#windowfunc) — SQL analytic window function (`OVER (...)`).
 
 ## Aggregation-related nodes
