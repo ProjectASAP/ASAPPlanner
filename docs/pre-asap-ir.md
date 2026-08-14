@@ -1,16 +1,40 @@
 # Pre-ASAP IR
 
-The pre-ASAP IR is deliberately narrower than SQL or any other source-language AST.
-Only concepts that are semantically relevant to answering the query and selecting a summary
-need to become first-class nodes.
+The goal of the pre-ASAP IR is represent operations from different query languages in a single representation, and make it easier to analyze how/where ASAP primitives can be used.
+Only operations that are semantically relevant to answering the query and selecting an ASAP primitive need to become first-class nodes here.
 
 Design principles:
 
-1. Expose the query semantics dimensions that affect summary applicability, correctness, and cost.
+1. Expose the query semantics that affect summary applicability, correctness, and cost.
 2. If an operation changes presentation but does not change the semantic summary intent, it does not need to be represented.
 3. Equivalent SQL, PromQL, and future-language queries should produce the same intent shape.
 
 The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of important enum types below.
+
+## Node index
+
+- [`Aggregate`](#aggregate) — collapses input rows into fewer output rows via grouping dimensions and measures.
+- [`TimeRange`](#timerange) — a range-vector lookback over the time axis (PromQL `[5m]`).
+- [`TimeShift`](#timeshift) — shifts *when* a selector is evaluated (PromQL `offset`/`@`).
+- [`Subquery`](#subquery) — re-evaluates an instant-vector expression over a range at a given step.
+- [`Scan`](#scan) — identifies the logical data source.
+- [`Filter`](#filter) — restricts rows using a predicate.
+- [`Project`](#project) — column projection (SQL `SELECT` list).
+- [`BinaryOp`](#binaryop) — arithmetic / comparison / boolean composition of two inputs.
+- [`Sort`](#sort) — generic (non-heavy-hitter) order-by, optionally per-group.
+- [`Limit`](#limit) — caps the row count, with an offset.
+- [`Distinct`](#distinct) — row-level deduplication.
+- [`Join`](#join) — logical join of two inputs.
+- [`SetOp`](#setop) — SQL's typed set operations (`UNION`/`INTERSECT`/`EXCEPT`).
+- [`Merge`](#merge) — exact, untyped `UNION ALL` of union-compatible branches.
+- [`Scalar`](#scalar) — a scalar constant leaf.
+- [`EvalTime`](#evaltime) — the query evaluation time as a scalar (PromQL `time()`).
+- [`VectorFromScalar`](#vectorfromscalar) — promotes a scalar to a label-less instant vector.
+- [`ScalarFromVector`](#scalarfromvector) — collapses a single-series vector to a scalar.
+- [`Relabel`](#relabel) — per-series label rewrite (PromQL `label_replace`/`label_join`).
+- [`InfoJoin`](#infojoin) — left-join label enrichment from an info metric.
+- [`Sample`](#sample) — keeps a subset of whole series, not a reduction.
+- [`WindowFunc`](#windowfunc) — SQL analytic window function (`OVER (...)`).
 
 ## Aggregation-related nodes
 
@@ -58,7 +82,6 @@ meaningful summary implementation.
 - `child` — the input being aggregated.
 
 ## Time-related nodes
-
 
 ### TimeRange
 
