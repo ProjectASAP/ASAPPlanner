@@ -63,15 +63,15 @@ list of aggregate intents (`aggs`).
 
 `Aggregate.reduction` is a `Reduction` — richer than a plain SQL `GROUP BY` — one of:
 
-- **`Reduce(GroupKeys)`** — a genuine cross-entity reduction: group by some columns, or group
+- **`Reduce(GroupKeys)`** — a cross-row reduction: group by some columns, or group
   by every column *except* some listed ones. `GroupKeys` holds positional column references
   (`ColumnId`s — indexes into the input schema, not column names) and carries a `by`/`without`
   flag, not just a plain list:
   - `by(keys)` — group by exactly these columns (SQL `GROUP BY`, PromQL `by(...)`).
   - `without(keys)` — group by every column *except* these (PromQL `without(...)`); the
-    excluded columns are stored but the kept set stays open (because PromQL is schemaless), resolved at runtime against
+    excluded columns are stored but the full set of all columns stay open (because PromQL is schemaless), resolved at runtime against
     the actual input schema.
-  - `none()` — an empty key set, i.e. a global (ungrouped) reduction. This is different from `PerEntity` below. 
+  - `none()` — an empty GroupKeys list, i.e. a global (ungrouped) reduction. This is different from `PerEntity` below. 
 
   ```text
   Aggregate(
