@@ -52,7 +52,8 @@ to one source language.
 
 ### Aggregate
 
-γ + α — a positional `GROUP BY` (`reduction`) plus a list of aggregate intents (`aggs`).
+Collapses input rows into fewer output rows via a positional `GROUP BY` (`reduction`) plus a
+list of aggregate intents (`aggs`).
 
 ```text
 Aggregate(
@@ -64,9 +65,9 @@ Aggregate(
 )
 ```
 
-#### Grouping — `reduction`
+#### Grouping
 
-Grouping is not a bare list of dimensions; it's a `Reduction`, one of:
+Grouping is not a bare list of dimensions; it's `Aggregate.reduction`, a `Reduction`, one of:
 
 - **`Reduce(GroupKeys)`** — a genuine cross-entity reduction. `GroupKeys` is positional
   (columns resolved against the input schema, not semantic field names) and carries a
@@ -77,12 +78,21 @@ Grouping is not a bare list of dimensions; it's a `Reduction`, one of:
     the actual input schema.
   - `none()` — an empty key set, i.e. a global (ungrouped) reduction — still a genuine
     reduction with zero grouping columns, not "no grouping concept."
-- **`PerEntity`** — no grouping concept at all: a per-entity pass-through (e.g. a per-series
-  windowed computation like `rate(v[5m])`, which has no `by(...)` clause to attach to) that
-  never merges rows across entities. Introduced in #165 to give per-entity reductions like
-  `Rate`/`Increase`/`*_over_time` a home distinct from a real `GROUP BY`.
+- **`PerEntity`** — no grouping concept at all: a per-entity pass-through that never merges
+  rows across entities, for a computation with no `by(...)` clause to attach to. Introduced
+  in #165 to give per-entity reductions like `Rate`/`Increase`/`*_over_time` a home distinct
+  from a real `GROUP BY`. E.g. PromQL `rate(http_requests_total[5m])`:
+  ```text
+  Aggregate(
+      reduction = PerEntity,
+      aggs = [Rate],
+      output_names = [],
+      having = None,
+      child = TimeRange(range = 5m, child = Scan("http_requests_total"))
+  )
+  ```
 
-#### Measures — `aggs`
+#### Measures
 
 Each entry in `aggs` names one statistic to compute. The vocabulary is wider than a minimal
 aggregate algebra needs, because it also covers PromQL's range-vector functions and
@@ -99,16 +109,24 @@ HistogramStdVar, HistogramFraction(lo, hi), HistogramQuantile(q)  // native-hist
 Math(func)                                                        // element-wise transform
 ```
 
-New variants are added when there is a stable semantic distinction and a meaningful summary
-implementation.
+Additional measures can be added when there is a stable semantic distinction and a
+meaningful summary implementation. (The field is still named `aggs` in code — see #200 for
+renaming it to `measures` to match this doc.)
 
 **Fields:**
 - `reduction` — the grouping; see "Grouping" above.
-- `aggs` — the aggregate intents to compute; see "Measures" above.
+- `aggs` — the aggregate intents (measures) to compute; see "Measures" above.
 - `output_names` — output column name per entry in `aggs`; a non-empty entry overrides the
   synthetic default — SQL threads DataFusion's generated name (e.g. `"sum(metrics.bytes)"`)
   here so an enclosing `Project` can resolve the aggregate output by the name it references.
-- `having` — an optional post-aggregation filter predicate (SQL `HAVING`).
+- `having` — an optional post-aggregation filter predicate (SQL `HAVING`). Distinct from a
+  `Filter` wrapping this `Aggregate` (see `Filter`'s note above), even though both express a
+  post-aggregation predicate: `having` lets the L3→L4 binding pass see, without looking at
+  its parent, that this `Aggregate` can't be sketch-bound — the predicate needs the *exact*
+  aggregate value, not an estimate, so a `having` (like a multi-measure `aggs`) always stays
+  logical. In practice the SQL front end does not yet populate `having` from a real `HAVING`
+  clause — it always emits `Filter { Aggregate { having: None } }` instead, so today `having`
+  is exercised only by hand-built L2/L3 trees, not by parsed SQL.
 - `child` — the input being aggregated.
 
 ## Time-related nodes
