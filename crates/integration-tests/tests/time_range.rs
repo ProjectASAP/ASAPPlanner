@@ -33,7 +33,6 @@ fn range_agg(range_secs: u64, intent: AggIntent, metric: &str) -> QueryExpr {
         reduction: Reduction::PerEntity,
         aggs: vec![intent],
         output_names: vec!["".into()],
-        having: None,
         child: Box::new(QueryExpr::TimeRange {
             range: Duration::from_secs(range_secs),
             child: Box::new(scan(metric)),

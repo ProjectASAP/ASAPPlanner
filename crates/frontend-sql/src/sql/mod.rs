@@ -588,7 +588,6 @@ impl<'a> SqlLowerer<'a> {
             // SQL `GROUP BY` is always an inclusion list — there is no `without`.
             without: false,
             aggs,
-            having: None,
             input,
         })
     }
@@ -687,7 +686,6 @@ impl<'a> SqlLowerer<'a> {
                     keys: level_keys,
                     without: false,
                     aggs: aggs.clone(),
-                    having: None,
                     input: Box::new(input.clone()),
                 };
                 // Reinstate omitted keys as typed nulls, in canonical order.

@@ -536,8 +536,6 @@ pub enum QueryExpr {
         /// (PromQL's convention).
         #[serde(default)]
         output_names: Vec<String>,
-        #[serde(default)]
-        having: Option<Predicate>,
         child: Box<QueryExpr>,
     },
 
@@ -938,10 +936,8 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
 }
 
 /// The output schema of an `Aggregate { reduction, aggs }` over `in_schema` —
-/// the **single** canonical derivation shared by
-/// [`QueryExpr::output_schema`]'s `Aggregate` arm and the converter's
-/// HAVING-resolution path (`column_resolution::output_schema_for_aggregate`),
-/// so the two can never drift (issue #41).
+/// the single canonical derivation used by [`QueryExpr::output_schema`]'s
+/// `Aggregate` arm.
 ///
 /// `Reduction::PerEntity` selects the label-preserving
 /// [`per_series_reduction_schema`] (`rate`/`increase`/`*_over_time`) instead
@@ -1359,7 +1355,6 @@ mod tests {
             reduction: Reduction::Reduce(GroupKeys::without(vec![2])), // exclude `instance`
             aggs: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
-            having: None,
             child: Box::new(scan_node),
         };
         let s = agg.output_schema().unwrap();
@@ -1437,7 +1432,6 @@ mod tests {
             reduction: Reduction::PerEntity,
             aggs: vec![AggIntent::Rate],
             output_names: vec![],
-            having: None,
             child: Box::new(QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
                 child: Box::new(scan_node),
@@ -1475,7 +1469,6 @@ mod tests {
             reduction: Reduction::PerEntity,
             aggs: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
-            having: None,
             child: Box::new(QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
                 child: Box::new(scan_node),
@@ -1524,7 +1517,6 @@ mod tests {
             reduction: Reduction::PerEntity,
             aggs: vec![AggIntent::Rate],
             output_names: vec![],
-            having: None,
             child: Box::new(open_leaf),
         };
         assert!(
@@ -1536,7 +1528,6 @@ mod tests {
             reduction: Reduction::by(vec![2]), // `job`
             aggs: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
-            having: None,
             child: Box::new(rate),
         };
         assert!(

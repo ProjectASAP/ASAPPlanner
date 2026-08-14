@@ -90,7 +90,6 @@ meaningful summary implementation.
 - `reduction` — whether this is a genuine cross-entity reduction (`Reduce(GroupKeys)`) or a per-entity pass-through with no grouping concept at all (`PerEntity`).
 - `aggs` — the aggregate intents to compute (`Sum`, `Rate`, `HistogramQuantile`, ...).
 - `output_names` — output column name per entry in `aggs`; overrides the synthetic default when non-empty.
-- `having` — an optional post-aggregation filter predicate (SQL `HAVING`).
 - `child` — the input being aggregated.
 
 ## Time-related nodes

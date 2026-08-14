@@ -219,7 +219,6 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             reduction,
             aggs,
             output_names,
-            having,
             child,
         } => {
             let c = build(child, nodes);
@@ -227,7 +226,6 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
                 "reduction": reduction,
                 "aggs": aggs,
                 "output_names": output_names,
-                "having": having,
             });
             push_node(
                 nodes,
@@ -417,7 +415,6 @@ mod tests {
                     accuracy: AccuracyTarget::Exact,
                 }],
                 output_names: vec![],
-                having: None,
                 child: Box::new(scan("metrics", value_col())),
             }),
         };

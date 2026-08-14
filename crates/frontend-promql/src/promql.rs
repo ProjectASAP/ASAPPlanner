@@ -485,16 +485,11 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
 fn mark_without(l2: L2, without: bool) -> L2 {
     match l2 {
         L2::Aggregate {
-            keys,
-            aggs,
-            having,
-            input,
-            ..
+            keys, aggs, input, ..
         } if without => L2::Aggregate {
             keys,
             without: true,
             aggs,
-            having,
             input,
         },
         other => other,
@@ -637,7 +632,6 @@ fn walk_histogram_quantiles(call: &Call) -> Result<L2> {
                     func,
                     col: ColumnRef::SampleValue,
                 }],
-                having: None,
                 input: Box::new(walk(vec_expr)?),
             };
             Ok(L2::Relabel {
@@ -1424,7 +1418,6 @@ fn windowed_aggregate(inner: Inner, keys: Vec<ColumnRef>, func: AggFunc) -> L2 {
             func,
             col: ColumnRef::SampleValue,
         }],
-        having: None,
         input: Box::new(input),
     }
 }
@@ -1443,7 +1436,6 @@ fn outer_aggregate(keys: Vec<ColumnRef>, func: AggFunc, input: L2) -> L2 {
             func,
             col: ColumnRef::SampleValue,
         }],
-        having: None,
         input: Box::new(input),
     }
 }

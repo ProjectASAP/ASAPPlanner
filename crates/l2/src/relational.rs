@@ -4,7 +4,7 @@
 //!
 //! Leaf / scalar types (`ColumnRef`, `SortKey`,
 //! `BinaryOpKind`, `VectorMatch`) are owned by `query_expr` and re-used here so
-//! there is one canonical spelling. Filter / having / project expressions use
+//! there is one canonical spelling. Filter / project expressions use
 //! the shared language-independent [`L3Expr`](asap_types::intent_algebra::expr_ir::L3Expr).
 
 use std::time::Duration;
@@ -261,7 +261,6 @@ pub enum QueryExpr {
         keys: Vec<ColumnRef>,
         without: bool,
         aggs: Vec<AggItem>,
-        having: Option<L2Expr>,
         input: Box<QueryExpr>,
     },
 

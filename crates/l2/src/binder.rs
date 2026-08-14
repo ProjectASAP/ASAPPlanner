@@ -126,7 +126,7 @@ fn default_leaf_columns() -> Vec<Column> {
 
 /// Collect every distinct column name the converter resolves positionally:
 /// group keys (`Aggregate.keys`, `TopK.by`, `Partition.keys`) **and** the
-/// columns referenced by name in filter / having / project / sort / join
+/// columns referenced by name in filter / project / sort / join
 /// expressions (e.g. a PromQL label matcher `m{env="prod"}` references `env`).
 /// The Binder seeds these into the usage-derived leaf so positional resolution
 /// downstream is total.
@@ -148,11 +148,8 @@ pub(crate) fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
     }
     let mut out: Vec<String> = Vec::new();
     tree.walk(&mut |node| match node {
-        LQueryExpr::Aggregate { keys, having, .. } => {
+        LQueryExpr::Aggregate { keys, .. } => {
             keys.iter().for_each(|k| push_ref_name(k, &mut out));
-            if let Some(h) = having {
-                named(h, &mut out);
-            }
         }
         LQueryExpr::TopK { by, .. } => by.iter().for_each(|k| push_ref_name(k, &mut out)),
         // `limitk`/`limit_ratio` grouping keys resolve positionally (issue #86).

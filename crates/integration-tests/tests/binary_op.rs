@@ -34,7 +34,6 @@ fn rate_agg(metric: &str) -> QueryExpr {
         reduction: Reduction::PerEntity,
         aggs: vec![AggIntent::Rate],
         output_names: vec!["".into()],
-        having: None,
         child: Box::new(QueryExpr::TimeRange {
             range: Duration::from_secs(300),
             child: Box::new(scan(metric, &[])),
@@ -47,7 +46,6 @@ fn sum_by_job(metric: &str) -> QueryExpr {
         reduction: Reduction::by(vec![2]),
         aggs: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
-        having: None,
         child: Box::new(scan(metric, &["job"])),
     }
 }
@@ -248,7 +246,6 @@ fn q36_sum_of_negation_nests() {
         reduction: Reduction::by(vec![]),
         aggs: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
-        having: None,
         child: Box::new(QueryExpr::BinaryOp {
             op: BinaryOpKind::Arith(ArithOp::Mul),
             lhs: Box::new(scan("node_cpu_seconds_total", &[])),

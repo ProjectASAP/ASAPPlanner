@@ -5,8 +5,7 @@
 //! Cross-series aggregates lower to a single `Aggregate` node with no
 //! `TimeRange` child (range functions use `TimeRange` — see `time_range.rs`).
 //! Group keys land on `Aggregate.by` as positional `ColumnId`s.
-//! Single-stat PromQL aggregates always get `output_names: [""]` (no alias)
-//! and `having: None`.
+//! Single-stat PromQL aggregates always get `output_names: [""]` (no alias).
 
 use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
@@ -32,7 +31,6 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
         reduction: Reduction::by(by),
         aggs: vec![intent],
         output_names: vec!["".into()],
-        having: None,
         child: Box::new(child),
     }
 }

@@ -23,11 +23,12 @@
 //!
 //! [`SummaryExpr::Logical`] boxes a whole L3 subtree — it has no L4 children —
 //! so a *logical* operator above a bindable aggregate (`Filter`/`BinaryOp`/…
-//! over a quantile) subsumes the aggregate into the logical wrapper unbound.
-//! Rewriting through logical parents is the L4 rule engine's job (#6/#33),
-//! not this pass's. Similarly conservative: multi-intent `Aggregate` nodes
-//! (SQL `SELECT SUM(a), AVG(b)`) and aggregates with a `HAVING` predicate
-//! (the filter would need the estimate first) stay logical.
+//! over a quantile, including a HAVING predicate — which lowers to a `Filter`
+//! wrapping the `Aggregate`, since the filter would need the estimate first)
+//! subsumes the aggregate into the logical wrapper unbound. Rewriting through
+//! logical parents is the L4 rule engine's job (#6/#33), not this pass's.
+//! Similarly conservative: multi-intent `Aggregate` nodes (SQL `SELECT SUM(a),
+//! AVG(b)`) stay logical.
 
 use std::rc::Rc;
 
@@ -68,14 +69,13 @@ pub fn implement_tree_with(
     if let QueryExpr::Aggregate {
         reduction,
         aggs,
-        having,
         child,
         ..
     } = expr
     {
-        // The bindable shape: exactly one intent, no HAVING. (Multi-intent
-        // nodes and HAVING stay logical — see the module docs.)
-        if let ([intent], None) = (aggs.as_slice(), having) {
+        // The bindable shape: exactly one intent. (Multi-intent nodes stay
+        // logical — see the module docs.)
+        if let [intent] = aggs.as_slice() {
             match implementation_for_with(intent, cost_model) {
                 Implementation::Summary { kind, params } => {
                     let estimate = !kind.is_exact();
@@ -269,7 +269,6 @@ mod tests {
             reduction: Reduction::by(by),
             aggs: vec![intent],
             output_names: vec![],
-            having: None,
             child: Box::new(child),
         }
     }
@@ -280,7 +279,6 @@ mod tests {
             reduction: Reduction::PerEntity,
             aggs: vec![intent],
             output_names: vec![],
-            having: None,
             child: Box::new(child),
         }
     }
@@ -690,21 +688,11 @@ mod tests {
     }
 
     #[test]
-    fn having_and_multi_intent_stay_logical() {
-        let mut q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        if let QueryExpr::Aggregate { having, .. } = &mut q {
-            *having = Some(Predicate(L3Expr::Literal(L3Scalar::Boolean(true))));
-        }
-        assert!(matches!(
-            implement_tree(&q).unwrap().expr,
-            SummaryExpr::Logical(_)
-        ));
-
+    fn multi_intent_stays_logical() {
         let multi = QueryExpr::Aggregate {
             reduction: Reduction::by(vec![2]),
             aggs: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
-            having: None,
             child: Box::new(metric_scan(&["job"])),
         };
         assert!(matches!(

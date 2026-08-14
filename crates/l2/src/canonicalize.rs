@@ -174,7 +174,6 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
             accuracy: accuracy.clone(),
         }],
         output_names: Vec::new(),
-        having: None,
         child: Box::new(agg_expr.clone()),
     })
 }
@@ -282,7 +281,6 @@ mod tests {
                 accuracy: AccuracyTarget::Exact,
             }],
             output_names: vec![],
-            having: None,
             child: Box::new(scan()),
         }
     }
@@ -394,7 +392,6 @@ mod tests {
             reduction: Reduction::by(vec![1]),
             aggs: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
-            having: None,
             child: Box::new(scan()),
         };
         let q = limit(5, 0, sort(desc(1), sum));
@@ -428,7 +425,6 @@ mod tests {
             reduction: Reduction::by(vec![1, 2]),
             aggs: vec![agg],
             output_names: vec![],
-            having: None,
             child: Box::new(scan4()),
         }
     }
