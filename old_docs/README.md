@@ -76,7 +76,7 @@ crates/
 ├── lower/                          # asap-lower — facade (re-exports both front ends) + cross-language tests
 └── e2e/                            # asap-e2e — PromQL→L4 integration tests (through L3→L4 binding) + fixtures
 
-# planned (see docs/l5-physical-plan.md): L5 physical framework, runtime
+# planned (see docs/l4-physical-plan.md): L4 physical framework, runtime
 # service, deployment-model-* crates, control-proto, and the bin/ entrypoints.
 ```
 
@@ -118,7 +118,7 @@ cargo test --workspace
 **Visualize the IR.** `asap-lower` ships an example, `dag_export`, that lowers
 one or more `--sql`/`--promql` queries through L1→L2→L3 and flattens each
 resulting `QueryExpr` — the L3 canonical IR (see
-[`docs/l3-intent-algebra.md`](docs/l3-intent-algebra.md)) — into a generic
+[`docs/l2-intent-algebra.md`](docs/l2-intent-algebra.md)) — into a generic
 node/edge graph, printed as JSON:
 
 ```bash

@@ -1,22 +1,21 @@
-# L5 — physical plan
+# L4 — physical plan
 
-**Status: an interface design, not a concrete implementation.**
-Everything below describes the intended shape of this layer — what a
-deployment must implement — rather than a shipped component. This
+**Status: an interface design.** Everything below describes the
+intended shape of this layer — what a deployment must implement. This
 layer's concrete realization is inherently deployment-specific: a
 downstream deployment supplies its own instance of it.
 
-## What L5 is for
+## What L4 is for
 
-L3 and L4 are symbolic — they describe computation and summary choices
-without committing to *where* anything runs. L5 produces the concrete,
+L2 and L3 are symbolic — they describe computation and summary choices
+without committing to *where* anything runs. L4 produces the concrete,
 placed plan: which physical stage each piece of computation runs at,
 how much parallelism it gets, and — ultimately — a form a specific
 deployment can act on (e.g. serialize into that deployment's own
 configuration format). The same summary-bound plan, combined with a
-different topology, is meant to produce a different placement without
-re-running any earlier layer — topology is a parameter to this layer,
-not a fork in its logic.
+different topology, is meant to produce a different placement through
+the same logic — topology is a parameter this layer's logic takes, not
+something earlier layers need to re-run for.
 
 ## Core concepts
 
@@ -40,23 +39,23 @@ not a fork in its logic.
 
 Placement is meant to split into two decisions:
 
-1. **Stage-level allocation** — given the summary-bound plan, the
-   topology, and deployment constraints, decide which *stage* each
-   piece of the plan runs at. This decision is stage-level only —
-   generic across deployments, since it only needs to know which
-   stages exist and how they connect, not which concrete executors a
-   deployment happens to have.
-2. **Per-executor fan-out** — given a stage-level assignment, decide
-   which concrete executor(s) at that stage actually run each piece.
-   This is deployment-specific, since it needs the deployment's own
-   executor list and its own policy for spreading work across them.
+1. **`stage-allocate`** — given the summary-bound plan, the topology,
+   and deployment constraints, decide which *stage* each piece of the
+   plan runs at. Generic across deployments: it only needs to know
+   which stages exist and how they connect, not which concrete
+   executors a deployment happens to have.
+2. **`physical-lower`** — given a stage-level assignment, decide which
+   concrete executor(s) at that stage actually run each piece, and
+   emit the deployment's own output format. Deployment-specific: it
+   uses the deployment's own executor list and its own policy for
+   spreading work across them.
 
-Stage-level allocation is also where a summary merge is meant to get
+`stage-allocate` is also where a summary merge is meant to get
 inserted — wherever a summary-bound plan is cut across a stage
 boundary that produces more than one instance of the same summary
 state, those instances need to be merged before serving can use them
 as a single value (see
-[`l4-summary-bound-ir.md`](./l4-summary-bound-ir.md)).
+[`l3-summary-bound-ir.md`](./l3-summary-bound-ir.md)).
 
 ## Summary catalog
 
@@ -64,10 +63,9 @@ A registry of what summaries exist, keyed by summary family: which
 intents each can serve, whether it supports merging/deletion/subtraction,
 its accuracy model, what grouping shapes it supports, its valid
 parameter ranges, and its cost characteristics. Built once, ahead of
-time; read by L4's binding decision (to choose a family) and by L5 (to
+time; read by L3's binding decision (to choose a family) and by L4 (to
 instantiate it). Rejecting an out-of-range parameter belongs here, at
-catalog level, so that L5 never has to handle an unsupported
-configuration reaching it. This catalog is meant to be shared
+catalog level, so L4 only ever receives an already-valid configuration. This catalog is meant to be shared
 infrastructure that every deployment reads from, rather than something
 each deployment reinvents independently — though which summary
 families and parameter ranges are actually registered is itself
@@ -75,21 +73,20 @@ deployment policy.
 
 ## Interface
 
-Speculative — nothing here is built (see this doc's status note at the
-top). Kept as a concrete target to design against, not as an API to
-depend on. Every concrete-looking name below (`StageId`'s example
-values, `Executor`'s addressing, an actual `TopologyDescriptor`) is
-**interface only, in this repo** — ASAPController defines the shape a
-deployment implements against; it never defines, reserves, or ships any
-of the actual values. A deployment names its own stages, addresses its
-own executors, and describes its own topology; nothing here is a fixed
-vocabulary to conform to:
+Speculative (see this doc's status note at the top) — kept as a
+concrete target to design against. Every concrete-looking name below
+(`StageId`'s example values, `Executor`'s addressing, an actual
+`TopologyDescriptor`) is **interface only, in this repo** —
+ASAPController defines the shape a deployment implements against; the
+deployment defines, reserves, and ships the actual values, names its
+own stages, addresses its own executors, and describes its own
+topology:
 
 ```rust
 pub trait PhysicalPlanner {
     type Topology: TopologyDescriptor;
     type Output;
-    fn lower(&self, l4: Rc<L4Node>, t: &Self::Topology) -> Result<Self::Output, PlanError>;
+    fn lower(&self, l3: Rc<L3Node>, t: &Self::Topology) -> Result<Self::Output, PlanError>;
 }
 
 pub trait TopologyDescriptor {
@@ -122,14 +119,14 @@ pub struct Executor {
     pub address: ExecutorAddr,        // OpAMP agent / HTTP endpoint / in-process handle — deployment-defined
 }
 
-// Stage-level allocation: given an L4 tree + a topology, decide which
+// Stage-level allocation: given an L3 tree + a topology, decide which
 // nodes land on which stage, subject to deployment constraints.
 // Per-executor fan-out is the deployment model's own PhysicalPlanner,
 // using the executor list from DeploymentConstraints::executors().
 pub struct StageAllocator;
 impl StageAllocator {
     pub fn allocate<T: TopologyDescriptor>(
-        &self, l4: Rc<L4Node>, topology: &T, c: &DeploymentConstraints,
+        &self, l3: Rc<L3Node>, topology: &T, c: &DeploymentConstraints,
     ) -> Result<Vec<StageAssignment>, PlanError>;
 }
 ```
@@ -142,8 +139,8 @@ per-executor fan-out on top:
 impl PhysicalPlanner for LifecyclePlanner {
     type Topology = ThreeStage;
     type Output = Vec<(ExecutorId, ExecutorPlan)>;
-    fn lower(&self, l4: Rc<L4Node>, t: &ThreeStage) -> Result<Self::Output, PlanError> {
-        let assignments = StageAllocator.allocate(l4, t, &self.constraints)?;
+    fn lower(&self, l3: Rc<L3Node>, t: &ThreeStage) -> Result<Self::Output, PlanError> {
+        let assignments = StageAllocator.allocate(l3, t, &self.constraints)?;
         let executors: &[Executor] = self.constraints.executors();
         // deployment-specific post-processing (cost accounting, backend
         // push preparation, ...) happens here.
