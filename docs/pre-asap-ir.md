@@ -52,12 +52,12 @@ to one source language.
 
 ### Aggregate
 
-Collapses input rows into fewer output rows via a positional `GROUP BY` (`reduction`) plus a
+Collapses input rows into fewer output rows via a `reduction` plus a
 list of aggregate intents (`aggs`).
 
-#### Grouping
+#### Reduction
 
-Grouping refers to `Aggregate.reduction`, a `Reduction`, one of the following types, which is more than just SQL GroupBy. 
+Reduction refers to `Aggregate.reduction`, a `Reduction`, one of the following types, which is more than just SQL GroupBy. 
 
 - **`Reduce(GroupKeys)`** — a genuine cross-entity reduction: group by some columns, or group
   by every column *except* some listed ones. `GroupKeys` holds positional column references
