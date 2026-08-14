@@ -120,14 +120,39 @@ renaming it to `measures` to match this doc.)
 - `output_names` — output column name per entry in `aggs`; a non-empty entry overrides the
   synthetic default — SQL threads DataFusion's generated name (e.g. `"sum(metrics.bytes)"`)
   here so an enclosing `Project` can resolve the aggregate output by the name it references.
-- `having` — an optional post-aggregation filter predicate (SQL `HAVING`). Distinct from a
-  `Filter` wrapping this `Aggregate` (see `Filter`'s note above), even though both express a
-  post-aggregation predicate: `having` lets the L3→L4 binding pass see, without looking at
-  its parent, that this `Aggregate` can't be sketch-bound — the predicate needs the *exact*
-  aggregate value, not an estimate, so a `having` (like a multi-measure `aggs`) always stays
-  logical. In practice the SQL front end does not yet populate `having` from a real `HAVING`
-  clause — it always emits `Filter { Aggregate { having: None } }` instead, so today `having`
-  is exercised only by hand-built L2/L3 trees, not by parsed SQL.
+- `having` — an optional post-aggregation filter predicate (SQL `HAVING`). Take:
+
+  ```sql
+  SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip HAVING COUNT(*) > 10
+  ```
+
+  What the *field* is for is putting the `cnt > 10` predicate directly on the `Aggregate` that
+  produces `cnt`, instead of behind a separate `Filter`:
+
+  ```text
+  Aggregate(
+      reduction = Reduce(by = [srcip]),
+      aggs = [Count],
+      output_names = ["cnt"],
+      having = Some(cnt > 10),
+      child = Scan("packets"),
+  )
+  ```
+
+  That's not the same shape as an ordinary `Filter` wrapping an `Aggregate` (see `Filter`'s
+  derived-table example above, which filters this *same* `cnt > 10` predicate but as a
+  separate node) — the two look interchangeable, but `having` being *on* the `Aggregate`
+  lets the L3→L4 binding pass reject sketch-binding right there, from the `Aggregate` node
+  alone: the predicate needs the aggregate's *exact* value, not a sketch's estimate, so a
+  `having` (like a multi-measure `aggs`) always keeps its own `Aggregate` logical. A wrapping
+  `Filter` reaches the same outcome today too, but by a more general rule — any logical node
+  sitting above a bindable aggregate falls back to logical, whatever its predicate is about
+  — not by inspecting what the predicate needs.
+
+  What actually happens today: the SQL front end doesn't populate `having` from a real
+  `HAVING` clause yet, so the query above currently lowers to the *other* shape —
+  `Filter { pred: cnt > 10, child: Aggregate { having: None, ... } }`. `having` is exercised
+  only by hand-built L2/L3 trees today, not by parsed SQL.
 - `child` — the input being aggregated.
 
 ## Time-related nodes
