@@ -55,7 +55,21 @@ to one source language.
 Collapses input rows into fewer output rows via a positional `GROUP BY` (`reduction`) plus a
 list of aggregate intents (`aggs`).
 
-```text
+
+
+#### Grouping
+
+Grouping is not a bare list of dimensions; it's `Aggregate.reduction`, a `Reduction`, one of:
+
+- **`Reduce(GroupKeys)`** — Reduce includes either group by some columns, or group by without the listed columns. `GroupKeys` can be columns or positional columns as indexes, carries a
+  `by`/`without` flag, not only group_by: 
+  - `by(keys)` — group by exactly these columns (SQL `GROUP BY`, PromQL `by(...)`).
+  - `without(keys)` — group by every column *except* these (PromQL `without(...)`); the
+    excluded positions are stored but the kept set stays open, resolved at runtime against
+    the actual input schema.
+  - `none()` — an empty key set, i.e. a global (ungrouped) reduction — still a genuine
+    reduction with zero grouping columns, not "no grouping concept."
+Example: ```text
 Aggregate(
     reduction = Reduce(by = [service, region]),   // GROUP BY service, region
     aggs = [Count],
@@ -64,25 +78,8 @@ Aggregate(
     child = ...
 )
 ```
-
-#### Grouping
-
-Grouping is not a bare list of dimensions; it's `Aggregate.reduction`, a `Reduction`, one of:
-
-- **`Reduce(GroupKeys)`** — a genuine cross-entity reduction. `GroupKeys` is positional
-  (columns resolved against the input schema, not semantic field names) and carries a
-  `by`/`without` flag, not just a plain list:
-  - `by(keys)` — group by exactly these columns (SQL `GROUP BY`, PromQL `by(...)`).
-  - `without(keys)` — group by every column *except* these (PromQL `without(...)`); the
-    excluded positions are stored but the kept set stays open, resolved at runtime against
-    the actual input schema.
-  - `none()` — an empty key set, i.e. a global (ungrouped) reduction — still a genuine
-    reduction with zero grouping columns, not "no grouping concept."
-- **`PerEntity`** — no grouping concept at all: a per-entity pass-through that never merges
-  rows across entities, for a computation with no `by(...)` clause to attach to. Introduced
-  in #165 to give per-entity reductions like `Rate`/`Increase`/`*_over_time` a home distinct
-  from a real `GROUP BY`. E.g. PromQL `rate(http_requests_total[5m])`:
-  ```text
+- **`PerEntity`** — Keep each row as it is, for a computation with no `by(...)` clause to attach to.  E.g. PromQL `rate(http_requests_total[5m])` returns rate for every http_reequests_total row:
+ Example: ```text
   Aggregate(
       reduction = PerEntity,
       aggs = [Rate],
