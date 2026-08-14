@@ -17,7 +17,7 @@ Grouped to match the sections below — common relational nodes first, then the 
 to one source language.
 
 **[Aggregation-related nodes](#aggregation-related-nodes)**
-- [`Aggregate`](#aggregate) — collapses input rows into fewer output rows via a reduction (grouping) and aggregate intents.
+- [`Aggregate`](#aggregate) — collapses input rows into fewer output rows via a reduction and aggregate intents.
 
 **[Time-related nodes](#time-related-nodes)**
 - [`TimeRange`](#timerange) — a range-vector lookback over the time axis (PromQL `[5m]`).
@@ -57,7 +57,7 @@ list of aggregate intents (`aggs`).
 
 #### Reduction
 
-Reduction refers to `Aggregate.reduction`, a `Reduction`, one of the following types, which is more than just SQL GroupBy. 
+`Aggregate.reduction` is a `Reduction` — richer than a plain SQL `GROUP BY` — one of:
 
 - **`Reduce(GroupKeys)`** — a genuine cross-entity reduction: group by some columns, or group
   by every column *except* some listed ones. `GroupKeys` holds positional column references
@@ -115,7 +115,7 @@ meaningful summary implementation. (The field is still named `aggs` in code — 
 renaming it to `measures` to match this doc.)
 
 **Fields:**
-- `reduction` — the grouping; see "Grouping" above.
+- `reduction` — how rows are grouped/collapsed; see "Reduction" above.
 - `aggs` — the aggregate intents (measures) to compute; see "Measures" above.
 - `output_names` — output column name per entry in `aggs`; a non-empty entry overrides the
   synthetic default — SQL threads DataFusion's generated name (e.g. `"sum(metrics.bytes)"`)
