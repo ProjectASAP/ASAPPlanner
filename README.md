@@ -1,13 +1,13 @@
 # ASAPController — design
 
-ASAPController is a system that maps a query workload to an ASAP plan. A query workload is a batch of queries, or a set of repeating queries, in any query language like PromQL or SQL. An ASAP plan is a query plan (like in databases) that uses ASAP primitives like sketches, exact summaries, wavelets, etc.
+ASAPController is a system to map a query workload to an ASAP plan. A query workload is a batch of queries or a set of repeating queries, in any query language like PromQL or SQL. An ASAP plan is a query plan (like in databases) that uses ASAP primitives like sketches, exact summaries, wavelets, etc.
 
-ASAPController does this in 2 steps:
+ASAPController does this mapping in 2 steps:
 (1) normalizing query workloads from different query languages into a common intermediate representation (IR)
 (2) mapping the IR to an ASAP plan
 
 Separating these 2 steps is helpful to decouple concerns and for extensibility.
-Step 1 **interprets** the query workload semantics and **normalizes** them our own IR. Adding a new query language or dialect can be done by extending step 1 and not touching step 2.
+Step 1 **interprets** the query workload semantics and **normalizes** them into our own IR. Adding a new query language or dialect can be done by extending step 1 and not touching step 2.
 Step 2 **maps** query workload semantics to ASAP primitives. Adding a new ASAP primitive can be done by extending step 2 and not touching step 1.
 
 1. **Interpretation** — understand a language-specific query and construct semantic intent.
