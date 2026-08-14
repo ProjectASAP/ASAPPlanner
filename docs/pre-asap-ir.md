@@ -8,10 +8,10 @@ Design principles:
 1. Expose the query semantics that affect summary applicability, correctness, and cost.
 2. If an operation changes presentation but does not change the semantic summary intent, it does not need to be represented.
 3. Equivalent SQL, PromQL, and future-language queries should produce the same intent shape. 
-4. A filtering predicate will be passed to at the lowest node that can express it — `Scan.predicates`,
+4. A filtering predicate will be passed to at the lowest node (closer to the leaves) in the AST/DAG that can express it — `Scan.predicates`,
    then `Aggregate.having`, then `Filter` as the fallback — so its constraint is visible at
    the node it actually applies to, not behind an opaque wrapper, once pre-ASAP IR translates
-   to post-ASAP IR with summary binding. The upper nodes can still have a `Filter` node with the same condition. This intentional duplication is for Summary related translation and optimizations.
+   to post-ASAP IR with summary binding. The upper nodes (closer to the root) in the AST/DAG can still have a `Filter` node with the same condition. This intentional duplication is for Summary related translation and optimizations.
 
 > Notes: **SQL and PromQL use different schema models**. SQL typically uses a closed schema, where tables, columns, and types are predefined, while PromQL uses an open (schemaless) schema, where metrics and labels can evolve without a fixed table schema. Closed schemas provide stronger structure and validation; open schemas provide greater flexibility and makes it easier to evolve or ingest diverse data, but can require more care around naming conventions, label cardinality, and query consistency.
 
