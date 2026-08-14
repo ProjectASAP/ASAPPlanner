@@ -1,11 +1,11 @@
-// cargo run -p asap-lower --example dag_export -- \
+// cargo run -p asap-lower --bin dag_export -- \
 //     --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
 //     --promql "topk(5, rate(http_requests_total[5m]))" --name q2
 //
 // Lowers each given SQL/PromQL query to L3 IR and prints a single
 // `asap_ir::dag_export::WorkloadGraph` as JSON on stdout — the input format
 // for `tools/dag-viewer` (issue #133). Redirect to a file and load it there:
-//   cargo run -p asap-lower --example dag_export -- --sql "..." --name q1 > /tmp/dag.json
+//   cargo run -p asap-lower --bin dag_export -- --sql "..." --name q1 > /tmp/dag.json
 //
 // `--name` is optional; an unnamed query defaults to `q<n>` (1-indexed).
 

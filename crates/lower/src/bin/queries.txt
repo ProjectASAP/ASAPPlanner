@@ -1,0 +1,23 @@
+# count
+promql> count(http_requests_total)
+promql> count(http_requests_total) by (le, service)
+promql> count_over_time(http_requests_total[5m])
+
+# sum
+promql> sum(http_requests_total)
+promql> sum(http_requests_total) by (le, service)
+promql> sum_over_time(http_requests_total[5m])
+
+# avg
+promql> avg(http_requests_total)
+promql> avg(http_requests_total) by (le, service)
+promql> avg_over_time(http_requests_total[5m])
+
+# quantile
+promql> quantile(0.9, http_requests_total)
+promql> quantile(0.9, http_requests_total) by (le, service)
+promql> quantile_over_time(0.9, http_requests_total[5m])
+
+# histogram_quantile (classic bucket form: le label + _bucket metric)
+promql> histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])))
+promql> histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service))
