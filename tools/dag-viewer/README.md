@@ -6,7 +6,7 @@ review/debugging, eyeballing common shapes across a corpus, and spotting shared 
 ## Generate a graph
 
 ```sh
-cargo run -p asap-lower --example dag_export -- \
+cargo run -p asap-lower --bin dag_export -- \
   --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
   --sql "SELECT service, AVG(latency) FROM metrics GROUP BY service" --name q2 \
   --promql "topk(5, rate(http_requests_total[5m]))" --name q3 \

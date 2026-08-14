@@ -49,8 +49,8 @@ physical IR, ready for runtime/execution  ← L4
   (a deployment's own Output type)
 ```
 
- 
- 
+
+
 ## L1 — query string → canonical intent algebra
 
 Two passes, both internal to L1: interpret, then resolve+canonicalize.

@@ -11,9 +11,9 @@ edition = "2021"
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
 
-[dev-dependencies]
-# The topk_ir / dag_export examples build catalog schemas + drive the async
-# SQL path, and dag_export prints its JSON output via serde_json.
+# Used by the show_ir / dag_export / variant_coverage bins (catalog schemas,
+# async SQL path, JSON output) and by the topk_ir / canonical_examples
+# examples. Regular deps, not dev-deps: `[[bin]]` targets can't see dev-deps.
 asap-ir = { path = "../ir" }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

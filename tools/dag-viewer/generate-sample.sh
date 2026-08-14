@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-cargo run -p asap-lower --example dag_export -- \
+cargo run -p asap-lower --bin dag_export -- \
   --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
   --sql "SELECT service, AVG(latency) FROM metrics GROUP BY service" --name q2 \
   --promql "topk(5, rate(http_requests_total[5m]))" --name q3 \
