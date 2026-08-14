@@ -17,7 +17,7 @@ Grouped to match the sections below — common relational nodes first, then the 
 to one source language.
 
 **[Aggregation-related nodes](#aggregation-related-nodes)**
-- [`Aggregate`](#aggregate) — collapses input rows into fewer output rows via grouping dimensions and measures.
+- [`Aggregate`](#aggregate) — collapses input rows into fewer output rows via a reduction (grouping) and aggregate intents.
 
 **[Time-related nodes](#time-related-nodes)**
 - [`TimeRange`](#timerange) — a range-vector lookback over the time axis (PromQL `[5m]`).
@@ -52,44 +52,62 @@ to one source language.
 
 ### Aggregate
 
+γ + α — a positional `GROUP BY` (`reduction`) plus a list of aggregate intents (`aggs`).
+
 ```text
-QueryExpr::Aggregate(
-    input = ...,
-    group_by = [FieldRef("service")],
-    measures = [Count]
+Aggregate(
+    reduction = Reduce(by = [service, region]),   // GROUP BY service, region
+    aggs = [Count],
+    output_names = [],
+    having = None,
+    child = ...
 )
 ```
 
-#### Grouping dimensions
+#### Grouping — `reduction`
 
-`group_by` contains semantic `FieldRef`s, not schema positions.
+Grouping is not a bare list of dimensions; it's a `Reduction`, one of:
+
+- **`Reduce(GroupKeys)`** — a genuine cross-entity reduction. `GroupKeys` is positional
+  (columns resolved against the input schema, not semantic field names) and carries a
+  `by`/`without` flag, not just a plain list:
+  - `by(keys)` — group by exactly these columns (SQL `GROUP BY`, PromQL `by(...)`).
+  - `without(keys)` — group by every column *except* these (PromQL `without(...)`); the
+    excluded positions are stored but the kept set stays open, resolved at runtime against
+    the actual input schema.
+  - `none()` — an empty key set, i.e. a global (ungrouped) reduction — still a genuine
+    reduction with zero grouping columns, not "no grouping concept."
+- **`PerEntity`** — no grouping concept at all: a per-entity pass-through (e.g. a per-series
+  windowed computation like `rate(v[5m])`, which has no `by(...)` clause to attach to) that
+  never merges rows across entities. Introduced in #165 to give per-entity reductions like
+  `Rate`/`Increase`/`*_over_time` a home distinct from a real `GROUP BY`.
+
+#### Measures — `aggs`
+
+Each entry in `aggs` names one statistic to compute. The vocabulary is wider than a minimal
+aggregate algebra needs, because it also covers PromQL's range-vector functions and
+native-histogram accessors — this list is representative, not exhaustive:
 
 ```text
-group_by = [FieldRef("service"), FieldRef("region")]
+Count, Sum(col), Min(col), Max(col), Avg(col), StdDev(col), Variance(col),
+Quantile(col, q), TopK(k), Cardinality(col)                      // data-model-agnostic
+Rate, Increase                                                    // counter derivatives
+Changes, Delta, IDelta, Deriv, Resets,
+PredictLinear(seconds), DoubleExpSmoothing(sf, tf)                // range-vector functions
+HistogramCount, HistogramSum, HistogramAvg, HistogramStdDev,
+HistogramStdVar, HistogramFraction(lo, hi), HistogramQuantile(q)  // native-histogram accessors
+Math(func)                                                        // element-wise transform
 ```
 
-#### Measures
+New variants are added when there is a stable semantic distinction and a meaningful summary
+implementation.
 
-Measures describe what statistic or aggregate is required. At minimum the algebra should
-support the following semantic measures:
-
-```text
-Count
-Sum(field)
-Min(field)
-Max(field)
-Avg(field)
-Quantile(field, q)
-DistinctCount(field)
-```
-
-Additional measures can be added when there is a stable semantic distinction and a
-meaningful summary implementation.
-
-**Fields** (real implementation — differs from the sketch above, see #185):
-- `reduction` — whether this is a genuine cross-entity reduction (`Reduce(GroupKeys)`) or a per-entity pass-through with no grouping concept at all (`PerEntity`).
-- `aggs` — the aggregate intents to compute (`Sum`, `Rate`, `HistogramQuantile`, ...).
-- `output_names` — output column name per entry in `aggs`; overrides the synthetic default when non-empty.
+**Fields:**
+- `reduction` — the grouping; see "Grouping" above.
+- `aggs` — the aggregate intents to compute; see "Measures" above.
+- `output_names` — output column name per entry in `aggs`; a non-empty entry overrides the
+  synthetic default — SQL threads DataFusion's generated name (e.g. `"sum(metrics.bytes)"`)
+  here so an enclosing `Project` can resolve the aggregate output by the name it references.
 - `having` — an optional post-aggregation filter predicate (SQL `HAVING`).
 - `child` — the input being aggregated.
 
