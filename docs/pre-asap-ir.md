@@ -9,52 +9,6 @@ Only operations that are semantically relevant to answering the query and select
 2. If an operation changes presentation but does not change the semantic summary intent, it does not need to be represented.
 3. Equivalent SQL, PromQL, and future-language queries should produce the same intent shape.
 
-## Rules/Invariants
-
-1. A filtering predicate will be passed to at the lowest node (closer to the leaves) in the AST/DAG that can express it — `Scan.predicates`,
-   then `Aggregate.having`, then `Filter` as the fallback — so its constraint is visible at
-   the node it actually applies to, not behind an opaque wrapper, once pre-ASAP IR translates
-   to post-ASAP IR with summary binding. The upper nodes (closer to the root) in the AST/DAG can still have a `Filter` node with the same condition. This intentional duplication is for Summary related translation and optimizations.
-
-   For example, `SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip HAVING COUNT(*) > 10`
-   pins `cnt > 10` to the lowest node that can express it, `Aggregate.having`:
-
-   ```text
-   Aggregate(
-       reduction = Reduce(by = [srcip]),
-       aggs = [Count],
-       output_names = ["cnt"],
-       having = Some(cnt > 10),
-       child = Scan("packets"),
-   )
-   ```
-
-   but the tree can still carry the same condition as a wrapping `Filter` near the root:
-
-   ```text
-   Filter(
-       pred = cnt > 10,
-       child = Aggregate(
-           reduction = Reduce(by = [srcip]),
-           aggs = [Count],
-           output_names = ["cnt"],
-           having = Some(cnt > 10),
-           child = Scan("packets"),
-       ),
-   )
-   ```
-
-   Both are valid at once, and neither is derived from the other: `having` is the canonical
-   spot a summary-aware pass reads to decide whether `Aggregate` can bind to a summary, while
-   the outer `Filter` is what a plain logical evaluator runs without knowing `having` exists.
-   Today's L3→L4 binder (`asap-aware-mapping::bind`) is conservative either way — a `Filter`
-   directly over an `Aggregate` subsumes the whole subtree as `Logical`, and an `Aggregate`
-   with `having` set does too even unwrapped — so this duplicated shape currently binds
-   identically to the single-`having` shape (see `logical_parent_subsumes_bindable_child`,
-   `having_and_multi_intent_stay_logical`). The duplication is forward-looking groundwork for
-   once HAVING-aware summary binding lands (#201, #204): `having` stays in its canonical spot
-   for that future pass to use, without requiring a change to the fallback tree shape now.
-
 > Notes: **SQL and PromQL use different schema models**. SQL typically uses a closed schema, where tables, columns, and types are predefined, while PromQL uses an open (schemaless) schema, where metrics and labels can evolve without a fixed table schema. Closed schemas provide stronger structure and validation; open schemas provide greater flexibility and makes it easier to evolve or ingest diverse data, but can require more care around naming conventions, label cardinality, and query consistency.
 
 The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of important enum types below.
@@ -188,10 +142,46 @@ renaming it to `measures` to match this doc.)
   )
   ```
 
-  This follows Rules/Invariants rule 1 (predicates push down to the lowest node that can
-  express them) — see `Filter`'s note below for the full placement rule and a worked example
-  of when a predicate genuinely stays a separate `Filter` instead.
+ ## Rules/Invariants
 
+1. A filtering predicate will be passed to at the lowest node (closer to the leaves) in the AST/DAG that can express it — `Scan.predicates`,
+   then `Aggregate.having`, then `Filter` as the fallback — so its constraint is visible at
+   the node it actually applies to, not behind an opaque wrapper, once pre-ASAP IR translates
+   to post-ASAP IR with summary binding. The upper nodes (closer to the root) in the AST/DAG can still have a `Filter` node with the same condition. This intentional duplication is for Summary related translation and optimizations.
+
+   For example, `SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip HAVING COUNT(*) > 10`
+   pins `cnt > 10` to the lowest node that can express it, `Aggregate.having`:
+
+   ```text
+   Aggregate(
+       reduction = Reduce(by = [srcip]),
+       aggs = [Count],
+       output_names = ["cnt"],
+       having = Some(cnt > 10),
+       child = Scan("packets"),
+   )
+   ```
+
+   but the tree can still carry the same condition as a wrapping `Filter` near the root:
+
+   ```text
+   Filter(
+       pred = cnt > 10,
+       child = Aggregate(
+           reduction = Reduce(by = [srcip]),
+           aggs = [Count],
+           output_names = ["cnt"],
+           having = Some(cnt > 10),
+           child = Scan("packets"),
+       ),
+   )
+   ```
+
+   Both are valid at once, and neither is derived from the other: `having` is the canonical
+   spot a summary-aware pass reads to decide whether `Aggregate` can bind to a summary, while
+   the outer `Filter` is what a plain logical evaluator runs without knowing `having` exists. The duplication is forward-looking groundwork for
+   once HAVING-aware summary binding (pre-ASAP-IR to post-ASAP-IR translation) lands.
+   
   Neither direction of that push-down is enforced yet: the SQL front end doesn't populate
   `having` from a real `HAVING` clause (#201), and canonicalization doesn't fold an existing
   `Filter { child: Aggregate { having: None, .. } }` into `Aggregate { having: Some(..), .. }`
