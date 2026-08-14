@@ -6,7 +6,7 @@ review/debugging, eyeballing common shapes across a corpus, and spotting shared 
 ## Generate a graph
 
 ```sh
-cargo run -p asap-lower --example dag_export -- \
+cargo run -p asap-lower --bin dag_export -- \
   --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
   --sql "SELECT service, AVG(latency) FROM metrics GROUP BY service" --name q2 \
   --promql "topk(5, rate(http_requests_total[5m]))" --name q3 \
@@ -29,7 +29,30 @@ picker.
 - Click a node to inspect its full field detail in the side panel.
 - Multiple loaded queries show up as tabs across the top.
 - Nodes that are structurally identical to a node in *another* loaded query
-  are outlined — toggle this off with "Highlight shared subtrees".
+  get a blue ring — toggle this off with "Highlight shared subtrees".
+- Each query's root node (its final output) gets a small red badge.
+- Node color/icon is driven by category — see the legend in the side panel,
+  or `node-style.js` for the underlying `kind -> category` table.
+
+## Visual style and node categories
+
+Node colors, icons, and shapes are adapted from
+[`ProjectASAP/bgp-query-dag-explorer`](https://github.com/ProjectASAP/bgp-query-dag-explorer)'s
+visual language, applied to the real `QueryExpr` IR instead of that repo's
+hardcoded BGP query set. `tools/dag-viewer/node-style.js` is the single
+source of truth for which of `QueryExpr`'s ~24 node kinds belongs to which of
+the 9 categories (data / filter / derive / aggregate / window / join / set /
+sort / bind) — edit that file to reclassify a kind or retune the palette;
+nothing else in `index.html` needs to change.
+
+## Future work
+
+Compare/Union modes that lay multiple queries out in shared lanes (like the
+reference repo's) were intentionally left out of the restyle — see
+[issue #186](https://github.com/ProjectASAP/ASAPController/issues/186) for
+why (short version: the reference's lane layout was built for BGP's flat,
+linear query shapes, and `QueryExpr` has real branching DAGs) and the
+proposed scope for a v2.
 
 ## Shared-subtree highlighting is a proxy, not real CSE
 

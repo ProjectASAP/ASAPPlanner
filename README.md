@@ -205,7 +205,10 @@ is required.
 `crates/lower` ships debugging binaries and examples for poking at the lowering pipeline. Binaries (`cargo run -p asap-lower --bin <name>`):
 
 - **`show_ir`** — prints pre-ASAP IRs for ad-hoc SQL/PromQL queries from a file or stdin, `sql>`/`promql>` prefixed
-- **`dag_export`** — dumps pre-ASAP IRs for given `--sql`/`--promql` queries for `tools/dag-viewer`.
+- **`dag_export`** — dumps pre-ASAP IRs for given `--sql`/`--promql` queries for
+  [`tools/dag-viewer`](tools/dag-viewer/index.html), an interactive DAG viewer
+  (see [`tools/dag-viewer/RUNNING.md`](tools/dag-viewer/RUNNING.md) for
+  end-to-end setup, including running it over a remote tunnel).
 - **`variant_coverage`** — parses and canonicalizes every query corpus in the repo to pre-ASAP IR and reports which `QueryExpr` variants get exercised.
 
 Examples (`cargo run -p asap-lower --example <name>`):
