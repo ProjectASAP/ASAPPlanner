@@ -315,6 +315,7 @@ dependencies = [
 name = "asap-devtools"
 version = "0.1.0"
 dependencies = [
+ "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-types",
@@ -326,6 +327,7 @@ dependencies = [
 name = "asap-frontend-promql"
 version = "0.1.0"
 dependencies = [
+ "asap-aware-mapping",
  "asap-l2",
  "asap-types",
  "promql-parser",
