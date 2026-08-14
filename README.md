@@ -204,7 +204,8 @@ is required.
 
 `crates/devtools` ships debugging binaries and examples for poking at the lowering pipeline. Binaries (`cargo run -p asap-devtools --bin <name>`):
 
-- **`show_ir`** — prints pre-ASAP IRs for ad-hoc SQL/PromQL queries from a file or stdin, `sql>`/`promql>` prefixed
+- **`show_pre_asap_ir`** — prints pre-ASAP IRs (L3, `QueryExpr`/`AggIntent`) for ad-hoc SQL/PromQL queries from a file or stdin, `sql>`/`promql>` prefixed
+- **`show_post_asap_ir`** — same input format, but runs the `asap-aware-mapping` L3→L4 binding pass and prints the post-ASAP IR (L4, `SummaryExpr`/`L4Node` — the committed `SummaryKind`/`SummaryParams` per aggregate)
 - **`dag_export`** — dumps pre-ASAP IRs for given `--sql`/`--promql` queries for
   [`tools/dag-viewer`](tools/dag-viewer/index.html), an interactive DAG viewer
   (see [`tools/dag-viewer/RUNNING.md`](tools/dag-viewer/RUNNING.md) for

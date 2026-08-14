@@ -10,6 +10,7 @@ edition = "2021"
 [dependencies]
 asap-frontend-promql = { path = "../frontend-promql" }
 asap-frontend-sql = { path = "../frontend-sql" }
+asap-aware-mapping = { path = "../asap-aware-mapping" }
 
 # Used by the show_ir / dag_export / variant_coverage bins (catalog schemas,
 # async SQL path, JSON output) and by the topk_ir / canonical_examples

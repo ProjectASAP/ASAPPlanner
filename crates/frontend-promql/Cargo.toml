@@ -13,6 +13,9 @@ asap-l2 = { path = "../l2" }
 # upstream; our `asap` branch carries the local patches.
 promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", branch = "asap" }
 
+[dev-dependencies]
+asap-aware-mapping = { path = "../asap-aware-mapping" }
+
 # Corpus tests live in domain folders (observability) but must still be declared
 # as test targets — Cargo only auto-discovers `.rs` files directly in `tests/`.
 [[test]]
