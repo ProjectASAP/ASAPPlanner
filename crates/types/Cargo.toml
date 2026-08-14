@@ -5,7 +5,8 @@ edition = "2021"
 
 # Shared vocabulary for the whole workspace: the L3 intent algebra (former
 # asap-ir) plus the L4 sketch-bound IR types (former asap-sketch, minus its
-# execution logic — that lives in asap-aware-mapping::exec). No internal deps.
+# execution logic — removed, no real implementor existed; see issue #190).
+# No internal deps.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -2,7 +2,7 @@
 members = [
     "crates/types",
     "crates/l2",
-    "crates/aware-mapping",
+    "crates/asap-aware-mapping",
     "crates/frontend-promql",
     "crates/frontend-sql",
     "crates/devtools",
