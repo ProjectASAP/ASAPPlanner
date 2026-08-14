@@ -7,6 +7,7 @@
 <script src="dagre.min.js"></script>
 <script src="cytoscape.min.js"></script>
 <script src="cytoscape-dagre.js"></script>
+<script src="node-style.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -14,9 +15,9 @@
     --fg: #1b1f24;
     --muted: #6b7280;
     --panel: #f6f7f9;
+    --panel2: #f0f2f5;
     --border: #d9dce1;
     --accent: #2563eb;
-    --shared: #d97706;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -24,9 +25,9 @@
       --fg: #e6e8eb;
       --muted: #9aa1ab;
       --panel: #1d2025;
+      --panel2: #23262c;
       --border: #333740;
       --accent: #5b8def;
-      --shared: #f2a93b;
     }
   }
   * { box-sizing: border-box; }
@@ -55,22 +56,27 @@
   }
   #dropzone {
     border: 1px dashed var(--border);
-    border-radius: 6px;
-    padding: 0.35rem 0.8rem;
+    border-radius: 999px;
+    padding: 0.35rem 0.9rem;
     font-size: 0.8rem;
     color: var(--muted);
     cursor: pointer;
   }
   #dropzone.dragover { border-color: var(--accent); color: var(--accent); }
   #fileInput { display: none; }
-  #clearBtn {
-    font-size: 0.8rem;
+  .btn {
+    font-size: 0.78rem;
+    font-weight: 650;
     padding: 0.35rem 0.7rem;
-    border-radius: 6px;
+    border-radius: 999px;
     border: 1px solid var(--border);
-    background: transparent;
+    background: var(--panel2);
     color: var(--fg);
     cursor: pointer;
+  }
+  .btn:hover, .btn.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
   }
   label.toggle {
     font-size: 0.8rem;
@@ -104,7 +110,12 @@
     display: flex;
     min-height: 0;
   }
-  #cy { flex: 1; min-width: 0; }
+  #cyOuter {
+    flex: 1;
+    min-width: 0;
+    position: relative;
+  }
+  #cy { position: absolute; inset: 0; }
   #empty {
     flex: 1;
     display: flex;
@@ -115,43 +126,116 @@
     text-align: center;
     padding: 2rem;
   }
+  .toolbar {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+    z-index: 4;
+    pointer-events: none;
+  }
+  .toolbar > * { pointer-events: auto; }
+  .pill, .zoomControls {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .12);
+  }
+  .pill {
+    border-radius: 999px;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+  .zoomControls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    border-radius: 999px;
+    padding: 0.3rem 0.5rem;
+  }
+  .zoomControls input { width: 100px; }
+  .zoomLabel {
+    font-size: 0.75rem;
+    color: var(--muted);
+    min-width: 36px;
+    text-align: right;
+  }
   #sidepanel {
     width: 340px;
     flex-shrink: 0;
     border-left: 1px solid var(--border);
     background: var(--panel);
-    padding: 0.8rem;
     overflow-y: auto;
     font-size: 0.8rem;
   }
-  #sidepanel h2 {
-    font-size: 0.85rem;
-    margin: 0 0 0.4rem;
+  #sidepanel .section {
+    padding: 0.8rem;
+    border-bottom: 1px solid var(--border);
   }
-  #sidepanel .kind {
+  #sidepanel h2 {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    margin: 0 0 0.5rem;
+    color: var(--muted);
+  }
+  .chip {
     display: inline-block;
     font-size: 0.7rem;
-    color: var(--accent);
-    border: 1px solid var(--accent);
-    border-radius: 4px;
-    padding: 0.05rem 0.4rem;
+    font-weight: 650;
+    border-radius: 999px;
+    padding: 0.1rem 0.55rem;
     margin-bottom: 0.5rem;
+    border: 1px solid currentColor;
   }
-  #sidepanel .shared-note {
-    color: var(--shared);
+  .rootNote, .shared-note {
     font-size: 0.75rem;
     margin-bottom: 0.5rem;
   }
-  #sidepanel pre {
+  .rootNote { color: var(--cat-output-border, #b42318); }
+  .shared-note { color: var(--accent); }
+  #detailSection pre {
     white-space: pre-wrap;
     word-break: break-word;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0.5rem;
+    border-radius: 8px;
+    padding: 0.55rem;
     margin: 0;
+    font-size: 0.72rem;
   }
-  #sidepanel .placeholder { color: var(--muted); }
+  #detailSection .placeholder { color: var(--muted); }
+  .code {
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.55rem;
+    margin: 0;
+    font: 0.7rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    max-height: 260px;
+    overflow: auto;
+  }
+  .code.placeholder { color: var(--muted); font-family: inherit; }
+  .legend { display: flex; flex-direction: column; gap: 7px; }
+  .leg { display: flex; align-items: flex-start; gap: 8px; font-size: 0.75rem; color: var(--fg); }
+  .leg .swatch {
+    width: 16px;
+    height: 16px;
+    border-radius: 5px;
+    flex-shrink: 0;
+    margin-top: 1px;
+    border: 1.5px solid;
+  }
+  .leg .swatchLabel { font-weight: 650; }
+  .leg .swatchDesc { color: var(--muted); display: block; }
+  .leg .swatch.ring { background: transparent; border-radius: 999px; border-width: 2px; }
 </style>
 </head>
 <body>
@@ -160,7 +244,7 @@
   <h1>ASAP query DAG viewer</h1>
   <div id="dropzone">Drop WorkloadGraph JSON here, or click to choose file(s)</div>
   <input id="fileInput" type="file" accept="application/json" multiple />
-  <button id="clearBtn">Clear all</button>
+  <button class="btn" id="clearBtn">Clear all</button>
   <label class="toggle">
     <input id="highlightToggle" type="checkbox" checked />
     Highlight shared subtrees
@@ -175,9 +259,33 @@
     <code>cargo run -p asap-lower --example dag_export -- --sql "..." --name q1 &gt; dag.json</code>
     to get started.
   </div>
-  <div id="cy" style="display:none"></div>
+  <div id="cyOuter" style="display:none">
+    <div class="toolbar">
+      <div class="pill" id="viewTitle">Query DAG</div>
+      <div class="zoomControls">
+        <button class="btn" id="zoomOutBtn" title="Zoom out">−</button>
+        <input id="zoomSlider" type="range" min="25" max="250" value="100" />
+        <button class="btn" id="zoomInBtn" title="Zoom in">+</button>
+        <span class="zoomLabel" id="zoomLabel">100%</span>
+        <button class="btn" id="fitBtn">Fit</button>
+        <button class="btn" id="resetBtn">100%</button>
+      </div>
+    </div>
+    <div id="cy"></div>
+  </div>
   <div id="sidepanel" style="display:none">
-    <div class="placeholder">Click a node to inspect it.</div>
+    <div class="section" id="detailSection">
+      <h2>Selected node</h2>
+      <div class="placeholder">Click a node to inspect it.</div>
+    </div>
+    <div class="section">
+      <h2>Query source</h2>
+      <pre class="code" id="sourceBox"></pre>
+    </div>
+    <div class="section">
+      <h2>Legend</h2>
+      <div class="legend" id="legendList"></div>
+    </div>
   </div>
 </div>
 
@@ -192,15 +300,21 @@ let queries = [];
 let activeIndex = -1;
 let cy = null;
 let highlightOn = true;
+let zoom = 1;
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const clearBtn = document.getElementById('clearBtn');
 const highlightToggle = document.getElementById('highlightToggle');
 const tabsEl = document.getElementById('tabs');
+const cyOuterEl = document.getElementById('cyOuter');
 const cyEl = document.getElementById('cy');
 const emptyEl = document.getElementById('empty');
 const sidepanel = document.getElementById('sidepanel');
+const detailSection = document.getElementById('detailSection');
+const viewTitleEl = document.getElementById('viewTitle');
+const zoomSlider = document.getElementById('zoomSlider');
+const zoomLabel = document.getElementById('zoomLabel');
 
 dropzone.addEventListener('click', () => fileInput.click());
 dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
@@ -236,7 +350,7 @@ function loadFiles(fileList) {
           let name = q.name;
           if (existingNames.has(name)) name = `${q.name} (${file.name})`;
           existingNames.add(name);
-          queries.push({ name, graph: q.graph });
+          queries.push({ name, graph: q.graph, source: q.source });
         });
       } catch (err) {
         alert(`Failed to parse ${file.name}: ${err.message}`);
@@ -274,13 +388,13 @@ function render() {
   tabsEl.innerHTML = '';
   if (queries.length === 0) {
     emptyEl.style.display = 'flex';
-    cyEl.style.display = 'none';
+    cyOuterEl.style.display = 'none';
     sidepanel.style.display = 'none';
     cy = null;
     return;
   }
   emptyEl.style.display = 'none';
-  cyEl.style.display = 'block';
+  cyOuterEl.style.display = 'block';
   sidepanel.style.display = 'block';
 
   queries.forEach((q, i) => {
@@ -292,13 +406,31 @@ function render() {
   });
 
   renderGraph(queries[activeIndex]);
+  renderLegend();
 }
 
 function renderGraph(query) {
+  viewTitleEl.textContent = query.name;
+
+  const sourceBox = document.getElementById('sourceBox');
+  if (query.source) {
+    sourceBox.textContent = query.source;
+    sourceBox.classList.remove('placeholder');
+  } else {
+    sourceBox.textContent = 'No source text in this export.';
+    sourceBox.classList.add('placeholder');
+  }
+
   const elements = [];
   for (const node of query.graph.nodes) {
     elements.push({
-      data: { id: String(node.id), label: `${node.kind}\n${node.label}`, node },
+      data: {
+        id: String(node.id),
+        label: `${node.kind}\n${node.label}`,
+        node,
+        category: categoryOf(node.kind),
+        root: node.id === query.graph.root,
+      },
     });
   }
   for (const node of query.graph.nodes) {
@@ -313,6 +445,19 @@ function renderGraph(query) {
     }
   }
 
+  const textColor = getComputedStyle(document.documentElement).getPropertyValue('--fg').trim() || '#1b1f24';
+  const edgeColor = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#9aa1ab';
+  const ringColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#2563eb';
+
+  const categoryStyles = Object.keys(CATEGORIES).map((name) => ({
+    selector: `node[category = "${name}"]`,
+    style: {
+      'border-color': categoryColors(name).border,
+      'background-color': categoryColors(name).bg,
+      'background-image': categoryIconDataUri(name),
+    },
+  }));
+
   cy = cytoscape({
     container: cyEl,
     elements,
@@ -321,40 +466,53 @@ function renderGraph(query) {
         selector: 'node',
         style: {
           'shape': 'round-rectangle',
-          'background-color': '#64748b',
+          'corner-radius': 10,
           'label': 'data(label)',
-          'color': '#fff',
+          'color': textColor,
           'text-wrap': 'wrap',
           'text-valign': 'center',
           'text-halign': 'center',
+          'text-margin-y': 9,
           'font-size': 10,
           'width': 'label',
           'height': 'label',
-          'padding': '8px',
-          'border-width': 0,
+          'padding': '16px',
+          'border-width': 1.5,
+          'background-fit': 'contain',
+          'background-position-x': '50%',
+          'background-position-y': '17%',
+          'background-width': '30%',
+          'background-height': '30%',
+          'background-clip': 'none',
         },
       },
       {
+        selector: 'node[category = "data"]',
+        style: { 'corner-radius': 999, 'border-style': 'dashed' },
+      },
+      ...categoryStyles,
+      {
         selector: 'node.shared',
         style: {
-          'border-width': 3,
-          'border-color': '#d97706',
-          'background-color': '#7c8896',
+          'underlay-color': ringColor,
+          'underlay-opacity': 0.28,
+          'underlay-padding': 6,
+          'underlay-shape': 'round-rectangle',
         },
       },
       {
         selector: 'node:selected',
         style: {
           'border-width': 3,
-          'border-color': '#2563eb',
+          'border-color': ringColor,
         },
       },
       {
         selector: 'edge',
         style: {
           'width': 1.5,
-          'line-color': '#9aa1ab',
-          'target-arrow-color': '#9aa1ab',
+          'line-color': edgeColor,
+          'target-arrow-color': edgeColor,
           'target-arrow-shape': 'triangle',
           'curve-style': 'bezier',
         },
@@ -363,11 +521,27 @@ function renderGraph(query) {
     layout: { name: 'dagre', rankDir: 'TB', nodeSep: 30, rankSep: 60 },
   });
 
+  // Root nodes get a second, smaller badge icon layered in the corner —
+  // QueryExpr has no dedicated terminal "output" kind the way the reference
+  // repo's BGP `out_*` steps do, so the root is marked structurally instead.
+  cy.nodes('[?root]').forEach((n) => {
+    n.addClass('root').style({
+      'background-image': [categoryIconDataUri(n.data('category')), rootBadgeIconDataUri()],
+      'background-position-x': ['46%', '86%'],
+      'background-position-y': ['17%', '15%'],
+      'background-width': ['26%', '22%'],
+      'background-height': ['26%', '22%'],
+      'background-clip': ['none', 'none'],
+    });
+  });
+
   cy.on('tap', 'node', (evt) => showDetail(evt.target.data('node'), query));
   cy.on('tap', (evt) => { if (evt.target === cy) clearDetail(); });
 
   applyHighlighting();
   clearDetail();
+  zoom = 1;
+  applyZoom();
 }
 
 function applyHighlighting() {
@@ -382,25 +556,49 @@ function applyHighlighting() {
 }
 
 function clearDetail() {
-  sidepanel.innerHTML = '<div class="placeholder">Click a node to inspect it.</div>';
+  detailSection.innerHTML = '<h2>Selected node</h2><div class="placeholder">Click a node to inspect it.</div>';
 }
 
 function showDetail(node, query) {
   const owners = computeHashOwners();
   const sharedWith = Array.from(owners.get(node.hash) || []).filter((n) => n !== query.name);
+  const category = categoryOf(node.kind);
+  const catColors = categoryColors(category);
+  const catLabel = (CATEGORIES[category] || {}).label || category;
 
+  const rootHtml = node.id === query.graph.root
+    ? `<div class="rootNote">This is the query's root (final output).</div>`
+    : '';
   const sharedHtml = sharedWith.length
     ? `<div class="shared-note">Structurally identical to a node also present in: ${sharedWith
         .map(escapeHtml)
         .join(', ')}</div>`
     : '';
 
-  sidepanel.innerHTML = `
-    <span class="kind">${escapeHtml(node.kind)}</span>
-    <h2>${escapeHtml(node.label)}</h2>
+  detailSection.innerHTML = `
+    <h2>Selected node</h2>
+    <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(catLabel)} · ${escapeHtml(node.kind)}</span>
+    <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
+    ${rootHtml}
     ${sharedHtml}
     <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
   `;
+}
+
+function renderLegend() {
+  const legendList = document.getElementById('legendList');
+  const rows = Object.entries(CATEGORIES).map(([name, cat]) => {
+    const c = categoryColors(name);
+    return `<div class="leg"><span class="swatch" style="background:${c.bg}; border-color:${c.border}"></span>
+      <span><span class="swatchLabel">${escapeHtml(cat.label)}</span><span class="swatchDesc">${escapeHtml(cat.description)}</span></span></div>`;
+  });
+  const ringColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#2563eb';
+  const rootColor = getComputedStyle(document.documentElement).getPropertyValue('--cat-output-border').trim() || '#b42318';
+  rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${ringColor}"></span>
+    <span><span class="swatchLabel">Shared subtree</span><span class="swatchDesc">Structurally identical to a node in another loaded query</span></span></div>`);
+  rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${rootColor}"></span>
+    <span><span class="swatchLabel">Query root</span><span class="swatchDesc">${escapeHtml(ROOT_BADGE.description)}</span></span></div>`);
+  legendList.innerHTML = rows.join('');
 }
 
 function escapeHtml(s) {
@@ -410,7 +608,37 @@ function escapeHtml(s) {
     .replace(/>/g, '&gt;');
 }
 
-render();
+function applyZoom() {
+  if (!cy) return;
+  cy.zoom(zoom);
+  cy.center();
+  zoomSlider.value = Math.round(zoom * 100);
+  zoomLabel.textContent = Math.round(zoom * 100) + '%';
+}
+
+document.getElementById('zoomSlider').addEventListener('input', (e) => { zoom = Number(e.target.value) / 100; applyZoom(); });
+document.getElementById('zoomOutBtn').addEventListener('click', () => { zoom = Math.max(0.25, zoom - 0.1); applyZoom(); });
+document.getElementById('zoomInBtn').addEventListener('click', () => { zoom = Math.min(2.5, zoom + 0.1); applyZoom(); });
+document.getElementById('fitBtn').addEventListener('click', () => { if (cy) { cy.fit(undefined, 30); zoom = cy.zoom(); zoomSlider.value = Math.round(zoom * 100); zoomLabel.textContent = Math.round(zoom * 100) + '%'; } });
+document.getElementById('resetBtn').addEventListener('click', () => { zoom = 1; applyZoom(); });
+
+// If a dag.json sits next to this page (e.g. so a remote/tunnelled session
+// has something to look at without a local file to drag in), load it
+// automatically. Silently does nothing if there's no such file — drag/drop
+// and the file picker still work either way.
+// Prefer a real, freshly-generated dag.json (gitignored scratch output of
+// generate-sample.sh or a manual dag_export run). Fall back to the committed
+// dag.example.json so the page still shows something with zero setup.
+fetch('dag.json')
+  .then((r) => (r.ok ? r : fetch('dag.example.json')))
+  .then((r) => (r.ok ? r.json() : null))
+  .then((parsed) => {
+    const incoming = (parsed && parsed.queries) || [];
+    incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source }));
+    if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
+  })
+  .catch(() => {})
+  .finally(render);
 </script>
 </body>
 </html>

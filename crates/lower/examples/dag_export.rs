@@ -104,7 +104,11 @@ async fn main() {
                 .map_err(|e| e.to_string()),
         };
         match graph {
-            Ok(graph) => queries.push(NamedGraph { name, graph }),
+            Ok(graph) => queries.push(NamedGraph {
+                name,
+                source: Some(query),
+                graph,
+            }),
             Err(e) => eprintln!("skipping {name:?} — lowering failed: {e}"),
         }
     }

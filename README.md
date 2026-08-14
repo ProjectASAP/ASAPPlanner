@@ -1,6 +1,6 @@
 # ASAPController
 
-This repo unifies the common parts of Query-to-Primitive/Summary translation and query optimization logic, in ASAP, including ASAPQuery, ASAPFusion, ASAPCollector, ASAPBGP, ASAPWavelets, etc. 
+This repo unifies the common parts of Query-to-Primitive/Summary translation and query optimization logic, in ASAP, including ASAPQuery, ASAPFusion, ASAPCollector, ASAPBGP, ASAPWavelets, etc.
 
 ## Status
 
@@ -79,7 +79,7 @@ crates/
 # planned (see docs/l4-physical-plan.md): L4 physical framework, runtime
 # service, deployment-model-* crates, control-proto, and the bin/ entrypoints.
 ```
- 
+
 
 ## Building
 
@@ -155,10 +155,10 @@ spotted by comparing hashes. The query above exports as:
 (`schema` and each node's `hash` elided above for width — the real output
 prints both in full.) Drop
 that JSON onto [`tools/dag-viewer/index.html`](tools/dag-viewer/index.html) —
-a self-contained offline page (open the file directly, or `python3 -m
-http.server` from `tools/dag-viewer/` if your browser blocks local module
-loads) — to browse it as an interactive DAG: click a node for its full
-`detail` in a side panel, switch between queries via tabs, and toggle
-highlighting of structurally-identical nodes shared across queries. See
+a self-contained offline page — to browse it as an interactive DAG: click a
+node for its full `detail` in a side panel, switch between queries via tabs,
+and toggle highlighting of structurally-identical nodes shared across
+queries. See [`tools/dag-viewer/RUNNING.md`](tools/dag-viewer/RUNNING.md) for
+end-to-end setup, including running it over a remote tunnel, and
 [`tools/dag-viewer/README.md`](tools/dag-viewer/README.md) for the shared-
 subtree-highlighting caveat (it's a client-side hash proxy, not real CSE).

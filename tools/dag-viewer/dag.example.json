@@ -1,0 +1,343 @@
+{
+  "queries": [
+    {
+      "name": "q1",
+      "source": "SELECT service, COUNT(*) FROM metrics GROUP BY service",
+      "graph": {
+        "nodes": [
+          {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(metrics)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": true,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "service",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "region",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "int64",
+                    "name": "bytes",
+                    "nullable": false,
+                    "table": "metrics"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "Table": {
+                  "table_ref": "metrics"
+                }
+              }
+            },
+            "children": [],
+            "hash": 8728565996306856918
+          },
+          {
+            "id": 1,
+            "kind": "Aggregate",
+            "label": "Aggregate(1 aggs)",
+            "detail": {
+              "aggs": [
+                {
+                  "accuracy": "Exact",
+                  "kind": "count"
+                }
+              ],
+              "having": null,
+              "output_names": [
+                "count(*)"
+              ],
+              "reduction": {
+                "Reduce": [
+                  1
+                ]
+              }
+            },
+            "children": [
+              0
+            ],
+            "hash": 10032018775968531104
+          },
+          {
+            "id": 2,
+            "kind": "Project",
+            "label": "Project(2 cols)",
+            "detail": {
+              "cols": [
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 0
+                  }
+                },
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 1
+                  }
+                }
+              ],
+              "qualifier": null
+            },
+            "children": [
+              1
+            ],
+            "hash": 4964139796740856868
+          }
+        ],
+        "root": 2
+      }
+    },
+    {
+      "name": "q2",
+      "source": "SELECT service, AVG(latency) FROM metrics GROUP BY service",
+      "graph": {
+        "nodes": [
+          {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(metrics)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": true,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "service",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "region",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "int64",
+                    "name": "bytes",
+                    "nullable": false,
+                    "table": "metrics"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "Table": {
+                  "table_ref": "metrics"
+                }
+              }
+            },
+            "children": [],
+            "hash": 8728565996306856918
+          },
+          {
+            "id": 1,
+            "kind": "Aggregate",
+            "label": "Aggregate(1 aggs)",
+            "detail": {
+              "aggs": [
+                {
+                  "col": 3,
+                  "kind": "avg"
+                }
+              ],
+              "having": null,
+              "output_names": [
+                "avg(metrics.latency)"
+              ],
+              "reduction": {
+                "Reduce": [
+                  1
+                ]
+              }
+            },
+            "children": [
+              0
+            ],
+            "hash": 10890882189167327462
+          },
+          {
+            "id": 2,
+            "kind": "Project",
+            "label": "Project(2 cols)",
+            "detail": {
+              "cols": [
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 0
+                  }
+                },
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 1
+                  }
+                }
+              ],
+              "qualifier": null
+            },
+            "children": [
+              1
+            ],
+            "hash": 7246216437560421843
+          }
+        ],
+        "root": 2
+      }
+    },
+    {
+      "name": "q3",
+      "source": "topk(5, rate(http_requests_total[5m]))",
+      "graph": {
+        "nodes": [
+          {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(http_requests_total)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": false,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "TimeSeries": {
+                  "metric": "http_requests_total"
+                }
+              }
+            },
+            "children": [],
+            "hash": 703108412807903437
+          },
+          {
+            "id": 1,
+            "kind": "TimeRange",
+            "label": "TimeRange(300s)",
+            "detail": {
+              "range": {
+                "nanos": 0,
+                "secs": 300
+              }
+            },
+            "children": [
+              0
+            ],
+            "hash": 11961238183880065676
+          },
+          {
+            "id": 2,
+            "kind": "Aggregate",
+            "label": "Aggregate(1 aggs)",
+            "detail": {
+              "aggs": [
+                {
+                  "kind": "rate"
+                }
+              ],
+              "having": null,
+              "output_names": [
+                ""
+              ],
+              "reduction": "PerEntity"
+            },
+            "children": [
+              1
+            ],
+            "hash": 15197161337493631235
+          },
+          {
+            "id": 3,
+            "kind": "Sort",
+            "label": "Sort(1 keys)",
+            "detail": {
+              "keys": [
+                {
+                  "ascending": false,
+                  "expr": {
+                    "Column": 1
+                  },
+                  "nulls_first": false
+                }
+              ],
+              "partition_by": []
+            },
+            "children": [
+              2
+            ],
+            "hash": 3761471737883684370
+          },
+          {
+            "id": 4,
+            "kind": "Limit",
+            "label": "Limit(5)",
+            "detail": {
+              "n": 5,
+              "offset": 0
+            },
+            "children": [
+              3
+            ],
+            "hash": 12035961998900520718
+          }
+        ],
+        "root": 4
+      }
+    }
+  ]
+}

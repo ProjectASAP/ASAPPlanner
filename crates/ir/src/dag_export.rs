@@ -49,6 +49,12 @@ pub struct DagGraph {
 #[derive(Debug, Clone, Serialize)]
 pub struct NamedGraph {
     pub name: String,
+    /// The original query text (SQL or PromQL) this graph was lowered from,
+    /// for display alongside the graph — not used by `export` itself, since
+    /// that only sees the already-lowered `QueryExpr`. Optional because not
+    /// every producer of a `NamedGraph` has the source text on hand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub graph: DagGraph,
 }
 
