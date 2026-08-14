@@ -14,7 +14,7 @@
 //! tanking how much of the corpus we can lower.
 
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
-use asap_ir::types::AccuracyTarget;
+use asap_types::types::AccuracyTarget;
 
 const DOCS: &str = include_str!("data/promql_corpus_docs.txt");
 const TESTDATA: &str = include_str!("data/promql_corpus_testdata.txt");

@@ -11,10 +11,10 @@ pub mod error;
 pub mod histogram;
 pub mod promql;
 
-use asap_ir::intent_algebra::QueryExpr;
-use asap_ir::types::AccuracyTarget;
-use asap_ir::workload::{QueryLanguage, QueryWorkload};
 use asap_l2::convert_root;
+use asap_types::intent_algebra::QueryExpr;
+use asap_types::types::AccuracyTarget;
+use asap_types::workload::{QueryLanguage, QueryWorkload};
 
 pub use error::PromqlError;
 pub use histogram::{HistogramCatalog, HistogramKind};

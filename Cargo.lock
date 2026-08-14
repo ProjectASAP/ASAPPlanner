@@ -303,21 +303,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "asap-e2e"
+name = "asap-aware-mapping"
+version = "0.1.0"
+dependencies = [
+ "asap-types",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "asap-devtools"
 version = "0.1.0"
 dependencies = [
  "asap-frontend-promql",
- "asap-ir",
- "asap-plan",
- "asap-sketch",
+ "asap-frontend-sql",
+ "asap-types",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
 name = "asap-frontend-promql"
 version = "0.1.0"
 dependencies = [
- "asap-ir",
  "asap-l2",
+ "asap-types",
  "promql-parser",
 ]
 
@@ -325,55 +335,36 @@ dependencies = [
 name = "asap-frontend-sql"
 version = "0.1.0"
 dependencies = [
- "asap-ir",
  "asap-l2",
+ "asap-types",
  "datafusion",
  "tokio",
 ]
 
 [[package]]
-name = "asap-ir"
+name = "asap-integration-tests"
 version = "0.1.0"
 dependencies = [
- "serde",
- "serde_json",
- "thiserror",
+ "asap-aware-mapping",
+ "asap-frontend-promql",
+ "asap-types",
 ]
 
 [[package]]
 name = "asap-l2"
 version = "0.1.0"
 dependencies = [
- "asap-ir",
+ "asap-types",
  "thiserror",
 ]
 
 [[package]]
-name = "asap-lower"
+name = "asap-types"
 version = "0.1.0"
 dependencies = [
- "asap-frontend-promql",
- "asap-frontend-sql",
- "asap-ir",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "asap-plan"
-version = "0.1.0"
-dependencies = [
- "asap-ir",
- "asap-sketch",
+ "serde",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "asap-sketch"
-version = "0.1.0"
-dependencies = [
- "asap-ir",
 ]
 
 [[package]]

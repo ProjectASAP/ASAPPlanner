@@ -202,7 +202,7 @@ is required.
 
 # Dev tools
 
-`crates/lower` ships debugging binaries and examples for poking at the lowering pipeline. Binaries (`cargo run -p asap-lower --bin <name>`):
+`crates/devtools` ships debugging binaries and examples for poking at the lowering pipeline. Binaries (`cargo run -p asap-devtools --bin <name>`):
 
 - **`show_ir`** — prints pre-ASAP IRs for ad-hoc SQL/PromQL queries from a file or stdin, `sql>`/`promql>` prefixed
 - **`dag_export`** — dumps pre-ASAP IRs for given `--sql`/`--promql` queries for
@@ -211,7 +211,7 @@ is required.
   end-to-end setup, including running it over a remote tunnel).
 - **`variant_coverage`** — parses and canonicalizes every query corpus in the repo to pre-ASAP IR and reports which `QueryExpr` variants get exercised.
 
-Examples (`cargo run -p asap-lower --example <name>`):
+Examples (`cargo run -p asap-devtools --example <name>`):
 
 - **`topk_ir`** — prints pre-ASAP IR for a hardcoded set of topk-shaped SQL/PromQL queries
 - **`canonical_examples`** — prints pre-ASAP IR for one canonical query per `QueryExpr` variant, and custom join/set-op/distinct/CTE probes, to eyeball their shape.

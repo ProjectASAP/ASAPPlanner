@@ -24,12 +24,14 @@
 //! column) it is oblivious to whether the count was aliased in the source, which
 //! is exactly the SQL alias gap (#20) the old front-end gate missed.
 
-use asap_ir::intent_algebra::agg_intent::{is_frequency_heavy_hitter, ranking_measure, AggIntent};
-use asap_ir::intent_algebra::expr_ir::{CompareOp, L3Scalar};
-use asap_ir::intent_algebra::query_expr::{
+use asap_types::intent_algebra::agg_intent::{
+    is_frequency_heavy_hitter, ranking_measure, AggIntent,
+};
+use asap_types::intent_algebra::expr_ir::{CompareOp, L3Scalar};
+use asap_types::intent_algebra::query_expr::{
     Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind,
 };
-use asap_ir::intent_algebra::L3Expr;
+use asap_types::intent_algebra::L3Expr;
 
 /// Rewrite `expr` into its canonical form (bottom-up). Idempotent: a tree that
 /// is already canonical is returned unchanged.
@@ -252,9 +254,9 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_ir::intent_algebra::query_expr::{GroupKeys, ProjectItem, Source};
-    use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
-    use asap_ir::types::AccuracyTarget;
+    use asap_types::intent_algebra::query_expr::{GroupKeys, ProjectItem, Source};
+    use asap_types::intent_algebra::schema::{Column, DataType, Schema};
+    use asap_types::types::AccuracyTarget;
 
     fn scan() -> QueryExpr {
         QueryExpr::Scan {

@@ -1,0 +1,9 @@
+[package]
+name = "asap-integration-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+asap-types = { path = "../types" }
+asap-frontend-promql = { path = "../frontend-promql" }
+asap-aware-mapping = { path = "../asap-aware-mapping" }

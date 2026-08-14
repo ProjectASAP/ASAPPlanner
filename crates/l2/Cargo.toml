@@ -5,7 +5,7 @@ edition = "2021"
 
 # The L2 per-language relational algebra + the L2→L3 converter (convert_root,
 # binder, column resolution). Front ends emit L2 and call convert_root; this
-# crate owns both. Depends only on the L3 IR crate (asap-ir).
+# crate owns both. Depends only on the shared types crate (asap-types).
 [dependencies]
-asap-ir = { path = "../ir" }
+asap-types = { path = "../types" }
 thiserror = "2"

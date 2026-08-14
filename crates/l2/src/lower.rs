@@ -20,13 +20,13 @@ use crate::column_resolution::{
     ResolveError,
 };
 use crate::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
-use asap_ir::intent_algebra::agg_intent::AggIntent;
-use asap_ir::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
-use asap_ir::intent_algebra::query_expr::{
+use asap_types::intent_algebra::agg_intent::AggIntent;
+use asap_types::intent_algebra::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
+use asap_types::intent_algebra::query_expr::{
     GroupKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, Reduction, SortKey, Source,
 };
-use asap_ir::intent_algebra::schema::{ColumnId, Schema};
-use asap_ir::types::AccuracyTarget;
+use asap_types::intent_algebra::schema::{ColumnId, Schema};
+use asap_types::types::AccuracyTarget;
 
 /// Errors produced while converting a Layer-2 tree to canonical.
 #[derive(Debug, Error)]
@@ -38,7 +38,7 @@ pub enum ConvertError {
     /// Deriving the schema of an already-converted child failed (needed to
     /// resolve positional column references against it).
     #[error("schema derivation failed: {0}")]
-    Schema(#[from] asap_ir::intent_algebra::query_expr::QueryExprError),
+    Schema(#[from] asap_types::intent_algebra::query_expr::QueryExprError),
     /// Group keys landed on a per-series windowed/range reduction, which must
     /// stay label-preserving (`Aggregate.by` empty). The only PromQL shape that
     /// would do this is a generic `topk by (…)`, whose grouping is routed to
@@ -747,10 +747,10 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
 mod tests {
     use super::*;
     use crate::relational::{AggFunc, AggItem, QueryExpr as LQueryExpr, SourceSpec};
-    use asap_ir::intent_algebra::agg_intent::AggIntent;
-    use asap_ir::intent_algebra::expr_ir::{CompareOp, L2Expr, L3Expr, L3Scalar};
-    use asap_ir::intent_algebra::query_expr::{JoinKind, QueryExpr as CQueryExpr};
-    use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
+    use asap_types::intent_algebra::agg_intent::AggIntent;
+    use asap_types::intent_algebra::expr_ir::{CompareOp, L2Expr, L3Expr, L3Scalar};
+    use asap_types::intent_algebra::query_expr::{JoinKind, QueryExpr as CQueryExpr};
+    use asap_types::intent_algebra::schema::{Column, DataType, Schema};
 
     fn col(name: &str, dtype: DataType) -> Column {
         Column::new(name, dtype, false)

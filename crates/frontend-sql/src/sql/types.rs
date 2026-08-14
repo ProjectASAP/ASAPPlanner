@@ -9,8 +9,8 @@ use datafusion::arrow::datatypes::{
 };
 use datafusion::common::ScalarValue;
 
-use asap_ir::intent_algebra::schema::{Column, DataType, Schema};
-use asap_ir::intent_algebra::L3Scalar;
+use asap_types::intent_algebra::schema::{Column, DataType, Schema};
+use asap_types::intent_algebra::L3Scalar;
 
 use crate::error::SqlError as LoweringError;
 
