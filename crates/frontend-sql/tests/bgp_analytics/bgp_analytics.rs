@@ -206,8 +206,10 @@ async fn corpus_lowering_matches_the_pinned_per_query_outcome() {
 fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
         QueryExpr::Aggregate {
-            reduction, aggs, ..
-        } => Some((reduction.expect_reduce(), aggs)),
+            reduction,
+            measures,
+            ..
+        } => Some((reduction.expect_reduce(), measures)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
@@ -229,7 +231,7 @@ async fn top_k_queries_are_count_grouped_by_prefix() {
         let qe = lower(&qs[idx])
             .await
             .unwrap_or_else(|e| panic!("q{} ({label}) failed: {e}", idx + 1));
-        let (by, aggs) = first_aggregate(&qe)
+        let (by, measures) = first_aggregate(&qe)
             .unwrap_or_else(|| panic!("q{} ({label}) expected an Aggregate", idx + 1));
         assert_eq!(
             *by,
@@ -238,8 +240,8 @@ async fn top_k_queries_are_count_grouped_by_prefix() {
             idx + 1
         );
         assert!(
-            matches!(aggs.as_slice(), [AggIntent::Count { .. }]),
-            "q{} ({label}) expected a single Count aggregate, got {aggs:?}",
+            matches!(measures.as_slice(), [AggIntent::Count { .. }]),
+            "q{} ({label}) expected a single Count aggregate, got {measures:?}",
             idx + 1
         );
         assert!(

@@ -55,7 +55,7 @@ to one source language.
 ### Aggregate
 
 Collapses input rows into fewer output rows via a `reduction` plus a
-list of aggregate intents (`aggs`).
+list of aggregate intents (`measures`).
 
 #### Reduction
 
@@ -69,12 +69,12 @@ list of aggregate intents (`aggs`).
   - `without(keys)` — group by every column *except* these (PromQL `without(...)`); the
     excluded columns are stored but the full set of all columns stay open (because PromQL is schemaless), resolved at runtime against
     the actual input schema.
-  - `none()` — an empty GroupKeys list, i.e. a global (ungrouped) reduction. This is different from `PerEntity` below. 
+  - `none()` — an empty GroupKeys list, i.e. a global (ungrouped) reduction. This is different from `PerEntity` below.
 
   ```text
   Aggregate(
       reduction = Reduce(by = [service, region]),   // GROUP BY service, region
-      aggs = [Count],
+      measures = [Count],
       output_names = [],
       having = None,
       child = ...
@@ -89,7 +89,7 @@ list of aggregate intents (`aggs`).
   ```text
   Aggregate(
       reduction = PerEntity,
-      aggs = [Rate],
+      measures = [Rate],
       output_names = [],
       having = None,
       child = TimeRange(range = 5m, child = Scan("http_requests_total"))
@@ -98,7 +98,7 @@ list of aggregate intents (`aggs`).
 
 #### Measures
 
-Each entry in `aggs` names one statistic to compute. The vocabulary is wider than a minimal
+Each entry in `measures` names one statistic to compute. The vocabulary is wider than a minimal
 aggregate algebra needs, because it also covers PromQL's range-vector functions and
 native-histogram accessors — this list is representative, not exhaustive:
 
@@ -114,18 +114,17 @@ Math(func)                                                        // element-wis
 ```
 
 Additional measures can be added when there is a stable semantic distinction and a
-meaningful summary implementation. (The field is still named `aggs` in code — see #200 for
-renaming it to `measures` to match this doc.)
+meaningful summary implementation.
 
 **Fields:**
 - `reduction` — how rows are grouped/collapsed; see "Reduction" above.
-- `aggs` — the aggregate intents (measures) to compute; see "Measures" above.
-- `output_names` — output column name per entry in `aggs`; a non-empty entry overrides the
+- `measures` — the aggregate intents to compute; see "Measures" above.
+- `output_names` — output column name per entry in `measures`; a non-empty entry overrides the
   synthetic default — SQL threads DataFusion's generated name (e.g. `"sum(metrics.bytes)"`)
   here so an enclosing `Project` can resolve the aggregate output by the name it references.
 - `having` — an optional post-aggregation filter predicate (SQL `HAVING`).
 - `child` — the input being aggregated.
-  
+
 Example for `having`:
 
   ```sql
@@ -138,7 +137,7 @@ Example for `having`:
   ```text
   Aggregate(
       reduction = Reduce(by = [srcip]),
-      aggs = [Count],
+      measures = [Count],
       output_names = ["cnt"],
       having = Some(cnt > 10),
       child = Scan("packets"),
@@ -156,7 +155,7 @@ Example for `having`:
    ```text
    Aggregate(
        reduction = Reduce(by = [srcip]),
-       aggs = [Count],
+       measures = [Count],
        output_names = ["cnt"],
        having = Some(cnt > 10),
        child = Scan("packets"),
@@ -170,7 +169,7 @@ Example for `having`:
        pred = cnt > 10,
        child = Aggregate(
            reduction = Reduce(by = [srcip]),
-           aggs = [Count],
+           measures = [Count],
            output_names = ["cnt"],
            having = Some(cnt > 10),
            child = Scan("packets"),
@@ -182,7 +181,7 @@ Example for `having`:
    spot a summary-aware pass reads to decide whether `Aggregate` can bind to a summary, while
    the outer `Filter` is what a plain logical evaluator runs without knowing `having` exists. The duplication is forward-looking groundwork for
    once HAVING-aware summary binding (pre-ASAP-IR to post-ASAP-IR translation) lands.
-   
+
   Neither direction of that push-down is enforced yet: the SQL front end doesn't populate
   `having` from a real `HAVING` clause (#201), and canonicalization doesn't fold an existing
   `Filter { child: Aggregate { having: None, .. } }` into `Aggregate { having: Some(..), .. }`

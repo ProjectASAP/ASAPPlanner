@@ -190,14 +190,14 @@ pub fn resolve_expr(expr: &L2Expr, schema: &Schema) -> Result<L3Expr, ResolveErr
     })
 }
 
-/// Output schema produced by an `Aggregate { by, aggs }` over `input`.
+/// Output schema produced by an `Aggregate { by, measures }` over `input`.
 /// Mirrors `QueryExpr::output_schema_in`'s `Aggregate` arm; out-of-range `by`
 /// ids are silently dropped (callers needing the strict check resolve `by`
 /// via [`resolve_column_refs`], which surfaces `NotFound`).
 pub fn output_schema_for_aggregate(
     input: &Schema,
     by: &GroupKeys,
-    aggs: &[AggIntent],
+    measures: &[AggIntent],
     output_names: &[String],
 ) -> Result<Schema, QueryExprError> {
     // Delegate to the single canonical derivation so HAVING resolution can never
@@ -208,13 +208,13 @@ pub fn output_schema_for_aggregate(
     // canonical arm also keys off is not visible here, and never co-occurs with
     // HAVING.
     let per_entity =
-        by.is_empty() && !by.is_without() && aggs.len() == 1 && aggs[0].is_per_series();
+        by.is_empty() && !by.is_without() && measures.len() == 1 && measures[0].is_per_series();
     let reduction = if per_entity {
         Reduction::PerEntity
     } else {
         Reduction::Reduce(by.clone())
     };
-    aggregate_output_schema(input, &reduction, aggs, output_names)
+    aggregate_output_schema(input, &reduction, measures, output_names)
 }
 
 #[cfg(test)]
@@ -375,7 +375,7 @@ mod tests {
         // a per-series reduction (label-preserving).
         let agg = L3::Aggregate {
             reduction: Reduction::PerEntity,
-            aggs: vec![AggIntent::Rate],
+            measures: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
             child: Box::new(L3::TimeRange {

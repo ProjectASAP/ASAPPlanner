@@ -31,7 +31,7 @@ fn scan(metric: &str) -> QueryExpr {
 fn range_agg(range_secs: u64, intent: AggIntent, metric: &str) -> QueryExpr {
     QueryExpr::Aggregate {
         reduction: Reduction::PerEntity,
-        aggs: vec![intent],
+        measures: vec![intent],
         output_names: vec!["".into()],
         having: None,
         child: Box::new(QueryExpr::TimeRange {

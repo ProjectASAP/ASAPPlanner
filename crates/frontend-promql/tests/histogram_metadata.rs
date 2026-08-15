@@ -16,7 +16,9 @@ use asap_types::types::AccuracyTarget;
 fn quantile_kind(qe: &QueryExpr) -> &'static str {
     fn walk(e: &QueryExpr) -> Option<&'static str> {
         match e {
-            QueryExpr::Aggregate { aggs, child, .. } => aggs
+            QueryExpr::Aggregate {
+                measures, child, ..
+            } => measures
                 .iter()
                 .find_map(|i| match i {
                     AggIntent::HistogramQuantile { .. } => Some("HQ"),

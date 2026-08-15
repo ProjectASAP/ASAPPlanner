@@ -126,16 +126,16 @@ async fn netflow_sql_corpus_lowers_to_expected_intents() {
 fn assert_expected(qe: &QueryExpr, expected: Expected, case_no: usize) {
     match expected {
         Expected::Quantile { q, by } => {
-            let (actual_by, aggs) = first_aggregate(qe).expect("expected Aggregate");
+            let (actual_by, measures) = first_aggregate(qe).expect("expected Aggregate");
             assert_eq!(
                 actual_by,
                 &GroupKeys::by(by.to_vec()),
                 "q{case_no} GROUP BY"
             );
             assert!(
-                aggs.iter()
+                measures.iter()
                     .any(|agg| matches!(agg, AggIntent::Quantile { q: actual, .. } if (*actual - q).abs() < 1e-9)),
-                "q{case_no} expected Quantile({q}), got {aggs:?}"
+                "q{case_no} expected Quantile({q}), got {measures:?}"
             );
         }
         Expected::CountTopK { k, inner_by } => {
@@ -193,8 +193,10 @@ impl AggKind {
 fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
         QueryExpr::Aggregate {
-            reduction, aggs, ..
-        } => Some((reduction.expect_reduce(), aggs)),
+            reduction,
+            measures,
+            ..
+        } => Some((reduction.expect_reduce(), measures)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Distinct { child, .. }
@@ -216,8 +218,8 @@ fn has_topk(qe: &QueryExpr, k: usize) -> bool {
     any_node(qe, |node| {
         matches!(
             node,
-            QueryExpr::Aggregate { aggs, .. }
-                if aggs.iter().any(|agg| matches!(agg, AggIntent::TopK { k: actual, .. } if *actual == k))
+            QueryExpr::Aggregate { measures, .. }
+                if measures.iter().any(|agg| matches!(agg, AggIntent::TopK { k: actual, .. } if *actual == k))
         )
     })
 }
@@ -231,10 +233,12 @@ fn aggregate_by_with(
     let mut found = false;
     visit(qe, &mut |node| {
         if let QueryExpr::Aggregate {
-            reduction, aggs, ..
+            reduction,
+            measures,
+            ..
         } = node
         {
-            found |= *reduction.expect_reduce() == expected_by && aggs.iter().any(&pred);
+            found |= *reduction.expect_reduce() == expected_by && measures.iter().any(&pred);
         }
     });
     found
@@ -243,8 +247,8 @@ fn aggregate_by_with(
 fn all_intents(qe: &QueryExpr) -> Vec<AggIntent> {
     let mut intents = Vec::new();
     visit(qe, &mut |node| {
-        if let QueryExpr::Aggregate { aggs, .. } = node {
-            intents.extend(aggs.iter().cloned());
+        if let QueryExpr::Aggregate { measures, .. } = node {
+            intents.extend(measures.iter().cloned());
         }
     });
     intents

@@ -25,7 +25,7 @@ fn lower(q: &str) -> QueryExpr {
 fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
     QueryExpr::Aggregate {
         reduction: Reduction::by(by),
-        aggs: vec![intent],
+        measures: vec![intent],
         output_names: vec!["".into()],
         having: None,
         child: Box::new(child),
@@ -35,7 +35,7 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
 fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
     QueryExpr::Aggregate {
         reduction: Reduction::PerEntity,
-        aggs: vec![intent],
+        measures: vec![intent],
         output_names: vec!["".into()],
         having: None,
         child: Box::new(child),
@@ -271,7 +271,7 @@ fn q39_sum_without_instance_over_rate() {
     );
     let expected = QueryExpr::Aggregate {
         reduction: Reduction::Reduce(GroupKeys::without(vec![2])), // exclude `instance`
-        aggs: vec![AggIntent::Sum { col: None }],
+        measures: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,
         child: Box::new(inner_rate),

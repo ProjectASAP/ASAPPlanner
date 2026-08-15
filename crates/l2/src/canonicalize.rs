@@ -14,8 +14,8 @@
 //! generic `topk` path); this pass promotes that shape to the canonical
 //!
 //! ```text
-//! Aggregate { reduction: Reduce(<partition>), aggs: [TopK{k}],
-//!             child: Aggregate { aggs: [Count], … } }
+//! Aggregate { reduction: Reduce(<partition>), measures: [TopK{k}],
+//!             child: Aggregate { measures: [Count], … } }
 //! ```
 //!
 //! — an outer `TopK` over the *explicit* inner `Count` (the shape PromQL's
@@ -129,7 +129,9 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     // `by` to rank a measure against — this shape can't be heavy-hitter
     // promoted, so it's a non-match rather than an error.
     let QueryExpr::Aggregate {
-        reduction, aggs, ..
+        reduction,
+        measures,
+        ..
     } = agg_expr
     else {
         return None;
@@ -137,7 +139,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     let Reduction::Reduce(by) = reduction else {
         return None;
     };
-    let [ranked_agg] = aggs.as_slice() else {
+    let [ranked_agg] = measures.as_slice() else {
         return None;
     };
     if ranked_col != by.len() {
@@ -165,7 +167,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     // over the *unchanged* inner `Count` aggregate.
     Some(QueryExpr::Aggregate {
         reduction: Reduction::by(partition_by.to_vec()),
-        aggs: vec![AggIntent::TopK {
+        measures: vec![AggIntent::TopK {
             k: *k,
             accuracy: accuracy.clone(),
         }],
@@ -274,7 +276,7 @@ mod tests {
     fn count_by_service() -> QueryExpr {
         QueryExpr::Aggregate {
             reduction: Reduction::by(vec![1]),
-            aggs: vec![AggIntent::Count {
+            measures: vec![AggIntent::Count {
                 accuracy: AccuracyTarget::Exact,
             }],
             output_names: vec![],
@@ -309,10 +311,10 @@ mod tests {
 
     fn is_topk_over_count(qe: &QueryExpr) -> bool {
         matches!(qe,
-            QueryExpr::Aggregate { aggs, child, .. }
-                if matches!(aggs.as_slice(), [AggIntent::TopK { k: 5, .. }])
-                && matches!(child.as_ref(), QueryExpr::Aggregate { aggs, .. }
-                    if matches!(aggs.as_slice(), [AggIntent::Count { .. }])))
+            QueryExpr::Aggregate { measures, child, .. }
+                if matches!(measures.as_slice(), [AggIntent::TopK { k: 5, .. }])
+                && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+                    if matches!(measures.as_slice(), [AggIntent::Count { .. }])))
     }
 
     #[test]
@@ -388,7 +390,7 @@ mod tests {
         // contract: flipping it on is a future weighted-sketch change.
         let sum = QueryExpr::Aggregate {
             reduction: Reduction::by(vec![1]),
-            aggs: vec![AggIntent::Sum { col: None }],
+            measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
             child: Box::new(scan()),
@@ -422,7 +424,7 @@ mod tests {
     fn grouped(agg: AggIntent) -> QueryExpr {
         QueryExpr::Aggregate {
             reduction: Reduction::by(vec![1, 2]),
-            aggs: vec![agg],
+            measures: vec![agg],
             output_names: vec![],
             having: None,
             child: Box::new(scan4()),
@@ -464,7 +466,7 @@ mod tests {
         let out = canonicalize(q);
         let QueryExpr::Aggregate {
             reduction,
-            aggs,
+            measures,
             child,
             ..
         } = &out
@@ -474,10 +476,15 @@ mod tests {
         let Reduction::Reduce(by) = reduction else {
             panic!("expected a Reduce grouping, got {reduction:?}");
         };
-        assert!(matches!(aggs.as_slice(), [AggIntent::TopK { k: 5, .. }]));
+        assert!(matches!(
+            measures.as_slice(),
+            [AggIntent::TopK { k: 5, .. }]
+        ));
         assert_eq!(**by, vec![2], "outer TopK partitioned by region");
-        assert!(matches!(child.as_ref(), QueryExpr::Aggregate { aggs, .. }
-            if matches!(aggs.as_slice(), [AggIntent::Count { .. }])));
+        assert!(
+            matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+            if matches!(measures.as_slice(), [AggIntent::Count { .. }]))
+        );
     }
 
     #[test]
@@ -499,8 +506,10 @@ mod tests {
             panic!("expected a Sort under the Limit");
         };
         assert_eq!(**partition_by, vec![2], "partitioned by region");
-        assert!(matches!(child.as_ref(), QueryExpr::Aggregate { aggs, .. }
-            if matches!(aggs.as_slice(), [AggIntent::Avg { .. }])));
+        assert!(
+            matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+            if matches!(measures.as_slice(), [AggIntent::Avg { .. }]))
+        );
     }
 
     #[test]

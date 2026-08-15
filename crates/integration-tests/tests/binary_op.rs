@@ -32,7 +32,7 @@ fn scan(metric: &str, labels: &[&str]) -> QueryExpr {
 fn rate_agg(metric: &str) -> QueryExpr {
     QueryExpr::Aggregate {
         reduction: Reduction::PerEntity,
-        aggs: vec![AggIntent::Rate],
+        measures: vec![AggIntent::Rate],
         output_names: vec!["".into()],
         having: None,
         child: Box::new(QueryExpr::TimeRange {
@@ -45,7 +45,7 @@ fn rate_agg(metric: &str) -> QueryExpr {
 fn sum_by_job(metric: &str) -> QueryExpr {
     QueryExpr::Aggregate {
         reduction: Reduction::by(vec![2]),
-        aggs: vec![AggIntent::Sum { col: None }],
+        measures: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,
         child: Box::new(scan(metric, &["job"])),
@@ -246,7 +246,7 @@ fn q36_unary_negation_is_multiply_by_minus_one() {
 fn q36_sum_of_negation_nests() {
     let expected = QueryExpr::Aggregate {
         reduction: Reduction::by(vec![]),
-        aggs: vec![AggIntent::Sum { col: None }],
+        measures: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,
         child: Box::new(QueryExpr::BinaryOp {

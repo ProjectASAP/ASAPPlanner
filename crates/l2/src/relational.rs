@@ -260,7 +260,7 @@ pub enum QueryExpr {
     Aggregate {
         keys: Vec<ColumnRef>,
         without: bool,
-        aggs: Vec<AggItem>,
+        measures: Vec<AggItem>,
         having: Option<L2Expr>,
         input: Box<QueryExpr>,
     },

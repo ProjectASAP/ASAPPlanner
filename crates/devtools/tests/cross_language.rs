@@ -54,19 +54,22 @@ fn promql(q: &str) -> QueryExpr {
 fn heavy_hitter(qe: &QueryExpr) -> Option<(usize, GroupKeys)> {
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = qe
     else {
         return None;
     };
-    let [AggIntent::TopK { k, .. }] = aggs.as_slice() else {
+    let [AggIntent::TopK { k, .. }] = measures.as_slice() else {
         return None;
     };
     // The child must be the explicit inner Count (not a raw Scan) — this is the
     // structural unification #25 asked for.
-    let QueryExpr::Aggregate { aggs: inner, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        measures: inner, ..
+    } = child.as_ref()
+    else {
         return None;
     };
     matches!(inner.as_slice(), [AggIntent::Count { .. }])
@@ -119,7 +122,7 @@ async fn non_count_ranked_topk_stays_generic_in_both_languages() {
         "SUM-ranked is not a heavy-hitter: {s:?}"
     );
     assert!(
-        !matches!(&s, QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::TopK { .. }])),
+        !matches!(&s, QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::TopK { .. }])),
     );
     assert!(
         heavy_hitter(&p).is_none(),

@@ -51,8 +51,10 @@ async fn lower(sql: &str) -> QueryExpr {
 fn find_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
         QueryExpr::Aggregate {
-            reduction, aggs, ..
-        } => Some((reduction.expect_reduce(), aggs)),
+            reduction,
+            measures,
+            ..
+        } => Some((reduction.expect_reduce(), measures)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Distinct { child, .. }
@@ -79,13 +81,14 @@ fn find_aggregate_node(qe: &QueryExpr) -> Option<&QueryExpr> {
 /// against its child's schema, plus whether that child is a materializing
 /// `Project` (issue #110).
 fn reducer_input_names(qe: &QueryExpr) -> (Vec<String>, bool) {
-    let QueryExpr::Aggregate { aggs, child, .. } =
-        find_aggregate_node(qe).expect("expected an Aggregate")
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = find_aggregate_node(qe).expect("expected an Aggregate")
     else {
         unreachable!()
     };
     let schema = child.output_schema().expect("child schema");
-    let names = aggs
+    let names = measures
         .iter()
         .filter_map(|a| a.input_col())
         .map(|id| schema.columns[id].name.clone())
@@ -146,15 +149,15 @@ async fn select_star_with_where_folds_predicate_onto_scan() {
 async fn multi_aggregate_group_by_binds_columns_positionally() {
     // SUM(bytes)=col 3, AVG(latency)=col 2, GROUP BY service=col 1.
     let qe = lower("SELECT service, SUM(bytes), AVG(latency) FROM metrics GROUP BY service").await;
-    let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate in the tree");
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate in the tree");
     assert_eq!(by, &vec![1], "GROUP BY service → column 1");
     assert!(
-        aggs.contains(&AggIntent::Sum { col: Some(3) }),
-        "SUM(bytes) → Sum{{col:3}}, got {aggs:?}"
+        measures.contains(&AggIntent::Sum { col: Some(3) }),
+        "SUM(bytes) → Sum{{col:3}}, got {measures:?}"
     );
     assert!(
-        aggs.contains(&AggIntent::Avg { col: Some(2) }),
-        "AVG(latency) → Avg{{col:2}}, got {aggs:?}"
+        measures.contains(&AggIntent::Avg { col: Some(2) }),
+        "AVG(latency) → Avg{{col:2}}, got {measures:?}"
     );
 }
 
@@ -187,9 +190,12 @@ async fn single_agg_group_by_keeps_key_in_output_schema() {
     // Aggregate.by path (not the PromQL fused-Partition shape), so the group
     // key is a real output column the enclosing SELECT projection resolves.
     let qe = lower("SELECT service, SUM(bytes) FROM metrics GROUP BY service").await;
-    let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate (not a Partition)");
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate (not a Partition)");
     assert_eq!(by, &vec![1], "GROUP BY service → Aggregate.by column 1");
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { col: Some(3) }]));
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Sum { col: Some(3) }]
+    ));
 
     // Both the group key and the aggregate resolve in the root projection schema.
     let schema = qe.output_schema().expect("root projection schema");
@@ -213,24 +219,24 @@ async fn count_ranked_topk_is_heavy_hitter() {
         "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 10",
     )
     .await;
-    let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(
         by.is_empty(),
         "outer TopK is a global ranking (by: []), got {by:?}"
     );
     assert!(
-        matches!(aggs.as_slice(), [AggIntent::TopK { k: 10, .. }]),
-        "count-ranked topk → heavy-hitter TopK, got {aggs:?}"
+        matches!(measures.as_slice(), [AggIntent::TopK { k: 10, .. }]),
+        "count-ranked topk → heavy-hitter TopK, got {measures:?}"
     );
     // The inner child is the explicit Count, grouped by service (col 1).
     let QueryExpr::Aggregate { child, .. } = &qe else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
-    let (inner_by, inner_aggs) = find_aggregate(child).expect("expected inner Count aggregate");
+    let (inner_by, inner_measures) = find_aggregate(child).expect("expected inner Count aggregate");
     assert_eq!(inner_by, &vec![1], "inner Count grouped by service → col 1");
     assert!(
-        matches!(inner_aggs.as_slice(), [AggIntent::Count { .. }]),
-        "inner aggregate is the explicit Count, got {inner_aggs:?}"
+        matches!(inner_measures.as_slice(), [AggIntent::Count { .. }]),
+        "inner aggregate is the explicit Count, got {inner_measures:?}"
     );
 }
 
@@ -251,10 +257,10 @@ async fn count_ranked_topk_via_alias_is_also_heavy_hitter() {
         inline, aliased,
         "aliased count-ranked topk must match the inline form"
     );
-    let (_, aggs) = find_aggregate(&aliased).expect("expected an Aggregate");
+    let (_, measures) = find_aggregate(&aliased).expect("expected an Aggregate");
     assert!(
-        matches!(aggs.as_slice(), [AggIntent::TopK { k: 10, .. }]),
-        "aliased count-ranked topk → heavy-hitter TopK, got {aggs:?}"
+        matches!(measures.as_slice(), [AggIntent::TopK { k: 10, .. }]),
+        "aliased count-ranked topk → heavy-hitter TopK, got {measures:?}"
     );
 }
 
@@ -266,14 +272,14 @@ async fn non_count_ranked_limit_keeps_the_aggregate() {
         "SELECT service, AVG(latency) AS a FROM metrics GROUP BY service ORDER BY a DESC LIMIT 10",
     )
     .await;
-    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(
-        aggs.iter().any(|a| matches!(a, AggIntent::Avg { .. })),
-        "AVG must be preserved, got {aggs:?}"
+        measures.iter().any(|a| matches!(a, AggIntent::Avg { .. })),
+        "AVG must be preserved, got {measures:?}"
     );
     assert!(
-        !aggs.iter().any(|a| matches!(a, AggIntent::TopK { .. })),
-        "AVG ranking must not become a frequency heavy-hitter, got {aggs:?}"
+        !measures.iter().any(|a| matches!(a, AggIntent::TopK { .. })),
+        "AVG ranking must not become a frequency heavy-hitter, got {measures:?}"
     );
 }
 
@@ -296,10 +302,10 @@ async fn aggregate_over_an_expression_reduces_a_derived_column() {
     // be rejected for that reason; since #110 the expression is materialized as
     // a derived column in a `Project` beneath the aggregate, and reduced there.
     let qe = lower("SELECT SUM(bytes + 1) FROM metrics").await;
-    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(
-        matches!(aggs.as_slice(), [AggIntent::Sum { col: Some(_) }]),
-        "expected Sum bound to the derived column, got {aggs:?}"
+        matches!(measures.as_slice(), [AggIntent::Sum { col: Some(_) }]),
+        "expected Sum bound to the derived column, got {measures:?}"
     );
     let (names, materialized) = reducer_input_names(&qe);
     assert!(materialized, "expected a materializing Project");
@@ -312,16 +318,19 @@ async fn aggregate_over_an_expression_reduces_a_derived_column() {
 #[tokio::test]
 async fn count_star_is_count_intent() {
     let qe = lower("SELECT COUNT(*) FROM metrics").await;
-    let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(by.is_empty());
-    assert!(matches!(aggs.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
 }
 
 #[tokio::test]
 async fn count_distinct_is_cardinality() {
     let qe = lower("SELECT COUNT(DISTINCT service) FROM metrics").await;
-    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
-    assert!(matches!(aggs.as_slice(), [AggIntent::Cardinality { .. }]));
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Cardinality { .. }]
+    ));
 }
 
 #[tokio::test]
@@ -525,7 +534,7 @@ async fn aggregate_over_join_binds_against_concatenated_schema() {
          GROUP BY hosts.region",
     )
     .await;
-    let (by, aggs) = find_aggregate(&qe).expect("expected an Aggregate over the join");
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate over the join");
     // metrics(ts,service,latency,bytes) ++ hosts(service,region) →
     // region is column 5, bytes is column 3 of the concatenated schema.
     assert_eq!(
@@ -534,8 +543,8 @@ async fn aggregate_over_join_binds_against_concatenated_schema() {
         "GROUP BY hosts.region → concatenated column 5"
     );
     assert!(
-        aggs.contains(&AggIntent::Sum { col: Some(3) }),
-        "SUM(metrics.bytes) → Sum{{col:3}}, got {aggs:?}"
+        measures.contains(&AggIntent::Sum { col: Some(3) }),
+        "SUM(metrics.bytes) → Sum{{col:3}}, got {measures:?}"
     );
 }
 
@@ -717,8 +726,10 @@ fn all_intents(qe: &QueryExpr) -> Vec<AggIntent> {
     let mut out = Vec::new();
     fn go(qe: &QueryExpr, out: &mut Vec<AggIntent>) {
         match qe {
-            QueryExpr::Aggregate { aggs, child, .. } => {
-                out.extend(aggs.iter().cloned());
+            QueryExpr::Aggregate {
+                measures, child, ..
+            } => {
+                out.extend(measures.iter().cloned());
                 go(child, out);
             }
             QueryExpr::Project { child, .. }
@@ -912,19 +923,19 @@ async fn quantile_carries_its_input_column() {
                 approx_percentile_cont(bytes, 0.5) FROM metrics",
     )
     .await;
-    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(
         matches!(
-            aggs.as_slice(),
+            measures.as_slice(),
             [
                 AggIntent::Quantile { col: Some(2), .. },
                 AggIntent::Quantile { col: Some(3), .. }
             ]
         ),
-        "quantiles must bind their own column, got {aggs:?}"
+        "quantiles must bind their own column, got {measures:?}"
     );
     assert_ne!(
-        aggs[0], aggs[1],
+        measures[0], measures[1],
         "distinct-column quantiles must not compare equal"
     );
 }
@@ -932,19 +943,19 @@ async fn quantile_carries_its_input_column() {
 #[tokio::test]
 async fn count_distinct_carries_its_input_column() {
     let qe = lower("SELECT COUNT(DISTINCT service), COUNT(DISTINCT bytes) FROM metrics").await;
-    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(
         matches!(
-            aggs.as_slice(),
+            measures.as_slice(),
             [
                 AggIntent::Cardinality { col: Some(1), .. },
                 AggIntent::Cardinality { col: Some(3), .. }
             ]
         ),
-        "cardinalities must bind their own column, got {aggs:?}"
+        "cardinalities must bind their own column, got {measures:?}"
     );
     assert_ne!(
-        aggs[0], aggs[1],
+        measures[0], measures[1],
         "distinct-column cardinalities must not compare equal"
     );
 }
@@ -960,10 +971,10 @@ async fn quantile_and_count_distinct_over_an_expression_bind_the_derived_column(
         "SELECT approx_distinct(bytes * 8) FROM metrics",
     ] {
         let qe = lower(q).await;
-        let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+        let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
         assert!(
-            aggs[0].input_col().is_some(),
-            "{q} must bind a column, never `col: None`, got {aggs:?}"
+            measures[0].input_col().is_some(),
+            "{q} must bind a column, never `col: None`, got {measures:?}"
         );
         let (names, materialized) = reducer_input_names(&qe);
         assert!(materialized, "{q} expected a materializing Project");
@@ -984,13 +995,13 @@ async fn median_lowers_to_the_half_quantile() {
         "SELECT approx_median(latency) FROM metrics",
     ] {
         let qe = lower(sql).await;
-        let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+        let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
         assert!(
             matches!(
-                aggs.as_slice(),
+                measures.as_slice(),
                 [AggIntent::Quantile { col: Some(2), q, .. }] if (*q - 0.5).abs() < 1e-9
             ),
-            "{sql} should lower to Quantile(0.5) over latency, got {aggs:?}"
+            "{sql} should lower to Quantile(0.5) over latency, got {measures:?}"
         );
     }
 }
@@ -1000,9 +1011,9 @@ async fn median_is_the_same_intent_as_an_explicit_half_percentile() {
     // Two spellings of one intent: CSE should be able to merge them.
     let m = lower("SELECT median(latency) FROM metrics").await;
     let p = lower("SELECT approx_percentile_cont(latency, 0.5) FROM metrics").await;
-    let (_, m_aggs) = find_aggregate(&m).expect("expected an Aggregate");
-    let (_, p_aggs) = find_aggregate(&p).expect("expected an Aggregate");
-    assert_eq!(m_aggs, p_aggs);
+    let (_, m_measures) = find_aggregate(&m).expect("expected an Aggregate");
+    let (_, p_measures) = find_aggregate(&p).expect("expected an Aggregate");
+    assert_eq!(m_measures, p_measures);
 }
 
 #[tokio::test]
@@ -1015,14 +1026,14 @@ async fn median_threads_the_accuracy_target() {
     )
     .await
     .expect("approx_median should lower");
-    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(
         matches!(
-            aggs.as_slice(),
+            measures.as_slice(),
             [AggIntent::Quantile { accuracy: AccuracyTarget::Epsilon(e), .. }]
                 if (*e - 0.01).abs() < 1e-12
         ),
-        "median must carry the workload's accuracy target, got {aggs:?}"
+        "median must carry the workload's accuracy target, got {measures:?}"
     );
 }
 
@@ -1031,10 +1042,10 @@ async fn median_over_an_expression_binds_the_derived_column() {
     // Was rejected when filed (#111); supported since #110 materialized the
     // expression. What must still hold is the #115 rule: never `col: None`.
     let qe = lower("SELECT median(bytes * 8) FROM metrics").await;
-    let (_, aggs) = find_aggregate(&qe).expect("expected an Aggregate");
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(
-        matches!(aggs.as_slice(), [AggIntent::Quantile { col: Some(_), q, .. }] if (*q - 0.5).abs() < 1e-9),
-        "expected Quantile(0.5) bound to the derived column, got {aggs:?}"
+        matches!(measures.as_slice(), [AggIntent::Quantile { col: Some(_), q, .. }] if (*q - 0.5).abs() < 1e-9),
+        "expected Quantile(0.5) bound to the derived column, got {measures:?}"
     );
 }
 
@@ -1049,7 +1060,7 @@ async fn time_bucketing_group_by_lowers_to_a_derived_key() {
     let node = find_aggregate_node(&qe).expect("expected an Aggregate");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = node
@@ -1068,7 +1079,10 @@ async fn time_bucketing_group_by_lowers_to_a_derived_key() {
         schema.columns[0].name
     );
     // The reducer still binds its own column, not the bucket.
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { col: Some(1) }]));
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Sum { col: Some(1) }]
+    ));
 }
 
 #[tokio::test]
@@ -1119,8 +1133,9 @@ async fn a_plain_group_by_inserts_no_projection() {
 #[tokio::test]
 async fn a_shared_expression_is_materialized_once() {
     let qe = lower("SELECT SUM(bytes * 2), MIN(bytes * 2) FROM metrics").await;
-    let QueryExpr::Aggregate { aggs, child, .. } =
-        find_aggregate_node(&qe).expect("expected an Aggregate")
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = find_aggregate_node(&qe).expect("expected an Aggregate")
     else {
         unreachable!()
     };
@@ -1129,7 +1144,7 @@ async fn a_shared_expression_is_materialized_once() {
         1,
         "the two reducers should share one derived column"
     );
-    assert_eq!(aggs[0].input_col(), aggs[1].input_col());
+    assert_eq!(measures[0].input_col(), measures[1].input_col());
 }
 
 // ── Issue #118: multi-level grouping expands into one Aggregate per level ───
@@ -1299,10 +1314,16 @@ async fn multi_level_grouping_composes_with_a_derived_reducer_argument() {
         let QueryExpr::Project { child, .. } = b else {
             panic!("expected a Project per level");
         };
-        let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+        let QueryExpr::Aggregate {
+            measures, child, ..
+        } = child.as_ref()
+        else {
             panic!("expected an Aggregate");
         };
-        assert!(matches!(aggs.as_slice(), [AggIntent::Sum { col: Some(_) }]));
+        assert!(matches!(
+            measures.as_slice(),
+            [AggIntent::Sum { col: Some(_) }]
+        ));
         assert!(
             matches!(**child, QueryExpr::Project { .. }),
             "the derived-column projection should sit under each level"

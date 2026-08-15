@@ -67,7 +67,7 @@ pub fn implement_tree_with(
 ) -> Result<Rc<L4Node>, ImplementError> {
     if let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         having,
         child,
         ..
@@ -75,7 +75,7 @@ pub fn implement_tree_with(
     {
         // The bindable shape: exactly one intent, no HAVING. (Multi-intent
         // nodes and HAVING stay logical — see the module docs.)
-        if let ([intent], None) = (aggs.as_slice(), having) {
+        if let ([intent], None) = (measures.as_slice(), having) {
             match implementation_for_with(intent, cost_model) {
                 Implementation::Summary { kind, params } => {
                     let estimate = !kind.is_exact();
@@ -267,7 +267,7 @@ mod tests {
     fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
         QueryExpr::Aggregate {
             reduction: Reduction::by(by),
-            aggs: vec![intent],
+            measures: vec![intent],
             output_names: vec![],
             having: None,
             child: Box::new(child),
@@ -278,7 +278,7 @@ mod tests {
     fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
         QueryExpr::Aggregate {
             reduction: Reduction::PerEntity,
-            aggs: vec![intent],
+            measures: vec![intent],
             output_names: vec![],
             having: None,
             child: Box::new(child),
@@ -702,7 +702,7 @@ mod tests {
 
         let multi = QueryExpr::Aggregate {
             reduction: Reduction::by(vec![2]),
-            aggs: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
+            measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
             child: Box::new(metric_scan(&["job"])),
