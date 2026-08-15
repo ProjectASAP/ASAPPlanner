@@ -18,7 +18,7 @@ the script and edit the `--sql`/`--promql` lines to try your own instead.
 For more control, call the underlying binary directly:
 
 ```sh
-cargo run -p asap-lower --bin dag_export -- \
+cargo run -p asap-devtools --bin dag_export -- \
   --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
   --promql "topk(5, rate(http_requests_total[5m]))" --name q2 \
   > tools/dag-viewer/dag.json

@@ -1,12 +1,12 @@
 # ASAP query DAG viewer
 
-Interactive viewer for the L3 query IR (`QueryExpr`), for manual IR
+Interactive viewer for the pre-ASAP query IR (`QueryExpr`), for manual IR
 review/debugging, eyeballing common shapes across a corpus, and spotting shared sub-DAGs across queries.
 
 ## Generate a graph
 
 ```sh
-cargo run -p asap-lower --bin dag_export -- \
+cargo run -p asap-devtools --bin dag_export -- \
   --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
   --sql "SELECT service, AVG(latency) FROM metrics GROUP BY service" --name q2 \
   --promql "topk(5, rate(http_requests_total[5m]))" --name q3 \
@@ -58,7 +58,7 @@ proposed scope for a v2.
 
 The highlight is computed by hashing each node's `(kind, detail, children)`
 bottom-up and matching hashes across queries — see the doc comment on
-`crates/ir/src/dag_export.rs`. It is **not** driven by
+`crates/types/src/dag_export.rs`. It is **not** driven by
 `asap_plan::cse::dedupe_subtrees`: that pass isn't wired into any end-to-end
 multi-root planning path today (no caller outside its own unit tests), so
 there's nothing yet that would emit a real `CseWorkloadPlan` to visualize.
