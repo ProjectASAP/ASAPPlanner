@@ -84,6 +84,7 @@ Selecting a sketch:
 - Sliding window vs tumbling window computation (this is specific to ASAPCollector and ASAPQuery's precompute engine)
 - Sliding window sketches (e.g. Promsketch) vs exact treatment of time
 - AHA vs treating hierarchical subpopulations independently
+- Combining computation between part from the sketch, and part from the raw data to meet an accuracy target
 
 ## Summary properties to model
 
@@ -91,3 +92,7 @@ Selecting a sketch:
 - Subpopulation aware?
 - Subtractable?
 - Able to delete an item?
+- Time aware?
+- Linearability?
+- Does accuracy drop when more items are inserted?
+- Can a summary work as an inner operator for other operators?
