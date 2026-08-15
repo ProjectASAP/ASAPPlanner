@@ -77,7 +77,7 @@ Speculative (see this doc's status note at the top) — kept as a
 concrete target to design against. Every concrete-looking name below
 (`StageId`'s example values, `Executor`'s addressing, an actual
 `TopologyDescriptor`) is **interface only, in this repo** —
-ASAPController defines the shape a deployment implements against; the
+ASAPPlanner defines the shape a deployment implements against; the
 deployment defines, reserves, and ships the actual values, names its
 own stages, addresses its own executors, and describes its own
 topology:
@@ -103,7 +103,7 @@ pub trait TopologyDescriptor {
     fn edges(&self) -> &[StageEdge];
 }
 
-// `StageId` is an opaque, deployment-chosen string — ASAPController
+// `StageId` is an opaque, deployment-chosen string — ASAPPlanner
 // neither defines nor reserves any particular value. "edge" / "gateway"
 // / "backend" / "in-process" below are one deployment's illustrative
 // choice (roughly: close to data ingestion / an intermediate

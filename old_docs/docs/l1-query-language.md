@@ -17,7 +17,7 @@ project-wide version of this distinction):
   differences into L2's one canonical form. See "Pass 2" below.
 
 **Status.** This describes the design target; implementation tracked in
-[issue #179](https://github.com/ProjectASAP/ASAPController/issues/179).
+[issue #179](https://github.com/ProjectASAP/ASAPPlanner/issues/179).
 
 Front ends never depend on each other: each language's parsing path is
 fully independent, so adding or removing a supported language leaves
