@@ -28,7 +28,7 @@
 //! | `sort`/`sort_desc(v)`, `sort_by_label[_desc](v,"l"…)` | `Sort{value \| label…}` (no `Limit`) — row-preserving reorder (issue #51); `min_of`/`max_of` scalar reducers → #89 |
 //! | `rate/irate(m[w])` | `Aggregate{[Rate{w}]}` (no Window) — `irate` shares the `rate` *intent*; the avg-vs-last-two-samples difference is an L4 estimation method |
 //! | `increase(m[w])` | `Aggregate{[Increase{w}]}` (no Window) |
-//! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], Window{w}}` — per-series counter-derivative intents (issue #44); `holt_winters` is the legacy alias of `double_exponential_smoothing` |
+//! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], Window{w}}` — per-series counter-derivative intents (issue #44) |
 //! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is L4 (issue #47) |
 //! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `Scalar` leaf |
 //! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `EvalTime` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
@@ -336,7 +336,7 @@ fn range_fn_over_subquery(call: &Call) -> Result<Option<L2>> {
         "ts_of_first_over_time" => (InnerFunc::TsOfFirstOverTime, 0),
         "ts_of_last_over_time" => (InnerFunc::TsOfLastOverTime, 0),
         "predict_linear" => (InnerFunc::PredictLinear(num_arg(call, 1)?), 0),
-        "double_exponential_smoothing" | "holt_winters" => (
+        "double_exponential_smoothing" => (
             InnerFunc::DoubleExp {
                 smoothing: num_arg(call, 1)?,
                 trend: num_arg(call, 2)?,
@@ -1266,8 +1266,7 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
                 shift,
             })
         }
-        // `holt_winters` is the legacy spelling of `double_exponential_smoothing`.
-        "double_exponential_smoothing" | "holt_winters" => {
+        "double_exponential_smoothing" => {
             let (metric, matchers, window, shift) = extract_matrix(arg(call, 0)?)?;
             let smoothing = num_arg(call, 1)?;
             let trend = num_arg(call, 2)?;

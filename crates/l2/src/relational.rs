@@ -135,8 +135,7 @@ pub enum AggFunc {
     PredictLinear {
         seconds: f64,
     },
-    /// PromQL `double_exponential_smoothing(v[w], sf, tf)` (a.k.a.
-    /// `holt_winters`) → `AggIntent::DoubleExpSmoothing`.
+    /// PromQL `double_exponential_smoothing(v[w], sf, tf)` → `AggIntent::DoubleExpSmoothing`.
     DoubleExpSmoothing {
         smoothing: f64,
         trend: f64,

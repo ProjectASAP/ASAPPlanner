@@ -9,9 +9,11 @@ edition = "2021"
 asap-types = { path = "../types" }
 asap-l2 = { path = "../l2" }
 
-# Private mirror of GreptimeTeam/promql-parser (Apache-2.0). `main` tracks
-# upstream; our `asap` branch carries the local patches.
-promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", branch = "asap" }
+# Public GreptimeTeam/promql-parser (Apache-2.0) from crates.io. 0.10 upstreamed
+# the experimental functions we used to carry as local patches (mad_over_time,
+# histogram_quantiles, min_of/max_of, ts_of_*_over_time, step()/range()), except
+# it also dropped the legacy `holt_winters` alias — see promql.rs.
+promql-parser = "0.10"
 
 [dev-dependencies]
 asap-aware-mapping = { path = "../asap-aware-mapping" }
