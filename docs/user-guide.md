@@ -30,6 +30,23 @@ Both accept stdin instead of a file (`... < queries.txt`). `show_post_asap_ir` l
 ε = 0.01 rather than `Exact` — an exact target only ever exercises the mergeable-accumulator
 arm of the binding decision, never a real sketch, so it wouldn't show the interesting case.
 
+### Other dev tools
+
+`crates/devtools` ships more debugging binaries and examples for poking at the lowering pipeline. Binaries (`cargo run -p asap-devtools --bin <name>`):
+
+- **`show_pre_asap_ir`** — see above
+- **`show_post_asap_ir`** — see above
+- **`dag_export`** — dumps pre-ASAP IRs for given `--sql`/`--promql` queries for
+  [`tools/dag-viewer`](../tools/dag-viewer/index.html), an interactive DAG viewer
+  (see [`tools/dag-viewer/RUNNING.md`](../tools/dag-viewer/RUNNING.md) for
+  end-to-end setup, including running it over a remote tunnel).
+- **`variant_coverage`** — parses and canonicalizes every query corpus in the repo to pre-ASAP IR and reports which `QueryExpr` variants get exercised.
+
+Examples (`cargo run -p asap-devtools --example <name>`):
+
+- **`topk_ir`** — prints pre-ASAP IR for a hardcoded set of topk-shaped SQL/PromQL queries
+- **`canonical_examples`** — prints pre-ASAP IR for one canonical query per `QueryExpr` variant, and custom join/set-op/distinct/CTE probes, to eyeball their shape.
+
 ## As a library
 
 Neither crate is published to crates.io — depend on them by path (inside this workspace) or by git:

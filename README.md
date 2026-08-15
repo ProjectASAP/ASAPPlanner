@@ -96,8 +96,6 @@ As of Aug 13, 2026, ASAPController will be scoped to:
 
 ## High-level workflow
 
-The pipeline is:
-
 ```text
 query workload
     │
@@ -192,31 +190,6 @@ TopK(Count, service, 5)
 SpaceSaving(k=5)
 ```
 
-The filter and input domain are also considered when deciding whether the chosen summary
-can answer the request directly or whether additional filtering / partitioning information
-is required.
-
-// MS: At this point, we need a concrete example of 2 query workloads (one SQL, one PromQL), their pre-ASAP IRs, and post-ASAP IRs
-
-// MS: After that, the goal should be to clearly write what the pre-ASAP and post-ASAP IRs are. The list of nodes
-
-# Dev tools
-
-`crates/devtools` ships debugging binaries and examples for poking at the lowering pipeline. Binaries (`cargo run -p asap-devtools --bin <name>`):
-
-- **`show_pre_asap_ir`** — prints pre-ASAP IRs (L3, `QueryExpr`/`AggIntent`) for ad-hoc SQL/PromQL queries from a file or stdin, `sql>`/`promql>` prefixed
-- **`show_post_asap_ir`** — same input format, but runs the `asap-aware-mapping` L3→L4 binding pass and prints the post-ASAP IR (L4, `SummaryExpr`/`L4Node` — the committed `SummaryKind`/`SummaryParams` per aggregate)
-- **`dag_export`** — dumps pre-ASAP IRs for given `--sql`/`--promql` queries for
-  [`tools/dag-viewer`](tools/dag-viewer/index.html), an interactive DAG viewer
-  (see [`tools/dag-viewer/RUNNING.md`](tools/dag-viewer/RUNNING.md) for
-  end-to-end setup, including running it over a remote tunnel).
-- **`variant_coverage`** — parses and canonicalizes every query corpus in the repo to pre-ASAP IR and reports which `QueryExpr` variants get exercised.
-
-Examples (`cargo run -p asap-devtools --example <name>`):
-
-- **`topk_ir`** — prints pre-ASAP IR for a hardcoded set of topk-shaped SQL/PromQL queries
-- **`canonical_examples`** — prints pre-ASAP IR for one canonical query per `QueryExpr` variant, and custom join/set-op/distinct/CTE probes, to eyeball their shape.
-
 # Design principles
 
 ## 1. Normalize semantics, not syntax
@@ -235,15 +208,24 @@ because they have distinct summary mappings.
 Do not add a node merely because SQL has an operator with that name. Add a node when it carries
 semantic information that matters downstream.
 
+# Next steps for you
+
+- [Description of pre-ASAP IR](docs/pre-asap-ir.md)
+- [Description of post-ASAP IR](docs/post-asap-ir.md)
+- [Converting a QueryWorkload to a pre-ASAP plan](docs/parse_and_canonicalize.md)
+- [Converting a pre-ASAP plan to a post-ASAP plan](docs/asap_aware_mapping.md)
+- [Guide on how to use ASAPController](docs/user-guide.md)
+
 # Open questions
 
-1. **Time semantics:** Should `TimeWindow` be an explicit node, or should time restriction be
+1. How to connect the output of ASAPController to ASAPQuery? ASAPController produces a post-ASAP plan that has semantics of batch query execution over data at rest. Somehow this needs to be converted into two plans (1) streaming dataflow graph that computes summaries on raw data, and (2) batch query execution plan that uses summaries to answer queries.
+2. **Time semantics:** Should `TimeWindow` be an explicit node, or should time restriction be
    represented as a specialized predicate?
-2. **Grouping semantics:** Should grouping remain embedded in `Aggregate`, or should grouping
+3. **Grouping semantics:** Should grouping remain embedded in `Aggregate`, or should grouping
    become a reusable relational dimension node?
-3. **Expression semantics:** Which arithmetic or derived expressions need dedicated semantic
+4. **Expression semantics:** Which arithmetic or derived expressions need dedicated semantic
    nodes because they materially affect summary selection?
-4. **Approximation contracts:** Should accuracy/error requirements be fields on the intent,
+5. **Approximation contracts:** Should accuracy/error requirements be fields on the intent,
    the workload, or the measure itself?
-5. **Summary composability:** How should nested intents describe summaries that can be merged,
+6. **Summary composability:** How should nested intents describe summaries that can be merged,
    transformed, or reused across queries?
