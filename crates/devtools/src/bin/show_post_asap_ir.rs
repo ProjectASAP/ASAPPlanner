@@ -22,7 +22,7 @@
 
 use asap_aware_mapping::implement_tree;
 use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
-use asap_types::intent_algebra::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 use std::io::Read;
 

@@ -21,8 +21,8 @@
 //! flow / 5-tuple = `(srcip, dstip, srcport, dstport, proto)`.
 
 use asap_frontend_sql::{lower_sql, SqlCatalog, SqlError as LoweringError};
-use asap_types::intent_algebra::schema::{Column, DataType, Schema};
-use asap_types::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
+use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
 use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/synthetic_packet_trace_queries.sql");

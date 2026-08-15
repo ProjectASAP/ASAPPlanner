@@ -8,7 +8,7 @@
 use asap_frontend_promql::{
     lower_promql, lower_promql_with_histograms, HistogramCatalog, HistogramKind,
 };
-use asap_types::intent_algebra::{AggIntent, QueryExpr};
+use asap_types::pre_asap::{AggIntent, QueryExpr};
 use asap_types::types::AccuracyTarget;
 
 /// The histogram/quantile intent kind in the lowered tree: `"HQ"` for the

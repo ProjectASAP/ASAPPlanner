@@ -27,9 +27,9 @@
 //! model keeps today's static-preference-order behavior exactly, byte for
 //! byte.
 
-use asap_types::intent_algebra::agg_intent::AggIntent;
-use asap_types::intent_algebra::expr_ir::ColumnRef;
 use asap_types::post_asap::{SketchQuery, SummaryKind, SummaryParams};
+use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::pre_asap::expr_ir::ColumnRef;
 
 use crate::boundary::Implementation;
 
@@ -129,7 +129,7 @@ impl CostModel for DefaultCostModel {
 mod tests {
     use super::*;
     use crate::boundary::summary_candidates;
-    use asap_types::intent_algebra::agg_intent::default_cardinality;
+    use asap_types::pre_asap::agg_intent::default_cardinality;
 
     #[test]
     fn default_cost_model_preserves_static_order() {
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn custom_cost_model_can_override_sizing_independently_of_ranking() {
-        use asap_types::intent_algebra::agg_intent::default_quantile;
+        use asap_types::pre_asap::agg_intent::default_quantile;
 
         let intent = default_quantile(0.99);
         assert_eq!(

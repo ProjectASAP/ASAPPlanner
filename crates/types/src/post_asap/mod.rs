@@ -1,7 +1,7 @@
 //! The post-ASAP L4 IR: sketch-bound types, distinct from
-//! [`crate::intent_algebra`]'s pre-ASAP L3 IR.
+//! [`crate::pre_asap`]'s pre-ASAP L3 IR.
 //!
-//! Where L3 ([`crate::intent_algebra`]) carries *intent* only ("compute a
+//! Where L3 ([`crate::pre_asap`]) carries *intent* only ("compute a
 //! quantile to ε accuracy"), this module is the sketch-bound IR: the sketch
 //! kind + parameters are committed ([`sketch::SummaryKind`] /
 //! [`sketch::SummaryParams`]), and [`expr::L4Node`] / [`expr::SummaryExpr`]

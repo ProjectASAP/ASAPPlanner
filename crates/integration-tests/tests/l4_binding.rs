@@ -8,12 +8,12 @@
 
 use asap_aware_mapping::implement_tree;
 use asap_frontend_promql::lower_promql;
-use asap_types::intent_algebra::expr_ir::ColumnRef;
-use asap_types::intent_algebra::query_expr::{QueryExpr, Reduction};
-use asap_types::intent_algebra::schema::DataType;
 use asap_types::post_asap::{
     L4DataType, L4Schema, SketchQuery, SummaryExpr, SummaryKind, SummaryParams,
 };
+use asap_types::pre_asap::expr_ir::ColumnRef;
+use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::schema::DataType;
 use asap_types::types::AccuracyTarget;
 
 fn dtype<'a>(schema: &'a L4Schema, name: &str) -> &'a L4DataType {

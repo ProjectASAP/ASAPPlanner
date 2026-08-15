@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use asap_types::intent_algebra::{
+use asap_types::pre_asap::{
     AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, QueryExpr, Reduction, Source,
 };
 use asap_types::types::AccuracyTarget;
@@ -477,7 +477,7 @@ fn binary_op_with_on_grouping() {
         panic!("expected BinaryOp, got {qe:?}");
     };
     let vm = vector_match.as_ref().expect("vector_match present");
-    use asap_types::intent_algebra::VectorMatchKind;
+    use asap_types::pre_asap::VectorMatchKind;
     assert_eq!(vm.kind, VectorMatchKind::On);
     assert_eq!(vm.labels, vec!["host".to_string()]);
 }

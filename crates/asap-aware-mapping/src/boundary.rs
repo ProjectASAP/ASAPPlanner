@@ -24,8 +24,8 @@
 //! realization — there is no silent fall-through. The [`bind`](crate::bind)
 //! pass fires it per node over nested trees.
 
-use asap_types::intent_algebra::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::post_asap::{SummaryKind, SummaryParams};
+use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::types::AccuracyTarget;
 
 use crate::cost_model::{CostModel, DefaultCostModel};
@@ -369,7 +369,7 @@ fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::intent_algebra::agg_intent::{
+    use asap_types::pre_asap::agg_intent::{
         agg_is_exact, default_cardinality, default_quantile, MathFunc, TimeFunc,
     };
 

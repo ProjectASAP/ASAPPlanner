@@ -34,8 +34,8 @@
 use std::time::Duration;
 
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
-use asap_types::intent_algebra::schema::DataType;
-use asap_types::intent_algebra::{
+use asap_types::pre_asap::schema::DataType;
+use asap_types::pre_asap::{
     AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, L3Expr, MathFunc, QueryExpr,
     Reduction, SampleKind, Source, TimeFunc,
 };

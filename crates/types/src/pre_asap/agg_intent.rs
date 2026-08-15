@@ -15,8 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::intent_algebra::query_expr::DataModel;
-use crate::intent_algebra::schema::{Column, ColumnId, DataType};
+use crate::pre_asap::query_expr::DataModel;
+use crate::pre_asap::schema::{Column, ColumnId, DataType};
 use crate::types::AccuracyTarget;
 
 /// "What to compute" at L3 — the vocabulary the planner pivots on.
@@ -642,7 +642,7 @@ pub fn default_quantile(q: f64) -> AggIntent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent_algebra::schema::{Column, DataType};
+    use crate::pre_asap::schema::{Column, DataType};
 
     fn c(name: &str, dtype: DataType) -> Column {
         Column::new(name, dtype, false)

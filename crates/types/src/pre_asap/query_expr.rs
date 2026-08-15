@@ -1165,7 +1165,7 @@ fn default_proj_name(expr: &L3Expr, idx: usize, schema: &Schema) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent_algebra::expr_ir::{ArithOp, CompareOp};
+    use crate::pre_asap::expr_ir::{ArithOp, CompareOp};
 
     fn col(name: &str, dtype: DataType, nullable: bool) -> Column {
         Column::new(name, dtype, nullable)
