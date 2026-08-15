@@ -123,8 +123,8 @@ pub enum AggIntent {
         /// The prediction horizon in seconds (the 2nd, scalar argument).
         seconds: f64,
     },
-    /// PromQL `double_exponential_smoothing(v[w], sf, tf)` (a.k.a. the legacy
-    /// `holt_winters`) — Holt-Winters double-exponential smoothing.
+    /// PromQL `double_exponential_smoothing(v[w], sf, tf)` — Holt-Winters
+    /// double-exponential smoothing.
     DoubleExpSmoothing {
         /// Data (level) smoothing factor `sf` ∈ (0, 1).
         smoothing: f64,

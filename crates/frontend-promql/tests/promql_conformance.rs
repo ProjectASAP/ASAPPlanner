@@ -1287,19 +1287,13 @@ fn predict_linear_carries_horizon_seconds() {
 }
 
 #[test]
-fn double_exponential_smoothing_carries_factors_and_holt_winters_is_an_alias() {
-    // Both spellings lower to the same intent carrying the two smoothing factors.
+fn double_exponential_smoothing_carries_factors() {
     let want = AggIntent::DoubleExpSmoothing {
         smoothing: 0.5,
         trend: 0.3,
     };
     let a = ok("double_exponential_smoothing(m[10m], 0.5, 0.3)");
-    let b = ok("holt_winters(m[10m], 0.5, 0.3)");
     assert_eq!(intents(&a).as_slice(), std::slice::from_ref(&want));
-    assert_eq!(
-        a, b,
-        "holt_winters is the legacy alias of double_exponential_smoothing"
-    );
 }
 
 #[test]
