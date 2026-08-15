@@ -60,7 +60,7 @@ fn quantile_over_time_is_time_range_aggregate() {
     let qe = lower(r#"quantile_over_time(0.99, http_request_duration{env="prod"}[5m])"#);
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -68,7 +68,9 @@ fn quantile_over_time_is_time_range_aggregate() {
         panic!("expected Aggregate, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::PerEntity);
-    assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.99).abs() < 1e-9));
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.99).abs() < 1e-9)
+    );
     let QueryExpr::TimeRange { range, child } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
     };
@@ -87,7 +89,7 @@ fn outer_sum_by_over_quantile_over_time_groups_positionally() {
     let qe = lower(r#"sum by (host) (quantile_over_time(0.99, latency{service="web"}[5m]))"#);
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -95,22 +97,28 @@ fn outer_sum_by_over_quantile_over_time_groups_positionally() {
         panic!("expected outer Aggregate grouped by host, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // Inner: Aggregate{Quantile} over TimeRange (per-series over_time reduction).
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = child.as_ref()
+    else {
         panic!("expected Aggregate (quantile_over_time) under the outer Sum, got {child:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Quantile { .. }]));
     assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
 }
 
 #[test]
 fn avg_over_time_maps_to_avg_intent() {
     let qe = lower("avg_over_time(cpu_seconds_total[10m])");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected Aggregate, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Avg { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Avg { .. }]));
     let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
     };
@@ -120,11 +128,14 @@ fn avg_over_time_maps_to_avg_intent() {
 #[test]
 fn stddev_and_stdvar_over_time() {
     let qe = lower("stddev_over_time(m[5m])");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected Aggregate");
     };
     assert!(matches!(
-        aggs.as_slice(),
+        measures.as_slice(),
         [AggIntent::StdDev {
             population: true,
             ..
@@ -133,11 +144,14 @@ fn stddev_and_stdvar_over_time() {
     assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
 
     let qe = lower("stdvar_over_time(m[5m])");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected Aggregate");
     };
     assert!(matches!(
-        aggs.as_slice(),
+        measures.as_slice(),
         [AggIntent::Variance {
             population: true,
             ..
@@ -152,16 +166,22 @@ fn histogram_quantile_wraps_inner_in_quantile() {
     // not squashed away. The `_bucket` metric + `le` matcher mark the classic
     // form → `HistogramQuantile` over `Aggregate{Rate}` over Scan.
     let qe = lower(r#"histogram_quantile(0.95, rate(http_duration_seconds_bucket{le="0.5"}[5m]))"#);
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     assert!(
-        matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.95).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.95).abs() < 1e-9)
     );
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = child.as_ref()
+    else {
         panic!("expected inner Aggregate{{Rate}}, got {child:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Rate]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
     let QueryExpr::TimeRange {
         range,
         child: tr_child,
@@ -181,23 +201,28 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     // UnsupportedFeature because `extract_matrix` couldn't see through the
     // `sum by (le)` aggregate; now the `le` grouping survives into L3.
     let qe = lower(r#"histogram_quantile(0.99, sum by (le) (rate(http_requests_bucket[5m])))"#);
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     // The `by (le)` grouping marks the classic cumulative-bucket form.
     assert!(
-        matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.99).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.99).abs() < 1e-9)
     );
     // `sum by (le)` survives as a positional Aggregate (by = [2], `le`) over the
     // inner Rate — no name-based Partition.
     let QueryExpr::Aggregate {
-        reduction, aggs, ..
+        reduction,
+        measures,
+        ..
     } = child.as_ref()
     else {
         panic!("expected `sum by (le)` as a positional Aggregate, got {child:?}");
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
 }
 
 // ── rate / increase carry their own window (no Window node) ─────────────────────
@@ -205,10 +230,13 @@ fn histogram_quantile_over_sum_by_le_preserves_grouping() {
 #[test]
 fn rate_has_time_range_child_not_window() {
     let qe = lower("rate(http_requests_total[5m])");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected Aggregate for rate, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Rate]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
     let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected TimeRange child (not Window), got {child:?}");
     };
@@ -218,10 +246,13 @@ fn rate_has_time_range_child_not_window() {
 #[test]
 fn increase_maps_to_increase_intent() {
     let qe = lower("increase(errors_total[1h])");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected Aggregate for increase, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Increase]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Increase]));
     let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
     };
@@ -235,14 +266,20 @@ fn sum_over_rate_keeps_both_levels() {
     // Regression: `sum(rate(m[w]))` — the most common PromQL shape — must keep
     // the cross-series Sum, not collapse to a bare per-series Rate.
     let qe = lower("sum(rate(http_requests_total[5m]))");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate{{Sum}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = child.as_ref()
+    else {
         panic!("expected inner Aggregate{{Rate}}, got {child:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Rate]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
     assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
 }
 
@@ -254,7 +291,7 @@ fn sum_by_over_rate_groups_the_outer_sum() {
     let qe = lower("sum by (job) (rate(http_requests_total[5m]))");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -262,10 +299,10 @@ fn sum_by_over_rate_groups_the_outer_sum() {
         panic!("expected outer Aggregate grouped by job, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate])
+        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -273,13 +310,19 @@ fn sum_by_over_rate_groups_the_outer_sum() {
 fn count_over_rate_keeps_both_levels() {
     // The `Outer::Count` sibling of the `sum(rate(...))` bug.
     let qe = lower("count(rate(http_requests_total[5m]))");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate{{Cardinality}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Cardinality { .. }]));
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Cardinality { .. }]
+    ));
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate])
+        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -288,10 +331,13 @@ fn count_over_rate_keeps_both_levels() {
 #[test]
 fn count_over_time_is_count_intent() {
     let qe = lower("count_over_time(m[5m])");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected Aggregate");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
 }
 
@@ -303,7 +349,7 @@ fn outer_count_is_cardinality() {
     let qe = lower("count by (symbol) (count_over_time(financial_last_trade_price[5m]))");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -311,12 +357,18 @@ fn outer_count_is_cardinality() {
         panic!("expected outer Aggregate grouped by symbol, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(aggs.as_slice(), [AggIntent::Cardinality { .. }]));
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Cardinality { .. }]
+    ));
     // Inner: Aggregate{Count} over TimeRange (per-series count_over_time).
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = child.as_ref()
+    else {
         panic!("expected Aggregate (count_over_time) under the cardinality, got {child:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
 }
 
@@ -328,7 +380,7 @@ fn topk_over_count_is_heavy_hitter_topk() {
     // Heavy-hitter: Aggregate{TopK} with grouping resolved to positional ids.
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -337,12 +389,18 @@ fn topk_over_count_is_heavy_hitter_topk() {
     };
     // `service` is the only group key → resolved to a positional ColumnId.
     assert_eq!(reduction.expect_reduce().len(), 1);
-    assert!(matches!(aggs.as_slice(), [AggIntent::TopK { k: 10, .. }]));
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::TopK { k: 10, .. }]
+    ));
     // The count_over_time under the TopK is a TimeRange-backed aggregate.
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = child.as_ref()
+    else {
         panic!("expected Aggregate (count_over_time) under TopK, got {child:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     let QueryExpr::TimeRange { range, child } = child.as_ref() else {
         panic!("expected TimeRange under Count aggregate, got {child:?}");
     };
@@ -375,8 +433,8 @@ fn topk_over_avg_is_generic_sort_limit() {
     // Underneath: the label-preserving windowed avg aggregate (by: []), no
     // intervening Partition.
     assert!(
-        matches!(child.as_ref(), QueryExpr::Aggregate { reduction, aggs, .. }
-            if reduction == &Reduction::PerEntity && matches!(aggs.as_slice(), [AggIntent::Avg { .. }])),
+        matches!(child.as_ref(), QueryExpr::Aggregate { reduction, measures, .. }
+            if reduction == &Reduction::PerEntity && matches!(measures.as_slice(), [AggIntent::Avg { .. }])),
         "expected bare per-series Avg aggregate under Sort, got {child:?}"
     );
 }
@@ -432,7 +490,7 @@ fn topk_count_output_schema_carries_group_key() {
     let qe = lower("topk by (service) (5, count_over_time(m[1m]))");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -444,12 +502,18 @@ fn topk_count_output_schema_carries_group_key() {
         &Reduction::by(vec![2]),
         "service is col 2 in [ts, value, service]"
     );
-    assert!(matches!(aggs.as_slice(), [AggIntent::TopK { k: 5, .. }]));
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::TopK { k: 5, .. }]
+    ));
     // Inner Count aggregate is visible with its TimeRange child.
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = child.as_ref()
+    else {
         panic!("expected inner Aggregate{{Count}}, got {child:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
     assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
 }
 
@@ -463,10 +527,10 @@ fn binary_op_division() {
     };
     assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Div));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate]))
+        matches!(lhs.as_ref(), QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate]))
     );
     assert!(
-        matches!(rhs.as_ref(), QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate]))
+        matches!(rhs.as_ref(), QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate]))
     );
 }
 
@@ -512,8 +576,10 @@ fn all_intents(e: &QueryExpr) -> Vec<AggIntent> {
 
 fn collect_intents(e: &QueryExpr, out: &mut Vec<AggIntent>) {
     match e {
-        QueryExpr::Aggregate { aggs, child, .. } => {
-            out.extend(aggs.iter().cloned());
+        QueryExpr::Aggregate {
+            measures, child, ..
+        } => {
+            out.extend(measures.iter().cloned());
             collect_intents(child, out);
         }
         QueryExpr::TimeRange { child, .. }
@@ -557,7 +623,7 @@ fn without_grouping_lowers_to_the_exclusion_form() {
     let qe = lower("sum without (instance) (rate(m[5m]))");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -567,11 +633,13 @@ fn without_grouping_lowers_to_the_exclusion_form() {
     let by = reduction.expect_reduce();
     assert!(by.is_without());
     assert_eq!(by.keys().len(), 1, "excluded `instance`");
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // The inner per-series rate is preserved (label-preserving) under the outer
     // cross-series `without` reduction.
-    assert!(matches!(child.as_ref(), QueryExpr::Aggregate { aggs, .. }
-        if matches!(aggs.as_slice(), [AggIntent::Rate])));
+    assert!(
+        matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+        if matches!(measures.as_slice(), [AggIntent::Rate]))
+    );
     assert!(!qe.output_schema().unwrap().closed);
 }
 
@@ -624,11 +692,11 @@ fn accuracy_target_flows_into_quantile_intent() {
         AccuracyTarget::Epsilon(0.01),
     )
     .unwrap();
-    let QueryExpr::Aggregate { aggs, .. } = &qe else {
+    let QueryExpr::Aggregate { measures, .. } = &qe else {
         panic!("expected Aggregate");
     };
     assert!(matches!(
-        &aggs[0],
+        &measures[0],
         AggIntent::Quantile { accuracy: AccuracyTarget::Epsilon(e), .. } if (*e - 0.01).abs() < 1e-12
     ));
 }
@@ -846,10 +914,10 @@ fn quantile_branches(q: &QueryExpr) -> Vec<(String, AggIntent)> {
             let L3Expr::Literal(L3Scalar::Utf8(v)) = value else {
                 panic!("expected a literal label value, got {value:?}");
             };
-            let QueryExpr::Aggregate { aggs, .. } = child.as_ref() else {
+            let QueryExpr::Aggregate { measures, .. } = child.as_ref() else {
                 panic!("expected an Aggregate under the Relabel, got {child:?}");
             };
-            (v.clone(), aggs[0].clone())
+            (v.clone(), measures[0].clone())
         })
         .collect()
 }

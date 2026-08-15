@@ -51,8 +51,10 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
     let mut out = Vec::new();
     fn go(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         match e {
-            QueryExpr::Aggregate { aggs, child, .. } => {
-                out.extend(aggs.iter().cloned());
+            QueryExpr::Aggregate {
+                measures, child, ..
+            } => {
+                out.extend(measures.iter().cloned());
                 go(child, out);
             }
             QueryExpr::TimeRange { child, .. }
@@ -223,7 +225,9 @@ fn all_targets_missing_core_lowers() {
     // `… == 0`). Cross-series sum grouped positionally on `job`.
     let qe = ok("sum by (job) (up)");
     let QueryExpr::Aggregate {
-        reduction, aggs, ..
+        reduction,
+        measures,
+        ..
     } = &qe
     else {
         panic!("expected Aggregate, got {qe:?}");
@@ -233,7 +237,7 @@ fn all_targets_missing_core_lowers() {
         &Reduction::by(vec![2]),
         "job grouping → col 2 in [ts, value, job]"
     );
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -325,7 +329,9 @@ fn without_grouping_lowers_to_the_exclusion_form() {
         panic!("expected a comparison BinaryOp, got {qe:?}");
     };
     let QueryExpr::Aggregate {
-        reduction, aggs, ..
+        reduction,
+        measures,
+        ..
     } = lhs.as_ref()
     else {
         panic!("expected a `min without` Aggregate on the LHS, got {lhs:?}");
@@ -334,5 +340,5 @@ fn without_grouping_lowers_to_the_exclusion_form() {
         reduction.expect_reduce().is_without(),
         "grouping is the exclusion form"
     );
-    assert!(matches!(aggs.as_slice(), [AggIntent::Min { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Min { .. }]));
 }

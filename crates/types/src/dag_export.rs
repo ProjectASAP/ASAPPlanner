@@ -217,7 +217,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         }
         QueryExpr::Aggregate {
             reduction,
-            aggs,
+            measures,
             output_names,
             having,
             child,
@@ -225,14 +225,14 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let c = build(child, nodes);
             let detail = serde_json::json!({
                 "reduction": reduction,
-                "aggs": aggs,
+                "measures": measures,
                 "output_names": output_names,
                 "having": having,
             });
             push_node(
                 nodes,
                 "Aggregate",
-                format!("Aggregate({} aggs)", aggs.len()),
+                format!("Aggregate({} measures)", measures.len()),
                 detail,
                 vec![c],
             )
@@ -413,7 +413,7 @@ mod tests {
             pred: Predicate(L3Expr::Literal(L3Scalar::Boolean(true))),
             child: Box::new(QueryExpr::Aggregate {
                 reduction: Reduction::Reduce(GroupKeys::none()),
-                aggs: vec![AggIntent::Count {
+                measures: vec![AggIntent::Count {
                     accuracy: AccuracyTarget::Exact,
                 }],
                 output_names: vec![],

@@ -527,8 +527,8 @@ pub enum QueryExpr {
     /// γ + α — GROUP BY (positional) + aggregate intents.
     Aggregate {
         reduction: Reduction,
-        aggs: Vec<AggIntent>,
-        /// Output column names parallel to `aggs`. A non-empty entry overrides
+        measures: Vec<AggIntent>,
+        /// Output column names parallel to `measures`. A non-empty entry overrides
         /// the synthetic intent-keyed name — SQL threads DataFusion's generated
         /// name (e.g. `"sum(metrics.bytes)"`) here so an enclosing `Project`
         /// resolves the aggregate output by the name it references. An empty
@@ -671,13 +671,13 @@ impl QueryExpr {
 
             QueryExpr::Aggregate {
                 reduction,
-                aggs,
+                measures,
                 output_names,
                 child,
                 ..
             } => {
                 let in_schema = child.output_schema()?;
-                aggregate_output_schema(&in_schema, reduction, aggs, output_names)
+                aggregate_output_schema(&in_schema, reduction, measures, output_names)
             }
 
             QueryExpr::Filter { child, .. }
@@ -937,7 +937,7 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
     }
 }
 
-/// The output schema of an `Aggregate { reduction, aggs }` over `in_schema` —
+/// The output schema of an `Aggregate { reduction, measures }` over `in_schema` —
 /// the **single** canonical derivation shared by
 /// [`QueryExpr::output_schema`]'s `Aggregate` arm and the converter's
 /// HAVING-resolution path (`column_resolution::output_schema_for_aggregate`),
@@ -945,19 +945,23 @@ fn per_series_reduction_schema(input: &Schema, agg: &AggIntent) -> Schema {
 ///
 /// `Reduction::PerEntity` selects the label-preserving
 /// [`per_series_reduction_schema`] (`rate`/`increase`/`*_over_time`) instead
-/// of the cross-series `by ++ aggs` shape. Which one applies is read directly
+/// of the cross-series `by ++ measures` shape. Which one applies is read directly
 /// off `reduction` — decided once, at construction, by whoever built the
 /// `Aggregate` node (issue #165) — not re-derived here from `by`/child shape.
 pub fn aggregate_output_schema(
     in_schema: &Schema,
     reduction: &Reduction,
-    aggs: &[AggIntent],
+    measures: &[AggIntent],
     output_names: &[String],
 ) -> Result<Schema, QueryExprError> {
     let by = match reduction {
         Reduction::PerEntity => {
-            debug_assert_eq!(aggs.len(), 1, "a per-entity reduction is single-aggregate");
-            return Ok(per_series_reduction_schema(in_schema, &aggs[0]));
+            debug_assert_eq!(
+                measures.len(),
+                1,
+                "a per-entity reduction is single-aggregate"
+            );
+            return Ok(per_series_reduction_schema(in_schema, &measures[0]));
         }
         Reduction::Reduce(by) => by,
     };
@@ -968,10 +972,10 @@ pub fn aggregate_output_schema(
     // runtime label set isn't known. The `by(...)` path instead enumerates its
     // kept columns and freezes to closed (issue #39).
     if by.is_without() {
-        return without_output_schema(in_schema, by.keys(), aggs, output_names);
+        return without_output_schema(in_schema, by.keys(), measures, output_names);
     }
 
-    let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + aggs.len());
+    let mut out_cols: Vec<Column> = Vec::with_capacity(by.len() + measures.len());
     for &id in by.keys() {
         let c = in_schema
             .columns
@@ -993,7 +997,7 @@ pub fn aggregate_output_schema(
     // in one node); `None` falls back to the sample-value probe (PromQL's
     // single-column convention). A non-empty `output_names[i]` overrides the
     // synthetic output column name.
-    for (i, intent) in aggs.iter().enumerate() {
+    for (i, intent) in measures.iter().enumerate() {
         // `count_values("l", v)` emits TWO columns: the synthesized `Utf8` label
         // `l` (the stringified sample value it groups by) and the per-value
         // count. If `l` collides with a group-by key of the same name, PromQL's
@@ -1022,7 +1026,7 @@ pub fn aggregate_output_schema(
     }
     // `count_values` groups by (by-keys ∪ the synthesized value label), so the
     // by-keys alone are not a unique key — be conservative and claim none.
-    let has_count_values = aggs
+    let has_count_values = measures
         .iter()
         .any(|a| matches!(a, AggIntent::CountValues { .. }));
     let unique_keys = if by.is_empty() || has_count_values {
@@ -1034,7 +1038,7 @@ pub fn aggregate_output_schema(
         columns: out_cols,
         time_index: None,
         unique_keys,
-        // A cross-series aggregate enumerates exactly `by ++ aggs`, so its output
+        // A cross-series aggregate enumerates exactly `by ++ measures`, so its output
         // is closed even over an open input — this is where an open schema
         // freezes to closed.
         closed: true,
@@ -1050,7 +1054,7 @@ pub fn aggregate_output_schema(
 fn without_output_schema(
     in_schema: &Schema,
     excluded: &[ColumnId],
-    aggs: &[AggIntent],
+    measures: &[AggIntent],
     output_names: &[String],
 ) -> Result<Schema, QueryExprError> {
     for &id in excluded {
@@ -1074,7 +1078,7 @@ fn without_output_schema(
         .and_then(|i| in_schema.columns.get(i))
         .cloned()
         .unwrap_or_else(|| Column::new("value", DataType::Float64, false));
-    for (i, intent) in aggs.iter().enumerate() {
+    for (i, intent) in measures.iter().enumerate() {
         let in_col = intent
             .input_col()
             .and_then(|id| in_schema.columns.get(id))
@@ -1357,7 +1361,7 @@ mod tests {
         };
         let agg = QueryExpr::Aggregate {
             reduction: Reduction::Reduce(GroupKeys::without(vec![2])), // exclude `instance`
-            aggs: vec![AggIntent::Sum { col: None }],
+            measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
             child: Box::new(scan_node),
@@ -1435,7 +1439,7 @@ mod tests {
         );
         let rate = QueryExpr::Aggregate {
             reduction: Reduction::PerEntity,
-            aggs: vec![AggIntent::Rate],
+            measures: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
             child: Box::new(QueryExpr::TimeRange {
@@ -1473,7 +1477,7 @@ mod tests {
         );
         let avg_over_time = QueryExpr::Aggregate {
             reduction: Reduction::PerEntity,
-            aggs: vec![AggIntent::Avg { col: None }],
+            measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
             child: Box::new(QueryExpr::TimeRange {
@@ -1522,7 +1526,7 @@ mod tests {
 
         let rate = QueryExpr::Aggregate {
             reduction: Reduction::PerEntity,
-            aggs: vec![AggIntent::Rate],
+            measures: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
             child: Box::new(open_leaf),
@@ -1534,14 +1538,14 @@ mod tests {
 
         let sum_by_job = QueryExpr::Aggregate {
             reduction: Reduction::by(vec![2]), // `job`
-            aggs: vec![AggIntent::Sum { col: None }],
+            measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
             child: Box::new(rate),
         };
         assert!(
             sum_by_job.output_schema().unwrap().closed,
-            "cross-series aggregate enumerates `by ++ aggs` → frozen to closed"
+            "cross-series aggregate enumerates `by ++ measures` → frozen to closed"
         );
     }
 

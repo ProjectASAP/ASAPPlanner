@@ -166,7 +166,7 @@ pub fn convert(
         LQueryExpr::Aggregate {
             keys,
             without,
-            aggs,
+            measures,
             having,
             input,
         } => {
@@ -184,7 +184,7 @@ pub fn convert(
             // *direct* input (the scan under any window). (SQL GROUP BY is
             // tabular, so it skips this branch for the plain `Aggregate.by` path
             // below.)
-            if aggs.len() == 1 && having.is_none() && !input.leaf_is_tabular() {
+            if measures.len() == 1 && having.is_none() && !input.leaf_is_tabular() {
                 // Extract the temporal range. Two sources:
                 //   1. An L2 `Window` child (emitted for `*_over_time` functions).
                 //   2. `Rate`/`Increase` AggFunc (carry their own range; no L2 Window).
@@ -205,7 +205,7 @@ pub fn convert(
                         // sub-query's range.
                         other @ LQueryExpr::PromQLSubquery { .. } => (other, None),
                         other => {
-                            let range = match &aggs[0].func {
+                            let range = match &measures[0].func {
                                 AggFunc::Rate { window } | AggFunc::Increase { window } => {
                                     Some(*window)
                                 }
@@ -223,7 +223,7 @@ pub fn convert(
                 if time_range.is_none()
                     && !matches!(agg_input_l2, LQueryExpr::PromQLSubquery { .. })
                     && matches!(
-                        &aggs[0].func,
+                        &measures[0].func,
                         AggFunc::Changes
                             | AggFunc::Delta
                             | AggFunc::IDelta
@@ -245,9 +245,9 @@ pub fn convert(
                 let agg_child_raw = convert(agg_input_l2, fallback, acc)?;
                 let agg_in_schema = agg_child_raw.output_schema()?;
                 let intent = agg_func_to_intent(
-                    &aggs[0].func,
+                    &measures[0].func,
                     acc,
-                    resolve_agg_col(&aggs[0].col, &agg_in_schema)?,
+                    resolve_agg_col(&measures[0].col, &agg_in_schema)?,
                 );
                 // Wrap the child in TimeRange when there is a range.
                 let agg_child = match time_range {
@@ -300,8 +300,8 @@ pub fn convert(
                 };
                 return Ok(CQueryExpr::Aggregate {
                     reduction,
-                    aggs: vec![intent],
-                    output_names: vec![aggs[0].alias.clone().unwrap_or_default()],
+                    measures: vec![intent],
+                    output_names: vec![measures[0].alias.clone().unwrap_or_default()],
                     having: None,
                     child: Box::new(agg_child),
                 });
@@ -314,14 +314,14 @@ pub fn convert(
             let child = convert(input, fallback, acc)?;
             let child_schema = child.output_schema()?;
             let by = group_keys(resolve_column_refs(keys, &child_schema)?, *without);
-            let intents: Vec<AggIntent> = aggs
+            let intents: Vec<AggIntent> = measures
                 .iter()
                 .map(|item| -> Result<AggIntent, ConvertError> {
                     let col = resolve_agg_col(&item.col, &child_schema)?;
                     Ok(agg_func_to_intent(&item.func, acc, col))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let output_names: Vec<String> = aggs
+            let output_names: Vec<String> = measures
                 .iter()
                 .map(|item| item.alias.clone().unwrap_or_default())
                 .collect();
@@ -338,7 +338,7 @@ pub fn convert(
                 // HAVING-bearing, and per-entity reductions are always a
                 // single, HAVING-less intent (handled above).
                 reduction: Reduction::Reduce(by),
-                aggs: intents,
+                measures: intents,
                 output_names,
                 having,
                 child: Box::new(child),
@@ -398,7 +398,7 @@ pub fn convert(
                 // A ranking always reduces (a `by`-empty TopK ranks the whole
                 // input into one ordering, never per-entity).
                 reduction: Reduction::Reduce(by),
-                aggs: vec![AggIntent::TopK {
+                measures: vec![AggIntent::TopK {
                     k: *k as usize,
                     accuracy: acc.clone(),
                 }],
@@ -777,7 +777,7 @@ mod tests {
         let tree = LQueryExpr::Aggregate {
             keys: vec![],
             without: false,
-            aggs: vec![AggItem {
+            measures: vec![AggItem {
                 alias: None,
                 func: AggFunc::Changes,
                 col: ColumnRef::SampleValue,
@@ -806,7 +806,7 @@ mod tests {
         let tree = LQueryExpr::Aggregate {
             keys: vec![],
             without: false,
-            aggs: vec![
+            measures: vec![
                 AggItem {
                     alias: Some("total_bytes".into()),
                     func: AggFunc::Sum,
@@ -824,7 +824,9 @@ mod tests {
 
         let l3 = convert(&tree, &schema, &AccuracyTarget::Exact).unwrap();
         let CQueryExpr::Aggregate {
-            reduction, aggs, ..
+            reduction,
+            measures,
+            ..
         } = &l3
         else {
             panic!("expected Aggregate, got {l3:?}");
@@ -835,7 +837,7 @@ mod tests {
         assert!(by.is_empty());
         // bytes is column 1, latency is column 2 in the input schema.
         assert_eq!(
-            aggs,
+            measures,
             &vec![
                 AggIntent::Sum { col: Some(1) },
                 AggIntent::Avg { col: Some(2) },
@@ -863,7 +865,7 @@ mod tests {
         let tree = LQueryExpr::Aggregate {
             keys: vec![],
             without: false,
-            aggs: vec![AggItem {
+            measures: vec![AggItem {
                 alias: Some("value".into()),
                 func: AggFunc::Sum,
                 col: ColumnRef::SampleValue,
@@ -873,10 +875,10 @@ mod tests {
         };
         let l3 = convert(&tree, &schema, &AccuracyTarget::Exact).unwrap();
         // single-agg fused path → bare Aggregate (no keys → no Partition)
-        let CQueryExpr::Aggregate { aggs, .. } = &l3 else {
+        let CQueryExpr::Aggregate { measures, .. } = &l3 else {
             panic!("expected Aggregate, got {l3:?}");
         };
-        assert_eq!(aggs, &[AggIntent::Sum { col: None }]);
+        assert_eq!(measures, &[AggIntent::Sum { col: None }]);
     }
 
     /// `SELECT region, SUM(bytes), COUNT(*) FROM logs JOIN meta … GROUP BY region`
@@ -908,7 +910,7 @@ mod tests {
         let tree = LQueryExpr::Aggregate {
             keys: vec![ColumnRef::Named("region".into())],
             without: false,
-            aggs: vec![
+            measures: vec![
                 AggItem {
                     alias: Some("tot".into()),
                     func: AggFunc::Sum,
@@ -926,7 +928,7 @@ mod tests {
         let l3 = convert_root(&tree, &AccuracyTarget::Exact).unwrap();
         let CQueryExpr::Aggregate {
             reduction,
-            aggs,
+            measures,
             child,
             ..
         } = &l3
@@ -938,11 +940,11 @@ mod tests {
         };
         assert_eq!(by, &vec![3], "region is column 3 of the joined schema");
         assert_eq!(
-            aggs[0],
+            measures[0],
             AggIntent::Sum { col: Some(1) },
             "bytes is column 1"
         );
-        assert!(matches!(aggs[1], AggIntent::Count { .. }));
+        assert!(matches!(measures[1], AggIntent::Count { .. }));
         assert!(matches!(child.as_ref(), CQueryExpr::Join { .. }));
     }
 
@@ -958,7 +960,7 @@ mod tests {
         let tree = LQueryExpr::Aggregate {
             keys: vec![ColumnRef::Named("region".into())],
             without: false,
-            aggs: vec![
+            measures: vec![
                 AggItem {
                     alias: Some("tot".into()),
                     func: AggFunc::Sum,

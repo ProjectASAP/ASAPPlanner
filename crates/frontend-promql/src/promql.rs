@@ -486,14 +486,14 @@ fn mark_without(l2: L2, without: bool) -> L2 {
     match l2 {
         L2::Aggregate {
             keys,
-            aggs,
+            measures,
             having,
             input,
             ..
         } if without => L2::Aggregate {
             keys,
             without: true,
-            aggs,
+            measures,
             having,
             input,
         },
@@ -632,7 +632,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<L2> {
             let quantile = L2::Aggregate {
                 keys: vec![],
                 without: false,
-                aggs: vec![AggItem {
+                measures: vec![AggItem {
                     alias: Some("value".into()),
                     func,
                     col: ColumnRef::SampleValue,
@@ -1417,7 +1417,7 @@ fn windowed_aggregate(inner: Inner, keys: Vec<ColumnRef>, func: AggFunc) -> L2 {
     L2::Aggregate {
         keys,
         without: false,
-        aggs: vec![AggItem {
+        measures: vec![AggItem {
             // None alias → the converter keeps PromQL's intent-keyed output
             // names ("sum", "quantile_0_99", …) instead of overriding them.
             alias: None,
@@ -1436,7 +1436,7 @@ fn outer_aggregate(keys: Vec<ColumnRef>, func: AggFunc, input: L2) -> L2 {
     L2::Aggregate {
         keys,
         without: false,
-        aggs: vec![AggItem {
+        measures: vec![AggItem {
             // None alias → the converter keeps PromQL's intent-keyed output
             // names ("sum", "quantile_0_99", …) instead of overriding them.
             alias: None,

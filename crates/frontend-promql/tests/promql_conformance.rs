@@ -66,8 +66,10 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
 
 fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
     match e {
-        QueryExpr::Aggregate { aggs, child, .. } => {
-            out.extend(aggs.iter().cloned());
+        QueryExpr::Aggregate {
+            measures, child, ..
+        } => {
+            out.extend(measures.iter().cloned());
             collect(child, out);
         }
         QueryExpr::TimeRange { child, .. }
@@ -228,10 +230,13 @@ fn rate_range_lives_in_time_range_node() {
     // SEMANTICS: per-second average rate; the temporal range lives on the
     // enclosing `TimeRange` node, not inside the intent.
     let qe = ok("rate(http_requests_total[5m])");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected Aggregate, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Rate]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
     let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
     };
@@ -250,10 +255,13 @@ fn irate_maps_to_rate_intent() {
 #[test]
 fn increase_range_lives_in_time_range_node() {
     let qe = ok("increase(http_requests_total[1h])");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected Aggregate, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Increase]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Increase]));
     let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected TimeRange child, got {child:?}");
     };
@@ -282,7 +290,7 @@ fn sum_by_groups_via_positional_aggregate() {
     let qe = ok("sum by(job, instance) (node_filesystem_size_bytes)");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -294,7 +302,7 @@ fn sum_by_groups_via_positional_aggregate() {
         &Reduction::by(vec![2, 3]),
         "group keys resolve to positional ColumnIds"
     );
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(child.as_ref(), QueryExpr::Scan { .. }));
 }
 
@@ -334,7 +342,9 @@ fn sum_without_groups_by_the_complement() {
     // stays OPEN (unlike `by`, which freezes to closed).
     let qe = ok("sum without(instance) (node_filesystem_size_bytes)");
     let QueryExpr::Aggregate {
-        reduction, aggs, ..
+        reduction,
+        measures,
+        ..
     } = &qe
     else {
         panic!("expected an Aggregate, got {qe:?}");
@@ -345,7 +355,7 @@ fn sum_without_groups_by_the_complement() {
         "the grouping is the `without` exclusion form"
     );
     assert_eq!(by.keys().len(), 1, "the one excluded label (instance)");
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(
         !qe.output_schema().unwrap().closed,
         "a `without` result keeps an open schema (kept label set is runtime-only)"
@@ -380,13 +390,16 @@ fn group_aggregator_lowers_to_a_distinct_intent() {
 fn sum_of_rate_is_two_levels() {
     // SEMANTICS: per-series rate, THEN cross-series sum. Both must survive.
     let qe = ok("sum(rate(http_requests_total[5m]))");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate{{Sum}}, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate])
+        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -397,7 +410,7 @@ fn sum_by_of_rate_groups_outer_level() {
     let qe = ok("sum by(instance) (rate(node_network_receive_bytes_total[5m]))");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -405,11 +418,11 @@ fn sum_by_of_rate_groups_outer_level() {
         panic!("expected outer Aggregate grouped by instance, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // child is the inner per-series Rate aggregate.
     assert!(matches!(
         child.as_ref(),
-        QueryExpr::Aggregate { aggs, .. } if matches!(aggs.as_slice(), [AggIntent::Rate])
+        QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate])
     ));
 }
 
@@ -422,7 +435,7 @@ fn sum_by_of_over_time_groups_outer_level() {
     let qe = ok("sum by(instance) (avg_over_time(node_cpu_seconds_total[5m]))");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -430,12 +443,15 @@ fn sum_by_of_over_time_groups_outer_level() {
         panic!("expected outer Aggregate grouped by instance, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // child is the inner per-series reduction: Aggregate{Avg} over TimeRange.
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = child.as_ref()
+    else {
         panic!("expected Aggregate (per-series avg_over_time) under the Sum, got {child:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Avg { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Avg { .. }]));
     assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
 }
 
@@ -492,11 +508,11 @@ fn histogram_quantile_over_rate() {
     // φ-quantile from bucket rates. The `_bucket` metric marks the classic
     // cumulative-bucket form → `HistogramQuantile` (even without `sum by (le)`).
     let qe = ok("histogram_quantile(0.9, rate(demo_api_request_duration_seconds_bucket[5m]))");
-    let QueryExpr::Aggregate { aggs, .. } = &qe else {
+    let QueryExpr::Aggregate { measures, .. } = &qe else {
         panic!("expected Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     assert!(
-        matches!(aggs.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.9).abs() < 1e-9)
+        matches!(measures.as_slice(), [AggIntent::HistogramQuantile { q }] if (*q - 0.9).abs() < 1e-9)
     );
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
 }
@@ -508,24 +524,29 @@ fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
     let qe = ok(
         "histogram_quantile(0.99, sum by(le) (rate(demo_api_request_duration_seconds_bucket[5m])))",
     );
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate{{HistogramQuantile}}, got {qe:?}");
     };
     // `by (le)` marks the classic cumulative-bucket form → `HistogramQuantile`.
     assert!(matches!(
-        aggs.as_slice(),
+        measures.as_slice(),
         [AggIntent::HistogramQuantile { .. }]
     ));
     // `sum by(le)` now survives as a positional Aggregate (by = [2], `le`), over
     // the inner Rate — no name-based Partition.
     let QueryExpr::Aggregate {
-        reduction, aggs, ..
+        reduction,
+        measures,
+        ..
     } = child.as_ref()
     else {
         panic!("expected `sum by(le)` as a positional Aggregate, got {child:?}");
     };
     assert_eq!(reduction, &Reduction::by(vec![2]));
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -628,10 +649,13 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
 
     // `sum(-m)` — the negation lowers inside the aggregate argument (issue #27
     // nesting), so the outer node is the `Sum` aggregate over the `Mul`.
-    let QueryExpr::Aggregate { aggs, child, .. } = &ok("sum(-node_cpu_seconds_total)") else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &ok("sum(-node_cpu_seconds_total)")
+    else {
         panic!("expected an outer Aggregate for `sum(-m)`");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(
         child.as_ref(),
         QueryExpr::BinaryOp {
@@ -808,12 +832,17 @@ fn outer_aggregate_over_nested_aggregate_nests() {
     // nested per-group reduction over a per-series rate: three stacked levels the
     // flat two-level template rejected. Each level survives into L3 (issue #27).
     let qe = ok("max(sum by (job) (rate(http_requests_total[5m])))");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Max { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
     let QueryExpr::Aggregate {
-        reduction, aggs, ..
+        reduction,
+        measures,
+        ..
     } = child.as_ref()
     else {
         panic!("expected inner `sum by (job)` Aggregate, got {child:?}");
@@ -823,7 +852,7 @@ fn outer_aggregate_over_nested_aggregate_nests() {
         &Reduction::by(vec![2]),
         "job grouping survives on the inner aggregate"
     );
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)), "rate preserved");
 }
 
@@ -839,7 +868,7 @@ fn outer_group_key_absent_from_nested_aggregate_is_dropped() {
     let qe = ok(r#"sum(sum by (group)(http_requests{job="api-server"})) by (job)"#);
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -851,7 +880,7 @@ fn outer_group_key_absent_from_nested_aggregate_is_dropped() {
         &Reduction::by(vec![]),
         "absent `job` key dropped → global aggregate"
     );
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     let QueryExpr::Aggregate { reduction, .. } = child.as_ref() else {
         panic!("expected inner `sum by (group)` Aggregate, got {child:?}");
     };
@@ -936,10 +965,13 @@ fn aggregate_over_binary_op_nests() {
     // op over two range vectors. The old template only accepted a single inner
     // selector/call; now the binary op lowers and the outer sum wraps it.
     let qe = ok("sum(rate(a[5m]) + rate(b[5m]))");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected outer Aggregate, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(
         matches!(child.as_ref(), QueryExpr::BinaryOp { .. }),
         "argument lowers as a BinaryOp, got {child:?}"
@@ -967,7 +999,7 @@ fn over_time_of_subquery_reduces_per_series() {
     let qe = ok("max_over_time(rate(demo_api_request_duration_seconds_count[5m])[1h:])");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -979,7 +1011,7 @@ fn over_time_of_subquery_reduces_per_series() {
         &Reduction::PerEntity,
         "`*_over_time` has no grouping — reduces per series"
     );
-    assert!(matches!(aggs.as_slice(), [AggIntent::Max { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
     // The reduction rides directly on the sub-query (the structural range marker
     // that keeps it label-preserving), which wraps the inner `rate`.
     assert!(
@@ -994,10 +1026,15 @@ fn quantile_over_time_of_subquery_carries_phi() {
     // The `quantile_over_time` φ parameter is read from arg 0; the sub-query is
     // arg 1. It lowers to a per-series `Quantile(φ)` over the `Subquery`.
     let qe = ok("quantile_over_time(0.9, rate(demo[5m])[1h:])");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected an Aggregate, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.9).abs() < 1e-9));
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.9).abs() < 1e-9)
+    );
     assert!(matches!(child.as_ref(), QueryExpr::Subquery { .. }));
 }
 
@@ -1010,7 +1047,7 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     let qe = ok("sum by (job) (max_over_time(rate(demo{job=\"api\"}[5m])[1h:]))");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -1021,11 +1058,11 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
         matches!(reduction, Reduction::Reduce(by) if !by.is_empty()),
         "outer `sum by (job)` groups on a label"
     );
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     // Inner node is the per-series `max_over_time` reduction over the subquery.
     let QueryExpr::Aggregate {
         reduction: inner_reduction,
-        aggs: inner_aggs,
+        measures: inner_measures,
         child: inner_child,
         ..
     } = child.as_ref()
@@ -1033,7 +1070,7 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
         panic!("expected inner Aggregate, got {child:?}");
     };
     assert_eq!(inner_reduction, &Reduction::PerEntity);
-    assert!(matches!(inner_aggs.as_slice(), [AggIntent::Max { .. }]));
+    assert!(matches!(inner_measures.as_slice(), [AggIntent::Max { .. }]));
     assert!(matches!(inner_child.as_ref(), QueryExpr::Subquery { .. }));
 }
 
@@ -1057,7 +1094,7 @@ fn nested_subquery_from_prometheus_docs() {
 
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -1065,7 +1102,7 @@ fn nested_subquery_from_prometheus_docs() {
         panic!("expected `max_over_time` Aggregate at the root, got {qe:?}");
     };
     assert_eq!(reduction, &Reduction::PerEntity);
-    assert!(matches!(aggs.as_slice(), [AggIntent::Max { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
 
     let QueryExpr::Subquery {
         range,
@@ -1080,7 +1117,7 @@ fn nested_subquery_from_prometheus_docs() {
 
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = child.as_ref()
@@ -1088,7 +1125,7 @@ fn nested_subquery_from_prometheus_docs() {
         panic!("expected the `deriv` Aggregate, got {child:?}");
     };
     assert_eq!(reduction, &Reduction::PerEntity);
-    assert!(matches!(aggs.as_slice(), [AggIntent::Deriv]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Deriv]));
 
     let QueryExpr::Subquery {
         range,
@@ -1101,10 +1138,13 @@ fn nested_subquery_from_prometheus_docs() {
     assert_eq!(*range, Duration::from_secs(30));
     assert_eq!(*resolution, Some(Duration::from_secs(5)));
 
-    let QueryExpr::Aggregate { aggs, child, .. } = child.as_ref() else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = child.as_ref()
+    else {
         panic!("expected the `rate` Aggregate, got {child:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Rate]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
     let QueryExpr::TimeRange { range, .. } = child.as_ref() else {
         panic!("expected the `[5s]` TimeRange under rate, got {child:?}");
     };
@@ -1178,10 +1218,13 @@ fn offset_on_a_ranged_selector_wraps_inside_the_time_range() {
     // `TimeShift` sits *under* the `TimeRange` (the 5m window is taken at the
     // shifted time), and the whole thing under the per-series `Rate` (#40).
     let qe = ok("rate(http_requests_total[5m] offset 1h)");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected the rate Aggregate, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Rate]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Rate]));
     let QueryExpr::TimeRange { child, .. } = child.as_ref() else {
         panic!("expected a TimeRange under rate, got {child:?}");
     };
@@ -1247,7 +1290,7 @@ fn counter_derivative_functions_lower_to_distinct_intents() {
         let qe = ok(q);
         let QueryExpr::Aggregate {
             reduction,
-            aggs,
+            measures,
             child,
             ..
         } = &qe
@@ -1260,7 +1303,7 @@ fn counter_derivative_functions_lower_to_distinct_intents() {
             "{q}: per-series, no grouping"
         );
         assert_eq!(
-            aggs.as_slice(),
+            measures.as_slice(),
             std::slice::from_ref(&want),
             "{q}: wrong intent"
         );
@@ -1276,11 +1319,14 @@ fn predict_linear_carries_horizon_seconds() {
     // `predict_linear(v[w], t)` — the 2nd (scalar) arg is the prediction horizon
     // in seconds; it must be carried in the intent (it changes the result).
     let qe = ok("predict_linear(node_filesystem_avail_bytes[3h], 86400)");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected an Aggregate, got {qe:?}");
     };
     assert_eq!(
-        aggs.as_slice(),
+        measures.as_slice(),
         &[AggIntent::PredictLinear { seconds: 86400.0 }]
     );
     assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
@@ -1309,7 +1355,7 @@ fn aggregation_over_counter_derivative_keeps_labels() {
     let qe = ok(r#"sum by (job) (changes(m{job="api"}[15m]))"#);
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -1320,7 +1366,7 @@ fn aggregation_over_counter_derivative_keeps_labels() {
         matches!(reduction, Reduction::Reduce(by) if !by.is_empty()),
         "outer sum groups on job"
     );
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Changes)));
     let _ = child;
 }
@@ -1335,7 +1381,7 @@ fn outer_stat_over_counter_derivative_nests_two_levels() {
     let qe = ok("avg by (dc) (predict_linear(m[3h], 3600))");
     let QueryExpr::Aggregate {
         reduction,
-        aggs,
+        measures,
         child,
         ..
     } = &qe
@@ -1346,10 +1392,10 @@ fn outer_stat_over_counter_derivative_nests_two_levels() {
         matches!(reduction, Reduction::Reduce(by) if !by.is_empty()),
         "outer `avg by (dc)` groups on a label"
     );
-    assert!(matches!(aggs.as_slice(), [AggIntent::Avg { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Avg { .. }]));
     let QueryExpr::Aggregate {
         reduction: inner_reduction,
-        aggs: inner_aggs,
+        measures: inner_measures,
         ..
     } = child.as_ref()
     else {
@@ -1361,7 +1407,7 @@ fn outer_stat_over_counter_derivative_nests_two_levels() {
         "inner derivative stays per-series"
     );
     assert_eq!(
-        inner_aggs.as_slice(),
+        inner_measures.as_slice(),
         std::slice::from_ref(&AggIntent::PredictLinear { seconds: 3600.0 })
     );
 }
@@ -1395,19 +1441,22 @@ fn counter_derivative_composes_in_binary_ops() {
     };
     assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Div));
     assert!(
-        matches!(lhs.as_ref(), QueryExpr::Aggregate { aggs, .. } if aggs.as_slice() == [AggIntent::Delta])
+        matches!(lhs.as_ref(), QueryExpr::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
     );
     assert!(
-        matches!(rhs.as_ref(), QueryExpr::Aggregate { aggs, .. } if aggs.as_slice() == [AggIntent::Delta])
+        matches!(rhs.as_ref(), QueryExpr::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
     );
 
     // Under an aggregate over a binary op mixing a counter-derivative with
     // another per-series function: `sum(rate(m[5m]) + changes(m[5m]))`.
     let mixed = ok("sum(rate(m[5m]) + changes(m[5m]))");
-    let QueryExpr::Aggregate { aggs, child, .. } = &mixed else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &mixed
+    else {
         panic!("expected Aggregate, got {mixed:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
     assert!(matches!(child.as_ref(), QueryExpr::BinaryOp { .. }));
     assert!(intents(&mixed).iter().any(|i| matches!(i, AggIntent::Rate)));
     assert!(intents(&mixed)
@@ -1434,7 +1483,7 @@ fn range_functions_over_a_subquery_reduce_per_series() {
         let qe = ok(q);
         let QueryExpr::Aggregate {
             reduction,
-            aggs,
+            measures,
             child,
             ..
         } = &qe
@@ -1447,7 +1496,7 @@ fn range_functions_over_a_subquery_reduce_per_series() {
             "{q}: per-series, no grouping"
         );
         assert_eq!(
-            aggs.as_slice(),
+            measures.as_slice(),
             std::slice::from_ref(&want),
             "{q}: wrong intent"
         );
@@ -1535,7 +1584,9 @@ fn histogram_accessors_lower_to_per_series_intents() {
     ] {
         let qe = ok(q);
         let QueryExpr::Aggregate {
-            reduction, aggs, ..
+            reduction,
+            measures,
+            ..
         } = &qe
         else {
             panic!("{q}: expected an Aggregate, got {qe:?}");
@@ -1546,7 +1597,7 @@ fn histogram_accessors_lower_to_per_series_intents() {
             "{q}: per-series, no grouping"
         );
         assert_eq!(
-            aggs.as_slice(),
+            measures.as_slice(),
             std::slice::from_ref(&want),
             "{q}: wrong intent"
         );
@@ -1587,7 +1638,9 @@ fn math_functions_lower_to_per_series_math_intents() {
     ] {
         let qe = ok(q);
         let QueryExpr::Aggregate {
-            reduction, aggs, ..
+            reduction,
+            measures,
+            ..
         } = &qe
         else {
             panic!("{q}: expected an Aggregate, got {qe:?}");
@@ -1598,8 +1651,8 @@ fn math_functions_lower_to_per_series_math_intents() {
             "{q}: per-series, no grouping"
         );
         assert!(
-            matches!(aggs.as_slice(), [AggIntent::Math(m)] if *m == want),
-            "{q}: wrong intent, got {aggs:?}"
+            matches!(measures.as_slice(), [AggIntent::Math(m)] if *m == want),
+            "{q}: wrong intent, got {measures:?}"
         );
     }
 }
@@ -1718,11 +1771,14 @@ fn no_arg_calendar_function_reads_the_eval_time() {
     // `day_of_week()` with no argument computes over the evaluation time itself,
     // so it is a `TimeFn` aggregate whose child is the `EvalTime` scalar.
     let qe = ok("day_of_week()");
-    let QueryExpr::Aggregate { aggs, child, .. } = &qe else {
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = &qe
+    else {
         panic!("expected an Aggregate, got {qe:?}");
     };
     assert!(matches!(
-        aggs.as_slice(),
+        measures.as_slice(),
         [AggIntent::TimeFn(TimeFunc::DayOfWeek)]
     ));
     assert!(matches!(child.as_ref(), QueryExpr::EvalTime));
@@ -1865,10 +1921,10 @@ fn group_lowers_to_a_constant_group_intent() {
     // SEMANTICS: `group(v)` yields a constant 1 per group — a distinct intent,
     // NOT folded onto `sum` (which would return the value sum instead of 1).
     let qe = ok("group(up)");
-    let QueryExpr::Aggregate { aggs, .. } = &qe else {
+    let QueryExpr::Aggregate { measures, .. } = &qe else {
         panic!("expected an Aggregate, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::Group]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Group]));
     // Output column is the constant-1 `group` value.
     let sch = qe.output_schema().unwrap();
     assert!(sch.columns.iter().any(|c| c.name == "group"));
@@ -1889,10 +1945,12 @@ fn count_values_groups_by_value_and_synthesizes_a_label() {
     // value, counts each distinct value, and emits that value as a new label
     // `l`. The intent carries the label; schema gains a `Utf8` `l` column.
     let qe = ok(r#"count_values("version", build_version)"#);
-    let QueryExpr::Aggregate { aggs, .. } = &qe else {
+    let QueryExpr::Aggregate { measures, .. } = &qe else {
         panic!("expected an Aggregate, got {qe:?}");
     };
-    assert!(matches!(aggs.as_slice(), [AggIntent::CountValues { label }] if label == "version"));
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::CountValues { label }] if label == "version")
+    );
     let sch = qe.output_schema().unwrap();
     let version = sch
         .columns

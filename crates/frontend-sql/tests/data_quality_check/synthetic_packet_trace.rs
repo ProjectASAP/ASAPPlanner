@@ -73,8 +73,10 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
     let mut out = Vec::new();
     fn go(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         match e {
-            QueryExpr::Aggregate { aggs, child, .. } => {
-                out.extend(aggs.iter().cloned());
+            QueryExpr::Aggregate {
+                measures, child, ..
+            } => {
+                out.extend(measures.iter().cloned());
                 go(child, out);
             }
             QueryExpr::TimeRange { child, .. }
@@ -114,14 +116,16 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
     out
 }
 
-/// The first `Aggregate`'s `(by, aggs)` along the single-child spine. SQL
+/// The first `Aggregate`'s `(by, measures)` along the single-child spine. SQL
 /// never lowers to `Reduction::PerEntity` (it has no per-series concept), so
 /// `expect_reduce()` here is a safe, load-bearing assumption for these tests.
 fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
         QueryExpr::Aggregate {
-            reduction, aggs, ..
-        } => Some((reduction.expect_reduce(), aggs)),
+            reduction,
+            measures,
+            ..
+        } => Some((reduction.expect_reduce(), measures)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Distinct { child, .. }
@@ -207,17 +211,20 @@ impl Tally {
 async fn packet_count_is_count_intent() {
     // P-COUNT — `SELECT COUNT(*) FROM packets`.
     let qe = lower("SELECT COUNT(*) AS total_packets FROM packets").await;
-    let (by, aggs) = first_aggregate(&qe).expect("expected an Aggregate");
+    let (by, measures) = first_aggregate(&qe).expect("expected an Aggregate");
     assert!(by.is_empty(), "global count has no grouping");
-    assert!(matches!(aggs.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
 }
 
 #[tokio::test]
 async fn distinct_source_ips_is_cardinality() {
     // P-SRCIP-CD — `COUNT(DISTINCT srcip)` → the `Cardinality` intent.
     let qe = lower("SELECT COUNT(DISTINCT srcip) AS n_src_ips FROM packets").await;
-    let (_, aggs) = first_aggregate(&qe).expect("expected an Aggregate");
-    assert!(matches!(aggs.as_slice(), [AggIntent::Cardinality { .. }]));
+    let (_, measures) = first_aggregate(&qe).expect("expected an Aggregate");
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Cardinality { .. }]
+    ));
 }
 
 #[tokio::test]
@@ -230,9 +237,12 @@ async fn multi_arg_count_distinct_flow_is_cardinality() {
          FROM packets GROUP BY srcport ORDER BY n DESC",
     )
     .await;
-    let (by, aggs) = first_aggregate(&qe).expect("expected an Aggregate");
+    let (by, measures) = first_aggregate(&qe).expect("expected an Aggregate");
     assert_eq!(by.len(), 1, "grouped by srcport");
-    assert!(matches!(aggs.as_slice(), [AggIntent::Cardinality { .. }]));
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::Cardinality { .. }]
+    ));
 }
 
 #[tokio::test]
@@ -244,18 +254,18 @@ async fn five_tuple_flow_group_by_binds_five_keys() {
          FROM packets GROUP BY srcip, dstip, srcport, dstport, proto ORDER BY pkts DESC",
     )
     .await;
-    let (by, aggs) = first_aggregate(&qe).expect("expected an Aggregate");
+    let (by, measures) = first_aggregate(&qe).expect("expected an Aggregate");
     assert_eq!(by.len(), 5, "grouped by the 5-tuple");
-    assert!(matches!(aggs.as_slice(), [AggIntent::Count { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Count { .. }]));
 }
 
 #[tokio::test]
 async fn bytes_per_source_ip_is_sum() {
     // SI-BYTE — `SUM(pkt_len)` per source IP.
     let qe = lower("SELECT srcip, SUM(pkt_len) AS bytes FROM packets GROUP BY srcip").await;
-    let (by, aggs) = first_aggregate(&qe).expect("expected an Aggregate");
+    let (by, measures) = first_aggregate(&qe).expect("expected an Aggregate");
     assert_eq!(by.len(), 1);
-    assert!(matches!(aggs.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
 }
 
 #[tokio::test]

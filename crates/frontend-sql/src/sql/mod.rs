@@ -572,7 +572,7 @@ impl<'a> SqlLowerer<'a> {
             .skip(agg.group_expr.len())
             .map(|f| f.name().to_string())
             .collect();
-        let aggs = aggr_expr
+        let measures = aggr_expr
             .iter()
             .enumerate()
             .map(|(i, e)| {
@@ -587,7 +587,7 @@ impl<'a> SqlLowerer<'a> {
             keys,
             // SQL `GROUP BY` is always an inclusion list — there is no `without`.
             without: false,
-            aggs,
+            measures,
             having: None,
             input,
         })
@@ -662,7 +662,7 @@ impl<'a> SqlLowerer<'a> {
             .iter()
             .map(|e| derived.rewrite_agg(e))
             .collect::<Result<Vec<_>, LoweringError>>()?;
-        let aggs = aggr_expr
+        let measures = aggr_expr
             .iter()
             .enumerate()
             .map(|(i, e)| {
@@ -686,7 +686,7 @@ impl<'a> SqlLowerer<'a> {
                 let aggregate = L2::Aggregate {
                     keys: level_keys,
                     without: false,
-                    aggs: aggs.clone(),
+                    measures: measures.clone(),
                     having: None,
                     input: Box::new(input.clone()),
                 };
