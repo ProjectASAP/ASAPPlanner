@@ -142,9 +142,7 @@ renaming it to `measures` to match this doc.)
   )
   ```
 
-**Rules/Invariants**
-
-1. A filtering predicate will be passed to at the lowest node (closer to the leaves) in the AST/DAG that can express it — `Scan.predicates`,
+**Rules/Invariants**: A filtering predicate will be passed to at the lowest node (closer to the leaves) in the AST/DAG that can express it — `Scan.predicates`,
    then `Aggregate.having`, then `Filter` as the fallback — so its constraint is visible at
    the node it actually applies to, not behind an opaque wrapper, once pre-ASAP IR translates
    to post-ASAP IR with summary binding. The upper nodes (closer to the root) in the AST/DAG can still have a `Filter` node with the same condition. This intentional duplication is for Summary related translation and optimizations.
