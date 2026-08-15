@@ -13,7 +13,7 @@ This layer **does not** assign physical resources like CPU and memory to nodes i
 - ReplacementStrategy: Each stratey defines one TargetSubDAG and one or more ReplacementSubDAGs
 - CostModel: Estimates the cost of a post-ASAP plan. Can be based on heuristics or empirical estimates
 
-## Pseudocode (not yet implemented)
+## Pseudocode for Replacement Plan Searching (not yet implemented)
 
 ```
 input_replacement_strategies: List[ReplacementStrategy]
