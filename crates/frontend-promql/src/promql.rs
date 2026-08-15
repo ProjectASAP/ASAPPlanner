@@ -3,7 +3,7 @@
 //! - **L1 (parse)** is delegated to `promql-parser` 0.8.
 //! - **L2 (per-language tree)** is built here: the walk interprets PromQL
 //!   semantics (range vectors, aggregate operators, label matchers) and emits
-//!   the language-flavored [`relational::QueryExpr`] the controller's L2→L3
+//!   the language-flavored [`relational::QueryExpr`] the planner's L2→L3
 //!   converter ([`convert_root`](asap_l2::convert_root))
 //!   consumes. Canonicalisation (window-over-aggregate fold, GROUP-BY →
 //!   positional `Aggregate.by`, positional name binding) happens in that

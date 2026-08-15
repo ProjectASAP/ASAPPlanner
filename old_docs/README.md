@@ -1,4 +1,4 @@
-# ASAPController
+# ASAPPlanner
 
 This repo unifies the common parts of Query-to-Primitive/Summary translation and query optimization logic, in ASAP, including ASAPQuery, ASAPFusion, ASAPCollector, ASAPBGP, ASAPWavelets, etc.
 
@@ -19,9 +19,9 @@ are still planned.
 |---|---|---|
 | 1 | Query-language parsing (PromQL, SQL; DataFusion, ElasticDSL planned) | `asap-frontend-promql`, `asap-frontend-sql` |
 | 2 | Per-language relational algebra tree + the shared L2→L3 converter (incl. the post-lowering canonicalization pass both languages run through) | `asap-l2` (emitted by the front ends) |
-| 3 | Intent algebra defined by ASAPController itself — query language and runtime independent IR (intent only — no summary type, no summary params). | `asap-ir::intent_algebra` |
+| 3 | Intent algebra defined by ASAPPlanner itself — query language and runtime independent IR (intent only — no summary type, no summary params). | `asap-ir::intent_algebra` |
 | 4 | Cost-aware optimizer — CSE + pluggable cost model + the summary-vs-exact accuracy decision (`AggIntent → SummaryKind`, landed). Produces the **summary-bound** IR (kind + params committed), plus the serving-time `SummaryExecutor` interface that answers a query against it. | binding/optimizer passes in `asap-plan`; summary-bound IR + serving-time executor in `asap-sketch` |
-| 5 | Physical runtime / Data plane — The controller emits configurations to physical runtime, with the execution environment consider the parallelism, hardware types, lifecycle stages, distributed workers | The implementation of this layer should be in different downstream application repos. |
+| 5 | Physical runtime / Data plane — The planner emits configurations to physical runtime, with the execution environment consider the parallelism, hardware types, lifecycle stages, distributed workers | The implementation of this layer should be in different downstream application repos. |
 
 ### Crates
 

@@ -49,7 +49,7 @@ nothing else in `index.html` needs to change.
 
 Compare/Union modes that lay multiple queries out in shared lanes (like the
 reference repo's) were intentionally left out of the restyle — see
-[issue #186](https://github.com/ProjectASAP/ASAPController/issues/186) for
+[issue #186](https://github.com/ProjectASAP/ASAPPlanner/issues/186) for
 why (short version: the reference's lane layout was built for BGP's flat,
 linear query shapes, and `QueryExpr` has real branching DAGs) and the
 proposed scope for a v2.

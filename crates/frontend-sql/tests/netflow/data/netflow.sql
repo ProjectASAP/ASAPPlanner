@@ -3,7 +3,7 @@
 # Schema in the test:
 #   netflow_table(time, srcip, dstip, srcport, dstport, proto, pkt_len)
 #
-# The controller SQL front end keeps simple table predicates on Scan nodes; the
+# The planner SQL front end keeps simple table predicates on Scan nodes; the
 # test asserts the aggregate intent shape around those time predicates.
 
 -- 1. Temporal quantile grouped by source IP.

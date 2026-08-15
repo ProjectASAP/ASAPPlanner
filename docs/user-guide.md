@@ -57,8 +57,8 @@ asap-frontend-promql = { path = "../frontend-promql" }   # or asap-frontend-sql
 asap-aware-mapping = { path = "../asap-aware-mapping" }
 
 # from an external codebase
-asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPController", package = "asap-frontend-promql" }
-asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPController", package = "asap-aware-mapping" }
+asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-frontend-promql" }
+asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-aware-mapping" }
 ```
 
 ### Step 1 — get the pre-ASAP IR (L3)

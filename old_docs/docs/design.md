@@ -1,6 +1,6 @@
-# ASAPController — design
+# ASAPPlanner — design
 
-ASAPController **plans** queries — turning a query string into a plan,
+ASAPPlanner **plans** queries — turning a query string into a plan,
 not running it. Two different questions come up when describing that
 pipeline, and this document answers them separately rather than
 conflating them into one "layer":
@@ -42,7 +42,7 @@ summary-bound IR  ← L3
     │  pass: physical-lower (deployment-supplied: assign each piece to
     │        a stage + executor, given the topology + deployment
     │        constraints — typically delegating the stage-level part to
-    │        ASAPController's own StageAllocator internally — then emit
+    │        ASAPPlanner's own StageAllocator internally — then emit
     │        the deployment's own output format)
     ▼
 physical IR, ready for runtime/execution  ← L4
@@ -152,9 +152,9 @@ distinct since it runs at request time rather than at planning time.
 **One pass: `physical-lower`** (deployment-supplied:
 `PhysicalPlanner::lower`) — assign each piece of the summary-bound IR
 to a stage + executor, then emit the deployment's own output format.
-ASAPController defines the contract; the deployment performs this pass
+ASAPPlanner defines the contract; the deployment performs this pass
 and owns its output type.
-- ASAPController ships `StageAllocator` as shared, generic code for the
+- ASAPPlanner ships `StageAllocator` as shared, generic code for the
   stage-level half of that decision — given the summary-bound IR, a
   topology, and deployment constraints, it decides which physical
   *stage* each piece runs at, the same way for every deployment. A
@@ -170,7 +170,7 @@ and owns its output type.
 flowchart LR
     L3N["summary-bound IR"] --> PP
     subgraph PP["deployment's own physical-lower\n(implements a shared interface)"]
-        SA["stage-allocate\n(ASAPController-owned,\ntypically delegated to)"] --> FO["per-executor fan-out\n+ final emission"]
+        SA["stage-allocate\n(ASAPPlanner-owned,\ntypically delegated to)"] --> FO["per-executor fan-out\n+ final emission"]
     end
     PP --> ART["physical IR\n(deployment-owned type)"]
 ```

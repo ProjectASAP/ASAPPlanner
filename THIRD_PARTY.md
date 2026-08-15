@@ -1,13 +1,13 @@
 # Third-party software
 
-ASAPController bundles third-party Rust crates. This file records the notable
+ASAPPlanner bundles third-party Rust crates. This file records the notable
 direct dependencies, their licenses, and any attribution obligations. It is a
 convenience summary, **not legal advice** — for an exhaustive, machine-generated
 list (including transitive dependencies) run e.g. `cargo tree` or
 [`cargo about`](https://github.com/EmbarkStudios/cargo-about).
 
 All licenses below are OSI-approved and **permissive** (MIT / Apache-2.0); none
-are copyleft. ASAPController itself is therefore not obligated to be open-sourced
+are copyleft. ASAPPlanner itself is therefore not obligated to be open-sourced
 on account of these dependencies.
 
 ## Direct dependencies
@@ -34,7 +34,7 @@ branch) with local patches adding experimental functions
 upstream. Upstream `GreptimeTeam/promql-parser` 0.10.0 shipped all of these, so
 the fork is no longer needed. The one behavioral difference: upstream 0.10.0
 also dropped the legacy `holt_winters` alias for
-`double_exponential_smoothing` — ASAPController no longer accepts that
+`double_exponential_smoothing` — ASAPPlanner no longer accepts that
 spelling either (see `crates/frontend-promql/src/promql.rs`).
 
 No CI credentials or private git access are required to build.

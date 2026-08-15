@@ -100,7 +100,7 @@ pub struct DataCharacteristics {
 // ── Top-level workload ────────────────────────────────────────────────────────
 
 /// The single normalised input type accepted by every entry point into the
-/// controller (HTTP POST /plan, YAML file, query-log replay, OpAMP callback).
+/// planner (HTTP POST /plan, YAML file, query-log replay, OpAMP callback).
 ///
 /// `query_batch` and `repeating_queries` are mutually exclusive today; both
 /// may be present in the future when mixed batch+streaming workloads are

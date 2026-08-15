@@ -1,8 +1,8 @@
-# ASAPController — design
+# ASAPPlanner — design
 
-ASAPController is a system to map a query workload to an ASAP plan. A query workload is a batch of queries or a set of repeating queries, in any query language like PromQL or SQL. An ASAP plan is a query plan (like in databases) that uses ASAP primitives like sketches, exact summaries, wavelets, etc.
+ASAPPlanner is a system to map a query workload to an ASAP plan. A query workload is a batch of queries or a set of repeating queries, in any query language like PromQL or SQL. An ASAP plan is a query plan (like in databases) that uses ASAP primitives like sketches, exact summaries, wavelets, etc.
 
-ASAPController does this mapping in 2 steps:
+ASAPPlanner does this mapping in 2 steps:
 (1) normalizing query workloads from different query languages into a common intermediate representation (IR)
 (2) mapping the IR to an ASAP plan
 
@@ -86,10 +86,10 @@ A DAG constructed in either the pre-ASAP IR or post-ASAP IR. Pre-ASAP plan repre
 
 ## Scope
 
-As of Aug 13, 2026, ASAPController will be scoped to:
+As of Aug 13, 2026, ASAPPlanner will be scoped to:
 - generating a set of candidate ASAP plans, not choosing the optimal one between them
 - not caring about CTSA stages i.e. whether a part of a plan is executed at the collector or at the analytics stage
-- not caring about assignment of physical resources, like CPU threads and memory, to nodes in the ASAP plan i.e. ASAPController is NOT doing any phyiscal query planning (ref: database term)
+- not caring about assignment of physical resources, like CPU threads and memory, to nodes in the ASAP plan i.e. ASAPPlanner is NOT doing any phyiscal query planning (ref: database term)
 - // TODO: add scope on what "IR to ASAP plan logic" we support right now
 
 ---
@@ -210,11 +210,11 @@ semantic information that matters downstream.
 
 # Immediate TODOs
 
-- Change input from a single query string to `QueryWorkload` (tracked in [#194](https://github.com/ProjectASAP/ASAPController/issues/194)
-- Remove legacy data structures and types (tracked in [#179](https://github.com/ProjectASAP/ASAPController/issues/179), [#205](https://github.com/ProjectASAP/ASAPController/issues/205)
+- Change input from a single query string to `QueryWorkload` (tracked in [#194](https://github.com/ProjectASAP/ASAPPlanner/issues/194)
+- Remove legacy data structures and types (tracked in [#179](https://github.com/ProjectASAP/ASAPPlanner/issues/179), [#205](https://github.com/ProjectASAP/ASAPPlanner/issues/205)
 - Implement the ASAP-aware mapping [logic and interfaces](docs/asap_aware_mapping.md)
-- Connect output of ASAPController to asap-fusion
-- Connect output of ASAPController to ASAPController and ASAPQuery (see open question #1 below)
+- Connect output of ASAPPlanner to asap-fusion
+- Connect output of ASAPPlanner to ASAPPlanner and ASAPQuery (see open question #1 below)
 
 # Next steps
 
@@ -222,11 +222,11 @@ semantic information that matters downstream.
 - [Description of post-ASAP IR](docs/post-asap-ir.md)
 - [Converting a QueryWorkload to a pre-ASAP plan](docs/parse_and_canonicalize.md)
 - [Converting a pre-ASAP plan to a post-ASAP plan](docs/asap_aware_mapping.md)
-- [Guide on how to use ASAPController](docs/user-guide.md)
+- [Guide on how to use ASAPPlanner](docs/user-guide.md)
 
 # Open questions
 
-1. **Integration with downstream artifacts:** How to connect the output of ASAPController to ASAPQuery? ASAPController produces a post-ASAP plan that has semantics of batch query execution over data at rest. Somehow this needs to be converted into two plans (1) streaming dataflow graph that computes summaries on raw data, and (2) batch query execution plan that uses summaries to answer queries.
+1. **Integration with downstream artifacts:** How to connect the output of ASAPPlanner to ASAPQuery? ASAPPlanner produces a post-ASAP plan that has semantics of batch query execution over data at rest. Somehow this needs to be converted into two plans (1) streaming dataflow graph that computes summaries on raw data, and (2) batch query execution plan that uses summaries to answer queries.
 2. **Time semantics:** Should `TimeWindow` be an explicit node, or should time restriction be
    represented as a specialized predicate?
 3. **Grouping semantics:** Should grouping remain embedded in `Aggregate`, or should grouping
