@@ -1,27 +1,41 @@
-ASAP-aware mappings decides **whether and how an intent can be answered by a summary** rather than by scanning
-raw data.
+# ASAP-aware mapping
 
-This is the layer where concrete summary families, parameters, and implementation strategies
-are selected.
+ASAP-aware mapping decides **whether and how an intent can be answered by a summary** rather than by scanning raw data.
 
+The input is a pre-ASAP plan and the output is a set of candidate post-ASAP plans. This layer decides what kind of sketches can be used to satisfy a query.
+Based on any given accuracy targets, it can also assign parameters to those sketches. (TODO: is this implemented?)
+This layer **does not** assign physical resources like CPU and memory to nodes in the plan.
 
+## Key concepts
 
-```text
-Pre-ASAP common IR
-    │
-    │ implement
-    ▼
-Post-ASAP Summary-bound IR
+- TargetSubDAG: Pre-ASAP sub-DAG that is a candidate to be replaced by a post-ASAP sub-DAG
+- ReplacementSubDAG: Candidate post-ASAP sub-DAG to replace a pre-ASAP sub-DAG
+- ReplacementStrategy: Each stratey defines one TargetSubDAG and one or more ReplacementSubDAGs
+- CostModel: Estimates the cost of a post-ASAP plan. Can be based on heuristics or empirical estimates
+
+## Pseudocode
+
 ```
+input_replacement_strategies: List[ReplacementStrategy]
+input_plan: pre-ASAP plan (DAG)
 
-An implementation is the concrete realization chosen for an intent, for example:
+candidate_plans = [input_plan]
+new_plans = []
+do
+    for candidate_plan in candidate_plans:
+        for strategy in input_replacement_strategies:
+            if candidate_plan has input_strategy.TargetSubDAG:
+                candidate_plan_replacements = replace(candidate_plan, strategy)
+                new_plans = candidate_plane_replacement - candidate_plans
+    new_plans = deduplicate(new_plans)
+    candidate_plans = candidate_plans UNION new_plans
+while new_plans != []
 
-```text
-summary family + parameters
-exact accumulator
-PassThrough (compute from raw data)
+sort candidate_plans based on CostModel
+
+output: candidate_plans
+
 ```
-
 
 ## Summary mapping
 
@@ -58,23 +72,3 @@ Cost / accuracy / latency constraints
         ↓
 chosen implementation
 ```
-
-## Intent-driven summary selection
-
-The summary selector should reason over the **shape of the intent**, not over source-language
-syntax.
-
-For example, both:
-
-```text
-PromQL: topk(10, count by (service) (...))
-SQL: ORDER BY COUNT(*) DESC LIMIT 10
-```
-
-arrive at:
-
-```text
-TopK(..., Count, ...)
-```
-
-and therefore reach the same summary-selection logic.
