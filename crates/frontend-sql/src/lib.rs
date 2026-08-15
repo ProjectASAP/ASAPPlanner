@@ -11,7 +11,7 @@ pub mod error;
 pub mod sql;
 
 use asap_l2::convert_root;
-use asap_types::intent_algebra::QueryExpr;
+use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{QueryLanguage, QueryWorkload, SqlDialect};
 

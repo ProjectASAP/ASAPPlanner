@@ -30,8 +30,8 @@
 //! coverage so a regression (or a future improvement) is visible, not silent.
 
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog, SqlError as LoweringError};
-use asap_types::intent_algebra::schema::{Column, DataType, Schema};
-use asap_types::intent_algebra::{AggIntent, GroupKeys, QueryExpr};
+use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use datafusion::error::DataFusionError;

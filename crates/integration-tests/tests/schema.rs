@@ -12,7 +12,7 @@
 use asap_frontend_promql::lower_promql;
 use asap_types::types::AccuracyTarget;
 
-fn lower(q: &str) -> asap_types::intent_algebra::QueryExpr {
+fn lower(q: &str) -> asap_types::pre_asap::QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 

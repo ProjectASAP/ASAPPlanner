@@ -14,7 +14,7 @@
 use serde::Serialize;
 use std::hash::{Hash, Hasher};
 
-use crate::intent_algebra::query_expr::{QueryExpr, Source};
+use crate::pre_asap::query_expr::{QueryExpr, Source};
 
 /// One flattened IR node. `detail` holds this node's own scalar fields
 /// (predicates, aggregate funcs, schema, sort keys, …) — everything except
@@ -373,10 +373,10 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent_algebra::agg_intent::AggIntent;
-    use crate::intent_algebra::expr_ir::{L3Expr, L3Scalar};
-    use crate::intent_algebra::query_expr::{GroupKeys, Predicate, Reduction};
-    use crate::intent_algebra::schema::{Column, DataType, Schema};
+    use crate::pre_asap::agg_intent::AggIntent;
+    use crate::pre_asap::expr_ir::{L3Expr, L3Scalar};
+    use crate::pre_asap::query_expr::{GroupKeys, Predicate, Reduction};
+    use crate::pre_asap::schema::{Column, DataType, Schema};
     use crate::types::AccuracyTarget;
 
     fn scan(table: &str, columns: Vec<Column>) -> QueryExpr {

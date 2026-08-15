@@ -6,8 +6,8 @@
 
 use asap_devtools::lower_promql;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
-use asap_types::intent_algebra::schema::{Column, DataType, Schema};
-use asap_types::intent_algebra::QueryExpr;
+use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 use std::collections::BTreeSet;

@@ -11,7 +11,7 @@
 
 use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
 use asap_types::dag_export::{self, NamedGraph, WorkloadGraph};
-use asap_types::intent_algebra::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 
 enum Lang {

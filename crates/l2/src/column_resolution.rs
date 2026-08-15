@@ -9,13 +9,13 @@
 use thiserror::Error;
 
 use crate::relational::QueryExpr;
-use asap_types::intent_algebra::agg_intent::AggIntent;
-use asap_types::intent_algebra::expr_ir::ColumnRef;
-use asap_types::intent_algebra::expr_ir::{L2Expr, L3Expr};
-use asap_types::intent_algebra::query_expr::{
+use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::pre_asap::expr_ir::ColumnRef;
+use asap_types::pre_asap::expr_ir::{L2Expr, L3Expr};
+use asap_types::pre_asap::query_expr::{
     aggregate_output_schema, GroupKeys, QueryExprError, Reduction,
 };
-use asap_types::intent_algebra::schema::{Column, ColumnId, DataType, Schema};
+use asap_types::pre_asap::schema::{Column, ColumnId, DataType, Schema};
 
 /// Errors returned by the resolution helpers.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -355,7 +355,7 @@ mod tests {
         // for the same aggregate. Before the dedup this diverged on a per-series
         // reduction — the HAVING mirror lacked the per-series branch and would
         // collapse `[ts, value]` to a single `rate` column.
-        use asap_types::intent_algebra::query_expr::{QueryExpr as L3, Source};
+        use asap_types::pre_asap::query_expr::{QueryExpr as L3, Source};
         use std::time::Duration;
 
         let leaf_schema = Schema::with_time_index(

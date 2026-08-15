@@ -5,8 +5,8 @@
 //! canonical L3 (the same converter the PromQL path uses).
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
-use asap_types::intent_algebra::schema::{Column, DataType, Schema};
-use asap_types::intent_algebra::{
+use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::{
     AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, L3Scalar, QueryExpr, Reduction, Source,
     WindowFuncKind,
 };

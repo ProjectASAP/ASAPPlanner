@@ -10,7 +10,7 @@
 
 use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
-use asap_types::intent_algebra::{AggIntent, QueryExpr, Reduction, Source};
+use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
 use asap_types::types::AccuracyTarget;
 
 fn lower(q: &str) -> QueryExpr {

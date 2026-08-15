@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
-use asap_types::intent_algebra::{
+use asap_types::pre_asap::{
     AggIntent, ArithOp, BinaryOpKind, CompareOp, GroupSide, QueryExpr, Reduction, Source,
     VectorGrouping, VectorMatch, VectorMatchKind,
 };

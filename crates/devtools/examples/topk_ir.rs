@@ -4,7 +4,7 @@
 // resulting L3 IR. Used for interactive exploration; not a test.
 
 use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
-use asap_types::intent_algebra::schema::{Column, DataType, Schema};
+use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 
 fn col(name: &str, dtype: DataType) -> Column {

@@ -31,13 +31,13 @@
 
 use std::rc::Rc;
 
-use asap_types::intent_algebra::agg_intent::AggIntent;
-use asap_types::intent_algebra::expr_ir::ColumnRef;
-use asap_types::intent_algebra::query_expr::{QueryExpr, QueryExprError, Reduction};
-use asap_types::intent_algebra::schema::Schema;
 use asap_types::post_asap::{
     L4DataType, L4Field, L4Node, L4Schema, SketchQuery, SummaryExpr, SummaryKind, SummaryParams,
 };
+use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::pre_asap::expr_ir::ColumnRef;
+use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
+use asap_types::pre_asap::schema::Schema;
 use thiserror::Error;
 
 use crate::boundary::{implementation_for_with, Implementation};
@@ -242,10 +242,10 @@ fn lift(schema: &Schema) -> L4Schema {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::intent_algebra::agg_intent::default_quantile;
-    use asap_types::intent_algebra::expr_ir::{CompareOp, L3Expr, L3Scalar};
-    use asap_types::intent_algebra::query_expr::{Predicate, Source};
-    use asap_types::intent_algebra::schema::{Column, DataType};
+    use asap_types::pre_asap::agg_intent::default_quantile;
+    use asap_types::pre_asap::expr_ir::{CompareOp, L3Expr, L3Scalar};
+    use asap_types::pre_asap::query_expr::{Predicate, Source};
+    use asap_types::pre_asap::schema::{Column, DataType};
     use asap_types::types::AccuracyTarget;
     use std::time::Duration;
 

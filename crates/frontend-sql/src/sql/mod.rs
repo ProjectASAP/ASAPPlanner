@@ -22,8 +22,8 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use asap_l2::relational::{
     AggFunc, AggItem, L2ProjectItem, L2SortKey, QueryExpr as L2, SourceSpec,
 };
-use asap_types::intent_algebra::schema::{DataType, Schema};
-use asap_types::intent_algebra::{
+use asap_types::pre_asap::schema::{DataType, Schema};
+use asap_types::pre_asap::{
     ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
 };
 use asap_types::workload::SqlDialect;
