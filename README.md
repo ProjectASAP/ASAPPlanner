@@ -15,6 +15,16 @@ Step 2 **maps** query workload semantics to ASAP primitives. Adding a new ASAP p
 3. **Mapping intents to ASAP primitives** — decide whether and how each intent can be answered by a summary,
    and select/size the corresponding summary family.
 
+## Building
+
+```sh
+cargo build
+cargo test --workspace
+```
+
+No external setup required. See [`docs/user-guide.md`](docs/user-guide.md) for how to run a
+query through the pipeline.
+
 ## Glossary
 
 Let us define a few terms.
@@ -139,13 +149,12 @@ topk(
 ## Unified intent
 
 ```text
-TopK(
-    k = 10,
-    key = FieldRef("service"),
-    measure = Count,
-    input = Filter(
-        predicate = region = "us-east",
-        input = Scan("metrics")
+Aggregate(
+    reduction = Reduce(by = [service]),
+    measures = [TopK { k = 10 }],
+    child = Filter(
+        pred = region = "us-east",
+        child = Scan("metrics")
     )
 )
 ```
@@ -169,13 +178,12 @@ LIMIT 5;
 ## parse + canonicalize
 
 ```text
-TopK(
-    k = 5,
-    key = FieldRef("service"),
-    measure = Count,
-    input = Filter(
-        predicate = region = "us-east",
-        input = Scan("metrics")
+Aggregate(
+    reduction = Reduce(by = [service]),
+    measures = [TopK { k = 5 }],
+    child = Filter(
+        pred = region = "us-east",
+        child = Scan("metrics")
     )
 )
 ```
@@ -185,7 +193,7 @@ Equivalent PromQL converges to the same structure.
 ## ASAP-aware mapping
 
 ```text
-TopK(Count, service, 5)
+Aggregate(reduction = Reduce(by = [service]), measures = [TopK { k = 5 }], ...)
         ↓
 SpaceSaving(k=5)
 ```
@@ -214,7 +222,7 @@ semantic information that matters downstream.
 - Remove legacy data structures and types (tracked in [#179](https://github.com/ProjectASAP/ASAPPlanner/issues/179), [#205](https://github.com/ProjectASAP/ASAPPlanner/issues/205)
 - Implement the ASAP-aware mapping [logic and interfaces](docs/asap_aware_mapping.md)
 - Connect output of ASAPPlanner to asap-fusion
-- Connect output of ASAPPlanner to ASAPPlanner and ASAPQuery (see open question #1 below)
+- Connect output of ASAPPlanner to ASAPCollector and ASAPQuery (see open question #1 below)
 
 # Next steps
 
@@ -227,13 +235,11 @@ semantic information that matters downstream.
 # Open questions
 
 1. **Integration with downstream artifacts:** How to connect the output of ASAPPlanner to ASAPQuery? ASAPPlanner produces a post-ASAP plan that has semantics of batch query execution over data at rest. Somehow this needs to be converted into two plans (1) streaming dataflow graph that computes summaries on raw data, and (2) batch query execution plan that uses summaries to answer queries.
-2. **Time semantics:** Should `TimeWindow` be an explicit node, or should time restriction be
-   represented as a specialized predicate?
-3. **Grouping semantics:** Should grouping remain embedded in `Aggregate`, or should grouping
+2. **Grouping semantics:** Should grouping remain embedded in `Aggregate`, or should grouping
    become a reusable relational dimension node?
-4. **Expression semantics:** Which arithmetic or derived expressions need dedicated semantic
+3. **Expression semantics:** Which arithmetic or derived expressions need dedicated semantic
    nodes because they materially affect summary selection?
-5. **Approximation contracts:** Should accuracy/error requirements be fields on the intent,
+4. **Approximation contracts:** Should accuracy/error requirements be fields on the intent,
    the workload, or the measure itself?
-6. **Summary composability:** How should nested intents describe summaries that can be merged,
+5. **Summary composability:** How should nested intents describe summaries that can be merged,
    transformed, or reused across queries?

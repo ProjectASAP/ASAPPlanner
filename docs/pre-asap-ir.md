@@ -361,7 +361,7 @@ SELECT DISTINCT srcip, dstip FROM packets
 
 ### Join
 
-Logical join; the physical strategy (hash/merge/broadcast) is picked at L4. SQL `JOIN`.
+Logical join; the physical strategy (hash/merge/broadcast) is picked in the post-ASAP IR. SQL `JOIN`.
 
 ```sql
 SELECT u.prefix FROM bgp_updates u JOIN bgp_rib_state r ON u.prefix = r.prefix

@@ -8,12 +8,12 @@ Examples:
 
 ```text
 PromQL topk(10, count by (service) (...))
-    -> TopK(k=10, key=FieldRef("service"), measure=Count, ...)
+    -> Aggregate(reduction=Reduce(by=[service]), measures=[TopK{k=10}], ...)
 ```
 
 ```text
 SQL ORDER BY COUNT(*) DESC LIMIT 10
-    -> TopK(k=10, key=..., measure=Count, ...)
+    -> Aggregate(reduction=Reduce(by=[...]), measures=[TopK{k=10}], ...)
 ```
 
 ## Canonicalize
@@ -32,10 +32,11 @@ Aggregate -> Sort(desc) -> Limit(k)
 can canonicalize into:
 
 ```text
-TopK(k, key, measure, Aggregate(...))
+Aggregate(reduction=Reduce(by=[key]), measures=[TopK{k}], ...)
 ```
 
-when the ordering expression and limit form the semantics of a top-k request.
+when the ordering expression and limit form the semantics of a top-k request — the
+heavy-hitter intent becomes an `AggIntent::TopK` measure on `Aggregate`, not a separate node.
 
 >  Canonicalization should be driven by **semantic equivalence and summary relevance**, not by
 trying to reproduce every relational operator in a universal AST.

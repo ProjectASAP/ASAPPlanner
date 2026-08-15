@@ -13,13 +13,13 @@ promql> quantile(0.99, rate(http_requests_total[5m]))
 sql> SELECT service, COUNT(*) FROM metrics GROUP BY service
 ```
 
-**Pre-ASAP IR** (L3 — the sketch-agnostic intent algebra: `QueryExpr`/`AggIntent`):
+**Pre-ASAP IR** (ASAP-agnostic `QueryExpr`/`AggIntent`):
 
 ```sh
 cargo run -p asap-devtools --bin show_pre_asap_ir -- queries.txt
 ```
 
-**Post-ASAP IR** (L4 — the sketch-bound IR: `SummaryExpr`/`L4Node`, one layer downstream, with
+**Post-ASAP IR** (ASAP-aware IR with `SummaryExpr`/`L4Node`, one layer downstream, with
 concrete `SummaryKind`/`SummaryParams` committed per aggregate):
 
 ```sh
@@ -61,7 +61,7 @@ asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", pac
 asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-aware-mapping" }
 ```
 
-### Step 1 — get the pre-ASAP IR (L3)
+### Step 1 — get the pre-ASAP IR
 
 Lower a query string with a front end. Front ends never depend on each other or on the binder —
 pull only the one you need.
@@ -70,7 +70,7 @@ pull only the one you need.
 use asap_frontend_promql::lower_promql;
 use asap_types::types::AccuracyTarget;
 
-let l3 = lower_promql(
+let pre_asap = lower_promql(
     "quantile(0.99, rate(http_requests_total[5m]))",
     AccuracyTarget::Epsilon(0.01),
 )?; // QueryExpr
@@ -82,7 +82,7 @@ describing your tables; see `crates/devtools/src/bin/show_pre_asap_ir.rs` for a 
 `AccuracyTarget` travels with the query, not the crate — pass `Exact` for no approximation
 allowed, `Epsilon(e)` / `EpsilonDelta{epsilon, delta}` otherwise.
 
-### Step 2 — get the post-ASAP IR (L4)
+### Step 2 — get the post-ASAP IR
 
 Feed the `QueryExpr` to `asap-aware-mapping`. This crate depends only on `asap-types`, never on a
 front end, so it's agnostic to which language produced the tree.
@@ -90,7 +90,7 @@ front end, so it's agnostic to which language produced the tree.
 ```rust
 use asap_aware_mapping::implement_tree;
 
-let l4 = implement_tree(&l3)?; // Rc<L4Node> — the SummaryExpr DAG
+let post_asap = implement_tree(&pre_asap)?; // Rc<L4Node> — the SummaryExpr DAG
 ```
 
 Two entry points, both re-exported from the crate root:
@@ -98,7 +98,7 @@ Two entry points, both re-exported from the crate root:
 - `implementation_for(&AggIntent) -> Implementation` — the single-node decision (sketch, exact
   accumulator, or pass-through) for one aggregation.
 - `implement_tree(&QueryExpr) -> Result<Rc<L4Node>, ImplementError>` — walks a whole tree, calling
-  the per-node decision at every `Aggregate` and emitting the full L4 DAG.
+  the per-node decision at every `Aggregate` and emitting the full post-ASAP DAG.
 
 Each has a `_with(..., &dyn CostModel)` variant. A `CostModel` is the extension point for a
 deployment that wants its own candidate ranking or parameter sizing instead of this crate's
@@ -108,7 +108,7 @@ overridable hooks (`rank_candidates`, `size_params`, `realize_extension`).
 
 ### Reading the result
 
-Match on `l4.expr` (a `SummaryExpr`):
+Match on `post_asap.expr` (a `SummaryExpr`):
 
 - `Logical(Box<QueryExpr>)` — this subtree wasn't rewritten; execute it exactly.
 - `SummaryAgg { summary, params, .. }` — an exact accumulator (`summary.is_exact()`) or an
