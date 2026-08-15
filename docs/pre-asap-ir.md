@@ -123,7 +123,10 @@ renaming it to `measures` to match this doc.)
 - `output_names` — output column name per entry in `aggs`; a non-empty entry overrides the
   synthetic default — SQL threads DataFusion's generated name (e.g. `"sum(metrics.bytes)"`)
   here so an enclosing `Project` can resolve the aggregate output by the name it references.
-- `having` — an optional post-aggregation filter predicate (SQL `HAVING`). Take:
+- `having` — an optional post-aggregation filter predicate (SQL `HAVING`).
+- `child` — the input being aggregated.
+- 
+Example for `having`:
 
   ```sql
   SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip HAVING COUNT(*) > 10
@@ -184,7 +187,7 @@ renaming it to `measures` to match this doc.)
   `having` from a real `HAVING` clause (#201), and canonicalization doesn't fold an existing
   `Filter { child: Aggregate { having: None, .. } }` into `Aggregate { having: Some(..), .. }`
   either (#204).
-- `child` — the input being aggregated.
+
 
 ## Time-related nodes
 
