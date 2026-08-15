@@ -208,7 +208,15 @@ because they have distinct summary mappings.
 Do not add a node merely because SQL has an operator with that name. Add a node when it carries
 semantic information that matters downstream.
 
-# Next steps for you
+# Immediate TODOs
+
+- Change input from a single query string to `QueryWorkload` (tracked in [#194](https://github.com/ProjectASAP/ASAPController/issues/194)
+- Remove legacy data structures and types (tracked in [#179](https://github.com/ProjectASAP/ASAPController/issues/179), [#205](https://github.com/ProjectASAP/ASAPController/issues/205)
+- Implement the ASAP-aware mapping [logic and interfaces](docs/asap_aware_mapping.md)
+- Connect output of ASAPController to asap-fusion
+- Connect output of ASAPController to ASAPController and ASAPQuery (see open question #1 below)
+
+# Next steps
 
 - [Description of pre-ASAP IR](docs/pre-asap-ir.md)
 - [Description of post-ASAP IR](docs/post-asap-ir.md)
@@ -218,7 +226,7 @@ semantic information that matters downstream.
 
 # Open questions
 
-1. How to connect the output of ASAPController to ASAPQuery? ASAPController produces a post-ASAP plan that has semantics of batch query execution over data at rest. Somehow this needs to be converted into two plans (1) streaming dataflow graph that computes summaries on raw data, and (2) batch query execution plan that uses summaries to answer queries.
+1. **Integration with downstream artifacts:** How to connect the output of ASAPController to ASAPQuery? ASAPController produces a post-ASAP plan that has semantics of batch query execution over data at rest. Somehow this needs to be converted into two plans (1) streaming dataflow graph that computes summaries on raw data, and (2) batch query execution plan that uses summaries to answer queries.
 2. **Time semantics:** Should `TimeWindow` be an explicit node, or should time restriction be
    represented as a specialized predicate?
 3. **Grouping semantics:** Should grouping remain embedded in `Aggregate`, or should grouping
