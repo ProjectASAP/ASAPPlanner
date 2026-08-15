@@ -125,7 +125,7 @@ renaming it to `measures` to match this doc.)
   here so an enclosing `Project` can resolve the aggregate output by the name it references.
 - `having` — an optional post-aggregation filter predicate (SQL `HAVING`).
 - `child` — the input being aggregated.
-- 
+  
 Example for `having`:
 
   ```sql
