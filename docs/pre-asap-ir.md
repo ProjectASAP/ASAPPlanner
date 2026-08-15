@@ -3,11 +3,13 @@
 The goal of the pre-ASAP IR is represent operations from different query languages in a single representation, and make it easier to analyze how/where ASAP primitives can be used.
 Only operations that are semantically relevant to answering the query and selecting an ASAP primitive need to become first-class nodes here.
 
-Design principles:
+## Design principles
 
 1. Expose the query semantics that affect summary applicability, correctness, and cost.
 2. If an operation changes presentation but does not change the semantic summary intent, it does not need to be represented.
 3. Equivalent SQL, PromQL, and future-language queries should produce the same intent shape.
+
+> Notes: **SQL and PromQL use different schema models**. SQL typically uses a closed schema, where tables, columns, and types are predefined, while PromQL uses an open (schemaless) schema, where metrics and labels can evolve without a fixed table schema. Closed schemas provide stronger structure and validation; open schemas provide greater flexibility and makes it easier to evolve or ingest diverse data, but can require more care around naming conventions, label cardinality, and query consistency.
 
 The pre-ASAP IR is defined using the `QueryExpr` enum. We discuss some of important enum types below.
 
@@ -17,7 +19,7 @@ Grouped to match the sections below — common relational nodes first, then the 
 to one source language.
 
 **[Aggregation-related nodes](#aggregation-related-nodes)**
-- [`Aggregate`](#aggregate) — collapses input rows into fewer output rows via grouping dimensions and measures.
+- [`Aggregate`](#aggregate) — collapses input rows into fewer output rows via a reduction and aggregate intents.
 
 **[Time-related nodes](#time-related-nodes)**
 - [`TimeRange`](#timerange) — a range-vector lookback over the time axis (PromQL `[5m]`).
@@ -52,46 +54,140 @@ to one source language.
 
 ### Aggregate
 
-```text
-QueryExpr::Aggregate(
-    input = ...,
-    group_by = [FieldRef("service")],
-    measures = [Count]
-)
-```
+Collapses input rows into fewer output rows via a `reduction` plus a
+list of aggregate intents (`aggs`).
 
-#### Grouping dimensions
+#### Reduction
 
-`group_by` contains semantic `FieldRef`s, not schema positions.
+`Aggregate.reduction` is a `Reduction` — richer than a plain SQL `GROUP BY` — one of:
 
-```text
-group_by = [FieldRef("service"), FieldRef("region")]
-```
+- **`Reduce(GroupKeys)`** — a cross-row reduction: group by some columns, or group
+  by every column *except* some listed ones. `GroupKeys` holds positional column references
+  (`ColumnId`s — indexes into the input schema, not column names) and carries a `by`/`without`
+  flag, not just a plain list:
+  - `by(keys)` — group by exactly these columns (SQL `GROUP BY`, PromQL `by(...)`).
+  - `without(keys)` — group by every column *except* these (PromQL `without(...)`); the
+    excluded columns are stored but the full set of all columns stay open (because PromQL is schemaless), resolved at runtime against
+    the actual input schema.
+  - `none()` — an empty GroupKeys list, i.e. a global (ungrouped) reduction. This is different from `PerEntity` below. 
+
+  ```text
+  Aggregate(
+      reduction = Reduce(by = [service, region]),   // GROUP BY service, region
+      aggs = [Count],
+      output_names = [],
+      having = None,
+      child = ...
+  )
+  ```
+- **`PerEntity`** — no collapsing multiple input rows/entities into fewer output rows: each input entity keeps its own output row (the
+  value is still recomputed by the agg intent, e.g. `Rate`), for a computation with no
+  `by(...)` clause to attach to. `PerEntity` is different from `by` for all columns, because in PromQL, it is schemaless and you don't know all columns beforehand.
+   E.g. PromQL `rate(http_requests_total[5m])`, which has one rate value
+  per input series:
+
+  ```text
+  Aggregate(
+      reduction = PerEntity,
+      aggs = [Rate],
+      output_names = [],
+      having = None,
+      child = TimeRange(range = 5m, child = Scan("http_requests_total"))
+  )
+  ```
 
 #### Measures
 
-Measures describe what statistic or aggregate is required. At minimum the algebra should
-support the following semantic measures:
+Each entry in `aggs` names one statistic to compute. The vocabulary is wider than a minimal
+aggregate algebra needs, because it also covers PromQL's range-vector functions and
+native-histogram accessors — this list is representative, not exhaustive:
 
 ```text
-Count
-Sum(field)
-Min(field)
-Max(field)
-Avg(field)
-Quantile(field, q)
-DistinctCount(field)
+Count, Sum(col), Min(col), Max(col), Avg(col), StdDev(col), Variance(col),
+Quantile(col, q), TopK(k), Cardinality(col)                      // data-model-agnostic
+Rate, Increase                                                    // counter derivatives
+Changes, Delta, IDelta, Deriv, Resets,
+PredictLinear(seconds), DoubleExpSmoothing(sf, tf)                // range-vector functions
+HistogramCount, HistogramSum, HistogramAvg, HistogramStdDev,
+HistogramStdVar, HistogramFraction(lo, hi), HistogramQuantile(q)  // native-histogram accessors
+Math(func)                                                        // element-wise transform
 ```
 
 Additional measures can be added when there is a stable semantic distinction and a
-meaningful summary implementation.
+meaningful summary implementation. (The field is still named `aggs` in code — see #200 for
+renaming it to `measures` to match this doc.)
 
-**Fields** (real implementation — differs from the sketch above, see #185):
-- `reduction` — whether this is a genuine cross-entity reduction (`Reduce(GroupKeys)`) or a per-entity pass-through with no grouping concept at all (`PerEntity`).
-- `aggs` — the aggregate intents to compute (`Sum`, `Rate`, `HistogramQuantile`, ...).
-- `output_names` — output column name per entry in `aggs`; overrides the synthetic default when non-empty.
+**Fields:**
+- `reduction` — how rows are grouped/collapsed; see "Reduction" above.
+- `aggs` — the aggregate intents (measures) to compute; see "Measures" above.
+- `output_names` — output column name per entry in `aggs`; a non-empty entry overrides the
+  synthetic default — SQL threads DataFusion's generated name (e.g. `"sum(metrics.bytes)"`)
+  here so an enclosing `Project` can resolve the aggregate output by the name it references.
 - `having` — an optional post-aggregation filter predicate (SQL `HAVING`).
 - `child` — the input being aggregated.
+  
+Example for `having`:
+
+  ```sql
+  SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip HAVING COUNT(*) > 10
+  ```
+
+  What the *field* is for is putting the `cnt > 10` predicate directly on the `Aggregate` that
+  produces `cnt`, instead of behind a separate `Filter`:
+
+  ```text
+  Aggregate(
+      reduction = Reduce(by = [srcip]),
+      aggs = [Count],
+      output_names = ["cnt"],
+      having = Some(cnt > 10),
+      child = Scan("packets"),
+  )
+  ```
+
+**Rules/Invariants**: A filtering predicate will be passed to at the lowest node (closer to the leaves) in the AST/DAG that can express it — `Scan.predicates`,
+   then `Aggregate.having`, then `Filter` as the fallback — so its constraint is visible at
+   the node it actually applies to, not behind an opaque wrapper, once pre-ASAP IR translates
+   to post-ASAP IR with summary binding. The upper nodes (closer to the root) in the AST/DAG can still have a `Filter` node with the same condition. This intentional duplication is for Summary related translation and optimizations.
+
+   For example, `SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip HAVING COUNT(*) > 10`
+   pins `cnt > 10` to the lowest node that can express it, `Aggregate.having`:
+
+   ```text
+   Aggregate(
+       reduction = Reduce(by = [srcip]),
+       aggs = [Count],
+       output_names = ["cnt"],
+       having = Some(cnt > 10),
+       child = Scan("packets"),
+   )
+   ```
+
+   but the tree can still carry the same condition as a wrapping `Filter` near the root:
+
+   ```text
+   Filter(
+       pred = cnt > 10,
+       child = Aggregate(
+           reduction = Reduce(by = [srcip]),
+           aggs = [Count],
+           output_names = ["cnt"],
+           having = Some(cnt > 10),
+           child = Scan("packets"),
+       ),
+   )
+   ```
+
+   Both are valid at once, and neither is derived from the other: `having` is the canonical
+   spot a summary-aware pass reads to decide whether `Aggregate` can bind to a summary, while
+   the outer `Filter` is what a plain logical evaluator runs without knowing `having` exists. The duplication is forward-looking groundwork for
+   once HAVING-aware summary binding (pre-ASAP-IR to post-ASAP-IR translation) lands.
+   
+  Neither direction of that push-down is enforced yet: the SQL front end doesn't populate
+  `having` from a real `HAVING` clause (#201), and canonicalization doesn't fold an existing
+  `Filter { child: Aggregate { having: None, .. } }` into `Aggregate { having: Some(..), .. }`
+  either (#204).
+
 
 ## Time-related nodes
 
@@ -152,7 +248,9 @@ the same logical data domain.
 
 **Fields:**
 - `source` — the logical data source (a table name or PromQL metric selector).
-- `predicates` — row-level filters pushed all the way down to this scan.
+- `predicates` — row-level filters pushed all the way down to this scan (Rules/Invariants
+  rule 1); enforced structurally at lowering time — a `Filter` directly over a `Scan` never
+  survives.
 - `schema` — the binding schema every positional column reference in the tree resolves against.
 
 ### Filter
@@ -170,12 +268,21 @@ Filters are first-class because they can change which summaries are applicable. 
 for an entire dataset is not necessarily sufficient to answer the same intent under an
 arbitrary predicate.
 
-Note: a `WHERE`/label-matcher predicate that pushes all the way onto a base table scan
-lands in `Scan.predicates` instead of a separate `Filter` node — `Filter` only survives when
-the predicate sits over something a scan can't absorb, e.g. a post-aggregate column:
+Note (Rules/Invariants rule 1): a predicate pushes down to the lowest node that can express it. A
+`WHERE`/label-matcher predicate directly on a base table scan lands in `Scan.predicates`, not
+a `Filter` node. A predicate directly over an enclosing `Aggregate`'s own output — SQL
+`HAVING`, or an equivalent derived-table `WHERE` — belongs in that `Aggregate`'s `having`
+field instead (see `Aggregate`'s `having` field above), not a `Filter`:
 
 ```sql
 SELECT * FROM (SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip) t WHERE cnt > 10
+```
+
+`Filter` genuinely survives once neither applies — e.g. a predicate over a computed column
+that's neither a base scan column nor an aggregate output:
+
+```sql
+SELECT * FROM (SELECT srcip, bytes_in + bytes_out AS total FROM packets) t WHERE total > 500
 ```
 
 **Fields:**
