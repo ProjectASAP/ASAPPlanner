@@ -11,8 +11,32 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::agg_intent::AggIntent;
-use super::expr_ir::{ArithOp, CompareOp, L3Expr, L3Scalar};
+use super::expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L3Expr, L3Scalar};
 use super::schema::{Column, ColumnId, DataType, Schema};
+
+/// The column-reference resolution state a [`QueryExpr<C>`] tree carries —
+/// [`ColumnId`] (the default, and what the bare `QueryExpr` name has always
+/// meant) once the [`Binder`](super::binder::Binder) has resolved every
+/// reference positionally, or the front-end-emitted, name-based [`ColumnRef`]
+/// before binding. The only place the two states differ in *shape* rather
+/// than just in which type fills `C` is [`QueryExpr::Scan`]'s `schema` field:
+/// a bound tree's binding schema is always known (the Binder is total, so
+/// [`ScanSchema`](Self::ScanSchema) `= Schema`); an unresolved front-end
+/// `Scan` knows its schema only when the front end already has it without
+/// binding — a SQL leaf, catalog-backed (`Some`) — `None` (PromQL) defers to
+/// the Binder, so `ScanSchema = Option<Schema>`.
+pub trait ColState: Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de> {
+    /// What [`QueryExpr::Scan`]'s `schema` field holds for a tree in this state.
+    type ScanSchema: Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>;
+}
+
+impl ColState for ColumnId {
+    type ScanSchema = Schema;
+}
+
+impl ColState for ColumnRef {
+    type ScanSchema = Option<Schema>;
+}
 
 /// Errors from schema derivation over a canonical tree.
 #[derive(Debug, Error)]
@@ -48,19 +72,31 @@ pub enum QueryExprError {
 /// Serialises as a bare array for the (overwhelmingly common) `by` case —
 /// wire-compatible with the `Vec<ColumnId>` this field held before — and as
 /// `{"without": [...]}` for the exclusion case.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct GroupKeys {
-    keys: Vec<ColumnId>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GroupKeys<C = ColumnId> {
+    keys: Vec<C>,
     without: bool,
 }
 
-impl GroupKeys {
+// Not `#[derive(Default)]`: derive would add a `C: Default` bound, but an
+// empty key set needs nothing from `C` — `ColumnRef` has no meaningful
+// default anyway.
+impl<C> Default for GroupKeys<C> {
+    fn default() -> Self {
+        Self {
+            keys: Vec::new(),
+            without: false,
+        }
+    }
+}
+
+impl<C> GroupKeys<C> {
     /// An empty key set — a global (ungrouped) operation.
     pub fn none() -> Self {
         Self::default()
     }
-    /// `by(keys)` — group by exactly these positional columns.
-    pub fn by(keys: Vec<ColumnId>) -> Self {
+    /// `by(keys)` — group by exactly these columns.
+    pub fn by(keys: Vec<C>) -> Self {
         Self {
             keys,
             without: false,
@@ -68,7 +104,7 @@ impl GroupKeys {
     }
     /// `without(keys)` — group by every label *except* these (issue #39). The
     /// kept set is runtime-resolved; only the excluded positions are stored.
-    pub fn without(keys: Vec<ColumnId>) -> Self {
+    pub fn without(keys: Vec<C>) -> Self {
         Self {
             keys,
             without: true,
@@ -79,70 +115,79 @@ impl GroupKeys {
         self.without
     }
     /// The named keys — kept labels for `by`, excluded labels for `without`.
-    pub fn keys(&self) -> &[ColumnId] {
+    pub fn keys(&self) -> &[C] {
         &self.keys
     }
 }
 
-impl std::ops::Deref for GroupKeys {
-    type Target = [ColumnId];
+impl<C> std::ops::Deref for GroupKeys<C> {
+    type Target = [C];
     fn deref(&self) -> &Self::Target {
         &self.keys
     }
 }
 
-impl From<Vec<ColumnId>> for GroupKeys {
-    fn from(keys: Vec<ColumnId>) -> Self {
+impl<C> From<Vec<C>> for GroupKeys<C> {
+    fn from(keys: Vec<C>) -> Self {
         Self::by(keys)
     }
 }
 
-impl FromIterator<ColumnId> for GroupKeys {
-    fn from_iter<I: IntoIterator<Item = ColumnId>>(iter: I) -> Self {
+impl<C> FromIterator<C> for GroupKeys<C> {
+    fn from_iter<I: IntoIterator<Item = C>>(iter: I) -> Self {
         Self::by(iter.into_iter().collect())
     }
 }
 
-impl<'a> IntoIterator for &'a GroupKeys {
-    type Item = &'a ColumnId;
-    type IntoIter = std::slice::Iter<'a, ColumnId>;
+impl<'a, C> IntoIterator for &'a GroupKeys<C> {
+    type Item = &'a C;
+    type IntoIter = std::slice::Iter<'a, C>;
     fn into_iter(self) -> Self::IntoIter {
         self.keys.iter()
     }
 }
 
-/// Compare directly against a `Vec<ColumnId>` so call sites and tests can keep
+/// Compare directly against a `Vec<C>` so call sites and tests can keep
 /// writing `keys == vec![..]` / `assert_eq!(keys, &vec![..])`. A `without`
 /// grouping never equals a bare `by` list.
-impl PartialEq<Vec<ColumnId>> for GroupKeys {
-    fn eq(&self, other: &Vec<ColumnId>) -> bool {
+impl<C: PartialEq> PartialEq<Vec<C>> for GroupKeys<C> {
+    fn eq(&self, other: &Vec<C>) -> bool {
         !self.without && &self.keys == other
     }
 }
 
 /// (De)serialise as a bare array for `by`, or `{"without": [...]}` for the
 /// exclusion form — keeping the `by` wire format identical to the old newtype.
-#[derive(Serialize, Deserialize)]
+/// Borrowed for `Serialize` (no `C: Clone` needed to write one out), owned for
+/// `Deserialize` (there's nothing to borrow from).
+#[derive(Serialize)]
 #[serde(untagged)]
-enum GroupKeysRepr {
-    By(Vec<ColumnId>),
-    Without { without: Vec<ColumnId> },
+enum GroupKeysReprRef<'a, C> {
+    By(&'a [C]),
+    Without { without: &'a [C] },
 }
 
-impl Serialize for GroupKeys {
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GroupKeysRepr<C> {
+    By(Vec<C>),
+    Without { without: Vec<C> },
+}
+
+impl<C: Serialize> Serialize for GroupKeys<C> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if self.without {
-            GroupKeysRepr::Without {
-                without: self.keys.clone(),
+            GroupKeysReprRef::Without {
+                without: self.keys.as_slice(),
             }
             .serialize(serializer)
         } else {
-            GroupKeysRepr::By(self.keys.clone()).serialize(serializer)
+            GroupKeysReprRef::By(self.keys.as_slice()).serialize(serializer)
         }
     }
 }
 
-impl<'de> Deserialize<'de> for GroupKeys {
+impl<'de, C: Deserialize<'de>> Deserialize<'de> for GroupKeys<C> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(match GroupKeysRepr::deserialize(deserializer)? {
             GroupKeysRepr::By(keys) => Self::by(keys),
@@ -297,8 +342,8 @@ pub enum SampleKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SortKey {
-    pub expr: L3Expr,
+pub struct SortKey<C = ColumnId> {
+    pub expr: Expr<C>,
     pub ascending: bool,
     pub nulls_first: bool,
 }
@@ -367,13 +412,13 @@ pub enum GroupSide {
 
 /// A row-level filter predicate (WHERE clause / PromQL label matcher).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Predicate(pub L3Expr);
+pub struct Predicate<C = ColumnId>(pub Expr<C>);
 
 /// One item in a SELECT projection list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProjectItem {
+pub struct ProjectItem<C = ColumnId> {
     pub alias: Option<String>,
-    pub expr: L3Expr,
+    pub expr: Expr<C>,
 }
 
 // ── L3 intent algebra IR ──────────────────────────────────────────────────────
@@ -385,12 +430,12 @@ pub struct ProjectItem {
 /// whether a grouping-key list happens to be empty or from a neighboring
 /// node's shape. See design proposal #165.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Reduction {
+pub enum Reduction<C = ColumnId> {
     /// Collapses input rows via `by` — `by`/`without` semantics are exactly
     /// [`GroupKeys`]'s. May still collapse every row into one (an empty,
     /// non-`without` `by`) — that's a genuine reduction with zero grouping
     /// columns, not "no grouping concept."
-    Reduce(GroupKeys),
+    Reduce(GroupKeys<C>),
     /// No grouping concept at all: preserves one output row per input
     /// entity (e.g. a per-series windowed computation with no `by(...)`
     /// clause to begin with, because there's no aggregation operator here
@@ -401,16 +446,16 @@ pub enum Reduction {
     PerEntity,
 }
 
-impl Reduction {
+impl<C> Reduction<C> {
     /// Shorthand for the common case — group by these (possibly empty)
     /// keys, kept rather than excluded.
-    pub fn by(keys: Vec<ColumnId>) -> Self {
+    pub fn by(keys: Vec<C>) -> Self {
         Self::Reduce(GroupKeys::by(keys))
     }
 
     /// The grouping keys, if this is a genuine reduction — `None` for
     /// `PerEntity`, which has no grouping-keys concept to report.
-    pub fn group_keys(&self) -> Option<&GroupKeys> {
+    pub fn group_keys(&self) -> Option<&GroupKeys<C>> {
         match self {
             Self::Reduce(by) => Some(by),
             Self::PerEntity => None,
@@ -421,7 +466,7 @@ impl Reduction {
     /// (tests, mostly) that already know, from the shape they built or are
     /// asserting on, that this must be a genuine reduction. Prefer
     /// [`group_keys`](Self::group_keys) wherever the caller can't assume that.
-    pub fn expect_reduce(&self) -> &GroupKeys {
+    pub fn expect_reduce(&self) -> &GroupKeys<C> {
         match self {
             Self::Reduce(by) => by,
             Self::PerEntity => panic!("expected Reduction::Reduce, got PerEntity"),
@@ -430,21 +475,27 @@ impl Reduction {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum QueryExpr {
+#[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
+pub enum QueryExpr<C: ColState = ColumnId> {
     /// Outermost leaf. `schema` is the **binding schema** — the resolved column
     /// set every positional `ColumnId` in the tree indexes into, *not* a full
-    /// description of the runtime row. Complete when catalog-backed (SQL); for
-    /// schemaless PromQL it is usage-derived by the [`Binder`](super::binder)
-    /// (the `(ts, value)` floor + the labels the query references), since a
-    /// metric's label set is open and known only at runtime. That distinction is
-    /// carried explicitly by [`Schema::closed`](super::schema::Schema::closed)
-    /// (SQL leaf → `true`, PromQL leaf → `false`). `predicates` are leaf-level
-    /// row filters (PromQL label matchers, pushed-down `WHERE` conjuncts).
+    /// description of the runtime row — once bound (`schema: Schema`, always
+    /// present: the [`Binder`](super::binder) is total). Before binding, a
+    /// front-end-emitted `Scan` (`C = ColumnRef`) knows it only when the front
+    /// end already has it without binding — a catalog-backed SQL leaf — `None`
+    /// (PromQL) defers to the Binder; see [`ColState::ScanSchema`]. Complete
+    /// when catalog-backed (SQL); for schemaless PromQL the bound schema is
+    /// usage-derived (the `(ts, value)` floor + the labels the query
+    /// references), since a metric's label set is open and known only at
+    /// runtime. That distinction is carried explicitly by
+    /// [`Schema::closed`](super::schema::Schema::closed) (SQL leaf → `true`,
+    /// PromQL leaf → `false`). `predicates` are leaf-level row filters (PromQL
+    /// label matchers, pushed-down `WHERE` conjuncts).
     Scan {
         source: Source,
         #[serde(default)]
-        predicates: Vec<Predicate>,
-        schema: Schema,
+        predicates: Vec<Predicate<C>>,
+        schema: C::ScanSchema,
     },
     /// A scalar constant leaf — a PromQL number literal or a folded constant
     /// scalar expression (`10*1024*1024`). Appears as a [`BinaryOp`](Self::BinaryOp)
@@ -460,13 +511,13 @@ pub enum QueryExpr {
     /// scalar-typed child to a single label-less series carrying the scalar's
     /// value at every step. Lets a scalar participate where a vector is required
     /// (`up or vector(0)` dead-man's-switch). Issue #48.
-    VectorFromScalar(Box<QueryExpr>),
+    VectorFromScalar(Box<QueryExpr<C>>),
 
     /// PromQL `scalar(v)` — the instant-vector→scalar bridge. Collapses a
     /// single-element vector to its value (NaN at runtime if the input is not
     /// exactly one series). Lets a vector feed a scalar position (`vector` /
     /// aggregation `k` args, thresholds). Issue #48.
-    ScalarFromVector(Box<QueryExpr>),
+    ScalarFromVector(Box<QueryExpr<C>>),
 
     /// ρ — a per-series **label rewrite** (PromQL `label_replace` /
     /// `label_join`). Every input row passes through unchanged except for the
@@ -478,8 +529,8 @@ pub enum QueryExpr {
     Relabel {
         /// The label written by this rewrite (PromQL `dst_label`).
         dst: String,
-        value: L3Expr,
-        child: Box<QueryExpr>,
+        value: Expr<C>,
+        child: Box<QueryExpr<C>>,
     },
 
     /// PromQL `info(v, [selector])` — left-join **label enrichment** (#84). Each
@@ -494,7 +545,7 @@ pub enum QueryExpr {
     InfoJoin {
         #[serde(default)]
         selector: Vec<InfoMatcher>,
-        child: Box<QueryExpr>,
+        child: Box<QueryExpr<C>>,
     },
 
     /// Series-sampling **selection** — PromQL `limitk` / `limit_ratio` (#86).
@@ -503,31 +554,31 @@ pub enum QueryExpr {
     /// reduction: the output schema equals the child's.
     Sample {
         #[serde(default)]
-        by: GroupKeys,
+        by: GroupKeys<C>,
         kind: SampleKind,
-        child: Box<QueryExpr>,
+        child: Box<QueryExpr<C>>,
     },
 
     /// σ — row-level filter. Output schema = child schema.
     Filter {
-        pred: Predicate,
-        child: Box<QueryExpr>,
+        pred: Predicate<C>,
+        child: Box<QueryExpr<C>>,
     },
     /// π — column projection.
     Project {
-        cols: Vec<ProjectItem>,
+        cols: Vec<ProjectItem<C>>,
         /// Re-qualifies every output column with this table alias (a derived
         /// table / inline view). `None` for an ordinary SELECT list. See
         /// [`relational::QueryExpr::Project`](super::relational).
         #[serde(default)]
         qualifier: Option<String>,
-        child: Box<QueryExpr>,
+        child: Box<QueryExpr<C>>,
     },
 
     /// γ + α — GROUP BY (positional) + aggregate intents.
     Aggregate {
-        reduction: Reduction,
-        measures: Vec<AggIntent>,
+        reduction: Reduction<C>,
+        measures: Vec<AggIntent<C>>,
         /// Output column names parallel to `measures`. A non-empty entry overrides
         /// the synthetic intent-keyed name — SQL threads DataFusion's generated
         /// name (e.g. `"sum(metrics.bytes)"`) here so an enclosing `Project`
@@ -537,15 +588,15 @@ pub enum QueryExpr {
         #[serde(default)]
         output_names: Vec<String>,
         #[serde(default)]
-        having: Option<Predicate>,
-        child: Box<QueryExpr>,
+        having: Option<Predicate<C>>,
+        child: Box<QueryExpr<C>>,
     },
 
     /// δ — SQL `DISTINCT` / row deduplication. Positional like every other L3
     /// column reference; empty = dedup on all columns (`SELECT DISTINCT *`).
     Distinct {
-        cols: Vec<ColumnId>,
-        child: Box<QueryExpr>,
+        cols: Vec<C>,
+        child: Box<QueryExpr<C>>,
     },
     /// ⊕ — exact, n-ary `UNION ALL` of independent branches. Rows are
     /// concatenated, never deduplicated; SQL's `UNION`/`INTERSECT`/`EXCEPT` are
@@ -567,20 +618,20 @@ pub enum QueryExpr {
     ///
     /// Empty children is an error ([`QueryExprError::EmptyMerge`]), not an
     /// empty relation: there would be no schema to derive.
-    Merge { children: Vec<QueryExpr> },
+    Merge { children: Vec<QueryExpr<C>> },
 
     /// Logical join. L4 picks the physical alternative.
     Join {
         kind: JoinKind,
-        pred: Predicate,
-        left: Box<QueryExpr>,
-        right: Box<QueryExpr>,
+        pred: Predicate<C>,
+        left: Box<QueryExpr<C>>,
+        right: Box<QueryExpr<C>>,
     },
     SetOp {
         kind: SetOpKind,
         all: bool,
-        left: Box<QueryExpr>,
-        right: Box<QueryExpr>,
+        left: Box<QueryExpr<C>>,
+        right: Box<QueryExpr<C>>,
     },
 
     /// Generic order-by for non-heavy-hitter cases.
@@ -593,15 +644,15 @@ pub enum QueryExpr {
     /// `Partition` node (issue #12: reducing GROUP BY → `Aggregate.by`, per-group
     /// ranking → here, parallel sharding → L5). Empty = a global order-by.
     Sort {
-        keys: Vec<SortKey>,
+        keys: Vec<SortKey<C>>,
         #[serde(default)]
-        partition_by: GroupKeys,
-        child: Box<QueryExpr>,
+        partition_by: GroupKeys<C>,
+        child: Box<QueryExpr<C>>,
     },
     Limit {
         n: usize,
         offset: usize,
-        child: Box<QueryExpr>,
+        child: Box<QueryExpr<C>>,
     },
 
     /// PromQL sub-query (`<expr>[range:resolution]`). Logical pass-through.
@@ -609,7 +660,7 @@ pub enum QueryExpr {
         range: Duration,
         #[serde(default)]
         resolution: Option<Duration>,
-        child: Box<QueryExpr>,
+        child: Box<QueryExpr<C>>,
     },
 
     /// Temporal range selection — "look back `range` of history for this
@@ -621,7 +672,7 @@ pub enum QueryExpr {
     /// plain `Scan` or another `Aggregate` is a *cross-series* reduction.
     TimeRange {
         range: Duration,
-        child: Box<QueryExpr>,
+        child: Box<QueryExpr<C>>,
     },
 
     /// PromQL `offset` / `@` **time shift** on a selector (issue #40). A
@@ -634,7 +685,7 @@ pub enum QueryExpr {
     /// selector when neither modifier is present).
     TimeShift {
         shift: TimeShift,
-        child: Box<QueryExpr>,
+        child: Box<QueryExpr<C>>,
     },
 
     /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …)`.
@@ -644,26 +695,44 @@ pub enum QueryExpr {
         func: WindowFuncKind,
         /// Operand expressions (`LAG(value)` → `[Column(value_id)]`); empty for
         /// the rank-only functions (`ROW_NUMBER`/`RANK`/`DENSE_RANK`).
-        args: Vec<L3Expr>,
-        partition_by: GroupKeys,
-        order_by: Vec<SortKey>,
+        args: Vec<Expr<C>>,
+        partition_by: GroupKeys<C>,
+        order_by: Vec<SortKey<C>>,
         /// The output column's name — DataFusion's window-expr field name, so a
         /// `Project` above resolves it (cf. `Aggregate.output_names`).
         output_name: String,
-        child: Box<QueryExpr>,
+        child: Box<QueryExpr<C>>,
     },
 
     /// Arithmetic / comparison / boolean composition (PromQL binary ops).
     BinaryOp {
         op: BinaryOpKind,
-        lhs: Box<QueryExpr>,
-        rhs: Box<QueryExpr>,
+        lhs: Box<QueryExpr<C>>,
+        rhs: Box<QueryExpr<C>>,
         #[serde(default)]
         vector_match: Option<VectorMatch>,
     },
 }
 
-impl QueryExpr {
+/// The canonical, positional Layer-3 tree — what the bare `QueryExpr` name has
+/// always meant (the default `C = ColumnId`). Every existing consumer keeps
+/// using `QueryExpr` unparameterized; this alias exists only to name the
+/// resolved state explicitly at a use site that also wants to name
+/// [`L2QueryExpr`] nearby.
+pub type L3QueryExpr = QueryExpr<ColumnId>;
+
+/// The front-end-emitted, name-based Layer-2 tree — `QueryExpr<ColumnRef>`,
+/// unresolved: front ends construct this directly during their own `interpret`
+/// step (issue #179), and the [`Binder`](super::binder) resolves it into
+/// [`L3QueryExpr`].
+pub type L2QueryExpr = QueryExpr<ColumnRef>;
+
+// `output_schema` needs a fully bound tree — it reads `Scan.schema` as a plain
+// `Schema` and resolves every scalar `Expr::Column` positionally — so it lives
+// only on the resolved instantiation, not `impl<C: ColState> QueryExpr<C>`.
+// Same reasoning as `AggIntent`'s `output_column`/`requires`/`is_per_series`
+// (#205): a schema-shaped property that is only meaningful post-binding.
+impl QueryExpr<ColumnId> {
     /// Output schema of the root of a canonical tree.
     pub fn output_schema(&self) -> Result<Schema, QueryExprError> {
         match self {

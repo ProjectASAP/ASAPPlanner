@@ -26,45 +26,51 @@ use crate::types::AccuracyTarget;
 /// carries only `k` + the accuracy target.
 ///
 /// The single-column reducers (`Sum` / `Min` / `Max` / `Avg` / `StdDev` /
-/// `Variance` / `Quantile` / `Cardinality`) carry `col: Option<ColumnId>` — the
-/// positional input column they reduce. `None` is the PromQL convention "the
-/// time-series sample value"; SQL `SUM(bytes), AVG(latency)` sets distinct
-/// `Some(id)`s so a multi-aggregate node binds each reducer to the right
-/// column, and `plan::bind` knows which column to summarise over (issue #115).
+/// `Variance` / `Quantile` / `Cardinality`) carry `col: Option<C>` — the input
+/// column they reduce, generic over the column-reference state the same way
+/// [`QueryExpr`](super::query_expr::QueryExpr) is: positional `ColumnId` once
+/// bound (the default, and every existing use of the bare `AggIntent` name),
+/// or an unresolved name-based `ColumnRef` for a front end constructing this
+/// intent directly, before the [`Binder`](super::binder::Binder) has run.
+/// `None` is the PromQL convention "the time-series sample value"; SQL
+/// `SUM(bytes), AVG(latency)` sets distinct `Some(_)`s so a multi-aggregate
+/// node binds each reducer to the right column, and `plan::bind` knows which
+/// column to summarise over (issue #115).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AggIntent {
+#[serde(bound(serialize = "C: Serialize", deserialize = "C: Deserialize<'de>"))]
+pub enum AggIntent<C = ColumnId> {
     // ── Data-model-agnostic ──────────────────────────────────────────────
     Count {
         accuracy: AccuracyTarget,
     },
     Sum {
         #[serde(default)]
-        col: Option<ColumnId>,
+        col: Option<C>,
     },
     Min {
         #[serde(default)]
-        col: Option<ColumnId>,
+        col: Option<C>,
     },
     Max {
         #[serde(default)]
-        col: Option<ColumnId>,
+        col: Option<C>,
     },
     Avg {
         #[serde(default)]
-        col: Option<ColumnId>,
+        col: Option<C>,
     },
     /// Sample standard deviation when `population == false`; population stddev
     /// otherwise. PromQL `stddev` / `stddev_over_time`; SQL `STDDEV(col)`.
     StdDev {
         #[serde(default)]
-        col: Option<ColumnId>,
+        col: Option<C>,
         population: bool,
     },
     /// Variance — PromQL `stdvar` / `stdvar_over_time`; SQL `VARIANCE(col)`.
     Variance {
         #[serde(default)]
-        col: Option<ColumnId>,
+        col: Option<C>,
         population: bool,
     },
     /// φ-quantile of `col`. SQL `approx_percentile_cont(col, φ)` and
@@ -72,7 +78,7 @@ pub enum AggIntent {
     /// (the sample value).
     Quantile {
         #[serde(default)]
-        col: Option<ColumnId>,
+        col: Option<C>,
         q: f64,
         accuracy: AccuracyTarget,
     },
@@ -89,7 +95,7 @@ pub enum AggIntent {
     /// `count_values` leaves `col` as `None` (the sample value).
     Cardinality {
         #[serde(default)]
-        col: Option<ColumnId>,
+        col: Option<C>,
         accuracy: AccuracyTarget,
     },
 
@@ -322,6 +328,14 @@ pub enum MathFunc {
     },
 }
 
+// `requires` / `is_per_series` / `output_column` never read `col`'s value —
+// only its presence via a `{ .. }` pattern — so they stay on the concrete,
+// resolved `AggIntent` (`= AggIntent<ColumnId>`) rather than every `C`: like
+// `QueryExpr::output_schema` (#205), these are schema/L4-facing properties
+// that are only meaningful once binding has picked a column identity, and no
+// front end constructing an unresolved `AggIntent<ColumnRef>` needs them
+// before then. `input_col` (below) is the one method that hands `col` back to
+// the caller, so it alone is generic.
 impl AggIntent {
     /// Which data model this intent semantically requires. L4 rules consult
     /// this to skip non-applicable intents (e.g. `Rate` over a tabular source).
@@ -394,13 +408,15 @@ impl AggIntent {
                 | Self::TsOfLastOverTime
         )
     }
+}
 
-    /// The positional input column this intent reduces, if it carries one.
-    /// `None` = the synthetic time-series sample value (PromQL) or an
-    /// argument-less aggregate (`Count` / `TopK`). Used by schema derivation to
-    /// resolve each reducer's input column, and by `plan::bind` to pick the
-    /// column a summary is built over.
-    pub fn input_col(&self) -> Option<ColumnId> {
+impl<C: Clone> AggIntent<C> {
+    /// The input column this intent reduces, if it carries one. `None` = the
+    /// synthetic time-series sample value (PromQL) or an argument-less
+    /// aggregate (`Count` / `TopK`). Used by schema derivation to resolve each
+    /// reducer's input column, and by `plan::bind` to pick the column a
+    /// summary is built over.
+    pub fn input_col(&self) -> Option<C> {
         match self {
             AggIntent::Sum { col }
             | AggIntent::Min { col }
@@ -409,11 +425,13 @@ impl AggIntent {
             | AggIntent::Quantile { col, .. }
             | AggIntent::Cardinality { col, .. }
             | AggIntent::StdDev { col, .. }
-            | AggIntent::Variance { col, .. } => *col,
+            | AggIntent::Variance { col, .. } => col.clone(),
             _ => None,
         }
     }
+}
 
+impl AggIntent {
     /// Output column name + type produced by this intent over `input`.
     /// Used by `QueryExpr::Aggregate`'s schema-derivation rule. The PromQL
     /// convention names the column after the intent kind so consumers can
@@ -729,12 +747,12 @@ mod tests {
     fn input_col_tracks_only_reducers() {
         assert_eq!(AggIntent::Sum { col: Some(3) }.input_col(), Some(3));
         assert_eq!(
-            AggIntent::Avg { col: None }.input_col(),
+            AggIntent::<ColumnId>::Avg { col: None }.input_col(),
             None,
             "None = PromQL sample value"
         );
         assert_eq!(
-            AggIntent::Count {
+            AggIntent::<ColumnId>::Count {
                 accuracy: AccuracyTarget::Exact
             }
             .input_col(),
