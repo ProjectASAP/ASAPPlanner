@@ -329,14 +329,15 @@ pub enum MathFunc {
 }
 
 // `requires` / `is_per_series` / `output_column` never read `col`'s value —
-// only its presence via a `{ .. }` pattern — so they stay on the concrete,
-// resolved `AggIntent` (`= AggIntent<ColumnId>`) rather than every `C`: like
-// `QueryExpr::output_schema` (#205), these are schema/L4-facing properties
-// that are only meaningful once binding has picked a column identity, and no
-// front end constructing an unresolved `AggIntent<ColumnRef>` needs them
-// before then. `input_col` (below) is the one method that hands `col` back to
-// the caller, so it alone is generic.
-impl AggIntent {
+// only its presence via a `{ .. }` pattern — so, unlike
+// `QueryExpr::output_schema` (which genuinely cannot compile for an
+// unresolved tree — see its own doc), nothing stops these from being generic
+// over every `C`. And a front end constructing `AggIntent<ColumnRef>`
+// directly (issue #179) does need `is_per_series` pre-binding — it decides
+// the `PerEntity`/`Reduce` reduction shape right at construction time (see
+// `asap_frontend_promql::promql::reduction_for`) — so they stay generic
+// alongside `input_col`, in one `impl<C>` block.
+impl<C: Clone> AggIntent<C> {
     /// Which data model this intent semantically requires. L4 rules consult
     /// this to skip non-applicable intents (e.g. `Rate` over a tabular source).
     pub fn requires(&self) -> DataModel {
@@ -431,7 +432,7 @@ impl<C: Clone> AggIntent<C> {
     }
 }
 
-impl AggIntent {
+impl<C: Clone> AggIntent<C> {
     /// Output column name + type produced by this intent over `input`.
     /// Used by `QueryExpr::Aggregate`'s schema-derivation rule. The PromQL
     /// convention names the column after the intent kind so consumers can
@@ -670,16 +671,21 @@ mod tests {
     fn output_column_names_are_intent_keyed() {
         let v = c("value", DataType::Float64);
         assert_eq!(
-            AggIntent::Count {
+            AggIntent::<ColumnId>::Count {
                 accuracy: AccuracyTarget::Exact
             }
             .output_column(&v)
             .name,
             "count"
         );
-        assert_eq!(AggIntent::Sum { col: None }.output_column(&v).name, "sum");
         assert_eq!(
-            AggIntent::Quantile {
+            AggIntent::<ColumnId>::Sum { col: None }
+                .output_column(&v)
+                .name,
+            "sum"
+        );
+        assert_eq!(
+            AggIntent::<ColumnId>::Quantile {
                 col: None,
                 q: 0.99,
                 accuracy: AccuracyTarget::Epsilon(0.01)
@@ -693,7 +699,7 @@ mod tests {
     #[test]
     fn sum_preserves_input_dtype() {
         assert!(matches!(
-            AggIntent::Sum { col: None }
+            AggIntent::<ColumnId>::Sum { col: None }
                 .output_column(&c("c", DataType::Int64))
                 .dtype,
             DataType::Int64

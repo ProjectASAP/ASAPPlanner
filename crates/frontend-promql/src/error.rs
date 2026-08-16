@@ -1,8 +1,10 @@
 use std::fmt;
 
-use asap_types::pre_asap::ConvertError;
+use asap_types::pre_asap::ResolveTreeError;
 
-/// Errors from lowering a PromQL query (L1 parse → L2 → shared L2→L3 convert).
+/// Errors from lowering a PromQL query (L1 parse → canonical L2, built
+/// directly → [`resolve_root`](asap_types::pre_asap::resolve_root) binds it
+/// to L3, issue #179).
 ///
 /// Carries no DataFusion type — the PromQL front end never depends on the SQL
 /// stack. The language-neutral variants (`UnsupportedFeature` / `WrongLanguage`
@@ -25,8 +27,9 @@ pub enum PromqlError {
     InvalidParameter(String),
     /// The workload's query language is not PromQL.
     WrongLanguage(String),
-    /// The L2→L3 converter failed (name resolution against the bound schema).
-    Convert(ConvertError),
+    /// Resolving the canonical L2 tree to L3 failed (name resolution against
+    /// the bound schema).
+    Convert(ResolveTreeError),
 }
 
 impl fmt::Display for PromqlError {
@@ -39,15 +42,15 @@ impl fmt::Display for PromqlError {
             Self::MissingArgument(m) => write!(f, "missing argument: {m}"),
             Self::InvalidParameter(m) => write!(f, "invalid parameter: {m}"),
             Self::WrongLanguage(l) => write!(f, "unsupported query language: {l}"),
-            Self::Convert(e) => write!(f, "L2→L3 conversion failed: {e}"),
+            Self::Convert(e) => write!(f, "L2→L3 resolution failed: {e}"),
         }
     }
 }
 
 impl std::error::Error for PromqlError {}
 
-impl From<ConvertError> for PromqlError {
-    fn from(e: ConvertError) -> Self {
+impl From<ResolveTreeError> for PromqlError {
+    fn from(e: ResolveTreeError) -> Self {
         Self::Convert(e)
     }
 }

@@ -1,17 +1,18 @@
-//! PromQL front end: L1 (parse via `promql-parser`) → L2 relational, then the
-//! shared L2→L3 [`convert_root`](asap_types::pre_asap::convert_root).
+//! PromQL front end: L1 (parse via `promql-parser`) → the canonical L2 shape,
+//! built directly (issue #179) → [`resolve_root`](asap_types::pre_asap::resolve_root).
 //!
-//! Emits the per-language
-//! [`relational::QueryExpr`](asap_types::pre_asap::relational); the shared
-//! converter runs the [`Binder`](asap_types::pre_asap::Binder) for
-//! positional name resolution. Depends on the PromQL parser only — never on the
-//! SQL / DataFusion stack.
+//! Emits [`L2QueryExpr`](asap_types::pre_asap::L2QueryExpr) itself — the
+//! canonical [`QueryExpr`](asap_types::pre_asap::QueryExpr), generic over an
+//! unresolved [`ColumnRef`](asap_types::pre_asap::ColumnRef) — rather than the
+//! legacy per-language `relational` tree; `resolve_root` runs the
+//! [`Binder`](asap_types::pre_asap::Binder) for positional name resolution.
+//! Depends on the PromQL parser only — never on the SQL / DataFusion stack.
 
 pub mod error;
 pub mod histogram;
 pub mod promql;
 
-use asap_types::pre_asap::convert_root;
+use asap_types::pre_asap::resolve_root;
 use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{QueryLanguage, QueryWorkload};
@@ -29,8 +30,8 @@ pub use promql::PromqlLowerer;
 /// `histogram_quantile` discrimination uses the structural heuristic; to drive
 /// it from declared sample types instead, use [`lower_promql_with_histograms`].
 pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError> {
-    let l2 = PromqlLowerer::lower(query)?;
-    let l3 = convert_root(&l2, &accuracy)?;
+    let l2 = PromqlLowerer::lower(query, &accuracy)?;
+    let l3 = resolve_root(&l2)?;
     Ok(l3)
 }
 

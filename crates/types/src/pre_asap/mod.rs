@@ -31,6 +31,7 @@ pub mod expr_ir;
 pub mod lower;
 pub mod query_expr;
 pub mod relational;
+pub mod resolve;
 pub mod schema;
 
 pub use agg_intent::{
@@ -45,10 +46,11 @@ pub use column_resolution::{
 };
 pub use expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L2Expr, L3Expr, L3Scalar};
 pub use lower::{convert, convert_root, ConvertError};
+pub use resolve::{resolve_root, ResolveTreeError};
 pub use query_expr::{
-    aggregate_output_schema, AtModifier, BinaryOpKind, DataModel, GroupKeys, GroupSide,
-    InfoMatcher, JoinKind, Predicate, ProjectItem, QueryExpr, QueryExprError, Reduction,
-    SampleKind, SetOpKind, SortKey, Source, TimeShift, VectorGrouping, VectorMatch,
-    VectorMatchKind, WindowFuncKind,
+    aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
+    InfoMatcher, JoinKind, L2QueryExpr, L3QueryExpr, Predicate, ProjectItem, QueryExpr,
+    QueryExprError, Reduction, SampleKind, SetOpKind, SortKey, Source, TimeShift, VectorGrouping,
+    VectorMatch, VectorMatchKind, WindowFuncKind,
 };
 pub use schema::{Column, ColumnId, DataType, Schema};
