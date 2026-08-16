@@ -328,7 +328,6 @@ name = "asap-frontend-promql"
 version = "0.1.0"
 dependencies = [
  "asap-aware-mapping",
- "asap-l2",
  "asap-types",
  "promql-parser",
 ]
@@ -337,7 +336,6 @@ dependencies = [
 name = "asap-frontend-sql"
 version = "0.1.0"
 dependencies = [
- "asap-l2",
  "asap-types",
  "datafusion",
  "tokio",
@@ -350,14 +348,6 @@ dependencies = [
  "asap-aware-mapping",
  "asap-frontend-promql",
  "asap-types",
-]
-
-[[package]]
-name = "asap-l2"
-version = "0.1.0"
-dependencies = [
- "asap-types",
- "thiserror",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 //! Shared post-lowering canonicalization of the L3 [`QueryExpr`].
 //!
-//! Both language front ends funnel through [`convert_root`](crate::convert_root),
+//! Both language front ends funnel through [`convert_root`](super::lower::convert_root),
 //! which runs this pass over the converted tree. Its job is to erase
 //! *structural* differences between semantically identical queries so an L4 rule
 //! matching on the intent algebra sees one canonical spelling regardless of
@@ -24,10 +24,9 @@
 //! column) it is oblivious to whether the count was aliased in the source, which
 //! is exactly the SQL alias gap (#20) the old front-end gate missed.
 
-use asap_types::pre_asap::agg_intent::{is_frequency_heavy_hitter, ranking_measure, AggIntent};
-use asap_types::pre_asap::expr_ir::{CompareOp, L3Scalar};
-use asap_types::pre_asap::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
-use asap_types::pre_asap::L3Expr;
+use super::agg_intent::{is_frequency_heavy_hitter, ranking_measure, AggIntent};
+use super::expr_ir::{CompareOp, L3Expr, L3Scalar};
+use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
 
 /// Rewrite `expr` into its canonical form (bottom-up). Idempotent: a tree that
 /// is already canonical is returned unchanged.
@@ -252,9 +251,9 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::pre_asap::query_expr::{GroupKeys, ProjectItem, Source};
-    use asap_types::pre_asap::schema::{Column, DataType, Schema};
-    use asap_types::types::AccuracyTarget;
+    use crate::pre_asap::query_expr::{GroupKeys, ProjectItem, Source};
+    use crate::pre_asap::schema::{Column, DataType, Schema};
+    use crate::types::AccuracyTarget;
 
     fn scan() -> QueryExpr {
         QueryExpr::Scan {

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use asap_l2::ConvertError;
+use asap_types::pre_asap::ConvertError;
 
 /// Errors from lowering a PromQL query (L1 parse → L2 → shared L2→L3 convert).
 ///

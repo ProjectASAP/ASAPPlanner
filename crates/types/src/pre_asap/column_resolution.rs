@@ -2,20 +2,18 @@
 //!
 //! The Layer-2 IR uses `ColumnRef` (name-based, optionally table-qualified);
 //! the canonical IR uses positional [`ColumnId`] resolved against a per-node
-//! [`Schema`]. These helpers bridge the two — the [`Binder`](crate::binder)
+//! [`Schema`]. These helpers bridge the two — the [`Binder`](super::binder)
 //! builds the schema, and [`resolve_column_refs`] turns the L2 refs (group
 //! keys, dedup columns) into positional ids, qualifier-aware.
 
 use thiserror::Error;
 
-use crate::relational::QueryExpr;
-use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::expr_ir::{L2Expr, L3Expr};
-use asap_types::pre_asap::query_expr::{
-    aggregate_output_schema, GroupKeys, QueryExprError, Reduction,
-};
-use asap_types::pre_asap::schema::{Column, ColumnId, DataType, Schema};
+use super::agg_intent::AggIntent;
+use super::expr_ir::ColumnRef;
+use super::expr_ir::{L2Expr, L3Expr};
+use super::query_expr::{aggregate_output_schema, GroupKeys, QueryExprError, Reduction};
+use super::relational::QueryExpr;
+use super::schema::{Column, ColumnId, DataType, Schema};
 
 /// Errors returned by the resolution helpers.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -355,7 +353,7 @@ mod tests {
         // for the same aggregate. Before the dedup this diverged on a per-series
         // reduction — the HAVING mirror lacked the per-series branch and would
         // collapse `[ts, value]` to a single `rate` column.
-        use asap_types::pre_asap::query_expr::{QueryExpr as L3, Source};
+        use crate::pre_asap::query_expr::{QueryExpr as L3, Source};
         use std::time::Duration;
 
         let leaf_schema = Schema::with_time_index(

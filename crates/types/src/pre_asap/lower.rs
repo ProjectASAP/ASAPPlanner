@@ -1,32 +1,35 @@
 //! Layer-2 → canonical L3 IR converter.
 //!
-//! Recursively converts a whole [`relational::QueryExpr`] tree into a whole
-//! [`query_expr::QueryExpr`] tree. The single-statistic sketchable `Aggregate`
+//! Recursively converts a whole [`relational::QueryExpr`](super::relational::QueryExpr)
+//! tree into a whole [`query_expr::QueryExpr`](super::query_expr::QueryExpr)
+//! tree. The single-statistic sketchable `Aggregate`
 //! fuses directly in canonical terms (window-swap, positional `Aggregate.by`);
 //! see the `Aggregate` arm.
 //!
 //! Name resolution is an explicit pass: [`convert_root`] runs the
-//! [`Binder`](crate::binder) first to build the complete, self-contained
+//! [`Binder`](super::binder) first to build the complete, self-contained
 //! schema every `ColumnId` indexes into, so positional resolution downstream
 //! is total.
+//!
+//! **Legacy, pending deletion** (issue #179) — see [`relational`](super::relational).
 
 use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::binder::{collect_referenced_columns, Binder};
-use crate::column_resolution::{
+use super::agg_intent::AggIntent;
+use super::binder::{collect_referenced_columns, Binder};
+use super::column_resolution::{
     output_schema_for_aggregate, resolve_column_refs, resolve_expr, resolve_group_keys_promql,
     ResolveError,
 };
-use crate::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
-use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
-use asap_types::pre_asap::query_expr::{
+use super::expr_ir::{ColumnRef, L2Expr, L3Expr, L3Scalar};
+use super::query_expr::{
     GroupKeys, Predicate, ProjectItem, QueryExpr as CQueryExpr, Reduction, SortKey, Source,
 };
-use asap_types::pre_asap::schema::{ColumnId, Schema};
-use asap_types::types::AccuracyTarget;
+use super::relational::{AggFunc, QueryExpr as LQueryExpr, SourceSpec};
+use super::schema::{ColumnId, Schema};
+use crate::types::AccuracyTarget;
 
 /// Errors produced while converting a Layer-2 tree to canonical.
 #[derive(Debug, Error)]
@@ -38,7 +41,7 @@ pub enum ConvertError {
     /// Deriving the schema of an already-converted child failed (needed to
     /// resolve positional column references against it).
     #[error("schema derivation failed: {0}")]
-    Schema(#[from] asap_types::pre_asap::query_expr::QueryExprError),
+    Schema(#[from] super::query_expr::QueryExprError),
     /// Group keys landed on a per-series windowed/range reduction, which must
     /// stay label-preserving (`Aggregate.by` empty). The only PromQL shape that
     /// would do this is a generic `topk by (…)`, whose grouping is routed to
@@ -82,7 +85,7 @@ fn convert_root_with_inherited(
     let l3 = convert(legacy, &fallback, accuracy)?;
     // Both language front ends end here, so this is the one place to normalize
     // structural differences between equivalent queries (issue #34).
-    Ok(crate::canonicalize::canonicalize(l3))
+    Ok(super::canonicalize::canonicalize(l3))
 }
 
 /// Convert a Layer-2 tree to canonical L3.
@@ -746,11 +749,11 @@ fn agg_func_to_intent(func: &AggFunc, acc: &AccuracyTarget, col: Option<ColumnId
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::relational::{AggFunc, AggItem, QueryExpr as LQueryExpr, SourceSpec};
-    use asap_types::pre_asap::agg_intent::AggIntent;
-    use asap_types::pre_asap::expr_ir::{CompareOp, L2Expr, L3Expr, L3Scalar};
-    use asap_types::pre_asap::query_expr::{JoinKind, QueryExpr as CQueryExpr};
-    use asap_types::pre_asap::schema::{Column, DataType, Schema};
+    use crate::pre_asap::agg_intent::AggIntent;
+    use crate::pre_asap::expr_ir::{CompareOp, L2Expr, L3Expr, L3Scalar};
+    use crate::pre_asap::query_expr::{JoinKind, QueryExpr as CQueryExpr};
+    use crate::pre_asap::relational::{AggFunc, AggItem, QueryExpr as LQueryExpr, SourceSpec};
+    use crate::pre_asap::schema::{Column, DataType, Schema};
 
     fn col(name: &str, dtype: DataType) -> Column {
         Column::new(name, dtype, false)

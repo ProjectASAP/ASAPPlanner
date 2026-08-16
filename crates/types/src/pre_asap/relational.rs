@@ -1,19 +1,26 @@
 //! The Layer-2 relational IR — the per-language query algebra the parser
-//! front ends emit, before [`convert_root`](crate::lower::convert_root) lowers
-//! it to the canonical L3 [`query_expr::QueryExpr`](asap_types::pre_asap::query_expr::QueryExpr).
+//! front ends emit, before [`convert_root`](super::lower::convert_root) lowers
+//! it to the canonical L3 [`query_expr::QueryExpr`](super::query_expr::QueryExpr).
 //!
 //! Leaf / scalar types (`ColumnRef`, `SortKey`,
 //! `BinaryOpKind`, `VectorMatch`) are owned by `query_expr` and re-used here so
 //! there is one canonical spelling. Filter / having / project expressions use
-//! the shared language-independent [`L3Expr`](asap_types::pre_asap::expr_ir::L3Expr).
+//! the shared language-independent [`L3Expr`](super::expr_ir::L3Expr).
+//!
+//! **Legacy, pending deletion** (issue #179): this module (and
+//! [`lower`](super::lower)) exist only until both front ends emit the
+//! canonical [`query_expr::QueryExpr`](super::query_expr::QueryExpr) directly
+//! during their own `interpret` step, using an unresolved column-reference
+//! state. `binder` / `column_resolution` / `canonicalize` are not legacy —
+//! they stay, just retargeted at whatever tree front ends build then.
 
 use std::time::Duration;
 
-use asap_types::pre_asap::agg_intent::{MathFunc, TimeFunc};
-pub use asap_types::pre_asap::expr_ir::{ColumnRef, L2Expr};
-pub use asap_types::pre_asap::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
-use asap_types::pre_asap::query_expr::{InfoMatcher, SampleKind, TimeShift};
-use asap_types::pre_asap::schema::Schema;
+use super::agg_intent::{MathFunc, TimeFunc};
+pub use super::expr_ir::{ColumnRef, L2Expr};
+pub use super::query_expr::{BinaryOpKind, VectorMatch, WindowFuncKind};
+use super::query_expr::{InfoMatcher, SampleKind, TimeShift};
+use super::schema::Schema;
 
 /// SELECT-list item at Layer 2 — a name-based [`L2Expr`] + optional alias.
 /// (`query_expr::ProjectItem` is the positional L3 sibling.)
@@ -37,7 +44,7 @@ pub struct SourceSpec {
     /// Metric name (PromQL) or table name (SQL).
     pub name: String,
     /// Front-end-resolved leaf schema. `Some` for SQL tables (DataFusion knows
-    /// the columns); `None` for PromQL, where the [`Binder`](crate::binder)
+    /// the columns); `None` for PromQL, where the [`Binder`](super::binder)
     /// synthesises a usage-derived schema (the `(ts, value)` floor + referenced
     /// labels). The presence of a schema also selects the L3 `Source` variant:
     /// `Some` → `Source::Table`, `None` → `Source::TimeSeries`.
@@ -86,7 +93,7 @@ pub struct AggItem {
 }
 
 /// Layer-2 aggregate functions. Mapped to canonical [`AggIntent`] by
-/// [`crate::lower::convert`].
+/// [`super::lower::convert`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum AggFunc {
     Count,
@@ -295,13 +302,13 @@ pub enum QueryExpr {
     Merge { inputs: Vec<QueryExpr> },
 
     Join {
-        kind: asap_types::pre_asap::query_expr::JoinKind,
+        kind: super::query_expr::JoinKind,
         pred: Option<L2Expr>,
         left: Box<QueryExpr>,
         right: Box<QueryExpr>,
     },
     SetOp {
-        kind: asap_types::pre_asap::query_expr::SetOpKind,
+        kind: super::query_expr::SetOpKind,
         all: bool,
         left: Box<QueryExpr>,
         right: Box<QueryExpr>,

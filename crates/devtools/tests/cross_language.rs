@@ -3,7 +3,7 @@
 //! Semantically equivalent SQL and PromQL queries must lower to the **same
 //! canonical intent algebra**, so an L4 rule matching on `AggIntent` sees one
 //! spelling regardless of source language. These tests are the executable spec
-//! for the shared [`canonicalize`](asap_l2::canonicalize) pass: they pin the
+//! for the shared [`canonicalize`](asap_types::pre_asap::canonicalize) pass: they pin the
 //! canonical heavy-hitter shape and assert both front ends reach it.
 //!
 //! A literal `lower_sql(S) == lower_promql(P)` cannot hold — the two count

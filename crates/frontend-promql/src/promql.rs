@@ -4,7 +4,7 @@
 //! - **L2 (per-language tree)** is built here: the walk interprets PromQL
 //!   semantics (range vectors, aggregate operators, label matchers) and emits
 //!   the language-flavored [`relational::QueryExpr`] the planner's L2→L3
-//!   converter ([`convert_root`](asap_l2::convert_root))
+//!   converter ([`convert_root`](asap_types::pre_asap::convert_root))
 //!   consumes. Canonicalisation (window-over-aggregate fold, GROUP-BY →
 //!   positional `Aggregate.by`, positional name binding) happens in that
 //!   converter, not here.
@@ -55,7 +55,6 @@ use promql_parser::parser::{
     VectorMatchCardinality, VectorSelector,
 };
 
-use asap_l2::relational::{AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec};
 use asap_types::pre_asap::agg_intent::{
     is_frequency_heavy_hitter, MathFunc, RankingMeasure, TimeFunc,
 };
@@ -63,6 +62,7 @@ use asap_types::pre_asap::query_expr::{
     AtModifier as L3AtModifier, BinaryOpKind, GroupSide, TimeShift, VectorGrouping, VectorMatch,
     VectorMatchKind,
 };
+use asap_types::pre_asap::relational::{AggFunc, AggItem, L2SortKey, QueryExpr as L2, SourceSpec};
 use asap_types::pre_asap::{
     ArithOp, ColumnRef, CompareOp, InfoMatcher, L2Expr, L3Scalar, SampleKind,
 };

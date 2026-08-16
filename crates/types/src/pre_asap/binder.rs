@@ -2,7 +2,7 @@
 //!
 //! [`Binder::bind`] produces the complete, self-contained [`Schema`] every
 //! `ColumnId` in the converted canonical tree indexes into. The converter
-//! ([`crate::lower::convert`]) then becomes purely structural: it threads the
+//! ([`super::lower::convert`]) then becomes purely structural: it threads the
 //! Binder's schema and positional resolution downstream is **total**.
 //!
 //! The default [`UsageDerivedCatalog`] knows nothing — every schema is derived
@@ -11,10 +11,10 @@
 //! `SchemaCatalog` is future work; the `Binder` pass does not change when it
 //! lands, only the catalog impl swaps.
 
-use crate::relational::QueryExpr as LQueryExpr;
-use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::expr_ir::L2Expr;
-use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use super::expr_ir::ColumnRef;
+use super::expr_ir::L2Expr;
+use super::relational::QueryExpr as LQueryExpr;
+use super::schema::{Column, DataType, Schema};
 
 /// The DB / source-schema metadata source — resolves a source (metric /
 /// table) name to its known columns.
@@ -188,10 +188,9 @@ pub(crate) fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::relational::{L2SortKey, QueryExpr as LQueryExpr, SourceSpec};
+    use super::super::L2Expr;
     use super::*;
-    use crate::relational::{L2SortKey, QueryExpr as LQueryExpr, SourceSpec};
-    use asap_types::pre_asap::expr_ir::ColumnRef;
-    use asap_types::pre_asap::L2Expr;
 
     fn src(name: &str) -> LQueryExpr {
         LQueryExpr::Source(SourceSpec::new(name))

@@ -1,16 +1,16 @@
 //! SQL front end: L1 (parse + plan via DataFusion) → L2 relational, then the
-//! shared L2→L3 [`convert_root`](asap_l2::convert_root).
+//! shared L2→L3 [`convert_root`](asap_types::pre_asap::convert_root).
 //!
 //! Emits the per-language
-//! [`relational::QueryExpr`](asap_l2::relational); the shared
-//! converter runs the [`Binder`](asap_l2::Binder) for
+//! [`relational::QueryExpr`](asap_types::pre_asap::relational); the shared
+//! converter runs the [`Binder`](asap_types::pre_asap::Binder) for
 //! positional name resolution. Depends on DataFusion only — never on the PromQL
 //! parser.
 
 pub mod error;
 pub mod sql;
 
-use asap_l2::convert_root;
+use asap_types::pre_asap::convert_root;
 use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{QueryLanguage, QueryWorkload, SqlDialect};

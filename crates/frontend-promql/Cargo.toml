@@ -4,10 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 # PromQL front end: L1 (parse) → L2 relational, then the shared L2→L3 converter
-# in asap-types. Pulls the PromQL parser only — never DataFusion.
+# — both in asap-types. Pulls the PromQL parser only — never DataFusion.
 [dependencies]
 asap-types = { path = "../types" }
-asap-l2 = { path = "../l2" }
 
 # Public GreptimeTeam/promql-parser (Apache-2.0) from crates.io. 0.10 upstreamed
 # the experimental functions we used to carry as local patches (mad_over_time,
