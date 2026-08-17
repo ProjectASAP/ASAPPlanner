@@ -1,9 +1,9 @@
 //! The L3 **Binder** — name resolution as an explicit pass.
 //!
 //! [`Binder::bind`] produces the complete, self-contained [`Schema`] every
-//! `ColumnId` in the converted canonical tree indexes into. The converter
-//! ([`super::lower::convert`]) then becomes purely structural: it threads the
-//! Binder's schema and positional resolution downstream is **total**.
+//! `ColumnId` in the canonical tree indexes into. [`resolve`](super::resolve)
+//! then becomes purely structural: it threads the Binder's schema and
+//! positional resolution downstream is **total**.
 //!
 //! The default [`UsageDerivedCatalog`] knows nothing — every schema is derived
 //! purely from the query's own usage. That is the honest state for the
@@ -14,7 +14,6 @@
 use super::expr_ir::ColumnRef;
 use super::expr_ir::L2Expr;
 use super::query_expr::L2QueryExpr;
-use super::relational::QueryExpr as LQueryExpr;
 use super::schema::{Column, DataType, Schema};
 
 /// The DB / source-schema metadata source — resolves a source (metric /
@@ -73,7 +72,7 @@ impl<C: SchemaCatalog> Binder<C> {
     /// Contains the time axis, the synthetic `value` column, and one column
     /// per distinct name referenced anywhere in the tree — so positional
     /// `ColumnId` resolution downstream is total.
-    pub fn bind(&self, tree: &LQueryExpr) -> Schema {
+    pub fn bind(&self, tree: &L2QueryExpr) -> Schema {
         self.bind_with_inherited(tree, &[])
     }
 
@@ -83,9 +82,8 @@ impl<C: SchemaCatalog> Binder<C> {
     /// own sub-tree) still sees an outer aggregate's group keys — e.g. the
     /// `__name__` / `job` in `sum by (__name__)(a or b)`, which appear in neither
     /// side's own matchers (issue #52).
-    pub fn bind_with_inherited(&self, tree: &LQueryExpr, inherited: &[String]) -> Schema {
-        let mut columns: Vec<Column> = tree
-            .source_name()
+    pub fn bind_with_inherited(&self, tree: &L2QueryExpr, inherited: &[String]) -> Schema {
+        let mut columns: Vec<Column> = leftmost_scan_name(tree)
             .and_then(|name| self.catalog.columns_for(name))
             .unwrap_or_else(default_leaf_columns);
 
@@ -115,49 +113,6 @@ impl<C: SchemaCatalog> Binder<C> {
             closed: false,
         }
     }
-
-    /// Like [`bind`](Self::bind)/[`bind_with_inherited`](Self::bind_with_inherited),
-    /// but for a front end that emits the canonical
-    /// [`QueryExpr`](super::query_expr::QueryExpr) shape directly
-    /// (`L2QueryExpr` = `QueryExpr<ColumnRef>`, unresolved) instead of the
-    /// legacy [`relational`](super::relational) tree — see
-    /// [`resolve`](super::resolve). Front ends migrating off
-    /// `relational`/`convert_root` (issue #179) use this one; every rule above
-    /// (the `(ts, value)` floor, usage-derived label columns, inherited names
-    /// for an independently-bound `BinaryOp` side) applies identically.
-    pub fn bind_query_expr(&self, tree: &L2QueryExpr) -> Schema {
-        self.bind_query_expr_with_inherited(tree, &[])
-    }
-
-    /// [`bind_query_expr`](Self::bind_query_expr) with inherited names — the
-    /// canonical-tree counterpart to
-    /// [`bind_with_inherited`](Self::bind_with_inherited).
-    pub fn bind_query_expr_with_inherited(&self, tree: &L2QueryExpr, inherited: &[String]) -> Schema {
-        let mut columns: Vec<Column> = leftmost_scan_name(tree)
-            .and_then(|name| self.catalog.columns_for(name))
-            .unwrap_or_else(default_leaf_columns);
-
-        for floor in default_leaf_columns() {
-            if !columns.iter().any(|c| c.name == floor.name) {
-                columns.push(floor);
-            }
-        }
-
-        let referenced = collect_referenced_columns_qe(tree);
-        for name in referenced.iter().chain(inherited) {
-            if !columns.iter().any(|c| c.name == *name) {
-                columns.push(Column::new(name.clone(), DataType::Utf8, true));
-            }
-        }
-
-        let time_index = columns.iter().position(|c| c.name == "ts");
-        Schema {
-            columns,
-            time_index,
-            unique_keys: Vec::new(),
-            closed: false,
-        }
-    }
 }
 
 /// The conventional PromQL leaf shape: `(ts: Timestamp, value: Float64)`.
@@ -168,12 +123,6 @@ fn default_leaf_columns() -> Vec<Column> {
     ]
 }
 
-/// Collect every distinct column name the converter resolves positionally:
-/// group keys (`Aggregate.keys`, `TopK.by`, `Partition.keys`) **and** the
-/// columns referenced by name in filter / having / project / sort / join
-/// expressions (e.g. a PromQL label matcher `m{env="prod"}` references `env`).
-/// The Binder seeds these into the usage-derived leaf so positional resolution
-/// downstream is total.
 /// Push a `ColumnRef`'s bare name (the schema-seedable identifier). `Qualified`
 /// collapses to its `name`; `SampleValue`/`Wildcard` carry no name.
 fn push_ref_name(c: &ColumnRef, out: &mut Vec<String>) {
@@ -184,58 +133,10 @@ fn push_ref_name(c: &ColumnRef, out: &mut Vec<String>) {
     }
 }
 
-pub(crate) fn collect_referenced_columns(tree: &LQueryExpr) -> Vec<String> {
-    fn named(expr: &L2Expr, out: &mut Vec<String>) {
-        for c in expr.columns_referenced() {
-            push_ref_name(c, out);
-        }
-    }
-    let mut out: Vec<String> = Vec::new();
-    tree.walk(&mut |node| match node {
-        LQueryExpr::Aggregate { keys, having, .. } => {
-            keys.iter().for_each(|k| push_ref_name(k, &mut out));
-            if let Some(h) = having {
-                named(h, &mut out);
-            }
-        }
-        LQueryExpr::TopK { by, .. } => by.iter().for_each(|k| push_ref_name(k, &mut out)),
-        // `limitk`/`limit_ratio` grouping keys resolve positionally (issue #86).
-        LQueryExpr::Sample { keys, .. } => keys.iter().for_each(|k| push_ref_name(k, &mut out)),
-        LQueryExpr::Filter { pred, .. } => named(pred, &mut out),
-        LQueryExpr::Project { cols, .. } => {
-            for item in cols {
-                named(&item.expr, &mut out);
-            }
-        }
-        LQueryExpr::Sort {
-            keys, partition_by, ..
-        } => {
-            for k in keys {
-                named(&k.expr, &mut out);
-            }
-            // Per-group ranking keys (`topk by (…)`) must be seeded into the
-            // leaf schema so they resolve positionally to `Sort.partition_by`.
-            partition_by.iter().for_each(|k| push_ref_name(k, &mut out));
-        }
-        LQueryExpr::Join { pred: Some(p), .. } => named(p, &mut out),
-        // A relabel's source labels are referenced by name inside `value`
-        // (`label_replace(instance, …)`); seed them so they resolve
-        // positionally. `dst` is an output — only seeded if `value` also reads
-        // it (an in-place `label_replace` on the same label).
-        LQueryExpr::Relabel { value, .. } => named(value, &mut out),
-        _ => {}
-    });
-    out.sort();
-    out.dedup();
-    out
-}
-
 /// The leftmost `Scan`'s source name in a canonical (`L2QueryExpr`) tree —
-/// the [`collect_referenced_columns_qe`] counterpart to
-/// [`relational::QueryExpr::source_name`](super::relational::QueryExpr::source_name),
-/// which the legacy tree carries as a method because it owns a dedicated
-/// `Source(SourceSpec)` leaf; the canonical tree's `Scan` leaf needs this
-/// walk written out instead.
+/// the [`collect_referenced_columns`] counterpart to what a dedicated
+/// `Source` leaf type would carry as a method; the canonical tree's `Scan`
+/// leaf needs this walk written out instead.
 fn leftmost_scan_name(tree: &L2QueryExpr) -> Option<&str> {
     use L2QueryExpr as QE;
     match tree {
@@ -265,14 +166,16 @@ fn leftmost_scan_name(tree: &L2QueryExpr) -> Option<&str> {
     }
 }
 
-/// [`collect_referenced_columns`]'s counterpart for a canonical
-/// (`L2QueryExpr`) tree — every distinct name a front end constructing
-/// [`QueryExpr<ColumnRef>`](super::query_expr::QueryExpr) directly needs
-/// seeded into the usage-derived leaf: `Scan.predicates`, `Aggregate`'s
+/// Collect every distinct column name referenced anywhere in `tree` that
+/// resolves positionally — every place a front end constructing
+/// [`QueryExpr<ColumnRef>`](super::query_expr::QueryExpr) directly (issue
+/// #179) puts a name-based reference: `Scan.predicates`, `Aggregate`'s
 /// `reduction`/`having`/per-measure `col`, `Distinct.cols`, `Sample.by`,
 /// `Filter.pred`, `Project.cols`, `Sort.keys`/`partition_by`,
 /// `WindowFunc.args`/`partition_by`/`order_by`, `Join.pred`, `Relabel.value`.
-pub(crate) fn collect_referenced_columns_qe(tree: &L2QueryExpr) -> Vec<String> {
+/// The Binder seeds these into the usage-derived leaf so positional
+/// resolution downstream is total.
+pub(crate) fn collect_referenced_columns(tree: &L2QueryExpr) -> Vec<String> {
     use L2QueryExpr as QE;
     fn named(expr: &L2Expr, out: &mut Vec<String>) {
         for c in expr.columns_referenced() {
@@ -398,12 +301,18 @@ pub(crate) fn collect_referenced_columns_qe(tree: &L2QueryExpr) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::relational::{L2SortKey, QueryExpr as LQueryExpr, SourceSpec};
+    use super::super::query_expr::{GroupKeys, Source};
     use super::super::L2Expr;
     use super::*;
 
-    fn src(name: &str) -> LQueryExpr {
-        LQueryExpr::Source(SourceSpec::new(name))
+    fn src(name: &str) -> L2QueryExpr {
+        L2QueryExpr::Scan {
+            source: Source::TimeSeries {
+                metric: name.into(),
+            },
+            predicates: vec![],
+            schema: None,
+        }
     }
 
     #[test]
@@ -419,14 +328,14 @@ mod tests {
     fn sort_partition_keys_land_in_schema() {
         // Per-group ranking keys (`topk by (host)` → `Sort.partition_by`) must be
         // seeded into the usage-derived leaf so they resolve positionally.
-        let tree = LQueryExpr::Sort {
-            keys: vec![L2SortKey {
+        let tree = L2QueryExpr::Sort {
+            keys: vec![super::super::query_expr::SortKey {
                 expr: L2Expr::Column(ColumnRef::SampleValue),
                 ascending: false,
                 nulls_first: false,
             }],
-            partition_by: vec![ColumnRef::Named("host".into())],
-            input: Box::new(src("hits")),
+            partition_by: GroupKeys::by(vec![ColumnRef::Named("host".into())]),
+            child: Box::new(src("hits")),
         };
         let schema = Binder::new().bind(&tree);
         assert!(schema.column_id("host").is_some());

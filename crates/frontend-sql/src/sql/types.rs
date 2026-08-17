@@ -17,8 +17,9 @@ use crate::error::SqlError as LoweringError;
 /// Table catalog for SQL lowering: table name → resolved L3 [`Schema`].
 ///
 /// Used twice: to register Arrow-backed `MemTable`s so DataFusion can resolve
-/// `SELECT … FROM t`, and to attach each table's schema to the relational
-/// `SourceSpec` so the L2→L3 Binder/converter has positional column identity.
+/// `SELECT … FROM t`, and to attach each table's schema directly onto the
+/// canonical `Scan` (`schema: Some(_)`) so the Binder doesn't need to
+/// usage-derive it.
 #[derive(Debug, Clone, Default)]
 pub struct SqlCatalog {
     pub tables: HashMap<String, Schema>,

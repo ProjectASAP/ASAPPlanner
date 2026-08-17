@@ -10,8 +10,9 @@
 //! invariant (arrows point up) holds here too.
 //!
 //! Post-lowering **canonicalization** is *not* here: it landed in
-//! `asap_types::pre_asap::canonicalize`, run inside the shared `convert_root` so every
-//! front end normalizes before L3 leaves the converter (issue #34, closed).
+//! `asap_types::pre_asap::canonicalize`, run inside the shared `resolve_root`
+//! so every front end normalizes before L3 leaves resolution (issue #34,
+//! closed).
 //!
 //! ## Status
 //!

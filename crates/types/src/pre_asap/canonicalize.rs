@@ -1,7 +1,7 @@
 //! Shared post-lowering canonicalization of the L3 [`QueryExpr`].
 //!
-//! Both language front ends funnel through [`convert_root`](super::lower::convert_root),
-//! which runs this pass over the converted tree. Its job is to erase
+//! Both language front ends funnel through [`resolve_root`](super::resolve::resolve_root),
+//! which runs this pass over the resolved tree. Its job is to erase
 //! *structural* differences between semantically identical queries so an L4 rule
 //! matching on the intent algebra sees one canonical spelling regardless of
 //! source language (issue #34).

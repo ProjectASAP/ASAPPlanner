@@ -1,17 +1,16 @@
 //! Resolve a front-end-emitted, unresolved [`L2QueryExpr`] (`QueryExpr<ColumnRef>`)
-//! into the canonical, positional [`L3QueryExpr`] (`QueryExpr<ColumnId>`) —
-//! the replacement for [`lower::convert_root`](super::lower::convert_root) for
-//! a front end that already builds the canonical shape directly during its
-//! own `interpret` step (issue #179), instead of the legacy
-//! [`relational`](super::relational) tree.
+//! into the canonical, positional [`L3QueryExpr`] (`QueryExpr<ColumnId>`).
 //!
-//! Unlike [`lower::convert`](super::lower::convert), `resolve` does no
-//! per-variant *structural* translation — the input is already
-//! canonical-shaped, so every [`L2QueryExpr`] variant maps to the identical
-//! [`L3QueryExpr`] variant. What's left is exactly the "mechanical,
-//! schema-dependent substitution" category #179 describes: a single generic,
-//! shape-preserving walk that resolves every [`ColumnRef`] to the
-//! [`Binder`](super::binder::Binder)-computed positional [`ColumnId`].
+//! Both front ends (`asap-frontend-promql`, `asap-frontend-sql`) construct
+//! canonical `QueryExpr` shapes directly during their own `interpret` step
+//! (issue #179) — heavy-hitter `topk` recognition, the window-over-aggregate
+//! fold, the `PerEntity`/`Reduce` reduction choice, and every other
+//! *structural* decision happen right there, since a front end already knows
+//! the answer at parse time. What's left for [`resolve_root`] is exactly the
+//! "mechanical, schema-dependent substitution" #179 describes: a single
+//! generic, shape-preserving walk — every [`L2QueryExpr`] variant maps to the
+//! identical [`L3QueryExpr`] variant — that resolves every [`ColumnRef`] to
+//! the [`Binder`](super::binder::Binder)-computed positional [`ColumnId`].
 
 use thiserror::Error;
 
@@ -42,22 +41,18 @@ pub enum ResolveTreeError {
 /// Resolve a whole [`L2QueryExpr`] tree rooted at `tree` into canonical
 /// [`L3QueryExpr`]: binds every `ColumnRef` to a `ColumnId` via the
 /// [`Binder`], then [`canonicalize`](super::canonicalize::canonicalize)s the
-/// result — the same two steps [`convert_root`](super::lower::convert_root)
-/// runs, minus the structural-translation step that a front end building this
-/// shape directly has already done itself.
+/// result.
 pub fn resolve_root(tree: &L2QueryExpr) -> Result<L3QueryExpr, ResolveTreeError> {
     resolve_root_with_inherited(tree, &[])
 }
 
 /// [`resolve_root`] with label names inherited from an enclosing scope seeded
-/// into the leaf schema — the canonical-tree counterpart to
-/// [`convert_root_with_inherited`](super::lower::convert_root), used when
-/// re-binding a `BinaryOp` side (issue #52).
+/// into the leaf schema, used when re-binding a `BinaryOp` side (issue #52).
 fn resolve_root_with_inherited(
     tree: &L2QueryExpr,
     inherited: &[String],
 ) -> Result<L3QueryExpr, ResolveTreeError> {
-    let fallback = Binder::new().bind_query_expr_with_inherited(tree, inherited);
+    let fallback = Binder::new().bind_with_inherited(tree, inherited);
     let l3 = resolve(tree, &fallback)?;
     Ok(super::canonicalize::canonicalize(l3))
 }
@@ -65,8 +60,7 @@ fn resolve_root_with_inherited(
 /// The generic substitution walk: converts children first (bottom-up), then
 /// resolves this node's own `ColumnRef`s against the *converted child's*
 /// derived output schema — so a `JOIN`'s concatenated schema and a cross-
-/// series aggregate's frozen-closed output bind to the right positions, same
-/// as [`lower::convert`](super::lower::convert).
+/// series aggregate's frozen-closed output bind to the right positions.
 fn resolve(tree: &L2QueryExpr, fallback: &Schema) -> Result<L3QueryExpr, ResolveTreeError> {
     use super::query_expr::QueryExpr as QE;
     Ok(match tree {
@@ -325,9 +319,8 @@ fn resolve(tree: &L2QueryExpr, fallback: &Schema) -> Result<L3QueryExpr, Resolve
             // A binary op's two sides may scan different metrics with
             // different label sets, so each branch resolves against its OWN
             // bound schema; but an independently-bound side still has to see
-            // label names an *enclosing* node references (issue #52) — same
-            // reasoning as `lower::convert`'s `BinaryOp` arm.
-            let own = super::binder::collect_referenced_columns_qe(tree);
+            // label names an *enclosing* node references (issue #52).
+            let own = super::binder::collect_referenced_columns(tree);
             let inherited: Vec<String> = inherited_names(fallback)
                 .into_iter()
                 .filter(|n| !own.contains(n))
@@ -377,11 +370,12 @@ fn resolve_group_keys(
 /// aggregate that collapsed the label) is provably absent from every row, so
 /// PromQL drops it from the grouping rather than rejecting the query (issue
 /// #53) — `sum(sum by (group) (m)) by (job)` is the canonical case, `job`
-/// absent from the inner aggregate's closed `[group, sum]` output. Mirrors
-/// `lower::convert`'s per-series-fused `Aggregate` branch, the only one a
-/// front end building this shape directly ever takes (every `Aggregate` it
-/// builds is single-measure and HAVING-less) — see
-/// `asap_frontend_promql::promql::reduction_for`.
+/// absent from the inner aggregate's closed `[group, sum]` output. Applied
+/// uniformly to every `Aggregate`, not just PromQL's: SQL's `GROUP BY` keys
+/// are always genuinely present (DataFusion validates the plan), so the
+/// "drop instead of reject" branch is simply never exercised there — the
+/// lenient resolver is a no-op difference for a SQL tree, not a behavior
+/// change.
 fn resolve_reduction(
     reduction: &Reduction<ColumnRef>,
     schema: &Schema,

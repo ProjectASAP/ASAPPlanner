@@ -568,8 +568,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     Project {
         cols: Vec<ProjectItem<C>>,
         /// Re-qualifies every output column with this table alias (a derived
-        /// table / inline view). `None` for an ordinary SELECT list. See
-        /// [`relational::QueryExpr::Project`](super::relational).
+        /// table / inline view). `None` for an ordinary SELECT list.
         #[serde(default)]
         qualifier: Option<String>,
         child: Box<QueryExpr<C>>,

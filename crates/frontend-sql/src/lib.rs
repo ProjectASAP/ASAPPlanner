@@ -1,16 +1,17 @@
-//! SQL front end: L1 (parse + plan via DataFusion) → L2 relational, then the
-//! shared L2→L3 [`convert_root`](asap_types::pre_asap::convert_root).
+//! SQL front end: L1 (parse + plan via DataFusion) → the canonical L2 shape,
+//! built directly (issue #179) → [`resolve_root`].
 //!
-//! Emits the per-language
-//! [`relational::QueryExpr`](asap_types::pre_asap::relational); the shared
-//! converter runs the [`Binder`](asap_types::pre_asap::Binder) for
-//! positional name resolution. Depends on DataFusion only — never on the PromQL
-//! parser.
+//! Emits [`L2QueryExpr`](asap_types::pre_asap::L2QueryExpr) itself — the
+//! canonical `QueryExpr`, generic over an unresolved
+//! [`ColumnRef`](asap_types::pre_asap::ColumnRef) — directly, rather than a
+//! separate per-language relational tree; `resolve_root` runs the
+//! [`Binder`](asap_types::pre_asap::Binder) for positional name resolution.
+//! Depends on DataFusion only — never on the PromQL parser.
 
 pub mod error;
 pub mod sql;
 
-use asap_types::pre_asap::convert_root;
+use asap_types::pre_asap::resolve_root;
 use asap_types::pre_asap::QueryExpr;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{QueryLanguage, QueryWorkload, SqlDialect};
@@ -45,9 +46,9 @@ pub async fn lower_sql_dialect(
     accuracy: AccuracyTarget,
 ) -> Result<QueryExpr, SqlError> {
     let l2 = SqlLowerer::with_dialect(catalog, dialect)
-        .lower(query)
+        .lower(query, &accuracy)
         .await?;
-    let l3 = convert_root(&l2, &accuracy)?;
+    let l3 = resolve_root(&l2)?;
     Ok(l3)
 }
 

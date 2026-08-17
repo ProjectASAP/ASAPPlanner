@@ -1,8 +1,9 @@
 //! End-to-end SQL → L2 → canonical L3 lowering tests (positional IR).
 //!
-//! Validates the re-targeted DataFusion front end: SQL parses + plans, lowers to
-//! the relational L2 algebra, and the shared `convert_root` produces positional
-//! canonical L3 (the same converter the PromQL path uses).
+//! Validates the DataFusion front end: SQL parses + plans, lowers directly to
+//! the canonical L2 shape (`QueryExpr<ColumnRef>`, issue #179), and the shared
+//! `resolve_root` produces positional canonical L3 (the same resolver the
+//! PromQL path uses).
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};

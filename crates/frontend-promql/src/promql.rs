@@ -1446,8 +1446,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
                 let count_agg = windowed_aggregate(inner, vec![], inner_intent(&InnerFunc::Count));
                 Ok(L2::Aggregate {
                     // A ranking always reduces (a `by`-empty TopK ranks the
-                    // whole input into one ordering, never per-entity) — same
-                    // as `lower::convert`'s `TopK` arm.
+                    // whole input into one ordering, never per-entity).
                     reduction: Reduction::Reduce(keys.into()),
                     measures: vec![AggIntent::TopK {
                         k: k as usize,
@@ -1492,13 +1491,13 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
     }
 }
 
-/// Decide `PerEntity` vs `Reduce(by)` for a canonical `Aggregate` — the same
-/// decision `asap_types::pre_asap::lower::convert`'s `Aggregate` arm makes
-/// from schema, made here schema-independently instead (issue #179): it only
-/// needs the keys list, the intent's own `is_per_series` flag, and whether
-/// the child being wrapped is already a range/subquery marker. `without()` is
-/// applied separately, post-hoc, by `mark_without` — see its doc for why
-/// that's still correct here.
+/// Decide `PerEntity` vs `Reduce(by)` for a canonical `Aggregate`, entirely
+/// from local, already-in-scope information (issue #179's "local,
+/// context-free structural rewriting"): the keys list, the intent's own
+/// `is_per_series` flag, and whether the child being wrapped is already a
+/// range/subquery marker — no schema needed. `without()` is applied
+/// separately, post-hoc, by `mark_without` — see its doc for why that's still
+/// correct here.
 fn reduction_for(keys: &[ColumnRef], intent: &AggIntent<ColumnRef>, child: &L2) -> Reduction<ColumnRef> {
     let is_range_child = matches!(child, L2::TimeRange { .. } | L2::Subquery { .. });
     if keys.is_empty() && (intent.is_per_series() || is_range_child) {
@@ -1530,8 +1529,7 @@ fn windowed_aggregate(inner: Inner, keys: Vec<ColumnRef>, intent: AggIntent<Colu
         measures: vec![intent],
         // A single empty entry — never an override — so the resolver keeps
         // PromQL's intent-keyed output names ("sum", "quantile_0_99", …)
-        // instead. Matches the shape `lower::convert` always produced for a
-        // PromQL `AggItem` (`alias: None` → `.unwrap_or_default()` → `""`).
+        // instead.
         output_names: vec![String::new()],
         having: None,
         child: Box::new(child),

@@ -1,10 +1,10 @@
 //! PromQL front end: L1 (parse via `promql-parser`) → the canonical L2 shape,
-//! built directly (issue #179) → [`resolve_root`](asap_types::pre_asap::resolve_root).
+//! built directly (issue #179) → [`resolve_root`].
 //!
 //! Emits [`L2QueryExpr`](asap_types::pre_asap::L2QueryExpr) itself — the
-//! canonical [`QueryExpr`](asap_types::pre_asap::QueryExpr), generic over an
-//! unresolved [`ColumnRef`](asap_types::pre_asap::ColumnRef) — rather than the
-//! legacy per-language `relational` tree; `resolve_root` runs the
+//! canonical `QueryExpr`, generic over an unresolved
+//! [`ColumnRef`](asap_types::pre_asap::ColumnRef) — directly, rather than a
+//! separate per-language relational tree; `resolve_root` runs the
 //! [`Binder`](asap_types::pre_asap::Binder) for positional name resolution.
 //! Depends on the PromQL parser only — never on the SQL / DataFusion stack.
 
