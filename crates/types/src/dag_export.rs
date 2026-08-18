@@ -119,9 +119,14 @@ fn source_label(source: &Source) -> String {
 
 /// Recursively flatten `expr`, appending nodes to `nodes` in post-order
 /// (children pushed before their parent), and return the id of the pushed
-/// root node. Exhaustive over every `QueryExpr` variant — a new variant
-/// fails to compile here until this match is extended, matching the rest of
-/// the IR's exhaustive-match style (e.g. `output_schema`).
+/// root node. Exhaustive over every **operator** `QueryExpr` variant — a new
+/// one fails to compile here until this match is extended, matching the rest
+/// of the IR's exhaustive-match style (e.g. `output_schema`). The scalar
+/// variants (issue #205) are never passed to `build` directly: every operator
+/// arm that carries one (`Filter.pred`, `Project.cols`, `Aggregate.having`, …)
+/// serializes it as opaque `detail` JSON via `Predicate`/`ProjectItem`/
+/// `AggIntent`'s own `Serialize` impl, same as before the merge — a scalar
+/// subtree was never a separate DAG node, so this doesn't change that.
 fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
     match expr {
         QueryExpr::Scan {
@@ -367,6 +372,21 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
                 vec![l, r],
             )
         }
+        other @ (QueryExpr::Column(_)
+        | QueryExpr::Literal(_)
+        | QueryExpr::Compare { .. }
+        | QueryExpr::BoolAnd(_)
+        | QueryExpr::BoolOr(_)
+        | QueryExpr::Not(_)
+        | QueryExpr::IsNull(_)
+        | QueryExpr::IsNotNull(_)
+        | QueryExpr::Cast { .. }
+        | QueryExpr::InList { .. }
+        | QueryExpr::FunctionCall { .. }
+        | QueryExpr::Arith { .. }
+        | QueryExpr::Case { .. }) => {
+            unreachable!("dag_export::build reached a scalar QueryExpr variant directly: {other:?}")
+        }
     }
 }
 
@@ -374,7 +394,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
 mod tests {
     use super::*;
     use crate::pre_asap::agg_intent::AggIntent;
-    use crate::pre_asap::expr_ir::{L3Expr, L3Scalar};
+    use crate::pre_asap::expr_ir::L3Scalar;
     use crate::pre_asap::query_expr::{GroupKeys, Predicate, Reduction};
     use crate::pre_asap::schema::{Column, DataType, Schema};
     use crate::types::AccuracyTarget;
@@ -410,7 +430,7 @@ mod tests {
     #[test]
     fn chain_preserves_shape_and_child_links() {
         let expr = QueryExpr::Filter {
-            pred: Predicate(L3Expr::Literal(L3Scalar::Boolean(true))),
+            pred: Predicate(Box::new(QueryExpr::Literal(L3Scalar::Boolean(true)))),
             child: Box::new(QueryExpr::Aggregate {
                 reduction: Reduction::Reduce(GroupKeys::none()),
                 measures: vec![AggIntent::Count {

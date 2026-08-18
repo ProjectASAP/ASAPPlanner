@@ -8,7 +8,7 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::{
-    AggIntent, CompareOp, GroupKeys, JoinKind, L3Expr, L3Scalar, QueryExpr, Reduction, Source,
+    AggIntent, CompareOp, GroupKeys, JoinKind, L3Scalar, QueryExpr, Reduction, Source,
     WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
@@ -373,16 +373,16 @@ fn join_eq_columns(join: &QueryExpr) -> [usize; 2] {
     let QueryExpr::Join { pred, .. } = join else {
         unreachable!("expected a Join");
     };
-    let L3Expr::Compare {
+    let QueryExpr::Compare {
         left,
         op: CompareOp::Eq,
         right,
-    } = &pred.0
+    } = pred.0.as_ref()
     else {
         panic!("expected an equijoin Compare, got {:?}", pred.0);
     };
     match (left.as_ref(), right.as_ref()) {
-        (L3Expr::Column(l), L3Expr::Column(r)) => {
+        (QueryExpr::Column(l), QueryExpr::Column(r)) => {
             let mut cols = [*l, *r];
             cols.sort_unstable();
             cols
@@ -485,8 +485,8 @@ async fn qualified_where_over_join_resolves_to_right_side() {
         unreachable!("find_filter only returns Filter");
     };
     assert!(
-        matches!(&pred.0, L3Expr::Compare { left, op: CompareOp::Eq, .. }
-            if matches!(left.as_ref(), L3Expr::Column(4))),
+        matches!(pred.0.as_ref(), QueryExpr::Compare { left, op: CompareOp::Eq, .. }
+            if matches!(left.as_ref(), QueryExpr::Column(4))),
         "hosts.service must bind to concatenated position 4 (not the first `service`), got {:?}",
         pred.0
     );
@@ -552,7 +552,7 @@ async fn aggregate_over_join_binds_against_concatenated_schema() {
 // ── Issue #111: IN / EXISTS subquery predicates become semi / anti joins ────
 
 /// The first `Join` node's `(kind, predicate, left column count)`.
-fn join_parts(qe: &QueryExpr) -> (&JoinKind, &L3Expr, usize) {
+fn join_parts(qe: &QueryExpr) -> (&JoinKind, &QueryExpr, usize) {
     let QueryExpr::Join {
         kind,
         pred,
@@ -563,7 +563,7 @@ fn join_parts(qe: &QueryExpr) -> (&JoinKind, &L3Expr, usize) {
         unreachable!()
     };
     let left_len = left.output_schema().expect("left schema").columns.len();
-    (kind, &pred.0, left_len)
+    (kind, pred.0.as_ref(), left_len)
 }
 
 #[tokio::test]
@@ -579,13 +579,13 @@ async fn in_subquery_lowers_to_a_semi_join() {
     // `service` column, so a name-based lookup would bind *both* sides to the
     // left's — silently making this `service = service`, always true. The key is
     // projected under a synthetic name to make that impossible.
-    let L3Expr::Compare { left, right, .. } = pred else {
+    let QueryExpr::Compare { left, right, .. } = pred else {
         panic!("expected a comparison, got {pred:?}");
     };
-    assert_eq!(**left, L3Expr::Column(1), "outer service");
+    assert_eq!(**left, QueryExpr::Column(1), "outer service");
     assert_eq!(
         **right,
-        L3Expr::Column(left_len),
+        QueryExpr::Column(left_len),
         "the subquery key, not the outer column again"
     );
 }
@@ -694,7 +694,7 @@ async fn window_function_lowers_to_positional_windowfunc() {
     assert_eq!(order_by.len(), 1);
     assert_eq!(
         order_by[0].expr,
-        L3Expr::Column(3),
+        QueryExpr::Column(3),
         "ORDER BY bytes → col 3"
     );
     assert!(!order_by[0].ascending, "DESC");
@@ -717,7 +717,7 @@ async fn window_aggregate_lowers_to_windowfunc() {
         unreachable!();
     };
     assert_eq!(*func, WindowFuncKind::Sum);
-    assert_eq!(args, &vec![L3Expr::Column(3)], "SUM(bytes) → arg col 3");
+    assert_eq!(args, &vec![QueryExpr::Column(3)], "SUM(bytes) → arg col 3");
 }
 
 // ── Nested query functions: derived tables / inline views (issue #27) ───────────
@@ -855,11 +855,15 @@ async fn correlated_exists_lifts_its_correlation_into_the_join() {
     .await;
     let (kind, pred, left_len) = join_parts(&qe);
     assert_eq!(kind, &JoinKind::Semi);
-    let L3Expr::Compare { left, right, .. } = pred else {
+    let QueryExpr::Compare { left, right, .. } = pred else {
         panic!("expected the correlation as a comparison, got {pred:?}");
     };
-    assert_eq!(**left, L3Expr::Column(left_len), "h.service (right side)");
-    assert_eq!(**right, L3Expr::Column(1), "m.service (left side)");
+    assert_eq!(
+        **left,
+        QueryExpr::Column(left_len),
+        "h.service (right side)"
+    );
+    assert_eq!(**right, QueryExpr::Column(1), "m.service (left side)");
 }
 
 #[tokio::test]
@@ -878,7 +882,7 @@ async fn an_uncorrelated_exists_is_an_unconditional_semi_join() {
     let qe = lower("SELECT service FROM metrics WHERE EXISTS (SELECT 1 FROM hosts)").await;
     let (kind, pred, _) = join_parts(&qe);
     assert_eq!(kind, &JoinKind::Semi);
-    assert_eq!(*pred, L3Expr::Literal(L3Scalar::Boolean(true)));
+    assert_eq!(*pred, QueryExpr::Literal(L3Scalar::Boolean(true)));
 }
 
 #[tokio::test]

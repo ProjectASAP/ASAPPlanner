@@ -127,6 +127,21 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
             walk(lhs, seen);
             walk(rhs, seen);
         }
+        // Scalar expression variants (issue #205) aren't relational nodes;
+        // this walk only reports on the relational skeleton, so stop here.
+        QueryExpr::Column(_)
+        | QueryExpr::Literal(_)
+        | QueryExpr::Compare { .. }
+        | QueryExpr::BoolAnd(_)
+        | QueryExpr::BoolOr(_)
+        | QueryExpr::Not(_)
+        | QueryExpr::IsNull(_)
+        | QueryExpr::IsNotNull(_)
+        | QueryExpr::Cast { .. }
+        | QueryExpr::InList { .. }
+        | QueryExpr::FunctionCall { .. }
+        | QueryExpr::Arith { .. }
+        | QueryExpr::Case { .. } => {}
     }
 }
 

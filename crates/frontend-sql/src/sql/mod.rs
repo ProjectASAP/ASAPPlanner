@@ -39,9 +39,7 @@ use asap_types::pre_asap::query_expr::{
     GroupKeys, L2QueryExpr as L2, Predicate, ProjectItem, Reduction, SortKey, Source,
 };
 use asap_types::pre_asap::schema::{DataType, Schema};
-use asap_types::pre_asap::{
-    ColumnRef, CompareOp, JoinKind, L2Expr, L3Scalar, SetOpKind, WindowFuncKind,
-};
+use asap_types::pre_asap::{ColumnRef, CompareOp, JoinKind, L3Scalar, SetOpKind, WindowFuncKind};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
@@ -233,7 +231,7 @@ impl<'a> SqlLowerer<'a> {
                                     .iter()
                                     .map(|f| ProjectItem {
                                         alias: Some(f.name().clone()),
-                                        expr: L2Expr::Column(ColumnRef::Named(f.name().clone())),
+                                        expr: L2::Column(ColumnRef::Named(f.name().clone())),
                                     })
                                     .collect();
                                 Ok(L2::Project {
@@ -335,7 +333,7 @@ impl<'a> SqlLowerer<'a> {
             other => L2::Project {
                 cols: vec![ProjectItem {
                     alias: Some(IN_SUBQUERY_KEY.to_string()),
-                    expr: L2Expr::Column(ColumnRef::Named(key.name().clone())),
+                    expr: L2::Column(ColumnRef::Named(key.name().clone())),
                 }],
                 qualifier: None,
                 child: Box::new(self.lower_plan(other)?),
@@ -343,13 +341,11 @@ impl<'a> SqlLowerer<'a> {
         };
         Ok(L2::Join {
             kind: JoinKind::Semi,
-            pred: Predicate(L2Expr::Compare {
+            pred: Predicate(Box::new(L2::Compare {
                 left: Box::new(df_expr_to_l2(&is.expr)?),
                 op: CompareOp::Eq,
-                right: Box::new(L2Expr::Column(ColumnRef::Named(
-                    IN_SUBQUERY_KEY.to_string(),
-                ))),
-            }),
+                right: Box::new(L2::Column(ColumnRef::Named(IN_SUBQUERY_KEY.to_string()))),
+            })),
             left: Box::new(left),
             right: Box::new(right),
         })
@@ -378,8 +374,8 @@ impl<'a> SqlLowerer<'a> {
         // the join condition is unconditionally true — same convention as an
         // unconditional `JOIN` (`lower_join`, below).
         let pred = match correlation {
-            Some(e) => Predicate(df_expr_to_l2(&e)?),
-            None => Predicate(L2Expr::Literal(L3Scalar::Boolean(true))),
+            Some(e) => Predicate(Box::new(df_expr_to_l2(&e)?)),
+            None => Predicate(Box::new(L2::Literal(L3Scalar::Boolean(true)))),
         };
         Ok(L2::Join {
             kind,
@@ -450,7 +446,7 @@ impl<'a> SqlLowerer<'a> {
             .on
             .iter()
             .map(|(l, r)| {
-                Ok(L2Expr::Compare {
+                Ok(L2::Compare {
                     left: Box::new(df_expr_to_l2(l)?),
                     op: CompareOp::Eq,
                     right: Box::new(df_expr_to_l2(r)?),
@@ -460,12 +456,12 @@ impl<'a> SqlLowerer<'a> {
         if let Some(filter) = &join.filter {
             conjuncts.push(df_expr_to_l2(filter)?);
         }
-        let pred = Predicate(match conjuncts.len() {
+        let pred = Predicate(Box::new(match conjuncts.len() {
             // No condition (a CROSS JOIN) is unconditionally true.
-            0 => L2Expr::Literal(L3Scalar::Boolean(true)),
+            0 => L2::Literal(L3Scalar::Boolean(true)),
             1 => conjuncts.pop().unwrap(),
-            _ => L2Expr::BoolAnd(conjuncts),
-        });
+            _ => L2::BoolAnd(conjuncts),
+        }));
         Ok(L2::Join {
             kind,
             pred,
@@ -502,7 +498,7 @@ impl<'a> SqlLowerer<'a> {
         // Nth_value: lift N from the (literal) 2nd arg, keep only the column.
         let func = if matches!(func, WindowFuncKind::NthValue(None)) {
             let n = match args.get(1) {
-                Some(L2Expr::Literal(L3Scalar::Int64(n))) if *n > 0 => *n as u64,
+                Some(L2::Literal(L3Scalar::Int64(n))) if *n > 0 => *n as u64,
                 other => {
                     return Err(LoweringError::InvalidExpression(format!(
                         "NTH_VALUE requires a positive integer literal 2nd arg, got {other:?}"
@@ -752,10 +748,10 @@ impl<'a> SqlLowerer<'a> {
                     .map(|((name, dtype), e)| ProjectItem {
                         alias: Some(name.clone()),
                         expr: if level.contains(e) {
-                            L2Expr::Column(ColumnRef::Named(name.clone()))
+                            L2::Column(ColumnRef::Named(name.clone()))
                         } else {
-                            L2Expr::Cast {
-                                expr: Box::new(L2Expr::Literal(L3Scalar::Null)),
+                            L2::Cast {
+                                expr: Box::new(L2::Literal(L3Scalar::Null)),
                                 to: dtype.clone(),
                                 try_cast: false,
                             }
@@ -763,7 +759,7 @@ impl<'a> SqlLowerer<'a> {
                     })
                     .chain(output_names.iter().map(|n| ProjectItem {
                         alias: Some(n.clone()),
-                        expr: L2Expr::Column(ColumnRef::Named(n.clone())),
+                        expr: L2::Column(ColumnRef::Named(n.clone())),
                     }))
                     .collect();
                 Ok(L2::Project {
@@ -915,14 +911,14 @@ const IN_SUBQUERY_KEY: &str = "__asap_in_key";
 /// `Filter` — canonical's invariant that a `Filter` never sits directly over a
 /// `Scan`. A front end emitting the canonical shape directly is responsible
 /// for maintaining that invariant itself (issue #179).
-fn filter_or_fold(pred: L2Expr, child: L2) -> L2 {
+fn filter_or_fold(pred: L2, child: L2) -> L2 {
     match child {
         L2::Scan {
             source,
             mut predicates,
             schema,
         } => {
-            predicates.push(Predicate(pred));
+            predicates.push(Predicate(Box::new(pred)));
             L2::Scan {
                 source,
                 predicates,
@@ -930,7 +926,7 @@ fn filter_or_fold(pred: L2Expr, child: L2) -> L2 {
             }
         }
         other => L2::Filter {
-            pred: Predicate(pred),
+            pred: Predicate(Box::new(pred)),
             child: Box::new(other),
         },
     }
@@ -1111,7 +1107,7 @@ impl DerivedCols {
     /// something else. `Project` carries one relation qualifier for all its
     /// columns, so `a.k` and `b.k` cannot both survive it — but that only
     /// matters when a projection gets inserted at all.
-    fn push(&mut self, alias: String, expr: L2Expr) {
+    fn push(&mut self, alias: String, expr: L2) {
         let existing = self
             .cols
             .iter()
@@ -1139,7 +1135,7 @@ impl DerivedCols {
     }
 
     /// A genuinely derived column: `alias` now names `expr`'s value.
-    fn materialize(&mut self, alias: String, expr: L2Expr) -> Result<(), LoweringError> {
+    fn materialize(&mut self, alias: String, expr: L2) -> Result<(), LoweringError> {
         self.any = true;
         self.push(alias, expr);
         Ok(())

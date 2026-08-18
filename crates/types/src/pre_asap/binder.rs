@@ -12,7 +12,6 @@
 //! lands, only the catalog impl swaps.
 
 use super::expr_ir::ColumnRef;
-use super::expr_ir::L2Expr;
 use super::query_expr::L2QueryExpr;
 use super::schema::{Column, DataType, Schema};
 
@@ -163,6 +162,23 @@ fn leftmost_scan_name(tree: &L2QueryExpr) -> Option<&str> {
         QE::Join { left, .. } | QE::SetOp { left, .. } | QE::BinaryOp { lhs: left, .. } => {
             leftmost_scan_name(left)
         }
+        // The scalar variants (issue #205) never appear as a direct
+        // `leftmost_scan_name` target — every reachable one sits behind a
+        // wrapper field (`Predicate`, `ProjectItem`, …) this walk never
+        // descends into; it only follows the relational skeleton.
+        QE::Column(_)
+        | QE::Literal(_)
+        | QE::Compare { .. }
+        | QE::BoolAnd(_)
+        | QE::BoolOr(_)
+        | QE::Not(_)
+        | QE::IsNull(_)
+        | QE::IsNotNull(_)
+        | QE::Cast { .. }
+        | QE::InList { .. }
+        | QE::FunctionCall { .. }
+        | QE::Arith { .. }
+        | QE::Case { .. } => None,
     }
 }
 
@@ -177,7 +193,7 @@ fn leftmost_scan_name(tree: &L2QueryExpr) -> Option<&str> {
 /// resolution downstream is total.
 pub(crate) fn collect_referenced_columns(tree: &L2QueryExpr) -> Vec<String> {
     use L2QueryExpr as QE;
-    fn named(expr: &L2Expr, out: &mut Vec<String>) {
+    fn named(expr: &L2QueryExpr, out: &mut Vec<String>) {
         for c in expr.columns_referenced() {
             push_ref_name(c, out);
         }
@@ -290,6 +306,25 @@ pub(crate) fn collect_referenced_columns(tree: &L2QueryExpr) -> Vec<String> {
                 walk(lhs, out);
                 walk(rhs, out);
             }
+            // The scalar variants (issue #205) never appear as a direct
+            // `walk` target — every reachable one is peeled off first by
+            // `named` at whichever operator field holds it (`Scan.predicates`,
+            // `Filter.pred`, `Project.cols`, …).
+            QE::Column(_)
+            | QE::Literal(_)
+            | QE::Compare { .. }
+            | QE::BoolAnd(_)
+            | QE::BoolOr(_)
+            | QE::Not(_)
+            | QE::IsNull(_)
+            | QE::IsNotNull(_)
+            | QE::Cast { .. }
+            | QE::InList { .. }
+            | QE::FunctionCall { .. }
+            | QE::Arith { .. }
+            | QE::Case { .. } => {
+                unreachable!("walk reached a scalar QueryExpr variant directly: {node:?}")
+            }
         }
     }
     let mut out: Vec<String> = Vec::new();
@@ -302,7 +337,6 @@ pub(crate) fn collect_referenced_columns(tree: &L2QueryExpr) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::super::query_expr::{GroupKeys, Source};
-    use super::super::L2Expr;
     use super::*;
 
     fn src(name: &str) -> L2QueryExpr {
@@ -330,7 +364,7 @@ mod tests {
         // seeded into the usage-derived leaf so they resolve positionally.
         let tree = L2QueryExpr::Sort {
             keys: vec![super::super::query_expr::SortKey {
-                expr: L2Expr::Column(ColumnRef::SampleValue),
+                expr: L2QueryExpr::Column(ColumnRef::SampleValue),
                 ascending: false,
                 nulls_first: false,
             }],

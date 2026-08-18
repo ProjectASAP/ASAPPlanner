@@ -1,12 +1,14 @@
 //! Layer 3 — the canonical intent algebra IR.
 //!
 //! - [`query_expr`] — the canonical, language- and deployment-independent L3
-//!   intent algebra ([`QueryExpr`] + [`AggIntent`]), generic over the
-//!   column-reference state (positional [`ColumnId`] once bound, name-based
-//!   [`ColumnRef`] before).
+//!   intent algebra: one recursive [`QueryExpr`] tree (relational operators
+//!   *and* scalar expression shapes both, since issue #205) + [`AggIntent`],
+//!   generic over the column-reference state (positional [`ColumnId`] once
+//!   bound, name-based [`ColumnRef`] before).
 //! - [`agg_intent`] — the L3 aggregation-intent vocabulary.
-//! - [`expr_ir`] — the scalar expression IR ([`L2Expr`] / [`L3Expr`] /
-//!   [`ColumnRef`]) shared by L2 and L3.
+//! - [`expr_ir`] — the [`ColumnRef`] column-reference type and the scalar
+//!   operator/literal vocabulary ([`L3Scalar`], [`CompareOp`], [`ArithOp`])
+//!   [`QueryExpr`]'s scalar variants are built from.
 //! - [`schema`] — the per-edge [`Schema`] every L3 node carries.
 //! - [`binder`] / [`column_resolution`] — name resolution: turn a `ColumnRef`
 //!   into a positional `ColumnId` against an in-scope [`Schema`].
@@ -43,7 +45,7 @@ pub use column_resolution::{
     output_schema_for_aggregate, resolve_column_ref, resolve_column_refs, resolve_expr,
     ResolveError,
 };
-pub use expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L2Expr, L3Expr, L3Scalar};
+pub use expr_ir::{ArithOp, ColumnRef, CompareOp, L3Scalar};
 pub use query_expr::{
     aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
     InfoMatcher, JoinKind, L2QueryExpr, L3QueryExpr, Predicate, ProjectItem, QueryExpr,

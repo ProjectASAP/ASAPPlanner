@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use asap_types::pre_asap::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Expr, L3Scalar, QueryExpr, Reduction, Source,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Scalar, QueryExpr, Reduction, Source,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{BatchEntry, Query, QueryLanguage, QueryRequirements, QueryWorkload};
@@ -31,7 +31,7 @@ fn bare_selector_is_scan_with_predicates() {
     assert_eq!(predicates.len(), 2);
     assert!(predicates
         .iter()
-        .all(|p| matches!(&p.0, L3Expr::Compare { .. })));
+        .all(|p| matches!(p.0.as_ref(), QueryExpr::Compare { .. })));
 }
 
 #[test]
@@ -43,14 +43,14 @@ fn regex_matcher_lowers_to_regex_compareop() {
     else {
         panic!("expected Scan, got {qe:?}");
     };
-    let L3Expr::Compare { left, op, right } = &predicates[0].0 else {
+    let QueryExpr::Compare { left, op, right } = predicates[0].0.as_ref() else {
         panic!("expected Compare, got {:?}", predicates[0].0);
     };
     assert_eq!(*op, CompareOp::Regex);
     // The label matcher's column is resolved positionally against the scan schema.
     let path_id = schema.column_id("path").expect("path in scan schema");
-    assert!(matches!(left.as_ref(), L3Expr::Column(id) if *id == path_id));
-    assert!(matches!(right.as_ref(), L3Expr::Literal(L3Scalar::Utf8(v)) if v == "/api/.*"));
+    assert!(matches!(left.as_ref(), QueryExpr::Column(id) if *id == path_id));
+    assert!(matches!(right.as_ref(), QueryExpr::Literal(L3Scalar::Utf8(v)) if v == "/api/.*"));
 }
 
 // ── *_over_time → Aggregate over TimeRange ──────────────────────────────────────
@@ -911,7 +911,7 @@ fn quantile_branches(q: &QueryExpr) -> Vec<(String, AggIntent)> {
             let QueryExpr::Relabel { value, child, .. } = c else {
                 panic!("expected Relabel per branch, got {c:?}");
             };
-            let L3Expr::Literal(L3Scalar::Utf8(v)) = value else {
+            let QueryExpr::Literal(L3Scalar::Utf8(v)) = value.as_ref() else {
                 panic!("expected a literal label value, got {value:?}");
             };
             let QueryExpr::Aggregate { measures, .. } = child.as_ref() else {

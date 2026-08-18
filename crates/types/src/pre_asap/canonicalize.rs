@@ -25,7 +25,7 @@
 //! is exactly the SQL alias gap (#20) the old front-end gate missed.
 
 use super::agg_intent::{is_frequency_heavy_hitter, ranking_measure, AggIntent};
-use super::expr_ir::{CompareOp, L3Expr, L3Scalar};
+use super::expr_ir::{CompareOp, L3Scalar};
 use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
 
 /// Rewrite `expr` into its canonical form (bottom-up). Idempotent: a tree that
@@ -52,7 +52,12 @@ fn canon(expr: &mut QueryExpr) {
     }
 }
 
-/// Mutable references to the direct `QueryExpr` children of a node.
+/// Mutable references to the direct **operator** `QueryExpr` children of a
+/// node — `canon`'s own top-down/bottom-up walk only ever visits the
+/// relational skeleton, never descending into a scalar position (`Filter.pred`,
+/// `ProjectItem.expr`, …): none of the three rewrite rules rewrite anything
+/// inside a scalar subtree, so there's nothing to gain by recursing into one,
+/// and every scalar variant (issue #205) hits the catch-all below.
 fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
     use QueryExpr::*;
     match expr {
@@ -76,6 +81,19 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
             vec![left.as_mut(), right.as_mut()]
         }
         BinaryOp { lhs, rhs, .. } => vec![lhs.as_mut(), rhs.as_mut()],
+        Column(_)
+        | Literal(_)
+        | Compare { .. }
+        | BoolAnd(_)
+        | BoolOr(_)
+        | Not(_)
+        | IsNull(_)
+        | IsNotNull(_)
+        | Cast { .. }
+        | InList { .. }
+        | FunctionCall { .. }
+        | Arith { .. }
+        | Case { .. } => vec![],
     }
 }
 
@@ -102,7 +120,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
         return None;
     };
     let [SortKey {
-        expr: L3Expr::Column(sort_col),
+        expr: QueryExpr::Column(sort_col),
         ascending,
         ..
     }] = keys.as_slice()
@@ -115,7 +133,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     // projection to the aggregate's own output column.
     let (agg_expr, ranked_col) = match sort_child.as_ref() {
         QueryExpr::Project { cols, child, .. } => {
-            let L3Expr::Column(underlying) = &cols.get(*sort_col)?.expr else {
+            let QueryExpr::Column(underlying) = &cols.get(*sort_col)?.expr else {
                 return None;
             };
             (child.as_ref(), *underlying)
@@ -187,14 +205,15 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
     let QueryExpr::Filter { pred, child } = expr else {
         return None;
     };
-    let Predicate(L3Expr::Compare { left, op, right }) = pred else {
+    let Predicate(pred_expr) = pred;
+    let QueryExpr::Compare { left, op, right } = pred_expr.as_ref() else {
         return None;
     };
     // `rn <= k` (top-k). `rn < k` would be off-by-one; require `<=`.
     if *op != CompareOp::Le {
         return None;
     }
-    let (L3Expr::Column(rn_col), L3Expr::Literal(L3Scalar::Int64(k))) =
+    let (QueryExpr::Column(rn_col), QueryExpr::Literal(L3Scalar::Int64(k))) =
         (left.as_ref(), right.as_ref())
     else {
         return None;
@@ -207,7 +226,7 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
     // re-exposes the aggregate columns + rn), mapping the rn column through it.
     let (wf_expr, rn_in_wf) = match child.as_ref() {
         QueryExpr::Project { cols, child, .. } => {
-            let L3Expr::Column(underlying) = &cols.get(*rn_col)?.expr else {
+            let QueryExpr::Column(underlying) = &cols.get(*rn_col)?.expr else {
                 return None;
             };
             (child.as_ref(), *underlying)
@@ -286,7 +305,7 @@ mod tests {
 
     fn desc(col: usize) -> Vec<SortKey> {
         vec![SortKey {
-            expr: L3Expr::Column(col),
+            expr: QueryExpr::Column(col),
             ascending: false,
             nulls_first: false,
         }]
@@ -330,11 +349,11 @@ mod tests {
             cols: vec![
                 ProjectItem {
                     alias: None,
-                    expr: L3Expr::Column(0),
+                    expr: QueryExpr::Column(0),
                 },
                 ProjectItem {
                     alias: Some("c".into()),
-                    expr: L3Expr::Column(1),
+                    expr: QueryExpr::Column(1),
                 },
             ],
             qualifier: None,
@@ -358,7 +377,7 @@ mod tests {
         // rejects it (needs descending), so it stays a generic Sort+Limit — the
         // same call PromQL `bottomk` makes (issue #38).
         let asc = vec![SortKey {
-            expr: L3Expr::Column(1),
+            expr: QueryExpr::Column(1),
             ascending: true,
             nulls_first: false,
         }];
@@ -438,7 +457,7 @@ mod tests {
             args: vec![],
             partition_by: GroupKeys::by(vec![2]), // region
             order_by: vec![SortKey {
-                expr: L3Expr::Column(2), // the aggregate output column
+                expr: QueryExpr::Column(2), // the aggregate output column
                 ascending: false,
                 nulls_first: true,
             }],
@@ -446,11 +465,11 @@ mod tests {
             child: Box::new(agg),
         };
         QueryExpr::Filter {
-            pred: Predicate(L3Expr::Compare {
-                left: Box::new(L3Expr::Column(3)), // rn = the appended window column
+            pred: Predicate(Box::new(QueryExpr::Compare {
+                left: Box::new(QueryExpr::Column(3)), // rn = the appended window column
                 op: CompareOp::Le,
-                right: Box::new(L3Expr::Literal(L3Scalar::Int64(5))),
-            }),
+                right: Box::new(QueryExpr::Literal(L3Scalar::Int64(5))),
+            })),
             child: Box::new(wf),
         }
     }
@@ -520,7 +539,7 @@ mod tests {
             args: vec![],
             partition_by: GroupKeys::by(vec![2]),
             order_by: vec![SortKey {
-                expr: L3Expr::Column(2),
+                expr: QueryExpr::Column(2),
                 ascending: false,
                 nulls_first: true,
             }],
@@ -530,11 +549,11 @@ mod tests {
             })),
         };
         let q = QueryExpr::Filter {
-            pred: Predicate(L3Expr::Compare {
-                left: Box::new(L3Expr::Column(0)), // NOT the rn column (index 3)
+            pred: Predicate(Box::new(QueryExpr::Compare {
+                left: Box::new(QueryExpr::Column(0)), // NOT the rn column (index 3)
                 op: CompareOp::Le,
-                right: Box::new(L3Expr::Literal(L3Scalar::Int64(5))),
-            }),
+                right: Box::new(QueryExpr::Literal(L3Scalar::Int64(5))),
+            })),
             child: Box::new(wf),
         };
         assert!(

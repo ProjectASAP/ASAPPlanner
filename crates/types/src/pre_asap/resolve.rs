@@ -72,7 +72,7 @@ fn resolve(tree: &L2QueryExpr, fallback: &Schema) -> Result<L3QueryExpr, Resolve
             let schema = schema.clone().unwrap_or_else(|| fallback.clone());
             let predicates = predicates
                 .iter()
-                .map(|Predicate(e)| Ok(Predicate(resolve_expr(e, &schema)?)))
+                .map(|Predicate(e)| Ok(Predicate(Box::new(resolve_expr(e, &schema)?))))
                 .collect::<Result<Vec<_>, ResolveError>>()?;
             QE::Scan {
                 source: source.clone(),
@@ -92,7 +92,7 @@ fn resolve(tree: &L2QueryExpr, fallback: &Schema) -> Result<L3QueryExpr, Resolve
             let child_schema = child.output_schema()?;
             QE::Relabel {
                 dst: dst.clone(),
-                value: resolve_expr(value, &child_schema)?,
+                value: Box::new(resolve_expr(value, &child_schema)?),
                 child: Box::new(child),
             }
         }
@@ -116,7 +116,7 @@ fn resolve(tree: &L2QueryExpr, fallback: &Schema) -> Result<L3QueryExpr, Resolve
             let child = resolve(child, fallback)?;
             let child_schema = child.output_schema()?;
             QE::Filter {
-                pred: Predicate(resolve_expr(&pred.0, &child_schema)?),
+                pred: Predicate(Box::new(resolve_expr(&pred.0, &child_schema)?)),
                 child: Box::new(child),
             }
         }
@@ -167,7 +167,7 @@ fn resolve(tree: &L2QueryExpr, fallback: &Schema) -> Result<L3QueryExpr, Resolve
                         &measures,
                         output_names,
                     )?;
-                    Ok(Predicate(resolve_expr(h, &out_schema)?))
+                    Ok(Predicate(Box::new(resolve_expr(h, &out_schema)?)))
                 })
                 .transpose()?;
             QE::Aggregate {
@@ -207,7 +207,7 @@ fn resolve(tree: &L2QueryExpr, fallback: &Schema) -> Result<L3QueryExpr, Resolve
             let right = resolve_root_with_inherited(right, &[])?;
             let mut concat = left.output_schema()?;
             concat.columns.extend(right.output_schema()?.columns);
-            let pred = Predicate(resolve_expr(&pred.0, &concat)?);
+            let pred = Predicate(Box::new(resolve_expr(&pred.0, &concat)?));
             QE::Join {
                 kind: kind.clone(),
                 pred,
@@ -336,11 +336,31 @@ fn resolve(tree: &L2QueryExpr, fallback: &Schema) -> Result<L3QueryExpr, Resolve
                 vector_match: vector_match.clone(),
             }
         }
+
+        // The scalar variants (issue #205) are never reached here directly —
+        // `resolve` only ever recurses into `child`/operator positions;
+        // every scalar position (`Predicate`, `ProjectItem.expr`, …) goes
+        // through `resolve_expr` instead, at the operator arm that owns it.
+        other @ (QE::Column(_)
+        | QE::Literal(_)
+        | QE::Compare { .. }
+        | QE::BoolAnd(_)
+        | QE::BoolOr(_)
+        | QE::Not(_)
+        | QE::IsNull(_)
+        | QE::IsNotNull(_)
+        | QE::Cast { .. }
+        | QE::InList { .. }
+        | QE::FunctionCall { .. }
+        | QE::Arith { .. }
+        | QE::Case { .. }) => {
+            unreachable!("resolve reached a scalar QueryExpr variant directly: {other:?}")
+        }
     })
 }
 
 /// The label names an enclosing scope's schema carries beyond the `(ts,
-/// value)` floor — mirrors [`lower::inherited_names`](super::lower).
+/// value)` floor.
 fn inherited_names(schema: &Schema) -> Vec<String> {
     schema
         .columns
