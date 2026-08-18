@@ -2,9 +2,10 @@ use std::fmt;
 
 use asap_types::pre_asap::ResolveTreeError;
 
-/// Errors from lowering a PromQL query (L1 parse → canonical L2, built
-/// directly → [`resolve_root`](asap_types::pre_asap::resolve_root) binds it
-/// to L3, issue #179).
+/// Errors from lowering a PromQL query (parse → the canonical, unresolved
+/// tree, built directly →
+/// [`resolve_root`](asap_types::pre_asap::resolve_root) binds it to the
+/// resolved tree, issue #179).
 ///
 /// Carries no DataFusion type — the PromQL front end never depends on the SQL
 /// stack. The language-neutral variants (`UnsupportedFeature` / `WrongLanguage`
@@ -12,7 +13,7 @@ use asap_types::pre_asap::ResolveTreeError;
 /// shared, so neither front end pulls the other's parser.
 #[derive(Debug)]
 pub enum PromqlError {
-    /// The `promql-parser` crate rejected the query string (L1 parse failure).
+    /// The `promql-parser` crate rejected the query string (parse failure).
     Parse(String),
     /// A PromQL function (`rate`, `*_over_time`, …) not supported in this version.
     UnsupportedFunction(String),
@@ -27,8 +28,8 @@ pub enum PromqlError {
     InvalidParameter(String),
     /// The workload's query language is not PromQL.
     WrongLanguage(String),
-    /// Resolving the canonical L2 tree to L3 failed (name resolution against
-    /// the bound schema).
+    /// Resolving the canonical unresolved tree failed (name resolution
+    /// against the bound schema).
     Convert(ResolveTreeError),
 }
 
@@ -42,7 +43,7 @@ impl fmt::Display for PromqlError {
             Self::MissingArgument(m) => write!(f, "missing argument: {m}"),
             Self::InvalidParameter(m) => write!(f, "invalid parameter: {m}"),
             Self::WrongLanguage(l) => write!(f, "unsupported query language: {l}"),
-            Self::Convert(e) => write!(f, "L2→L3 resolution failed: {e}"),
+            Self::Convert(e) => write!(f, "column resolution failed: {e}"),
         }
     }
 }

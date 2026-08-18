@@ -1,4 +1,4 @@
-//! Export the L3 [`QueryExpr`] tree as a generic node/edge graph, for tools
+//! Export the pre-ASAP [`QueryExpr`] tree as a generic node/edge graph, for tools
 //! that need to render or diff the IR (the `dag_export` example + the
 //! `tools/dag-viewer` viewer — see issue #133) rather than walk it in Rust.
 //!

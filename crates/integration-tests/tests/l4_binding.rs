@@ -1,22 +1,23 @@
-//! End-to-end query-string → L4 pin (issue #98).
+//! End-to-end query-string → post-ASAP IR pin (issue #98).
 //!
-//! Drives the full pipeline — PromQL text → L3 `QueryExpr` (`lower_promql`)
-//! → L4 `SummaryExpr` DAG (`asap_aware_mapping::implement_tree`) — and pins the sketch-bound
-//! shape node by node, including the `(SummaryKind, SummaryParams)` committed
-//! on each edge's schema. This is the design doc's §"L4 — sketch algebra"
+//! Drives the full pipeline — PromQL text → pre-ASAP `QueryExpr`
+//! (`lower_promql`) → post-ASAP `SummaryExpr` DAG
+//! (`asap_aware_mapping::implement_tree`) — and pins the sketch-bound shape
+//! node by node, including the `(SummaryKind, SummaryParams)` committed on
+//! each edge's schema. This is the design doc's §"L4 — sketch algebra"
 //! worked example, running for real.
 
 use asap_aware_mapping::implement_tree;
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
-    L4DataType, L4Schema, SketchQuery, SummaryExpr, SummaryKind, SummaryParams,
+    SketchQuery, SummaryDataType, SummaryExpr, SummaryKind, SummaryParams, SummarySchema,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
 use asap_types::pre_asap::schema::DataType;
 use asap_types::types::AccuracyTarget;
 
-fn dtype<'a>(schema: &'a L4Schema, name: &str) -> &'a L4DataType {
+fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryDataType {
     &schema
         .fields
         .iter()
@@ -57,7 +58,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     assert!(matches!(query, SketchQuery::Quantile { q } if *q == 0.99));
     assert_eq!(
         dtype(&root.schema, "quantile_0_99"),
-        &L4DataType::Primitive(DataType::Float64),
+        &SummaryDataType::Primitive(DataType::Float64),
         "the Sketch(…) type must not propagate past the estimate"
     );
 
@@ -86,7 +87,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
     assert_eq!(
         dtype(&summary_input.schema, "quantile_0_99"),
-        &L4DataType::Sketch(SummaryKind::Kll, SummaryParams::Kll { k: 200 })
+        &SummaryDataType::Sketch(SummaryKind::Kll, SummaryParams::Kll { k: 200 })
     );
 
     // The rate: exact counter-reset-aware accumulator, per-series (labels
@@ -107,7 +108,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     assert_eq!(reduction, &Reduction::PerEntity);
     assert_eq!(
         dtype(&child.schema, "value"),
-        &L4DataType::Sketch(SummaryKind::Rate, SummaryParams::Rate)
+        &SummaryDataType::Sketch(SummaryKind::Rate, SummaryParams::Rate)
     );
     assert_eq!(
         child.schema.time_index,
@@ -115,12 +116,12 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         "per-series keeps the time axis"
     );
 
-    // The leaf: unrewritten L3 pass-through — TimeRange marker over the Scan.
-    let SummaryExpr::Logical(l3_leaf) = &leaf.expr else {
+    // The leaf: unrewritten pass-through — TimeRange marker over the Scan.
+    let SummaryExpr::Logical(logical_leaf) = &leaf.expr else {
         panic!("expected Logical leaf, got {:?}", leaf.expr);
     };
-    let QueryExpr::TimeRange { range, child: scan } = l3_leaf.as_ref() else {
-        panic!("expected TimeRange leaf, got {l3_leaf:?}");
+    let QueryExpr::TimeRange { range, child: scan } = logical_leaf.as_ref() else {
+        panic!("expected TimeRange leaf, got {logical_leaf:?}");
     };
     assert_eq!(range.as_secs(), 300);
     assert!(matches!(scan.as_ref(), QueryExpr::Scan { .. }));
@@ -128,7 +129,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         leaf.schema
             .fields
             .iter()
-            .all(|f| matches!(f.dtype, L4DataType::Primitive(_))),
+            .all(|f| matches!(f.dtype, SummaryDataType::Primitive(_))),
         "logical edges carry only primitive columns"
     );
 }
@@ -159,7 +160,7 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
     );
     assert_eq!(
         dtype(&root.schema, "job"),
-        &L4DataType::Primitive(DataType::Utf8),
+        &SummaryDataType::Primitive(DataType::Utf8),
         "group keys pass through verbatim"
     );
 

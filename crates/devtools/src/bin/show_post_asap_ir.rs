@@ -1,10 +1,10 @@
 // cargo run -p asap-devtools --bin show_post_asap_ir -- queries.txt
 // (or pipe via stdin: cargo run -p asap-devtools --bin show_post_asap_ir < queries.txt)
 //
-// Lowers a batch of ad-hoc SQL/PromQL queries to pre-ASAP IR (L3), then runs
-// the `asap-aware-mapping` L3→L4 binding pass and prints the resulting
-// **post-ASAP IR** (L4, the sketch-bound IR: `SummaryExpr`/`L4Node` — the
-// concrete `SummaryKind`/`SummaryParams` committed per aggregate, or
+// Lowers a batch of ad-hoc SQL/PromQL queries to pre-ASAP IR, then runs the
+// `asap-aware-mapping` pre-ASAP → post-ASAP binding pass and prints the
+// resulting **post-ASAP IR** (the sketch-bound IR: `SummaryExpr`/`SummaryNode`
+// — the concrete `SummaryKind`/`SummaryParams` committed per aggregate, or
 // `Logical` for whatever the pass left untouched). See `show_pre_asap_ir`
 // for the sketch-agnostic IR one layer upstream.
 //

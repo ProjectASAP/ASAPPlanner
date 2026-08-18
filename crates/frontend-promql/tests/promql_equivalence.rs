@@ -1,10 +1,10 @@
-//! PromQL **semantic-equivalence proving** for the L1→L3 lowering.
+//! PromQL **semantic-equivalence proving** for the parse-to-canonical-tree lowering.
 //!
 //! The lowering is a *normalizer*: it should map a whole class of
-//! semantically-equivalent PromQL strings to **one** canonical L3 tree, and
+//! semantically-equivalent PromQL strings to **one** canonical tree, and
 //! must keep semantically-*distinct* queries distinct. This suite proves:
 //!
-//!   1. Equivalence classes collapse to identical L3  (`assert_equiv`).
+//!   1. Equivalence classes collapse to an identical canonical tree  (`assert_equiv`).
 //!   2. Distinct meanings stay distinct                (`assert_distinct`).
 //!   3. The lowering never *wrongly* equates distinct semantics — the cases it
 //!      cannot faithfully distinguish are **rejected**, not silently merged.
@@ -25,30 +25,30 @@ fn lo(q: &str) -> QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("{q:?} should lower: {e}"))
 }
 
-/// Every member of an equivalence class must lower to the *same* L3 tree.
+/// Every member of an equivalence class must lower to the *same* canonical tree.
 fn assert_equiv(class: &[&str]) {
     let first = lo(class[0]);
     for q in &class[1..] {
         assert_eq!(
             lo(q),
             first,
-            "expected {q:?} ≡ {:?}, but they lowered to different L3",
+            "expected {q:?} ≡ {:?}, but they lowered to different trees",
             class[0]
         );
     }
 }
 
-/// Two semantically-distinct queries must lower to *different* L3 trees.
+/// Two semantically-distinct queries must lower to *different* canonical trees.
 fn assert_distinct(a: &str, b: &str) {
     assert_ne!(
         lo(a),
         lo(b),
-        "{a:?} and {b:?} must not collapse to the same L3"
+        "{a:?} and {b:?} must not collapse to the same tree"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Equivalence classes the lowering canonicalises to one L3.
+// 1. Equivalence classes the lowering canonicalises to one shape.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -78,8 +78,8 @@ fn whitespace_is_irrelevant() {
 
 #[test]
 fn label_matcher_order_is_equivalent() {
-    // A matcher set is unordered: same series, so same L3 (FIX: predicates are
-    // now canonicalised by (name, value) at lowering time).
+    // A matcher set is unordered: same series, so same canonical tree (FIX:
+    // predicates are now canonicalised by (name, value) at lowering time).
     assert_equiv(&[r#"up{job="a",env="prod"}"#, r#"up{env="prod",job="a"}"#]);
 }
 
@@ -125,10 +125,11 @@ fn distinct_semantics_stay_distinct() {
 
 #[test]
 fn rate_and_irate_share_the_same_intent() {
-    // L3 captures *intent* ("per-second rate of a counter"), not the estimation
-    // method. `rate` (windowed average) and `irate` (last two samples) differ
-    // only in HOW the rate is estimated — an L4/execution concern — so they
-    // share one L3 intent by design.
+    // The canonical tree captures *intent* ("per-second rate of a counter"),
+    // not the estimation method. `rate` (windowed average) and `irate` (last
+    // two samples) differ only in HOW the rate is estimated — a
+    // post-ASAP/execution concern — so they share one canonical intent by
+    // design.
     assert_equiv(&["rate(m[5m])", "irate(m[5m])"]);
 }
 
@@ -156,7 +157,7 @@ fn changes_and_resets_are_not_count_over_time() {
     // PromQL: count_over_time = #samples, changes = #value-changes,
     // resets = #counter-resets. They previously all collapsed to `Count`; now
     // each lowers to its own intent (issue #44), so all three are pairwise
-    // distinct L3 rather than being rejected or merged.
+    // distinct canonical trees rather than being rejected or merged.
     assert_distinct("changes(m[5m])", "count_over_time(m[5m])");
     assert_distinct("resets(m[5m])", "count_over_time(m[5m])");
     assert_distinct("changes(m[5m])", "resets(m[5m])");
@@ -166,7 +167,7 @@ fn changes_and_resets_are_not_count_over_time() {
 fn group_is_not_sum() {
     // PromQL `group` returns a constant 1 per group; it previously collapsed
     // onto `sum` (sum of values). It now lowers to its own `Group` intent
-    // (issue #49) — distinct L3 from `sum`, not merged.
+    // (issue #49) — a distinct canonical tree from `sum`, not merged.
     assert_distinct("group(up)", "sum(up)");
     assert_distinct("group by (job) (up)", "sum by (job) (up)");
 }

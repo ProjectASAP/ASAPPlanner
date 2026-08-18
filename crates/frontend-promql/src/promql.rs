@@ -1,22 +1,23 @@
-//! Layers 1→2 lowering: PromQL string → the canonical, unresolved
-//! [`L2QueryExpr`](asap_types::pre_asap::query_expr::L2QueryExpr)
+//! PromQL string → the canonical, unresolved
+//! [`UnresolvedQueryExpr`](asap_types::pre_asap::query_expr::UnresolvedQueryExpr)
 //! (`QueryExpr<ColumnRef>`).
 //!
-//! - **L1 (parse)** is delegated to `promql-parser` 0.8.
-//! - **L2** is built *directly in canonical shape* here (issue #179): the walk
-//!   interprets PromQL semantics (range vectors, aggregate operators, label
-//!   matchers) and emits `L2QueryExpr` nodes with unresolved `ColumnRef`s —
-//!   the same tree shape [`resolve_root`](asap_types::pre_asap::resolve_root)
-//!   later binds to canonical, positional `QueryExpr<ColumnId>`. The
-//!   structural decisions a two-layer design would otherwise defer to a
-//!   separate converter (heavy-hitter `topk` recognition, the
-//!   `PerEntity`/`Reduce` reduction choice, `without(...)` grouping) are made
-//!   right here, since a front end building this shape already knows the
-//!   answer at parse time — see `reduction_for` and `mark_without`.
-//!   `resolve_root` is left with exactly the schema-*dependent* work: binding
-//!   every `ColumnRef` to its positional `ColumnId`.
+//! - **Parsing** is delegated to `promql-parser` 0.8.
+//! - **Lowering** builds *directly in canonical shape* here (issue #179): the
+//!   walk interprets PromQL semantics (range vectors, aggregate operators,
+//!   label matchers) and emits `UnresolvedQueryExpr` nodes with unresolved
+//!   `ColumnRef`s — the same tree shape
+//!   [`resolve_root`](asap_types::pre_asap::resolve_root) later binds to
+//!   canonical, positional `QueryExpr<ColumnId>`. The structural decisions a
+//!   separate converter stage would otherwise have to make (heavy-hitter
+//!   `topk` recognition, the `PerEntity`/`Reduce` reduction choice,
+//!   `without(...)` grouping) are made right here, since a front end
+//!   building this shape already knows the answer at parse time — see
+//!   `reduction_for` and `mark_without`. `resolve_root` is left with exactly
+//!   the schema-*dependent* work: binding every `ColumnRef` to its
+//!   positional `ColumnId`.
 //!
-//! # PromQL → canonical L2 mapping (summary)
+//! # PromQL → canonical unresolved-tree mapping (summary)
 //!
 //! | PromQL | Canonical shape |
 //! |---|---|
@@ -33,15 +34,15 @@
 //! | `count_over_time(m[w])` | `Aggregate{[Count], TimeRange{w}}` |
 //! | `last/first/mad/ts_of_min/ts_of_max/ts_of_first/ts_of_last_over_time(m[w])` | `Aggregate{[Last/First/Mad/TsOf…OverTime], TimeRange{w}}` — per-series range reducers (issue #51) |
 //! | `sort`/`sort_desc(v)`, `sort_by_label[_desc](v,"l"…)` | `Sort{value \| label…}` (no `Limit`) — row-preserving reorder (issue #51); `min_of`/`max_of` scalar reducers → #89 |
-//! | `rate/irate(m[w])` | `Aggregate{[Rate], TimeRange{w}}` — `irate` shares the `rate` *intent*; the avg-vs-last-two-samples difference is an L4 estimation method |
+//! | `rate/irate(m[w])` | `Aggregate{[Rate], TimeRange{w}}` — `irate` shares the `rate` *intent*; the avg-vs-last-two-samples difference is a post-ASAP estimation method |
 //! | `increase(m[w])` | `Aggregate{[Increase], TimeRange{w}}` |
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], TimeRange{w}}` — per-series counter-derivative intents (issue #44) |
-//! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is L4 (issue #47) |
+//! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is a post-ASAP concern (issue #47) |
 //! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `Scalar` leaf |
 //! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `EvalTime` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
 //! | `vector(s)` / `scalar(v)` | `VectorFromScalar` / `ScalarFromVector` — the scalar⇄vector bridges (issue #48) |
 //! | `label_replace(v,…)` / `label_join(v,…)` | `Relabel{dst, value}` — per-series label rewrite; value unchanged (issue #50) |
-//! | `info(v, [selector])` | `InfoJoin{selector}` — label-enrichment join against the info metric(s); join keys resolved at L4 (issue #84) |
+//! | `info(v, [selector])` | `InfoJoin{selector}` — label-enrichment join against the info metric(s); join keys resolved during post-ASAP binding (issue #84) |
 //! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
 //! | `OUTER by (dims) (…)` | `Aggregate.reduction = Reduce(by = dims)` (generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[Cardinality], …}` |
@@ -58,16 +59,16 @@ use std::time::{Duration, SystemTime};
 
 use promql_parser::label::{MatchOp, Matcher};
 use promql_parser::parser::{
-    self, token, AggregateExpr, AtModifier, BinaryExpr, Call, Expr, LabelModifier, Offset,
-    VectorMatchCardinality, VectorSelector,
+    self, token, AggregateExpr, AtModifier as ParserAtModifier, BinaryExpr, Call, Expr,
+    LabelModifier, Offset, VectorMatchCardinality, VectorSelector,
 };
 
 use asap_types::pre_asap::agg_intent::{
     is_frequency_heavy_hitter, AggIntent, MathFunc, RankingMeasure, TimeFunc,
 };
 use asap_types::pre_asap::query_expr::{
-    AtModifier as L3AtModifier, BinaryOpKind, GroupKeys, GroupSide, L2QueryExpr as L2, Predicate,
-    Reduction, SortKey, Source, TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
+    AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, Reduction, SortKey, Source,
+    TimeShift, UnresolvedQueryExpr as Unresolved, VectorGrouping, VectorMatch, VectorMatchKind,
 };
 use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, InfoMatcher, SampleKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
@@ -76,7 +77,7 @@ use crate::error::PromqlError as LoweringError;
 
 type Result<T> = std::result::Result<T, LoweringError>;
 
-/// Parses (L1) and lowers (→ L2 relational) a PromQL query string.
+/// Parses and lowers (→ the canonical, unresolved tree) a PromQL query string.
 pub struct PromqlLowerer;
 
 #[derive(Debug, Clone)]
@@ -122,7 +123,7 @@ enum InnerFunc {
     StdDev,
     Variance,
     Count,
-    // `Rate`/`Increase` carry no window of their own — unlike the old L2
+    // `Rate`/`Increase` carry no window of their own — unlike the old Unresolved
     // `AggFunc::Rate{window}`, canonical `AggIntent::Rate`/`Increase` have no
     // window field either; `windowed_aggregate` reads `Inner.window`
     // uniformly for every intent, so it would be a redundant duplicate here.
@@ -139,7 +140,7 @@ enum InnerFunc {
     PredictLinear(f64),
     DoubleExp { smoothing: f64, trend: f64 },
     // Additional range-vector reducers (issue #51). Per-series over the window
-    // (like `*_over_time`); the window rides on the enclosing L2 `Window`.
+    // (like `*_over_time`); the window rides on the enclosing Unresolved `Window`.
     LastOverTime,
     FirstOverTime,
     MadOverTime,
@@ -151,7 +152,7 @@ enum InnerFunc {
 
 struct Inner {
     metric: String,
-    matchers: Vec<L2>,
+    matchers: Vec<Unresolved>,
     window: Option<Duration>,
     func: Option<InnerFunc>,
     /// `offset` / `@` on the selector, carried to the `Source` (issue #40).
@@ -165,7 +166,7 @@ struct Inner {
 const MAX_DEPTH: usize = 256;
 
 impl PromqlLowerer {
-    /// Lower `query` to the canonical L2 tree, threading `accuracy` onto every
+    /// Lower `query` to the canonical Unresolved tree, threading `accuracy` onto every
     /// approximate intent (`Count`, `Quantile`, `Cardinality`, `TopK`) as it is
     /// built — this front end constructs the canonical shape directly (issue
     /// #179), so accuracy is baked in here rather than threaded through a
@@ -175,7 +176,7 @@ impl PromqlLowerer {
     /// `walk` recursion without a parameter on every one of its ~30 mutually
     /// recursive signatures; consulted only at the handful of sites that build
     /// an accuracy-bearing `AggIntent`.
-    pub fn lower(query: &str, accuracy: &AccuracyTarget) -> Result<L2> {
+    pub fn lower(query: &str, accuracy: &AccuracyTarget) -> Result<Unresolved> {
         let _guard = AccuracyGuard::install(accuracy.clone());
         let ast = parser::parse(query).map_err(LoweringError::Parse)?;
         // Reject over-deep nesting up front, so the (mutually-recursive) walk
@@ -250,7 +251,7 @@ fn check_depth(expr: &Expr, budget: usize) -> Result<()> {
     Ok(())
 }
 
-fn walk(expr: &Expr) -> Result<L2> {
+fn walk(expr: &Expr) -> Result<Unresolved> {
     match expr {
         Expr::Aggregate(agg) => walk_aggregate(agg),
         Expr::Call(call) if call.func.name.starts_with("histogram_") => walk_histogram(call),
@@ -262,7 +263,9 @@ fn walk(expr: &Expr) -> Result<L2> {
         Expr::Call(call) if is_sort_fn(call.func.name) => walk_sort(call),
         // A bare `min_of`/`max_of(consts…)` scalar query folds to a `Scalar`
         // leaf; a non-constant argument makes `num_expr` fail → rejected (#89).
-        Expr::Call(call) if is_scalar_reducer_fn(call.func.name) => Ok(L2::Scalar(num_expr(expr)?)),
+        Expr::Call(call) if is_scalar_reducer_fn(call.func.name) => {
+            Ok(Unresolved::Scalar(num_expr(expr)?))
+        }
         Expr::Call(call) if call.func.name == "info" => walk_info(call),
         Expr::Call(call) => walk_call(call),
         Expr::Binary(bin) => walk_binary(bin),
@@ -275,15 +278,15 @@ fn walk(expr: &Expr) -> Result<L2> {
         // else is a vector, sign-flipped by a `Mul` against `Scalar(-1)`. `Mul`
         // is commutative, so operand order carries no hazard (#36).
         Expr::Unary(u) => match num_expr(&u.expr) {
-            Ok(v) => Ok(L2::Scalar(-v)),
-            Err(_) => Ok(L2::BinaryOp {
+            Ok(v) => Ok(Unresolved::Scalar(-v)),
+            Err(_) => Ok(Unresolved::BinaryOp {
                 op: BinaryOpKind::Arith(ArithOp::Mul),
                 lhs: Box::new(walk(&u.expr)?),
-                rhs: Box::new(L2::Scalar(-1.0)),
+                rhs: Box::new(Unresolved::Scalar(-1.0)),
                 vector_match: None,
             }),
         },
-        Expr::Subquery(sq) => Ok(L2::Subquery {
+        Expr::Subquery(sq) => Ok(Unresolved::Subquery {
             range: sq.range,
             resolution: sq.step,
             child: Box::new(walk(&sq.expr)?),
@@ -294,7 +297,7 @@ fn walk(expr: &Expr) -> Result<L2> {
         }
         Expr::MatrixSelector(ms) => {
             let (metric, matchers, shift) = vs_parts(&ms.vs)?;
-            Ok(L2::TimeRange {
+            Ok(Unresolved::TimeRange {
                 range: ms.range,
                 child: Box::new(filtered_source(metric, matchers, shift)),
             })
@@ -302,7 +305,7 @@ fn walk(expr: &Expr) -> Result<L2> {
         // A number literal is a scalar leaf (`v > 5`, or a bare scalar query
         // `5`). String literals only appear as function args (`label_replace`,
         // …), which are not supported, so reject them (issue #35).
-        Expr::NumberLiteral(n) => Ok(L2::Scalar(n.val)),
+        Expr::NumberLiteral(n) => Ok(Unresolved::Scalar(n.val)),
         Expr::StringLiteral(_) => Err(LoweringError::UnsupportedFeature(
             "bare string literal".into(),
         )),
@@ -320,9 +323,9 @@ fn walk(expr: &Expr) -> Result<L2> {
 /// `PromQLSubquery`, not a matrix selector, so the flat template's
 /// `extract_matrix` can't accept it. Lower the sub-query recursively and reduce
 /// it per series (issue #27).
-fn walk_call(call: &Call) -> Result<L2> {
-    if let Some(l2) = range_fn_over_subquery(call)? {
-        return Ok(l2);
+fn walk_call(call: &Call) -> Result<Unresolved> {
+    if let Some(tree) = range_fn_over_subquery(call)? {
+        return Ok(tree);
     }
     build(lower_inner_call(call)?, vec![], Outer::None)
 }
@@ -334,11 +337,11 @@ fn walk_call(call: &Call) -> Result<L2> {
 /// (`changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/
 /// `double_exponential_smoothing`). Each lowers to a per-series `Aggregate{[f]}`
 /// directly over the `PromQLSubquery` — the sub-query is the range context, so
-/// there is no separate `Window`/`TimeRange` (the L2→L3 converter treats the
-/// `Subquery` as the range marker). Returns `None` when `call` isn't a range
+/// there is no separate `Window`/`TimeRange` (this walk treats the `Subquery`
+/// node itself as the range marker). Returns `None` when `call` isn't a range
 /// function or its argument isn't a sub-query, so the flat matrix-selector
 /// template still handles `f(m[w])` (issues #42, #55).
-fn range_fn_over_subquery(call: &Call) -> Result<Option<L2>> {
+fn range_fn_over_subquery(call: &Call) -> Result<Option<Unresolved>> {
     // `rate`/`increase`/`irate` carry their window in the `AggFunc`; over a
     // sub-query that window is the sub-query's own range.
     if let "rate" | "irate" | "increase" = call.func.name {
@@ -417,7 +420,7 @@ fn subquery_range(expr: &Expr) -> Option<Duration> {
     }
 }
 
-fn walk_aggregate(agg: &AggregateExpr) -> Result<L2> {
+fn walk_aggregate(agg: &AggregateExpr) -> Result<Unresolved> {
     let (keys, without) = resolve_group(agg)?;
     let outer = outer_kind(agg)?;
 
@@ -515,7 +518,7 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
     })
 }
 
-/// Wrap an already-lowered L2 subtree in the outer aggregation. This is the
+/// Wrap an already-lowered Unresolved subtree in the outer aggregation. This is the
 /// general-nesting counterpart to [`build`]: where `build` assembles the
 /// two-level shape from a flat [`Inner`], this composes the outer operator over
 /// an arbitrary child (`max(sum by (job) (…))`, `sum(a + b)`, …).
@@ -535,20 +538,21 @@ fn outer_kind(agg: &AggregateExpr) -> Result<Outer> {
 /// `reduction_for` (used by [`windowed_aggregate`]/[`outer_aggregate`] to
 /// build this node) decides `PerEntity` vs `Reduce(by)` *without* knowing
 /// about `without` yet — it only ever sees `by`-mode keys, since `without`'s
-/// excluded-labels list is applied here, after the fact, exactly like the old
-/// L2 `relational` tree's `mark_without` did (the L2→L3 converter read
-/// `without` only after this front-end step had already set it). Whether
+/// excluded-labels list is applied here, after the fact, exactly like the
+/// pre-#179 legacy `relational::QueryExpr` tree's own `mark_without` did (its
+/// converter read `without` only after this front-end step had already set
+/// it). Whether
 /// `reduction_for` picked `PerEntity` (only possible when `keys` was empty)
 /// or `Reduce(by)`, the correct answer under `without(...)` is always
 /// `Reduce(without(keys))`: a `without` grouping is never label-preserving —
 /// per-entity requires `!by.is_without()` — so this both re-tags an existing
 /// `Reduce` and upgrades a wrongly-early `PerEntity` guess, uniformly.
-fn mark_without(l2: L2, without: bool) -> L2 {
+fn mark_without(tree: Unresolved, without: bool) -> Unresolved {
     if !without {
-        return l2;
+        return tree;
     }
-    match l2 {
-        L2::Aggregate {
+    match tree {
+        Unresolved::Aggregate {
             reduction,
             measures,
             output_names,
@@ -559,7 +563,7 @@ fn mark_without(l2: L2, without: bool) -> L2 {
                 Reduction::Reduce(by) => by.keys().to_vec(),
                 Reduction::PerEntity => vec![],
             };
-            L2::Aggregate {
+            Unresolved::Aggregate {
                 reduction: Reduction::Reduce(GroupKeys::without(keys)),
                 measures,
                 output_names,
@@ -571,7 +575,7 @@ fn mark_without(l2: L2, without: bool) -> L2 {
     }
 }
 
-fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L2> {
+fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> Result<Unresolved> {
     Ok(match outer {
         // `walk_aggregate` always passes a real aggregator; `None` can't occur.
         Outer::None => child,
@@ -587,22 +591,22 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L
         Outer::CountValues { label } => {
             outer_aggregate(keys, AggIntent::CountValues { label }, child)
         }
-        Outer::Sample { kind } => L2::Sample {
+        Outer::Sample { kind } => Unresolved::Sample {
             by: keys.into(),
             kind,
             child: Box::new(child),
         },
         Outer::TopK { k, descending } => {
-            let sorted = L2::Sort {
+            let sorted = Unresolved::Sort {
                 keys: vec![SortKey {
-                    expr: L2::Column(ColumnRef::SampleValue),
+                    expr: Unresolved::Column(ColumnRef::SampleValue),
                     ascending: !descending,
                     nulls_first: false,
                 }],
                 partition_by: keys.into(),
                 child: Box::new(child),
             };
-            L2::Limit {
+            Unresolved::Limit {
                 n: k as usize,
                 offset: 0,
                 child: Box::new(sorted),
@@ -628,7 +632,7 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L
 /// per-series `Aggregate{[accessor]}` directly over the (instant) argument.
 /// `histogram_fraction(lower, upper, v)` reads its bounds from args 0/1 and the
 /// vector from arg 2; the rest take the vector at arg 0.
-fn walk_histogram(call: &Call) -> Result<L2> {
+fn walk_histogram(call: &Call) -> Result<Unresolved> {
     if call.func.name == "histogram_quantiles" {
         return walk_histogram_quantiles(call);
     }
@@ -692,7 +696,7 @@ fn walk_histogram(call: &Call) -> Result<L2> {
 /// would make the merged schema silently misdescribe every branch but one. The
 /// quantile is carried by the `label` column, which is exactly where Prometheus
 /// puts it.
-fn walk_histogram_quantiles(call: &Call) -> Result<L2> {
+fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
     let vec_expr = arg(call, 0)?;
     let label = str_arg(call, 1)?;
     if call.args.args.len() < 3 {
@@ -716,7 +720,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<L2> {
             };
             let child = walk(vec_expr)?;
             let reduction = reduction_for(&[], &intent, &child);
-            let quantile = L2::Aggregate {
+            let quantile = Unresolved::Aggregate {
                 reduction,
                 measures: vec![intent],
                 // Each branch aliases its value column to "value" (not the
@@ -726,14 +730,16 @@ fn walk_histogram_quantiles(call: &Call) -> Result<L2> {
                 having: None,
                 child: Box::new(child),
             };
-            Ok(L2::Relabel {
+            Ok(Unresolved::Relabel {
                 dst: label.clone(),
-                value: Box::new(L2::Literal(ScalarValue::Utf8(open_metrics_float(phi)))),
+                value: Box::new(Unresolved::Literal(ScalarValue::Utf8(open_metrics_float(
+                    phi,
+                )))),
                 child: Box::new(quantile),
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(L2::Merge { children: branches })
+    Ok(Unresolved::Merge { children: branches })
 }
 
 /// Prometheus's `labels.FormatOpenMetricsFloat` — how `histogram_quantiles`
@@ -796,9 +802,9 @@ fn is_time_fn(name: &str) -> bool {
 /// `time()` → the `EvalTime` leaf. `timestamp(v)` and the calendar accessors →
 /// `Aggregate{[TimeFn(f)]}` over the argument vector, or over `EvalTime` for the
 /// no-argument calendar forms (`hour()`, `day_of_week()`, …). Issue #46.
-fn walk_time(call: &Call) -> Result<L2> {
+fn walk_time(call: &Call) -> Result<Unresolved> {
     if call.func.name == "time" {
-        return Ok(L2::EvalTime);
+        return Ok(Unresolved::EvalTime);
     }
     let func = match call.func.name {
         "timestamp" => TimeFunc::Timestamp,
@@ -815,7 +821,7 @@ fn walk_time(call: &Call) -> Result<L2> {
     // A calendar function with no argument reads the evaluation time; otherwise
     // it maps over each sample's timestamp in the argument vector.
     let inner = if call.args.args.is_empty() {
-        L2::EvalTime
+        Unresolved::EvalTime
     } else {
         walk(arg(call, 0)?)?
     };
@@ -829,9 +835,9 @@ fn is_presence_fn(name: &str) -> bool {
 
 /// `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` — lowered
 /// to an `Aggregate{[Absent/…]}` over the (instant or range) argument. The
-/// empty-result → synthesized-1-sample logic is an L4/runtime concern; L3 only
-/// marks the operation (issue #47).
-fn walk_presence(call: &Call) -> Result<L2> {
+/// empty-result → synthesized-1-sample logic is a post-ASAP/runtime concern;
+/// the canonical tree only marks the operation (issue #47).
+fn walk_presence(call: &Call) -> Result<Unresolved> {
     let func = match call.func.name {
         "absent" => AggIntent::Absent,
         "absent_over_time" => AggIntent::AbsentOverTime,
@@ -853,12 +859,12 @@ fn is_typeconv_fn(name: &str) -> bool {
 /// `vector(s)` — promote a scalar to a label-less instant vector. `scalar(v)`
 /// — collapse a single-element vector to its value. Both are honest bridge
 /// nodes in the IR; the "exactly one element → NaN otherwise" runtime rule of
-/// `scalar` is an L4/runtime concern (issue #48).
-fn walk_typeconv(call: &Call) -> Result<L2> {
+/// `scalar` is a post-ASAP/runtime concern (issue #48).
+fn walk_typeconv(call: &Call) -> Result<Unresolved> {
     let inner = walk(arg(call, 0)?)?;
     Ok(match call.func.name {
-        "vector" => L2::VectorFromScalar(Box::new(inner)),
-        "scalar" => L2::ScalarFromVector(Box::new(inner)),
+        "vector" => Unresolved::VectorFromScalar(Box::new(inner)),
+        "scalar" => Unresolved::ScalarFromVector(Box::new(inner)),
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     })
 }
@@ -875,7 +881,7 @@ fn is_sort_fn(name: &str) -> bool {
 /// `sort_by_label`/`sort_by_label_desc(v, "l"…)` reorder by label values. All
 /// lower to a bare `Sort` (no `Limit`) over the vector argument — a faithful,
 /// row-preserving reordering (issue #51).
-fn walk_sort(call: &Call) -> Result<L2> {
+fn walk_sort(call: &Call) -> Result<Unresolved> {
     let child = Box::new(walk(arg(call, 0)?)?);
     let (by_value, ascending) = match call.func.name {
         "sort" => (true, true),
@@ -890,7 +896,7 @@ fn walk_sort(call: &Call) -> Result<L2> {
         nulls_first: false,
     };
     let keys = if by_value {
-        vec![sort_key(L2::Column(ColumnRef::SampleValue))]
+        vec![sort_key(Unresolved::Column(ColumnRef::SampleValue))]
     } else {
         // `sort_by_label(v, "l1", "l2", …)` — one key per label arg, in order.
         if call.args.args.len() < 2 {
@@ -899,10 +905,14 @@ fn walk_sort(call: &Call) -> Result<L2> {
             ));
         }
         (1..call.args.args.len())
-            .map(|i| Ok(sort_key(L2::Column(ColumnRef::Named(str_arg(call, i)?)))))
+            .map(|i| {
+                Ok(sort_key(Unresolved::Column(ColumnRef::Named(str_arg(
+                    call, i,
+                )?))))
+            })
             .collect::<Result<Vec<_>>>()?
     };
-    Ok(L2::Sort {
+    Ok(Unresolved::Sort {
         keys,
         partition_by: GroupKeys::none(),
         child,
@@ -912,14 +922,14 @@ fn walk_sort(call: &Call) -> Result<L2> {
 /// `info(v, [selector])` — a label-enrichment join. Lowers the input vector and
 /// wraps it in an `InfoJoin` carrying the (optional) data-label selector's
 /// matchers; the actual join against the info metric — on shared identifying
-/// labels — is resolved at L4 (issue #84).
-fn walk_info(call: &Call) -> Result<L2> {
+/// labels — is resolved during post-ASAP binding (issue #84).
+fn walk_info(call: &Call) -> Result<Unresolved> {
     let child = Box::new(walk(arg(call, 0)?)?);
     let selector = match call.args.args.get(1) {
         Some(sel) => info_selector(sel)?,
         None => Vec::new(), // default: enrich from `target_info`
     };
-    Ok(L2::InfoJoin { selector, child })
+    Ok(Unresolved::InfoJoin { selector, child })
 }
 
 /// Extract the `info` data-label selector's matchers. Unlike an ordinary
@@ -962,8 +972,8 @@ fn is_label_fn(name: &str) -> bool {
 /// expression that computes the destination label: `label_replace` a regex
 /// capture-expansion, `label_join` a separator-joined concatenation. Sample
 /// values are untouched; the regex-match-or-passthrough and capture-expansion
-/// are L4/runtime concerns (issue #50).
-fn walk_label(call: &Call) -> Result<L2> {
+/// are post-ASAP/runtime concerns (issue #50).
+fn walk_label(call: &Call) -> Result<Unresolved> {
     let child = Box::new(walk(arg(call, 0)?)?);
     match call.func.name {
         "label_replace" => {
@@ -971,15 +981,15 @@ fn walk_label(call: &Call) -> Result<L2> {
             let replacement = str_arg(call, 2)?;
             let src = str_arg(call, 3)?;
             let regex = str_arg(call, 4)?;
-            let value = L2::FunctionCall {
+            let value = Unresolved::FunctionCall {
                 name: "label_replace".into(),
                 args: vec![
-                    L2::Column(ColumnRef::Named(src)),
-                    L2::Literal(ScalarValue::Utf8(regex)),
-                    L2::Literal(ScalarValue::Utf8(replacement)),
+                    Unresolved::Column(ColumnRef::Named(src)),
+                    Unresolved::Literal(ScalarValue::Utf8(regex)),
+                    Unresolved::Literal(ScalarValue::Utf8(replacement)),
                 ],
             };
-            Ok(L2::Relabel {
+            Ok(Unresolved::Relabel {
                 dst,
                 value: Box::new(value),
                 child,
@@ -994,15 +1004,15 @@ fn walk_label(call: &Call) -> Result<L2> {
             }
             let dst = str_arg(call, 1)?;
             let sep = str_arg(call, 2)?;
-            let mut args = vec![L2::Literal(ScalarValue::Utf8(sep))];
+            let mut args = vec![Unresolved::Literal(ScalarValue::Utf8(sep))];
             for i in 3..call.args.args.len() {
-                args.push(L2::Column(ColumnRef::Named(str_arg(call, i)?)));
+                args.push(Unresolved::Column(ColumnRef::Named(str_arg(call, i)?)));
             }
-            let value = L2::FunctionCall {
+            let value = Unresolved::FunctionCall {
                 name: "label_join".into(),
                 args,
             };
-            Ok(L2::Relabel {
+            Ok(Unresolved::Relabel {
                 dst,
                 value: Box::new(value),
                 child,
@@ -1050,9 +1060,9 @@ fn is_math_fn(name: &str) -> bool {
 /// A math / trig function — a per-series element-wise value transform, lowered
 /// to a per-series `Aggregate{[Math(f)]}` over the (instant) argument vector.
 /// `pi()` is the constant π, lowered to a `Scalar` leaf (issue #45).
-fn walk_math(call: &Call) -> Result<L2> {
+fn walk_math(call: &Call) -> Result<Unresolved> {
     if call.func.name == "pi" {
-        return Ok(L2::Scalar(std::f64::consts::PI));
+        return Ok(Unresolved::Scalar(std::f64::consts::PI));
     }
     let func = match call.func.name {
         "abs" => MathFunc::Abs,
@@ -1203,7 +1213,7 @@ fn selector_is_bucket(vs: &VectorSelector) -> bool {
         || vs.matchers.matchers.iter().any(|m| m.name == "le")
 }
 
-fn walk_binary(bin: &BinaryExpr) -> Result<L2> {
+fn walk_binary(bin: &BinaryExpr) -> Result<Unresolved> {
     let lhs = scalar_or_vector(&bin.lhs)?;
     let rhs = scalar_or_vector(&bin.rhs)?;
     let op = binop(bin.op.id())?;
@@ -1237,7 +1247,7 @@ fn walk_binary(bin: &BinaryExpr) -> Result<L2> {
             grouping,
         }
     });
-    Ok(L2::BinaryOp {
+    Ok(Unresolved::BinaryOp {
         op,
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
@@ -1374,7 +1384,7 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
 
 /// Assemble the Layer-2 tree from a lowered inner vector, the resolved group
 /// keys, and the enclosing aggregator shape.
-fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
+fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved> {
     match outer {
         Outer::None => match &inner.func {
             None => Ok(filtered_source(inner.metric, inner.matchers, inner.shift)),
@@ -1421,7 +1431,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
                 Some(intent) => windowed_aggregate(inner, vec![], intent),
                 None => filtered_source(inner.metric, inner.matchers, inner.shift),
             };
-            Ok(L2::Sample {
+            Ok(Unresolved::Sample {
                 by: keys.into(),
                 kind,
                 child: Box::new(base),
@@ -1433,20 +1443,21 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
             // over avg/quantile/rate, a bare selector's raw value, all bottomk)
             // is a generic order-by-value + limit and stays as the `Sort + Limit`
             // operator pair. The descending-plus-measure rule is shared with the
-            // L3 canonicalize promotion so the two cannot drift (issue #38).
+            // canonicalize-pass promotion so the two cannot drift (issue #38).
             let measure = match inner.func {
                 Some(InnerFunc::Count) => RankingMeasure::Frequency,
                 _ => RankingMeasure::NonAdditive,
             };
             let heavy_hitter = is_frequency_heavy_hitter(descending, measure);
             if heavy_hitter {
-                // Preserve the Count intent in L3 so the intent algebra is
-                // explicit about what is being computed. L4 may fuse the Count
-                // and TopK into a single-pass heavy-hitter sketch (SpaceSaving /
-                // CMS-with-heap), but that is a cost-model decision, not an L3
-                // concern.
+                // Preserve the Count intent in the canonical tree so the
+                // intent algebra is explicit about what is being computed.
+                // Post-ASAP binding may fuse the Count and TopK into a
+                // single-pass heavy-hitter sketch (SpaceSaving /
+                // CMS-with-heap), but that is a cost-model decision, not a
+                // canonical-IR concern.
                 let count_agg = windowed_aggregate(inner, vec![], inner_intent(&InnerFunc::Count));
-                Ok(L2::Aggregate {
+                Ok(Unresolved::Aggregate {
                     // A ranking always reduces (a `by`-empty TopK ranks the
                     // whole input into one ordering, never per-entity).
                     reduction: Reduction::Reduce(keys.into()),
@@ -1468,22 +1479,22 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
                 // (PromQL `topk` ranks the raw samples, it does not sum them) and
                 // destructive — the cross-series `Sum` collapses every label,
                 // including the `by (…)` partition keys, so they no longer
-                // resolve at L3 (issue #30). Keep the selector label-preserving so
+                // resolve (issue #30). Keep the selector label-preserving so
                 // `Sort.partition_by` can rank within each group (issue #12).
                 let base = match inner.func.as_ref().map(inner_intent) {
                     Some(intent) => windowed_aggregate(inner, vec![], intent),
                     None => filtered_source(inner.metric, inner.matchers, inner.shift),
                 };
-                let sorted = L2::Sort {
+                let sorted = Unresolved::Sort {
                     keys: vec![SortKey {
-                        expr: L2::Column(ColumnRef::SampleValue),
+                        expr: Unresolved::Column(ColumnRef::SampleValue),
                         ascending: !descending,
                         nulls_first: false,
                     }],
                     partition_by: keys.into(),
                     child: Box::new(base),
                 };
-                Ok(L2::Limit {
+                Ok(Unresolved::Limit {
                     n: k as usize,
                     offset: 0,
                     child: Box::new(sorted),
@@ -1503,9 +1514,12 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
 fn reduction_for(
     keys: &[ColumnRef],
     intent: &AggIntent<ColumnRef>,
-    child: &L2,
+    child: &Unresolved,
 ) -> Reduction<ColumnRef> {
-    let is_range_child = matches!(child, L2::TimeRange { .. } | L2::Subquery { .. });
+    let is_range_child = matches!(
+        child,
+        Unresolved::TimeRange { .. } | Unresolved::Subquery { .. }
+    );
     if keys.is_empty() && (intent.is_per_series() || is_range_child) {
         Reduction::PerEntity
     } else {
@@ -1517,20 +1531,24 @@ fn reduction_for(
 /// in `TimeRange` when there's a window — including for `Rate`/`Increase`,
 /// whose window rides on `inner.window` too (set redundantly alongside the
 /// intent itself): canonical `AggIntent::Rate`/`Increase` carry no window
-/// field of their own, unlike the old L2 `AggFunc::Rate{window}` — "the range
+/// field of their own, unlike the old Unresolved `AggFunc::Rate{window}` — "the range
 /// is on the enclosing `TimeRange` node" is now true unconditionally, so
 /// there's no more `skip_window` special case.
-fn windowed_aggregate(inner: Inner, keys: Vec<ColumnRef>, intent: AggIntent<ColumnRef>) -> L2 {
+fn windowed_aggregate(
+    inner: Inner,
+    keys: Vec<ColumnRef>,
+    intent: AggIntent<ColumnRef>,
+) -> Unresolved {
     let base = filtered_source(inner.metric, inner.matchers, inner.shift);
     let child = match inner.window {
-        Some(w) => L2::TimeRange {
+        Some(w) => Unresolved::TimeRange {
             range: w,
             child: Box::new(base),
         },
         None => base,
     };
     let reduction = reduction_for(&keys, &intent, &child);
-    L2::Aggregate {
+    Unresolved::Aggregate {
         reduction,
         measures: vec![intent],
         // A single empty entry — never an override — so the resolver keeps
@@ -1542,12 +1560,16 @@ fn windowed_aggregate(inner: Inner, keys: Vec<ColumnRef>, intent: AggIntent<Colu
     }
 }
 
-/// `Aggregate{reduction, [intent]}` directly over an existing L2 subtree — the
+/// `Aggregate{reduction, [intent]}` directly over an existing Unresolved subtree — the
 /// OUTER level of a two-level aggregation such as `sum(rate(…))` or the
 /// `Aggregate{[Quantile]}` that wraps a `histogram_quantile` argument.
-fn outer_aggregate(keys: Vec<ColumnRef>, intent: AggIntent<ColumnRef>, child: L2) -> L2 {
+fn outer_aggregate(
+    keys: Vec<ColumnRef>,
+    intent: AggIntent<ColumnRef>,
+    child: Unresolved,
+) -> Unresolved {
     let reduction = reduction_for(&keys, &intent, &child);
-    L2::Aggregate {
+    Unresolved::Aggregate {
         reduction,
         measures: vec![intent],
         output_names: vec![String::new()],
@@ -1556,8 +1578,8 @@ fn outer_aggregate(keys: Vec<ColumnRef>, intent: AggIntent<ColumnRef>, child: L2
     }
 }
 
-fn filtered_source(metric: String, matchers: Vec<L2>, shift: TimeShift) -> L2 {
-    let scan = L2::Scan {
+fn filtered_source(metric: String, matchers: Vec<Unresolved>, shift: TimeShift) -> Unresolved {
+    let scan = Unresolved::Scan {
         source: Source::TimeSeries { metric },
         predicates: matchers
             .into_iter()
@@ -1569,7 +1591,7 @@ fn filtered_source(metric: String, matchers: Vec<L2>, shift: TimeShift) -> L2 {
     if shift.is_identity() {
         scan
     } else {
-        L2::TimeShift {
+        Unresolved::TimeShift {
             shift,
             child: Box::new(scan),
         }
@@ -1705,12 +1727,12 @@ fn resolve_group(agg: &AggregateExpr) -> Result<(Vec<ColumnRef>, bool)> {
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
-fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2>, TimeShift)> {
+fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<Unresolved>, TimeShift)> {
     // A non-equality `__name__` matcher (`=~` / `!~` / `!=`) selects *across*
-    // metric names. The L3 `Source::TimeSeries { metric }` carries a single
-    // concrete metric name, so there is no representation for a regex/negated
-    // name match — reject rather than mislower it to a literal metric named
-    // after the pattern (issue #67). An equality `__name__` (`{__name__="up"}`)
+    // metric names. `Source::TimeSeries { metric }` carries a single concrete
+    // metric name, so there is no representation for a regex/negated name
+    // match — reject rather than mislower it to a literal metric named after
+    // the pattern (issue #67). An equality `__name__` (`{__name__="up"}`)
     // still names the metric below.
     if let Some(m) = vs
         .matchers
@@ -1720,7 +1742,7 @@ fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2>, TimeShift)> {
     {
         return Err(LoweringError::UnsupportedFeature(format!(
             "non-equality `__name__` matcher ({}{:?}) selects across metric names, \
-             which has no single-metric L3 representation",
+             which has no single-metric canonical representation",
             m.name, m.op
         )));
     }
@@ -1742,7 +1764,7 @@ fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2>, TimeShift)> {
         .filter(|m| m.name != "__name__")
         .collect();
     ms.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.value.cmp(&b.value)));
-    let matchers = ms.into_iter().map(matcher_to_l3expr).collect();
+    let matchers = ms.into_iter().map(matcher_to_compare).collect();
     let shift = time_shift(vs.offset.as_ref(), vs.at.as_ref())?;
     Ok((metric, matchers, shift))
 }
@@ -1750,7 +1772,7 @@ fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2>, TimeShift)> {
 /// Convert the parser's `offset` / `@` modifiers into a [`TimeShift`] (issue
 /// #40). Offset is signed milliseconds; `@ <ts>` (parser seconds → ms) becomes
 /// an absolute anchor, `@ start()`/`@ end()` the range bounds.
-fn time_shift(offset: Option<&Offset>, at: Option<&AtModifier>) -> Result<TimeShift> {
+fn time_shift(offset: Option<&Offset>, at: Option<&ParserAtModifier>) -> Result<TimeShift> {
     let offset_ms = match offset {
         None => 0,
         Some(Offset::Pos(d)) => duration_ms(*d)?,
@@ -1758,9 +1780,9 @@ fn time_shift(offset: Option<&Offset>, at: Option<&AtModifier>) -> Result<TimeSh
     };
     let at = match at {
         None => None,
-        Some(AtModifier::Start) => Some(L3AtModifier::Start),
-        Some(AtModifier::End) => Some(L3AtModifier::End),
-        Some(AtModifier::At(t)) => Some(L3AtModifier::Timestamp(system_time_ms(*t)?)),
+        Some(ParserAtModifier::Start) => Some(AtModifier::Start),
+        Some(ParserAtModifier::End) => Some(AtModifier::End),
+        Some(ParserAtModifier::At(t)) => Some(AtModifier::Timestamp(system_time_ms(*t)?)),
     };
     Ok(TimeShift { offset_ms, at })
 }
@@ -1785,21 +1807,21 @@ fn system_time_ms(t: SystemTime) -> Result<i64> {
     })
 }
 
-fn matcher_to_l3expr(m: &Matcher) -> L2 {
+fn matcher_to_compare(m: &Matcher) -> Unresolved {
     let op = match &m.op {
         MatchOp::Equal => CompareOp::Eq,
         MatchOp::NotEqual => CompareOp::Ne,
         MatchOp::Re(_) => CompareOp::Regex,
         MatchOp::NotRe(_) => CompareOp::NotRegex,
     };
-    L2::Compare {
-        left: Box::new(L2::Column(ColumnRef::Named(m.name.clone()))),
+    Unresolved::Compare {
+        left: Box::new(Unresolved::Column(ColumnRef::Named(m.name.clone()))),
         op,
-        right: Box::new(L2::Literal(ScalarValue::Utf8(m.value.clone()))),
+        right: Box::new(Unresolved::Literal(ScalarValue::Utf8(m.value.clone()))),
     }
 }
 
-fn extract_matrix(expr: &Expr) -> Result<(String, Vec<L2>, Duration, TimeShift)> {
+fn extract_matrix(expr: &Expr) -> Result<(String, Vec<Unresolved>, Duration, TimeShift)> {
     match expr {
         Expr::MatrixSelector(ms) => {
             let (metric, matchers, shift) = vs_parts(&ms.vs)?;
@@ -1902,9 +1924,9 @@ fn is_scalar_reducer_fn(name: &str) -> bool {
 
 /// A `BinaryOp` operand: fold a pure-scalar expression (`5`, `10*1024*1024`) to
 /// a `Scalar` leaf, otherwise walk it as a vector (issue #35).
-fn scalar_or_vector(expr: &Expr) -> Result<L2> {
+fn scalar_or_vector(expr: &Expr) -> Result<Unresolved> {
     match num_expr(expr) {
-        Ok(v) => Ok(L2::Scalar(v)),
+        Ok(v) => Ok(Unresolved::Scalar(v)),
         Err(_) => walk(expr),
     }
 }

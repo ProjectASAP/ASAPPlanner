@@ -12,8 +12,8 @@ use thiserror::Error;
 use super::agg_intent::AggIntent;
 use super::expr_ir::ColumnRef;
 use super::query_expr::{
-    aggregate_output_schema, GroupKeys, L2QueryExpr, L3QueryExpr, QueryExpr, QueryExprError,
-    Reduction,
+    aggregate_output_schema, GroupKeys, QueryExpr, QueryExprError, Reduction, ResolvedQueryExpr,
+    UnresolvedQueryExpr,
 };
 use super::schema::{ColumnId, DataType, Schema};
 
@@ -110,16 +110,19 @@ pub fn resolve_group_keys_promql(
         .collect()
 }
 
-/// Resolve a name-based scalar [`L2QueryExpr`] (one of `QueryExpr`'s scalar
-/// variants, issue #205) into a positional [`L3QueryExpr`] by resolving every
+/// Resolve a name-based scalar [`UnresolvedQueryExpr`] (one of `QueryExpr`'s scalar
+/// variants, issue #205) into a positional [`ResolvedQueryExpr`] by resolving every
 /// column reference against `schema`. Structural otherwise. `expr` must be
 /// one of the scalar variants — an operator variant here is a construction
 /// bug, not a shape this needs to handle silently.
-pub fn resolve_expr(expr: &L2QueryExpr, schema: &Schema) -> Result<L3QueryExpr, ResolveError> {
-    let boxed = |e: &L2QueryExpr| -> Result<Box<L3QueryExpr>, ResolveError> {
+pub fn resolve_expr(
+    expr: &UnresolvedQueryExpr,
+    schema: &Schema,
+) -> Result<ResolvedQueryExpr, ResolveError> {
+    let boxed = |e: &UnresolvedQueryExpr| -> Result<Box<ResolvedQueryExpr>, ResolveError> {
         Ok(Box::new(resolve_expr(e, schema)?))
     };
-    let each = |es: &[L2QueryExpr]| -> Result<Vec<L3QueryExpr>, ResolveError> {
+    let each = |es: &[UnresolvedQueryExpr]| -> Result<Vec<ResolvedQueryExpr>, ResolveError> {
         es.iter().map(|e| resolve_expr(e, schema)).collect()
     };
     Ok(match expr {
@@ -344,7 +347,7 @@ mod tests {
         // for the same aggregate. Before the dedup this diverged on a per-series
         // reduction — the HAVING mirror lacked the per-series branch and would
         // collapse `[ts, value]` to a single `rate` column.
-        use crate::pre_asap::query_expr::{QueryExpr as L3, Source};
+        use crate::pre_asap::query_expr::Source;
         use std::time::Duration;
 
         let leaf_schema = Schema::with_time_index(
@@ -355,19 +358,19 @@ mod tests {
             0,
             vec![],
         );
-        let scan = L3::Scan {
+        let scan = QueryExpr::Scan {
             source: Source::TimeSeries { metric: "m".into() },
             predicates: vec![],
             schema: leaf_schema.clone(),
         };
         // Aggregate{ reduction: PerEntity, [Rate], child: TimeRange{ Scan } } —
         // a per-series reduction (label-preserving).
-        let agg = L3::Aggregate {
+        let agg = QueryExpr::Aggregate {
             reduction: Reduction::PerEntity,
             measures: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
-            child: Box::new(L3::TimeRange {
+            child: Box::new(QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
                 child: Box::new(scan),
             }),

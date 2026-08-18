@@ -1,14 +1,14 @@
-//! Layer 3 aggregation-intent vocabulary — "what to compute, not how".
+//! The pre-ASAP aggregation-intent vocabulary — "what to compute, not how".
 //!
-//! L3 carries intent ("compute a quantile to ε=0.01 accuracy"); the choice
-//! between `HashAgg` / `SortAgg` / `SketchAgg(KLL{k=200})` is an L4 cost-aware
-//! decision, not encoded here.
+//! This IR carries intent ("compute a quantile to ε=0.01 accuracy"); the
+//! choice between `HashAgg` / `SortAgg` / `SketchAgg(KLL{k=200})` is a
+//! post-ASAP cost-aware decision, not encoded here.
 //!
 //! `AggIntent::TopK` is a first-class *intent*: "the k most frequent keys by
 //! value, to accuracy ε." Like `Quantile`, the exact-vs-approximate
 //! realisation — an exact heap / sort+limit when `accuracy: Exact`, a
-//! heavy-hitter sketch when approximate — is an L4 cost-aware decision, not
-//! encoded here. The semantic distinction that *is* made at lowering is
+//! heavy-hitter sketch when approximate — is a post-ASAP cost-aware decision,
+//! not encoded here. The semantic distinction that *is* made at lowering is
 //! intent vs operator: a heavy-hitter aggregate becomes `TopK`, whereas a
 //! generic `ORDER BY value LIMIT k` stays as the `QueryExpr::Sort + Limit`
 //! operator pair.
@@ -19,7 +19,7 @@ use crate::pre_asap::query_expr::DataModel;
 use crate::pre_asap::schema::{Column, ColumnId, DataType};
 use crate::types::AccuracyTarget;
 
-/// "What to compute" at L3 — the vocabulary the planner pivots on.
+/// "What to compute" — the vocabulary the planner pivots on.
 ///
 /// Grouping for `TopK` rides on the enclosing `QueryExpr::Aggregate.by`
 /// (positional `ColumnId`s), like every other aggregate; the intent itself
@@ -177,8 +177,8 @@ pub enum AggIntent<C = ColumnId> {
     // ── Presence functions (issue #47) ───────────────────────────────────
     // `absent`/`present_over_time` — the value/emptiness of the argument
     // determines the output. The empty-result → synthesized-1-sample logic is
-    // an L4/runtime concern; L3 only marks the operation. Modelled as
-    // label-preserving so the argument's (matcher-derived) labels — which
+    // a post-ASAP/runtime concern; this IR only marks the operation.
+    // Modelled as label-preserving so the argument's (matcher-derived) labels — which
     // `absent` synthesizes onto its output — stay in the schema.
     /// PromQL `absent(v)` — a 1-sample vector when the instant vector `v` has no
     /// matching series, else empty.
@@ -234,7 +234,7 @@ pub enum AggIntent<C = ColumnId> {
     /// A deployment-model-specific intent this core vocabulary doesn't
     /// (and shouldn't) know the shape of. First step toward issue #131
     /// ("add an explicit registration API for extending query / sketch /
-    /// primitive / data types") applied to L3: rather than growing
+    /// primitive / data types") applied to this IR: rather than growing
     /// `AggIntent` for every capability a single deployment model needs
     /// (which would turn this shared vocabulary into a dumping ground —
     /// core only grows for intents ≥2 deployment models actually use),
@@ -338,8 +338,9 @@ pub enum MathFunc {
 // `asap_frontend_promql::promql::reduction_for`) — so they stay generic
 // alongside `input_col`, in one `impl<C>` block.
 impl<C: Clone> AggIntent<C> {
-    /// Which data model this intent semantically requires. L4 rules consult
-    /// this to skip non-applicable intents (e.g. `Rate` over a tabular source).
+    /// Which data model this intent semantically requires. Post-ASAP binding
+    /// rules consult this to skip non-applicable intents (e.g. `Rate` over a
+    /// tabular source).
     pub fn requires(&self) -> DataModel {
         match self {
             Self::Rate
@@ -451,8 +452,8 @@ impl<C: Clone> AggIntent<C> {
                 DataType::Float64,
                 false,
             ),
-            // TopK output is a per-row struct/list; modeled as Utf8 at L3
-            // (the L4 sketch-bound IR upgrades the dtype).
+            // TopK output is a per-row struct/list; modeled as Utf8 here
+            // (the post-ASAP sketch-bound IR upgrades the dtype).
             AggIntent::TopK { k, .. } => col(&format!("topk_{k}"), DataType::Utf8, false),
             AggIntent::Cardinality { .. } => col("cardinality", DataType::Int64, false),
             AggIntent::Rate => col("rate", DataType::Float64, false),
@@ -541,7 +542,7 @@ pub enum RankingMeasure {
     /// Sketchable in principle (weighted SpaceSaving), but no weighted
     /// heavy-hitter sketch is realised yet, so a `sum`-ranked top-k currently
     /// stays a generic `Sort + Limit`. Reserved so the axis is explicit; the
-    /// realisation is L4 sketch selection (issues #6/#33).
+    /// realisation is post-ASAP sketch selection (issues #6/#33).
     WeightedSum,
     /// A non-additive measure (`avg` / `quantile` / `min` / `max`) or a raw,
     /// un-aggregated value. Never a heavy-hitter — always generic.
@@ -583,7 +584,7 @@ pub fn ranking_measure(agg: &AggIntent) -> RankingMeasure {
 /// - the PromQL front-end gate, on `topk(k, count_over_time(…))` — `descending`
 ///   is the `topk`-vs-`bottomk` choice, `measure` is the inner range function
 ///   (`count_over_time` → `Frequency`, else `NonAdditive`);
-/// - the shared L3 canonicalize promotion, on a
+/// - the shared canonicalize promotion, on a
 ///   `Limit { Sort { … Aggregate([agg]) } }` — `descending` is the sort key's
 ///   direction, `measure` is [`ranking_measure`] of the ranked aggregate.
 ///
@@ -790,8 +791,8 @@ mod tests {
         }
     }
 
-    /// `col` is `#[serde(default)]`, so L3 serialized before issue #115 — with
-    /// no `col` key — still deserializes, as the sample-value convention `None`.
+    /// `col` is `#[serde(default)]`, so a tree serialized before issue #115 —
+    /// with no `col` key — still deserializes, as the sample-value convention `None`.
     #[test]
     fn agg_intent_serde_reads_pre_115_payloads() {
         let legacy = r#"{"kind":"quantile","q":0.99,"accuracy":"Exact"}"#;

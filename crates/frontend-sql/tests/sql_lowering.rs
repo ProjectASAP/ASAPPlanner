@@ -1,9 +1,9 @@
-//! End-to-end SQL → L2 → canonical L3 lowering tests (positional IR).
+//! End-to-end SQL → unresolved → canonical tree lowering tests (positional IR).
 //!
 //! Validates the DataFusion front end: SQL parses + plans, lowers directly to
-//! the canonical L2 shape (`QueryExpr<ColumnRef>`, issue #179), and the shared
-//! `resolve_root` produces positional canonical L3 (the same resolver the
-//! PromQL path uses).
+//! the canonical, unresolved shape (`QueryExpr<ColumnRef>`, issue #179), and
+//! the shared `resolve_root` produces the positional, resolved canonical
+//! tree (the same resolver the PromQL path uses).
 
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -166,8 +166,8 @@ async fn multi_aggregate_group_by_binds_columns_positionally() {
 async fn projection_over_aggregate_resolves_output_types_via_output_names() {
     // The enclosing Projection references the aggregates by DataFusion's
     // generated names (e.g. "sum(metrics.bytes)"); output_names threads those
-    // onto the L3 Aggregate so the Project resolves real types — not the Utf8
-    // fallback that an unresolved column would get.
+    // onto the canonical Aggregate so the Project resolves real types — not
+    // the Utf8 fallback that an unresolved column would get.
     let qe = lower("SELECT SUM(bytes), AVG(latency) FROM metrics").await;
     let schema = qe
         .output_schema()
@@ -212,7 +212,7 @@ async fn single_agg_group_by_keeps_key_in_output_schema() {
 #[tokio::test]
 async fn count_ranked_topk_is_heavy_hitter() {
     // `ORDER BY COUNT(*) DESC LIMIT k` over a single COUNT aggregate is the one
-    // case the heavy-hitter (frequency) sketch is correct for. The shared L3
+    // case the heavy-hitter (frequency) sketch is correct for. The shared
     // `canonicalize` pass (issue #34) promotes it to the canonical two-level
     // form: an outer global `TopK` (by: []) over the explicit inner `Count`
     // grouped by `service`.
@@ -245,7 +245,7 @@ async fn count_ranked_topk_is_heavy_hitter() {
 async fn count_ranked_topk_via_alias_is_also_heavy_hitter() {
     // Regression for #20: aliasing `COUNT(*)` in the ORDER BY used to defeat the
     // SQL front-end gate. The positional `canonicalize` pass now promotes it too,
-    // so the aliased and inline forms produce identical L3.
+    // so the aliased and inline forms produce an identical canonical tree.
     let inline = lower(
         "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 10",
     )
@@ -286,8 +286,8 @@ async fn non_count_ranked_limit_keeps_the_aggregate() {
 
 #[tokio::test]
 async fn distinct_value_reducer_is_rejected_not_dropped() {
-    // L3 has no distinct-Sum; SUM(DISTINCT x) must be rejected, not silently
-    // lowered as SUM(x).
+    // The canonical intent algebra has no distinct-Sum; SUM(DISTINCT x) must
+    // be rejected, not silently lowered as SUM(x).
     let res = lower_sql(
         "SELECT SUM(DISTINCT bytes) FROM metrics",
         &catalog(),
@@ -299,9 +299,10 @@ async fn distinct_value_reducer_is_rejected_not_dropped() {
 
 #[tokio::test]
 async fn aggregate_over_an_expression_reduces_a_derived_column() {
-    // L3 reduces a column, not an arbitrary expression. `SUM(bytes + 1)` used to
-    // be rejected for that reason; since #110 the expression is materialized as
-    // a derived column in a `Project` beneath the aggregate, and reduced there.
+    // The canonical `AggIntent` reduces a column, not an arbitrary expression.
+    // `SUM(bytes + 1)` used to be rejected for that reason; since #110 the
+    // expression is materialized as a derived column in a `Project` beneath
+    // the aggregate, and reduced there.
     let qe = lower("SELECT SUM(bytes + 1) FROM metrics").await;
     let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
     assert!(
@@ -349,7 +350,7 @@ async fn select_distinct_lowers_to_distinct_with_positional_cols() {
 
 #[tokio::test]
 async fn inner_join_lowers_to_join_over_two_scans() {
-    // INNER JOIN over two distinct tables → L3 Join with both leaves as Scans.
+    // INNER JOIN over two distinct tables → a canonical Join with both leaves as Scans.
     let qe = lower(
         "SELECT metrics.bytes, hosts.region \
          FROM metrics JOIN hosts ON metrics.service = hosts.service",
@@ -494,7 +495,7 @@ async fn qualified_where_over_join_resolves_to_right_side() {
 
 #[tokio::test]
 async fn self_join_group_by_disambiguates_via_qualifier() {
-    // L2 group-key qualifier fix: GROUP BY on the *duplicated* column over a
+    // Group-key qualifier fix: GROUP BY on the *duplicated* column over a
     // self-join must bind to the qualified side, not first-match. metrics ⋈
     // metrics → a.service = col 1, b.service = col 5. (Without qualified keys,
     // both `GROUP BY a.service` and `GROUP BY b.service` collapsed to col 1.)
@@ -765,7 +766,8 @@ fn all_intents(qe: &QueryExpr) -> Vec<AggIntent> {
 async fn derived_table_aggregate_over_aggregate_nests() {
     // `MAX(s)` over a derived table `(SELECT service, SUM(bytes) AS s … GROUP BY
     // service)` — the SQL counterpart of PromQL function nesting (issue #27).
-    // Both reductions survive into L3: an outer `Max` over the inner `Sum`.
+    // Both reductions survive into the canonical tree: an outer `Max` over
+    // the inner `Sum`.
     let qe = lower(
         "SELECT MAX(s) FROM \
          (SELECT service, SUM(bytes) AS s FROM metrics GROUP BY service) t",
@@ -788,7 +790,7 @@ async fn derived_table_aggregate_over_aggregate_nests() {
 #[tokio::test]
 async fn derived_table_outer_avg_over_inner_percentile() {
     // Outer exact `AVG` over an inner approximate `Quantile` — each layer keeps
-    // its own intent (the per-node sketch-vs-exact choice is an L4 decision).
+    // its own intent (the per-node sketch-vs-exact choice is a post-ASAP decision).
     let qe = lower(
         "SELECT AVG(p) FROM \
          (SELECT service, approx_percentile_cont(latency, 0.9) AS p \
@@ -827,8 +829,8 @@ async fn filter_over_derived_aggregate_resolves_alias_column() {
 #[tokio::test]
 async fn scalar_subquery_in_predicate_is_rejected() {
     // A subquery-*valued* expression (`x > (SELECT …)`) needs a subquery node in
-    // the L2 expression IR (and a correlated/uncorrelated decision); rejected
-    // cleanly until that lands. Derived tables in FROM (the common nesting
+    // the unresolved expression IR (and a correlated/uncorrelated decision);
+    // rejected cleanly until that lands. Derived tables in FROM (the common nesting
     // shape) ARE supported — see the tests above.
     let res = lower_sql(
         "SELECT service FROM metrics WHERE bytes > (SELECT AVG(bytes) FROM metrics)",
@@ -968,8 +970,9 @@ async fn count_distinct_carries_its_input_column() {
 #[tokio::test]
 async fn quantile_and_count_distinct_over_an_expression_bind_the_derived_column() {
     // A SQL aggregate has no "sample value" to fall back on, so an expression
-    // argument must never reach L3 as `col: None` (#115). Since #110 it reaches
-    // L3 as `col: Some(derived)` instead of being rejected.
+    // argument must never reach the canonical tree as `col: None` (#115).
+    // Since #110 it reaches the canonical tree as `col: Some(derived)`
+    // instead of being rejected.
     for q in [
         "SELECT approx_percentile_cont(bytes * 8, 0.95) FROM metrics",
         "SELECT COUNT(DISTINCT bytes * 8) FROM metrics",

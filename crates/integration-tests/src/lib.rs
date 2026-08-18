@@ -1,10 +1,11 @@
 //! Shared test fixtures for the ASAP e2e test suite.
 //!
-//! This crate owns the integration tests that verify correct L3 IR output for
-//! each input **PromQL** query workload (it depends on the PromQL front end
-//! only). The *cross-language* equivalence tests — semantically equivalent SQL
-//! and PromQL mapping to the same canonical L3 — live in
-//! `crates/lower/tests/cross_language.rs`, where both front ends are in scope.
+//! This crate owns the integration tests that verify correct pre-ASAP IR
+//! output for each input **PromQL** query workload (it depends on the PromQL
+//! front end only). The *cross-language* equivalence tests — semantically
+//! equivalent SQL and PromQL mapping to the same canonical pre-ASAP IR —
+//! live in `crates/devtools/tests/cross_language.rs`, where both front ends
+//! are in scope.
 //!
 //! `fixtures` provides column/schema constructors used across test files.
 //! Expected IR trees are always hand-constructed inside each test — nothing

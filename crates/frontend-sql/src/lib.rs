@@ -1,7 +1,7 @@
-//! SQL front end: L1 (parse + plan via DataFusion) → the canonical L2 shape,
-//! built directly (issue #179) → [`resolve_root`].
+//! SQL front end: parse + plan (via DataFusion) → the canonical, unresolved
+//! shape, built directly (issue #179) → [`resolve_root`].
 //!
-//! Emits [`L2QueryExpr`](asap_types::pre_asap::L2QueryExpr) itself — the
+//! Emits [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr) itself — the
 //! canonical `QueryExpr`, generic over an unresolved
 //! [`ColumnRef`](asap_types::pre_asap::ColumnRef) — directly, rather than a
 //! separate per-language relational tree; `resolve_root` runs the
@@ -19,12 +19,12 @@ use asap_types::workload::{QueryLanguage, QueryWorkload, SqlDialect};
 pub use error::SqlError;
 pub use sql::{SqlCatalog, SqlLowerer};
 
-/// Lower a single SQL query string to the canonical L3 `QueryExpr`, parsed as
-/// `SqlDialect::DataFusionSQL`.
+/// Lower a single SQL query string to the canonical, resolved `QueryExpr`,
+/// parsed as `SqlDialect::DataFusionSQL`.
 ///
 /// The `catalog` supplies table schemas (used both to plan the SQL with
-/// DataFusion and to carry positional column identity into L3). `accuracy` is
-/// threaded onto every approximate intent by the shared converter.
+/// DataFusion and to carry positional column identity into the resolved
+/// tree). `accuracy` is threaded onto every approximate intent as it's built.
 pub async fn lower_sql(
     query: &str,
     catalog: &SqlCatalog,
@@ -45,11 +45,11 @@ pub async fn lower_sql_dialect(
     dialect: SqlDialect,
     accuracy: AccuracyTarget,
 ) -> Result<QueryExpr, SqlError> {
-    let l2 = SqlLowerer::with_dialect(catalog, dialect)
+    let unresolved = SqlLowerer::with_dialect(catalog, dialect)
         .lower(query, &accuracy)
         .await?;
-    let l3 = resolve_root(&l2)?;
-    Ok(l3)
+    let resolved = resolve_root(&unresolved)?;
+    Ok(resolved)
 }
 
 /// Lower every SQL batch entry in `workload` to a `QueryExpr`.

@@ -3,7 +3,7 @@ use crate::pre_asap::ColumnRef;
 // ── Summary kind identifiers ───────────────────────────────────────────────────
 
 /// Identifies a precomputed aggregation family — either an exact accumulator
-/// or an approximate sketch. Used as a type tag in `L4DataType` and as the
+/// or an approximate sketch. Used as a type tag in `SummaryDataType` and as the
 /// binding choice recorded in `SummaryExpr` nodes.
 ///
 /// `PartialOrd`/`Ord` (derived, by variant declaration order below): a
@@ -67,7 +67,8 @@ impl SummaryKind {
 
 /// Concrete, catalog-validated parameters for a specific summary instance.
 /// The variant must correspond to the associated `SummaryKind`; mismatches
-/// are caught at L4 bind time before L5 ever sees the plan.
+/// are caught at post-ASAP bind time, before any later, deployment-specific
+/// stage ever sees the plan.
 /// Exact-accumulator variants carry no parameters (their semantics are fixed).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SummaryParams {

@@ -1,4 +1,4 @@
-//! The L3 **Binder** — name resolution as an explicit pass.
+//! The **Binder** — name resolution as an explicit pass.
 //!
 //! [`Binder::bind`] produces the complete, self-contained [`Schema`] every
 //! `ColumnId` in the canonical tree indexes into. [`resolve`](super::resolve)
@@ -12,7 +12,7 @@
 //! lands, only the catalog impl swaps.
 
 use super::expr_ir::ColumnRef;
-use super::query_expr::L2QueryExpr;
+use super::query_expr::UnresolvedQueryExpr;
 use super::schema::{Column, DataType, Schema};
 
 /// The DB / source-schema metadata source — resolves a source (metric /
@@ -42,7 +42,7 @@ impl SchemaCatalog for UsageDerivedCatalog {
     }
 }
 
-/// The L3 Binder — the explicit name-resolution pass.
+/// The explicit name-resolution pass.
 pub struct Binder<C: SchemaCatalog = UsageDerivedCatalog> {
     catalog: C,
 }
@@ -71,7 +71,7 @@ impl<C: SchemaCatalog> Binder<C> {
     /// Contains the time axis, the synthetic `value` column, and one column
     /// per distinct name referenced anywhere in the tree — so positional
     /// `ColumnId` resolution downstream is total.
-    pub fn bind(&self, tree: &L2QueryExpr) -> Schema {
+    pub fn bind(&self, tree: &UnresolvedQueryExpr) -> Schema {
         self.bind_with_inherited(tree, &[])
     }
 
@@ -81,7 +81,7 @@ impl<C: SchemaCatalog> Binder<C> {
     /// own sub-tree) still sees an outer aggregate's group keys — e.g. the
     /// `__name__` / `job` in `sum by (__name__)(a or b)`, which appear in neither
     /// side's own matchers (issue #52).
-    pub fn bind_with_inherited(&self, tree: &L2QueryExpr, inherited: &[String]) -> Schema {
+    pub fn bind_with_inherited(&self, tree: &UnresolvedQueryExpr, inherited: &[String]) -> Schema {
         let mut columns: Vec<Column> = leftmost_scan_name(tree)
             .and_then(|name| self.catalog.columns_for(name))
             .unwrap_or_else(default_leaf_columns);
@@ -132,12 +132,12 @@ fn push_ref_name(c: &ColumnRef, out: &mut Vec<String>) {
     }
 }
 
-/// The leftmost `Scan`'s source name in a canonical (`L2QueryExpr`) tree —
+/// The leftmost `Scan`'s source name in a canonical (`UnresolvedQueryExpr`) tree —
 /// the [`collect_referenced_columns`] counterpart to what a dedicated
 /// `Source` leaf type would carry as a method; the canonical tree's `Scan`
 /// leaf needs this walk written out instead.
-fn leftmost_scan_name(tree: &L2QueryExpr) -> Option<&str> {
-    use L2QueryExpr as QE;
+fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
+    use UnresolvedQueryExpr as QE;
     match tree {
         QE::Scan { source, .. } => Some(match source {
             super::query_expr::Source::TimeSeries { metric } => metric.as_str(),
@@ -191,9 +191,9 @@ fn leftmost_scan_name(tree: &L2QueryExpr) -> Option<&str> {
 /// `WindowFunc.args`/`partition_by`/`order_by`, `Join.pred`, `Relabel.value`.
 /// The Binder seeds these into the usage-derived leaf so positional
 /// resolution downstream is total.
-pub(crate) fn collect_referenced_columns(tree: &L2QueryExpr) -> Vec<String> {
-    use L2QueryExpr as QE;
-    fn named(expr: &L2QueryExpr, out: &mut Vec<String>) {
+pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<String> {
+    use UnresolvedQueryExpr as QE;
+    fn named(expr: &UnresolvedQueryExpr, out: &mut Vec<String>) {
         for c in expr.columns_referenced() {
             push_ref_name(c, out);
         }
@@ -211,7 +211,7 @@ pub(crate) fn collect_referenced_columns(tree: &L2QueryExpr) -> Vec<String> {
             opt_ref(&m.input_col(), out);
         }
     }
-    fn walk(node: &L2QueryExpr, out: &mut Vec<String>) {
+    fn walk(node: &UnresolvedQueryExpr, out: &mut Vec<String>) {
         match node {
             QE::Scan { predicates, .. } => {
                 for super::query_expr::Predicate(p) in predicates {
@@ -339,8 +339,8 @@ mod tests {
     use super::super::query_expr::{GroupKeys, Source};
     use super::*;
 
-    fn src(name: &str) -> L2QueryExpr {
-        L2QueryExpr::Scan {
+    fn src(name: &str) -> UnresolvedQueryExpr {
+        UnresolvedQueryExpr::Scan {
             source: Source::TimeSeries {
                 metric: name.into(),
             },
@@ -362,9 +362,9 @@ mod tests {
     fn sort_partition_keys_land_in_schema() {
         // Per-group ranking keys (`topk by (host)` → `Sort.partition_by`) must be
         // seeded into the usage-derived leaf so they resolve positionally.
-        let tree = L2QueryExpr::Sort {
+        let tree = UnresolvedQueryExpr::Sort {
             keys: vec![super::super::query_expr::SortKey {
-                expr: L2QueryExpr::Column(ColumnRef::SampleValue),
+                expr: UnresolvedQueryExpr::Column(ColumnRef::SampleValue),
                 ascending: false,
                 nulls_first: false,
             }],

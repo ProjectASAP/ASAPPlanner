@@ -3,7 +3,8 @@
 //! `histogram_quantile(φ, m)` has two lowerings: exact interpolation over
 //! classic cumulative `le` buckets (`AggIntent::HistogramQuantile`, **not**
 //! sketch-able) versus the generic sketch-able `Quantile` (native histograms /
-//! raw samples, which L4 can approximate to an accuracy target). The true
+//! raw samples, which post-ASAP binding can approximate to an accuracy
+//! target). The true
 //! signal is the argument's **sample type**, which query structure only
 //! *proxies* — see the structural `is_classic_bucket_arg` heuristic, whose
 //! false-positive (`…_bucket`-named non-histogram) and false-negative

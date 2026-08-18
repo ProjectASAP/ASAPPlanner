@@ -1,8 +1,8 @@
-//! PromQL **semantic conformance** for the L1→L3 lowering.
+//! PromQL **semantic conformance** for the parse-to-canonical-tree lowering.
 //!
 //! We *lower* PromQL to the intent algebra; we do not *execute* it. So "same
 //! semantic job as Prometheus" here means: for each canonical query, does the
-//! L3 tree encode the **documented PromQL meaning** — and where we knowingly
+//! canonical tree encode the **documented PromQL meaning** — and where we knowingly
 //! diverge (reject, approximate, or drop a modifier), is that pinned by a test
 //! so it stays visible?
 //!
@@ -19,7 +19,7 @@
 //!   subquery.test, at_modifier.test, literals.test, limit.test
 //!
 //! Legend used in test names:
-//! - (no suffix)  — we lower it and the L3 intent matches PromQL.
+//! - (no suffix)  — we lower it and the canonical intent matches PromQL.
 //! - `__GAP`      — a PromQL capability we don't *yet* support. It is **cleanly
 //!   rejected** (never silently mislowered), and pinned here so adding support
 //!   later flips the assertion deliberately.
@@ -227,7 +227,7 @@ fn name_regex_matcher_is_rejected__GAP() {
 #[test]
 fn range_vector_selector_is_time_range() {
     // SEMANTICS: `[5m]` turns an instant vector into a range vector,
-    // represented in L3 as a dedicated `TimeRange` node.
+    // represented in the canonical tree as a dedicated `TimeRange` node.
     let qe = ok("node_cpu_seconds_total[5m]");
     let QueryExpr::TimeRange { range, .. } = &qe else {
         panic!("expected TimeRange for a range-vector selector, got {qe:?}");
@@ -535,7 +535,8 @@ fn histogram_quantile_over_rate() {
 #[test]
 fn histogram_quantile_over_sum_by_le_preserves_le_grouping() {
     // SEMANTICS: the standard pattern — bucket rates summed by `le`, then the
-    // quantile. The `sum by (le)` aggregation must survive into L3.
+    // quantile. The `sum by (le)` aggregation must survive into the
+    // canonical tree.
     let qe = ok(
         "histogram_quantile(0.99, sum by(le) (rate(demo_api_request_duration_seconds_bucket[5m])))",
     );
@@ -715,8 +716,8 @@ fn count_maps_to_cardinality_and_inherits_accuracy() {
     // SEMANTICS (review #2): PromQL `count by (...)` counts distinct series → the
     // `Cardinality` intent. The workload's AccuracyTarget threads onto it:
     // `Exact` stays exact (no silent HLL substitution); an approximate target is
-    // carried through for L4 to honor. This pins the intentional count→Cardinality
-    // mapping and its accuracy gating.
+    // carried through for post-ASAP binding to honor. This pins the
+    // intentional count→Cardinality mapping and its accuracy gating.
     let exact = lower_promql("count by (job) (up)", AccuracyTarget::Exact).unwrap();
     assert!(
         has(&exact, |i| matches!(
@@ -845,7 +846,8 @@ fn topk_over_nested_aggregate_is_generic_sort_limit() {
 fn outer_aggregate_over_nested_aggregate_nests() {
     // `max(sum by (job) (rate(m[5m])))` — an outer cross-series reduction over a
     // nested per-group reduction over a per-series rate: three stacked levels the
-    // flat two-level template rejected. Each level survives into L3 (issue #27).
+    // flat two-level template rejected. Each level survives into the
+    // canonical tree (issue #27).
     let qe = ok("max(sum by (job) (rate(http_requests_total[5m])))");
     let QueryExpr::Aggregate {
         measures, child, ..

@@ -2,8 +2,8 @@
 //!
 //! The per-node choice of how an [`AggIntent`] is *realised*: by an
 //! approximate sketch, by an exact mergeable accumulator, or by an ordinary
-//! exact operator (pass-through). This is an L4 concern: L3 carries only the
-//! intent + accuracy target, never the realization.
+//! exact operator (pass-through). This is a post-ASAP concern: the pre-ASAP
+//! IR carries only the intent + accuracy target, never the realization.
 //!
 //! The decision consumes three inputs:
 //!
@@ -30,7 +30,7 @@ use asap_types::types::AccuracyTarget;
 
 use crate::cost_model::{CostModel, DefaultCostModel};
 
-/// How an [`AggIntent`] is realised at L4.
+/// How an [`AggIntent`] is realised at post-ASAP binding time.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Implementation {
     /// A summary — either an approximate sketch sized to the intent's
@@ -45,8 +45,8 @@ pub enum Implementation {
         kind: SummaryKind,
         params: SummaryParams,
     },
-    /// No summary form — the node stays a logical L3 operator and is executed
-    /// exactly (per-series transforms, non-mergeable reducers, exact
+    /// No summary form — the node stays a logical pre-ASAP operator and is
+    /// executed exactly (per-series transforms, non-mergeable reducers, exact
     /// quantile/top-k/cardinality, classic-bucket `HistogramQuantile`, …).
     PassThrough,
 }
@@ -79,8 +79,8 @@ pub enum Implementation {
 ///   single-population query via re-aggregation is a fact about that
 ///   deployment's storage layout, not about `SummaryKind` at all —
 ///   `SummaryKind`'s exact accumulators don't encode grouping (grouping
-///   lives on the L4 node's `by` instead), so there is nothing in this
-///   crate's own vocabulary to subsume.
+///   lives on the post-ASAP node's `by` instead), so there is nothing in
+///   this crate's own vocabulary to subsume.
 ///
 /// Implementations are expected to consult `required`/`available`'s
 /// `kind` (and whatever grouping/placement context the deployment tracks

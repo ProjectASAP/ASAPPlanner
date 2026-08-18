@@ -11,7 +11,7 @@ pub struct Query(pub String);
 pub struct RepetitionInterval(pub u32);
 
 /// SQL dialect variant — different dialects have different syntax and
-/// function sets that affect how the query string is parsed at L1.
+/// function sets that affect how the query string is parsed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SqlDialect {
     DataFusionSQL,

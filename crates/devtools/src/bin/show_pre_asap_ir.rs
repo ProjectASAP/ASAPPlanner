@@ -1,10 +1,11 @@
 // cargo run -p asap-devtools --bin show_pre_asap_ir -- queries.txt
 // (or pipe via stdin: cargo run -p asap-devtools --bin show_pre_asap_ir < queries.txt)
 //
-// Lowers a batch of ad-hoc SQL/PromQL queries to **pre-ASAP IR** (L3, the
+// Lowers a batch of ad-hoc SQL/PromQL queries to **pre-ASAP IR** (the
 // sketch-agnostic intent algebra: `QueryExpr`/`AggIntent`) and prints them.
-// See `show_post_asap_ir` for the L4 sketch-bound IR one layer downstream —
-// this tool never picks a sketch, it only shows what a query means.
+// See `show_post_asap_ir` for the post-ASAP sketch-bound IR one layer
+// downstream — this tool never picks a sketch, it only shows what a query
+// means.
 //
 // File format: one query per line, prefixed with "sql>" or "promql>".
 // Blank lines and lines starting with '#' are ignored.

@@ -1,4 +1,4 @@
-//! The canonical Layer-3 intent algebra IR.
+//! The canonical pre-ASAP intent algebra IR.
 //!
 //! Language- and deployment-independent. Box-owned tree; column identity is **positional**
 //! (`Aggregate.reduction: Reduction`, wrapping `GroupKeys` for the
@@ -58,7 +58,7 @@ pub enum QueryExprError {
 
 // ── Leaf / supporting types ───────────────────────────────────────────────────
 
-/// Positional grouping keys, shared by every "operate per group" L3 operator:
+/// Positional grouping keys, shared by every "operate per group" operator:
 /// `Aggregate.by` (reduce per group), `Sort.partition_by` (rank per group —
 /// including generic `topk`/`bottomk`), and `WindowFunc.partition_by` (window
 /// per group). One spelling so grouping has a single home to evolve. Empty
@@ -327,7 +327,7 @@ pub enum WindowFuncKind {
 /// [`QueryExpr::InfoJoin`] (issue #84). Unlike a `Scan` predicate it is not
 /// resolved positionally — it references the info metric's labels (`__name__`
 /// picks the metric, the rest constrain data labels), which aren't in the input
-/// vector's schema; L4 applies it against the info metric.
+/// vector's schema; the post-ASAP binder applies it against the info metric.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InfoMatcher {
     pub label: String,
@@ -437,12 +437,12 @@ pub struct ProjectItem<C: ColState = ColumnId> {
     pub expr: QueryExpr<C>,
 }
 
-// ── L3 intent algebra IR ──────────────────────────────────────────────────────
+// ── Intent algebra IR ────────────────────────────────────────────────────────
 
 /// What kind of computation an `Aggregate` node performs — orthogonal to
 /// *which* columns it groups by (that's still [`GroupKeys`], inside
 /// `Reduce`). Explicit, decided once by whichever pass constructs the node
-/// (structural, at L2→L3 lowering), rather than inferred downstream from
+/// (structural, at front-end lowering time), rather than inferred downstream from
 /// whether a grouping-key list happens to be empty or from a neighboring
 /// node's shape. See design proposal #165.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -555,8 +555,9 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// metric(s), the rest constrain the data labels), joined on their shared
     /// identifying labels. Those join keys are the info metric's identifying
     /// labels — runtime/metadata-resolved, since an open PromQL schema can't
-    /// enumerate them — so they are NOT carried here; L4 resolves them from the
-    /// info metric's schema. The output keeps `child`'s (open) schema: the
+    /// enumerate them — so they are NOT carried here; the post-ASAP binder
+    /// resolves them from the info metric's schema. The output keeps
+    /// `child`'s (open) schema: the
     /// grafted labels appear at runtime.
     InfoJoin {
         #[serde(default)]
@@ -607,8 +608,8 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         child: Box<QueryExpr<C>>,
     },
 
-    /// δ — SQL `DISTINCT` / row deduplication. Positional like every other L3
-    /// column reference; empty = dedup on all columns (`SELECT DISTINCT *`).
+    /// δ — SQL `DISTINCT` / row deduplication. Positional like every other
+    /// column reference here; empty = dedup on all columns (`SELECT DISTINCT *`).
     Distinct {
         cols: Vec<C>,
         child: Box<QueryExpr<C>>,
@@ -635,7 +636,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// empty relation: there would be no schema to derive.
     Merge { children: Vec<QueryExpr<C>> },
 
-    /// Logical join. L4 picks the physical alternative.
+    /// Logical join. Post-ASAP binding picks the physical alternative.
     Join {
         kind: JoinKind,
         pred: Predicate<C>,
@@ -657,7 +658,8 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// row-preserving (schema pass-through) and is where the grouping of a
     /// generic (non-heavy-hitter) ranking lives, so there is no separate
     /// `Partition` node (issue #12: reducing GROUP BY → `Aggregate.by`, per-group
-    /// ranking → here, parallel sharding → L5). Empty = a global order-by.
+    /// ranking → here, parallel sharding → a deployment's own physical
+    /// stage). Empty = a global order-by.
     Sort {
         keys: Vec<SortKey<C>>,
         #[serde(default)]
@@ -821,7 +823,8 @@ impl<C: ColState> QueryExpr<C> {
 
     /// Recursively collect every column reference in a **scalar** subtree —
     /// used by the [`Binder`](super::binder::Binder) to seed usage-derived
-    /// leaf schemas, and available to L4 for column-lineage / selectivity.
+    /// leaf schemas, and available to post-ASAP binding for column-lineage /
+    /// selectivity.
     /// `self` must be one of the scalar variants (see the module doc on
     /// [`QueryExpr`]'s scalar shapes) — every caller already only reaches
     /// this through a scalar-typed position (`Predicate`, `ProjectItem.expr`,
@@ -876,18 +879,18 @@ impl<C: ColState> QueryExpr<C> {
     }
 }
 
-/// The canonical, positional Layer-3 tree — what the bare `QueryExpr` name has
-/// always meant (the default `C = ColumnId`). Every existing consumer keeps
-/// using `QueryExpr` unparameterized; this alias exists only to name the
-/// resolved state explicitly at a use site that also wants to name
-/// [`L2QueryExpr`] nearby.
-pub type L3QueryExpr = QueryExpr<ColumnId>;
+/// The canonical, positional, resolved tree — what the bare `QueryExpr` name
+/// has always meant (the default `C = ColumnId`). Every existing consumer
+/// keeps using `QueryExpr` unparameterized; this alias exists only to name
+/// the resolved state explicitly at a use site that also wants to name
+/// [`UnresolvedQueryExpr`] nearby.
+pub type ResolvedQueryExpr = QueryExpr<ColumnId>;
 
-/// The front-end-emitted, name-based Layer-2 tree — `QueryExpr<ColumnRef>`,
-/// unresolved: front ends construct this directly during their own `interpret`
-/// step (issue #179), and the [`Binder`](super::binder) resolves it into
-/// [`L3QueryExpr`].
-pub type L2QueryExpr = QueryExpr<ColumnRef>;
+/// The front-end-emitted, name-based, unresolved tree —
+/// `QueryExpr<ColumnRef>`: front ends construct this directly during their
+/// own `interpret` step (issue #179), and the [`Binder`](super::binder)
+/// resolves it into [`ResolvedQueryExpr`].
+pub type UnresolvedQueryExpr = QueryExpr<ColumnRef>;
 
 // `output_schema` needs a fully bound tree — it reads `Scan.schema` as a plain
 // `Schema` and resolves every scalar `Expr::Column` positionally — so it lives
@@ -1346,9 +1349,9 @@ fn without_output_schema(
 }
 
 /// Infer the `(DataType, nullable)` a scalar [`QueryExpr`] produces against an
-/// input [`Schema`]. Used by `Project` schema derivation. Approximate at L3:
+/// input [`Schema`]. Used by `Project` schema derivation. Approximate here:
 /// unknown columns and bare `FunctionCall`s fall back to a permissive default
-/// (the L4/emit layer refines with a real function/type registry). `expr`
+/// (post-ASAP binding refines with a real function/type registry). `expr`
 /// must be one of the scalar variants (issue #205) — an operator variant here
 /// is a construction bug, not a shape this needs to handle silently.
 fn infer_expr_type(expr: &QueryExpr<ColumnId>, schema: &Schema) -> (DataType, bool) {
@@ -1387,7 +1390,7 @@ fn infer_expr_type(expr: &QueryExpr<ColumnId>, schema: &Schema) -> (DataType, bo
             let (_, nullable) = infer_expr_type(expr, schema);
             (to.clone(), *try_cast || nullable)
         }
-        // No function/type registry at L3 — default permissive.
+        // No function/type registry here — default permissive.
         QueryExpr::FunctionCall { .. } => (DataType::Float64, true),
         QueryExpr::Case {
             branches,

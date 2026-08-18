@@ -12,7 +12,7 @@
 //! verbatim into a differently-licensed test suite is fine as-is is an open
 //! question — tracked in issue #135, not resolved by this file's existence.
 //!
-//! We *lower* (parse → L2 → L3), we do not execute. Totality: every query
+//! We *lower* (parse → the canonical tree), we do not execute. Totality: every query
 //! returns `Ok` or a clean `LoweringError` and never panics. Given the corpus
 //! is small and hand-picked from realistic incident-response queries, we also
 //! assert full lowering coverage — a regression here means a real pattern

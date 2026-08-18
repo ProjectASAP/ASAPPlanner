@@ -1,9 +1,9 @@
 //! SQL → the canonical, unresolved
-//! [`L2QueryExpr`](asap_types::pre_asap::query_expr::L2QueryExpr)
+//! [`UnresolvedQueryExpr`](asap_types::pre_asap::query_expr::UnresolvedQueryExpr)
 //! (`QueryExpr<ColumnRef>`).
 //!
 //! Parses SQL via DataFusion (over the catalog's registered tables), then
-//! walks the unoptimized `LogicalPlan` and emits `L2QueryExpr` nodes with
+//! walks the unoptimized `LogicalPlan` and emits `UnresolvedQueryExpr` nodes with
 //! unresolved `ColumnRef`s directly (issue #179) — the same tree shape
 //! [`resolve_root`](asap_types::pre_asap::resolve_root) binds to canonical,
 //! positional `QueryExpr<ColumnId>`. Unlike PromQL's front end, SQL's
@@ -17,7 +17,7 @@
 //! this shape are responsible for it now, not a converter.
 //!
 //! Heavy-hitter `topk` recognition (`ORDER BY count(...) DESC LIMIT k`) is
-//! *not* done here: SQL emits a plain `Sort`/`Limit`, and the shared L3
+//! *not* done here: SQL emits a plain `Sort`/`Limit`, and the shared
 //! `canonicalize` pass (issue #34, run by `resolve_root`) recognises the
 //! count-ranked shape positionally, so a SQL `ORDER BY`/`LIMIT` and a PromQL
 //! `topk(...)` converge without either front end special-casing the other's
@@ -36,7 +36,8 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{
-    GroupKeys, L2QueryExpr as L2, Predicate, ProjectItem, Reduction, SortKey, Source,
+    GroupKeys, Predicate, ProjectItem, Reduction, SortKey, Source,
+    UnresolvedQueryExpr as Unresolved,
 };
 use asap_types::pre_asap::schema::{DataType, Schema};
 use asap_types::pre_asap::{
@@ -52,8 +53,8 @@ mod types;
 
 pub use types::SqlCatalog;
 
-use self::expr::df_expr_to_l2;
-use self::types::{arrow_to_l3, schema_to_arrow};
+use self::expr::df_expr_to_unresolved;
+use self::types::{arrow_to_dtype, schema_to_arrow};
 
 std::thread_local! {
     static ACCURACY: std::cell::RefCell<AccuracyTarget> =
@@ -86,10 +87,10 @@ fn current_accuracy() -> AccuracyTarget {
     ACCURACY.with(|a| a.borrow().clone())
 }
 
-/// Lowers SQL strings to the canonical [`L2QueryExpr`](asap_types::pre_asap::L2QueryExpr)
+/// Lowers SQL strings to the canonical [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr)
 /// over a table [`SqlCatalog`]. Call
 /// [`resolve_root`](asap_types::pre_asap::resolve_root) on the result for
-/// canonical L3.
+/// the canonical, resolved tree.
 pub struct SqlLowerer<'a> {
     catalog: &'a SqlCatalog,
     dialect: SqlDialect,
@@ -113,7 +114,7 @@ impl<'a> SqlLowerer<'a> {
         Self { catalog, dialect }
     }
 
-    /// Parse + lower a SQL query to the canonical L2 shape, threading
+    /// Parse + lower a SQL query to the canonical, unresolved shape, threading
     /// `accuracy` onto every approximate intent (`Count`, `Quantile`,
     /// `Cardinality`) as it is built.
     ///
@@ -121,7 +122,11 @@ impl<'a> SqlLowerer<'a> {
     /// (`ctx.sql`) — `lower_plan` itself is synchronous, so once it starts
     /// there is no further suspension point that could move this task to a
     /// different OS thread out from under a thread-local set beforehand.
-    pub async fn lower(&self, sql: &str, accuracy: &AccuracyTarget) -> Result<L2, LoweringError> {
+    pub async fn lower(
+        &self,
+        sql: &str,
+        accuracy: &AccuracyTarget,
+    ) -> Result<Unresolved, LoweringError> {
         let ctx = self.build_context()?;
         let df = ctx.sql(sql).await?;
         let plan = df.into_unoptimized_plan();
@@ -162,7 +167,7 @@ impl<'a> SqlLowerer<'a> {
         Ok(ctx)
     }
 
-    fn lower_plan(&self, plan: &LogicalPlan) -> Result<L2, LoweringError> {
+    fn lower_plan(&self, plan: &LogicalPlan) -> Result<Unresolved, LoweringError> {
         match plan {
             LogicalPlan::TableScan(scan) => self.lower_table_scan(scan),
             LogicalPlan::Filter(filter) => self.lower_filter(filter),
@@ -172,7 +177,7 @@ impl<'a> SqlLowerer<'a> {
             LogicalPlan::Limit(limit) => self.lower_limit(limit),
             LogicalPlan::Distinct(d) => match d {
                 Distinct::On(_) => Err(LoweringError::UnsupportedFeature("DISTINCT ON".into())),
-                Distinct::All(input) => Ok(L2::Distinct {
+                Distinct::All(input) => Ok(Unresolved::Distinct {
                     cols: vec![],
                     child: Box::new(self.lower_plan(input)?),
                 }),
@@ -185,7 +190,7 @@ impl<'a> SqlLowerer<'a> {
                     .ok_or_else(|| LoweringError::InvalidExpression("empty union".into()))?;
                 let first_expr = self.lower_plan(first)?;
                 iter.try_fold(first_expr, |left, right_plan| {
-                    Ok(L2::SetOp {
+                    Ok(Unresolved::SetOp {
                         kind: SetOpKind::Union,
                         all: true,
                         left: Box::new(left),
@@ -217,7 +222,7 @@ impl<'a> SqlLowerer<'a> {
                         match self.lower_plan(other)? {
                             // The derived SELECT list already lowered to a
                             // Projection — stamp the alias onto it, no extra node.
-                            L2::Project { cols, child, .. } => Ok(L2::Project {
+                            Unresolved::Project { cols, child, .. } => Ok(Unresolved::Project {
                                 cols,
                                 qualifier: Some(alias_name),
                                 child,
@@ -233,10 +238,12 @@ impl<'a> SqlLowerer<'a> {
                                     .iter()
                                     .map(|f| ProjectItem {
                                         alias: Some(f.name().clone()),
-                                        expr: L2::Column(ColumnRef::Named(f.name().clone())),
+                                        expr: Unresolved::Column(ColumnRef::Named(
+                                            f.name().clone(),
+                                        )),
                                     })
                                     .collect();
-                                Ok(L2::Project {
+                                Ok(Unresolved::Project {
                                     cols,
                                     qualifier: Some(alias_name),
                                     child: Box::new(inner),
@@ -264,7 +271,7 @@ impl<'a> SqlLowerer<'a> {
     /// before: a semi-join only ever drops left rows, so the two orders agree —
     /// and keeping the fold-onto-`Scan` (`filter_or_fold`) below the joins
     /// matches where the old converter folded it too.
-    fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<L2, LoweringError> {
+    fn lower_filter(&self, filter: &logical_expr::Filter) -> Result<Unresolved, LoweringError> {
         let mut conjuncts = Vec::new();
         split_conjunction(&filter.predicate, &mut conjuncts);
         let (subqueries, residual): (Vec<_>, Vec<_>) = conjuncts
@@ -273,7 +280,7 @@ impl<'a> SqlLowerer<'a> {
 
         let input = self.lower_plan(&filter.input)?;
         let mut node = match rebuild_conjunction(&residual) {
-            Some(pred) => filter_or_fold(df_expr_to_l2(&pred)?, input),
+            Some(pred) => filter_or_fold(df_expr_to_unresolved(&pred)?, input),
             None => input,
         };
         for sq in subqueries {
@@ -290,8 +297,8 @@ impl<'a> SqlLowerer<'a> {
     fn lower_in_subquery(
         &self,
         is: &logical_expr::expr::InSubquery,
-        left: L2,
-    ) -> Result<L2, LoweringError> {
+        left: Unresolved,
+    ) -> Result<Unresolved, LoweringError> {
         if is.negated {
             // `NOT IN` is not an anti-join. Under three-valued logic a single
             // NULL among the subquery's rows makes `c NOT IN (…)` UNKNOWN for
@@ -324,29 +331,31 @@ impl<'a> SqlLowerer<'a> {
             // Rebuild the subquery's projection with the synthetic alias, so a
             // computed key (`SELECT bytes + 1 …`) is named rather than becoming
             // the anonymous `col_0` that nothing can reference.
-            LogicalPlan::Projection(p) if p.expr.len() == 1 => L2::Project {
+            LogicalPlan::Projection(p) if p.expr.len() == 1 => Unresolved::Project {
                 cols: vec![ProjectItem {
                     alias: Some(IN_SUBQUERY_KEY.to_string()),
-                    expr: df_expr_to_l2(unalias(&p.expr[0]))?,
+                    expr: df_expr_to_unresolved(unalias(&p.expr[0]))?,
                 }],
                 qualifier: None,
                 child: Box::new(self.lower_plan(&p.input)?),
             },
-            other => L2::Project {
+            other => Unresolved::Project {
                 cols: vec![ProjectItem {
                     alias: Some(IN_SUBQUERY_KEY.to_string()),
-                    expr: L2::Column(ColumnRef::Named(key.name().clone())),
+                    expr: Unresolved::Column(ColumnRef::Named(key.name().clone())),
                 }],
                 qualifier: None,
                 child: Box::new(self.lower_plan(other)?),
             },
         };
-        Ok(L2::Join {
+        Ok(Unresolved::Join {
             kind: JoinKind::Semi,
-            pred: Predicate(Box::new(L2::Compare {
-                left: Box::new(df_expr_to_l2(&is.expr)?),
+            pred: Predicate(Box::new(Unresolved::Compare {
+                left: Box::new(df_expr_to_unresolved(&is.expr)?),
                 op: CompareOp::Eq,
-                right: Box::new(L2::Column(ColumnRef::Named(IN_SUBQUERY_KEY.to_string()))),
+                right: Box::new(Unresolved::Column(ColumnRef::Named(
+                    IN_SUBQUERY_KEY.to_string(),
+                ))),
             })),
             left: Box::new(left),
             right: Box::new(right),
@@ -355,7 +364,11 @@ impl<'a> SqlLowerer<'a> {
 
     /// `[NOT] EXISTS (SELECT … WHERE inner.k = outer.k)` → a semi- / anti-join
     /// on the correlation predicate (issue #111).
-    fn lower_exists(&self, ex: &logical_expr::expr::Exists, left: L2) -> Result<L2, LoweringError> {
+    fn lower_exists(
+        &self,
+        ex: &logical_expr::expr::Exists,
+        left: Unresolved,
+    ) -> Result<Unresolved, LoweringError> {
         let kind = if ex.negated {
             JoinKind::Anti
         } else {
@@ -376,10 +389,10 @@ impl<'a> SqlLowerer<'a> {
         // the join condition is unconditionally true — same convention as an
         // unconditional `JOIN` (`lower_join`, below).
         let pred = match correlation {
-            Some(e) => Predicate(Box::new(df_expr_to_l2(&e)?)),
-            None => Predicate(Box::new(L2::Literal(ScalarValue::Boolean(true)))),
+            Some(e) => Predicate(Box::new(df_expr_to_unresolved(&e)?)),
+            None => Predicate(Box::new(Unresolved::Literal(ScalarValue::Boolean(true)))),
         };
-        Ok(L2::Join {
+        Ok(Unresolved::Join {
             kind,
             pred,
             left: Box::new(left),
@@ -392,7 +405,10 @@ impl<'a> SqlLowerer<'a> {
     /// usage-derive it (SQL is never schemaless). Projection pushdown is left
     /// to the enclosing `Project` (DataFusion's unoptimized plan sets no
     /// projection).
-    fn lower_table_scan(&self, scan: &logical_expr::TableScan) -> Result<L2, LoweringError> {
+    fn lower_table_scan(
+        &self,
+        scan: &logical_expr::TableScan,
+    ) -> Result<Unresolved, LoweringError> {
         let table = scan.table_name.to_string();
         self.scan_source(&table, &table)
     }
@@ -400,7 +416,7 @@ impl<'a> SqlLowerer<'a> {
     /// A `Scan` over catalog table `table`, with its columns qualified by
     /// `qualifier` (the table name, or an alias from a `SubqueryAlias`) so
     /// `Qualified` column refs resolve to the right side across a join.
-    fn scan_source(&self, table: &str, qualifier: &str) -> Result<L2, LoweringError> {
+    fn scan_source(&self, table: &str, qualifier: &str) -> Result<Unresolved, LoweringError> {
         let schema = self
             .catalog
             .tables
@@ -418,7 +434,7 @@ impl<'a> SqlLowerer<'a> {
             // Catalog-backed: the table's columns are fully declared → closed.
             closed: true,
         };
-        Ok(L2::Scan {
+        Ok(Unresolved::Scan {
             source: Source::Table {
                 table_ref: table.to_string(),
             },
@@ -428,11 +444,11 @@ impl<'a> SqlLowerer<'a> {
     }
 
     /// ⋈ — equijoin. The `on` key pairs become `left = right` comparisons,
-    /// AND-ed with any non-equi `filter`, into the L2 join predicate. The L2→L3
-    /// converter derives the concatenated output schema; the join predicate
-    /// stays name-based (like a `WHERE`). Semi/anti/mark joins have no L3
-    /// counterpart yet and are rejected.
-    fn lower_join(&self, join: &logical_expr::Join) -> Result<L2, LoweringError> {
+    /// AND-ed with any non-equi `filter`, into the join predicate — still
+    /// name-based here (like a `WHERE`); `resolve_root` derives the
+    /// concatenated output schema downstream. Semi/anti/mark joins have no
+    /// canonical counterpart yet and are rejected.
+    fn lower_join(&self, join: &logical_expr::Join) -> Result<Unresolved, LoweringError> {
         let kind = match join.join_type {
             JoinType::Inner => JoinKind::Inner,
             JoinType::Left => JoinKind::Left,
@@ -448,23 +464,23 @@ impl<'a> SqlLowerer<'a> {
             .on
             .iter()
             .map(|(l, r)| {
-                Ok(L2::Compare {
-                    left: Box::new(df_expr_to_l2(l)?),
+                Ok(Unresolved::Compare {
+                    left: Box::new(df_expr_to_unresolved(l)?),
                     op: CompareOp::Eq,
-                    right: Box::new(df_expr_to_l2(r)?),
+                    right: Box::new(df_expr_to_unresolved(r)?),
                 })
             })
             .collect::<Result<Vec<_>, LoweringError>>()?;
         if let Some(filter) = &join.filter {
-            conjuncts.push(df_expr_to_l2(filter)?);
+            conjuncts.push(df_expr_to_unresolved(filter)?);
         }
         let pred = Predicate(Box::new(match conjuncts.len() {
             // No condition (a CROSS JOIN) is unconditionally true.
-            0 => L2::Literal(ScalarValue::Boolean(true)),
+            0 => Unresolved::Literal(ScalarValue::Boolean(true)),
             1 => conjuncts.pop().unwrap(),
-            _ => L2::BoolAnd(conjuncts),
+            _ => Unresolved::BoolAnd(conjuncts),
         }));
-        Ok(L2::Join {
+        Ok(Unresolved::Join {
             kind,
             pred,
             left: Box::new(self.lower_plan(&join.left)?),
@@ -474,7 +490,7 @@ impl<'a> SqlLowerer<'a> {
 
     /// `func(args) OVER (PARTITION BY … ORDER BY …)`. One window function per
     /// plan node; window frames are not modelled yet (default frame assumed).
-    fn lower_window(&self, window: &logical_expr::Window) -> Result<L2, LoweringError> {
+    fn lower_window(&self, window: &logical_expr::Window) -> Result<Unresolved, LoweringError> {
         if window.window_expr.len() > 1 {
             return Err(LoweringError::UnsupportedFeature(format!(
                 "multiple window functions in one plan node (got {}); split them",
@@ -495,12 +511,12 @@ impl<'a> SqlLowerer<'a> {
         let mut args = wf
             .args
             .iter()
-            .map(df_expr_to_l2)
+            .map(df_expr_to_unresolved)
             .collect::<Result<Vec<_>, _>>()?;
         // Nth_value: lift N from the (literal) 2nd arg, keep only the column.
         let func = if matches!(func, WindowFuncKind::NthValue(None)) {
             let n = match args.get(1) {
-                Some(L2::Literal(ScalarValue::Int64(n))) if *n > 0 => *n as u64,
+                Some(Unresolved::Literal(ScalarValue::Int64(n))) if *n > 0 => *n as u64,
                 other => {
                     return Err(LoweringError::InvalidExpression(format!(
                         "NTH_VALUE requires a positive integer literal 2nd arg, got {other:?}"
@@ -521,7 +537,7 @@ impl<'a> SqlLowerer<'a> {
             .order_by
             .iter()
             .map(|s| {
-                df_expr_to_l2(&s.expr).map(|expr| SortKey {
+                df_expr_to_unresolved(&s.expr).map(|expr| SortKey {
                     expr,
                     ascending: s.asc,
                     nulls_first: s.nulls_first,
@@ -536,7 +552,7 @@ impl<'a> SqlLowerer<'a> {
             .last()
             .map(|f| f.name().clone())
             .unwrap_or_else(|| "window".into());
-        Ok(L2::WindowFunc {
+        Ok(Unresolved::WindowFunc {
             func,
             args,
             partition_by: partition_by.into(),
@@ -546,7 +562,10 @@ impl<'a> SqlLowerer<'a> {
         })
     }
 
-    fn lower_projection(&self, proj: &logical_expr::Projection) -> Result<L2, LoweringError> {
+    fn lower_projection(
+        &self,
+        proj: &logical_expr::Projection,
+    ) -> Result<Unresolved, LoweringError> {
         // SELECT * — no column constraint; pass through without a Project.
         if proj.expr.iter().any(|e| matches!(e, Expr::Wildcard { .. })) {
             return self.lower_plan(&proj.input);
@@ -556,21 +575,21 @@ impl<'a> SqlLowerer<'a> {
             .expr
             .iter()
             .map(|e| match e {
-                Expr::Alias(a) => df_expr_to_l2(&a.expr).map(|expr| ProjectItem {
+                Expr::Alias(a) => df_expr_to_unresolved(&a.expr).map(|expr| ProjectItem {
                     expr,
                     alias: Some(a.name.clone()),
                 }),
-                _ => df_expr_to_l2(e).map(|expr| ProjectItem { expr, alias: None }),
+                _ => df_expr_to_unresolved(e).map(|expr| ProjectItem { expr, alias: None }),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(L2::Project {
+        Ok(Unresolved::Project {
             cols,
             qualifier: None,
             child,
         })
     }
 
-    fn lower_aggregate(&self, agg: &logical_expr::Aggregate) -> Result<L2, LoweringError> {
+    fn lower_aggregate(&self, agg: &logical_expr::Aggregate) -> Result<Unresolved, LoweringError> {
         let input = self.lower_plan(&agg.input)?;
 
         // `GROUPING SETS`/`ROLLUP`/`CUBE` emit several grouping levels from one
@@ -609,7 +628,7 @@ impl<'a> SqlLowerer<'a> {
                         .get(i)
                         .cloned()
                         .unwrap_or_else(|| other.to_string());
-                    derived.materialize(name.clone(), df_expr_to_l2(other)?)?;
+                    derived.materialize(name.clone(), df_expr_to_unresolved(other)?)?;
                     keys.push(ColumnRef::Named(name));
                 }
             }
@@ -640,7 +659,7 @@ impl<'a> SqlLowerer<'a> {
             .iter()
             .map(lower_agg_intent)
             .collect::<Result<Vec<_>, LoweringError>>()?;
-        Ok(L2::Aggregate {
+        Ok(Unresolved::Aggregate {
             // SQL `GROUP BY` is always an inclusion list, never PromQL's
             // `without(...)` exclusion form — and always a genuine reduction,
             // never `PerEntity` (there's no windowed/subquery-child concept
@@ -674,8 +693,8 @@ impl<'a> SqlLowerer<'a> {
         &self,
         agg: &logical_expr::Aggregate,
         gs: &logical_expr::GroupingSet,
-        input: L2,
-    ) -> Result<L2, LoweringError> {
+        input: Unresolved,
+    ) -> Result<Unresolved, LoweringError> {
         // DataFusion normalizes every mixed form (`GROUP BY g, ROLLUP(d)`) into a
         // single `GroupingSets`, so one grouping expression is the only shape.
         if agg.group_expr.len() != 1 {
@@ -700,7 +719,7 @@ impl<'a> SqlLowerer<'a> {
             .fields()
             .iter()
             .take(distinct.len())
-            .map(|f| Ok((f.name().to_string(), arrow_to_l3(f.data_type())?)))
+            .map(|f| Ok((f.name().to_string(), arrow_to_dtype(f.data_type())?)))
             .collect::<Result<_, LoweringError>>()?;
 
         let output_names: Vec<String> = agg
@@ -736,7 +755,7 @@ impl<'a> SqlLowerer<'a> {
                     .filter(|e| level.contains(e))
                     .map(|e| expr_to_group_ref(e))
                     .collect::<Result<Vec<_>, LoweringError>>()?;
-                let aggregate = L2::Aggregate {
+                let aggregate = Unresolved::Aggregate {
                     reduction: Reduction::Reduce(GroupKeys::by(level_keys)),
                     measures: measures.clone(),
                     output_names: output_names.clone(),
@@ -750,10 +769,10 @@ impl<'a> SqlLowerer<'a> {
                     .map(|((name, dtype), e)| ProjectItem {
                         alias: Some(name.clone()),
                         expr: if level.contains(e) {
-                            L2::Column(ColumnRef::Named(name.clone()))
+                            Unresolved::Column(ColumnRef::Named(name.clone()))
                         } else {
-                            L2::Cast {
-                                expr: Box::new(L2::Literal(ScalarValue::Null)),
+                            Unresolved::Cast {
+                                expr: Box::new(Unresolved::Literal(ScalarValue::Null)),
                                 to: dtype.clone(),
                                 try_cast: false,
                             }
@@ -761,10 +780,10 @@ impl<'a> SqlLowerer<'a> {
                     })
                     .chain(output_names.iter().map(|n| ProjectItem {
                         alias: Some(n.clone()),
-                        expr: L2::Column(ColumnRef::Named(n.clone())),
+                        expr: Unresolved::Column(ColumnRef::Named(n.clone())),
                     }))
                     .collect();
-                Ok(L2::Project {
+                Ok(Unresolved::Project {
                     cols,
                     qualifier: None,
                     child: Box::new(aggregate),
@@ -772,13 +791,13 @@ impl<'a> SqlLowerer<'a> {
             })
             .collect::<Result<Vec<_>, LoweringError>>()?;
 
-        Ok(L2::Merge { children: branches })
+        Ok(Unresolved::Merge { children: branches })
     }
 
-    fn lower_sort(&self, sort: &logical_expr::Sort) -> Result<L2, LoweringError> {
+    fn lower_sort(&self, sort: &logical_expr::Sort) -> Result<Unresolved, LoweringError> {
         // A count-ranked `ORDER BY … LIMIT k` is the frequency heavy-hitter the
         // `TopK` intent represents, but that promotion now happens in the shared
-        // L3 `canonicalize` pass (issue #34) — the same one both front ends run —
+        // `canonicalize` pass (issue #34) — the same one both front ends run —
         // so SQL emits a plain `Sort` (+ `Limit`) here and lets canonicalization
         // recognise the count-ranked shape positionally. This removes the gate's
         // alias blind spot (#20).
@@ -786,14 +805,14 @@ impl<'a> SqlLowerer<'a> {
             .expr
             .iter()
             .map(|s| {
-                df_expr_to_l2(&s.expr).map(|expr| SortKey {
+                df_expr_to_unresolved(&s.expr).map(|expr| SortKey {
                     expr,
                     ascending: s.asc,
                     nulls_first: s.nulls_first,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(L2::Sort {
+        Ok(Unresolved::Sort {
             keys,
             // SQL `ORDER BY` is a global sort; per-group ranking would come from a
             // window function (`WindowFunc`), not a bare Sort.
@@ -802,10 +821,10 @@ impl<'a> SqlLowerer<'a> {
         })
     }
 
-    fn lower_limit(&self, limit: &logical_expr::Limit) -> Result<L2, LoweringError> {
+    fn lower_limit(&self, limit: &logical_expr::Limit) -> Result<Unresolved, LoweringError> {
         // Count-ranked `LIMIT k` over a `Sort` is promoted to the heavy-hitter
-        // `TopK` by the shared L3 `canonicalize` pass (issue #34), not here.
-        Ok(L2::Limit {
+        // `TopK` by the shared `canonicalize` pass (issue #34), not here.
+        Ok(Unresolved::Limit {
             n: eval_fetch(&limit.fetch).unwrap_or(usize::MAX),
             offset: eval_fetch(&limit.skip).unwrap_or(0),
             child: Box::new(self.lower_plan(&limit.input)?),
@@ -826,7 +845,8 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
         Expr::Alias(a) => lower_agg_intent(&a.expr),
         Expr::AggregateFunction(agg_fn) => {
             let name = agg_fn.func.name().to_lowercase();
-            // L3 has no DISTINCT modifier for the value reducers; only
+            // The canonical intent algebra has no DISTINCT modifier for the
+            // value reducers; only
             // COUNT(DISTINCT) maps (to Cardinality). Reject DISTINCT elsewhere
             // rather than silently lowering `SUM(DISTINCT x)` as `SUM(x)`.
             if agg_fn.distinct && name != "count" {
@@ -913,21 +933,21 @@ const IN_SUBQUERY_KEY: &str = "__asap_in_key";
 /// `Filter` — canonical's invariant that a `Filter` never sits directly over a
 /// `Scan`. A front end emitting the canonical shape directly is responsible
 /// for maintaining that invariant itself (issue #179).
-fn filter_or_fold(pred: L2, child: L2) -> L2 {
+fn filter_or_fold(pred: Unresolved, child: Unresolved) -> Unresolved {
     match child {
-        L2::Scan {
+        Unresolved::Scan {
             source,
             mut predicates,
             schema,
         } => {
             predicates.push(Predicate(Box::new(pred)));
-            L2::Scan {
+            Unresolved::Scan {
                 source,
                 predicates,
                 schema,
             }
         }
-        other => L2::Filter {
+        other => Unresolved::Filter {
             pred: Predicate(Box::new(pred)),
             child: Box::new(other),
         },
@@ -1109,7 +1129,7 @@ impl DerivedCols {
     /// something else. `Project` carries one relation qualifier for all its
     /// columns, so `a.k` and `b.k` cannot both survive it — but that only
     /// matters when a projection gets inserted at all.
-    fn push(&mut self, alias: String, expr: L2) {
+    fn push(&mut self, alias: String, expr: Unresolved) {
         let existing = self
             .cols
             .iter()
@@ -1132,12 +1152,12 @@ impl DerivedCols {
         let Expr::Column(c) = unalias(expr) else {
             return Ok(());
         };
-        self.push(c.name.clone(), df_expr_to_l2(expr)?);
+        self.push(c.name.clone(), df_expr_to_unresolved(expr)?);
         Ok(())
     }
 
     /// A genuinely derived column: `alias` now names `expr`'s value.
-    fn materialize(&mut self, alias: String, expr: L2) -> Result<(), LoweringError> {
+    fn materialize(&mut self, alias: String, expr: Unresolved) -> Result<(), LoweringError> {
         self.any = true;
         self.push(alias, expr);
         Ok(())
@@ -1160,12 +1180,12 @@ impl DerivedCols {
         }
         match agg_col_name(&agg_fn.args) {
             Some(name) => {
-                self.push(name, df_expr_to_l2(arg)?);
+                self.push(name, df_expr_to_unresolved(arg)?);
                 Ok(expr.clone())
             }
             None => {
                 let alias = unalias(arg).to_string();
-                self.materialize(alias.clone(), df_expr_to_l2(arg)?)?;
+                self.materialize(alias.clone(), df_expr_to_unresolved(arg)?)?;
                 let mut agg_fn = agg_fn.clone();
                 agg_fn.args[0] = Expr::Column(DfColumn::new_unqualified(alias));
                 Ok(Expr::AggregateFunction(agg_fn))
@@ -1177,7 +1197,7 @@ impl DerivedCols {
     /// nothing needed deriving — so a query that lowers today keeps its exact
     /// tree, and a name collision that the projection would have flattened only
     /// matters once the projection exists.
-    fn wrap(self, input: L2) -> Result<L2, LoweringError> {
+    fn wrap(self, input: Unresolved) -> Result<Unresolved, LoweringError> {
         if !self.any {
             return Ok(input);
         }
@@ -1187,7 +1207,7 @@ impl DerivedCols {
                  aggregate — alias the relations apart"
             )));
         }
-        Ok(L2::Project {
+        Ok(Unresolved::Project {
             cols: self.cols,
             qualifier: None,
             child: Box::new(input),
@@ -1211,8 +1231,9 @@ fn agg_col_name(args: &[Expr]) -> Option<String> {
 
 /// The single input column of a value reducer (`SUM`/`MIN`/`MAX`/`AVG`/stddev/
 /// variance/quantile/count-distinct). Errors if the argument is not a column:
-/// L3 reduces a column, not an arbitrary expression (`SUM(a*b)`), so silently
-/// picking a probe column would compute the wrong result.
+/// the canonical `AggIntent` reduces a column, not an arbitrary expression
+/// (`SUM(a*b)`), so silently picking a probe column would compute the wrong
+/// result.
 fn reducer_col(name: &str, args: &[Expr]) -> Result<ColumnRef, LoweringError> {
     agg_col_name(args).map(ColumnRef::Named).ok_or_else(|| {
         LoweringError::UnsupportedAggregate(format!("{name} over a non-column expression"))
@@ -1223,7 +1244,7 @@ fn expr_to_group_ref(expr: &Expr) -> Result<ColumnRef, LoweringError> {
     match expr {
         // Preserve the relation qualifier so a GROUP BY / PARTITION BY key over a
         // join (`b.k` vs `a.k`) resolves to the correct side — the same rule the
-        // scalar predicate path uses (`df_expr_to_l2`).
+        // scalar predicate path uses (`df_expr_to_unresolved`).
         Expr::Column(col) => Ok(match &col.relation {
             Some(rel) => ColumnRef::Qualified {
                 table: rel.to_string(),
@@ -1268,7 +1289,8 @@ fn eval_fetch(expr_opt: &Option<Box<Expr>>) -> Option<usize> {
     })
 }
 
-/// Map a DataFusion window-function definition to the L3 [`WindowFuncKind`].
+/// Map a DataFusion window-function definition to the canonical
+/// [`WindowFuncKind`].
 /// `NthValue` is returned with `None`; `lower_window` fills in `n` from args.
 fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKind, LoweringError> {
     let unsupported = |what: &str, name: &str| {
