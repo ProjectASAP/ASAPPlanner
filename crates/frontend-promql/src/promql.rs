@@ -69,7 +69,7 @@ use asap_types::pre_asap::query_expr::{
     AtModifier as L3AtModifier, BinaryOpKind, GroupKeys, GroupSide, L2QueryExpr as L2, Predicate,
     Reduction, SortKey, Source, TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
 };
-use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, InfoMatcher, L3Scalar, SampleKind};
+use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, InfoMatcher, SampleKind, ScalarValue};
 use asap_types::types::AccuracyTarget;
 
 use crate::error::PromqlError as LoweringError;
@@ -728,7 +728,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<L2> {
             };
             Ok(L2::Relabel {
                 dst: label.clone(),
-                value: Box::new(L2::Literal(L3Scalar::Utf8(open_metrics_float(phi)))),
+                value: Box::new(L2::Literal(ScalarValue::Utf8(open_metrics_float(phi)))),
                 child: Box::new(quantile),
             })
         })
@@ -975,8 +975,8 @@ fn walk_label(call: &Call) -> Result<L2> {
                 name: "label_replace".into(),
                 args: vec![
                     L2::Column(ColumnRef::Named(src)),
-                    L2::Literal(L3Scalar::Utf8(regex)),
-                    L2::Literal(L3Scalar::Utf8(replacement)),
+                    L2::Literal(ScalarValue::Utf8(regex)),
+                    L2::Literal(ScalarValue::Utf8(replacement)),
                 ],
             };
             Ok(L2::Relabel {
@@ -994,7 +994,7 @@ fn walk_label(call: &Call) -> Result<L2> {
             }
             let dst = str_arg(call, 1)?;
             let sep = str_arg(call, 2)?;
-            let mut args = vec![L2::Literal(L3Scalar::Utf8(sep))];
+            let mut args = vec![L2::Literal(ScalarValue::Utf8(sep))];
             for i in 3..call.args.args.len() {
                 args.push(L2::Column(ColumnRef::Named(str_arg(call, i)?)));
             }
@@ -1795,7 +1795,7 @@ fn matcher_to_l3expr(m: &Matcher) -> L2 {
     L2::Compare {
         left: Box::new(L2::Column(ColumnRef::Named(m.name.clone()))),
         op,
-        right: Box::new(L2::Literal(L3Scalar::Utf8(m.value.clone()))),
+        right: Box::new(L2::Literal(ScalarValue::Utf8(m.value.clone()))),
     }
 }
 

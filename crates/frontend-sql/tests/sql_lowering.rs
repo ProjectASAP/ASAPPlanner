@@ -8,7 +8,7 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::{
-    AggIntent, CompareOp, GroupKeys, JoinKind, L3Scalar, QueryExpr, Reduction, Source,
+    AggIntent, CompareOp, GroupKeys, JoinKind, QueryExpr, Reduction, ScalarValue, Source,
     WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
@@ -882,7 +882,7 @@ async fn an_uncorrelated_exists_is_an_unconditional_semi_join() {
     let qe = lower("SELECT service FROM metrics WHERE EXISTS (SELECT 1 FROM hosts)").await;
     let (kind, pred, _) = join_parts(&qe);
     assert_eq!(kind, &JoinKind::Semi);
-    assert_eq!(*pred, QueryExpr::Literal(L3Scalar::Boolean(true)));
+    assert_eq!(*pred, QueryExpr::Literal(ScalarValue::Boolean(true)));
 }
 
 #[tokio::test]

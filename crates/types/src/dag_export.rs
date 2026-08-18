@@ -394,7 +394,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
 mod tests {
     use super::*;
     use crate::pre_asap::agg_intent::AggIntent;
-    use crate::pre_asap::expr_ir::L3Scalar;
+    use crate::pre_asap::expr_ir::ScalarValue;
     use crate::pre_asap::query_expr::{GroupKeys, Predicate, Reduction};
     use crate::pre_asap::schema::{Column, DataType, Schema};
     use crate::types::AccuracyTarget;
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn chain_preserves_shape_and_child_links() {
         let expr = QueryExpr::Filter {
-            pred: Predicate(Box::new(QueryExpr::Literal(L3Scalar::Boolean(true)))),
+            pred: Predicate(Box::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
             child: Box::new(QueryExpr::Aggregate {
                 reduction: Reduction::Reduce(GroupKeys::none()),
                 measures: vec![AggIntent::Count {

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::agg_intent::AggIntent;
-use super::expr_ir::{ArithOp, ColumnRef, CompareOp, L3Scalar};
+use super::expr_ir::{ArithOp, ColumnRef, CompareOp, ScalarValue};
 use super::schema::{Column, ColumnId, DataType, Schema};
 
 /// The column-reference resolution state a [`QueryExpr<C>`] tree carries —
@@ -751,7 +751,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// ColumnRef`) or positional [`ColumnId`] (once bound, `C = ColumnId`).
     Column(C),
     /// A constant literal value.
-    Literal(L3Scalar),
+    Literal(ScalarValue),
     /// `left op right` — binary comparison.
     Compare {
         left: Box<QueryExpr<C>>,
@@ -1359,11 +1359,11 @@ fn infer_expr_type(expr: &QueryExpr<ColumnId>, schema: &Schema) -> (DataType, bo
             .map(|c| (c.dtype.clone(), c.nullable))
             .unwrap_or((DataType::Float64, true)),
         QueryExpr::Literal(s) => match s {
-            L3Scalar::Int64(_) => (DataType::Int64, false),
-            L3Scalar::Float64(_) => (DataType::Float64, false),
-            L3Scalar::Utf8(_) => (DataType::Utf8, false),
-            L3Scalar::Boolean(_) => (DataType::Bool, false),
-            L3Scalar::Null => (DataType::Float64, true),
+            ScalarValue::Int64(_) => (DataType::Int64, false),
+            ScalarValue::Float64(_) => (DataType::Float64, false),
+            ScalarValue::Utf8(_) => (DataType::Utf8, false),
+            ScalarValue::Boolean(_) => (DataType::Bool, false),
+            ScalarValue::Null => (DataType::Float64, true),
         },
         // Boolean-valued expressions (SQL three-valued logic → nullable).
         QueryExpr::Compare { .. }
@@ -1544,7 +1544,7 @@ mod tests {
                     expr: QueryExpr::Compare {
                         left: Box::new(QueryExpr::Column(2)),
                         op: CompareOp::Gt,
-                        right: Box::new(QueryExpr::Literal(L3Scalar::Float64(0.0))),
+                        right: Box::new(QueryExpr::Literal(ScalarValue::Float64(0.0))),
                     },
                 },
             ],
@@ -1836,7 +1836,7 @@ mod tests {
         let right = scan(vec![col("b", DataType::Utf8, false)], None, vec![]);
         QueryExpr::Join {
             kind,
-            pred: Predicate(Box::new(QueryExpr::Literal(L3Scalar::Boolean(true)))),
+            pred: Predicate(Box::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
             left: Box::new(left),
             right: Box::new(right),
         }

@@ -1,6 +1,6 @@
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, L3Scalar};
+use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, ScalarValue};
 
 use crate::error::SqlError as LoweringError;
 
@@ -88,11 +88,11 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
         Expr::Negative(inner) => {
             let inner_l3 = df_expr_to_l2(inner)?;
             match inner_l3 {
-                L2::Literal(L3Scalar::Int64(v)) => Ok(L2::Literal(L3Scalar::Int64(-v))),
-                L2::Literal(L3Scalar::Float64(v)) => Ok(L2::Literal(L3Scalar::Float64(-v))),
+                L2::Literal(ScalarValue::Int64(v)) => Ok(L2::Literal(ScalarValue::Int64(-v))),
+                L2::Literal(ScalarValue::Float64(v)) => Ok(L2::Literal(ScalarValue::Float64(-v))),
                 other => Ok(L2::Arith {
                     op: ArithOp::Mul,
-                    left: Box::new(L2::Literal(L3Scalar::Int64(-1))),
+                    left: Box::new(L2::Literal(ScalarValue::Int64(-1))),
                     right: Box::new(other),
                 }),
             }

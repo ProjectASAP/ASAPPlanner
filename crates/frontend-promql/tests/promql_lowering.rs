@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use asap_types::pre_asap::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, L3Scalar, QueryExpr, Reduction, Source,
+    AggIntent, ArithOp, BinaryOpKind, CompareOp, QueryExpr, Reduction, ScalarValue, Source,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{BatchEntry, Query, QueryLanguage, QueryRequirements, QueryWorkload};
@@ -50,7 +50,7 @@ fn regex_matcher_lowers_to_regex_compareop() {
     // The label matcher's column is resolved positionally against the scan schema.
     let path_id = schema.column_id("path").expect("path in scan schema");
     assert!(matches!(left.as_ref(), QueryExpr::Column(id) if *id == path_id));
-    assert!(matches!(right.as_ref(), QueryExpr::Literal(L3Scalar::Utf8(v)) if v == "/api/.*"));
+    assert!(matches!(right.as_ref(), QueryExpr::Literal(ScalarValue::Utf8(v)) if v == "/api/.*"));
 }
 
 // ── *_over_time → Aggregate over TimeRange ──────────────────────────────────────
@@ -911,7 +911,7 @@ fn quantile_branches(q: &QueryExpr) -> Vec<(String, AggIntent)> {
             let QueryExpr::Relabel { value, child, .. } = c else {
                 panic!("expected Relabel per branch, got {c:?}");
             };
-            let QueryExpr::Literal(L3Scalar::Utf8(v)) = value.as_ref() else {
+            let QueryExpr::Literal(ScalarValue::Utf8(v)) = value.as_ref() else {
                 panic!("expected a literal label value, got {value:?}");
             };
             let QueryExpr::Aggregate { measures, .. } = child.as_ref() else {

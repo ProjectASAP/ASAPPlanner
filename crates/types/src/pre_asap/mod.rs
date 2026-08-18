@@ -7,7 +7,7 @@
 //!   bound, name-based [`ColumnRef`] before).
 //! - [`agg_intent`] — the L3 aggregation-intent vocabulary.
 //! - [`expr_ir`] — the [`ColumnRef`] column-reference type and the scalar
-//!   operator/literal vocabulary ([`L3Scalar`], [`CompareOp`], [`ArithOp`])
+//!   operator/literal vocabulary ([`ScalarValue`], [`CompareOp`], [`ArithOp`])
 //!   [`QueryExpr`]'s scalar variants are built from.
 //! - [`schema`] — the per-edge [`Schema`] every L3 node carries.
 //! - [`binder`] / [`column_resolution`] — name resolution: turn a `ColumnRef`
@@ -45,7 +45,7 @@ pub use column_resolution::{
     output_schema_for_aggregate, resolve_column_ref, resolve_column_refs, resolve_expr,
     ResolveError,
 };
-pub use expr_ir::{ArithOp, ColumnRef, CompareOp, L3Scalar};
+pub use expr_ir::{ArithOp, ColumnRef, CompareOp, ScalarValue};
 pub use query_expr::{
     aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
     InfoMatcher, JoinKind, L2QueryExpr, L3QueryExpr, Predicate, ProjectItem, QueryExpr,

@@ -11,7 +11,7 @@
 //! [`ColumnId`](super::schema::ColumnId) (positional, once bound).
 //!
 //! What's left here is the vocabulary those scalar variants are built from —
-//! [`L3Scalar`], [`CompareOp`], [`ArithOp`] — the **union** of what the two
+//! [`ScalarValue`], [`CompareOp`], [`ArithOp`] — the **union** of what the two
 //! front ends need: PromQL contributes `Regex` / `NotRegex` (`=~` / `!~`); SQL
 //! contributes arithmetic, `CASE`, `IN`, `CAST`, `IS [NOT] NULL`, scalar
 //! function calls, and the `LIKE` / `ILIKE` comparison family.
@@ -41,7 +41,7 @@ pub enum ColumnRef {
 
 /// A typed scalar constant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum L3Scalar {
+pub enum ScalarValue {
     Int64(i64),
     Float64(f64),
     Utf8(String),

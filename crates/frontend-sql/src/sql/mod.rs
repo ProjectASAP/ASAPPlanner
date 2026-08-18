@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use datafusion::catalog_common::MemorySchemaProvider;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::common::{Column as DfColumn, ScalarValue};
+use datafusion::common::{Column as DfColumn, ScalarValue as DfScalarValue};
 use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{
     self, Distinct, Expr, JoinType, LogicalPlan, WindowFunctionDefinition,
@@ -39,7 +39,9 @@ use asap_types::pre_asap::query_expr::{
     GroupKeys, L2QueryExpr as L2, Predicate, ProjectItem, Reduction, SortKey, Source,
 };
 use asap_types::pre_asap::schema::{DataType, Schema};
-use asap_types::pre_asap::{ColumnRef, CompareOp, JoinKind, L3Scalar, SetOpKind, WindowFuncKind};
+use asap_types::pre_asap::{
+    ColumnRef, CompareOp, JoinKind, ScalarValue, SetOpKind, WindowFuncKind,
+};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
 
@@ -375,7 +377,7 @@ impl<'a> SqlLowerer<'a> {
         // unconditional `JOIN` (`lower_join`, below).
         let pred = match correlation {
             Some(e) => Predicate(Box::new(df_expr_to_l2(&e)?)),
-            None => Predicate(Box::new(L2::Literal(L3Scalar::Boolean(true)))),
+            None => Predicate(Box::new(L2::Literal(ScalarValue::Boolean(true)))),
         };
         Ok(L2::Join {
             kind,
@@ -458,7 +460,7 @@ impl<'a> SqlLowerer<'a> {
         }
         let pred = Predicate(Box::new(match conjuncts.len() {
             // No condition (a CROSS JOIN) is unconditionally true.
-            0 => L2::Literal(L3Scalar::Boolean(true)),
+            0 => L2::Literal(ScalarValue::Boolean(true)),
             1 => conjuncts.pop().unwrap(),
             _ => L2::BoolAnd(conjuncts),
         }));
@@ -498,7 +500,7 @@ impl<'a> SqlLowerer<'a> {
         // Nth_value: lift N from the (literal) 2nd arg, keep only the column.
         let func = if matches!(func, WindowFuncKind::NthValue(None)) {
             let n = match args.get(1) {
-                Some(L2::Literal(L3Scalar::Int64(n))) if *n > 0 => *n as u64,
+                Some(L2::Literal(ScalarValue::Int64(n))) if *n > 0 => *n as u64,
                 other => {
                     return Err(LoweringError::InvalidExpression(format!(
                         "NTH_VALUE requires a positive integer literal 2nd arg, got {other:?}"
@@ -751,7 +753,7 @@ impl<'a> SqlLowerer<'a> {
                             L2::Column(ColumnRef::Named(name.clone()))
                         } else {
                             L2::Cast {
-                                expr: Box::new(L2::Literal(L3Scalar::Null)),
+                                expr: Box::new(L2::Literal(ScalarValue::Null)),
                                 to: dtype.clone(),
                                 try_cast: false,
                             }
@@ -1238,8 +1240,8 @@ fn expr_to_group_ref(expr: &Expr) -> Result<ColumnRef, LoweringError> {
 
 fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
     let q = match args.get(1) {
-        Some(Expr::Literal(ScalarValue::Float64(Some(q)))) => *q,
-        Some(Expr::Literal(ScalarValue::Float32(Some(q)))) => *q as f64,
+        Some(Expr::Literal(DfScalarValue::Float64(Some(q)))) => *q,
+        Some(Expr::Literal(DfScalarValue::Float32(Some(q)))) => *q as f64,
         _ => {
             return Err(LoweringError::InvalidExpression(
                 "percentile value must be a float literal (2nd arg)".into(),
@@ -1259,9 +1261,9 @@ fn extract_percentile_q(args: &[Expr]) -> Result<f64, LoweringError> {
 
 fn eval_fetch(expr_opt: &Option<Box<Expr>>) -> Option<usize> {
     expr_opt.as_ref().and_then(|e| match e.as_ref() {
-        Expr::Literal(ScalarValue::Int64(Some(v))) if *v >= 0 => Some(*v as usize),
-        Expr::Literal(ScalarValue::UInt64(Some(v))) => Some(*v as usize),
-        Expr::Literal(ScalarValue::Int32(Some(v))) if *v >= 0 => Some(*v as usize),
+        Expr::Literal(DfScalarValue::Int64(Some(v))) if *v >= 0 => Some(*v as usize),
+        Expr::Literal(DfScalarValue::UInt64(Some(v))) => Some(*v as usize),
+        Expr::Literal(DfScalarValue::Int32(Some(v))) if *v >= 0 => Some(*v as usize),
         _ => None,
     })
 }
