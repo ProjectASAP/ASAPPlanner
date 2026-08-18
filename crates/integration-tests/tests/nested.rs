@@ -13,8 +13,8 @@ use std::time::Duration;
 use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
 use asap_types::pre_asap::{
-    AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, GroupKeys, L3Expr, L3Scalar,
-    Predicate, QueryExpr, Reduction, Source, TimeShift, VectorMatch, VectorMatchKind,
+    AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, GroupKeys, L3Scalar, Predicate,
+    QueryExpr, Reduction, Source, TimeShift, VectorMatch, VectorMatchKind,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -76,11 +76,11 @@ fn q23_sum_by_job_over_filtered_scan() {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },
-        predicates: vec![Predicate(L3Expr::Compare {
-            left: Box::new(L3Expr::Column(3)),
+        predicates: vec![Predicate(Box::new(QueryExpr::Compare {
+            left: Box::new(QueryExpr::Column(3)),
             op: CompareOp::Eq,
-            right: Box::new(L3Expr::Literal(L3Scalar::Utf8("200".into()))),
-        })],
+            right: Box::new(QueryExpr::Literal(L3Scalar::Utf8("200".into()))),
+        }))],
         schema: metric_schema(&["job", "status"]),
     };
     let expected = agg(vec![2], AggIntent::Sum { col: None }, scan);
@@ -101,11 +101,11 @@ fn q25_div_over_complex_subtrees() {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },
-        predicates: vec![Predicate(L3Expr::Compare {
-            left: Box::new(L3Expr::Column(3)),
+        predicates: vec![Predicate(Box::new(QueryExpr::Compare {
+            left: Box::new(QueryExpr::Column(3)),
             op: CompareOp::Eq,
-            right: Box::new(L3Expr::Literal(L3Scalar::Utf8("200".into()))),
-        })],
+            right: Box::new(QueryExpr::Literal(L3Scalar::Utf8("200".into()))),
+        }))],
         schema: metric_schema(&["job", "status"]),
     };
     let lhs = agg(
@@ -194,11 +194,11 @@ fn q53_outer_group_key_absent_from_nested_aggregate() {
         source: Source::TimeSeries {
             metric: "http_requests".into(),
         },
-        predicates: vec![Predicate(L3Expr::Compare {
-            left: Box::new(L3Expr::Column(3)),
+        predicates: vec![Predicate(Box::new(QueryExpr::Compare {
+            left: Box::new(QueryExpr::Column(3)),
             op: CompareOp::Eq,
-            right: Box::new(L3Expr::Literal(L3Scalar::Utf8("api-server".into()))),
-        })],
+            right: Box::new(QueryExpr::Literal(L3Scalar::Utf8("api-server".into()))),
+        }))],
         schema: metric_schema(&["group", "job"]),
     };
     let inner = agg(vec![2], AggIntent::Sum { col: None }, scan);
@@ -222,11 +222,11 @@ fn q52_outer_name_label_over_binary_op() {
         source: Source::TimeSeries {
             metric: metric.into(),
         },
-        predicates: vec![Predicate(L3Expr::Compare {
-            left: Box::new(L3Expr::Column(2)), // env
+        predicates: vec![Predicate(Box::new(QueryExpr::Compare {
+            left: Box::new(QueryExpr::Column(2)), // env
             op: CompareOp::Eq,
-            right: Box::new(L3Expr::Literal(L3Scalar::Utf8(env.into()))),
-        })],
+            right: Box::new(QueryExpr::Literal(L3Scalar::Utf8(env.into()))),
+        }))],
         schema: metric_schema(&["env", "__name__"]),
     };
     let expected = agg(
@@ -349,11 +349,11 @@ fn q24_sum_by_job_over_rate_over_filtered_scan() {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },
-        predicates: vec![Predicate(L3Expr::Compare {
-            left: Box::new(L3Expr::Column(3)),
+        predicates: vec![Predicate(Box::new(QueryExpr::Compare {
+            left: Box::new(QueryExpr::Column(3)),
             op: CompareOp::Eq,
-            right: Box::new(L3Expr::Literal(L3Scalar::Utf8("200".into()))),
-        })],
+            right: Box::new(QueryExpr::Literal(L3Scalar::Utf8("200".into()))),
+        }))],
         schema: metric_schema(&["job", "status"]),
     };
     let inner_rate = agg_per_entity(

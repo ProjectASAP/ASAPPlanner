@@ -1,10 +1,11 @@
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, L2Expr, L3Scalar};
+use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, L3Scalar};
 
 use crate::error::SqlError as LoweringError;
 
 use super::types::{arrow_to_l3, scalar_value_to_l3};
+use super::L2;
 
 pub(super) fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
     match expr {
@@ -21,13 +22,13 @@ pub(super) fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// Translate a DataFusion `Expr` to an `L2Expr`.
+/// Translate a DataFusion `Expr` to an `L2`.
 /// Returns `UnsupportedFeature` for anything not needed in v1.
-pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
+pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
     match expr {
         // Preserve DataFusion's relation qualifier so a column name shared
         // across a join (`a.k` vs `b.k`) resolves to the correct side.
-        Expr::Column(col) => Ok(L2Expr::Column(match &col.relation {
+        Expr::Column(col) => Ok(L2::Column(match &col.relation {
             Some(rel) => ColumnRef::Qualified {
                 table: rel.to_string(),
                 name: col.name.clone(),
@@ -35,7 +36,7 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
             None => ColumnRef::Named(col.name.clone()),
         })),
 
-        Expr::Literal(sv) => scalar_value_to_l3(sv).map(L2Expr::Literal),
+        Expr::Literal(sv) => scalar_value_to_l3(sv).map(L2::Literal),
 
         Expr::Alias(a) => df_expr_to_l2(&a.expr),
 
@@ -43,12 +44,12 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
             Operator::And => {
                 let parts = split_conjuncts(expr);
                 let l3_parts: Result<Vec<_>, _> = parts.iter().map(|e| df_expr_to_l2(e)).collect();
-                Ok(L2Expr::BoolAnd(l3_parts?))
+                Ok(L2::BoolAnd(l3_parts?))
             }
             Operator::Or => {
                 let parts = split_disjuncts(expr);
                 let l3_parts: Result<Vec<_>, _> = parts.iter().map(|e| df_expr_to_l2(e)).collect();
-                Ok(L2Expr::BoolOr(l3_parts?))
+                Ok(L2::BoolOr(l3_parts?))
             }
             Operator::Eq => compare(left, CompareOp::Eq, right),
             Operator::NotEq => compare(left, CompareOp::Ne, right),
@@ -87,11 +88,11 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
         Expr::Negative(inner) => {
             let inner_l3 = df_expr_to_l2(inner)?;
             match inner_l3 {
-                L2Expr::Literal(L3Scalar::Int64(v)) => Ok(L2Expr::Literal(L3Scalar::Int64(-v))),
-                L2Expr::Literal(L3Scalar::Float64(v)) => Ok(L2Expr::Literal(L3Scalar::Float64(-v))),
-                other => Ok(L2Expr::Arith {
+                L2::Literal(L3Scalar::Int64(v)) => Ok(L2::Literal(L3Scalar::Int64(-v))),
+                L2::Literal(L3Scalar::Float64(v)) => Ok(L2::Literal(L3Scalar::Float64(-v))),
+                other => Ok(L2::Arith {
                     op: ArithOp::Mul,
-                    left: Box::new(L2Expr::Literal(L3Scalar::Int64(-1))),
+                    left: Box::new(L2::Literal(L3Scalar::Int64(-1))),
                     right: Box::new(other),
                 }),
             }
@@ -114,23 +115,23 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
                 .as_ref()
                 .map(|e| df_expr_to_l2(e).map(Box::new))
                 .transpose()?;
-            Ok(L2Expr::Case {
+            Ok(L2::Case {
                 operand,
                 branches,
                 else_expr,
             })
         }
 
-        Expr::Not(inner) => Ok(L2Expr::Not(Box::new(df_expr_to_l2(inner)?))),
+        Expr::Not(inner) => Ok(L2::Not(Box::new(df_expr_to_l2(inner)?))),
 
-        Expr::IsNull(inner) => Ok(L2Expr::IsNull(Box::new(df_expr_to_l2(inner)?))),
+        Expr::IsNull(inner) => Ok(L2::IsNull(Box::new(df_expr_to_l2(inner)?))),
 
-        Expr::IsNotNull(inner) => Ok(L2Expr::IsNotNull(Box::new(df_expr_to_l2(inner)?))),
+        Expr::IsNotNull(inner) => Ok(L2::IsNotNull(Box::new(df_expr_to_l2(inner)?))),
 
         Expr::Cast(c) => {
             let inner = df_expr_to_l2(&c.expr)?;
             let to = arrow_to_l3(&c.data_type)?;
-            Ok(L2Expr::Cast {
+            Ok(L2::Cast {
                 expr: Box::new(inner),
                 to,
                 try_cast: false,
@@ -141,7 +142,7 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
         Expr::TryCast(c) => {
             let inner = df_expr_to_l2(&c.expr)?;
             let to = arrow_to_l3(&c.data_type)?;
-            Ok(L2Expr::Cast {
+            Ok(L2::Cast {
                 expr: Box::new(inner),
                 to,
                 try_cast: true,
@@ -151,7 +152,7 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
         Expr::InList(il) => {
             let expr = df_expr_to_l2(&il.expr)?;
             let list: Result<Vec<_>, _> = il.list.iter().map(df_expr_to_l2).collect();
-            Ok(L2Expr::InList {
+            Ok(L2::InList {
                 expr: Box::new(expr),
                 list: list?,
                 negated: il.negated,
@@ -167,15 +168,15 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
                 // NOT BETWEEN: invert each side
                 let lt = compare(&b.expr, CompareOp::Lt, &b.low)?;
                 let gt = compare(&b.expr, CompareOp::Gt, &b.high)?;
-                Ok(L2Expr::BoolOr(vec![lt, gt]))
+                Ok(L2::BoolOr(vec![lt, gt]))
             } else {
-                Ok(L2Expr::BoolAnd(vec![x_low, x_high]))
+                Ok(L2::BoolAnd(vec![x_low, x_high]))
             }
         }
 
         Expr::ScalarFunction(sf) => {
             let args: Result<Vec<_>, _> = sf.args.iter().map(df_expr_to_l2).collect();
-            Ok(L2Expr::FunctionCall {
+            Ok(L2::FunctionCall {
                 name: sf.func.name().to_string(),
                 args: args?,
             })
@@ -198,16 +199,16 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2Expr, LoweringError> {
     }
 }
 
-pub(super) fn compare(left: &Expr, op: CompareOp, right: &Expr) -> Result<L2Expr, LoweringError> {
-    Ok(L2Expr::Compare {
+pub(super) fn compare(left: &Expr, op: CompareOp, right: &Expr) -> Result<L2, LoweringError> {
+    Ok(L2::Compare {
         left: Box::new(df_expr_to_l2(left)?),
         op,
         right: Box::new(df_expr_to_l2(right)?),
     })
 }
 
-pub(super) fn arith(left: &Expr, op: ArithOp, right: &Expr) -> Result<L2Expr, LoweringError> {
-    Ok(L2Expr::Arith {
+pub(super) fn arith(left: &Expr, op: ArithOp, right: &Expr) -> Result<L2, LoweringError> {
+    Ok(L2::Arith {
         op,
         left: Box::new(df_expr_to_l2(left)?),
         right: Box::new(df_expr_to_l2(right)?),

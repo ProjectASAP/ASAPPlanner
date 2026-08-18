@@ -87,7 +87,22 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
                 go(inner, out)
             }
+            // `AggIntent` only ever lives in `Aggregate.measures`, never in a
+            // scalar position (issue #205) — nothing to collect there.
             QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
+            QueryExpr::Column(_)
+            | QueryExpr::Literal(_)
+            | QueryExpr::Compare { .. }
+            | QueryExpr::BoolAnd(_)
+            | QueryExpr::BoolOr(_)
+            | QueryExpr::Not(_)
+            | QueryExpr::IsNull(_)
+            | QueryExpr::IsNotNull(_)
+            | QueryExpr::Cast { .. }
+            | QueryExpr::InList { .. }
+            | QueryExpr::FunctionCall { .. }
+            | QueryExpr::Arith { .. }
+            | QueryExpr::Case { .. } => {}
         }
     }
     go(e, &mut out);

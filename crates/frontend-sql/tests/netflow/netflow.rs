@@ -297,5 +297,20 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
         }
         QueryExpr::VectorFromScalar(child) | QueryExpr::ScalarFromVector(child) => visit(child, f),
         QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
+        // Scalar expression variants (issue #205) aren't relational nodes;
+        // this visitor only walks the relational tree, so stop here.
+        QueryExpr::Column(_)
+        | QueryExpr::Literal(_)
+        | QueryExpr::Compare { .. }
+        | QueryExpr::BoolAnd(_)
+        | QueryExpr::BoolOr(_)
+        | QueryExpr::Not(_)
+        | QueryExpr::IsNull(_)
+        | QueryExpr::IsNotNull(_)
+        | QueryExpr::Cast { .. }
+        | QueryExpr::InList { .. }
+        | QueryExpr::FunctionCall { .. }
+        | QueryExpr::Arith { .. }
+        | QueryExpr::Case { .. } => {}
     }
 }

@@ -36,8 +36,8 @@ use std::time::Duration;
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
 use asap_types::pre_asap::schema::DataType;
 use asap_types::pre_asap::{
-    AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, L3Expr, MathFunc, QueryExpr,
-    Reduction, SampleKind, Source, TimeFunc,
+    AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, MathFunc, QueryExpr, Reduction,
+    SampleKind, Source, TimeFunc,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -96,7 +96,22 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
             collect(inner, out)
         }
+        // `AggIntent` only ever lives in `Aggregate.measures`, never in a
+        // scalar position (issue #205) — nothing to collect there.
         QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
+        QueryExpr::Column(_)
+        | QueryExpr::Literal(_)
+        | QueryExpr::Compare { .. }
+        | QueryExpr::BoolAnd(_)
+        | QueryExpr::BoolOr(_)
+        | QueryExpr::Not(_)
+        | QueryExpr::IsNull(_)
+        | QueryExpr::IsNotNull(_)
+        | QueryExpr::Cast { .. }
+        | QueryExpr::InList { .. }
+        | QueryExpr::FunctionCall { .. }
+        | QueryExpr::Arith { .. }
+        | QueryExpr::Case { .. } => {}
     }
 }
 
@@ -2066,8 +2081,8 @@ fn first_relabel(e: &QueryExpr) -> &QueryExpr {
 }
 
 /// True when `value` is a `FunctionCall` with the given name.
-fn is_fn_named(value: &L3Expr, name: &str) -> bool {
-    matches!(value, L3Expr::FunctionCall { name: n, .. } if n == name)
+fn is_fn_named(value: &QueryExpr, name: &str) -> bool {
+    matches!(value, QueryExpr::FunctionCall { name: n, .. } if n == name)
 }
 
 #[test]

@@ -69,9 +69,7 @@ use asap_types::pre_asap::query_expr::{
     AtModifier as L3AtModifier, BinaryOpKind, GroupKeys, GroupSide, L2QueryExpr as L2, Predicate,
     Reduction, SortKey, Source, TimeShift, VectorGrouping, VectorMatch, VectorMatchKind,
 };
-use asap_types::pre_asap::{
-    ArithOp, ColumnRef, CompareOp, InfoMatcher, L2Expr, L3Scalar, SampleKind,
-};
+use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, InfoMatcher, L3Scalar, SampleKind};
 use asap_types::types::AccuracyTarget;
 
 use crate::error::PromqlError as LoweringError;
@@ -153,7 +151,7 @@ enum InnerFunc {
 
 struct Inner {
     metric: String,
-    matchers: Vec<L2Expr>,
+    matchers: Vec<L2>,
     window: Option<Duration>,
     func: Option<InnerFunc>,
     /// `offset` / `@` on the selector, carried to the `Source` (issue #40).
@@ -597,7 +595,7 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: L2) -> Result<L
         Outer::TopK { k, descending } => {
             let sorted = L2::Sort {
                 keys: vec![SortKey {
-                    expr: L2Expr::Column(ColumnRef::SampleValue),
+                    expr: L2::Column(ColumnRef::SampleValue),
                     ascending: !descending,
                     nulls_first: false,
                 }],
@@ -730,7 +728,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<L2> {
             };
             Ok(L2::Relabel {
                 dst: label.clone(),
-                value: L2Expr::Literal(L3Scalar::Utf8(open_metrics_float(phi))),
+                value: Box::new(L2::Literal(L3Scalar::Utf8(open_metrics_float(phi)))),
                 child: Box::new(quantile),
             })
         })
@@ -892,7 +890,7 @@ fn walk_sort(call: &Call) -> Result<L2> {
         nulls_first: false,
     };
     let keys = if by_value {
-        vec![sort_key(L2Expr::Column(ColumnRef::SampleValue))]
+        vec![sort_key(L2::Column(ColumnRef::SampleValue))]
     } else {
         // `sort_by_label(v, "l1", "l2", …)` — one key per label arg, in order.
         if call.args.args.len() < 2 {
@@ -901,11 +899,7 @@ fn walk_sort(call: &Call) -> Result<L2> {
             ));
         }
         (1..call.args.args.len())
-            .map(|i| {
-                Ok(sort_key(L2Expr::Column(ColumnRef::Named(str_arg(
-                    call, i,
-                )?))))
-            })
+            .map(|i| Ok(sort_key(L2::Column(ColumnRef::Named(str_arg(call, i)?)))))
             .collect::<Result<Vec<_>>>()?
     };
     Ok(L2::Sort {
@@ -977,15 +971,19 @@ fn walk_label(call: &Call) -> Result<L2> {
             let replacement = str_arg(call, 2)?;
             let src = str_arg(call, 3)?;
             let regex = str_arg(call, 4)?;
-            let value = L2Expr::FunctionCall {
+            let value = L2::FunctionCall {
                 name: "label_replace".into(),
                 args: vec![
-                    L2Expr::Column(ColumnRef::Named(src)),
-                    L2Expr::Literal(L3Scalar::Utf8(regex)),
-                    L2Expr::Literal(L3Scalar::Utf8(replacement)),
+                    L2::Column(ColumnRef::Named(src)),
+                    L2::Literal(L3Scalar::Utf8(regex)),
+                    L2::Literal(L3Scalar::Utf8(replacement)),
                 ],
             };
-            Ok(L2::Relabel { dst, value, child })
+            Ok(L2::Relabel {
+                dst,
+                value: Box::new(value),
+                child,
+            })
         }
         "label_join" => {
             // label_join(v, dst, sep, src_1, …, src_n) — needs ≥1 source label.
@@ -996,15 +994,19 @@ fn walk_label(call: &Call) -> Result<L2> {
             }
             let dst = str_arg(call, 1)?;
             let sep = str_arg(call, 2)?;
-            let mut args = vec![L2Expr::Literal(L3Scalar::Utf8(sep))];
+            let mut args = vec![L2::Literal(L3Scalar::Utf8(sep))];
             for i in 3..call.args.args.len() {
-                args.push(L2Expr::Column(ColumnRef::Named(str_arg(call, i)?)));
+                args.push(L2::Column(ColumnRef::Named(str_arg(call, i)?)));
             }
-            let value = L2Expr::FunctionCall {
+            let value = L2::FunctionCall {
                 name: "label_join".into(),
                 args,
             };
-            Ok(L2::Relabel { dst, value, child })
+            Ok(L2::Relabel {
+                dst,
+                value: Box::new(value),
+                child,
+            })
         }
         other => Err(LoweringError::UnsupportedFunction(other.to_string())),
     }
@@ -1474,7 +1476,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
                 };
                 let sorted = L2::Sort {
                     keys: vec![SortKey {
-                        expr: L2Expr::Column(ColumnRef::SampleValue),
+                        expr: L2::Column(ColumnRef::SampleValue),
                         ascending: !descending,
                         nulls_first: false,
                     }],
@@ -1554,10 +1556,13 @@ fn outer_aggregate(keys: Vec<ColumnRef>, intent: AggIntent<ColumnRef>, child: L2
     }
 }
 
-fn filtered_source(metric: String, matchers: Vec<L2Expr>, shift: TimeShift) -> L2 {
+fn filtered_source(metric: String, matchers: Vec<L2>, shift: TimeShift) -> L2 {
     let scan = L2::Scan {
         source: Source::TimeSeries { metric },
-        predicates: matchers.into_iter().map(Predicate).collect(),
+        predicates: matchers
+            .into_iter()
+            .map(|m| Predicate(Box::new(m)))
+            .collect(),
         // Usage-derived (PromQL is schemaless) — the Binder fills this in.
         schema: None,
     };
@@ -1700,7 +1705,7 @@ fn resolve_group(agg: &AggregateExpr) -> Result<(Vec<ColumnRef>, bool)> {
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
-fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2Expr>, TimeShift)> {
+fn vs_parts(vs: &VectorSelector) -> Result<(String, Vec<L2>, TimeShift)> {
     // A non-equality `__name__` matcher (`=~` / `!~` / `!=`) selects *across*
     // metric names. The L3 `Source::TimeSeries { metric }` carries a single
     // concrete metric name, so there is no representation for a regex/negated
@@ -1780,21 +1785,21 @@ fn system_time_ms(t: SystemTime) -> Result<i64> {
     })
 }
 
-fn matcher_to_l3expr(m: &Matcher) -> L2Expr {
+fn matcher_to_l3expr(m: &Matcher) -> L2 {
     let op = match &m.op {
         MatchOp::Equal => CompareOp::Eq,
         MatchOp::NotEqual => CompareOp::Ne,
         MatchOp::Re(_) => CompareOp::Regex,
         MatchOp::NotRe(_) => CompareOp::NotRegex,
     };
-    L2Expr::Compare {
-        left: Box::new(L2Expr::Column(ColumnRef::Named(m.name.clone()))),
+    L2::Compare {
+        left: Box::new(L2::Column(ColumnRef::Named(m.name.clone()))),
         op,
-        right: Box::new(L2Expr::Literal(L3Scalar::Utf8(m.value.clone()))),
+        right: Box::new(L2::Literal(L3Scalar::Utf8(m.value.clone()))),
     }
 }
 
-fn extract_matrix(expr: &Expr) -> Result<(String, Vec<L2Expr>, Duration, TimeShift)> {
+fn extract_matrix(expr: &Expr) -> Result<(String, Vec<L2>, Duration, TimeShift)> {
     match expr {
         Expr::MatrixSelector(ms) => {
             let (metric, matchers, shift) = vs_parts(&ms.vs)?;

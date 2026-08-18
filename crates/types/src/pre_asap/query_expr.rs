@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::agg_intent::AggIntent;
-use super::expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L3Expr, L3Scalar};
+use super::expr_ir::{ArithOp, ColumnRef, CompareOp, L3Scalar};
 use super::schema::{Column, ColumnId, DataType, Schema};
 
 /// The column-reference resolution state a [`QueryExpr<C>`] tree carries —
@@ -47,6 +47,13 @@ pub enum QueryExprError {
     InvalidGroupByColumn(ColumnId, usize),
     #[error("Merge requires at least one child")]
     EmptyMerge,
+    /// [`QueryExpr::output_schema`] called on (or reached, while recursing, a
+    /// child that is) one of the scalar variants (issue #205) — those have no
+    /// independent row schema of their own; a scalar expression's *type* only
+    /// makes sense against the schema it's embedded in (see `infer_expr_type`,
+    /// used by `Project`'s own `output_schema` arm instead).
+    #[error("a scalar expression has no row schema of its own")]
+    ScalarHasNoRowSchema,
 }
 
 // ── Leaf / supporting types ───────────────────────────────────────────────────
@@ -232,10 +239,10 @@ impl Source {
 /// variants are PromQL vector-set / power ops with no scalar-IR counterpart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOpKind {
-    /// Arithmetic — `Add/Sub/Mul/Div/Mod` (shared with `L3Expr::Arith`).
+    /// Arithmetic — `Add/Sub/Mul/Div/Mod` (shared with `QueryExpr::Arith`).
     Arith(ArithOp),
     /// Comparison — `Eq/Ne/Lt/Le/Gt/Ge` + `Like/ILike/Regex` family (shared
-    /// with `L3Expr::Compare`).
+    /// with `QueryExpr::Compare`).
     Compare(CompareOp),
     /// PromQL logical-set intersection (`and`).
     And,
@@ -344,8 +351,9 @@ pub enum SampleKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SortKey<C = ColumnId> {
-    pub expr: Expr<C>,
+#[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
+pub struct SortKey<C: ColState = ColumnId> {
+    pub expr: QueryExpr<C>,
     pub ascending: bool,
     pub nulls_first: bool,
 }
@@ -413,14 +421,20 @@ pub enum GroupSide {
 }
 
 /// A row-level filter predicate (WHERE clause / PromQL label matcher).
+/// Boxed: `Predicate<C>` sits directly (not behind a `Vec`) in
+/// `Filter.pred`/`Join.pred`/`Aggregate.having`, and `QueryExpr<C>` is
+/// self-recursive without further indirection once the scalar variants are
+/// part of it — the box is what makes the recursive type's size finite there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Predicate<C = ColumnId>(pub Expr<C>);
+#[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
+pub struct Predicate<C: ColState = ColumnId>(pub Box<QueryExpr<C>>);
 
 /// One item in a SELECT projection list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProjectItem<C = ColumnId> {
+#[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
+pub struct ProjectItem<C: ColState = ColumnId> {
     pub alias: Option<String>,
-    pub expr: Expr<C>,
+    pub expr: QueryExpr<C>,
 }
 
 // ── L3 intent algebra IR ──────────────────────────────────────────────────────
@@ -531,7 +545,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     Relabel {
         /// The label written by this rewrite (PromQL `dst_label`).
         dst: String,
-        value: Expr<C>,
+        value: Box<QueryExpr<C>>,
         child: Box<QueryExpr<C>>,
     },
 
@@ -696,7 +710,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         func: WindowFuncKind,
         /// Operand expressions (`LAG(value)` → `[Column(value_id)]`); empty for
         /// the rank-only functions (`ROW_NUMBER`/`RANK`/`DENSE_RANK`).
-        args: Vec<Expr<C>>,
+        args: Vec<QueryExpr<C>>,
         partition_by: GroupKeys<C>,
         order_by: Vec<SortKey<C>>,
         /// The output column's name — DataFusion's window-expr field name, so a
@@ -713,6 +727,153 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         #[serde(default)]
         vector_match: Option<VectorMatch>,
     },
+
+    // ── Scalar expression shapes (issue #205) ───────────────────────────
+    //
+    // Formerly a separate, self-recursive `Expr<C>` tree, reachable from the
+    // operator variants above only through wrapper fields (`Predicate`,
+    // `ProjectItem`, `SortKey`). They're variants of this same tree now — a
+    // scalar sub-expression is only ever reachable through one of those same
+    // wrapper positions (`Filter.pred`, `ProjectItem.expr`, `Aggregate.having`,
+    // `Relabel.value`, `WindowFunc.args`, …), which is a *convention* this
+    // type no longer enforces at compile time the way the old, closed
+    // `Expr<C>` variant set did — nothing stops constructing, say, a `Scan`
+    // where a `Compare`'s `left` operand belongs. `output_schema` and every
+    // scalar-position consumer (`resolve`, `canonicalize`, `infer_expr_type`)
+    // reject a non-scalar variant found there instead (a `QueryExprError` or
+    // an `unreachable!`, depending on the call site) — the accepted
+    // replacement, since the alternative (a marker-trait/sub-enum bound
+    // restricting which variants are constructible in a scalar position) adds
+    // real type-level machinery for a distinction every constructor already
+    // has to get right structurally anyway (a `Filter` is never built with an
+    // operator subtree as its `pred`).
+    /// A column reference — unresolved [`ColumnRef`] (front-end-emitted, `C =
+    /// ColumnRef`) or positional [`ColumnId`] (once bound, `C = ColumnId`).
+    Column(C),
+    /// A constant literal value.
+    Literal(L3Scalar),
+    /// `left op right` — binary comparison.
+    Compare {
+        left: Box<QueryExpr<C>>,
+        op: CompareOp,
+        right: Box<QueryExpr<C>>,
+    },
+    /// Flat conjunction (logical AND). An empty list is vacuously true.
+    BoolAnd(Vec<QueryExpr<C>>),
+    /// Flat disjunction (logical OR). An empty list is vacuously false.
+    BoolOr(Vec<QueryExpr<C>>),
+    /// Logical NOT.
+    Not(Box<QueryExpr<C>>),
+    /// `expr IS NULL`.
+    IsNull(Box<QueryExpr<C>>),
+    /// `expr IS NOT NULL`.
+    IsNotNull(Box<QueryExpr<C>>),
+    /// `CAST(expr AS to)`; `try_cast` for SQL `TRY_CAST` (NULL on failure).
+    Cast {
+        expr: Box<QueryExpr<C>>,
+        to: DataType,
+        try_cast: bool,
+    },
+    /// `expr [NOT] IN (v1, v2, …)`.
+    InList {
+        expr: Box<QueryExpr<C>>,
+        list: Vec<QueryExpr<C>>,
+        negated: bool,
+    },
+    /// Scalar function call, e.g. `LOWER(col)`, `ABS(x)`.
+    FunctionCall {
+        name: String,
+        args: Vec<QueryExpr<C>>,
+    },
+    /// Binary arithmetic: `left op right`.
+    Arith {
+        op: ArithOp,
+        left: Box<QueryExpr<C>>,
+        right: Box<QueryExpr<C>>,
+    },
+    /// SQL `CASE` (both searched and simple forms). `operand` present for the
+    /// simple form (`CASE expr WHEN …`), absent for searched.
+    Case {
+        operand: Option<Box<QueryExpr<C>>>,
+        branches: Vec<(QueryExpr<C>, QueryExpr<C>)>,
+        else_expr: Option<Box<QueryExpr<C>>>,
+    },
+}
+
+impl<C: ColState> QueryExpr<C> {
+    /// If this expression is a `BoolAnd`, return its elements; otherwise a
+    /// single-element slice containing `self`.
+    pub fn conjuncts(&self) -> &[QueryExpr<C>] {
+        match self {
+            QueryExpr::BoolAnd(v) => v.as_slice(),
+            _ => std::slice::from_ref(self),
+        }
+    }
+
+    /// If this expression is a `BoolOr`, return its elements; otherwise a
+    /// single-element slice containing `self`.
+    pub fn disjuncts(&self) -> &[QueryExpr<C>] {
+        match self {
+            QueryExpr::BoolOr(v) => v.as_slice(),
+            _ => std::slice::from_ref(self),
+        }
+    }
+
+    /// Recursively collect every column reference in a **scalar** subtree —
+    /// used by the [`Binder`](super::binder::Binder) to seed usage-derived
+    /// leaf schemas, and available to L4 for column-lineage / selectivity.
+    /// `self` must be one of the scalar variants (see the module doc on
+    /// [`QueryExpr`]'s scalar shapes) — every caller already only reaches
+    /// this through a scalar-typed position (`Predicate`, `ProjectItem.expr`,
+    /// …), so an operator variant here indicates a construction bug, not a
+    /// shape this needs to handle silently.
+    pub fn columns_referenced(&self) -> Vec<&C> {
+        match self {
+            QueryExpr::Column(c) => vec![c],
+            QueryExpr::Literal(_) => vec![],
+            QueryExpr::Compare { left, right, .. } | QueryExpr::Arith { left, right, .. } => {
+                let mut v = left.columns_referenced();
+                v.extend(right.columns_referenced());
+                v
+            }
+            QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
+                parts.iter().flat_map(|e| e.columns_referenced()).collect()
+            }
+            QueryExpr::Not(e) | QueryExpr::IsNull(e) | QueryExpr::IsNotNull(e) => {
+                e.columns_referenced()
+            }
+            QueryExpr::Cast { expr, .. } => expr.columns_referenced(),
+            QueryExpr::InList { expr, list, .. } => {
+                let mut v = expr.columns_referenced();
+                v.extend(list.iter().flat_map(|e| e.columns_referenced()));
+                v
+            }
+            QueryExpr::FunctionCall { args, .. } => {
+                args.iter().flat_map(|e| e.columns_referenced()).collect()
+            }
+            QueryExpr::Case {
+                operand,
+                branches,
+                else_expr,
+            } => {
+                let mut v = vec![];
+                if let Some(op) = operand {
+                    v.extend(op.columns_referenced());
+                }
+                for (when, then) in branches {
+                    v.extend(when.columns_referenced());
+                    v.extend(then.columns_referenced());
+                }
+                if let Some(e) = else_expr {
+                    v.extend(e.columns_referenced());
+                }
+                v
+            }
+            other => unreachable!(
+                "columns_referenced called on a non-scalar QueryExpr variant: {other:?}"
+            ),
+        }
+    }
 }
 
 /// The canonical, positional Layer-3 tree — what the bare `QueryExpr` name has
@@ -904,7 +1065,7 @@ impl QueryExpr<ColumnId> {
                 // First operand's (dtype, nullable) from the child schema, owned
                 // so the borrow ends before we append.
                 let arg = args.first().and_then(|a| match a {
-                    L3Expr::Column(id) => out.columns.get(*id),
+                    QueryExpr::Column(id) => out.columns.get(*id),
                     _ => None,
                 });
                 let arg_dtype = || arg.map_or(DataType::Float64, |c| c.dtype.clone());
@@ -973,6 +1134,21 @@ impl QueryExpr<ColumnId> {
                 ) => r.output_schema(),
                 (l, _) => l.output_schema(),
             },
+
+            // The scalar variants (issue #205) — see `QueryExprError::ScalarHasNoRowSchema`.
+            QueryExpr::Column(_)
+            | QueryExpr::Literal(_)
+            | QueryExpr::Compare { .. }
+            | QueryExpr::BoolAnd(_)
+            | QueryExpr::BoolOr(_)
+            | QueryExpr::Not(_)
+            | QueryExpr::IsNull(_)
+            | QueryExpr::IsNotNull(_)
+            | QueryExpr::Cast { .. }
+            | QueryExpr::InList { .. }
+            | QueryExpr::FunctionCall { .. }
+            | QueryExpr::Arith { .. }
+            | QueryExpr::Case { .. } => Err(QueryExprError::ScalarHasNoRowSchema),
         }
     }
 }
@@ -1169,18 +1345,20 @@ fn without_output_schema(
     })
 }
 
-/// Infer the `(DataType, nullable)` a scalar [`L3Expr`] produces against an
+/// Infer the `(DataType, nullable)` a scalar [`QueryExpr`] produces against an
 /// input [`Schema`]. Used by `Project` schema derivation. Approximate at L3:
 /// unknown columns and bare `FunctionCall`s fall back to a permissive default
-/// (the L4/emit layer refines with a real function/type registry).
-fn infer_expr_type(expr: &L3Expr, schema: &Schema) -> (DataType, bool) {
+/// (the L4/emit layer refines with a real function/type registry). `expr`
+/// must be one of the scalar variants (issue #205) — an operator variant here
+/// is a construction bug, not a shape this needs to handle silently.
+fn infer_expr_type(expr: &QueryExpr<ColumnId>, schema: &Schema) -> (DataType, bool) {
     match expr {
-        L3Expr::Column(id) => schema
+        QueryExpr::Column(id) => schema
             .columns
             .get(*id)
             .map(|c| (c.dtype.clone(), c.nullable))
             .unwrap_or((DataType::Float64, true)),
-        L3Expr::Literal(s) => match s {
+        QueryExpr::Literal(s) => match s {
             L3Scalar::Int64(_) => (DataType::Int64, false),
             L3Scalar::Float64(_) => (DataType::Float64, false),
             L3Scalar::Utf8(_) => (DataType::Utf8, false),
@@ -1188,14 +1366,14 @@ fn infer_expr_type(expr: &L3Expr, schema: &Schema) -> (DataType, bool) {
             L3Scalar::Null => (DataType::Float64, true),
         },
         // Boolean-valued expressions (SQL three-valued logic → nullable).
-        L3Expr::Compare { .. }
-        | L3Expr::BoolAnd(_)
-        | L3Expr::BoolOr(_)
-        | L3Expr::Not(_)
-        | L3Expr::IsNull(_)
-        | L3Expr::IsNotNull(_)
-        | L3Expr::InList { .. } => (DataType::Bool, true),
-        L3Expr::Arith { left, right, .. } => {
+        QueryExpr::Compare { .. }
+        | QueryExpr::BoolAnd(_)
+        | QueryExpr::BoolOr(_)
+        | QueryExpr::Not(_)
+        | QueryExpr::IsNull(_)
+        | QueryExpr::IsNotNull(_)
+        | QueryExpr::InList { .. } => (DataType::Bool, true),
+        QueryExpr::Arith { left, right, .. } => {
             let (lt, ln) = infer_expr_type(left, schema);
             let (rt, rn) = infer_expr_type(right, schema);
             let dtype = if matches!(lt, DataType::Int64) && matches!(rt, DataType::Int64) {
@@ -1205,13 +1383,13 @@ fn infer_expr_type(expr: &L3Expr, schema: &Schema) -> (DataType, bool) {
             };
             (dtype, ln || rn)
         }
-        L3Expr::Cast { to, try_cast, expr } => {
+        QueryExpr::Cast { to, try_cast, expr } => {
             let (_, nullable) = infer_expr_type(expr, schema);
             (to.clone(), *try_cast || nullable)
         }
         // No function/type registry at L3 — default permissive.
-        L3Expr::FunctionCall { .. } => (DataType::Float64, true),
-        L3Expr::Case {
+        QueryExpr::FunctionCall { .. } => (DataType::Float64, true),
+        QueryExpr::Case {
             branches,
             else_expr,
             ..
@@ -1220,14 +1398,17 @@ fn infer_expr_type(expr: &L3Expr, schema: &Schema) -> (DataType, bool) {
             .map(|(_, then)| (infer_expr_type(then, schema).0, true))
             .or_else(|| else_expr.as_ref().map(|e| infer_expr_type(e, schema)))
             .unwrap_or((DataType::Float64, true)),
+        other => {
+            unreachable!("infer_expr_type called on a non-scalar QueryExpr variant: {other:?}")
+        }
     }
 }
 
 /// Default output-column name for a projection item with no explicit alias:
 /// a bare column keeps its (schema) name; anything else gets `col_{i}`.
-fn default_proj_name(expr: &L3Expr, idx: usize, schema: &Schema) -> String {
+fn default_proj_name(expr: &QueryExpr<ColumnId>, idx: usize, schema: &Schema) -> String {
     match expr {
-        L3Expr::Column(id) => schema
+        QueryExpr::Column(id) => schema
             .columns
             .get(*id)
             .map(|c| c.name.clone())
@@ -1346,24 +1527,24 @@ mod tests {
                 // bare column passthrough keeps its (schema) name + type: host=col 1
                 ProjectItem {
                     alias: None,
-                    expr: L3Expr::Column(1),
+                    expr: QueryExpr::Column(1),
                 },
                 // arithmetic over value (col 2) → Float64
                 ProjectItem {
                     alias: Some("dbl".into()),
-                    expr: L3Expr::Arith {
+                    expr: QueryExpr::Arith {
                         op: ArithOp::Add,
-                        left: Box::new(L3Expr::Column(2)),
-                        right: Box::new(L3Expr::Column(2)),
+                        left: Box::new(QueryExpr::Column(2)),
+                        right: Box::new(QueryExpr::Column(2)),
                     },
                 },
                 // comparison → Bool (nullable under 3-valued logic)
                 ProjectItem {
                     alias: Some("flag".into()),
-                    expr: L3Expr::Compare {
-                        left: Box::new(L3Expr::Column(2)),
+                    expr: QueryExpr::Compare {
+                        left: Box::new(QueryExpr::Column(2)),
                         op: CompareOp::Gt,
-                        right: Box::new(L3Expr::Literal(L3Scalar::Float64(0.0))),
+                        right: Box::new(QueryExpr::Literal(L3Scalar::Float64(0.0))),
                     },
                 },
             ],
@@ -1635,11 +1816,11 @@ mod tests {
                 // value=col 1, ts=col 0
                 ProjectItem {
                     alias: None,
-                    expr: L3Expr::Column(1),
+                    expr: QueryExpr::Column(1),
                 },
                 ProjectItem {
                     alias: None,
-                    expr: L3Expr::Column(0),
+                    expr: QueryExpr::Column(0),
                 },
             ],
             child: Box::new(child),
@@ -1655,7 +1836,7 @@ mod tests {
         let right = scan(vec![col("b", DataType::Utf8, false)], None, vec![]);
         QueryExpr::Join {
             kind,
-            pred: Predicate(L3Expr::Literal(L3Scalar::Boolean(true))),
+            pred: Predicate(Box::new(QueryExpr::Literal(L3Scalar::Boolean(true)))),
             left: Box::new(left),
             right: Box::new(right),
         }

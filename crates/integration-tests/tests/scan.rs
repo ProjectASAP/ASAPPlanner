@@ -8,7 +8,7 @@
 
 use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
-use asap_types::pre_asap::{CompareOp, L3Expr, L3Scalar, Predicate, QueryExpr, Source};
+use asap_types::pre_asap::{CompareOp, L3Scalar, Predicate, QueryExpr, Source};
 use asap_types::types::AccuracyTarget;
 
 fn lower(q: &str) -> QueryExpr {
@@ -26,35 +26,35 @@ fn bare_scan(metric: &str, labels: &[&str]) -> QueryExpr {
 }
 
 fn eq_pred(col_id: usize, value: &str) -> Predicate {
-    Predicate(L3Expr::Compare {
-        left: Box::new(L3Expr::Column(col_id)),
+    Predicate(Box::new(QueryExpr::Compare {
+        left: Box::new(QueryExpr::Column(col_id)),
         op: CompareOp::Eq,
-        right: Box::new(L3Expr::Literal(L3Scalar::Utf8(value.into()))),
-    })
+        right: Box::new(QueryExpr::Literal(L3Scalar::Utf8(value.into()))),
+    }))
 }
 
 fn ne_pred(col_id: usize, value: &str) -> Predicate {
-    Predicate(L3Expr::Compare {
-        left: Box::new(L3Expr::Column(col_id)),
+    Predicate(Box::new(QueryExpr::Compare {
+        left: Box::new(QueryExpr::Column(col_id)),
         op: CompareOp::Ne,
-        right: Box::new(L3Expr::Literal(L3Scalar::Utf8(value.into()))),
-    })
+        right: Box::new(QueryExpr::Literal(L3Scalar::Utf8(value.into()))),
+    }))
 }
 
 fn regex_pred(col_id: usize, pattern: &str) -> Predicate {
-    Predicate(L3Expr::Compare {
-        left: Box::new(L3Expr::Column(col_id)),
+    Predicate(Box::new(QueryExpr::Compare {
+        left: Box::new(QueryExpr::Column(col_id)),
         op: CompareOp::Regex,
-        right: Box::new(L3Expr::Literal(L3Scalar::Utf8(pattern.into()))),
-    })
+        right: Box::new(QueryExpr::Literal(L3Scalar::Utf8(pattern.into()))),
+    }))
 }
 
 fn notregex_pred(col_id: usize, pattern: &str) -> Predicate {
-    Predicate(L3Expr::Compare {
-        left: Box::new(L3Expr::Column(col_id)),
+    Predicate(Box::new(QueryExpr::Compare {
+        left: Box::new(QueryExpr::Column(col_id)),
         op: CompareOp::NotRegex,
-        right: Box::new(L3Expr::Literal(L3Scalar::Utf8(pattern.into()))),
-    })
+        right: Box::new(QueryExpr::Literal(L3Scalar::Utf8(pattern.into()))),
+    }))
 }
 
 // #1 — bare metric name, no matchers

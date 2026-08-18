@@ -11,8 +11,10 @@ use thiserror::Error;
 
 use super::agg_intent::AggIntent;
 use super::expr_ir::ColumnRef;
-use super::expr_ir::{L2Expr, L3Expr};
-use super::query_expr::{aggregate_output_schema, GroupKeys, QueryExprError, Reduction};
+use super::query_expr::{
+    aggregate_output_schema, GroupKeys, L2QueryExpr, L3QueryExpr, QueryExpr, QueryExprError,
+    Reduction,
+};
 use super::schema::{ColumnId, DataType, Schema};
 
 /// Errors returned by the resolution helpers.
@@ -108,56 +110,59 @@ pub fn resolve_group_keys_promql(
         .collect()
 }
 
-/// Resolve a Layer-2 [`L2Expr`] (name-based) into a positional [`L3Expr`] by
-/// resolving every column reference against `schema`. Structural otherwise.
-pub fn resolve_expr(expr: &L2Expr, schema: &Schema) -> Result<L3Expr, ResolveError> {
-    let boxed = |e: &L2Expr| -> Result<Box<L3Expr>, ResolveError> {
+/// Resolve a name-based scalar [`L2QueryExpr`] (one of `QueryExpr`'s scalar
+/// variants, issue #205) into a positional [`L3QueryExpr`] by resolving every
+/// column reference against `schema`. Structural otherwise. `expr` must be
+/// one of the scalar variants — an operator variant here is a construction
+/// bug, not a shape this needs to handle silently.
+pub fn resolve_expr(expr: &L2QueryExpr, schema: &Schema) -> Result<L3QueryExpr, ResolveError> {
+    let boxed = |e: &L2QueryExpr| -> Result<Box<L3QueryExpr>, ResolveError> {
         Ok(Box::new(resolve_expr(e, schema)?))
     };
-    let each = |es: &[L2Expr]| -> Result<Vec<L3Expr>, ResolveError> {
+    let each = |es: &[L2QueryExpr]| -> Result<Vec<L3QueryExpr>, ResolveError> {
         es.iter().map(|e| resolve_expr(e, schema)).collect()
     };
     Ok(match expr {
-        L2Expr::Column(c) => L3Expr::Column(resolve_column_ref(c, schema)?),
-        L2Expr::Literal(s) => L3Expr::Literal(s.clone()),
-        L2Expr::Compare { left, op, right } => L3Expr::Compare {
+        QueryExpr::Column(c) => QueryExpr::Column(resolve_column_ref(c, schema)?),
+        QueryExpr::Literal(s) => QueryExpr::Literal(s.clone()),
+        QueryExpr::Compare { left, op, right } => QueryExpr::Compare {
             left: boxed(left)?,
             op: op.clone(),
             right: boxed(right)?,
         },
-        L2Expr::BoolAnd(v) => L3Expr::BoolAnd(each(v)?),
-        L2Expr::BoolOr(v) => L3Expr::BoolOr(each(v)?),
-        L2Expr::Not(e) => L3Expr::Not(boxed(e)?),
-        L2Expr::IsNull(e) => L3Expr::IsNull(boxed(e)?),
-        L2Expr::IsNotNull(e) => L3Expr::IsNotNull(boxed(e)?),
-        L2Expr::Cast { expr, to, try_cast } => L3Expr::Cast {
+        QueryExpr::BoolAnd(v) => QueryExpr::BoolAnd(each(v)?),
+        QueryExpr::BoolOr(v) => QueryExpr::BoolOr(each(v)?),
+        QueryExpr::Not(e) => QueryExpr::Not(boxed(e)?),
+        QueryExpr::IsNull(e) => QueryExpr::IsNull(boxed(e)?),
+        QueryExpr::IsNotNull(e) => QueryExpr::IsNotNull(boxed(e)?),
+        QueryExpr::Cast { expr, to, try_cast } => QueryExpr::Cast {
             expr: boxed(expr)?,
             to: to.clone(),
             try_cast: *try_cast,
         },
-        L2Expr::InList {
+        QueryExpr::InList {
             expr,
             list,
             negated,
-        } => L3Expr::InList {
+        } => QueryExpr::InList {
             expr: boxed(expr)?,
             list: each(list)?,
             negated: *negated,
         },
-        L2Expr::FunctionCall { name, args } => L3Expr::FunctionCall {
+        QueryExpr::FunctionCall { name, args } => QueryExpr::FunctionCall {
             name: name.clone(),
             args: each(args)?,
         },
-        L2Expr::Arith { op, left, right } => L3Expr::Arith {
+        QueryExpr::Arith { op, left, right } => QueryExpr::Arith {
             op: op.clone(),
             left: boxed(left)?,
             right: boxed(right)?,
         },
-        L2Expr::Case {
+        QueryExpr::Case {
             operand,
             branches,
             else_expr,
-        } => L3Expr::Case {
+        } => QueryExpr::Case {
             operand: operand.as_deref().map(&boxed).transpose()?,
             branches: branches
                 .iter()
@@ -165,6 +170,7 @@ pub fn resolve_expr(expr: &L2Expr, schema: &Schema) -> Result<L3Expr, ResolveErr
                 .collect::<Result<Vec<_>, ResolveError>>()?,
             else_expr: else_expr.as_deref().map(&boxed).transpose()?,
         },
+        other => unreachable!("resolve_expr called on a non-scalar QueryExpr variant: {other:?}"),
     })
 }
 
