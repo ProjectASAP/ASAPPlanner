@@ -1,32 +1,54 @@
 //! Layer 3 — the canonical intent algebra IR.
 //!
 //! - [`query_expr`] — the canonical, language- and deployment-independent L3
-//!   intent algebra ([`QueryExpr`] + [`AggIntent`]), with positional
-//!   [`ColumnId`] schema flow.
+//!   intent algebra ([`QueryExpr`] + [`AggIntent`]), generic over the
+//!   column-reference state (positional [`ColumnId`] once bound, name-based
+//!   [`ColumnRef`] before).
 //! - [`agg_intent`] — the L3 aggregation-intent vocabulary.
 //! - [`expr_ir`] — the scalar expression IR ([`L2Expr`] / [`L3Expr`] /
 //!   [`ColumnRef`]) shared by L2 and L3.
 //! - [`schema`] — the per-edge [`Schema`] every L3 node carries.
+//! - [`binder`] / [`column_resolution`] — name resolution: turn a `ColumnRef`
+//!   into a positional `ColumnId` against an in-scope [`Schema`].
+//! - [`resolve`] — binds a whole front-end-emitted [`L2QueryExpr`] tree to
+//!   canonical [`L3QueryExpr`] (issue #179): both front ends
+//!   (`asap-frontend-promql`, `asap-frontend-sql`) construct `L2QueryExpr`
+//!   directly during their own `interpret` step and call
+//!   [`resolve_root`] on the result — there is no separate per-language
+//!   relational tree or converter anymore.
+//! - [`canonicalize`] — post-lowering structural normalization of [`QueryExpr`]
+//!   (issue #34), run by [`resolve_root`].
 //!
-//! The Layer-2 relational tree and the L2→L3 converter (`convert_root`, the
-//! `Binder`, column resolution) live in the `asap-l2` crate — front ends need
-//! them, but L3-only consumers (optimizer, sketch) do not, so they stay out of
-//! this crate.
+//! Formerly the separate `asap-l2` crate; folded in here since
+//! `binder`/`column_resolution`/`canonicalize`/`resolve` have no
+//! front-end-specific logic — they operate directly on this crate's own
+//! `QueryExpr`.
 
 pub mod agg_intent;
+pub mod binder;
+pub mod canonicalize;
+pub mod column_resolution;
 pub mod expr_ir;
 pub mod query_expr;
+pub mod resolve;
 pub mod schema;
 
 pub use agg_intent::{
     agg_accuracy, agg_is_exact, agg_is_mergeable, default_cardinality, default_quantile,
     is_frequency_heavy_hitter, ranking_measure, AggIntent, MathFunc, RankingMeasure, TimeFunc,
 };
+pub use binder::{Binder, SchemaCatalog, UsageDerivedCatalog};
+pub use canonicalize::canonicalize;
+pub use column_resolution::{
+    output_schema_for_aggregate, resolve_column_ref, resolve_column_refs, resolve_expr,
+    ResolveError,
+};
 pub use expr_ir::{ArithOp, ColumnRef, CompareOp, Expr, L2Expr, L3Expr, L3Scalar};
 pub use query_expr::{
-    aggregate_output_schema, AtModifier, BinaryOpKind, DataModel, GroupKeys, GroupSide,
-    InfoMatcher, JoinKind, Predicate, ProjectItem, QueryExpr, QueryExprError, Reduction,
-    SampleKind, SetOpKind, SortKey, Source, TimeShift, VectorGrouping, VectorMatch,
-    VectorMatchKind, WindowFuncKind,
+    aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
+    InfoMatcher, JoinKind, L2QueryExpr, L3QueryExpr, Predicate, ProjectItem, QueryExpr,
+    QueryExprError, Reduction, SampleKind, SetOpKind, SortKey, Source, TimeShift, VectorGrouping,
+    VectorMatch, VectorMatchKind, WindowFuncKind,
 };
+pub use resolve::{resolve_root, ResolveTreeError};
 pub use schema::{Column, ColumnId, DataType, Schema};

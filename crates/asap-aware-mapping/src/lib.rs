@@ -10,8 +10,9 @@
 //! invariant (arrows point up) holds here too.
 //!
 //! Post-lowering **canonicalization** is *not* here: it landed in
-//! `asap_l2::canonicalize`, run inside the shared `convert_root` so every
-//! front end normalizes before L3 leaves the converter (issue #34, closed).
+//! `asap_types::pre_asap::canonicalize`, run inside the shared `resolve_root`
+//! so every front end normalizes before L3 leaves resolution (issue #34,
+//! closed).
 //!
 //! ## Status
 //!
@@ -45,7 +46,7 @@
 //! | Term | Layer | Meaning | Lives in |
 //! |---|---|---|---|
 //! | **Parse** | L1 | text (PromQL/SQL) → AST | `asap-frontend-promql` / `asap-frontend-sql` |
-//! | **Bind #1** | L2 | *name resolution*: `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → **Bind** → Optimize" pipeline sense (e.g. SQL Server's query-processor terminology) | [`asap_l2::binder::Binder`](https://docs.rs/asap-l2) |
+//! | **Bind #1** | L2 | *name resolution*: `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → **Bind** → Optimize" pipeline sense (e.g. SQL Server's query-processor terminology) | [`asap_types::pre_asap::binder::Binder`](https://docs.rs/asap-types) |
 //! | **Implementation** — [`boundary::implementation_for`] | L3→L4, *one node* | choosing a concrete physical realization (a sketch family, an exact accumulator, or pass-through) for one [`AggIntent`](asap_types::pre_asap::agg_intent::AggIntent) | [`boundary`] |
 //! | **`implement_tree`** — [`bind::implement_tree`] | L3→L4, *whole tree* | walk a whole `QueryExpr` tree, calling [`boundary::implementation_for`] per node, and emit the complete L4 [`SummaryExpr`](asap_types::post_asap::SummaryExpr)/`L4Node` DAG — named after "implementation" too rather than reusing "bind" a second time | [`bind`] |
 //! | **Bind #2** (downstream, not in this crate) | L4→L5 | a *deployment's* own physical binder, additionally deciding **placement** (edge vs. backend, wire format, …) — a genuinely different, deployment-specific decision this crate doesn't model at all | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |

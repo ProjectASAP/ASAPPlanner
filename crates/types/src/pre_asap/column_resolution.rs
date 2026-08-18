@@ -1,21 +1,19 @@
-//! Schema-driven column resolution for the Layer-2 `relational` IR.
+//! Schema-driven column resolution.
 //!
-//! The Layer-2 IR uses `ColumnRef` (name-based, optionally table-qualified);
-//! the canonical IR uses positional [`ColumnId`] resolved against a per-node
-//! [`Schema`]. These helpers bridge the two — the [`Binder`](crate::binder)
-//! builds the schema, and [`resolve_column_refs`] turns the L2 refs (group
-//! keys, dedup columns) into positional ids, qualifier-aware.
+//! Front ends (issue #179) emit `ColumnRef` (name-based, optionally
+//! table-qualified); the canonical tree uses positional [`ColumnId`] resolved
+//! against a per-node [`Schema`]. These helpers bridge the two — the
+//! [`Binder`](super::binder) builds the schema, and [`resolve_column_refs`]
+//! turns name-based refs (group keys, dedup columns) into positional ids,
+//! qualifier-aware.
 
 use thiserror::Error;
 
-use crate::relational::QueryExpr;
-use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::expr_ir::{L2Expr, L3Expr};
-use asap_types::pre_asap::query_expr::{
-    aggregate_output_schema, GroupKeys, QueryExprError, Reduction,
-};
-use asap_types::pre_asap::schema::{Column, ColumnId, DataType, Schema};
+use super::agg_intent::AggIntent;
+use super::expr_ir::ColumnRef;
+use super::expr_ir::{L2Expr, L3Expr};
+use super::query_expr::{aggregate_output_schema, GroupKeys, QueryExprError, Reduction};
+use super::schema::{ColumnId, DataType, Schema};
 
 /// Errors returned by the resolution helpers.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -29,26 +27,6 @@ pub enum ResolveError {
     NoSampleValue { available: Vec<String> },
     #[error("ColumnRef::Wildcard cannot be resolved to a single ColumnId")]
     WildcardNotPositional,
-}
-
-/// Synthesize the conventional PromQL leaf schema `(ts, value)` for a metric.
-pub fn infer_source_schema(_metric_or_table: &str) -> Schema {
-    Schema::with_time_index(
-        vec![
-            Column::new("ts", DataType::Timestamp, false),
-            Column::new("value", DataType::Float64, false),
-        ],
-        0,
-        Vec::new(),
-    )
-}
-
-/// Synthesise the root schema by walking to the outermost `Source` leaf.
-pub fn infer_schema_for_root(expr: &QueryExpr) -> Schema {
-    match expr.source_name() {
-        Some(name) => infer_source_schema(name),
-        None => Schema::default(),
-    }
 }
 
 /// Resolve a single [`ColumnRef`] to a positional [`ColumnId`].
@@ -220,18 +198,23 @@ pub fn output_schema_for_aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pre_asap::schema::Column;
 
-    #[test]
-    fn source_schema_has_ts_and_value() {
-        let s = infer_source_schema("m");
-        assert_eq!(s.columns.len(), 2);
-        assert_eq!(s.time_index, Some(0));
-        assert!(!s.has_unique_key());
+    /// The conventional PromQL leaf shape: `(ts: Timestamp, value: Float64)`.
+    fn ts_value_schema() -> Schema {
+        Schema::with_time_index(
+            vec![
+                Column::new("ts", DataType::Timestamp, false),
+                Column::new("value", DataType::Float64, false),
+            ],
+            0,
+            Vec::new(),
+        )
     }
 
     #[test]
     fn resolve_sample_value() {
-        let s = infer_source_schema("m");
+        let s = ts_value_schema();
         assert_eq!(resolve_column_ref(&ColumnRef::SampleValue, &s), Ok(1));
     }
 
@@ -281,7 +264,7 @@ mod tests {
 
     #[test]
     fn resolve_unknown_name_errors() {
-        let s = infer_source_schema("m");
+        let s = ts_value_schema();
         let err = resolve_column_ref(&ColumnRef::Named("host".into()), &s).unwrap_err();
         assert!(matches!(err, ResolveError::NotFound { .. }));
     }
@@ -321,7 +304,7 @@ mod tests {
         // An open schema can't prove absence — an unresolved key there is a
         // resolution bug (the Binder seeds every referenced label), not an
         // absent label. Keep the strict error.
-        let open = infer_source_schema("m"); // closed: false
+        let open = ts_value_schema(); // closed: false
         assert!(matches!(
             resolve_group_keys_promql(&[ColumnRef::Named("job".into())], &open),
             Err(ResolveError::NotFound { .. })
@@ -330,7 +313,7 @@ mod tests {
 
     #[test]
     fn aggregate_strips_time_and_keeps_unique_keys() {
-        let mut input = infer_source_schema("m");
+        let mut input = ts_value_schema();
         input
             .columns
             .push(Column::new("host", DataType::Utf8, false));
@@ -355,7 +338,7 @@ mod tests {
         // for the same aggregate. Before the dedup this diverged on a per-series
         // reduction — the HAVING mirror lacked the per-series branch and would
         // collapse `[ts, value]` to a single `rate` column.
-        use asap_types::pre_asap::query_expr::{QueryExpr as L3, Source};
+        use crate::pre_asap::query_expr::{QueryExpr as L3, Source};
         use std::time::Duration;
 
         let leaf_schema = Schema::with_time_index(

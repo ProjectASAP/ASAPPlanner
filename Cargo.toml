@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/types",
-    "crates/l2",
     "crates/asap-aware-mapping",
     "crates/frontend-promql",
     "crates/frontend-sql",
