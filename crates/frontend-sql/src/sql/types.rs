@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use datafusion::arrow::datatypes::{
     DataType as ArrowDataType, Field, Fields, Schema as ArrowSchema,
 };
-use datafusion::common::ScalarValue;
+use datafusion::common::ScalarValue as DfScalarValue;
 
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
-use asap_types::pre_asap::L3Scalar;
+use asap_types::pre_asap::ScalarValue;
 
 use crate::error::SqlError as LoweringError;
 
@@ -37,23 +37,23 @@ impl SqlCatalog {
     }
 }
 
-pub(super) fn scalar_value_to_l3(sv: &ScalarValue) -> Result<L3Scalar, LoweringError> {
+pub(super) fn scalar_value_to_l3(sv: &DfScalarValue) -> Result<ScalarValue, LoweringError> {
     match sv {
-        ScalarValue::Int64(Some(v)) => Ok(L3Scalar::Int64(*v)),
-        ScalarValue::Int32(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
-        ScalarValue::Int16(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
-        ScalarValue::Int8(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
-        ScalarValue::UInt64(Some(v)) => i64::try_from(*v).map(L3Scalar::Int64).map_err(|_| {
+        DfScalarValue::Int64(Some(v)) => Ok(ScalarValue::Int64(*v)),
+        DfScalarValue::Int32(Some(v)) => Ok(ScalarValue::Int64(*v as i64)),
+        DfScalarValue::Int16(Some(v)) => Ok(ScalarValue::Int64(*v as i64)),
+        DfScalarValue::Int8(Some(v)) => Ok(ScalarValue::Int64(*v as i64)),
+        DfScalarValue::UInt64(Some(v)) => i64::try_from(*v).map(ScalarValue::Int64).map_err(|_| {
             LoweringError::InvalidExpression(format!("UInt64 value {v} overflows i64"))
         }),
-        ScalarValue::UInt32(Some(v)) => Ok(L3Scalar::Int64(*v as i64)),
-        ScalarValue::Float64(Some(v)) => Ok(L3Scalar::Float64(*v)),
-        ScalarValue::Float32(Some(v)) => Ok(L3Scalar::Float64(*v as f64)),
-        ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
-            Ok(L3Scalar::Utf8(s.clone()))
+        DfScalarValue::UInt32(Some(v)) => Ok(ScalarValue::Int64(*v as i64)),
+        DfScalarValue::Float64(Some(v)) => Ok(ScalarValue::Float64(*v)),
+        DfScalarValue::Float32(Some(v)) => Ok(ScalarValue::Float64(*v as f64)),
+        DfScalarValue::Utf8(Some(s)) | DfScalarValue::LargeUtf8(Some(s)) => {
+            Ok(ScalarValue::Utf8(s.clone()))
         }
-        ScalarValue::Boolean(Some(b)) => Ok(L3Scalar::Boolean(*b)),
-        _ if sv.is_null() => Ok(L3Scalar::Null),
+        DfScalarValue::Boolean(Some(b)) => Ok(ScalarValue::Boolean(*b)),
+        _ if sv.is_null() => Ok(ScalarValue::Null),
         _ => Err(LoweringError::InvalidExpression(format!(
             "unsupported scalar: {sv:?}"
         ))),

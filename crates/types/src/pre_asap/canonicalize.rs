@@ -25,7 +25,7 @@
 //! is exactly the SQL alias gap (#20) the old front-end gate missed.
 
 use super::agg_intent::{is_frequency_heavy_hitter, ranking_measure, AggIntent};
-use super::expr_ir::{CompareOp, L3Scalar};
+use super::expr_ir::{CompareOp, ScalarValue};
 use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
 
 /// Rewrite `expr` into its canonical form (bottom-up). Idempotent: a tree that
@@ -213,7 +213,7 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
     if *op != CompareOp::Le {
         return None;
     }
-    let (QueryExpr::Column(rn_col), QueryExpr::Literal(L3Scalar::Int64(k))) =
+    let (QueryExpr::Column(rn_col), QueryExpr::Literal(ScalarValue::Int64(k))) =
         (left.as_ref(), right.as_ref())
     else {
         return None;
@@ -468,7 +468,7 @@ mod tests {
             pred: Predicate(Box::new(QueryExpr::Compare {
                 left: Box::new(QueryExpr::Column(3)), // rn = the appended window column
                 op: CompareOp::Le,
-                right: Box::new(QueryExpr::Literal(L3Scalar::Int64(5))),
+                right: Box::new(QueryExpr::Literal(ScalarValue::Int64(5))),
             })),
             child: Box::new(wf),
         }
@@ -552,7 +552,7 @@ mod tests {
             pred: Predicate(Box::new(QueryExpr::Compare {
                 left: Box::new(QueryExpr::Column(0)), // NOT the rn column (index 3)
                 op: CompareOp::Le,
-                right: Box::new(QueryExpr::Literal(L3Scalar::Int64(5))),
+                right: Box::new(QueryExpr::Literal(ScalarValue::Int64(5))),
             })),
             child: Box::new(wf),
         };

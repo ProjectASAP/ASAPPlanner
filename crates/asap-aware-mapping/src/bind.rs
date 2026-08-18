@@ -243,7 +243,7 @@ fn lift(schema: &Schema) -> L4Schema {
 mod tests {
     use super::*;
     use asap_types::pre_asap::agg_intent::default_quantile;
-    use asap_types::pre_asap::expr_ir::{CompareOp, L3Scalar};
+    use asap_types::pre_asap::expr_ir::{CompareOp, ScalarValue};
     use asap_types::pre_asap::query_expr::{Predicate, Source};
     use asap_types::pre_asap::schema::{Column, DataType};
     use asap_types::types::AccuracyTarget;
@@ -681,7 +681,7 @@ mod tests {
             pred: Predicate(Box::new(QueryExpr::Compare {
                 left: Box::new(QueryExpr::Column(0)),
                 op: CompareOp::Gt,
-                right: Box::new(QueryExpr::Literal(L3Scalar::Float64(0.5))),
+                right: Box::new(QueryExpr::Literal(ScalarValue::Float64(0.5))),
             })),
             child: Box::new(agg(vec![], default_quantile(0.99), metric_scan(&[]))),
         };
@@ -693,9 +693,9 @@ mod tests {
     fn having_and_multi_intent_stay_logical() {
         let mut q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         if let QueryExpr::Aggregate { having, .. } = &mut q {
-            *having = Some(Predicate(Box::new(QueryExpr::Literal(L3Scalar::Boolean(
-                true,
-            )))));
+            *having = Some(Predicate(Box::new(QueryExpr::Literal(
+                ScalarValue::Boolean(true),
+            ))));
         }
         assert!(matches!(
             implement_tree(&q).unwrap().expr,
