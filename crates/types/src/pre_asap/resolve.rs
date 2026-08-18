@@ -161,8 +161,12 @@ fn resolve(tree: &L2QueryExpr, fallback: &Schema) -> Result<L3QueryExpr, Resolve
             let having = having
                 .as_ref()
                 .map(|Predicate(h)| -> Result<Predicate, ResolveTreeError> {
-                    let out_schema =
-                        aggregate_output_schema(&child_schema, &reduction, &measures, output_names)?;
+                    let out_schema = aggregate_output_schema(
+                        &child_schema,
+                        &reduction,
+                        &measures,
+                        output_names,
+                    )?;
                     Ok(Predicate(resolve_expr(h, &out_schema)?))
                 })
                 .transpose()?;
@@ -402,7 +406,9 @@ fn resolve_agg_intent(
     schema: &Schema,
 ) -> Result<AggIntent<ColumnId>, ResolveError> {
     let col = |c: &Option<ColumnRef>| -> Result<Option<ColumnId>, ResolveError> {
-        c.as_ref().map(|r| resolve_column_ref(r, schema)).transpose()
+        c.as_ref()
+            .map(|r| resolve_column_ref(r, schema))
+            .transpose()
     };
     Ok(match intent {
         AggIntent::Count { accuracy } => AggIntent::Count {
@@ -420,7 +426,11 @@ fn resolve_agg_intent(
             col: col(c)?,
             population: *population,
         },
-        AggIntent::Quantile { col: c, q, accuracy } => AggIntent::Quantile {
+        AggIntent::Quantile {
+            col: c,
+            q,
+            accuracy,
+        } => AggIntent::Quantile {
             col: col(c)?,
             q: *q,
             accuracy: accuracy.clone(),

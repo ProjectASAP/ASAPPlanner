@@ -25,7 +25,9 @@ use super::schema::{Column, ColumnId, DataType, Schema};
 /// `Scan` knows its schema only when the front end already has it without
 /// binding — a SQL leaf, catalog-backed (`Some`) — `None` (PromQL) defers to
 /// the Binder, so `ScanSchema = Option<Schema>`.
-pub trait ColState: Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de> {
+pub trait ColState:
+    Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>
+{
     /// What [`QueryExpr::Scan`]'s `schema` field holds for a tree in this state.
     type ScanSchema: Clone + std::fmt::Debug + PartialEq + Serialize + for<'de> Deserialize<'de>;
 }

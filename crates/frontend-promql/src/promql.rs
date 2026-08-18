@@ -1498,7 +1498,11 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<L2> {
 /// range/subquery marker — no schema needed. `without()` is applied
 /// separately, post-hoc, by `mark_without` — see its doc for why that's still
 /// correct here.
-fn reduction_for(keys: &[ColumnRef], intent: &AggIntent<ColumnRef>, child: &L2) -> Reduction<ColumnRef> {
+fn reduction_for(
+    keys: &[ColumnRef],
+    intent: &AggIntent<ColumnRef>,
+    child: &L2,
+) -> Reduction<ColumnRef> {
     let is_range_child = matches!(child, L2::TimeRange { .. } | L2::Subquery { .. });
     if keys.is_empty() && (intent.is_per_series() || is_range_child) {
         Reduction::PerEntity
