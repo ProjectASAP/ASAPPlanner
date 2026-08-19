@@ -1,20 +1,22 @@
 //! The pre-ASAP → post-ASAP binding pass (issue #98).
 //!
-//! Walks a canonical pre-ASAP [`QueryExpr`] and emits the sketch-bound
+//! Walks a canonical pre-ASAP [`QueryExpr`] and emits the summary-bound
 //! post-ASAP IR ([`SummaryExpr`] / [`SummaryNode`] in `asap-sketch`). Per
 //! node, the [`boundary`](crate::boundary) decision picks the realization:
 //!
-//! - **Sketch** — the `Aggregate` becomes a [`SummaryExpr::SummaryAgg`]
-//!   carrying the committed `(SummaryKind, SummaryParams)`, wrapped in a
-//!   [`SummaryExpr::SummaryEstimate`] that reads the answer back out (the
-//!   `Sketch(…)` column type does not propagate past the estimate);
-//! - **Exact accumulator** — a `SummaryAgg` with an exact kind
-//!   (`Sum`/`Count`/`MinMax`/`Rate`/`Increase`) and no estimate: the partial
-//!   state *is* the value, so a deployment's later finalization step is the
-//!   identity;
+//! - **Summary family** (sketch / sample / wavelet / statistical model) —
+//!   the `Aggregate` becomes a [`SummaryExpr::SummaryAgg`] carrying the
+//!   committed `family: SummaryFamilyType` (that family's own
+//!   `(kind, params)`), wrapped in a [`SummaryExpr::SummaryEstimate`] that
+//!   reads the answer back out (the summary-state column type does not
+//!   propagate past the estimate);
+//! - **Exact accumulator** — a `SummaryAgg` with `family:
+//!   SummaryFamilyType::ExactAggregate` (`Sum`/`Count`/`MinMax`/`Rate`/
+//!   `Increase`) and no estimate: the partial state *is* the value, so a
+//!   deployment's later finalization step is the identity;
 //! - **Pass-through** — the whole pre-ASAP subtree is wrapped as
 //!   [`SummaryExpr::Logical`], schema lifted with every column
-//!   `SummaryDataType::Primitive`.
+//!   `SummaryFamilyType::Plain`.
 //!
 //! Binding recurses through the `Aggregate` spine, so nested aggregates each
 //! get their own decision (`quantile(0.9, sum by (svc) (rate(m[5m]))))` binds
@@ -34,8 +36,7 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    SketchQuery, SummaryDataType, SummaryExpr, SummaryField, SummaryKind, SummaryNode,
-    SummaryParams, SummarySchema,
+    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryField, SummaryNode, SummarySchema,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -79,30 +80,50 @@ pub fn implement_tree_with(
         // The bindable shape: exactly one intent, no HAVING. (Multi-intent
         // nodes and HAVING stay logical — see the module docs.)
         if let ([intent], None) = (measures.as_slice(), having) {
-            match implementation_for_with(intent, cost_model) {
-                Implementation::Summary { kind, params } => {
-                    let estimate = !kind.is_exact();
-                    return bind_summary_agg(
-                        expr, reduction, intent, child, kind, params, estimate, cost_model,
-                    );
-                }
-                Implementation::PassThrough => {}
+            let implementation = implementation_for_with(intent, cost_model);
+            if let Some((family, estimate)) = summary_family(implementation) {
+                return bind_summary_agg(
+                    expr, reduction, intent, child, family, estimate, cost_model,
+                );
             }
         }
     }
     logical(expr)
 }
 
+/// Translate an [`Implementation`] into the `(family, needs a
+/// SummaryEstimate readout)` pair [`bind_summary_agg`] needs, or `None` for
+/// `PassThrough` (the caller falls back to [`logical`]).
+///
+/// Every family's partial state needs a readout to recover a value, except
+/// `ExactAggregate` — its partial state *is* the value already, so no
+/// estimate step follows it.
+fn summary_family(implementation: Implementation) -> Option<(SummaryFamilyType, bool)> {
+    Some(match implementation {
+        Implementation::ExactAggregate { kind, params } => {
+            (SummaryFamilyType::ExactAggregate(kind, params), false)
+        }
+        Implementation::Sketch { kind, params } => (SummaryFamilyType::Sketch(kind, params), true),
+        Implementation::Sample { kind, params } => (SummaryFamilyType::Sample(kind, params), true),
+        Implementation::Wavelet { kind, params } => {
+            (SummaryFamilyType::Wavelet(kind, params), true)
+        }
+        Implementation::StatModel { kind, params } => {
+            (SummaryFamilyType::StatModel(kind, params), true)
+        }
+        Implementation::PassThrough => return None,
+    })
+}
+
 /// Emit `SummaryAgg` (recursively binding the child), plus the
-/// `SummaryEstimate` readout when the realization is a sketch.
+/// `SummaryEstimate` readout when `estimate` is set.
 #[allow(clippy::too_many_arguments)]
 fn bind_summary_agg(
     node: &QueryExpr,
     reduction: &Reduction,
     intent: &AggIntent,
     child: &QueryExpr,
-    kind: SummaryKind,
-    params: SummaryParams,
+    family: SummaryFamilyType,
     estimate: bool,
     cost_model: &dyn CostModel,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
@@ -123,7 +144,7 @@ fn bind_summary_agg(
 
     let mut state_schema = lift(&out_schema);
     if let Some(field) = state_schema.fields.get_mut(state_idx) {
-        field.dtype = SummaryDataType::Sketch(kind.clone(), params.clone());
+        field.dtype = family.clone();
     }
 
     // `reduction` is carried onto `SummaryAgg` verbatim — not flattened to a
@@ -134,8 +155,7 @@ fn bind_summary_agg(
     let agg = Rc::new(SummaryNode {
         expr: SummaryExpr::SummaryAgg {
             child: implement_tree_with(child, cost_model)?,
-            summary: kind,
-            params,
+            family,
             col,
             reduction: reduction.clone(),
         },
@@ -143,7 +163,8 @@ fn bind_summary_agg(
     });
     match query {
         // The readout: downstream of the estimate the schema is the plain
-        // pre-ASAP row shape again (the `Sketch(…)` type does not propagate).
+        // pre-ASAP row shape again (the summary-state type does not
+        // propagate).
         Some(query) => Ok(Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: agg,
@@ -190,7 +211,7 @@ fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
     }
 }
 
-/// The `SummaryEstimate` readout for a sketch-bound intent.
+/// The `SummaryEstimate` readout for a summary-bound intent.
 fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> SketchQuery {
     match intent {
         AggIntent::Quantile { q, .. } => SketchQuery::Quantile { q: *q },
@@ -203,17 +224,19 @@ fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> S
         // Core doesn't know the shape of a deployment-specific `Extension`
         // intent, so it can't build its readout either — delegate to the
         // same `CostModel` that decided (via `realize_extension`) this
-        // intent gets a sketch realization at all. See `readout_extension`'s
+        // intent gets a summary realization at all. See `readout_extension`'s
         // doc for the invariant this depends on.
         AggIntent::Extension { ext_kind, payload } => {
             cost_model.readout_extension(ext_kind, payload, col)
         }
-        other => unreachable!("no sketch realization for {other:?} (boundary::implementation_for)"),
+        other => {
+            unreachable!("no summary realization for {other:?} (boundary::implementation_for)")
+        }
     }
 }
 
 /// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
-/// `SummaryDataType::Primitive`. Public so a deployment can force a node it
+/// `SummaryFamilyType::Plain`. Public so a deployment can force a node it
 /// knows `implement_tree_in_with` would otherwise actively (mis)bind —
 /// e.g. an intent this crate's `boundary::implementation_for` maps to an
 /// accumulator kind the deployment's runtime doesn't actually implement —
@@ -234,7 +257,7 @@ fn lift(schema: &Schema) -> SummarySchema {
             .iter()
             .map(|c| SummaryField {
                 name: c.name.clone(),
-                dtype: SummaryDataType::Primitive(c.dtype.clone()),
+                dtype: SummaryFamilyType::Plain(c.dtype.clone()),
                 nullable: c.nullable,
             })
             .collect(),
@@ -245,6 +268,7 @@ fn lift(schema: &Schema) -> SummarySchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_types::post_asap::{ExactKind, ExactParams, SketchKind, SketchParams};
     use asap_types::pre_asap::agg_intent::default_quantile;
     use asap_types::pre_asap::expr_ir::{CompareOp, ScalarValue};
     use asap_types::pre_asap::query_expr::{Predicate, Source};
@@ -314,31 +338,32 @@ mod tests {
         // Estimate edge: plain row shape — group key + Float64 answer.
         assert_eq!(
             field(&root.schema, "quantile_0_99").dtype,
-            SummaryDataType::Primitive(DataType::Float64)
+            SummaryFamilyType::Plain(DataType::Float64)
         );
         assert_eq!(
             field(&root.schema, "job").dtype,
-            SummaryDataType::Primitive(DataType::Utf8)
+            SummaryFamilyType::Plain(DataType::Utf8)
         );
 
         let SummaryExpr::SummaryAgg {
             child,
-            summary,
-            params,
+            family,
             col,
             reduction,
         } = &summary_input.expr
         else {
             panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
-        assert_eq!(summary, &SummaryKind::Kll);
-        assert_eq!(params, &SummaryParams::Kll { k: 200 });
+        assert_eq!(
+            family,
+            &SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+        );
         assert_eq!(col, &ColumnRef::SampleValue);
         assert_eq!(reduction, &Reduction::by(vec![2]));
-        // SummaryAgg edge: the state column carries the committed (kind, params).
+        // SummaryAgg edge: the state column carries the committed family.
         assert_eq!(
             field(&summary_input.schema, "quantile_0_99").dtype,
-            SummaryDataType::Sketch(SummaryKind::Kll, SummaryParams::Kll { k: 200 })
+            SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
         );
         assert!(matches!(child.expr, SummaryExpr::Logical(ref e)
             if matches!(**e, QueryExpr::Scan { .. })));
@@ -353,10 +378,10 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SummaryKind],
-        ) -> Vec<SummaryKind> {
+            candidates: &[SketchKind],
+        ) -> Vec<SketchKind> {
             let mut v = candidates.to_vec();
-            if let Some(pos) = v.iter().position(|k| *k == SummaryKind::DDSketch) {
+            if let Some(pos) = v.iter().position(|k| *k == SketchKind::DDSketch) {
                 let ddsketch = v.remove(pos);
                 v.insert(0, ddsketch);
             }
@@ -373,24 +398,29 @@ mod tests {
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &default_root.expr else {
             panic!("expected SummaryEstimate root, got {:?}", default_root.expr);
         };
-        let SummaryExpr::SummaryAgg { summary, .. } = &summary_input.expr else {
+        let SummaryExpr::SummaryAgg { family, .. } = &summary_input.expr else {
             panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
-        assert_eq!(summary, &SummaryKind::Kll);
+        assert!(matches!(
+            family,
+            SummaryFamilyType::Sketch(SketchKind::Kll, _)
+        ));
 
         // With `PreferDDSketch`: DDSketch instead, same query.
         let custom_root = implement_tree_with(&q, &PreferDDSketch).unwrap();
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &custom_root.expr else {
             panic!("expected SummaryEstimate root, got {:?}", custom_root.expr);
         };
-        let SummaryExpr::SummaryAgg {
-            summary, params, ..
-        } = &summary_input.expr
-        else {
+        let SummaryExpr::SummaryAgg { family, .. } = &summary_input.expr else {
             panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
-        assert_eq!(summary, &SummaryKind::DDSketch);
-        assert_eq!(params, &SummaryParams::DDSketch { alpha: 0.01 });
+        assert_eq!(
+            family,
+            &SummaryFamilyType::Sketch(
+                SketchKind::DDSketch,
+                SketchParams::DDSketch { alpha: 0.01 }
+            )
+        );
     }
 
     /// A deployment-supplied `CostModel` can realize an `AggIntent::Extension`
@@ -404,8 +434,8 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SummaryKind],
-        ) -> Vec<SummaryKind> {
+            candidates: &[SketchKind],
+        ) -> Vec<SketchKind> {
             candidates.to_vec()
         }
 
@@ -415,9 +445,9 @@ mod tests {
             _payload: &serde_json::Value,
         ) -> crate::boundary::Implementation {
             if ext_kind == "frequency" {
-                crate::boundary::Implementation::Summary {
-                    kind: SummaryKind::CountSketch,
-                    params: SummaryParams::CountSketch {
+                crate::boundary::Implementation::Sketch {
+                    kind: SketchKind::CountSketch,
+                    params: SketchParams::CountSketch {
                         width: 256,
                         depth: 4,
                     },
@@ -478,19 +508,18 @@ mod tests {
                 if k == "item" && v == "checkout"
         ));
 
-        let SummaryExpr::SummaryAgg {
-            summary, params, ..
-        } = &summary_input.expr
-        else {
+        let SummaryExpr::SummaryAgg { family, .. } = &summary_input.expr else {
             panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
-        assert_eq!(summary, &SummaryKind::CountSketch);
         assert_eq!(
-            params,
-            &SummaryParams::CountSketch {
-                width: 256,
-                depth: 4
-            }
+            family,
+            &SummaryFamilyType::Sketch(
+                SketchKind::CountSketch,
+                SketchParams::CountSketch {
+                    width: 256,
+                    depth: 4
+                }
+            )
         );
     }
 
@@ -498,20 +527,19 @@ mod tests {
     fn exact_sum_binds_accumulator_without_estimate() {
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let root = implement_tree(&q).unwrap();
-        let SummaryExpr::SummaryAgg {
-            summary, params, ..
-        } = &root.expr
-        else {
+        let SummaryExpr::SummaryAgg { family, .. } = &root.expr else {
             panic!(
                 "expected bare SummaryAgg (no estimate), got {:?}",
                 root.expr
             );
         };
-        assert_eq!(summary, &SummaryKind::Sum);
-        assert_eq!(params, &SummaryParams::Sum);
+        assert_eq!(
+            family,
+            &SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        );
         assert_eq!(
             field(&root.schema, "sum").dtype,
-            SummaryDataType::Sketch(SummaryKind::Sum, SummaryParams::Sum)
+            SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         );
     }
 
@@ -527,10 +555,13 @@ mod tests {
             },
         );
         let root = implement_tree(&q).unwrap();
-        let SummaryExpr::SummaryAgg { summary, .. } = &root.expr else {
+        let SummaryExpr::SummaryAgg { family, .. } = &root.expr else {
             panic!("expected SummaryAgg, got {:?}", root.expr);
         };
-        assert_eq!(summary, &SummaryKind::Rate);
+        assert_eq!(
+            family,
+            &SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
+        );
         assert_eq!(
             root.schema
                 .fields
@@ -541,7 +572,7 @@ mod tests {
         );
         assert_eq!(
             field(&root.schema, "value").dtype,
-            SummaryDataType::Sketch(SummaryKind::Rate, SummaryParams::Rate)
+            SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
         );
         assert_eq!(root.schema.time_index, Some(0));
     }
@@ -603,19 +634,25 @@ mod tests {
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
             panic!("expected estimate root, got {:?}", root.expr);
         };
-        let SummaryExpr::SummaryAgg { child, summary, .. } = &summary_input.expr else {
+        let SummaryExpr::SummaryAgg { child, family, .. } = &summary_input.expr else {
             panic!("expected outer SummaryAgg, got {:?}", summary_input.expr);
         };
-        assert_eq!(summary, &SummaryKind::Kll);
+        assert!(matches!(
+            family,
+            SummaryFamilyType::Sketch(SketchKind::Kll, _)
+        ));
         let SummaryExpr::SummaryAgg {
-            summary: inner_kind,
+            family: inner_family,
             child: leaf,
             ..
         } = &child.expr
         else {
             panic!("expected inner SummaryAgg, got {:?}", child.expr);
         };
-        assert_eq!(inner_kind, &SummaryKind::Sum);
+        assert_eq!(
+            inner_family,
+            &SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        );
         assert!(matches!(leaf.expr, SummaryExpr::Logical(_)));
     }
 
@@ -741,7 +778,7 @@ mod tests {
         assert!(matches!(
             &summary_input.expr,
             SummaryExpr::SummaryAgg {
-                summary: SummaryKind::CmsWithHeap,
+                family: SummaryFamilyType::Sketch(SketchKind::CmsWithHeap, _),
                 ..
             }
         ));
