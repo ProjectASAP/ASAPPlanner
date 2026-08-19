@@ -4,8 +4,8 @@ use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, ScalarValue};
 
 use crate::error::SqlError as LoweringError;
 
-use super::types::{arrow_to_l3, scalar_value_to_l3};
-use super::L2;
+use super::types::{arrow_to_dtype, scalar_value_to_asap};
+use super::Unresolved;
 
 pub(super) fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
     match expr {
@@ -22,13 +22,13 @@ pub(super) fn split_conjuncts(expr: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// Translate a DataFusion `Expr` to an `L2`.
+/// Translate a DataFusion `Expr` to the canonical, unresolved tree.
 /// Returns `UnsupportedFeature` for anything not needed in v1.
-pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
+pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringError> {
     match expr {
         // Preserve DataFusion's relation qualifier so a column name shared
         // across a join (`a.k` vs `b.k`) resolves to the correct side.
-        Expr::Column(col) => Ok(L2::Column(match &col.relation {
+        Expr::Column(col) => Ok(Unresolved::Column(match &col.relation {
             Some(rel) => ColumnRef::Qualified {
                 table: rel.to_string(),
                 name: col.name.clone(),
@@ -36,20 +36,22 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
             None => ColumnRef::Named(col.name.clone()),
         })),
 
-        Expr::Literal(sv) => scalar_value_to_l3(sv).map(L2::Literal),
+        Expr::Literal(sv) => scalar_value_to_asap(sv).map(Unresolved::Literal),
 
-        Expr::Alias(a) => df_expr_to_l2(&a.expr),
+        Expr::Alias(a) => df_expr_to_unresolved(&a.expr),
 
         Expr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
             Operator::And => {
                 let parts = split_conjuncts(expr);
-                let l3_parts: Result<Vec<_>, _> = parts.iter().map(|e| df_expr_to_l2(e)).collect();
-                Ok(L2::BoolAnd(l3_parts?))
+                let lowered: Result<Vec<_>, _> =
+                    parts.iter().map(|e| df_expr_to_unresolved(e)).collect();
+                Ok(Unresolved::BoolAnd(lowered?))
             }
             Operator::Or => {
                 let parts = split_disjuncts(expr);
-                let l3_parts: Result<Vec<_>, _> = parts.iter().map(|e| df_expr_to_l2(e)).collect();
-                Ok(L2::BoolOr(l3_parts?))
+                let lowered: Result<Vec<_>, _> =
+                    parts.iter().map(|e| df_expr_to_unresolved(e)).collect();
+                Ok(Unresolved::BoolOr(lowered?))
             }
             Operator::Eq => compare(left, CompareOp::Eq, right),
             Operator::NotEq => compare(left, CompareOp::Ne, right),
@@ -86,13 +88,17 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
 
         // Unary minus: negate literals directly; wrap others in -1 * x.
         Expr::Negative(inner) => {
-            let inner_l3 = df_expr_to_l2(inner)?;
-            match inner_l3 {
-                L2::Literal(ScalarValue::Int64(v)) => Ok(L2::Literal(ScalarValue::Int64(-v))),
-                L2::Literal(ScalarValue::Float64(v)) => Ok(L2::Literal(ScalarValue::Float64(-v))),
-                other => Ok(L2::Arith {
+            let inner = df_expr_to_unresolved(inner)?;
+            match inner {
+                Unresolved::Literal(ScalarValue::Int64(v)) => {
+                    Ok(Unresolved::Literal(ScalarValue::Int64(-v)))
+                }
+                Unresolved::Literal(ScalarValue::Float64(v)) => {
+                    Ok(Unresolved::Literal(ScalarValue::Float64(-v)))
+                }
+                other => Ok(Unresolved::Arith {
                     op: ArithOp::Mul,
-                    left: Box::new(L2::Literal(ScalarValue::Int64(-1))),
+                    left: Box::new(Unresolved::Literal(ScalarValue::Int64(-1))),
                     right: Box::new(other),
                 }),
             }
@@ -103,35 +109,39 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
             let operand = c
                 .expr
                 .as_ref()
-                .map(|e| df_expr_to_l2(e).map(Box::new))
+                .map(|e| df_expr_to_unresolved(e).map(Box::new))
                 .transpose()?;
             let branches = c
                 .when_then_expr
                 .iter()
-                .map(|(when, then)| Ok((df_expr_to_l2(when)?, df_expr_to_l2(then)?)))
+                .map(|(when, then)| {
+                    Ok((df_expr_to_unresolved(when)?, df_expr_to_unresolved(then)?))
+                })
                 .collect::<Result<Vec<_>, LoweringError>>()?;
             let else_expr = c
                 .else_expr
                 .as_ref()
-                .map(|e| df_expr_to_l2(e).map(Box::new))
+                .map(|e| df_expr_to_unresolved(e).map(Box::new))
                 .transpose()?;
-            Ok(L2::Case {
+            Ok(Unresolved::Case {
                 operand,
                 branches,
                 else_expr,
             })
         }
 
-        Expr::Not(inner) => Ok(L2::Not(Box::new(df_expr_to_l2(inner)?))),
+        Expr::Not(inner) => Ok(Unresolved::Not(Box::new(df_expr_to_unresolved(inner)?))),
 
-        Expr::IsNull(inner) => Ok(L2::IsNull(Box::new(df_expr_to_l2(inner)?))),
+        Expr::IsNull(inner) => Ok(Unresolved::IsNull(Box::new(df_expr_to_unresolved(inner)?))),
 
-        Expr::IsNotNull(inner) => Ok(L2::IsNotNull(Box::new(df_expr_to_l2(inner)?))),
+        Expr::IsNotNull(inner) => Ok(Unresolved::IsNotNull(Box::new(df_expr_to_unresolved(
+            inner,
+        )?))),
 
         Expr::Cast(c) => {
-            let inner = df_expr_to_l2(&c.expr)?;
-            let to = arrow_to_l3(&c.data_type)?;
-            Ok(L2::Cast {
+            let inner = df_expr_to_unresolved(&c.expr)?;
+            let to = arrow_to_dtype(&c.data_type)?;
+            Ok(Unresolved::Cast {
                 expr: Box::new(inner),
                 to,
                 try_cast: false,
@@ -140,9 +150,9 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
 
         // TRY_CAST returns NULL on conversion failure; preserve that semantic.
         Expr::TryCast(c) => {
-            let inner = df_expr_to_l2(&c.expr)?;
-            let to = arrow_to_l3(&c.data_type)?;
-            Ok(L2::Cast {
+            let inner = df_expr_to_unresolved(&c.expr)?;
+            let to = arrow_to_dtype(&c.data_type)?;
+            Ok(Unresolved::Cast {
                 expr: Box::new(inner),
                 to,
                 try_cast: true,
@@ -150,9 +160,9 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
         }
 
         Expr::InList(il) => {
-            let expr = df_expr_to_l2(&il.expr)?;
-            let list: Result<Vec<_>, _> = il.list.iter().map(df_expr_to_l2).collect();
-            Ok(L2::InList {
+            let expr = df_expr_to_unresolved(&il.expr)?;
+            let list: Result<Vec<_>, _> = il.list.iter().map(df_expr_to_unresolved).collect();
+            Ok(Unresolved::InList {
                 expr: Box::new(expr),
                 list: list?,
                 negated: il.negated,
@@ -168,15 +178,15 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
                 // NOT BETWEEN: invert each side
                 let lt = compare(&b.expr, CompareOp::Lt, &b.low)?;
                 let gt = compare(&b.expr, CompareOp::Gt, &b.high)?;
-                Ok(L2::BoolOr(vec![lt, gt]))
+                Ok(Unresolved::BoolOr(vec![lt, gt]))
             } else {
-                Ok(L2::BoolAnd(vec![x_low, x_high]))
+                Ok(Unresolved::BoolAnd(vec![x_low, x_high]))
             }
         }
 
         Expr::ScalarFunction(sf) => {
-            let args: Result<Vec<_>, _> = sf.args.iter().map(df_expr_to_l2).collect();
-            Ok(L2::FunctionCall {
+            let args: Result<Vec<_>, _> = sf.args.iter().map(df_expr_to_unresolved).collect();
+            Ok(Unresolved::FunctionCall {
                 name: sf.func.name().to_string(),
                 args: args?,
             })
@@ -184,7 +194,7 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
 
         // Subquery-valued expressions in a predicate/projection — `x > (SELECT
         // …)`, `x IN (SELECT …)`, `EXISTS (SELECT …)`. These need a subquery
-        // node in the L2 expression IR (and a correlated-vs-uncorrelated
+        // node in the unresolved expression IR (and a correlated-vs-uncorrelated
         // decision); rejected cleanly until that lands rather than mislowered.
         // Derived tables in `FROM` (the common nesting shape) ARE supported —
         // see `lower_plan`'s `SubqueryAlias` arm.
@@ -199,19 +209,23 @@ pub(super) fn df_expr_to_l2(expr: &Expr) -> Result<L2, LoweringError> {
     }
 }
 
-pub(super) fn compare(left: &Expr, op: CompareOp, right: &Expr) -> Result<L2, LoweringError> {
-    Ok(L2::Compare {
-        left: Box::new(df_expr_to_l2(left)?),
+pub(super) fn compare(
+    left: &Expr,
+    op: CompareOp,
+    right: &Expr,
+) -> Result<Unresolved, LoweringError> {
+    Ok(Unresolved::Compare {
+        left: Box::new(df_expr_to_unresolved(left)?),
         op,
-        right: Box::new(df_expr_to_l2(right)?),
+        right: Box::new(df_expr_to_unresolved(right)?),
     })
 }
 
-pub(super) fn arith(left: &Expr, op: ArithOp, right: &Expr) -> Result<L2, LoweringError> {
-    Ok(L2::Arith {
+pub(super) fn arith(left: &Expr, op: ArithOp, right: &Expr) -> Result<Unresolved, LoweringError> {
+    Ok(Unresolved::Arith {
         op,
-        left: Box::new(df_expr_to_l2(left)?),
-        right: Box::new(df_expr_to_l2(right)?),
+        left: Box::new(df_expr_to_unresolved(left)?),
+        right: Box::new(df_expr_to_unresolved(right)?),
     })
 }
 

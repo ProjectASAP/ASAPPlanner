@@ -1,8 +1,8 @@
-//! The L3→L4 binding pass (issue #98).
+//! The pre-ASAP → post-ASAP binding pass (issue #98).
 //!
-//! Walks a canonical L3 [`QueryExpr`] and emits the sketch-bound L4 IR
-//! ([`SummaryExpr`] / [`L4Node`] in `asap-sketch`). Per node, the
-//! [`boundary`](crate::boundary) decision picks the realization:
+//! Walks a canonical pre-ASAP [`QueryExpr`] and emits the sketch-bound
+//! post-ASAP IR ([`SummaryExpr`] / [`SummaryNode`] in `asap-sketch`). Per
+//! node, the [`boundary`](crate::boundary) decision picks the realization:
 //!
 //! - **Sketch** — the `Aggregate` becomes a [`SummaryExpr::SummaryAgg`]
 //!   carrying the committed `(SummaryKind, SummaryParams)`, wrapped in a
@@ -10,10 +10,11 @@
 //!   `Sketch(…)` column type does not propagate past the estimate);
 //! - **Exact accumulator** — a `SummaryAgg` with an exact kind
 //!   (`Sum`/`Count`/`MinMax`/`Rate`/`Increase`) and no estimate: the partial
-//!   state *is* the value, so L5 finalization is the identity;
-//! - **Pass-through** — the whole L3 subtree is wrapped as
+//!   state *is* the value, so a deployment's later finalization step is the
+//!   identity;
+//! - **Pass-through** — the whole pre-ASAP subtree is wrapped as
 //!   [`SummaryExpr::Logical`], schema lifted with every column
-//!   `L4DataType::Primitive`.
+//!   `SummaryDataType::Primitive`.
 //!
 //! Binding recurses through the `Aggregate` spine, so nested aggregates each
 //! get their own decision (`quantile(0.9, sum by (svc) (rate(m[5m]))))` binds
@@ -21,18 +22,20 @@
 //!
 //! ## Conservative fallbacks
 //!
-//! [`SummaryExpr::Logical`] boxes a whole L3 subtree — it has no L4 children —
-//! so a *logical* operator above a bindable aggregate (`Filter`/`BinaryOp`/…
-//! over a quantile) subsumes the aggregate into the logical wrapper unbound.
-//! Rewriting through logical parents is the L4 rule engine's job (#6/#33),
-//! not this pass's. Similarly conservative: multi-intent `Aggregate` nodes
-//! (SQL `SELECT SUM(a), AVG(b)`) and aggregates with a `HAVING` predicate
-//! (the filter would need the estimate first) stay logical.
+//! [`SummaryExpr::Logical`] boxes a whole pre-ASAP subtree — it has no
+//! post-ASAP children — so a *logical* operator above a bindable aggregate
+//! (`Filter`/`BinaryOp`/… over a quantile) subsumes the aggregate into the
+//! logical wrapper unbound. Rewriting through logical parents is the
+//! post-ASAP rule engine's job (#6/#33), not this pass's. Similarly
+//! conservative: multi-intent `Aggregate` nodes (SQL `SELECT SUM(a), AVG(b)`)
+//! and aggregates with a `HAVING` predicate (the filter would need the
+//! estimate first) stay logical.
 
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    L4DataType, L4Field, L4Node, L4Schema, SketchQuery, SummaryExpr, SummaryKind, SummaryParams,
+    SketchQuery, SummaryDataType, SummaryExpr, SummaryField, SummaryKind, SummaryNode,
+    SummaryParams, SummarySchema,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -43,19 +46,19 @@ use thiserror::Error;
 use crate::boundary::{implementation_for_with, Implementation};
 use crate::cost_model::{CostModel, DefaultCostModel};
 
-/// Errors from the L3→L4 binding pass.
+/// Errors from the pre-ASAP → post-ASAP binding pass.
 #[derive(Debug, Error)]
 pub enum ImplementError {
-    /// L3 schema derivation failed while lifting an edge to `L4Schema`.
-    #[error("schema derivation failed during L3→L4 binding: {0}")]
+    /// Schema derivation failed while lifting an edge to `SummarySchema`.
+    #[error("schema derivation failed during pre-ASAP → post-ASAP binding: {0}")]
     Schema(#[from] QueryExprError),
 }
 
-/// Bind a single query to the L4 IR. Ranks candidate summaries via
+/// Bind a single query to the post-ASAP IR. Ranks candidate summaries via
 /// [`DefaultCostModel`] (`asap-plan`'s built-in static preference order,
 /// unchanged); use [`implement_tree_with`] to plug in a deployment-specific
 /// [`CostModel`] instead.
-pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L4Node>, ImplementError> {
+pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     implement_tree_with(expr, &DefaultCostModel)
 }
 
@@ -64,7 +67,7 @@ pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<L4Node>, ImplementError> {
 pub fn implement_tree_with(
     expr: &QueryExpr,
     cost_model: &dyn CostModel,
-) -> Result<Rc<L4Node>, ImplementError> {
+) -> Result<Rc<SummaryNode>, ImplementError> {
     if let QueryExpr::Aggregate {
         reduction,
         measures,
@@ -102,11 +105,11 @@ fn bind_summary_agg(
     params: SummaryParams,
     estimate: bool,
     cost_model: &dyn CostModel,
-) -> Result<Rc<L4Node>, ImplementError> {
+) -> Result<Rc<SummaryNode>, ImplementError> {
     let child_schema = child.output_schema()?;
-    // The single canonical L3 derivation (per-series vs cross-series, name
-    // overrides) already computes the row shape; L4 only retypes the summary
-    // state column.
+    // The single canonical pre-ASAP derivation (per-series vs cross-series,
+    // name overrides) already computes the row shape; binding only retypes
+    // the summary state column.
     let per_series = matches!(reduction, Reduction::PerEntity);
     let by: Vec<usize> = reduction
         .group_keys()
@@ -120,7 +123,7 @@ fn bind_summary_agg(
 
     let mut state_schema = lift(&out_schema);
     if let Some(field) = state_schema.fields.get_mut(state_idx) {
-        field.dtype = L4DataType::Sketch(kind.clone(), params.clone());
+        field.dtype = SummaryDataType::Sketch(kind.clone(), params.clone());
     }
 
     // `reduction` is carried onto `SummaryAgg` verbatim — not flattened to a
@@ -128,7 +131,7 @@ fn bind_summary_agg(
     // a genuine empty-`by` reduction apart from a per-entity shape with no
     // grouping concept at all (issue #163). `bind_summary_agg` is the single
     // place that decides this; nothing downstream re-derives it.
-    let agg = Rc::new(L4Node {
+    let agg = Rc::new(SummaryNode {
         expr: SummaryExpr::SummaryAgg {
             child: implement_tree_with(child, cost_model)?,
             summary: kind,
@@ -139,9 +142,9 @@ fn bind_summary_agg(
         schema: state_schema,
     });
     match query {
-        // The readout: downstream of the estimate the schema is the plain L3
-        // row shape again (the `Sketch(…)` type does not propagate).
-        Some(query) => Ok(Rc::new(L4Node {
+        // The readout: downstream of the estimate the schema is the plain
+        // pre-ASAP row shape again (the `Sketch(…)` type does not propagate).
+        Some(query) => Ok(Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryEstimate {
                 summary_input: agg,
                 query,
@@ -209,29 +212,29 @@ fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> S
     }
 }
 
-/// Wrap an unrewritten L3 subtree, lifting its schema with every column
-/// `L4DataType::Primitive`. Public so a deployment can force a node it
+/// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
+/// `SummaryDataType::Primitive`. Public so a deployment can force a node it
 /// knows `implement_tree_in_with` would otherwise actively (mis)bind —
 /// e.g. an intent this crate's `boundary::implementation_for` maps to an
 /// accumulator kind the deployment's runtime doesn't actually implement —
 /// through the same fallback this crate's own dispatch uses, without
 /// duplicating the schema-lift logic.
-pub fn logical(expr: &QueryExpr) -> Result<Rc<L4Node>, ImplementError> {
+pub fn logical(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     let schema = expr.output_schema()?;
-    Ok(Rc::new(L4Node {
+    Ok(Rc::new(SummaryNode {
         expr: SummaryExpr::Logical(Box::new(expr.clone())),
         schema: lift(&schema),
     }))
 }
 
-fn lift(schema: &Schema) -> L4Schema {
-    L4Schema {
+fn lift(schema: &Schema) -> SummarySchema {
+    SummarySchema {
         fields: schema
             .columns
             .iter()
-            .map(|c| L4Field {
+            .map(|c| SummaryField {
                 name: c.name.clone(),
-                dtype: L4DataType::Primitive(c.dtype.clone()),
+                dtype: SummaryDataType::Primitive(c.dtype.clone()),
                 nullable: c.nullable,
             })
             .collect(),
@@ -285,7 +288,7 @@ mod tests {
         }
     }
 
-    fn field<'a>(schema: &'a L4Schema, name: &str) -> &'a L4Field {
+    fn field<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryField {
         schema
             .fields
             .iter()
@@ -311,11 +314,11 @@ mod tests {
         // Estimate edge: plain row shape — group key + Float64 answer.
         assert_eq!(
             field(&root.schema, "quantile_0_99").dtype,
-            L4DataType::Primitive(DataType::Float64)
+            SummaryDataType::Primitive(DataType::Float64)
         );
         assert_eq!(
             field(&root.schema, "job").dtype,
-            L4DataType::Primitive(DataType::Utf8)
+            SummaryDataType::Primitive(DataType::Utf8)
         );
 
         let SummaryExpr::SummaryAgg {
@@ -335,7 +338,7 @@ mod tests {
         // SummaryAgg edge: the state column carries the committed (kind, params).
         assert_eq!(
             field(&summary_input.schema, "quantile_0_99").dtype,
-            L4DataType::Sketch(SummaryKind::Kll, SummaryParams::Kll { k: 200 })
+            SummaryDataType::Sketch(SummaryKind::Kll, SummaryParams::Kll { k: 200 })
         );
         assert!(matches!(child.expr, SummaryExpr::Logical(ref e)
             if matches!(**e, QueryExpr::Scan { .. })));
@@ -508,7 +511,7 @@ mod tests {
         assert_eq!(params, &SummaryParams::Sum);
         assert_eq!(
             field(&root.schema, "sum").dtype,
-            L4DataType::Sketch(SummaryKind::Sum, SummaryParams::Sum)
+            SummaryDataType::Sketch(SummaryKind::Sum, SummaryParams::Sum)
         );
     }
 
@@ -538,16 +541,16 @@ mod tests {
         );
         assert_eq!(
             field(&root.schema, "value").dtype,
-            L4DataType::Sketch(SummaryKind::Rate, SummaryParams::Rate)
+            SummaryDataType::Sketch(SummaryKind::Rate, SummaryParams::Rate)
         );
         assert_eq!(root.schema.time_index, Some(0));
     }
 
     /// Issue #163, case 1: a bare per-series range function (e.g.
     /// `quantile_over_time(...)`) binds to `SummaryAgg { reduction:
-    /// PerEntity, .. }` — proving the L3 `Reduction` this crate already
-    /// computes (issue #165) is carried onto the L4 node verbatim, not
-    /// flattened back into an ambiguous bare `Vec<ColumnId>`.
+    /// PerEntity, .. }` — proving the pre-ASAP `Reduction` this crate
+    /// already computes (issue #165) is carried onto the post-ASAP node
+    /// verbatim, not flattened back into an ambiguous bare `Vec<ColumnId>`.
     #[test]
     fn bare_per_series_aggregate_binds_summary_agg_with_per_entity_reduction() {
         let q = agg_per_entity(
@@ -642,7 +645,7 @@ mod tests {
     }
 
     /// The `col` of the first `SummaryAgg` in the tree.
-    fn find_summary_col(node: &L4Node) -> Option<ColumnRef> {
+    fn find_summary_col(node: &SummaryNode) -> Option<ColumnRef> {
         match &node.expr {
             SummaryExpr::SummaryAgg { col, .. } => Some(col.clone()),
             SummaryExpr::SummaryEstimate { summary_input, .. } => find_summary_col(summary_input),
@@ -675,8 +678,9 @@ mod tests {
 
     #[test]
     fn logical_parent_subsumes_bindable_child() {
-        // Filter over a bindable quantile: `Logical` has no L4 children, so
-        // the conservative fallback keeps the whole subtree logical.
+        // Filter over a bindable quantile: `Logical` has no post-ASAP
+        // children, so the conservative fallback keeps the whole subtree
+        // logical.
         let q = QueryExpr::Filter {
             pred: Predicate(Box::new(QueryExpr::Compare {
                 left: Box::new(QueryExpr::Column(0)),

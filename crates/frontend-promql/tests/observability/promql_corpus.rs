@@ -55,10 +55,11 @@ fn tally(corpus: &str) -> Tally {
     t
 }
 
-/// Every query that lowers, additionally run through the L3→L4
-/// `asap-aware-mapping` binding pass (issue #98), at an approximate
-/// accuracy target so the sketch-selection boundary actually fires (an
-/// `Exact` target would only ever exercise the exact-accumulator arm).
+/// Every query that lowers, additionally run through the pre-ASAP →
+/// post-ASAP `asap-aware-mapping` binding pass (issue #98), at an
+/// approximate accuracy target so the sketch-selection boundary actually
+/// fires (an `Exact` target would only ever exercise the exact-accumulator
+/// arm).
 #[derive(Default, Debug)]
 struct BindTally {
     /// Root bound to `SummaryAgg`/`SummaryEstimate` — the pass did something.
@@ -72,11 +73,11 @@ struct BindTally {
 fn bind_tally(corpus: &str, accuracy: AccuracyTarget) -> BindTally {
     let mut t = BindTally::default();
     for q in queries(corpus) {
-        let Ok(l3) = lower_promql(q, accuracy.clone()) else {
+        let Ok(tree) = lower_promql(q, accuracy.clone()) else {
             continue;
         };
-        match implement_tree(&l3) {
-            Ok(l4) if matches!(l4.expr, SummaryExpr::Logical(_)) => t.unchanged += 1,
+        match implement_tree(&tree) {
+            Ok(bound) if matches!(bound.expr, SummaryExpr::Logical(_)) => t.unchanged += 1,
             Ok(_) => t.transformed += 1,
             Err(_) => t.errored += 1,
         }
@@ -89,13 +90,13 @@ fn binding_is_total_over_the_entire_corpus() {
     let accuracy = AccuracyTarget::Epsilon(0.01);
     let docs = bind_tally(DOCS, accuracy.clone());
     let td = bind_tally(TESTDATA, accuracy);
-    eprintln!("docs corpus L4 binding:     {docs:?}");
-    eprintln!("testdata corpus L4 binding: {td:?}");
+    eprintln!("docs corpus post-ASAP binding:     {docs:?}");
+    eprintln!("testdata corpus post-ASAP binding: {td:?}");
 
     // Same totality guarantee as lowering: reaching here means `implement_tree`
     // never panicked over any lowerable query in the corpus.
-    assert_eq!(docs.errored, 0, "L3->L4 binding errored: {docs:?}");
-    assert_eq!(td.errored, 0, "L3->L4 binding errored: {td:?}");
+    assert_eq!(docs.errored, 0, "post-ASAP binding errored: {docs:?}");
+    assert_eq!(td.errored, 0, "post-ASAP binding errored: {td:?}");
 }
 
 #[test]

@@ -1,8 +1,9 @@
-//! Cross-language L3 equivalence (issue #34).
+//! Cross-language pre-ASAP-IR equivalence (issue #34).
 //!
 //! Semantically equivalent SQL and PromQL queries must lower to the **same
-//! canonical intent algebra**, so an L4 rule matching on `AggIntent` sees one
-//! spelling regardless of source language. These tests are the executable spec
+//! canonical intent algebra**, so a post-ASAP binding rule matching on
+//! `AggIntent` sees one spelling regardless of source language. These tests
+//! are the executable spec
 //! for the shared [`canonicalize`](asap_types::pre_asap::canonicalize) pass: they pin the
 //! canonical heavy-hitter shape and assert both front ends reach it.
 //!
@@ -97,7 +98,7 @@ async fn sql_and_promql_heavy_hitter_share_the_canonical_shape() {
 
 #[tokio::test]
 async fn sql_aliased_and_inline_count_topk_are_identical() {
-    // #20: aliasing the COUNT in the ORDER BY must not change the L3.
+    // #20: aliasing the COUNT in the ORDER BY must not change the canonical shape.
     let inline = sql(
         "SELECT service, COUNT(*) FROM metrics GROUP BY service ORDER BY COUNT(*) DESC LIMIT 5",
     )

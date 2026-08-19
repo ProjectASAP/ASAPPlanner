@@ -1,56 +1,57 @@
 use std::rc::Rc;
 
-use super::schema::L4Schema;
+use super::schema::SummarySchema;
 use super::sketch::{SketchQuery, SummaryKind, SummaryParams};
 use crate::pre_asap::{ColumnRef, QueryExpr, Reduction};
 
-// ── L4 DAG node ───────────────────────────────────────────────────────────────
+// ── Post-ASAP DAG node ───────────────────────────────────────────────────────
 
-/// A node in the L4 DAG. Mirrors `L3Node`: wraps the expression and its
-/// derived output schema so every edge carries a typed schema.
-/// `L4Schema` may contain `L4DataType::Sketch` columns; `L3Schema` cannot.
+/// A node in the post-ASAP DAG: wraps the expression and its derived output
+/// schema so every edge carries a typed schema. `SummarySchema` may contain
+/// `SummaryDataType::Sketch` columns; the pre-ASAP `Schema` cannot.
 #[derive(Debug, Clone)]
-pub struct L4Node {
+pub struct SummaryNode {
     pub expr: SummaryExpr,
     /// Output schema of `expr` — the schema of the data flowing on the edge
     /// leading *from* this node to its parent(s).
-    pub schema: L4Schema,
+    pub schema: SummarySchema,
 }
 
-// ── L4 sketch-bound IR ────────────────────────────────────────────────────────
+// ── Post-ASAP sketch-bound IR ────────────────────────────────────────────────
 
-/// Sketch-bound IR produced by L4 optimizer rules. L4 rules selectively
-/// replace logical aggregates and joins in the L3 `QueryExpr` with their
-/// sketch-bound counterparts; everything not rewritten passes through as
-/// `Logical(Box<QueryExpr>)`.
+/// Sketch-bound IR produced by post-ASAP binding rules. Those rules
+/// selectively replace logical aggregates and joins in the pre-ASAP
+/// `QueryExpr` with their sketch-bound counterparts; everything not
+/// rewritten passes through as `Logical(Box<QueryExpr>)`.
 ///
 /// Traversing from the root node yields a DAG; shared sub-expressions appear
-/// as multiple `Rc` references to the same `L4Node`.
+/// as multiple `Rc` references to the same `SummaryNode`.
 #[derive(Debug, Clone)]
 pub enum SummaryExpr {
-    /// Any L3 node that no L4 rule rewrote (e.g. `Filter`, `Project`, `Sort`).
-    /// Output schema is the inner L3 node's schema, lifted to `L4Schema`
-    /// with all fields as `L4DataType::Primitive`.
+    /// Any pre-ASAP node no binding rule rewrote (e.g. `Filter`, `Project`,
+    /// `Sort`). Output schema is the inner node's schema, lifted to
+    /// `SummarySchema` with all fields as `SummaryDataType::Primitive`.
     Logical(Box<QueryExpr>),
 
-    /// Summary aggregation. L4 chose `summary` + `params` from the catalog
-    /// for `AggIntent` under `DeploymentConstraints`.
+    /// Summary aggregation. Post-ASAP binding chose `summary` + `params`
+    /// from the catalog for `AggIntent` under `DeploymentConstraints`.
     /// Output schema: grouping columns (verbatim) + one `Sketch(summary,
     /// params)` field carrying partial summary state per group.
     SummaryAgg {
-        child: Rc<L4Node>,
+        child: Rc<SummaryNode>,
         summary: SummaryKind,
         params: SummaryParams,
         /// The column being summarised (fed into the sketch).
         col: ColumnRef,
         /// How this aggregation's output rows relate to `child`'s — the
-        /// same [`Reduction`] the L3 `Aggregate` node it was bound from
-        /// carried (issue #165), reused verbatim rather than flattened to
-        /// a bare `Vec<ColumnId>`. `Reduction::Reduce(by)` with an empty
-        /// `by` is a genuine full reduction (merge every candidate into
-        /// one group); `Reduction::PerEntity` has no grouping concept at
-        /// all (never merge across entities) — the two collapsed to the
-        /// same ambiguous `by: []` before this field existed (issue #163).
+        /// same [`Reduction`] the pre-ASAP `Aggregate` node it was bound
+        /// from carried (issue #165), reused verbatim rather than
+        /// flattened to a bare `Vec<ColumnId>`. `Reduction::Reduce(by)`
+        /// with an empty `by` is a genuine full reduction (merge every
+        /// candidate into one group); `Reduction::PerEntity` has no
+        /// grouping concept at all (never merge across entities) — the
+        /// two collapsed to the same ambiguous `by: []` before this field
+        /// existed (issue #163).
         reduction: Reduction,
     },
 
@@ -59,8 +60,8 @@ pub enum SummaryExpr {
     /// Output schema: one `Sketch(sketch, params)` field read by a downstream
     /// `SummaryEstimate`.
     SummaryJoin {
-        outer: Rc<L4Node>,
-        inner: Rc<L4Node>,
+        outer: Rc<SummaryNode>,
+        inner: Rc<SummaryNode>,
         key: ColumnRef,
         summary: SummaryKind,
         params: SummaryParams,
@@ -70,13 +71,16 @@ pub enum SummaryExpr {
     /// linear-inverse property (CMS, theta, count-based). Catalog flag
     /// `subtractable` must be true for the sketch family.
     /// Output schema: one `Sketch(s, p)` field (same family + params as inputs).
-    SummarySubtract { left: Rc<L4Node>, right: Rc<L4Node> },
+    SummarySubtract {
+        left: Rc<SummaryNode>,
+        right: Rc<SummaryNode>,
+    },
 
     /// Delete a key from a sketch (CMS update with −1, deletable Bloom
     /// filter). Catalog flag `deletable` must be true. Output schema =
     /// input schema unchanged in type (same `Sketch(s, p)` field).
     SummaryDelete {
-        summary_input: Rc<L4Node>,
+        summary_input: Rc<SummaryNode>,
         key: ColumnRef,
     },
 
@@ -85,14 +89,15 @@ pub enum SummaryExpr {
     /// schema is a regular row-shaped schema (Float64 for quantile, Int64
     /// for count/cardinality, `[(key, count)]` for top-k).
     SummaryEstimate {
-        summary_input: Rc<L4Node>,
+        summary_input: Rc<SummaryNode>,
         query: SketchQuery,
     },
 
-    /// ⊕ — union of sketches across stages / shards. Distinct from L3
-    /// `Merge` because sketch union has type constraints: all inputs must
-    /// agree on `(sketch, params)` and the catalog flag `mergeable` must
-    /// be true. Inserted by the L5 stage allocator on cut edges.
+    /// ⊕ — union of sketches across stages / shards. Distinct from the
+    /// pre-ASAP `Merge` because sketch union has type constraints: all
+    /// inputs must agree on `(sketch, params)` and the catalog flag
+    /// `mergeable` must be true. Inserted by a deployment's own stage
+    /// allocator (not modeled in this crate) on cut edges.
     /// Output schema: one `Sketch(s, p)` field (same family + params as inputs).
-    SummaryMerge { children: Vec<Rc<L4Node>> },
+    SummaryMerge { children: Vec<Rc<SummaryNode>> },
 }

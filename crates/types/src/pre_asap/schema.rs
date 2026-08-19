@@ -1,9 +1,10 @@
-//! Layer 3 schema flow — every L3 edge carries a typed `Schema`.
+//! Pre-ASAP IR schema flow — every edge carries a typed `Schema`.
 //!
 //! Per `control_plane/docs/design.md` §6 "Schema flow — every L3 edge carries
-//! a typed schema". The DAG is type-checked: a node's output schema is a
-//! function of its inputs and parameters and is verifiable independently
-//! of the surrounding context.
+//! a typed schema" (that doc's own layer numbering; this crate no longer uses
+//! it). The DAG is type-checked: a node's output schema is a function of its
+//! inputs and parameters and is verifiable independently of the surrounding
+//! context.
 //!
 //! `Schema::unique_keys` is metadata for reuse-aware planning: a producer's
 //! output can only be safely shared across consumers when its row identity
@@ -11,7 +12,7 @@
 //!
 //! Single-query plans don't read this field; it lives here so the metadata
 //! is available the moment workload-aware planning lands without requiring
-//! an L3-wide schema change.
+//! a pre-ASAP-IR-wide schema change.
 
 #![allow(dead_code)]
 
@@ -33,9 +34,9 @@ pub struct Column {
     /// produce label-name + the synthetic `value` / `timestamp` columns;
     /// SQL leaves carry their `information_schema` names.
     pub name: String,
-    /// Column data type. Kept narrow at L3 (`Int64` / `Float64` / `Utf8`
-    /// / `Bool` / `Timestamp`); `Sketch(...)` is an L4-only addition per
-    /// design.md §6.4 and is intentionally absent here.
+    /// Column data type. Kept narrow here (`Int64` / `Float64` / `Utf8` /
+    /// `Bool` / `Timestamp`); `Sketch(...)` is a post-ASAP-only addition
+    /// (design.md §6.4) and is intentionally absent here.
     pub dtype: DataType,
     /// Whether NULL values are allowed in this column. PromQL value
     /// columns are non-nullable; SQL columns inherit their DDL nullability.
@@ -66,8 +67,8 @@ impl Column {
     }
 }
 
-/// L3 column data types. Deliberately narrow: no sketch state at this
-/// layer (see `design.md` §6.4 for the L4 `DataType::Sketch(...)`
+/// Pre-ASAP IR column data types. Deliberately narrow: no sketch state at
+/// this layer (see `design.md` §6.4 for the post-ASAP `DataType::Sketch(...)`
 /// extension).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,7 +86,7 @@ pub enum DataType {
     Timestamp,
 }
 
-/// Per-edge L3 schema. Flowing between any two L3 operators, on every
+/// Per-edge pre-ASAP IR schema. Flowing between any two operators, on every
 /// node's input and output.
 ///
 /// `unique_keys` is metadata for reuse-aware planning: each inner `Vec<ColumnId>`
@@ -96,8 +97,8 @@ pub enum DataType {
 /// adds `cols`; most other nodes pass through.
 ///
 /// **Consumed by**: a future workload-level reuse pass (not yet shipped).
-/// The single-query path, the `Bind*` rules, push-down, and L5 emitters do
-/// not read this field.
+/// The single-query path, the `Bind*` rules, push-down, and a deployment's
+/// own physical emitters do not read this field.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Schema {
     /// Columns flowing on this edge, in positional order.

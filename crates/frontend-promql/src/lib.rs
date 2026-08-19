@@ -1,7 +1,7 @@
-//! PromQL front end: L1 (parse via `promql-parser`) → the canonical L2 shape,
-//! built directly (issue #179) → [`resolve_root`].
+//! PromQL front end: parse (via `promql-parser`) → the canonical, unresolved
+//! shape, built directly (issue #179) → [`resolve_root`].
 //!
-//! Emits [`L2QueryExpr`](asap_types::pre_asap::L2QueryExpr) itself — the
+//! Emits [`UnresolvedQueryExpr`](asap_types::pre_asap::UnresolvedQueryExpr) itself — the
 //! canonical `QueryExpr`, generic over an unresolved
 //! [`ColumnRef`](asap_types::pre_asap::ColumnRef) — directly, rather than a
 //! separate per-language relational tree; `resolve_root` runs the
@@ -21,7 +21,7 @@ pub use error::PromqlError;
 pub use histogram::{HistogramCatalog, HistogramKind};
 pub use promql::PromqlLowerer;
 
-/// Lower a single PromQL query string to the canonical L3 `QueryExpr`.
+/// Lower a single PromQL query string to the canonical, resolved `QueryExpr`.
 ///
 /// `accuracy` is threaded onto every approximate intent (`Count`, `Quantile`,
 /// `Cardinality`, `TopK`). The returned tree carries a self-contained `Schema`
@@ -30,9 +30,9 @@ pub use promql::PromqlLowerer;
 /// `histogram_quantile` discrimination uses the structural heuristic; to drive
 /// it from declared sample types instead, use [`lower_promql_with_histograms`].
 pub fn lower_promql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, PromqlError> {
-    let l2 = PromqlLowerer::lower(query, &accuracy)?;
-    let l3 = resolve_root(&l2)?;
-    Ok(l3)
+    let unresolved = PromqlLowerer::lower(query, &accuracy)?;
+    let resolved = resolve_root(&unresolved)?;
+    Ok(resolved)
 }
 
 /// Like [`lower_promql`], but consults `histograms` to decide whether a

@@ -1,6 +1,6 @@
-//! Type bridges between DataFusion's Arrow types and the L3 `DataType`, plus
+//! Type bridges between DataFusion's Arrow types and the canonical `DataType`, plus
 //! the SQL table catalog used to register tables with DataFusion and to carry
-//! resolved leaf schemas into the relational L2 tree.
+//! resolved leaf schemas into the canonical, unresolved tree.
 
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ use asap_types::pre_asap::ScalarValue;
 
 use crate::error::SqlError as LoweringError;
 
-/// Table catalog for SQL lowering: table name → resolved L3 [`Schema`].
+/// Table catalog for SQL lowering: table name → resolved canonical [`Schema`].
 ///
 /// Used twice: to register Arrow-backed `MemTable`s so DataFusion can resolve
 /// `SELECT … FROM t`, and to attach each table's schema directly onto the
@@ -30,14 +30,14 @@ impl SqlCatalog {
         Self::default()
     }
 
-    /// Builder: register `name` with its resolved L3 schema.
+    /// Builder: register `name` with its resolved canonical schema.
     pub fn with_table(mut self, name: impl Into<String>, schema: Schema) -> Self {
         self.tables.insert(name.into(), schema);
         self
     }
 }
 
-pub(super) fn scalar_value_to_l3(sv: &DfScalarValue) -> Result<ScalarValue, LoweringError> {
+pub(super) fn scalar_value_to_asap(sv: &DfScalarValue) -> Result<ScalarValue, LoweringError> {
     match sv {
         DfScalarValue::Int64(Some(v)) => Ok(ScalarValue::Int64(*v)),
         DfScalarValue::Int32(Some(v)) => Ok(ScalarValue::Int64(*v as i64)),
@@ -60,8 +60,8 @@ pub(super) fn scalar_value_to_l3(sv: &DfScalarValue) -> Result<ScalarValue, Lowe
     }
 }
 
-/// Arrow → L3 `DataType` (used for `CAST` targets). L3 is deliberately narrow.
-pub(super) fn arrow_to_l3(dt: &ArrowDataType) -> Result<DataType, LoweringError> {
+/// Arrow → the canonical `DataType` (used for `CAST` targets). Deliberately narrow.
+pub(super) fn arrow_to_dtype(dt: &ArrowDataType) -> Result<DataType, LoweringError> {
     match dt {
         ArrowDataType::Int64
         | ArrowDataType::Int32
@@ -77,8 +77,8 @@ pub(super) fn arrow_to_l3(dt: &ArrowDataType) -> Result<DataType, LoweringError>
     }
 }
 
-/// L3 `DataType` → Arrow (for registering catalog tables with DataFusion).
-pub(super) fn l3_to_arrow(dt: &DataType) -> ArrowDataType {
+/// The canonical `DataType` → Arrow (for registering catalog tables with DataFusion).
+pub(super) fn dtype_to_arrow(dt: &DataType) -> ArrowDataType {
     match dt {
         DataType::Int64 => ArrowDataType::Int64,
         DataType::Float64 => ArrowDataType::Float64,
@@ -90,12 +90,12 @@ pub(super) fn l3_to_arrow(dt: &DataType) -> ArrowDataType {
     }
 }
 
-/// Build an Arrow schema from an L3 [`Schema`] (column name + type + nullability).
+/// Build an Arrow schema from a canonical [`Schema`] (column name + type + nullability).
 pub(super) fn schema_to_arrow(schema: &Schema) -> ArrowSchema {
     let fields: Fields = schema
         .columns
         .iter()
-        .map(|c: &Column| Field::new(&c.name, l3_to_arrow(&c.dtype), c.nullable))
+        .map(|c: &Column| Field::new(&c.name, dtype_to_arrow(&c.dtype), c.nullable))
         .collect();
     ArrowSchema::new(fields)
 }

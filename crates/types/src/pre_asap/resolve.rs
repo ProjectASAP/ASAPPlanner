@@ -1,5 +1,5 @@
-//! Resolve a front-end-emitted, unresolved [`L2QueryExpr`] (`QueryExpr<ColumnRef>`)
-//! into the canonical, positional [`L3QueryExpr`] (`QueryExpr<ColumnId>`).
+//! Resolve a front-end-emitted, unresolved [`UnresolvedQueryExpr`] (`QueryExpr<ColumnRef>`)
+//! into the canonical, positional [`ResolvedQueryExpr`] (`QueryExpr<ColumnId>`).
 //!
 //! Both front ends (`asap-frontend-promql`, `asap-frontend-sql`) construct
 //! canonical `QueryExpr` shapes directly during their own `interpret` step
@@ -8,8 +8,8 @@
 //! *structural* decision happen right there, since a front end already knows
 //! the answer at parse time. What's left for [`resolve_root`] is exactly the
 //! "mechanical, schema-dependent substitution" #179 describes: a single
-//! generic, shape-preserving walk — every [`L2QueryExpr`] variant maps to the
-//! identical [`L3QueryExpr`] variant — that resolves every [`ColumnRef`] to
+//! generic, shape-preserving walk — every [`UnresolvedQueryExpr`] variant maps to the
+//! identical [`ResolvedQueryExpr`] variant — that resolves every [`ColumnRef`] to
 //! the [`Binder`](super::binder::Binder)-computed positional [`ColumnId`].
 
 use thiserror::Error;
@@ -21,12 +21,12 @@ use super::column_resolution::{
 };
 use super::expr_ir::ColumnRef;
 use super::query_expr::{
-    aggregate_output_schema, GroupKeys, L2QueryExpr, L3QueryExpr, Predicate, ProjectItem,
-    QueryExprError, Reduction, SortKey,
+    aggregate_output_schema, GroupKeys, Predicate, ProjectItem, QueryExprError, Reduction,
+    ResolvedQueryExpr, SortKey, UnresolvedQueryExpr,
 };
 use super::schema::{ColumnId, Schema};
 
-/// Errors from resolving a canonical, unresolved [`L2QueryExpr`] tree.
+/// Errors from resolving a canonical, unresolved [`UnresolvedQueryExpr`] tree.
 #[derive(Debug, Error)]
 pub enum ResolveTreeError {
     /// A column reference did not resolve against its in-scope schema.
@@ -38,20 +38,20 @@ pub enum ResolveTreeError {
     Schema(#[from] QueryExprError),
 }
 
-/// Resolve a whole [`L2QueryExpr`] tree rooted at `tree` into canonical
-/// [`L3QueryExpr`]: binds every `ColumnRef` to a `ColumnId` via the
+/// Resolve a whole [`UnresolvedQueryExpr`] tree rooted at `tree` into canonical
+/// [`ResolvedQueryExpr`]: binds every `ColumnRef` to a `ColumnId` via the
 /// [`Binder`], then [`canonicalize`](super::canonicalize::canonicalize)s the
 /// result.
-pub fn resolve_root(tree: &L2QueryExpr) -> Result<L3QueryExpr, ResolveTreeError> {
+pub fn resolve_root(tree: &UnresolvedQueryExpr) -> Result<ResolvedQueryExpr, ResolveTreeError> {
     resolve_root_with_inherited(tree, &[])
 }
 
 /// [`resolve_root`] with label names inherited from an enclosing scope seeded
 /// into the leaf schema, used when re-binding a `BinaryOp` side (issue #52).
 fn resolve_root_with_inherited(
-    tree: &L2QueryExpr,
+    tree: &UnresolvedQueryExpr,
     inherited: &[String],
-) -> Result<L3QueryExpr, ResolveTreeError> {
+) -> Result<ResolvedQueryExpr, ResolveTreeError> {
     let fallback = Binder::new().bind_with_inherited(tree, inherited);
     let l3 = resolve(tree, &fallback)?;
     Ok(super::canonicalize::canonicalize(l3))
@@ -61,7 +61,10 @@ fn resolve_root_with_inherited(
 /// resolves this node's own `ColumnRef`s against the *converted child's*
 /// derived output schema — so a `JOIN`'s concatenated schema and a cross-
 /// series aggregate's frozen-closed output bind to the right positions.
-fn resolve(tree: &L2QueryExpr, fallback: &Schema) -> Result<L3QueryExpr, ResolveTreeError> {
+fn resolve(
+    tree: &UnresolvedQueryExpr,
+    fallback: &Schema,
+) -> Result<ResolvedQueryExpr, ResolveTreeError> {
     use super::query_expr::QueryExpr as QE;
     Ok(match tree {
         QE::Scan {

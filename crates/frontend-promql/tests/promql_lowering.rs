@@ -1,4 +1,4 @@
-//! End-to-end tests for PromQL → L2 → canonical L3 lowering.
+//! End-to-end tests for PromQL → unresolved → canonical tree lowering.
 
 use std::time::Duration;
 
@@ -199,7 +199,8 @@ fn histogram_quantile_wraps_inner_in_quantile() {
 fn histogram_quantile_over_sum_by_le_preserves_grouping() {
     // The canonical Prometheus histogram pattern. Previously returned
     // UnsupportedFeature because `extract_matrix` couldn't see through the
-    // `sum by (le)` aggregate; now the `le` grouping survives into L3.
+    // `sum by (le)` aggregate; now the `le` grouping survives into the
+    // canonical tree.
     let qe = lower(r#"histogram_quantile(0.99, sum by (le) (rate(http_requests_bucket[5m])))"#);
     let QueryExpr::Aggregate {
         measures, child, ..
@@ -792,12 +793,13 @@ fn batch_rejects_non_promql_language() {
     assert!(matches!(results[0], Err(LoweringError::WrongLanguage(_))));
 }
 
-// ── #12: one home per grouping concept (the L3 `Partition` node is removed) ──
+// ── #12: one home per grouping concept (the canonical `Partition` node is removed) ──
 //
 // `Partition` and `Aggregate.by` were two ways to express grouping. #12 collapses
 // them: a reducing GROUP BY → `Aggregate.by`; per-group *ranking* (split without
-// reduce) → `Sort.partition_by`; parallel sharding → L5-physical. There is no
-// longer an L3 `Partition` node. These tests pin both surviving L3 homes.
+// reduce) → `Sort.partition_by`; parallel sharding → a deployment's own
+// physical stage. There is no longer a canonical `Partition` node. These
+// tests pin both surviving canonical homes.
 
 #[test]
 fn reducing_group_by_lowers_to_aggregate_by() {

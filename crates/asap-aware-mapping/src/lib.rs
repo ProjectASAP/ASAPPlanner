@@ -1,18 +1,18 @@
-//! `asap-plan` — the cost-aware optimizer layer over the L3 intent algebra.
+//! `asap-plan` — the cost-aware optimizer layer over the pre-ASAP intent algebra.
 //!
 //! This crate sits between the language-agnostic IR ([`asap_ir`]) and
-//! any runtime: it consumes L3 [`QueryExpr`](asap_types::pre_asap::QueryExpr)
-//! trees and makes the cost-aware decisions that L3 deliberately leaves open —
-//! which shared sub-expressions to hoist and which sketch (if any) realises
-//! each approximate intent.
+//! any runtime: it consumes pre-ASAP [`QueryExpr`](asap_types::pre_asap::QueryExpr)
+//! trees and makes the cost-aware decisions the pre-ASAP IR deliberately
+//! leaves open — which shared sub-expressions to hoist and which sketch (if
+//! any) realises each approximate intent.
 //!
 //! It depends only on the IR crate, never on a front end — the layering
 //! invariant (arrows point up) holds here too.
 //!
 //! Post-lowering **canonicalization** is *not* here: it landed in
 //! `asap_types::pre_asap::canonicalize`, run inside the shared `resolve_root`
-//! so every front end normalizes before L3 leaves resolution (issue #34,
-//! closed).
+//! so every front end normalizes before the pre-ASAP IR leaves resolution
+//! (issue #34, closed).
 //!
 //! ## Status
 //!
@@ -43,13 +43,13 @@
 //! distinct from a *transformation rule*, logical → logical — see Graefe,
 //! *The Cascades Framework for Query Optimization*):
 //!
-//! | Term | Layer | Meaning | Lives in |
+//! | Term | Stage | Meaning | Lives in |
 //! |---|---|---|---|
-//! | **Parse** | L1 | text (PromQL/SQL) → AST | `asap-frontend-promql` / `asap-frontend-sql` |
-//! | **Bind #1** | L2 | *name resolution*: `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → **Bind** → Optimize" pipeline sense (e.g. SQL Server's query-processor terminology) | [`asap_types::pre_asap::binder::Binder`](https://docs.rs/asap-types) |
-//! | **Implementation** — [`boundary::implementation_for`] | L3→L4, *one node* | choosing a concrete physical realization (a sketch family, an exact accumulator, or pass-through) for one [`AggIntent`](asap_types::pre_asap::agg_intent::AggIntent) | [`boundary`] |
-//! | **`implement_tree`** — [`bind::implement_tree`] | L3→L4, *whole tree* | walk a whole `QueryExpr` tree, calling [`boundary::implementation_for`] per node, and emit the complete L4 [`SummaryExpr`](asap_types::post_asap::SummaryExpr)/`L4Node` DAG — named after "implementation" too rather than reusing "bind" a second time | [`bind`] |
-//! | **Bind #2** (downstream, not in this crate) | L4→L5 | a *deployment's* own physical binder, additionally deciding **placement** (edge vs. backend, wire format, …) — a genuinely different, deployment-specific decision this crate doesn't model at all | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
+//! | **Parse** | parse | text (PromQL/SQL) → AST | `asap-frontend-promql` / `asap-frontend-sql` |
+//! | **Bind #1** | name resolution | `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → **Bind** → Optimize" pipeline sense (e.g. SQL Server's query-processor terminology) | [`asap_types::pre_asap::binder::Binder`](https://docs.rs/asap-types) |
+//! | **Implementation** — [`boundary::implementation_for`] | pre-ASAP → post-ASAP, *one node* | choosing a concrete physical realization (a sketch family, an exact accumulator, or pass-through) for one [`AggIntent`](asap_types::pre_asap::agg_intent::AggIntent) | [`boundary`] |
+//! | **`implement_tree`** — [`bind::implement_tree`] | pre-ASAP → post-ASAP, *whole tree* | walk a whole `QueryExpr` tree, calling [`boundary::implementation_for`] per node, and emit the complete post-ASAP [`SummaryExpr`](asap_types::post_asap::SummaryExpr)/`SummaryNode` DAG — named after "implementation" too rather than reusing "bind" a second time | [`bind`] |
+//! | **Bind #2** (downstream, not in this crate) | post-ASAP → deployment placement | a *deployment's* own physical binder, additionally deciding **placement** (edge vs. backend, wire format, …) — a genuinely different, deployment-specific decision this crate doesn't model at all | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
 //!
 //! A related question (tracked alongside issues #6/#33): whether this
 //! crate should also own a **matching** predicate — "does an already

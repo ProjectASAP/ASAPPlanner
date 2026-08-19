@@ -5,7 +5,7 @@
 //! host/hardware, node-exporter, databases, message brokers, Kubernetes, and
 //! more (`tests/data/awesome_prometheus_alerts.txt`).
 //!
-//! We *lower* (parse → L2 → L3), we do not execute. Two guarantees:
+//! We *lower* (parse → the canonical tree), we do not execute. Two guarantees:
 //!   1. **Totality** — every real-world query returns `Ok` or a clean
 //!      `LoweringError` and never panics.
 //!   2. **Parseability** — none of them fail at the *parse* stage; the private
@@ -18,8 +18,8 @@
 //!
 //! NOTE: the headline finding is that real alerting PromQL is overwhelmingly
 //! `<vector-expr> <cmp> <scalar>` (e.g. `… > 0`, `… != 1`): ~822/949 queries are
-//! rejected *only* because a bare numeric threshold operand has no L2 scalar
-//! node yet (see `scalar_threshold_*__GAP`). The query bodies underneath
+//! rejected *only* because a bare numeric threshold operand has no canonical
+//! scalar-comparison node yet (see `scalar_threshold_*__GAP`). The query bodies underneath
 //! (`rate`, `*_over_time`, `histogram_quantile`, `sum by (…)`) lower fine on
 //! their own — see the `*_core_lowers` tests.
 
@@ -165,7 +165,7 @@ fn corpus_lowering_is_total_and_fully_parseable() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Patterns we lower (verbatim corpus queries) — pin the L3 shape
+// Patterns we lower (verbatim corpus queries) — pin the canonical shape
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -282,7 +282,8 @@ fn scalar_threshold_comparisons_lower_to_binaryop_scalar() {
 #[test]
 fn absent_function_lowers_to_absent_intent() {
     // `absent(up{job="prometheus"})` — "job missing" alerts. Lowers to the
-    // `Absent` intent (issue #47); the empty→synthesized-sample logic is L4.
+    // `Absent` intent (issue #47); the empty→synthesized-sample logic is a
+    // post-ASAP concern.
     let qe = ok(r#"absent(up{job="prometheus"})"#);
     assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Absent)));
 }

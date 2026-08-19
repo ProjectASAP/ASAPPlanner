@@ -1,10 +1,10 @@
-//! Shared post-lowering canonicalization of the L3 [`QueryExpr`].
+//! Shared post-lowering canonicalization of the resolved [`QueryExpr`].
 //!
 //! Both language front ends funnel through [`resolve_root`](super::resolve::resolve_root),
 //! which runs this pass over the resolved tree. Its job is to erase
-//! *structural* differences between semantically identical queries so an L4 rule
-//! matching on the intent algebra sees one canonical spelling regardless of
-//! source language (issue #34).
+//! *structural* differences between semantically identical queries so a
+//! post-ASAP binding rule matching on the intent algebra sees one canonical
+//! spelling regardless of source language (issue #34).
 //!
 //! ## Heavy-hitter promotion
 //!

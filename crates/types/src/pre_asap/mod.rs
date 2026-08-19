@@ -1,20 +1,20 @@
-//! Layer 3 — the canonical intent algebra IR.
+//! The canonical pre-ASAP intent algebra IR.
 //!
-//! - [`query_expr`] — the canonical, language- and deployment-independent L3
+//! - [`query_expr`] — the canonical, language- and deployment-independent
 //!   intent algebra: one recursive [`QueryExpr`] tree (relational operators
 //!   *and* scalar expression shapes both, since issue #205) + [`AggIntent`],
 //!   generic over the column-reference state (positional [`ColumnId`] once
 //!   bound, name-based [`ColumnRef`] before).
-//! - [`agg_intent`] — the L3 aggregation-intent vocabulary.
+//! - [`agg_intent`] — the aggregation-intent vocabulary.
 //! - [`expr_ir`] — the [`ColumnRef`] column-reference type and the scalar
 //!   operator/literal vocabulary ([`ScalarValue`], [`CompareOp`], [`ArithOp`])
 //!   [`QueryExpr`]'s scalar variants are built from.
-//! - [`schema`] — the per-edge [`Schema`] every L3 node carries.
+//! - [`schema`] — the per-edge [`Schema`] every node carries.
 //! - [`binder`] / [`column_resolution`] — name resolution: turn a `ColumnRef`
 //!   into a positional `ColumnId` against an in-scope [`Schema`].
-//! - [`resolve`] — binds a whole front-end-emitted [`L2QueryExpr`] tree to
-//!   canonical [`L3QueryExpr`] (issue #179): both front ends
-//!   (`asap-frontend-promql`, `asap-frontend-sql`) construct `L2QueryExpr`
+//! - [`resolve`] — binds a whole front-end-emitted [`UnresolvedQueryExpr`] tree to
+//!   canonical [`ResolvedQueryExpr`] (issue #179): both front ends
+//!   (`asap-frontend-promql`, `asap-frontend-sql`) construct `UnresolvedQueryExpr`
 //!   directly during their own `interpret` step and call
 //!   [`resolve_root`] on the result — there is no separate per-language
 //!   relational tree or converter anymore.
@@ -48,9 +48,9 @@ pub use column_resolution::{
 pub use expr_ir::{ArithOp, ColumnRef, CompareOp, ScalarValue};
 pub use query_expr::{
     aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
-    InfoMatcher, JoinKind, L2QueryExpr, L3QueryExpr, Predicate, ProjectItem, QueryExpr,
-    QueryExprError, Reduction, SampleKind, SetOpKind, SortKey, Source, TimeShift, VectorGrouping,
-    VectorMatch, VectorMatchKind, WindowFuncKind,
+    InfoMatcher, JoinKind, Predicate, ProjectItem, QueryExpr, QueryExprError, Reduction,
+    ResolvedQueryExpr, SampleKind, SetOpKind, SortKey, Source, TimeShift, UnresolvedQueryExpr,
+    VectorGrouping, VectorMatch, VectorMatchKind, WindowFuncKind,
 };
 pub use resolve::{resolve_root, ResolveTreeError};
 pub use schema::{Column, ColumnId, DataType, Schema};
