@@ -25,13 +25,20 @@
 
 use std::sync::Arc;
 
+use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::catalog_common::MemorySchemaProvider;
+use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::common::{Column as DfColumn, ScalarValue as DfScalarValue};
+use datafusion::common::{Column as DfColumn, DFSchema, ScalarValue as DfScalarValue};
 use datafusion::datasource::MemTable;
+use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::logical_expr::expr::AggregateFunction;
+use datafusion::logical_expr::expr_rewriter::FunctionRewrite;
 use datafusion::logical_expr::{
-    self, Distinct, Expr, JoinType, LogicalPlan, WindowFunctionDefinition,
+    self, AggregateUDF, Distinct, Expr, JoinType, LogicalPlan, Signature, SimpleAggregateUDF,
+    Volatility, WindowFunctionDefinition,
 };
+use datafusion::optimizer::{Analyzer, OptimizerConfig};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use asap_types::pre_asap::agg_intent::AggIntent;
@@ -122,6 +129,24 @@ impl<'a> SqlLowerer<'a> {
     /// (`ctx.sql`) — `lower_plan` itself is synchronous, so once it starts
     /// there is no further suspension point that could move this task to a
     /// different OS thread out from under a thread-local set beforehand.
+    ///
+    /// Runs a standalone `Analyzer` carrying *only* `UniqExactRewrite` — no
+    /// built-in rules (`TypeCoercion`, `ExpandWildcardRule`, …) — over the raw
+    /// parsed plan before lowering. `ctx.sql(...).into_unoptimized_plan()`
+    /// alone returns `SqlToRel`'s output untouched, and a `FunctionRewrite`
+    /// only ever runs as part of an `Analyzer` pass, so *some* Analyzer call
+    /// is unavoidable to make the rewrite fire. Deliberately not
+    /// `ctx.state().analyzer()` (DataFusion's default 5-rule analyzer): that
+    /// pulls in unrelated normalization for every SQL query in the system,
+    /// not just `uniqExact` ones — `ExpandWildcardRule` alone changed
+    /// `SELECT *` from lowering straight to a `Scan` into an identity
+    /// `Project` wrapping one, breaking an unrelated pinned test. A bare
+    /// `Analyzer::with_rules(vec![])` still runs one check unconditionally
+    /// (`execute_and_check`'s post-pass subquery-arity/correctness check,
+    /// hardcoded, not itself a rule) — that's an accepted, narrow side
+    /// effect: `lower_in_subquery`'s own arity check below it is now
+    /// unreachable dead code for the multi-column case, since DataFusion's
+    /// own check rejects it first with an equivalent error.
     pub async fn lower(
         &self,
         sql: &str,
@@ -130,6 +155,9 @@ impl<'a> SqlLowerer<'a> {
         let ctx = self.build_context()?;
         let df = ctx.sql(sql).await?;
         let plan = df.into_unoptimized_plan();
+        let mut uniq_exact_only = Analyzer::with_rules(vec![]);
+        uniq_exact_only.add_function_rewrite(Arc::new(UniqExactRewrite));
+        let plan = uniq_exact_only.execute_and_check(plan, ctx.state().options(), |_, _| {})?;
         let _guard = AccuracyGuard::install(accuracy.clone());
         self.lower_plan(&plan)
     }
@@ -164,6 +192,11 @@ impl<'a> SqlLowerer<'a> {
             let mem_table = MemTable::try_new(arrow_schema, vec![])?;
             ctx.register_table(name.as_str(), Arc::new(mem_table))?;
         }
+        // Register a stub `uniqexact` UDAF purely so DataFusion's planner can
+        // resolve the function name during parsing — `lower()` rewrites every
+        // call site to `COUNT(DISTINCT ...)` via `UniqExactRewrite` before
+        // `lower_plan` sees it.
+        ctx.register_udaf(uniq_exact_udaf());
         Ok(ctx)
     }
 
@@ -829,6 +862,68 @@ impl<'a> SqlLowerer<'a> {
             offset: eval_fetch(&limit.skip).unwrap_or(0),
             child: Box::new(self.lower_plan(&limit.input)?),
         })
+    }
+}
+
+// ── ClickHouse-builtin compatibility, taught to DataFusion itself ──────────────
+
+/// A stub `uniqexact` UDAF, registered purely so DataFusion's planner can
+/// resolve the function name during `SqlToRel` conversion (it errors on an
+/// unknown function before a rewrite ever gets a chance to run). Every call
+/// site is replaced by `UniqExactRewrite` — via the `Analyzer` `lower()` runs
+/// after parsing — before physical planning could ever ask this UDAF for an
+/// `Accumulator`, so `accumulator` is unreachable.
+fn uniq_exact_udaf() -> AggregateUDF {
+    AggregateUDF::from(SimpleAggregateUDF::new_with_signature(
+        "uniqexact",
+        Signature::any(1, Volatility::Immutable),
+        ArrowDataType::Int64,
+        Arc::new(|_| {
+            // ponytail: dead code by construction (see doc comment above) —
+            // a real accumulator would just reimplement COUNT(DISTINCT).
+            unimplemented!(
+                "uniqexact has no accumulator: every call site is rewritten to \
+                 COUNT(DISTINCT ...) before physical planning"
+            )
+        }),
+        vec![],
+    ))
+}
+
+/// Rewrites `uniqexact(x)` to DataFusion's own `count(x) DISTINCT` — so
+/// ClickHouse's exact-distinct-count builtin becomes an ordinary DataFusion
+/// aggregate before the plan ever reaches `lower_agg_intent`, which already
+/// maps `count` + `distinct` to `AggIntent::Cardinality` and needs no
+/// ClickHouse-specific name of its own.
+#[derive(Debug)]
+struct UniqExactRewrite;
+
+impl FunctionRewrite for UniqExactRewrite {
+    fn name(&self) -> &str {
+        "uniqexact -> count distinct"
+    }
+
+    fn rewrite(
+        &self,
+        expr: Expr,
+        _schema: &DFSchema,
+        _config: &ConfigOptions,
+    ) -> datafusion::common::Result<Transformed<Expr>> {
+        match expr {
+            Expr::AggregateFunction(f) if f.func.name() == "uniqexact" => {
+                Ok(Transformed::yes(Expr::AggregateFunction(
+                    AggregateFunction::new_udf(
+                        count_udaf(),
+                        f.args,
+                        true, // DISTINCT
+                        f.filter,
+                        f.order_by,
+                        f.null_treatment,
+                    ),
+                )))
+            }
+            other => Ok(Transformed::no(other)),
+        }
     }
 }
 
