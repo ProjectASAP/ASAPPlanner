@@ -12,6 +12,10 @@ datafusion = "43"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
+# bgp_jan2024_workload corpus is sourced verbatim as YAML (ASAPQuery PR #561)
+# rather than transcribed into the flat .sql shape the other corpora use.
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
 
 # Corpus tests in domain folders (data-quality-check, netflow); declared
 # explicitly since Cargo only auto-discovers `.rs` files directly in `tests/`.
@@ -26,3 +30,7 @@ path = "tests/netflow/netflow.rs"
 [[test]]
 name = "bgp_analytics"
 path = "tests/bgp_analytics/bgp_analytics.rs"
+
+[[test]]
+name = "bgp_jan2024_workload"
+path = "tests/bgp_jan2024_workload/bgp_jan2024_workload.rs"
