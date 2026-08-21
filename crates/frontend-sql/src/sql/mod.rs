@@ -38,7 +38,8 @@ use datafusion::logical_expr::{
     self, AggregateUDF, Distinct, Expr, JoinType, LogicalPlan, Signature, SimpleAggregateUDF,
     Volatility, WindowFunctionDefinition,
 };
-use datafusion::optimizer::{Analyzer, OptimizerConfig};
+use datafusion::optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
+use datafusion::optimizer::{AnalyzerRule, OptimizerConfig};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use asap_types::pre_asap::agg_intent::AggIntent;
@@ -130,23 +131,23 @@ impl<'a> SqlLowerer<'a> {
     /// there is no further suspension point that could move this task to a
     /// different OS thread out from under a thread-local set beforehand.
     ///
-    /// Runs a standalone `Analyzer` carrying *only* `UniqExactRewrite` — no
-    /// built-in rules (`TypeCoercion`, `ExpandWildcardRule`, …) — over the raw
-    /// parsed plan before lowering. `ctx.sql(...).into_unoptimized_plan()`
-    /// alone returns `SqlToRel`'s output untouched, and a `FunctionRewrite`
-    /// only ever runs as part of an `Analyzer` pass, so *some* Analyzer call
-    /// is unavoidable to make the rewrite fire. Deliberately not
-    /// `ctx.state().analyzer()` (DataFusion's default 5-rule analyzer): that
-    /// pulls in unrelated normalization for every SQL query in the system,
-    /// not just `uniqExact` ones — `ExpandWildcardRule` alone changed
-    /// `SELECT *` from lowering straight to a `Scan` into an identity
-    /// `Project` wrapping one, breaking an unrelated pinned test. A bare
-    /// `Analyzer::with_rules(vec![])` still runs one check unconditionally
-    /// (`execute_and_check`'s post-pass subquery-arity/correctness check,
-    /// hardcoded, not itself a rule) — that's an accepted, narrow side
-    /// effect: `lower_in_subquery`'s own arity check below it is now
-    /// unreachable dead code for the multi-column case, since DataFusion's
-    /// own check rejects it first with an equivalent error.
+    /// Runs `ApplyFunctionRewrites` — the single `AnalyzerRule` DataFusion's
+    /// own `Analyzer` uses internally to apply `FunctionRewrite`s, called
+    /// directly rather than through `Analyzer::execute_and_check` — over the
+    /// raw parsed plan before lowering, carrying only `UniqExactRewrite`.
+    /// `ctx.sql(...).into_unoptimized_plan()` alone returns `SqlToRel`'s
+    /// output untouched, and a `FunctionRewrite` only ever runs as part of
+    /// this rule, so calling it directly is unavoidable to make the rewrite
+    /// fire. Its `analyze()` already does a full `transform_up_with_subqueries`
+    /// over the whole plan, so it needs no wrapping `Analyzer` at all —
+    /// deliberately not `Analyzer::execute_and_check` (whether with the
+    /// default 5-rule analyzer or an empty one carrying just this rewrite):
+    /// that method runs an unconditional post-check (`check_plan`, hardcoded,
+    /// not itself a rule) that isn't wanted here — e.g. it independently
+    /// rejects a multi-column `IN (subquery)` before `lower_in_subquery`'s
+    /// own arity check would. Going straight to `ApplyFunctionRewrites`
+    /// avoids that entirely: zero behavior change for every query that
+    /// doesn't call `uniqExact`.
     pub async fn lower(
         &self,
         sql: &str,
@@ -155,9 +156,8 @@ impl<'a> SqlLowerer<'a> {
         let ctx = self.build_context()?;
         let df = ctx.sql(sql).await?;
         let plan = df.into_unoptimized_plan();
-        let mut uniq_exact_only = Analyzer::with_rules(vec![]);
-        uniq_exact_only.add_function_rewrite(Arc::new(UniqExactRewrite));
-        let plan = uniq_exact_only.execute_and_check(plan, ctx.state().options(), |_, _| {})?;
+        let rewriter = ApplyFunctionRewrites::new(vec![Arc::new(UniqExactRewrite)]);
+        let plan = rewriter.analyze(plan, ctx.state().options())?;
         let _guard = AccuracyGuard::install(accuracy.clone());
         self.lower_plan(&plan)
     }

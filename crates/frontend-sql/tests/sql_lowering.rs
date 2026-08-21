@@ -618,12 +618,6 @@ async fn a_subquery_key_that_is_an_expression_still_binds() {
 
 #[tokio::test]
 async fn a_multi_column_in_subquery_is_rejected() {
-    // Rejected by DataFusion's own `Analyzer` post-check (`lower()` runs it,
-    // scoped down to just `UniqExactRewrite`, but its unconditional
-    // subquery-arity check rides along regardless of which rules are
-    // registered) before `lower_plan`/`lower_in_subquery` ever run — not by
-    // `lower_in_subquery`'s own `fields.len() != 1` check below it, which
-    // this case never reaches anymore.
     let err = lower_sql(
         "SELECT service FROM metrics WHERE service IN (SELECT service, region FROM hosts)",
         &catalog(),
@@ -631,10 +625,7 @@ async fn a_multi_column_in_subquery_is_rejected() {
     )
     .await
     .expect_err("IN must select one column");
-    assert!(
-        format!("{err}").contains("only return one column"),
-        "got {err}"
-    );
+    assert!(format!("{err}").contains("exactly one column"), "got {err}");
 }
 
 #[tokio::test]
