@@ -19,8 +19,9 @@
 //! Two real occupants and one stub:
 //!
 //! - [`boundary`] — the per-intent sketch-vs-exact (accuracy) decision:
-//!   `AggIntent → SummaryKind + SummaryParams` sized to the `AccuracyTarget`
-//!   (issue #98). [`boundary::implementation_for`] is the per-node decision;
+//!   `AggIntent → Implementation` (a summary family's own `(Kind, Params)`,
+//!   or an exact accumulator) sized to the `AccuracyTarget` (issue #98).
+//!   [`boundary::implementation_for`] is the per-node decision;
 //!   [`bind::implement_tree`] drives it over a whole tree — see the
 //!   terminology section below for why these two are named around
 //!   "implementation" rather than "bind".
@@ -64,7 +65,7 @@
 //! compatibility rules (e.g. a heap-bearing top-k sketch also satisfying a
 //! bare frequency point-query) turned out to have deployment-specific
 //! competitors (e.g. single-vs-multi-population re-aggregation) that
-//! don't reduce to a fact about `SummaryKind` alone. `control_plane`'s own
+//! don't reduce to a fact about a summary family's kind alone. `control_plane`'s own
 //! `sketch_algebra::capability::Capability`/`is_satisfied_by` is the
 //! reference downstream implementation.
 

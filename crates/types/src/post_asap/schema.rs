@@ -1,25 +1,40 @@
-use super::sketch::{SummaryKind, SummaryParams};
+use super::sketch::{
+    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchKind, SketchParams, StatModelKind,
+    StatModelParams, WaveletKind, WaveletParams,
+};
 use crate::pre_asap::DataType;
 
 // ── Post-ASAP data types ────────────────────────────────────────────────────
 
 /// Column types that may appear on a post-ASAP DAG edge. A strict superset of
-/// the pre-ASAP [`DataType`]: adds `Sketch` for edges that carry partial
-/// sketch state between a `SummaryAgg` and a downstream `SummaryEstimate` or
-/// `SummaryMerge`.
+/// the pre-ASAP [`DataType`]: adds one variant per summary *family* for
+/// edges that carry partial summary state between a `SummaryAgg` and a
+/// downstream `SummaryEstimate` or `SummaryMerge`.
 ///
-/// The `Sketch` variant carries `(kind, params)` so the type system can reject
-/// merges of incompatible sketches at plan construction time — a `SummaryMerge`
-/// over `Sketch(Kll, …)` and `Sketch(Cms, …)` inputs is a plan-time error.
+/// Every non-`Plain` variant carries `(kind, params)` from that family's own
+/// pair of types, so the type system can reject merges of incompatible
+/// summaries at plan construction time — a `SummaryMerge` over
+/// `Sketch(Kll, …)` and `Sketch(Cms, …)` inputs is a plan-time error, and a
+/// `Sketch(…)` can never be confused for a `Sample(…)` even though both are
+/// "opaque summary state" at a glance.
 #[derive(Debug, Clone, PartialEq)]
-pub enum SummaryDataType {
-    /// Any base pre-ASAP column type — passed through unchanged from
-    /// pre-ASAP edges.
-    Primitive(DataType),
-    /// Opaque summary state (exact accumulator or approximate sketch).
-    /// The `(kind, params)` pair is the type identity: two summary columns
-    /// are compatible only if both match exactly.
-    Sketch(SummaryKind, SummaryParams),
+pub enum SummaryFamilyType {
+    /// An ordinary, readable value — the same closed vocabulary as the
+    /// pre-ASAP `DataType` (`Int64`/`Float64`/`Utf8`/`Bool`/`Timestamp`),
+    /// passed through unchanged from a pre-ASAP edge.
+    Plain(DataType),
+    /// Exact, mergeable accumulator state (`Sum`/`Count`/`MinMax`/`Rate`/
+    /// `Increase`) — the partial state *is* the value; no readout needed.
+    ExactAggregate(ExactKind, ExactParams),
+    /// Approximate sketch state (KLL/CMS/HLL/…), read out via a
+    /// `SummaryEstimate`.
+    Sketch(SketchKind, SketchParams),
+    /// Sampling-based summary state (a retained row subset).
+    Sample(SamplingKind, SamplingParams),
+    /// Wavelet-transform summary state (a coefficient vector).
+    Wavelet(WaveletKind, WaveletParams),
+    /// Fitted statistical/parametric-model summary state.
+    StatModel(StatModelKind, StatModelParams),
 }
 
 // ── Post-ASAP schema ─────────────────────────────────────────────────────────
@@ -27,14 +42,15 @@ pub enum SummaryDataType {
 #[derive(Debug, Clone)]
 pub struct SummaryField {
     pub name: String,
-    pub dtype: SummaryDataType,
+    pub dtype: SummaryFamilyType,
     pub nullable: bool,
 }
 
 /// Schema carried on every edge of the post-ASAP DAG. Extends the pre-ASAP
-/// `Schema` with the ability to express sketch-state columns. The two are
+/// `Schema` with the ability to express summary-state columns. The two are
 /// separate types so a pre-ASAP node structurally cannot carry a
-/// `Sketch`-typed column — any attempt to do so is a compile-time type error.
+/// summary-state-typed column — any attempt to do so is a compile-time type
+/// error.
 #[derive(Debug, Clone)]
 pub struct SummarySchema {
     pub fields: Vec<SummaryField>,

@@ -1,19 +1,12 @@
 use crate::pre_asap::ColumnRef;
 
-// ── Summary kind identifiers ───────────────────────────────────────────────────
+// ── Exact accumulators ──────────────────────────────────────────────────────
 
-/// Identifies a precomputed aggregation family — either an exact accumulator
-/// or an approximate sketch. Used as a type tag in `SummaryDataType` and as the
-/// binding choice recorded in `SummaryExpr` nodes.
-///
-/// `PartialOrd`/`Ord` (derived, by variant declaration order below): a
-/// downstream deployment (ASAPQuery-backend's `control_plane`) needs a
-/// deterministic set of families per metric — e.g. `BTreeSet<SummaryKind>`
-/// — to emit reproducible YAML/JSON config. This crate has no ordering
-/// opinion of its own; the derive just makes one available.
+/// An exact, mergeable accumulator family — zero approximation error. The
+/// partial state built for one of these *is* the answer; no
+/// `SummaryEstimate` readout is needed to get a value out of it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum SummaryKind {
-    // ── Exact accumulators (no approximation error) ──────────────────────────
+pub enum ExactKind {
     /// Exact sum accumulator (mergeable by addition).
     Sum,
     /// Exact count accumulator (mergeable by addition).
@@ -24,7 +17,27 @@ pub enum SummaryKind {
     Increase,
     /// Rate accumulator (increase / time window duration).
     Rate,
-    // ── Approximate sketches ─────────────────────────────────────────────────
+}
+
+/// Parameters for an [`ExactKind`] accumulator. All exact accumulators have
+/// fixed semantics — no tuning parameters — so each variant carries none;
+/// kept as a per-kind enum (mirroring [`SketchParams`]) so a mismatched
+/// `(kind, params)` pair is still a type error, not a runtime check.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExactParams {
+    Sum,
+    Count,
+    MinMax,
+    Increase,
+    Rate,
+}
+
+// ── Approximate sketches ─────────────────────────────────────────────────────
+
+/// An approximate, mergeable sketch family — bounded error, sized by its
+/// [`SketchParams`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SketchKind {
     /// KLL quantile sketch (mergeable, ε-accurate rank queries).
     Kll,
     /// Count-Min Sketch (mergeable, (ε,δ)-accurate frequency queries).
@@ -48,37 +61,12 @@ pub enum SummaryKind {
     CountSketchWithHeap,
 }
 
-impl SummaryKind {
-    /// Is this family an exact accumulator (zero approximation error) rather
-    /// than an approximate sketch? The partial state built for an exact kind
-    /// *is* the answer — no `SummaryEstimate` readout is needed to get a
-    /// value out of it. Used by `asap-plan::boundary::Implementation::Summary`
-    /// to recover, from `kind` alone, the same fact the now-collapsed
-    /// `Sketch`/`ExactAccumulator` variant tags used to carry directly.
-    pub fn is_exact(&self) -> bool {
-        matches!(
-            self,
-            Self::Sum | Self::Count | Self::MinMax | Self::Increase | Self::Rate
-        )
-    }
-}
-
-// ── Sketch parameters ─────────────────────────────────────────────────────────
-
-/// Concrete, catalog-validated parameters for a specific summary instance.
-/// The variant must correspond to the associated `SummaryKind`; mismatches
-/// are caught at post-ASAP bind time, before any later, deployment-specific
-/// stage ever sees the plan.
-/// Exact-accumulator variants carry no parameters (their semantics are fixed).
+/// Concrete, catalog-validated parameters for a specific [`SketchKind`]
+/// instance. The variant must correspond to the associated `SketchKind`;
+/// mismatches are caught at post-ASAP bind time, before any later,
+/// deployment-specific stage ever sees the plan.
 #[derive(Debug, Clone, PartialEq)]
-pub enum SummaryParams {
-    // Exact accumulators — no tuning parameters
-    Sum,
-    Count,
-    MinMax,
-    Increase,
-    Rate,
-    // Approximate sketches — algorithm-specific tuning parameters
+pub enum SketchParams {
     Kll {
         k: u32,
     },
@@ -114,9 +102,77 @@ pub enum SummaryParams {
     },
 }
 
+// ── Sampling summaries ───────────────────────────────────────────────────────
+
+/// A sampling-based summary family — retains an actual (weighted) subset of
+/// rows rather than a compressed sketch. Minimal starting vocabulary: one
+/// family, extend as a deployment needs another (stratified, weighted, …).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SamplingKind {
+    /// Reservoir sampling (mergeable via weighted reservoir merge;
+    /// uniform-random retained subset of a fixed size).
+    Reservoir,
+}
+
+/// Parameters for a [`SamplingKind`] instance.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SamplingParams {
+    Reservoir {
+        /// Reservoir capacity — the number of retained rows.
+        size: u32,
+    },
+}
+
+// ── Wavelet summaries ────────────────────────────────────────────────────────
+
+/// A wavelet-transform-based summary family — a compressed coefficient
+/// vector supporting approximate range-sum / histogram queries. Minimal
+/// starting vocabulary: one basis, extend as a deployment needs another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum WaveletKind {
+    /// Haar wavelet synopsis — the simplest, most common streaming basis.
+    Haar,
+}
+
+/// Parameters for a [`WaveletKind`] instance.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WaveletParams {
+    Haar {
+        /// Number of retained coefficients — the compression / accuracy knob.
+        coefficients: u32,
+    },
+}
+
+// ── Statistical-model summaries ──────────────────────────────────────────────
+
+/// A fitted statistical/parametric-model summary family — e.g. a distribution
+/// fit used to answer approximate quantile/density queries without
+/// retaining raw samples. Deliberately open-ended: `family` names the model
+/// family and is interpreted by whatever deployment builds/reads it, the
+/// same "core doesn't enumerate every deployment shape" stance
+/// `AggIntent::Extension` already takes for pre-ASAP intents.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum StatModelKind {
+    /// A parametric model fit to the data (e.g. a fitted distribution or
+    /// regression). `family` (in [`StatModelParams::Parametric`]) names
+    /// which one.
+    Parametric,
+}
+
+/// Parameters for a [`StatModelKind`] instance.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatModelParams {
+    Parametric {
+        /// Deployment-interpreted model family name (e.g.
+        /// `"gaussian_mixture"`). Core has no fixed catalog of families —
+        /// see [`StatModelKind::Parametric`].
+        family: String,
+    },
+}
+
 // ── Sketch read-out queries ───────────────────────────────────────────────────
 
-/// What to extract from a built sketch. Carried by `SummaryEstimate`.
+/// What to extract from a built summary. Carried by `SummaryEstimate`.
 #[derive(Debug, Clone)]
 pub enum SketchQuery {
     /// Extract the value at quantile rank `q` ∈ (0, 1].
@@ -137,41 +193,4 @@ pub enum SketchQuery {
     Cardinality,
     /// Top-k most frequent (key, count) pairs.
     TopK { k: usize },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn is_exact_matches_the_enum_declaration_split() {
-        for kind in [
-            SummaryKind::Sum,
-            SummaryKind::Count,
-            SummaryKind::MinMax,
-            SummaryKind::Increase,
-            SummaryKind::Rate,
-        ] {
-            assert!(
-                kind.is_exact(),
-                "{kind:?} is declared as an exact accumulator"
-            );
-        }
-        for kind in [
-            SummaryKind::Kll,
-            SummaryKind::Cms,
-            SummaryKind::Hll,
-            SummaryKind::DDSketch,
-            SummaryKind::CmsWithHeap,
-            SummaryKind::Kmv,
-            SummaryKind::Theta,
-            SummaryKind::CountSketch,
-            SummaryKind::CountSketchWithHeap,
-        ] {
-            assert!(
-                !kind.is_exact(),
-                "{kind:?} is declared as an approximate sketch"
-            );
-        }
-    }
 }

@@ -1,16 +1,24 @@
-//! The post-ASAP IR: sketch-bound types, distinct from
+//! The post-ASAP IR: summary-bound types, distinct from
 //! [`crate::pre_asap`]'s pre-ASAP IR.
 //!
 //! Where [`crate::pre_asap`] carries *intent* only ("compute a
-//! quantile to ε accuracy"), this module is the sketch-bound IR: the sketch
-//! kind + parameters are committed ([`sketch::SummaryKind`] /
-//! [`sketch::SummaryParams`]), and [`expr::SummaryNode`] / [`expr::SummaryExpr`]
-//! describe the summary computation.
+//! quantile to ε accuracy"), this module is the summary-bound IR: the
+//! summary family, kind, and parameters are committed (one `(Kind, Params)`
+//! pair per family — [`sketch::ExactKind`]/[`sketch::ExactParams`],
+//! [`sketch::SketchKind`]/[`sketch::SketchParams`],
+//! [`sketch::SamplingKind`]/[`sketch::SamplingParams`],
+//! [`sketch::WaveletKind`]/[`sketch::WaveletParams`],
+//! [`sketch::StatModelKind`]/[`sketch::StatModelParams`]), and
+//! [`expr::SummaryNode`] / [`expr::SummaryExpr`] describe the summary
+//! computation.
 
 pub mod expr;
 pub mod schema;
 pub mod sketch;
 
 pub use expr::{SummaryExpr, SummaryNode};
-pub use schema::{SummaryDataType, SummaryField, SummarySchema};
-pub use sketch::{SketchQuery, SummaryKind, SummaryParams};
+pub use schema::{SummaryFamilyType, SummaryField, SummarySchema};
+pub use sketch::{
+    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchKind, SketchParams, SketchQuery,
+    StatModelKind, StatModelParams, WaveletKind, WaveletParams,
+};

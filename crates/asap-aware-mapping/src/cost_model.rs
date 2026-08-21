@@ -11,14 +11,19 @@
 //! each downstream (ASAPCollector + ASAPQuery-backend, ASAPFusion, …) to
 //! fork [`boundary::implementation_for`].
 //!
-//! "Summary" here is deliberately broader than the classic streaming
-//! sketches [`SummaryKind`] enumerates today (Kll/DDSketch/Hll/Cms/…):
-//! [`CostModel::rank_candidates`] ranks whatever [`SummaryKind`] variants
-//! [`boundary::summary_candidates`] offers for an intent, so it already
-//! extends to non-sketch realizations — sampling-based summaries,
-//! wavelet-transform summaries, OMP/compressive-sensing summaries, … —
-//! the day a variant for one lands in [`asap_sketch`]; nothing in this
-//! trait or [`boundary`]'s dispatch is sketch-specific.
+//! This trait is scoped to the approximate-**sketch** family specifically
+//! ([`CostModel::rank_candidates`]/[`size_params`](CostModel::size_params)
+//! take/return [`SketchKind`]/[`SketchParams`]) — `asap_sketch` also has
+//! sibling families for sampling-based, wavelet-transform, and fitted
+//! statistical-model summaries
+//! ([`asap_types::post_asap::SamplingKind`]/…/[`asap_types::post_asap::StatModelKind`]),
+//! each with its own `(Kind, Params)` pair, deliberately *not* folded into
+//! this trait: no core `AggIntent` picks one of those families today (only
+//! [`CostModel::realize_extension`] can, for a deployment-specific
+//! `AggIntent::Extension`), so there is no ranking/sizing decision for this
+//! trait to own yet. Should a family other than `Sketch` ever need its own
+//! `rank_candidates`/`size_params`, it gets its own trait methods rather
+//! than overloading these ones across incompatible `Kind`/`Params` types.
 //!
 //! Every entry point that doesn't take an explicit `&dyn CostModel`
 //! ([`implementation_for`](crate::boundary::implementation_for),
@@ -27,7 +32,7 @@
 //! model keeps today's static-preference-order behavior exactly, byte for
 //! byte.
 
-use asap_types::post_asap::{SketchQuery, SummaryKind, SummaryParams};
+use asap_types::post_asap::{SketchKind, SketchParams, SketchQuery};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 
@@ -49,15 +54,15 @@ pub trait CostModel {
     ///
     /// Implementations MAY reorder freely and MAY drop entries that aren't
     /// available in their deployment, but MUST NOT invent a candidate that
-    /// wasn't in the input — an unknown [`SummaryKind`] has no
-    /// [`SummaryParams`](asap_types::post_asap::SummaryParams) sizing logic in
+    /// wasn't in the input — an unknown [`SketchKind`] has no
+    /// [`SketchParams`](asap_types::post_asap::SketchParams) sizing logic in
     /// [`boundary::implementation_for_with`] and binding it will panic.
     /// Returning an empty `Vec` means "no candidate is acceptable";
     /// `implementation_for_with` treats that the same as `candidates`
     /// having been empty to begin with.
-    fn rank_candidates(&self, intent: &AggIntent, candidates: &[SummaryKind]) -> Vec<SummaryKind>;
+    fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind>;
 
-    /// Size [`SummaryParams`] for `kind` (one of the candidates
+    /// Size [`SketchParams`] for `kind` (one of the candidates
     /// [`rank_candidates`](Self::rank_candidates) put first) under the
     /// resolved `(eps, delta)` accuracy budget.
     ///
@@ -71,11 +76,11 @@ pub trait CostModel {
     /// not resize them, can leave this method unimplemented.
     fn size_params(
         &self,
-        kind: SummaryKind,
+        kind: SketchKind,
         intent: &AggIntent,
         eps: f64,
         delta: f64,
-    ) -> SummaryParams {
+    ) -> SketchParams {
         crate::boundary::default_size_params(kind, intent, eps, delta)
     }
 
@@ -120,7 +125,7 @@ pub trait CostModel {
 pub struct DefaultCostModel;
 
 impl CostModel for DefaultCostModel {
-    fn rank_candidates(&self, _intent: &AggIntent, candidates: &[SummaryKind]) -> Vec<SummaryKind> {
+    fn rank_candidates(&self, _intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind> {
         candidates.to_vec()
     }
 }
@@ -147,8 +152,8 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SummaryKind],
-        ) -> Vec<SummaryKind> {
+            candidates: &[SketchKind],
+        ) -> Vec<SketchKind> {
             let mut v = candidates.to_vec();
             v.reverse();
             v
@@ -170,8 +175,8 @@ mod tests {
     fn size_params_default_body_matches_default_size_params() {
         let intent = default_cardinality();
         assert_eq!(
-            AlwaysPreferLast.size_params(SummaryKind::Hll, &intent, 0.01, 0.01),
-            crate::boundary::default_size_params(SummaryKind::Hll, &intent, 0.01, 0.01),
+            AlwaysPreferLast.size_params(SketchKind::Hll, &intent, 0.01, 0.01),
+            crate::boundary::default_size_params(SketchKind::Hll, &intent, 0.01, 0.01),
         );
     }
 
@@ -185,22 +190,22 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SummaryKind],
-        ) -> Vec<SummaryKind> {
+            candidates: &[SketchKind],
+        ) -> Vec<SketchKind> {
             candidates.to_vec()
         }
 
         fn size_params(
             &self,
-            kind: SummaryKind,
+            kind: SketchKind,
             intent: &AggIntent,
             eps: f64,
             delta: f64,
-        ) -> SummaryParams {
+        ) -> SketchParams {
             match kind {
-                SummaryKind::Kll => {
+                SketchKind::Kll => {
                     let k = if eps >= 0.01 { 200 } else { 2048 };
-                    SummaryParams::Kll { k }
+                    SketchParams::Kll { k }
                 }
                 other => crate::boundary::default_size_params(other, intent, eps, delta),
             }
@@ -213,13 +218,13 @@ mod tests {
 
         let intent = default_quantile(0.99);
         assert_eq!(
-            DiscreteKllRungs.size_params(SummaryKind::Kll, &intent, 0.001, 0.01),
-            SummaryParams::Kll { k: 2048 },
+            DiscreteKllRungs.size_params(SketchKind::Kll, &intent, 0.001, 0.01),
+            SketchParams::Kll { k: 2048 },
         );
         // Untouched kinds still fall through to the default formula.
         assert_eq!(
-            DiscreteKllRungs.size_params(SummaryKind::Hll, &intent, 0.01, 0.01),
-            crate::boundary::default_size_params(SummaryKind::Hll, &intent, 0.01, 0.01),
+            DiscreteKllRungs.size_params(SketchKind::Hll, &intent, 0.01, 0.01),
+            crate::boundary::default_size_params(SketchKind::Hll, &intent, 0.01, 0.01),
         );
     }
 }
