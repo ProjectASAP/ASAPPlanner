@@ -160,11 +160,15 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
              gap was added/removed: {tally:?}"
         );
     };
-    expect(Category::Lowered, 64);
-    expect(Category::Plan, 127);
+    expect(Category::Lowered, 85);
+    expect(Category::Plan, 105);
     expect(Category::Schema, 0);
     expect(Category::Parse, 0);
-    expect(Category::NotImplemented, 3);
+    // One query that used to fail at `uniqExact` (`Plan`) now clears that
+    // hurdle -- `UniqExactRewrite` in `sql/mod.rs` rewrites it to
+    // `COUNT(DISTINCT ...)` before `lower_plan` runs -- and plans far enough
+    // to hit a second, pre-existing gap: map/array index access.
+    expect(Category::NotImplemented, 4);
     expect(Category::UnsupportedFeature, 6);
     expect(Category::Other, 0);
 }

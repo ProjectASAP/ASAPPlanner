@@ -7,16 +7,18 @@
 //! attribution, MOAS detection, prefix deaggregation, RIB visibility/churn.
 //!
 //! Unlike the DQC and netflow SQL corpora, this one does **not** pin full
-//! coverage: only queries 1-2 (plain `COUNT`/`GROUP BY`/`ORDER BY`/`LIMIT`)
-//! lower end to end. The other 13 fail for two distinct reasons -- distinct
-//! `DataFusionError` variants, not just "some `SqlError::DataFusion`" -- and
-//! `EXPECTED` below pins each query to its specific variant *and* a snippet
-//! of the error message, so a query silently drifting from one failure mode
-//! to the other (e.g. a grammar gap getting "fixed" into an unknown-function
-//! error, or vice versa) fails the test even though the aggregate 2/11/2
-//! split wouldn't otherwise move:
-//!   - 11 queries hit `DataFusionError::Plan` ("unknown function"): they use
-//!     ClickHouse-only builtins (`uniqExact`, `countIf`, `toStartOfInterval`,
+//! coverage: only queries 1, 2, 6, 12 (plain `COUNT`/`GROUP BY`/`ORDER
+//! BY`/`LIMIT`, plus `uniqExact` -- rewritten to `COUNT(DISTINCT ...)` by
+//! DataFusion's own `Analyzer` before `lower_plan` runs, see
+//! `UniqExactRewrite` in `sql/mod.rs`) lower end to end. The other 11 fail
+//! for two distinct reasons -- distinct `DataFusionError` variants, not just
+//! "some `SqlError::DataFusion`" -- and `EXPECTED` below pins each query to
+//! its specific variant *and* a snippet of the error message, so a query
+//! silently drifting from one failure mode to the other (e.g. a grammar gap
+//! getting "fixed" into an unknown-function error, or vice versa) fails the
+//! test even though the aggregate 4/9/2 split wouldn't otherwise move:
+//!   - 9 queries hit `DataFusionError::Plan` ("unknown function"): they use
+//!     ClickHouse-only builtins (`countIf`, `toStartOfInterval`,
 //!     `lagInFrame`, `isIPAddressInRange`, `arrayJoin`, `arrayFilter`, ...)
 //!     that parse fine under the ClickHouse dialect but have no DataFusion
 //!     planner equivalent registered.
@@ -119,13 +121,13 @@ const EXPECTED: &[Expected] = &[
     Expected::UnknownFunction("arrayfilter"),                                   // 3
     Expected::UnknownFunction("arrayfilter"),                                   // 4
     Expected::UnknownFunction("arrayfilter"),                                   // 5
-    Expected::UnknownFunction("uniqexact"),                                     // 6
+    Expected::Lowered,                                                          // 6
     Expected::UnknownFunction("tostartofinterval"),                             // 7
     Expected::UnknownFunction("arrayfilter"),                                   // 8
     Expected::UnknownFunction("isipaddressinrange"),                            // 9
     Expected::UnknownFunction("arrayfilter"),                                   // 10
     Expected::UnknownFunction("laginframe"),                                    // 11
-    Expected::UnknownFunction("uniqexact"),                                     // 12
+    Expected::Lowered,                                                          // 12
     Expected::UnknownFunction("arrayjoin"),                                     // 13
     Expected::UnsupportedGrammar("Expected: identifier, found: ("),             // 14
     Expected::UnsupportedGrammar("Expected: a list of columns in parentheses"), // 15
@@ -184,17 +186,19 @@ async fn corpus_lowering_matches_the_pinned_per_query_outcome() {
     }
     eprintln!("bgp-analytics SQL corpus: {t:?}");
 
-    // Coverage ratchet -- today only queries 1-2 lower; ClickHouse-builtin
-    // UDF support or vendored-grammar fixes should move the affected query's
-    // entry in `EXPECTED` to `Lowered` (raising `t.lowered` here) rather than
-    // just this summary.
+    // Coverage ratchet -- queries 1, 2, 6, 12 lower (6 and 12's `uniqExact`
+    // calls are rewritten to `COUNT(DISTINCT ...)` before `lower_plan` ever
+    // sees them, see `UniqExactRewrite` in `sql/mod.rs`); further
+    // ClickHouse-builtin UDF support or vendored-grammar fixes should move the
+    // affected query's entry in `EXPECTED` to `Lowered` (raising `t.lowered`
+    // here) rather than just this summary.
     assert_eq!(
-        t.lowered, 2,
+        t.lowered, 4,
         "BGP analytics SQL coverage changed -- update EXPECTED if support for \
          a ClickHouse builtin or grammar gap was added: {t:?}"
     );
     assert_eq!(
-        t.unknown_function, 11,
+        t.unknown_function, 9,
         "BGP analytics SQL coverage changed: {t:?}"
     );
     assert_eq!(
