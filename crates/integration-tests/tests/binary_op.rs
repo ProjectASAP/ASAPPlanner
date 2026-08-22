@@ -5,6 +5,7 @@
 //! `VectorMatch` labels (e.g. `on(job)`) are carried as strings on the node
 //! and are NOT resolved to column ids — the Binder does not see them.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use asap_frontend_promql::lower_promql;
@@ -35,9 +36,9 @@ fn rate_agg(metric: &str) -> QueryExpr {
         measures: vec![AggIntent::Rate],
         output_names: vec!["".into()],
         having: None,
-        child: Box::new(QueryExpr::TimeRange {
+        child: Rc::new(QueryExpr::TimeRange {
             range: Duration::from_secs(300),
-            child: Box::new(scan(metric, &[])),
+            child: Rc::new(scan(metric, &[])),
         }),
     }
 }
@@ -48,7 +49,7 @@ fn sum_by_job(metric: &str) -> QueryExpr {
         measures: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,
-        child: Box::new(scan(metric, &["job"])),
+        child: Rc::new(scan(metric, &["job"])),
     }
 }
 
@@ -57,8 +58,8 @@ fn sum_by_job(metric: &str) -> QueryExpr {
 fn q18_div_bare_scans() {
     let expected = QueryExpr::BinaryOp {
         op: BinaryOpKind::Arith(ArithOp::Div),
-        lhs: Box::new(scan("http_requests_total", &[])),
-        rhs: Box::new(scan("http_requests_total", &[])),
+        lhs: Rc::new(scan("http_requests_total", &[])),
+        rhs: Rc::new(scan("http_requests_total", &[])),
         vector_match: None,
     };
     assert_eq!(lower("http_requests_total / http_requests_total"), expected);
@@ -69,8 +70,8 @@ fn q18_div_bare_scans() {
 fn q19_add_with_on_match() {
     let expected = QueryExpr::BinaryOp {
         op: BinaryOpKind::Arith(ArithOp::Add),
-        lhs: Box::new(scan("http_requests_total", &[])),
-        rhs: Box::new(scan("http_requests_total", &[])),
+        lhs: Rc::new(scan("http_requests_total", &[])),
+        rhs: Rc::new(scan("http_requests_total", &[])),
         vector_match: Some(VectorMatch {
             kind: VectorMatchKind::On,
             labels: vec!["job".into()],
@@ -88,8 +89,8 @@ fn q19_add_with_on_match() {
 fn q20_div_two_rates() {
     let expected = QueryExpr::BinaryOp {
         op: BinaryOpKind::Arith(ArithOp::Div),
-        lhs: Box::new(rate_agg("http_requests_total")),
-        rhs: Box::new(rate_agg("http_errors_total")),
+        lhs: Rc::new(rate_agg("http_requests_total")),
+        rhs: Rc::new(rate_agg("http_errors_total")),
         vector_match: None,
     };
     assert_eq!(
@@ -105,8 +106,8 @@ fn q_gt_comparison() {
         lower("http_requests_total > http_errors_total"),
         QueryExpr::BinaryOp {
             op: BinaryOpKind::Compare(CompareOp::Gt),
-            lhs: Box::new(scan("http_requests_total", &[])),
-            rhs: Box::new(scan("http_errors_total", &[])),
+            lhs: Rc::new(scan("http_requests_total", &[])),
+            rhs: Rc::new(scan("http_errors_total", &[])),
             vector_match: None,
         }
     );
@@ -118,8 +119,8 @@ fn q_lt_comparison() {
         lower("http_requests_total < http_errors_total"),
         QueryExpr::BinaryOp {
             op: BinaryOpKind::Compare(CompareOp::Lt),
-            lhs: Box::new(scan("http_requests_total", &[])),
-            rhs: Box::new(scan("http_errors_total", &[])),
+            lhs: Rc::new(scan("http_requests_total", &[])),
+            rhs: Rc::new(scan("http_errors_total", &[])),
             vector_match: None,
         }
     );
@@ -131,8 +132,8 @@ fn q_ge_comparison() {
         lower("http_requests_total >= http_errors_total"),
         QueryExpr::BinaryOp {
             op: BinaryOpKind::Compare(CompareOp::Ge),
-            lhs: Box::new(scan("http_requests_total", &[])),
-            rhs: Box::new(scan("http_errors_total", &[])),
+            lhs: Rc::new(scan("http_requests_total", &[])),
+            rhs: Rc::new(scan("http_errors_total", &[])),
             vector_match: None,
         }
     );
@@ -144,8 +145,8 @@ fn q_le_comparison() {
         lower("http_requests_total <= http_errors_total"),
         QueryExpr::BinaryOp {
             op: BinaryOpKind::Compare(CompareOp::Le),
-            lhs: Box::new(scan("http_requests_total", &[])),
-            rhs: Box::new(scan("http_errors_total", &[])),
+            lhs: Rc::new(scan("http_requests_total", &[])),
+            rhs: Rc::new(scan("http_errors_total", &[])),
             vector_match: None,
         }
     );
@@ -158,8 +159,8 @@ fn q_add_with_ignoring() {
         lower("http_requests_total + ignoring(job) http_errors_total"),
         QueryExpr::BinaryOp {
             op: BinaryOpKind::Arith(ArithOp::Add),
-            lhs: Box::new(scan("http_requests_total", &[])),
-            rhs: Box::new(scan("http_errors_total", &[])),
+            lhs: Rc::new(scan("http_requests_total", &[])),
+            rhs: Rc::new(scan("http_errors_total", &[])),
             vector_match: Some(VectorMatch {
                 kind: VectorMatchKind::Ignoring,
                 labels: vec!["job".into()],
@@ -176,8 +177,8 @@ fn q_mul_group_left() {
         lower("http_requests_total * on(job) group_left() node_info"),
         QueryExpr::BinaryOp {
             op: BinaryOpKind::Arith(ArithOp::Mul),
-            lhs: Box::new(scan("http_requests_total", &[])),
-            rhs: Box::new(scan("node_info", &[])),
+            lhs: Rc::new(scan("http_requests_total", &[])),
+            rhs: Rc::new(scan("node_info", &[])),
             vector_match: Some(VectorMatch {
                 kind: VectorMatchKind::On,
                 labels: vec!["job".into()],
@@ -197,8 +198,8 @@ fn q_mul_group_right() {
         lower("node_info * on(job) group_right() http_requests_total"),
         QueryExpr::BinaryOp {
             op: BinaryOpKind::Arith(ArithOp::Mul),
-            lhs: Box::new(scan("node_info", &[])),
-            rhs: Box::new(scan("http_requests_total", &[])),
+            lhs: Rc::new(scan("node_info", &[])),
+            rhs: Rc::new(scan("http_requests_total", &[])),
             vector_match: Some(VectorMatch {
                 kind: VectorMatchKind::On,
                 labels: vec!["job".into()],
@@ -217,8 +218,8 @@ fn q_mul_group_right() {
 fn q21_div_two_sum_by_job() {
     let expected = QueryExpr::BinaryOp {
         op: BinaryOpKind::Arith(ArithOp::Div),
-        lhs: Box::new(sum_by_job("http_requests_total")),
-        rhs: Box::new(sum_by_job("http_errors_total")),
+        lhs: Rc::new(sum_by_job("http_requests_total")),
+        rhs: Rc::new(sum_by_job("http_errors_total")),
         vector_match: None,
     };
     assert_eq!(
@@ -233,8 +234,8 @@ fn q21_div_two_sum_by_job() {
 fn q36_unary_negation_is_multiply_by_minus_one() {
     let expected = QueryExpr::BinaryOp {
         op: BinaryOpKind::Arith(ArithOp::Mul),
-        lhs: Box::new(scan("some_metric", &[])),
-        rhs: Box::new(QueryExpr::Scalar(-1.0)),
+        lhs: Rc::new(scan("some_metric", &[])),
+        rhs: Rc::new(QueryExpr::Scalar(-1.0)),
         vector_match: None,
     };
     assert_eq!(lower("-some_metric"), expected);
@@ -249,10 +250,10 @@ fn q36_sum_of_negation_nests() {
         measures: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,
-        child: Box::new(QueryExpr::BinaryOp {
+        child: Rc::new(QueryExpr::BinaryOp {
             op: BinaryOpKind::Arith(ArithOp::Mul),
-            lhs: Box::new(scan("node_cpu_seconds_total", &[])),
-            rhs: Box::new(QueryExpr::Scalar(-1.0)),
+            lhs: Rc::new(scan("node_cpu_seconds_total", &[])),
+            rhs: Rc::new(QueryExpr::Scalar(-1.0)),
             vector_match: None,
         }),
     };

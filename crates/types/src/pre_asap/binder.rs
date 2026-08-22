@@ -336,6 +336,8 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::super::query_expr::{GroupKeys, Source};
     use super::*;
 
@@ -369,7 +371,7 @@ mod tests {
                 nulls_first: false,
             }],
             partition_by: GroupKeys::by(vec![ColumnRef::Named("host".into())]),
-            child: Box::new(src("hits")),
+            child: Rc::new(src("hits")),
         };
         let schema = Binder::new().bind(&tree);
         assert!(schema.column_id("host").is_some());

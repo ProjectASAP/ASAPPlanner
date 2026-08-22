@@ -24,6 +24,8 @@
 //! column) it is oblivious to whether the count was aliased in the source, which
 //! is exactly the SQL alias gap (#20) the old front-end gate missed.
 
+use std::rc::Rc;
+
 use super::agg_intent::{is_frequency_heavy_hitter, ranking_measure, AggIntent};
 use super::expr_ir::{CompareOp, ScalarValue};
 use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
@@ -52,6 +54,25 @@ fn canon(expr: &mut QueryExpr) {
     }
 }
 
+/// A `&mut QueryExpr` out of a child `Rc<QueryExpr>` — clone-on-write via
+/// [`Rc::make_mut`]: free (no clone) while `r` is uniquely owned, which is
+/// the overwhelmingly common case (a tree `canonicalize` was just handed by
+/// value); falls back to cloning just *this* node (its own fields — the
+/// grandchildren stay shared `Rc`s, not deep-copied) only when some other
+/// owner still holds the same `Rc`, e.g. a caller that kept its own clone
+/// around (`once.clone()` in `is_idempotent` below — `QueryExpr::clone()` is
+/// now a cheap `Rc`-bump, not a deep copy, so that clone shares structure
+/// with `once` until a rewrite here needs to touch it). `Rc::get_mut` would
+/// panic on exactly that case; `make_mut` degrades to a shallow copy instead
+/// of requiring sole ownership as a precondition. Once a workload-level CSE
+/// pass runs (issue #212, #222) and canonicalize sees an already-shared
+/// subtree from a *different* query, this is also the mechanism that keeps
+/// canonicalizing one query from silently corrupting another's view of the
+/// same shared node.
+fn rc_mut(r: &mut Rc<QueryExpr>) -> &mut QueryExpr {
+    Rc::make_mut(r)
+}
+
 /// Mutable references to the direct **operator** `QueryExpr` children of a
 /// node — `canon`'s own top-down/bottom-up walk only ever visits the
 /// relational skeleton, never descending into a scalar position (`Filter.pred`,
@@ -62,7 +83,7 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
     use QueryExpr::*;
     match expr {
         Scan { .. } | Scalar(_) | EvalTime => vec![],
-        VectorFromScalar(c) | ScalarFromVector(c) => vec![c.as_mut()],
+        VectorFromScalar(c) | ScalarFromVector(c) => vec![rc_mut(c)],
         Relabel { child, .. }
         | Filter { child, .. }
         | Project { child, .. }
@@ -75,12 +96,12 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
         | Sample { child, .. }
         | InfoJoin { child, .. }
         | Sort { child, .. }
-        | Limit { child, .. } => vec![child.as_mut()],
+        | Limit { child, .. } => vec![rc_mut(child)],
         Merge { children } => children.iter_mut().collect(),
         Join { left, right, .. } | SetOp { left, right, .. } => {
-            vec![left.as_mut(), right.as_mut()]
+            vec![rc_mut(left), rc_mut(right)]
         }
-        BinaryOp { lhs, rhs, .. } => vec![lhs.as_mut(), rhs.as_mut()],
+        BinaryOp { lhs, rhs, .. } => vec![rc_mut(lhs), rc_mut(rhs)],
         Column(_)
         | Literal(_)
         | Compare { .. }
@@ -190,7 +211,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
         }],
         output_names: Vec::new(),
         having: None,
-        child: Box::new(agg_expr.clone()),
+        child: Rc::new(agg_expr.clone()),
     })
 }
 
@@ -259,10 +280,10 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
     Some(QueryExpr::Limit {
         n: *k as usize,
         offset: 0,
-        child: Box::new(QueryExpr::Sort {
+        child: Rc::new(QueryExpr::Sort {
             keys: order_by.clone(),
             partition_by: partition_by.clone(),
-            child: Box::new(inner.as_ref().clone()),
+            child: Rc::new(inner.as_ref().clone()),
         }),
     })
 }
@@ -299,7 +320,7 @@ mod tests {
             }],
             output_names: vec![],
             having: None,
-            child: Box::new(scan()),
+            child: Rc::new(scan()),
         }
     }
 
@@ -315,7 +336,7 @@ mod tests {
         QueryExpr::Limit {
             n,
             offset,
-            child: Box::new(child),
+            child: Rc::new(child),
         }
     }
 
@@ -323,7 +344,7 @@ mod tests {
         QueryExpr::Sort {
             keys,
             partition_by: GroupKeys::by(vec![]),
-            child: Box::new(child),
+            child: Rc::new(child),
         }
     }
 
@@ -357,7 +378,7 @@ mod tests {
                 },
             ],
             qualifier: None,
-            child: Box::new(count_by_service()),
+            child: Rc::new(count_by_service()),
         };
         let q = limit(5, 0, sort(desc(1), proj));
         assert!(is_topk_over_count(&canonicalize(q)));
@@ -411,7 +432,7 @@ mod tests {
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
-            child: Box::new(scan()),
+            child: Rc::new(scan()),
         };
         let q = limit(5, 0, sort(desc(1), sum));
         assert!(!is_topk_over_count(&canonicalize(q)));
@@ -445,7 +466,7 @@ mod tests {
             measures: vec![agg],
             output_names: vec![],
             having: None,
-            child: Box::new(scan4()),
+            child: Rc::new(scan4()),
         }
     }
 
@@ -462,15 +483,15 @@ mod tests {
                 nulls_first: true,
             }],
             output_name: "rn".into(),
-            child: Box::new(agg),
+            child: Rc::new(agg),
         };
         QueryExpr::Filter {
-            pred: Predicate(Box::new(QueryExpr::Compare {
-                left: Box::new(QueryExpr::Column(3)), // rn = the appended window column
+            pred: Predicate(Rc::new(QueryExpr::Compare {
+                left: Rc::new(QueryExpr::Column(3)), // rn = the appended window column
                 op: CompareOp::Le,
-                right: Box::new(QueryExpr::Literal(ScalarValue::Int64(5))),
+                right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(5))),
             })),
-            child: Box::new(wf),
+            child: Rc::new(wf),
         }
     }
 
@@ -544,17 +565,17 @@ mod tests {
                 nulls_first: true,
             }],
             output_name: "rn".into(),
-            child: Box::new(grouped(AggIntent::Count {
+            child: Rc::new(grouped(AggIntent::Count {
                 accuracy: AccuracyTarget::Exact,
             })),
         };
         let q = QueryExpr::Filter {
-            pred: Predicate(Box::new(QueryExpr::Compare {
-                left: Box::new(QueryExpr::Column(0)), // NOT the rn column (index 3)
+            pred: Predicate(Rc::new(QueryExpr::Compare {
+                left: Rc::new(QueryExpr::Column(0)), // NOT the rn column (index 3)
                 op: CompareOp::Le,
-                right: Box::new(QueryExpr::Literal(ScalarValue::Int64(5))),
+                right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(5))),
             })),
-            child: Box::new(wf),
+            child: Rc::new(wf),
         };
         assert!(
             matches!(canonicalize(q), QueryExpr::Filter { .. }),

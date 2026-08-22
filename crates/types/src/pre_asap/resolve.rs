@@ -12,6 +12,8 @@
 //! identical [`ResolvedQueryExpr`] variant — that resolves every [`ColumnRef`] to
 //! the [`Binder`](super::binder::Binder)-computed positional [`ColumnId`].
 
+use std::rc::Rc;
+
 use thiserror::Error;
 
 use super::agg_intent::AggIntent;
@@ -75,7 +77,7 @@ fn resolve(
             let schema = schema.clone().unwrap_or_else(|| fallback.clone());
             let predicates = predicates
                 .iter()
-                .map(|Predicate(e)| Ok(Predicate(Box::new(resolve_expr(e, &schema)?))))
+                .map(|Predicate(e)| Ok(Predicate(Rc::new(resolve_expr(e, &schema)?))))
                 .collect::<Result<Vec<_>, ResolveError>>()?;
             QE::Scan {
                 source: source.clone(),
@@ -87,22 +89,22 @@ fn resolve(
         QE::Scalar(v) => QE::Scalar(*v),
         QE::EvalTime => QE::EvalTime,
 
-        QE::VectorFromScalar(child) => QE::VectorFromScalar(Box::new(resolve(child, fallback)?)),
-        QE::ScalarFromVector(child) => QE::ScalarFromVector(Box::new(resolve(child, fallback)?)),
+        QE::VectorFromScalar(child) => QE::VectorFromScalar(Rc::new(resolve(child, fallback)?)),
+        QE::ScalarFromVector(child) => QE::ScalarFromVector(Rc::new(resolve(child, fallback)?)),
 
         QE::Relabel { dst, value, child } => {
             let child = resolve(child, fallback)?;
             let child_schema = child.output_schema()?;
             QE::Relabel {
                 dst: dst.clone(),
-                value: Box::new(resolve_expr(value, &child_schema)?),
-                child: Box::new(child),
+                value: Rc::new(resolve_expr(value, &child_schema)?),
+                child: Rc::new(child),
             }
         }
 
         QE::InfoJoin { selector, child } => QE::InfoJoin {
             selector: selector.clone(),
-            child: Box::new(resolve(child, fallback)?),
+            child: Rc::new(resolve(child, fallback)?),
         },
 
         QE::Sample { by, kind, child } => {
@@ -111,7 +113,7 @@ fn resolve(
             QE::Sample {
                 by: resolve_group_keys(by, &child_schema)?,
                 kind: *kind,
-                child: Box::new(child),
+                child: Rc::new(child),
             }
         }
 
@@ -119,8 +121,8 @@ fn resolve(
             let child = resolve(child, fallback)?;
             let child_schema = child.output_schema()?;
             QE::Filter {
-                pred: Predicate(Box::new(resolve_expr(&pred.0, &child_schema)?)),
-                child: Box::new(child),
+                pred: Predicate(Rc::new(resolve_expr(&pred.0, &child_schema)?)),
+                child: Rc::new(child),
             }
         }
 
@@ -143,7 +145,7 @@ fn resolve(
             QE::Project {
                 cols,
                 qualifier: qualifier.clone(),
-                child: Box::new(child),
+                child: Rc::new(child),
             }
         }
 
@@ -170,7 +172,7 @@ fn resolve(
                         &measures,
                         output_names,
                     )?;
-                    Ok(Predicate(Box::new(resolve_expr(h, &out_schema)?)))
+                    Ok(Predicate(Rc::new(resolve_expr(h, &out_schema)?)))
                 })
                 .transpose()?;
             QE::Aggregate {
@@ -178,7 +180,7 @@ fn resolve(
                 measures,
                 output_names: output_names.clone(),
                 having,
-                child: Box::new(child),
+                child: Rc::new(child),
             }
         }
 
@@ -187,7 +189,7 @@ fn resolve(
             let child_schema = child.output_schema()?;
             QE::Distinct {
                 cols: resolve_column_refs(cols, &child_schema)?,
-                child: Box::new(child),
+                child: Rc::new(child),
             }
         }
 
@@ -210,12 +212,12 @@ fn resolve(
             let right = resolve_root_with_inherited(right, &[])?;
             let mut concat = left.output_schema()?;
             concat.columns.extend(right.output_schema()?.columns);
-            let pred = Predicate(Box::new(resolve_expr(&pred.0, &concat)?));
+            let pred = Predicate(Rc::new(resolve_expr(&pred.0, &concat)?));
             QE::Join {
                 kind: kind.clone(),
                 pred,
-                left: Box::new(left),
-                right: Box::new(right),
+                left: Rc::new(left),
+                right: Rc::new(right),
             }
         }
 
@@ -227,8 +229,8 @@ fn resolve(
         } => QE::SetOp {
             kind: kind.clone(),
             all: *all,
-            left: Box::new(resolve_root_with_inherited(left, &[])?),
-            right: Box::new(resolve_root_with_inherited(right, &[])?),
+            left: Rc::new(resolve_root_with_inherited(left, &[])?),
+            right: Rc::new(resolve_root_with_inherited(right, &[])?),
         },
 
         QE::Sort {
@@ -252,14 +254,14 @@ fn resolve(
             QE::Sort {
                 keys,
                 partition_by,
-                child: Box::new(child),
+                child: Rc::new(child),
             }
         }
 
         QE::Limit { n, offset, child } => QE::Limit {
             n: *n,
             offset: *offset,
-            child: Box::new(resolve(child, fallback)?),
+            child: Rc::new(resolve(child, fallback)?),
         },
 
         QE::Subquery {
@@ -269,17 +271,17 @@ fn resolve(
         } => QE::Subquery {
             range: *range,
             resolution: *resolution,
-            child: Box::new(resolve(child, fallback)?),
+            child: Rc::new(resolve(child, fallback)?),
         },
 
         QE::TimeRange { range, child } => QE::TimeRange {
             range: *range,
-            child: Box::new(resolve(child, fallback)?),
+            child: Rc::new(resolve(child, fallback)?),
         },
 
         QE::TimeShift { shift, child } => QE::TimeShift {
             shift: *shift,
-            child: Box::new(resolve(child, fallback)?),
+            child: Rc::new(resolve(child, fallback)?),
         },
 
         QE::WindowFunc {
@@ -313,7 +315,7 @@ fn resolve(
                 partition_by,
                 order_by,
                 output_name: output_name.clone(),
-                child: Box::new(child),
+                child: Rc::new(child),
             }
         }
 
@@ -334,8 +336,8 @@ fn resolve(
                 .collect();
             QE::BinaryOp {
                 op: op.clone(),
-                lhs: Box::new(resolve_root_with_inherited(lhs, &inherited)?),
-                rhs: Box::new(resolve_root_with_inherited(rhs, &inherited)?),
+                lhs: Rc::new(resolve_root_with_inherited(lhs, &inherited)?),
+                rhs: Rc::new(resolve_root_with_inherited(rhs, &inherited)?),
                 vector_match: vector_match.clone(),
             }
         }

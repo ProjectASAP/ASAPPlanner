@@ -7,6 +7,8 @@
 //! turns name-based refs (group keys, dedup columns) into positional ids,
 //! qualifier-aware.
 
+use std::rc::Rc;
+
 use thiserror::Error;
 
 use super::agg_intent::AggIntent;
@@ -119,8 +121,8 @@ pub fn resolve_expr(
     expr: &UnresolvedQueryExpr,
     schema: &Schema,
 ) -> Result<ResolvedQueryExpr, ResolveError> {
-    let boxed = |e: &UnresolvedQueryExpr| -> Result<Box<ResolvedQueryExpr>, ResolveError> {
-        Ok(Box::new(resolve_expr(e, schema)?))
+    let rc = |e: &UnresolvedQueryExpr| -> Result<Rc<ResolvedQueryExpr>, ResolveError> {
+        Ok(Rc::new(resolve_expr(e, schema)?))
     };
     let each = |es: &[UnresolvedQueryExpr]| -> Result<Vec<ResolvedQueryExpr>, ResolveError> {
         es.iter().map(|e| resolve_expr(e, schema)).collect()
@@ -129,17 +131,17 @@ pub fn resolve_expr(
         QueryExpr::Column(c) => QueryExpr::Column(resolve_column_ref(c, schema)?),
         QueryExpr::Literal(s) => QueryExpr::Literal(s.clone()),
         QueryExpr::Compare { left, op, right } => QueryExpr::Compare {
-            left: boxed(left)?,
+            left: rc(left)?,
             op: op.clone(),
-            right: boxed(right)?,
+            right: rc(right)?,
         },
         QueryExpr::BoolAnd(v) => QueryExpr::BoolAnd(each(v)?),
         QueryExpr::BoolOr(v) => QueryExpr::BoolOr(each(v)?),
-        QueryExpr::Not(e) => QueryExpr::Not(boxed(e)?),
-        QueryExpr::IsNull(e) => QueryExpr::IsNull(boxed(e)?),
-        QueryExpr::IsNotNull(e) => QueryExpr::IsNotNull(boxed(e)?),
+        QueryExpr::Not(e) => QueryExpr::Not(rc(e)?),
+        QueryExpr::IsNull(e) => QueryExpr::IsNull(rc(e)?),
+        QueryExpr::IsNotNull(e) => QueryExpr::IsNotNull(rc(e)?),
         QueryExpr::Cast { expr, to, try_cast } => QueryExpr::Cast {
-            expr: boxed(expr)?,
+            expr: rc(expr)?,
             to: to.clone(),
             try_cast: *try_cast,
         },
@@ -148,7 +150,7 @@ pub fn resolve_expr(
             list,
             negated,
         } => QueryExpr::InList {
-            expr: boxed(expr)?,
+            expr: rc(expr)?,
             list: each(list)?,
             negated: *negated,
         },
@@ -158,20 +160,20 @@ pub fn resolve_expr(
         },
         QueryExpr::Arith { op, left, right } => QueryExpr::Arith {
             op: op.clone(),
-            left: boxed(left)?,
-            right: boxed(right)?,
+            left: rc(left)?,
+            right: rc(right)?,
         },
         QueryExpr::Case {
             operand,
             branches,
             else_expr,
         } => QueryExpr::Case {
-            operand: operand.as_deref().map(&boxed).transpose()?,
+            operand: operand.as_deref().map(&rc).transpose()?,
             branches: branches
                 .iter()
                 .map(|(w, t)| Ok((resolve_expr(w, schema)?, resolve_expr(t, schema)?)))
                 .collect::<Result<Vec<_>, ResolveError>>()?,
-            else_expr: else_expr.as_deref().map(&boxed).transpose()?,
+            else_expr: else_expr.as_deref().map(&rc).transpose()?,
         },
         other => unreachable!("resolve_expr called on a non-scalar QueryExpr variant: {other:?}"),
     })
@@ -370,9 +372,9 @@ mod tests {
             measures: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
-            child: Box::new(QueryExpr::TimeRange {
+            child: Rc::new(QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
-                child: Box::new(scan),
+                child: Rc::new(scan),
             }),
         };
         let canonical = agg.output_schema().expect("canonical schema");
