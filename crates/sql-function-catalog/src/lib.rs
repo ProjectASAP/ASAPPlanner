@@ -16,24 +16,31 @@
 //! outright (`reducer_col` in `asap-frontend-sql`) rather than trying to
 //! typecheck it.
 //!
-//! Two tables, matching the two problems this replaces:
+//! Three tables, matching the three problems this replaces:
 //!
-//! - [`NATIVE_FUNCTIONS`] -- names DataFusion's own planner already resolves
-//!   (`sum`, `avg`, `approx_percentile_cont`, ...). [`lookup_native`] maps
-//!   one to the [`AggSemantic`] `lower_agg_intent` builds an `AggIntent`
+//! - [`NATIVE_FUNCTIONS`] -- aggregate names DataFusion's own planner already
+//!   resolves (`sum`, `avg`, `approx_percentile_cont`, ...). [`lookup_native`]
+//!   maps one to the [`AggSemantic`] `lower_agg_intent` builds an `AggIntent`
 //!   from. The DISTINCT-modifier rule ("`COUNT DISTINCT` alone maps, to
 //!   `Cardinality`; reject DISTINCT elsewhere") and the "reducer argument
 //!   must be a bare column" rule are call-site logic, not per-function data,
 //!   and stay in `asap-frontend-sql`.
-//! - [`CLICKHOUSE_BUILTINS`] -- ClickHouse-only names DataFusion doesn't
-//!   know at all (`uniqExact`, `countIf`). Each entry additionally carries a
-//!   [`RewriteKind`]: the native DataFusion aggregate shape the call
-//!   rewrites to before `lower_agg_intent` (or DataFusion's own physical
+//! - [`CLICKHOUSE_BUILTINS`] -- ClickHouse-only *aggregate* names DataFusion
+//!   doesn't know at all (`uniqExact`, `countIf`). Each entry additionally
+//!   carries a [`RewriteKind`]: the native DataFusion aggregate shape the
+//!   call rewrites to before `lower_agg_intent` (or DataFusion's own physical
 //!   planner) ever has to understand the ClickHouse name itself. This is
 //!   what generalizes `uniqExact`'s old bespoke `UniqExactRewrite` +
 //!   `uniq_exact_udaf` pair (issue #221): a new builtin that rewrites to an
 //!   already-handled shape is a new entry in this table, not a new
 //!   `FunctionRewrite` impl and a new stub-`AggregateUDF` constructor.
+//! - [`CLICKHOUSE_SCALAR_BUILTINS`] -- ClickHouse-only *scalar* names
+//!   DataFusion doesn't know at all (`splitByChar`, `toDate`, `match`,
+//!   the `toStartOf*` family, `startsWith`, `positionCaseInsensitive`). No
+//!   [`RewriteKind`] here: unlike an aggregate call, a scalar call already
+//!   lowers generically (`asap-frontend-sql::sql::expr`'s
+//!   `Expr::ScalarFunction` arm), so a stub `ScalarUDF` registered for the
+//!   name is the whole fix (issue #230).
 //!
 //! Generating these tables from a live introspectable source -- ClickHouse's
 //! `system.functions`, DataFusion's own in-process UDF/UDAF registry -- the
@@ -342,6 +349,97 @@ pub fn lookup_clickhouse_builtin(name: &str) -> Option<&'static ClickHouseBuilti
     CLICKHOUSE_BUILTINS.iter().find(|b| b.name == name)
 }
 
+/// One [`CLICKHOUSE_SCALAR_BUILTINS`] entry -- just `{ name, arity }`, no
+/// [`RewriteKind`]. Unlike an aggregate call, a scalar function call in the
+/// canonical IR is already deliberately opaque
+/// (`asap-frontend-sql::sql::expr::df_expr_to_unresolved`'s
+/// `Expr::ScalarFunction` arm lowers *any* scalar call generically to
+/// `Unresolved::FunctionCall { name, args }`), so once DataFusion's planner
+/// accepts the name at all -- via a stub `ScalarUDF`, see
+/// `asap-frontend-sql::sql::clickhouse_scalar_builtin_stub_udf` -- the
+/// existing generic lowering already produces a structurally correct node.
+/// No rewrite/semantic classification is needed (issue #230).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickHouseScalarBuiltin {
+    /// Lowercase function name, matching the name a stub `ScalarUDF` is
+    /// registered under (DataFusion resolves a SQL call to it
+    /// case-insensitively, but reports it back lowercase).
+    pub name: &'static str,
+    pub arity: Arity,
+}
+
+/// ClickHouse-only *scalar* builtin names DataFusion's planner has no native
+/// equivalent for at all -- each needs a stub `ScalarUDF` registered so the
+/// planner accepts the call. Arities follow ClickHouse's documented
+/// signatures for each function (optional trailing arguments -- a timezone,
+/// a start position, a max-substrings cap -- become an `Arity::Range`).
+///
+/// No return-type modeling here: the stub's Arrow return type (a single,
+/// per-entry plausible choice, not modeled in this arity-only table) only
+/// needs to let DataFusion's planner keep building the surrounding
+/// expression's type -- see `clickhouse_scalar_builtin_stub_udf`'s call
+/// sites in `SqlLowerer::build_context`.
+pub const CLICKHOUSE_SCALAR_BUILTINS: &[ClickHouseScalarBuiltin] = &[
+    // splitByChar(separator, s[, max_substrings]) -> Array(String).
+    ClickHouseScalarBuiltin {
+        name: "splitbychar",
+        arity: Arity::Range { min: 2, max: 3 },
+    },
+    // toDate(expr) -> Date.
+    ClickHouseScalarBuiltin {
+        name: "todate",
+        arity: Arity::Exact(1),
+    },
+    // match(haystack, pattern) -> UInt8 (0/1), used as a boolean predicate.
+    ClickHouseScalarBuiltin {
+        name: "match",
+        arity: Arity::Exact(2),
+    },
+    // toStartOfHour(datetime[, timezone]) -> DateTime.
+    ClickHouseScalarBuiltin {
+        name: "tostartofhour",
+        arity: Arity::Range { min: 1, max: 2 },
+    },
+    // toStartOfWeek(datetime[, mode[, timezone]]) -> Date.
+    ClickHouseScalarBuiltin {
+        name: "tostartofweek",
+        arity: Arity::Range { min: 1, max: 3 },
+    },
+    // toStartOfMinute(datetime[, timezone]) -> DateTime.
+    ClickHouseScalarBuiltin {
+        name: "tostartofminute",
+        arity: Arity::Range { min: 1, max: 2 },
+    },
+    // toStartOfFiveMinutes(datetime[, timezone]) -> DateTime.
+    ClickHouseScalarBuiltin {
+        name: "tostartoffiveminutes",
+        arity: Arity::Range { min: 1, max: 2 },
+    },
+    // toStartOfInterval(datetime, INTERVAL x unit[, timezone]) -> DateTime.
+    // The `INTERVAL x unit` clause parses as a single expression argument.
+    ClickHouseScalarBuiltin {
+        name: "tostartofinterval",
+        arity: Arity::Range { min: 2, max: 3 },
+    },
+    // startsWith(s, prefix) -> UInt8 (0/1), used as a boolean predicate.
+    ClickHouseScalarBuiltin {
+        name: "startswith",
+        arity: Arity::Exact(2),
+    },
+    // positionCaseInsensitive(haystack, needle[, start_pos]) -> UInt64
+    // (1-based position, 0 if not found).
+    ClickHouseScalarBuiltin {
+        name: "positioncaseinsensitive",
+        arity: Arity::Range { min: 2, max: 3 },
+    },
+];
+
+/// Look up a ClickHouse-only scalar builtin by name (case-sensitive, see
+/// [`lookup_native`]).
+pub fn lookup_clickhouse_scalar_builtin(name: &str) -> Option<&'static ClickHouseScalarBuiltin> {
+    CLICKHOUSE_SCALAR_BUILTINS.iter().find(|b| b.name == name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +518,48 @@ mod tests {
     fn known_unmapped_names_are_lowercase() {
         for name in KNOWN_UNMAPPED_NATIVE_FUNCTIONS {
             assert_eq!(*name, name.to_lowercase(), "not lowercase: {name}");
+        }
+    }
+
+    #[test]
+    fn clickhouse_scalar_builtin_lookup_finds_every_listed_name() {
+        for b in CLICKHOUSE_SCALAR_BUILTINS {
+            let found =
+                lookup_clickhouse_scalar_builtin(b.name).expect("listed name must be found");
+            assert_eq!(found.name, b.name);
+            assert_eq!(found.arity, b.arity);
+        }
+        assert_eq!(
+            lookup_clickhouse_scalar_builtin("not_a_real_function"),
+            None
+        );
+    }
+
+    #[test]
+    fn clickhouse_scalar_builtin_names_are_lowercase() {
+        for b in CLICKHOUSE_SCALAR_BUILTINS {
+            assert_eq!(b.name, b.name.to_lowercase(), "not lowercase: {}", b.name);
+        }
+    }
+
+    /// Scalar builtins live in their own namespace from the aggregate
+    /// tables: a scalar and an aggregate function can share a bare SQL name
+    /// in general, but none of this catalog's entries happen to collide, so
+    /// this documents that rather than asserting a real invariant this crate
+    /// enforces elsewhere.
+    #[test]
+    fn clickhouse_scalar_builtins_do_not_shadow_native_or_aggregate_names() {
+        for b in CLICKHOUSE_SCALAR_BUILTINS {
+            assert!(
+                lookup_native(b.name).is_none(),
+                "{} listed as both a native aggregate and a ClickHouse scalar builtin",
+                b.name
+            );
+            assert!(
+                lookup_clickhouse_builtin(b.name).is_none(),
+                "{} listed as both a ClickHouse aggregate and scalar builtin",
+                b.name
+            );
         }
     }
 }
