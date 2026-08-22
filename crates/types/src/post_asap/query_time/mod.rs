@@ -34,7 +34,10 @@
 
 pub mod error_estimation;
 
-pub use error_estimation::{
-    classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,
-    cu_sketch_posterior_error_bound, traditional_a_priori_bound,
-};
+// Glob, not a named list: this submodule exists only to hold
+// `error_estimation` today, so re-exporting everything it makes public
+// keeps this hop in sync automatically — a new `pub fn` there needs no
+// matching edit here, only in `post_asap::mod`'s own list below (the
+// actual curated short-path public surface, kept explicit like `expr`'s
+// and `sketch`'s re-exports).
+pub use error_estimation::*;

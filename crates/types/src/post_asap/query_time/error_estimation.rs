@@ -149,15 +149,38 @@ pub fn count_sketch_posterior_error_bound(row: &[i64], rows: u32, delta: f64) ->
     // to handle, but we never reach here with even r.
     let j_start = r.div_ceil(2);
 
-    let mut chosen_p0 = 1.0_f64;
-    for i in 1..=w {
+    // `C(r, j)` for every `j` in `j_start..=r`, computed once via the
+    // incremental recurrence below (O(r) total) instead of letting
+    // `binomial_tail` recompute `binomial_coeff` (itself O(r)) from
+    // scratch for every `j` on every fractile tried — the fractile search
+    // just below evaluates the tail up to `log2(w)` times, so hoisting
+    // this out turns each evaluation's cost from O(r²) into O(r).
+    let coeffs = binomial_coeffs_from(r, j_start);
+
+    // `2 * binomial_tail(p0/2)` is monotonically non-decreasing in `p0`
+    // (raising each row's bad-probability can only raise the chance that a
+    // majority of rows are bad), so the smallest qualifying fractile
+    // `p0 = (i+1)/w` is a binary search over `i`, not a linear scan —
+    // O(log w) tail evaluations instead of O(w).
+    let satisfies = |i: usize| -> bool {
         let p0 = ((i + 1) as f64 / w as f64).min(1.0);
-        let tail = binomial_tail(r, j_start, p0 / 2.0);
-        if 2.0 * tail >= delta {
-            chosen_p0 = p0;
-            break;
+        2.0 * binomial_tail_with_coeffs(&coeffs, r, j_start, p0 / 2.0) >= delta
+    };
+    let mut lo = 1usize;
+    let mut hi = w;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if satisfies(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
         }
     }
+    // `lo == hi`: either `satisfies(lo)`, or `lo == w` and the search
+    // never found one — matching the original linear scan's fallback,
+    // which left `chosen_p0` at its pre-loop-initialized `1.0` in that
+    // case (the same value `p0(w)` evaluates to below).
+    let chosen_p0 = ((lo + 1) as f64 / w as f64).min(1.0);
 
     let idx = ((w as f64) * chosen_p0).ceil() as usize;
     let idx = idx.clamp(1, w);
@@ -167,32 +190,39 @@ pub fn count_sketch_posterior_error_bound(row: &[i64], rows: u32, delta: f64) ->
 
 // ── Traditional a priori bound (§3.3), for comparison ──────────────────────
 
+/// `⌈x⌉` clamped to `[lo, hi]`; NaN / non-positive `x` saturate to `hi` (a
+/// degenerate accuracy target means "as accurate as this family goes").
+/// Byte-for-byte the same policy as `boundary.rs`'s private
+/// `saturating_ceil` — duplicated here, not imported, for the same
+/// layering reason [`classic_cms_sizing`] itself is duplicated rather than
+/// calling `boundary.rs` directly.
+fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
+    if !x.is_finite() || x <= 0.0 {
+        return hi;
+    }
+    (x.ceil() as u32).clamp(lo, hi)
+}
+
 /// The classic CMS `(ε, δ)` sizing formula (§3.3, restated just before
-/// Eq. 6; identical to `crates/asap-aware-mapping/src/boundary.rs`'s private
+/// Eq. 6; identical — formula *and* clamping — to
+/// `crates/asap-aware-mapping/src/boundary.rs`'s private
 /// `cms_width`/`cms_depth`, reimplemented here — deliberately, not by
 /// accident — because `asap-types` sits below `asap-aware-mapping` in the
 /// workspace's dependency layering and cannot import from it): `w = ⌈e/ε⌉`
-/// counters/row, `r = ⌈ln(1/δ)⌉` rows.
+/// counters/row, clamped to `[2, 2²⁶]`; `r = ⌈ln(1/δ)⌉` rows, clamped to
+/// `[1, 32]`.
 ///
-/// Returns `(width, depth)`. Degenerate `eps`/`delta` (non-positive, NaN,
-/// `delta >= 1`) return `(0, 0)` — callers computing a bound from this
-/// should treat that as "undefined", matching `boundary.rs`'s own
-/// saturating-clamp philosophy for out-of-range accuracy targets (this
-/// function does not replicate that clamp, since it exists here only to
-/// give test/comparison code the traditional sizing, not to be a sizing
-/// API in its own right — see `posterior_aware_size_params` in
-/// `boundary.rs` for the real, opt-in sizing entry point).
+/// Returns `(width, depth)`. Matching `boundary.rs`'s own clamp semantics
+/// exactly (not just its in-range formula) matters here specifically:
+/// this function's whole purpose is giving comparison/test code (and,
+/// per issue #250, a future replan) the traditional bound to compare
+/// this module's posterior bound against — an un-clamped reimplementation
+/// would silently diverge from `boundary.rs`'s real sizing outside a
+/// narrow "nothing saturates" range of `(eps, delta)`, exactly the range
+/// most tests default to, making the divergence easy to miss.
 pub fn classic_cms_sizing(eps: f64, delta: f64) -> (u32, u32) {
-    let width = if eps.is_finite() && eps > 0.0 {
-        (std::f64::consts::E / eps).ceil() as u32
-    } else {
-        0
-    };
-    let depth = if delta.is_finite() && delta > 0.0 && delta < 1.0 {
-        (1.0 / delta).ln().ceil() as u32
-    } else {
-        0
-    };
+    let width = saturating_ceil(std::f64::consts::E / eps, 2, 1 << 26);
+    let depth = saturating_ceil((1.0 / delta).ln(), 1, 32);
     (width, depth)
 }
 
@@ -222,23 +252,49 @@ fn posterior_rank(w: usize, rows: u32, delta: f64) -> Option<usize> {
 /// The `k`-th largest value in `values` (1-indexed): sorts a copy in
 /// descending order and returns `sorted[k-1]`. `k` is expected already
 /// clamped to `[1, values.len()]` by the caller.
+/// The `k`-th largest value in `values` (1-indexed: `k=1` is the max).
+/// `select_nth_unstable_by` partitions in O(w) average instead of fully
+/// sorting in O(w log w) — this only ever needs one rank, not a total
+/// order, and both call sites (this module's per-query readout math) are
+/// documented as meant to run on a future runtime's hot readout path.
 fn kth_largest(values: &[u64], k: usize) -> u64 {
-    let mut sorted: Vec<u64> = values.to_vec();
-    sorted.sort_unstable_by(|a, b| b.cmp(a));
-    sorted[k - 1]
+    let mut buf: Vec<u64> = values.to_vec();
+    let idx = k - 1;
+    let (_, &mut kth, _) = buf.select_nth_unstable_by(idx, |a, b| b.cmp(a));
+    kth
 }
 
 /// `Σ_{j=j_start}^{r} C(r, j) · p^j · (1-p)^(r-j)` — the upper binomial tail
-/// probability, computed iteratively (no factorials) to stay accurate for
-/// the realistic sketch-depth range.
-fn binomial_tail(r: u64, j_start: u64, p: f64) -> f64 {
+/// probability, given `coeffs[i] = C(r, j_start + i)` already computed by
+/// [`binomial_coeffs_from`]. Split out from the coefficient computation so
+/// a caller trying several `p` values against the same `(r, j_start)` (as
+/// [`count_sketch_posterior_error_bound`]'s fractile search does) pays for
+/// the coefficients once, not once per `p`.
+fn binomial_tail_with_coeffs(coeffs: &[f64], r: u64, j_start: u64, p: f64) -> f64 {
     let p = p.clamp(0.0, 1.0);
-    (j_start..=r).map(|j| binomial_pmf(r, j, p)).sum()
+    coeffs
+        .iter()
+        .enumerate()
+        .map(|(offset, &c)| {
+            let j = j_start + offset as u64;
+            c * p.powi(j as i32) * (1.0 - p).powi((r - j) as i32)
+        })
+        .sum()
 }
 
-/// `C(n, k) · p^k · (1-p)^(n-k)`.
-fn binomial_pmf(n: u64, k: u64, p: f64) -> f64 {
-    binomial_coeff(n, k) * p.powi(k as i32) * (1.0 - p).powi((n - k) as i32)
+/// `C(r, j)` for every `j` in `j_start..=r`, in one O(r) pass via the
+/// incremental recurrence `C(r,j) = C(r,j-1) · (r-j+1)/j` — instead of
+/// calling [`binomial_coeff`] (itself O(r)) fresh for every `j`, which is
+/// what made evaluating a single tail probability O(r²).
+fn binomial_coeffs_from(r: u64, j_start: u64) -> Vec<f64> {
+    let mut coeffs = Vec::with_capacity((r - j_start + 1) as usize);
+    let mut c = binomial_coeff(r, j_start);
+    coeffs.push(c);
+    for j in (j_start + 1)..=r {
+        c = c * (r - j + 1) as f64 / j as f64;
+        coeffs.push(c);
+    }
+    coeffs
 }
 
 /// `C(n, k)`, computed as an iterative running product in `f64` (avoids
@@ -430,11 +486,33 @@ mod tests {
     }
 
     #[test]
-    fn classic_cms_sizing_degenerate_inputs() {
-        assert_eq!(classic_cms_sizing(0.0, 0.01), (0, 5));
-        assert_eq!(classic_cms_sizing(0.01, 0.0), (272, 0));
-        assert_eq!(classic_cms_sizing(0.01, 1.0), (272, 0));
-        assert_eq!(classic_cms_sizing(f64::NAN, 0.01), (0, 5));
+    fn classic_cms_sizing_degenerate_inputs_saturate_like_boundary_rs() {
+        // Degenerate width/depth saturate to their hi clamp (2^26 / 32),
+        // matching `boundary.rs`'s `saturating_ceil` exactly — not `0` (see
+        // the correctness fix on `classic_cms_sizing`'s doc comment: an
+        // earlier version returned `(0, 0)` here, silently diverging from
+        // `boundary.rs`'s real degenerate-input behavior).
+        assert_eq!(classic_cms_sizing(0.0, 0.01), (1 << 26, 5));
+        assert_eq!(classic_cms_sizing(0.01, 0.0), (272, 32));
+        assert_eq!(classic_cms_sizing(0.01, 1.0), (272, 32));
+        assert_eq!(classic_cms_sizing(f64::NAN, 0.01), (1 << 26, 5));
+    }
+
+    /// Pinned extreme-range values — the clamp actually engaging, not just
+    /// the in-range formula — computed by hand against the same
+    /// `[2, 2²⁶]` / `[1, 32]` bounds `boundary.rs`'s `cms_width`/`cms_depth`
+    /// use, so a future edit that reintroduces the un-clamped bug (an
+    /// earlier version of this function silently diverged from
+    /// `boundary.rs` outside the narrow range most other tests exercise)
+    /// gets caught here.
+    #[test]
+    fn classic_cms_sizing_clamps_extreme_ranges_like_boundary_rs() {
+        // eps=1e-10: raw width e/eps ≈ 2.7e10, hi-clamped to 2^26.
+        assert_eq!(classic_cms_sizing(1e-10, 0.01), (1 << 26, 5));
+        // eps=3.0: raw width e/3 < 1, lo-clamped to 2.
+        assert_eq!(classic_cms_sizing(3.0, 0.01), (2, 5));
+        // delta=1e-20: raw depth ln(1e20) ≈ 46.05 → ⌈⌉ 47, hi-clamped to 32.
+        assert_eq!(classic_cms_sizing(0.01, 1e-20), (272, 32));
     }
 
     #[test]

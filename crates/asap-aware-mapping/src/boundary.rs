@@ -430,7 +430,7 @@ pub fn posterior_aware_size_params(
         if !(f.is_finite() && f > 0.0 && f < 1.0) {
             return base; // out-of-range bet: no relaxation, fall back to worst case
         }
-        ((base as f64 * f).ceil() as u32).clamp(2, base)
+        saturating_ceil(base as f64 * f, 2, base)
     };
     match kind {
         SketchKind::Cms => SketchParams::Cms {
@@ -464,8 +464,16 @@ pub fn posterior_aware_size_params(
             }
         }
         // Every other kind is untouched by this issue's CMS-specific
-        // relaxation — defer to the existing formula verbatim.
-        other => default_size_params(other, intent, eps, delta),
+        // relaxation — defer to the existing formula verbatim. Spelled out
+        // exhaustively, matching `default_size_params`'s own match, rather
+        // than a wildcard arm: a future `SketchKind` variant then fails to
+        // compile *here* too, instead of silently inheriting worst-case
+        // sizing with no signal that this function never considered it.
+        SketchKind::Kll => default_size_params(kind, intent, eps, delta),
+        SketchKind::Hll => default_size_params(kind, intent, eps, delta),
+        SketchKind::DDSketch => default_size_params(kind, intent, eps, delta),
+        SketchKind::Theta => default_size_params(kind, intent, eps, delta),
+        SketchKind::Kmv => default_size_params(kind, intent, eps, delta),
     }
 }
 
