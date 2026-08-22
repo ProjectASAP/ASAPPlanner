@@ -37,8 +37,8 @@ use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::expr_rewriter::FunctionRewrite;
 use datafusion::logical_expr::{
-    self, lit, AggregateUDF, Case, Distinct, Expr, JoinType, LogicalPlan, Signature,
-    SimpleAggregateUDF, TypeSignature, Volatility, WindowFunctionDefinition,
+    self, lit, AggregateUDF, Case, Distinct, Expr, JoinType, LogicalPlan, ScalarUDF, ScalarUDFImpl,
+    Signature, SimpleAggregateUDF, TypeSignature, Volatility, WindowFunctionDefinition,
 };
 use datafusion::optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion::optimizer::{AnalyzerRule, OptimizerConfig};
@@ -207,6 +207,19 @@ impl<'a> SqlLowerer<'a> {
         // before `lower_plan` sees it.
         for builtin in asap_sql_function_catalog::CLICKHOUSE_BUILTINS {
             ctx.register_udaf(clickhouse_builtin_stub_udaf(builtin.name, builtin.arity));
+        }
+        // Register a stub `ScalarUDF` for every catalog-listed ClickHouse-only
+        // *scalar* builtin — same reason as the `AggregateUDF` loop above
+        // (DataFusion otherwise rejects the call as an unknown function
+        // during `SqlToRel` conversion), but with no rewrite step to follow:
+        // `df_expr_to_unresolved`'s `Expr::ScalarFunction` arm already lowers
+        // any scalar call generically to `Unresolved::FunctionCall { name,
+        // args }`, so registering the stub is the entire fix (issue #230).
+        for builtin in asap_sql_function_catalog::CLICKHOUSE_SCALAR_BUILTINS {
+            ctx.register_udf(clickhouse_scalar_builtin_stub_udf(
+                builtin.name,
+                builtin.arity,
+            ));
         }
         Ok(ctx)
     }
@@ -911,8 +924,10 @@ fn clickhouse_builtin_stub_udaf(name: &'static str, arity: Arity) -> AggregateUD
     ))
 }
 
-/// A catalog [`Arity`] as the DataFusion `Signature` a stub UDAF is
-/// registered with.
+/// A catalog [`Arity`] as the DataFusion `Signature` a stub UDAF/UDF is
+/// registered with — shared by the aggregate stub above and the scalar stub
+/// below, since neither wants to model per-argument types, only how many
+/// arguments a call may take.
 fn arity_to_signature(arity: Arity) -> Signature {
     match arity {
         Arity::Exact(n) => Signature::any(n, Volatility::Immutable),
@@ -920,6 +935,104 @@ fn arity_to_signature(arity: Arity) -> Signature {
             (min..=max).map(TypeSignature::Any).collect(),
             Volatility::Immutable,
         ),
+    }
+}
+
+// ── ClickHouse scalar-builtin compatibility ─────────────────────────────────
+//
+// The scalar counterpart of the aggregate mechanism above, but simpler:
+// `asap_sql_function_catalog::CLICKHOUSE_SCALAR_BUILTINS` carries no
+// `RewriteKind`, because a scalar call needs none. Unlike an aggregate call
+// (which must become a real `AggIntent`, hence the rewrite to a native
+// DataFusion aggregate shape `lower_agg_intent` can classify), a scalar
+// function call in this IR is already deliberately opaque —
+// `expr::df_expr_to_unresolved`'s `Expr::ScalarFunction` arm lowers *any*
+// scalar call generically to `Unresolved::FunctionCall { name, args }`, with
+// zero name-specific logic. So teaching DataFusion's planner to accept a
+// ClickHouse scalar builtin's name — a stub `ScalarUDF`, registered below —
+// is the entire fix; the existing generic lowering already does the rest.
+
+/// A stub `ScalarUDF` for one `CLICKHOUSE_SCALAR_BUILTINS` entry, registered
+/// purely so DataFusion's planner can resolve the function name during
+/// `SqlToRel` conversion (it errors on an unknown function otherwise), and so
+/// it can keep building the surrounding expression's type from a plausible
+/// return type. Unlike `clickhouse_builtin_stub_udaf`, no `FunctionRewrite`
+/// ever fires for these — the call survives to `lower_plan` as-is and lowers
+/// through the generic `Expr::ScalarFunction` arm — so `invoke`/`invoke_batch`
+/// (left at their default, which returns a `NotImplemented` `DataFusionError`)
+/// are unreachable for every catalog entry: this front end only ever uses
+/// DataFusion for planning/type-checking, never physical execution.
+fn clickhouse_scalar_builtin_stub_udf(name: &'static str, arity: Arity) -> ScalarUDF {
+    ScalarUDF::from(ClickHouseScalarBuiltinStub {
+        name,
+        signature: arity_to_signature(arity),
+        return_type: clickhouse_scalar_builtin_return_type(name),
+    })
+}
+
+/// A plausible Arrow return type for one `CLICKHOUSE_SCALAR_BUILTINS` entry —
+/// just precise enough that DataFusion's planner can keep building the type
+/// of whatever expression the call sits inside (e.g. a `WHERE` predicate
+/// wants `Boolean`), not a claim about ClickHouse's actual return type.
+/// Real function typing happens downstream, at post-ASAP binding.
+fn clickhouse_scalar_builtin_return_type(name: &str) -> ArrowDataType {
+    match name {
+        // Array(String) in ClickHouse; a plain `Utf8` element list is close
+        // enough for planning purposes here.
+        "splitbychar" => ArrowDataType::List(Arc::new(datafusion::arrow::datatypes::Field::new(
+            "item",
+            ArrowDataType::Utf8,
+            true,
+        ))),
+        "todate" => ArrowDataType::Date32,
+        // ClickHouse returns UInt8 (0/1), but every corpus use is a boolean
+        // predicate — `Boolean` keeps that context type-checking.
+        "match" | "startswith" => ArrowDataType::Boolean,
+        "tostartofhour"
+        | "tostartofweek"
+        | "tostartofminute"
+        | "tostartoffiveminutes"
+        | "tostartofinterval" => {
+            ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None)
+        }
+        // 1-based match position, 0 if not found.
+        "positioncaseinsensitive" => ArrowDataType::UInt64,
+        other => unreachable!(
+            "{other}: every CLICKHOUSE_SCALAR_BUILTINS entry must have a return type listed here"
+        ),
+    }
+}
+
+/// A stub `ScalarUDFImpl` carrying only what DataFusion's planner needs:
+/// name, arity-only [`Signature`], and a fixed return type. `invoke`/
+/// `invoke_batch` are left at their trait defaults (a `NotImplemented`
+/// `DataFusionError`) — see [`clickhouse_scalar_builtin_stub_udf`]'s doc for
+/// why that is unreachable in practice.
+#[derive(Debug)]
+struct ClickHouseScalarBuiltinStub {
+    name: &'static str,
+    signature: Signature,
+    return_type: ArrowDataType,
+}
+
+impl ScalarUDFImpl for ClickHouseScalarBuiltinStub {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(
+        &self,
+        _arg_types: &[ArrowDataType],
+    ) -> datafusion::common::Result<ArrowDataType> {
+        Ok(self.return_type.clone())
     }
 }
 

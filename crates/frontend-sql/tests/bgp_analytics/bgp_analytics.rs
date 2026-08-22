@@ -18,10 +18,12 @@
 //! getting "fixed" into an unknown-function error, or vice versa) fails the
 //! test even though the aggregate 4/9/2 split wouldn't otherwise move:
 //!   - 9 queries hit `DataFusionError::Plan` ("unknown function"): they use
-//!     ClickHouse-only builtins (`countIf`, `toStartOfInterval`,
-//!     `lagInFrame`, `isIPAddressInRange`, `arrayJoin`, `arrayFilter`, ...)
-//!     that parse fine under the ClickHouse dialect but have no DataFusion
-//!     planner equivalent registered.
+//!     ClickHouse-only builtins (`toIntervalMinute`, `lagInFrame`,
+//!     `isIPAddressInRange`, `arrayJoin`, `arrayFilter`, ...) that parse fine
+//!     under the ClickHouse dialect but have no DataFusion planner equivalent
+//!     registered. (`toStartOfInterval` itself is registered -- issue #230 --
+//!     but query 7 nests an unregistered `toIntervalMinute(...)` call inside
+//!     it, so it still lands here, just one function name deeper.)
 //!   - 2 queries (14, 15) hit `DataFusionError::SQL` (a `ParserError`): they
 //!     use ClickHouse grammar the vendored sqlparser doesn't implement at
 //!     all -- a scalar/tuple `WITH <expr> AS <alias>` binding, and the
@@ -116,20 +118,24 @@ enum Expected {
 /// Expected outcome for corpus queries 1-15, in order. See the module doc
 /// comment for why each query lands where it does.
 const EXPECTED: &[Expected] = &[
-    Expected::Lowered,                                                          // 1
-    Expected::Lowered,                                                          // 2
-    Expected::UnknownFunction("arrayfilter"),                                   // 3
-    Expected::UnknownFunction("arrayfilter"),                                   // 4
-    Expected::UnknownFunction("arrayfilter"),                                   // 5
-    Expected::Lowered,                                                          // 6
-    Expected::UnknownFunction("tostartofinterval"),                             // 7
-    Expected::UnknownFunction("arrayfilter"),                                   // 8
-    Expected::UnknownFunction("isipaddressinrange"),                            // 9
-    Expected::UnknownFunction("arrayfilter"),                                   // 10
-    Expected::UnknownFunction("laginframe"),                                    // 11
-    Expected::Lowered,                                                          // 12
-    Expected::UnknownFunction("arrayjoin"),                                     // 13
-    Expected::UnsupportedGrammar("Expected: identifier, found: ("),             // 14
+    Expected::Lowered,                        // 1
+    Expected::Lowered,                        // 2
+    Expected::UnknownFunction("arrayfilter"), // 3
+    Expected::UnknownFunction("arrayfilter"), // 4
+    Expected::UnknownFunction("arrayfilter"), // 5
+    Expected::Lowered,                        // 6
+    // `toStartOfInterval` itself is registered (issue #230), so planning
+    // proceeds into its nested `toIntervalMinute(5)` argument -- an
+    // unregistered ClickHouse builtin outside this issue's 10-function
+    // scope -- and fails there instead.
+    Expected::UnknownFunction("tointervalminute"), // 7
+    Expected::UnknownFunction("arrayfilter"),      // 8
+    Expected::UnknownFunction("isipaddressinrange"), // 9
+    Expected::UnknownFunction("arrayfilter"),      // 10
+    Expected::UnknownFunction("laginframe"),       // 11
+    Expected::Lowered,                             // 12
+    Expected::UnknownFunction("arrayjoin"),        // 13
+    Expected::UnsupportedGrammar("Expected: identifier, found: ("), // 14
     Expected::UnsupportedGrammar("Expected: a list of columns in parentheses"), // 15
 ];
 

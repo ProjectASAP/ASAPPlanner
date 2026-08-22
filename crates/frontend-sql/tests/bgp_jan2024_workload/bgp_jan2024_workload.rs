@@ -165,15 +165,37 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // "unknown function: countif" `Plan` failure for 13 queries: 12 now
     // lower end to end, and a 13th plans far enough to hit a second,
     // pre-existing gap (map/array index access, `NotImplemented`).
-    expect(Category::Lowered, 97);
-    expect(Category::Plan, 92);
+    //
+    // Stub-`ScalarUDF` registration for `CLICKHOUSE_SCALAR_BUILTINS` (issue
+    // #230 -- `splitByChar`, `toDate`, `match`, the `toStartOf*` family,
+    // `startsWith`, `positionCaseInsensitive`) clears the "unknown function"
+    // `Plan` failure for the rest of the 92: most now lower end to end, but
+    // not all -- as the issue itself flags, `splitByChar(...)[-1]`-style
+    // calls (and a couple of other array/map-index uses) now plan far enough
+    // to hit the same pre-existing map/array-index `NotImplemented` gap, and
+    // two `toStartOfInterval(...)` queries plan far enough to hit a
+    // different pre-existing gap: `types::scalar_value_to_asap` doesn't yet
+    // convert an `INTERVAL x unit` literal (`DfScalarValue::
+    // IntervalMonthDayNano`), so those two land in `Other` via
+    // `LoweringError::InvalidExpression` instead. Both are companion gaps
+    // this issue's scope explicitly doesn't chase down (see its "known
+    // caveat" section) -- getting these functions' *names* to lower to a
+    // structurally correct `FunctionCall` node is what's in scope here, not
+    // array/map indexing or interval-literal conversion.
+    expect(Category::Lowered, 145);
+    expect(Category::Plan, 40);
     expect(Category::Schema, 0);
     expect(Category::Parse, 0);
     // One query that used to fail at `uniqExact` (`Plan`) now clears that
     // hurdle -- `ClickHouseBuiltinRewrite` in `sql/mod.rs` rewrites it to
     // `COUNT(DISTINCT ...)` before `lower_plan` runs -- and plans far enough
-    // to hit a second, pre-existing gap: map/array index access.
-    expect(Category::NotImplemented, 5);
+    // to hit a second, pre-existing gap: map/array index access. Plus the
+    // `splitByChar`/other array-index companion gap noted above (issue
+    // #230).
+    expect(Category::NotImplemented, 7);
     expect(Category::UnsupportedFeature, 6);
-    expect(Category::Other, 0);
+    // Two `toStartOfInterval(...)` queries -- see the `toStartOfInterval`
+    // note above; a pre-existing `INTERVAL`-literal conversion gap, not a
+    // ClickHouse scalar-builtin catalog gap.
+    expect(Category::Other, 2);
 }
