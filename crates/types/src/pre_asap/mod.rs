@@ -20,6 +20,10 @@
 //!   relational tree or converter anymore.
 //! - [`canonicalize`] — post-lowering structural normalization of [`QueryExpr`]
 //!   (issue #34), run by [`resolve_root`].
+//! - [`cse`] — workload-level structural common-subexpression elimination
+//!   over an already-`resolve_root`'d tree (issue #212, #222, #223), run
+//!   *after* `resolve_root` / `canonicalize` and *before* implementation
+//!   (`asap_aware_mapping::implement_workload`).
 //!
 //! Formerly the separate `asap-l2` crate; folded in here since
 //! `binder`/`column_resolution`/`canonicalize`/`resolve` have no
@@ -30,6 +34,7 @@ pub mod agg_intent;
 pub mod binder;
 pub mod canonicalize;
 pub mod column_resolution;
+pub mod cse;
 pub mod expr_ir;
 pub mod query_expr;
 pub mod resolve;
@@ -45,6 +50,7 @@ pub use column_resolution::{
     output_schema_for_aggregate, resolve_column_ref, resolve_column_refs, resolve_expr,
     ResolveError,
 };
+pub use cse::share_common_subtrees;
 pub use expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 pub use query_expr::{
     aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
