@@ -1188,7 +1188,9 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
                 },
             })
         }
-        _ => Err(LoweringError::UnsupportedAggregate(format!("{expr:?}"))),
+        _ => Err(LoweringError::UnsupportedAggregate(format!(
+            "measure is not an aggregate function call: {expr}"
+        ))),
     }
 }
 

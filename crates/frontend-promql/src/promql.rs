@@ -958,8 +958,7 @@ fn info_selector(expr: &Expr) -> Result<Vec<InfoMatcher>> {
             .collect()),
         Expr::Paren(p) => info_selector(&p.expr),
         other => Err(LoweringError::UnsupportedFeature(format!(
-            "`info` data-label selector must be a label-matcher set, got {:?}",
-            std::mem::discriminant(other)
+            "`info` data-label selector must be a label-matcher set, got `{other}`"
         ))),
     }
 }
@@ -1283,8 +1282,7 @@ fn lower_inner(expr: &Expr) -> Result<Inner> {
         Expr::Paren(p) => lower_inner(&p.expr),
         Expr::Call(call) => lower_inner_call(call),
         other => Err(LoweringError::UnsupportedFeature(format!(
-            "aggregate argument: {:?}",
-            std::mem::discriminant(other)
+            "aggregate argument: `{other}`"
         ))),
     }
 }
@@ -1685,8 +1683,7 @@ fn expr_str(expr: &Expr) -> Result<String> {
         Expr::StringLiteral(s) => Ok(s.val.clone()),
         Expr::Paren(p) => expr_str(&p.expr),
         other => Err(LoweringError::InvalidParameter(format!(
-            "expected a string literal, got {:?}",
-            std::mem::discriminant(other)
+            "expected a string literal, got `{other}`"
         ))),
     }
 }
@@ -1836,8 +1833,7 @@ fn extract_matrix(expr: &Expr) -> Result<(String, Vec<Unresolved>, Duration, Tim
         // silently strip an unsupported wrapper (`rate(deriv(m[5m]))` lowering
         // as `rate(m[5m])`). Reject instead.
         other => Err(LoweringError::UnsupportedFeature(format!(
-            "expected a range-vector (matrix) argument, got {:?}",
-            std::mem::discriminant(other)
+            "expected a range-vector (matrix) argument, got `{other}`"
         ))),
     }
 }
@@ -1913,8 +1909,7 @@ fn num_expr(expr: &Expr) -> Result<f64> {
                 })?
         }
         other => Err(LoweringError::InvalidParameter(format!(
-            "expected a numeric scalar, got {:?}",
-            std::mem::discriminant(other)
+            "expected a numeric scalar, got `{other}`"
         ))),
     }
 }
