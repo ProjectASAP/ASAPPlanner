@@ -144,60 +144,72 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             });
             push_node(nodes, "Scan", label, detail, vec![])
         }
-        QueryExpr::Scalar(v) => {
+        QueryExpr::PromqlScalar(v) => {
             let detail = serde_json::json!({ "value": v });
-            push_node(nodes, "Scalar", format!("Scalar({v})"), detail, vec![])
+            push_node(
+                nodes,
+                "PromqlScalar",
+                format!("PromqlScalar({v})"),
+                detail,
+                vec![],
+            )
         }
-        QueryExpr::EvalTime => push_node(
+        QueryExpr::QueryTimestamp => push_node(
             nodes,
-            "EvalTime",
-            "EvalTime".into(),
+            "QueryTimestamp",
+            "QueryTimestamp".into(),
             serde_json::json!({}),
             vec![],
         ),
-        QueryExpr::VectorFromScalar(child) => {
+        QueryExpr::PromqlVectorFromScalar(child) => {
             let c = build(child, nodes);
             push_node(
                 nodes,
-                "VectorFromScalar",
+                "PromqlVectorFromScalar",
                 "vector()".into(),
                 serde_json::json!({}),
                 vec![c],
             )
         }
-        QueryExpr::ScalarFromVector(child) => {
+        QueryExpr::PromqlScalarFromVector(child) => {
             let c = build(child, nodes);
             push_node(
                 nodes,
-                "ScalarFromVector",
+                "PromqlScalarFromVector",
                 "scalar()".into(),
                 serde_json::json!({}),
                 vec![c],
             )
         }
-        QueryExpr::Relabel { dst, value, child } => {
+        QueryExpr::PromqlRelabel { dst, value, child } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "dst": dst, "value": value });
             push_node(
                 nodes,
-                "Relabel",
-                format!("Relabel(dst={dst})"),
+                "PromqlRelabel",
+                format!("PromqlRelabel(dst={dst})"),
                 detail,
                 vec![c],
             )
         }
-        QueryExpr::InfoJoin { selector, child } => {
+        QueryExpr::PromqlInfoEnrich { selector, child } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "selector": selector });
-            push_node(nodes, "InfoJoin", "InfoJoin".into(), detail, vec![c])
+            push_node(
+                nodes,
+                "PromqlInfoEnrich",
+                "PromqlInfoEnrich".into(),
+                detail,
+                vec![c],
+            )
         }
-        QueryExpr::Sample { by, kind, child } => {
+        QueryExpr::PromqlSeriesSample { by, kind, child } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "by": by, "kind": kind });
             push_node(
                 nodes,
-                "Sample",
-                format!("Sample({kind:?})"),
+                "PromqlSeriesSample",
+                format!("PromqlSeriesSample({kind:?})"),
                 detail,
                 vec![c],
             )
@@ -244,21 +256,21 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
                 vec![c],
             )
         }
-        QueryExpr::Distinct { cols, child } => {
+        QueryExpr::Dedup { cols, child } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "cols": cols });
             push_node(
                 nodes,
-                "Distinct",
-                format!("Distinct({} cols)", cols.len()),
+                "Dedup",
+                format!("Dedup({} cols)", cols.len()),
                 detail,
                 vec![c],
             )
         }
-        QueryExpr::Merge { children } => {
+        QueryExpr::Concat { children } => {
             let ids: Vec<u32> = children.iter().map(|c| build(c, nodes)).collect();
-            let label = format!("Merge({} branches)", ids.len());
-            push_node(nodes, "Merge", label, serde_json::json!({}), ids)
+            let label = format!("Concat({} branches)", ids.len());
+            push_node(nodes, "Concat", label, serde_json::json!({}), ids)
         }
         QueryExpr::Join {
             kind,
@@ -308,14 +320,20 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "n": n, "offset": offset });
             push_node(nodes, "Limit", format!("Limit({n})"), detail, vec![c])
         }
-        QueryExpr::Subquery {
+        QueryExpr::PromqlSubquery {
             range,
             resolution,
             child,
         } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "range": range, "resolution": resolution });
-            push_node(nodes, "Subquery", "Subquery".into(), detail, vec![c])
+            push_node(
+                nodes,
+                "PromqlSubquery",
+                "PromqlSubquery".into(),
+                detail,
+                vec![c],
+            )
         }
         QueryExpr::TimeRange { range, child } => {
             let c = build(child, nodes);
@@ -333,7 +351,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "shift": shift });
             push_node(nodes, "TimeShift", "TimeShift".into(), detail, vec![c])
         }
-        QueryExpr::WindowFunc {
+        QueryExpr::SQLWindowFunc {
             func,
             args,
             partition_by,
@@ -351,8 +369,8 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             });
             push_node(
                 nodes,
-                "WindowFunc",
-                format!("WindowFunc({func:?})"),
+                "SQLWindowFunc",
+                format!("SQLWindowFunc({func:?})"),
                 detail,
                 vec![c],
             )
@@ -385,7 +403,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         | QueryExpr::Cast { .. }
         | QueryExpr::InList { .. }
         | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arith { .. }
+        | QueryExpr::Arithmetic { .. }
         | QueryExpr::Case { .. }) => {
             unreachable!("dag_export::build reached a scalar QueryExpr variant directly: {other:?}")
         }
@@ -463,7 +481,7 @@ mod tests {
 
     #[test]
     fn merge_keeps_every_branch_as_a_child() {
-        let expr = QueryExpr::Merge {
+        let expr = QueryExpr::Concat {
             children: vec![
                 scan("a", value_col()),
                 scan("b", value_col()),
@@ -471,9 +489,9 @@ mod tests {
             ],
         };
         let graph = export(&expr);
-        assert_eq!(graph.nodes.len(), 4, "3 branches + the Merge node");
+        assert_eq!(graph.nodes.len(), 4, "3 branches + the Concat node");
         let merge = &graph.nodes[graph.root as usize];
-        assert_eq!(merge.kind, "Merge");
+        assert_eq!(merge.kind, "Concat");
         assert_eq!(merge.children.len(), 3);
     }
 
@@ -511,7 +529,7 @@ mod tests {
             offset: 0,
             child: Rc::new(shared_shape()),
         };
-        let q2 = QueryExpr::Distinct {
+        let q2 = QueryExpr::Dedup {
             cols: vec![0],
             child: Rc::new(shared_shape()),
         };
@@ -523,7 +541,7 @@ mod tests {
         let scan_hash_in_g2 = g2.nodes.iter().find(|n| n.kind == "Scan").unwrap().hash;
         assert_eq!(scan_hash_in_g1, scan_hash_in_g2);
 
-        // And the two roots themselves (Limit vs Distinct) must not collide.
+        // And the two roots themselves (Limit vs Dedup) must not collide.
         assert_ne!(
             g1.nodes[g1.root as usize].hash,
             g2.nodes[g2.root as usize].hash

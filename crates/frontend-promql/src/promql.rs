@@ -24,7 +24,7 @@
 //! | `quantile_over_time(φ, m{f}[w])` | `Aggregate{[Quantile(φ)], TimeRange{w, Scan{predicates}}}` |
 //! | `histogram_quantile(φ, <classic buckets>)` | `Aggregate{[HistogramQuantile(φ)]}` — cumulative-bucket interpolation (classic form recognised by `by (le)` / a `_bucket` metric / an `le` matcher) |
 //! | `histogram_quantile(φ, <native hist / raw>)` | `Aggregate{[Quantile(φ)]}` over the fully-lowered arg (generic, sketch-able with an accuracy target) |
-//! | `histogram_quantiles(v, "l", φ…)` | `Merge{Relabel{l=φᵢ, <the histogram_quantile(φᵢ, v) branch>}…}` — one branch per φ (issue #109) |
+//! | `histogram_quantiles(v, "l", φ…)` | `Concat{PromqlRelabel{l=φᵢ, <the histogram_quantile(φᵢ, v) branch>}…}` — one branch per φ (issue #109) |
 //! | `histogram_count/sum/avg/stddev/stdvar(v)`, `histogram_fraction(l,u,v)` | `Aggregate{[Histogram*]}` — per-series native-histogram accessors (issue #43) |
 //! | `OUTER_op(inner_func(m[w]))` (e.g. `sum(rate(m[w]))`) | `Aggregate{[OUTER_op]}` over `Aggregate{[inner_func]}` — two levels |
 //! | `OUTER_op(<any expr>)` (e.g. `max(sum by (job) (rate(m[w])))`, `sum(rate(a[w]) + rate(b[w]))`) | `Aggregate{[OUTER_op]}` over the fully-lowered `<any expr>` — arbitrary function nesting (issue #27) |
@@ -38,21 +38,21 @@
 //! | `increase(m[w])` | `Aggregate{[Increase], TimeRange{w}}` |
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], TimeRange{w}}` — per-series counter-derivative intents (issue #44) |
 //! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is a post-ASAP concern (issue #47) |
-//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `Scalar` leaf |
-//! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `EvalTime` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
-//! | `vector(s)` / `scalar(v)` | `VectorFromScalar` / `ScalarFromVector` — the scalar⇄vector bridges (issue #48) |
-//! | `label_replace(v,…)` / `label_join(v,…)` | `Relabel{dst, value}` — per-series label rewrite; value unchanged (issue #50) |
-//! | `info(v, [selector])` | `InfoJoin{selector}` — label-enrichment join against the info metric(s); join keys resolved during post-ASAP binding (issue #84) |
+//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `PromqlScalar` leaf |
+//! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `QueryTimestamp` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
+//! | `vector(s)` / `scalar(v)` | `PromqlVectorFromScalar` / `PromqlScalarFromVector` — the scalar⇄vector bridges (issue #48) |
+//! | `label_replace(v,…)` / `label_join(v,…)` | `PromqlRelabel{dst, value}` — per-series label rewrite; value unchanged (issue #50) |
+//! | `info(v, [selector])` | `PromqlInfoEnrich{selector}` — label-enrichment join against the info metric(s); join keys resolved during post-ASAP binding (issue #84) |
 //! | `group` / `offset` / `@` / `info` | **rejected** — distinct semantics with no intent-algebra representation yet (`info` label-join → #84) |
 //! | `OUTER by (dims) (…)` | `Aggregate.reduction = Reduce(by = dims)` (generic `topk by`/`bottomk` grouping → `Sort.partition_by`) |
 //! | `count by (d) (…)` | `Aggregate{[Cardinality], …}` |
 //! | `group(v)` / `count_values("l", v)` | `Aggregate{[Group]}` (constant 1) / `Aggregate{[CountValues{l}]}` (group-by-value + count, new label `l`) — issue #49 |
-//! | `limitk(k, v)` / `limit_ratio(r, v)` | `Sample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series kept unchanged (issue #86) |
+//! | `limitk(k, v)` / `limit_ratio(r, v)` | `PromqlSeriesSample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series kept unchanged (issue #86) |
 //! | `topk(k, count_over_time(…))` | `Aggregate{[TopK{k}]}` (heavy-hitter intent) over the explicit inner `Aggregate{[Count]}` |
 //! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
 //! | `m{f}` | `Scan{predicates}` |
 //! | `a OP b` | `BinaryOp{vector_match}` |
-//! | `expr[r:res]` | `Subquery{r, res}` |
+//! | `expr[r:res]` | `PromqlSubquery{r, res}` |
 //! | `<selector> offset <d>` / `<selector> @ <ts>`/`start()`/`end()` | `TimeShift{shift}` over the selector's `Scan` — pass-through schema; a ranged selector shifts under its `TimeRange` (issue #40) |
 
 use std::rc::Rc;
@@ -71,7 +71,9 @@ use asap_types::pre_asap::query_expr::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, Reduction, SortKey, Source,
     TimeShift, UnresolvedQueryExpr as Unresolved, VectorGrouping, VectorMatch, VectorMatchKind,
 };
-use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, InfoMatcher, SampleKind, ScalarValue};
+use asap_types::pre_asap::{
+    ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue,
+};
 use asap_types::types::AccuracyTarget;
 
 use crate::error::PromqlError as LoweringError;
@@ -262,10 +264,10 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         Expr::Call(call) if is_typeconv_fn(call.func.name) => walk_typeconv(call),
         Expr::Call(call) if is_label_fn(call.func.name) => walk_label(call),
         Expr::Call(call) if is_sort_fn(call.func.name) => walk_sort(call),
-        // A bare `min_of`/`max_of(consts…)` scalar query folds to a `Scalar`
+        // A bare `min_of`/`max_of(consts…)` scalar query folds to a `PromqlScalar`
         // leaf; a non-constant argument makes `num_expr` fail → rejected (#89).
         Expr::Call(call) if is_scalar_reducer_fn(call.func.name) => {
-            Ok(Unresolved::Scalar(num_expr(expr)?))
+            Ok(Unresolved::PromqlScalar(num_expr(expr)?))
         }
         Expr::Call(call) if call.func.name == "info" => walk_info(call),
         Expr::Call(call) => walk_call(call),
@@ -275,19 +277,19 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         // identity and `-<literal>` to a negated `NumberLiteral`, so this wraps a
         // sub-expression whose samples must be sign-flipped. Now that a scalar
         // operand exists (#35), express it as `x * -1` — a constant-foldable
-        // operand (`-(10*1024)`) collapses to a negated `Scalar` leaf; anything
-        // else is a vector, sign-flipped by a `Mul` against `Scalar(-1)`. `Mul`
+        // operand (`-(10*1024)`) collapses to a negated `PromqlScalar` leaf; anything
+        // else is a vector, sign-flipped by a `Mul` against `PromqlScalar(-1)`. `Mul`
         // is commutative, so operand order carries no hazard (#36).
         Expr::Unary(u) => match num_expr(&u.expr) {
-            Ok(v) => Ok(Unresolved::Scalar(-v)),
+            Ok(v) => Ok(Unresolved::PromqlScalar(-v)),
             Err(_) => Ok(Unresolved::BinaryOp {
-                op: BinaryOpKind::Arith(ArithOp::Mul),
+                op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
                 lhs: Rc::new(walk(&u.expr)?),
-                rhs: Rc::new(Unresolved::Scalar(-1.0)),
+                rhs: Rc::new(Unresolved::PromqlScalar(-1.0)),
                 vector_match: None,
             }),
         },
-        Expr::Subquery(sq) => Ok(Unresolved::Subquery {
+        Expr::Subquery(sq) => Ok(Unresolved::PromqlSubquery {
             range: sq.range,
             resolution: sq.step,
             child: Rc::new(walk(&sq.expr)?),
@@ -306,7 +308,7 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         // A number literal is a scalar leaf (`v > 5`, or a bare scalar query
         // `5`). String literals only appear as function args (`label_replace`,
         // …), which are not supported, so reject them (issue #35).
-        Expr::NumberLiteral(n) => Ok(Unresolved::Scalar(n.val)),
+        Expr::NumberLiteral(n) => Ok(Unresolved::PromqlScalar(n.val)),
         Expr::StringLiteral(_) => Err(LoweringError::UnsupportedFeature(
             "bare string literal".into(),
         )),
@@ -337,8 +339,8 @@ fn walk_call(call: &Call) -> Result<Unresolved> {
 /// `rate`/`irate`/`increase`, and the counter-derivatives
 /// (`changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/
 /// `double_exponential_smoothing`). Each lowers to a per-series `Aggregate{[f]}`
-/// directly over the `PromQLSubquery` — the sub-query is the range context, so
-/// there is no separate `Window`/`TimeRange` (this walk treats the `Subquery`
+/// directly over the `PromqlSubquery` — the sub-query is the range context, so
+/// there is no separate `Window`/`TimeRange` (this walk treats the `PromqlSubquery`
 /// node itself as the range marker). Returns `None` when `call` isn't a range
 /// function or its argument isn't a sub-query, so the flat matrix-selector
 /// template still handles `f(m[w])` (issues #42, #55).
@@ -427,7 +429,7 @@ fn walk_aggregate(agg: &AggregateExpr) -> Result<Unresolved> {
 
     // `without(...)` grouping is modelled only for the reducing aggregations
     // (sum/avg/count/…), whose grouping lives on an `Aggregate` node. `topk`/
-    // `bottomk` (→ `Sort.partition_by`) and `limitk`/`limit_ratio` (→ `Sample`)
+    // `bottomk` (→ `Sort.partition_by`) and `limitk`/`limit_ratio` (→ `PromqlSeriesSample`)
     // would need without-partitioning too; reject rather than silently lower
     // them as a `by` grouping (issue #39).
     if without && matches!(outer, Outer::TopK { .. } | Outer::Sample { .. }) {
@@ -592,7 +594,7 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
         Outer::CountValues { label } => {
             outer_aggregate(keys, AggIntent::CountValues { label }, child)
         }
-        Outer::Sample { kind } => Unresolved::Sample {
+        Outer::Sample { kind } => Unresolved::PromqlSeriesSample {
             by: keys.into(),
             kind,
             child: Rc::new(child),
@@ -682,7 +684,7 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
 /// form (issue #109). It is `histogram_quantile(φᵢ, v)` fanned out over the
 /// quantiles, each branch's output series tagged with `label = φᵢ`.
 ///
-/// Lowers to a `Merge` of one `Relabel`-wrapped quantile branch per φ, reusing
+/// Lowers to a `Concat` of one `PromqlRelabel`-wrapped quantile branch per φ, reusing
 /// the single-quantile decision — classic `le`-buckets interpolate
 /// (`HistogramQuantile`), native histograms / raw samples take the sketch-able
 /// `Quantile` (issues #43 / #79) — so the two functions cannot diverge.
@@ -692,7 +694,7 @@ fn walk_histogram(call: &Call) -> Result<Unresolved> {
 /// producer.
 ///
 /// Each branch aliases its value column to `value` rather than taking the
-/// intent-keyed name (`quantile_0_5`, `quantile_0_9`, …). `Merge` derives its
+/// intent-keyed name (`quantile_0_5`, `quantile_0_9`, …). `Concat` derives its
 /// schema from the first child, so branches that disagree on a column *name*
 /// would make the merged schema silently misdescribe every branch but one. The
 /// quantile is carried by the `label` column, which is exactly where Prometheus
@@ -725,13 +727,13 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
                 reduction,
                 measures: vec![intent],
                 // Each branch aliases its value column to "value" (not the
-                // intent-keyed default) so `Merge` — which derives its schema
+                // intent-keyed default) so `Concat` — which derives its schema
                 // from the first branch — doesn't silently misdescribe the rest.
                 output_names: vec!["value".into()],
                 having: None,
                 child: Rc::new(child),
             };
-            Ok(Unresolved::Relabel {
+            Ok(Unresolved::PromqlRelabel {
                 dst: label.clone(),
                 value: Rc::new(Unresolved::Literal(ScalarValue::Utf8(open_metrics_float(
                     phi,
@@ -740,7 +742,7 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(Unresolved::Merge { children: branches })
+    Ok(Unresolved::Concat { children: branches })
 }
 
 /// Prometheus's `labels.FormatOpenMetricsFloat` — how `histogram_quantiles`
@@ -800,12 +802,12 @@ fn is_time_fn(name: &str) -> bool {
     )
 }
 
-/// `time()` → the `EvalTime` leaf. `timestamp(v)` and the calendar accessors →
-/// `Aggregate{[TimeFn(f)]}` over the argument vector, or over `EvalTime` for the
+/// `time()` → the `QueryTimestamp` leaf. `timestamp(v)` and the calendar accessors →
+/// `Aggregate{[TimeFn(f)]}` over the argument vector, or over `QueryTimestamp` for the
 /// no-argument calendar forms (`hour()`, `day_of_week()`, …). Issue #46.
 fn walk_time(call: &Call) -> Result<Unresolved> {
     if call.func.name == "time" {
-        return Ok(Unresolved::EvalTime);
+        return Ok(Unresolved::QueryTimestamp);
     }
     let func = match call.func.name {
         "timestamp" => TimeFunc::Timestamp,
@@ -822,7 +824,7 @@ fn walk_time(call: &Call) -> Result<Unresolved> {
     // A calendar function with no argument reads the evaluation time; otherwise
     // it maps over each sample's timestamp in the argument vector.
     let inner = if call.args.args.is_empty() {
-        Unresolved::EvalTime
+        Unresolved::QueryTimestamp
     } else {
         walk(arg(call, 0)?)?
     };
@@ -864,8 +866,8 @@ fn is_typeconv_fn(name: &str) -> bool {
 fn walk_typeconv(call: &Call) -> Result<Unresolved> {
     let inner = walk(arg(call, 0)?)?;
     Ok(match call.func.name {
-        "vector" => Unresolved::VectorFromScalar(Rc::new(inner)),
-        "scalar" => Unresolved::ScalarFromVector(Rc::new(inner)),
+        "vector" => Unresolved::PromqlVectorFromScalar(Rc::new(inner)),
+        "scalar" => Unresolved::PromqlScalarFromVector(Rc::new(inner)),
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     })
 }
@@ -921,7 +923,7 @@ fn walk_sort(call: &Call) -> Result<Unresolved> {
 }
 
 /// `info(v, [selector])` — a label-enrichment join. Lowers the input vector and
-/// wraps it in an `InfoJoin` carrying the (optional) data-label selector's
+/// wraps it in an `PromqlInfoEnrich` carrying the (optional) data-label selector's
 /// matchers; the actual join against the info metric — on shared identifying
 /// labels — is resolved during post-ASAP binding (issue #84).
 fn walk_info(call: &Call) -> Result<Unresolved> {
@@ -930,7 +932,7 @@ fn walk_info(call: &Call) -> Result<Unresolved> {
         Some(sel) => info_selector(sel)?,
         None => Vec::new(), // default: enrich from `target_info`
     };
-    Ok(Unresolved::InfoJoin { selector, child })
+    Ok(Unresolved::PromqlInfoEnrich { selector, child })
 }
 
 /// Extract the `info` data-label selector's matchers. Unlike an ordinary
@@ -946,10 +948,10 @@ fn info_selector(expr: &Expr) -> Result<Vec<InfoMatcher>> {
             .map(|m| InfoMatcher {
                 label: m.name.clone(),
                 op: match &m.op {
-                    MatchOp::Equal => CompareOp::Eq,
-                    MatchOp::NotEqual => CompareOp::Ne,
-                    MatchOp::Re(_) => CompareOp::Regex,
-                    MatchOp::NotRe(_) => CompareOp::NotRegex,
+                    MatchOp::Equal => CompareOpKind::Eq,
+                    MatchOp::NotEqual => CompareOpKind::Ne,
+                    MatchOp::Re(_) => CompareOpKind::Regex,
+                    MatchOp::NotRe(_) => CompareOpKind::NotRegex,
                 },
                 value: m.value.clone(),
             })
@@ -969,7 +971,7 @@ fn is_label_fn(name: &str) -> bool {
 
 /// `label_replace(v, dst, replacement, src, regex)` /
 /// `label_join(v, dst, sep, src…)` — per-series label rewrites. Both lower to a
-/// `Relabel` over the fully-lowered vector argument, differing only in the
+/// `PromqlRelabel` over the fully-lowered vector argument, differing only in the
 /// expression that computes the destination label: `label_replace` a regex
 /// capture-expansion, `label_join` a separator-joined concatenation. Sample
 /// values are untouched; the regex-match-or-passthrough and capture-expansion
@@ -990,7 +992,7 @@ fn walk_label(call: &Call) -> Result<Unresolved> {
                     Unresolved::Literal(ScalarValue::Utf8(replacement)),
                 ],
             };
-            Ok(Unresolved::Relabel {
+            Ok(Unresolved::PromqlRelabel {
                 dst,
                 value: Rc::new(value),
                 child,
@@ -1013,7 +1015,7 @@ fn walk_label(call: &Call) -> Result<Unresolved> {
                 name: "label_join".into(),
                 args,
             };
-            Ok(Unresolved::Relabel {
+            Ok(Unresolved::PromqlRelabel {
                 dst,
                 value: Rc::new(value),
                 child,
@@ -1060,10 +1062,10 @@ fn is_math_fn(name: &str) -> bool {
 
 /// A math / trig function — a per-series element-wise value transform, lowered
 /// to a per-series `Aggregate{[Math(f)]}` over the (instant) argument vector.
-/// `pi()` is the constant π, lowered to a `Scalar` leaf (issue #45).
+/// `pi()` is the constant π, lowered to a `PromqlScalar` leaf (issue #45).
 fn walk_math(call: &Call) -> Result<Unresolved> {
     if call.func.name == "pi" {
-        return Ok(Unresolved::Scalar(std::f64::consts::PI));
+        return Ok(Unresolved::PromqlScalar(std::f64::consts::PI));
     }
     let func = match call.func.name {
         "abs" => MathFunc::Abs,
@@ -1432,7 +1434,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                 Some(intent) => windowed_aggregate(inner, vec![], intent),
                 None => filtered_source(inner.metric, inner.matchers, inner.shift),
             };
-            Ok(Unresolved::Sample {
+            Ok(Unresolved::PromqlSeriesSample {
                 by: keys.into(),
                 kind,
                 child: Rc::new(base),
@@ -1519,7 +1521,7 @@ fn reduction_for(
 ) -> Reduction<ColumnRef> {
     let is_range_child = matches!(
         child,
-        Unresolved::TimeRange { .. } | Unresolved::Subquery { .. }
+        Unresolved::TimeRange { .. } | Unresolved::PromqlSubquery { .. }
     );
     if keys.is_empty() && (intent.is_per_series() || is_range_child) {
         Reduction::PerEntity
@@ -1810,10 +1812,10 @@ fn system_time_ms(t: SystemTime) -> Result<i64> {
 
 fn matcher_to_compare(m: &Matcher) -> Unresolved {
     let op = match &m.op {
-        MatchOp::Equal => CompareOp::Eq,
-        MatchOp::NotEqual => CompareOp::Ne,
-        MatchOp::Re(_) => CompareOp::Regex,
-        MatchOp::NotRe(_) => CompareOp::NotRegex,
+        MatchOp::Equal => CompareOpKind::Eq,
+        MatchOp::NotEqual => CompareOpKind::Ne,
+        MatchOp::Re(_) => CompareOpKind::Regex,
+        MatchOp::NotRe(_) => CompareOpKind::NotRegex,
     };
     Unresolved::Compare {
         left: Rc::new(Unresolved::Column(ColumnRef::Named(m.name.clone()))),
@@ -1924,10 +1926,10 @@ fn is_scalar_reducer_fn(name: &str) -> bool {
 }
 
 /// A `BinaryOp` operand: fold a pure-scalar expression (`5`, `10*1024*1024`) to
-/// a `Scalar` leaf, otherwise walk it as a vector (issue #35).
+/// a `PromqlScalar` leaf, otherwise walk it as a vector (issue #35).
 fn scalar_or_vector(expr: &Expr) -> Result<Unresolved> {
     match num_expr(expr) {
-        Ok(v) => Ok(Unresolved::Scalar(v)),
+        Ok(v) => Ok(Unresolved::PromqlScalar(v)),
         Err(_) => walk(expr),
     }
 }
@@ -1975,31 +1977,31 @@ fn quantile_param(q: f64) -> Result<f64> {
 
 fn binop(id: token::TokenId) -> Result<BinaryOpKind> {
     Ok(if id == token::T_ADD {
-        BinaryOpKind::Arith(ArithOp::Add)
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Add)
     } else if id == token::T_SUB {
-        BinaryOpKind::Arith(ArithOp::Sub)
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub)
     } else if id == token::T_MUL {
-        BinaryOpKind::Arith(ArithOp::Mul)
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul)
     } else if id == token::T_DIV {
-        BinaryOpKind::Arith(ArithOp::Div)
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Div)
     } else if id == token::T_MOD {
-        BinaryOpKind::Arith(ArithOp::Mod)
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Mod)
     } else if id == token::T_POW {
         BinaryOpKind::Pow
     } else if id == token::T_ATAN2 {
         BinaryOpKind::Atan2
     } else if id == token::T_EQLC {
-        BinaryOpKind::Compare(CompareOp::Eq)
+        BinaryOpKind::Compare(CompareOpKind::Eq)
     } else if id == token::T_NEQ {
-        BinaryOpKind::Compare(CompareOp::Ne)
+        BinaryOpKind::Compare(CompareOpKind::Ne)
     } else if id == token::T_LSS {
-        BinaryOpKind::Compare(CompareOp::Lt)
+        BinaryOpKind::Compare(CompareOpKind::Lt)
     } else if id == token::T_LTE {
-        BinaryOpKind::Compare(CompareOp::Le)
+        BinaryOpKind::Compare(CompareOpKind::Le)
     } else if id == token::T_GTR {
-        BinaryOpKind::Compare(CompareOp::Gt)
+        BinaryOpKind::Compare(CompareOpKind::Gt)
     } else if id == token::T_GTE {
-        BinaryOpKind::Compare(CompareOp::Ge)
+        BinaryOpKind::Compare(CompareOpKind::Ge)
     } else if id == token::T_LAND {
         BinaryOpKind::And
     } else if id == token::T_LOR {

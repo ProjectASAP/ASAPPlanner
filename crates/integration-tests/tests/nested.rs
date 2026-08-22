@@ -14,8 +14,8 @@ use std::time::Duration;
 use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
 use asap_types::pre_asap::{
-    AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, GroupKeys, Predicate, QueryExpr,
-    Reduction, ScalarValue, Source, TimeShift, VectorMatch, VectorMatchKind,
+    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, GroupKeys, Predicate,
+    QueryExpr, Reduction, ScalarValue, Source, TimeShift, VectorMatch, VectorMatchKind,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -79,7 +79,7 @@ fn q23_sum_by_job_over_filtered_scan() {
         },
         predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
             left: Rc::new(QueryExpr::Column(3)),
-            op: CompareOp::Eq,
+            op: CompareOpKind::Eq,
             right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("200".into()))),
         }))],
         schema: metric_schema(&["job", "status"]),
@@ -104,7 +104,7 @@ fn q25_div_over_complex_subtrees() {
         },
         predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
             left: Rc::new(QueryExpr::Column(3)),
-            op: CompareOp::Eq,
+            op: CompareOpKind::Eq,
             right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("200".into()))),
         }))],
         schema: metric_schema(&["job", "status"]),
@@ -141,7 +141,7 @@ fn q25_div_over_complex_subtrees() {
     );
 
     let expected = QueryExpr::BinaryOp {
-        op: BinaryOpKind::Arith(ArithOp::Div),
+        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         lhs: Rc::new(lhs),
         rhs: Rc::new(rhs),
         vector_match: None,
@@ -197,7 +197,7 @@ fn q53_outer_group_key_absent_from_nested_aggregate() {
         },
         predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
             left: Rc::new(QueryExpr::Column(3)),
-            op: CompareOp::Eq,
+            op: CompareOpKind::Eq,
             right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("api-server".into()))),
         }))],
         schema: metric_schema(&["group", "job"]),
@@ -225,7 +225,7 @@ fn q52_outer_name_label_over_binary_op() {
         },
         predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
             left: Rc::new(QueryExpr::Column(2)), // env
-            op: CompareOp::Eq,
+            op: CompareOpKind::Eq,
             right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(env.into()))),
         }))],
         schema: metric_schema(&["env", "__name__"]),
@@ -313,7 +313,7 @@ fn q40_week_over_week_offset() {
         )
     };
     let expected = QueryExpr::BinaryOp {
-        op: BinaryOpKind::Arith(ArithOp::Sub),
+        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
         lhs: Rc::new(rate_over(None)),
         rhs: Rc::new(rate_over(Some(604_800_000))), // 1w
         vector_match: None,
@@ -352,7 +352,7 @@ fn q24_sum_by_job_over_rate_over_filtered_scan() {
         },
         predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
             left: Rc::new(QueryExpr::Column(3)),
-            op: CompareOp::Eq,
+            op: CompareOpKind::Eq,
             right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("200".into()))),
         }))],
         schema: metric_schema(&["job", "status"]),
@@ -395,7 +395,7 @@ fn q27_nested_subquery_prometheus_docs_example() {
     );
     let deriv = agg_per_entity(
         AggIntent::Deriv,
-        QueryExpr::Subquery {
+        QueryExpr::PromqlSubquery {
             range: Duration::from_secs(30),
             resolution: Some(Duration::from_secs(5)),
             child: Rc::new(rate),
@@ -403,7 +403,7 @@ fn q27_nested_subquery_prometheus_docs_example() {
     );
     let expected = agg_per_entity(
         AggIntent::Max { col: None },
-        QueryExpr::Subquery {
+        QueryExpr::PromqlSubquery {
             range: Duration::from_secs(600),
             resolution: None,
             child: Rc::new(deriv),

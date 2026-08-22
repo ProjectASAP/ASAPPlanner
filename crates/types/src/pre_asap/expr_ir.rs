@@ -11,7 +11,7 @@
 //! [`ColumnId`](super::schema::ColumnId) (positional, once bound).
 //!
 //! What's left here is the vocabulary those scalar variants are built from —
-//! [`ScalarValue`], [`CompareOp`], [`ArithOp`] — the **union** of what the two
+//! [`ScalarValue`], [`CompareOpKind`], [`ArithmeticOpKind`] — the **union** of what the two
 //! front ends need: PromQL contributes `Regex` / `NotRegex` (`=~` / `!~`); SQL
 //! contributes arithmetic, `CASE`, `IN`, `CAST`, `IS [NOT] NULL`, scalar
 //! function calls, and the `LIKE` / `ILIKE` comparison family.
@@ -55,7 +55,7 @@ pub enum ScalarValue {
 /// the right-hand side is a regular-expression pattern, not a literal value.
 /// `Like` / `ILike` (+ negations) are the SQL pattern-match analogues.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CompareOp {
+pub enum CompareOpKind {
     Eq,
     Ne,
     Lt,
@@ -76,28 +76,28 @@ pub enum CompareOp {
     NotRegex,
 }
 
-impl std::fmt::Display for CompareOp {
+impl std::fmt::Display for CompareOpKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            CompareOp::Eq => "==",
-            CompareOp::Ne => "!=",
-            CompareOp::Lt => "<",
-            CompareOp::Le => "<=",
-            CompareOp::Gt => ">",
-            CompareOp::Ge => ">=",
-            CompareOp::Like => "LIKE",
-            CompareOp::NotLike => "NOT LIKE",
-            CompareOp::ILike => "ILIKE",
-            CompareOp::NotILike => "NOT ILIKE",
-            CompareOp::Regex => "=~",
-            CompareOp::NotRegex => "!~",
+            CompareOpKind::Eq => "==",
+            CompareOpKind::Ne => "!=",
+            CompareOpKind::Lt => "<",
+            CompareOpKind::Le => "<=",
+            CompareOpKind::Gt => ">",
+            CompareOpKind::Ge => ">=",
+            CompareOpKind::Like => "LIKE",
+            CompareOpKind::NotLike => "NOT LIKE",
+            CompareOpKind::ILike => "ILIKE",
+            CompareOpKind::NotILike => "NOT ILIKE",
+            CompareOpKind::Regex => "=~",
+            CompareOpKind::NotRegex => "!~",
         })
     }
 }
 
 /// Binary arithmetic operators.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ArithOp {
+pub enum ArithmeticOpKind {
     Add,
     Sub,
     Mul,
@@ -105,14 +105,14 @@ pub enum ArithOp {
     Mod,
 }
 
-impl std::fmt::Display for ArithOp {
+impl std::fmt::Display for ArithmeticOpKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            ArithOp::Add => "+",
-            ArithOp::Sub => "-",
-            ArithOp::Mul => "*",
-            ArithOp::Div => "/",
-            ArithOp::Mod => "%",
+            ArithmeticOpKind::Add => "+",
+            ArithmeticOpKind::Sub => "-",
+            ArithmeticOpKind::Mul => "*",
+            ArithmeticOpKind::Div => "/",
+            ArithmeticOpKind::Mod => "%",
         })
     }
 }

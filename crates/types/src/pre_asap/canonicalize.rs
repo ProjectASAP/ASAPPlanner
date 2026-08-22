@@ -27,7 +27,7 @@
 use std::rc::Rc;
 
 use super::agg_intent::{is_frequency_heavy_hitter, ranking_measure, AggIntent};
-use super::expr_ir::{CompareOp, ScalarValue};
+use super::expr_ir::{CompareOpKind, ScalarValue};
 use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
 
 /// Rewrite `expr` into its canonical form (bottom-up). Idempotent: a tree that
@@ -82,22 +82,22 @@ fn rc_mut(r: &mut Rc<QueryExpr>) -> &mut QueryExpr {
 fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
     use QueryExpr::*;
     match expr {
-        Scan { .. } | Scalar(_) | EvalTime => vec![],
-        VectorFromScalar(c) | ScalarFromVector(c) => vec![rc_mut(c)],
-        Relabel { child, .. }
+        Scan { .. } | PromqlScalar(_) | QueryTimestamp => vec![],
+        PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => vec![rc_mut(c)],
+        PromqlRelabel { child, .. }
         | Filter { child, .. }
         | Project { child, .. }
         | Aggregate { child, .. }
-        | Distinct { child, .. }
-        | Subquery { child, .. }
+        | Dedup { child, .. }
+        | PromqlSubquery { child, .. }
         | TimeRange { child, .. }
         | TimeShift { child, .. }
-        | WindowFunc { child, .. }
-        | Sample { child, .. }
-        | InfoJoin { child, .. }
+        | SQLWindowFunc { child, .. }
+        | PromqlSeriesSample { child, .. }
+        | PromqlInfoEnrich { child, .. }
         | Sort { child, .. }
         | Limit { child, .. } => vec![rc_mut(child)],
-        Merge { children } => children.iter_mut().collect(),
+        Concat { children } => children.iter_mut().collect(),
         Join { left, right, .. } | SetOp { left, right, .. } => {
             vec![rc_mut(left), rc_mut(right)]
         }
@@ -113,7 +113,7 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
         | Cast { .. }
         | InList { .. }
         | FunctionCall { .. }
-        | Arith { .. }
+        | Arithmetic { .. }
         | Case { .. } => vec![],
     }
 }
@@ -231,7 +231,7 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
         return None;
     };
     // `rn <= k` (top-k). `rn < k` would be off-by-one; require `<=`.
-    if *op != CompareOp::Le {
+    if *op != CompareOpKind::Le {
         return None;
     }
     let (QueryExpr::Column(rn_col), QueryExpr::Literal(ScalarValue::Int64(k))) =
@@ -256,8 +256,8 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
     };
 
     // The filtered column must be a `ROW_NUMBER()` window output — the single
-    // column the WindowFunc appends after its input, i.e. the last one.
-    let QueryExpr::WindowFunc {
+    // column the SQLWindowFunc appends after its input, i.e. the last one.
+    let QueryExpr::SQLWindowFunc {
         func: WindowFuncKind::RowNumber,
         partition_by,
         order_by,
@@ -470,10 +470,10 @@ mod tests {
         }
     }
 
-    /// `Filter{ rn(3) <= 5 } { WindowFunc{ RowNumber, PARTITION BY region(2),
+    /// `Filter{ rn(3) <= 5 } { SQLWindowFunc{ RowNumber, PARTITION BY region(2),
     /// ORDER BY col(2) DESC } { agg } }`.
     fn rownumber_topk(agg: QueryExpr) -> QueryExpr {
-        let wf = QueryExpr::WindowFunc {
+        let wf = QueryExpr::SQLWindowFunc {
             func: WindowFuncKind::RowNumber,
             args: vec![],
             partition_by: GroupKeys::by(vec![2]), // region
@@ -488,7 +488,7 @@ mod tests {
         QueryExpr::Filter {
             pred: Predicate(Rc::new(QueryExpr::Compare {
                 left: Rc::new(QueryExpr::Column(3)), // rn = the appended window column
-                op: CompareOp::Le,
+                op: CompareOpKind::Le,
                 right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(5))),
             })),
             child: Rc::new(wf),
@@ -555,7 +555,7 @@ mod tests {
     fn filter_on_a_non_rownumber_column_is_left_alone() {
         // `WHERE service_len <= 5` (col 0, not the rn window column) must not be
         // mistaken for a top-k.
-        let wf = QueryExpr::WindowFunc {
+        let wf = QueryExpr::SQLWindowFunc {
             func: WindowFuncKind::RowNumber,
             args: vec![],
             partition_by: GroupKeys::by(vec![2]),
@@ -572,7 +572,7 @@ mod tests {
         let q = QueryExpr::Filter {
             pred: Predicate(Rc::new(QueryExpr::Compare {
                 left: Rc::new(QueryExpr::Column(0)), // NOT the rn column (index 3)
-                op: CompareOp::Le,
+                op: CompareOpKind::Le,
                 right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(5))),
             })),
             child: Rc::new(wf),

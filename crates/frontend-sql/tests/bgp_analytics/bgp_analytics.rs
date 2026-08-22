@@ -218,8 +218,8 @@ fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::Distinct { child, .. }
-        | QueryExpr::Subquery { child, .. } => first_aggregate(child),
+        | QueryExpr::Dedup { child, .. }
+        | QueryExpr::PromqlSubquery { child, .. } => first_aggregate(child),
         _ => None,
     }
 }

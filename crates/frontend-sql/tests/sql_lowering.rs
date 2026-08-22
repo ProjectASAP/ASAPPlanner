@@ -8,7 +8,7 @@
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::{
-    AggIntent, CompareOp, GroupKeys, JoinKind, QueryExpr, Reduction, ScalarValue, Source,
+    AggIntent, CompareOpKind, GroupKeys, JoinKind, QueryExpr, Reduction, ScalarValue, Source,
     WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
@@ -58,10 +58,10 @@ fn find_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
         } => Some((reduction.expect_reduce(), measures)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
-        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Dedup { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::Subquery { child, .. } => find_aggregate(child),
+        | QueryExpr::PromqlSubquery { child, .. } => find_aggregate(child),
         _ => None,
     }
 }
@@ -104,10 +104,10 @@ fn find_join(qe: &QueryExpr) -> Option<&QueryExpr> {
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Dedup { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::Subquery { child, .. } => find_join(child),
+        | QueryExpr::PromqlSubquery { child, .. } => find_join(child),
         _ => None,
     }
 }
@@ -118,10 +118,10 @@ fn find_filter(qe: &QueryExpr) -> Option<&QueryExpr> {
         QueryExpr::Filter { .. } => Some(qe),
         QueryExpr::Project { child, .. }
         | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Dedup { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::Subquery { child, .. } => find_filter(child),
+        | QueryExpr::PromqlSubquery { child, .. } => find_filter(child),
         _ => None,
     }
 }
@@ -337,12 +337,12 @@ async fn count_distinct_is_cardinality() {
 
 #[tokio::test]
 async fn select_distinct_lowers_to_distinct_with_positional_cols() {
-    // SELECT DISTINCT → a `Distinct` node whose `cols` are positional ColumnIds
+    // SELECT DISTINCT → a `Dedup` node whose `cols` are positional ColumnIds
     // (not name-based ColumnRefs). DataFusion's `Distinct::All` dedups on every
     // column, so `cols` is empty here — but the field type is now `Vec<ColumnId>`.
     let qe = lower("SELECT DISTINCT service FROM metrics").await;
-    let QueryExpr::Distinct { cols, .. } = &qe else {
-        panic!("expected a Distinct at the root, got {qe:?}");
+    let QueryExpr::Dedup { cols, .. } = &qe else {
+        panic!("expected a Dedup at the root, got {qe:?}");
     };
     let _: &Vec<usize> = cols; // compile-time: positional ids, not ColumnRefs
     assert!(cols.is_empty(), "DISTINCT * dedups on all columns");
@@ -376,7 +376,7 @@ fn join_eq_columns(join: &QueryExpr) -> [usize; 2] {
     };
     let QueryExpr::Compare {
         left,
-        op: CompareOp::Eq,
+        op: CompareOpKind::Eq,
         right,
     } = pred.0.as_ref()
     else {
@@ -486,7 +486,7 @@ async fn qualified_where_over_join_resolves_to_right_side() {
         unreachable!("find_filter only returns Filter");
     };
     assert!(
-        matches!(pred.0.as_ref(), QueryExpr::Compare { left, op: CompareOp::Eq, .. }
+        matches!(pred.0.as_ref(), QueryExpr::Compare { left, op: CompareOpKind::Eq, .. }
             if matches!(left.as_ref(), QueryExpr::Column(4))),
         "hosts.service must bind to concatenated position 4 (not the first `service`), got {:?}",
         pred.0
@@ -657,17 +657,17 @@ async fn an_ordinary_conjunct_still_folds_onto_the_scan() {
     );
 }
 
-/// Find the first `WindowFunc` node along the single-child spine.
+/// Find the first `SQLWindowFunc` node along the single-child spine.
 fn find_windowfunc(qe: &QueryExpr) -> Option<&QueryExpr> {
     match qe {
-        QueryExpr::WindowFunc { .. } => Some(qe),
+        QueryExpr::SQLWindowFunc { .. } => Some(qe),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Dedup { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::Subquery { child, .. } => find_windowfunc(child),
+        | QueryExpr::PromqlSubquery { child, .. } => find_windowfunc(child),
         _ => None,
     }
 }
@@ -680,15 +680,15 @@ async fn window_function_lowers_to_positional_windowfunc() {
          FROM metrics",
     )
     .await;
-    let win = find_windowfunc(&qe).expect("expected a WindowFunc node");
-    let QueryExpr::WindowFunc {
+    let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
+    let QueryExpr::SQLWindowFunc {
         func,
         partition_by,
         order_by,
         ..
     } = win
     else {
-        unreachable!("find_windowfunc only returns WindowFunc");
+        unreachable!("find_windowfunc only returns SQLWindowFunc");
     };
     assert_eq!(*func, WindowFuncKind::RowNumber);
     assert_eq!(partition_by, &vec![1], "PARTITION BY service → col 1");
@@ -713,8 +713,8 @@ async fn window_function_lowers_to_positional_windowfunc() {
 #[tokio::test]
 async fn window_aggregate_lowers_to_windowfunc() {
     let qe = lower("SELECT service, SUM(bytes) OVER (PARTITION BY service) FROM metrics").await;
-    let win = find_windowfunc(&qe).expect("expected a WindowFunc node");
-    let QueryExpr::WindowFunc { func, args, .. } = win else {
+    let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
+    let QueryExpr::SQLWindowFunc { func, args, .. } = win else {
         unreachable!();
     };
     assert_eq!(*func, WindowFuncKind::Sum);
@@ -736,11 +736,11 @@ fn all_intents(qe: &QueryExpr) -> Vec<AggIntent> {
             }
             QueryExpr::Project { child, .. }
             | QueryExpr::Filter { child, .. }
-            | QueryExpr::Distinct { child, .. }
+            | QueryExpr::Dedup { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }
-            | QueryExpr::WindowFunc { child, .. }
-            | QueryExpr::Subquery { child, .. } => go(child, out),
+            | QueryExpr::SQLWindowFunc { child, .. }
+            | QueryExpr::PromqlSubquery { child, .. } => go(child, out),
             QueryExpr::BinaryOp { lhs, rhs, .. }
             | QueryExpr::Join {
                 left: lhs,
@@ -1157,11 +1157,11 @@ async fn a_shared_expression_is_materialized_once() {
 
 // ── Issue #118: multi-level grouping expands into one Aggregate per level ───
 
-/// The branches of the first `Merge` along the single-child spine.
+/// The branches of the first `Concat` along the single-child spine.
 fn merge_branches(qe: &QueryExpr) -> &Vec<QueryExpr> {
     fn find(qe: &QueryExpr) -> Option<&Vec<QueryExpr>> {
         match qe {
-            QueryExpr::Merge { children } => Some(children),
+            QueryExpr::Concat { children } => Some(children),
             QueryExpr::Project { child, .. }
             | QueryExpr::Filter { child, .. }
             | QueryExpr::Sort { child, .. }
@@ -1169,7 +1169,7 @@ fn merge_branches(qe: &QueryExpr) -> &Vec<QueryExpr> {
             _ => None,
         }
     }
-    find(qe).expect("expected a Merge")
+    find(qe).expect("expected a Concat")
 }
 
 /// `(group keys, column names)` of each merged grouping level.
@@ -1235,7 +1235,7 @@ async fn a_mixed_grouping_set_is_normalized_by_datafusion() {
 #[tokio::test]
 async fn omitted_grouping_keys_become_typed_nulls() {
     // Every level must emit every key — as NULL where the level omits it — or
-    // `Merge` (which takes the first child's schema) would misdescribe the rest.
+    // `Concat` (which takes the first child's schema) would misdescribe the rest.
     // The null is *cast*: a bare Null literal infers as Float64.
     let qe = lower("SELECT service, SUM(bytes) FROM metrics GROUP BY ROLLUP(service)").await;
     let levels = grouping_levels(&qe);

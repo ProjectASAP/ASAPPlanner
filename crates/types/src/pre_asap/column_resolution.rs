@@ -158,7 +158,7 @@ pub fn resolve_expr(
             name: name.clone(),
             args: each(args)?,
         },
-        QueryExpr::Arith { op, left, right } => QueryExpr::Arith {
+        QueryExpr::Arithmetic { op, left, right } => QueryExpr::Arithmetic {
             op: op.clone(),
             left: rc(left)?,
             right: rc(right)?,

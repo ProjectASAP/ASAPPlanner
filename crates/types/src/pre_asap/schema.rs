@@ -93,7 +93,7 @@ pub enum DataType {
 /// is a set of column indices that together uniquely identify rows. The
 /// outer `Vec` allows multiple unique-key sets (primary key + another
 /// unique constraint). Populated by per-node input/output spec —
-/// `Aggregate { by, .. }` emits `unique_keys = [by]`; `Distinct { cols }`
+/// `Aggregate { by, .. }` emits `unique_keys = [by]`; `Dedup { cols }`
 /// adds `cols`; most other nodes pass through.
 ///
 /// **Consumed by**: a future workload-level reuse pass (not yet shipped).
@@ -182,7 +182,7 @@ impl Schema {
     }
 
     /// Append `cols` as an additional unique-key set if not already present.
-    /// Used by `Distinct { cols }` per design.md §6 schema-flow table:
+    /// Used by `Dedup { cols }` per design.md §6 schema-flow table:
     /// "the input schema with `unique_keys` tightened to include `cols`".
     pub fn add_unique_key(&mut self, cols: Vec<ColumnId>) {
         if !self.unique_keys.contains(&cols) {

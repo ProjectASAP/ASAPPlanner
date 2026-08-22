@@ -86,31 +86,35 @@ fn resolve(
             }
         }
 
-        QE::Scalar(v) => QE::Scalar(*v),
-        QE::EvalTime => QE::EvalTime,
+        QE::PromqlScalar(v) => QE::PromqlScalar(*v),
+        QE::QueryTimestamp => QE::QueryTimestamp,
 
-        QE::VectorFromScalar(child) => QE::VectorFromScalar(Rc::new(resolve(child, fallback)?)),
-        QE::ScalarFromVector(child) => QE::ScalarFromVector(Rc::new(resolve(child, fallback)?)),
+        QE::PromqlVectorFromScalar(child) => {
+            QE::PromqlVectorFromScalar(Rc::new(resolve(child, fallback)?))
+        }
+        QE::PromqlScalarFromVector(child) => {
+            QE::PromqlScalarFromVector(Rc::new(resolve(child, fallback)?))
+        }
 
-        QE::Relabel { dst, value, child } => {
+        QE::PromqlRelabel { dst, value, child } => {
             let child = resolve(child, fallback)?;
             let child_schema = child.output_schema()?;
-            QE::Relabel {
+            QE::PromqlRelabel {
                 dst: dst.clone(),
                 value: Rc::new(resolve_expr(value, &child_schema)?),
                 child: Rc::new(child),
             }
         }
 
-        QE::InfoJoin { selector, child } => QE::InfoJoin {
+        QE::PromqlInfoEnrich { selector, child } => QE::PromqlInfoEnrich {
             selector: selector.clone(),
             child: Rc::new(resolve(child, fallback)?),
         },
 
-        QE::Sample { by, kind, child } => {
+        QE::PromqlSeriesSample { by, kind, child } => {
             let child = resolve(child, fallback)?;
             let child_schema = child.output_schema()?;
-            QE::Sample {
+            QE::PromqlSeriesSample {
                 by: resolve_group_keys(by, &child_schema)?,
                 kind: *kind,
                 child: Rc::new(child),
@@ -184,16 +188,16 @@ fn resolve(
             }
         }
 
-        QE::Distinct { cols, child } => {
+        QE::Dedup { cols, child } => {
             let child = resolve(child, fallback)?;
             let child_schema = child.output_schema()?;
-            QE::Distinct {
+            QE::Dedup {
                 cols: resolve_column_refs(cols, &child_schema)?,
                 child: Rc::new(child),
             }
         }
 
-        QE::Merge { children } => QE::Merge {
+        QE::Concat { children } => QE::Concat {
             children: children
                 .iter()
                 .map(|c| resolve(c, fallback))
@@ -264,11 +268,11 @@ fn resolve(
             child: Rc::new(resolve(child, fallback)?),
         },
 
-        QE::Subquery {
+        QE::PromqlSubquery {
             range,
             resolution,
             child,
-        } => QE::Subquery {
+        } => QE::PromqlSubquery {
             range: *range,
             resolution: *resolution,
             child: Rc::new(resolve(child, fallback)?),
@@ -284,7 +288,7 @@ fn resolve(
             child: Rc::new(resolve(child, fallback)?),
         },
 
-        QE::WindowFunc {
+        QE::SQLWindowFunc {
             func,
             args,
             partition_by,
@@ -309,7 +313,7 @@ fn resolve(
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            QE::WindowFunc {
+            QE::SQLWindowFunc {
                 func: func.clone(),
                 args,
                 partition_by,
@@ -357,7 +361,7 @@ fn resolve(
         | QE::Cast { .. }
         | QE::InList { .. }
         | QE::FunctionCall { .. }
-        | QE::Arith { .. }
+        | QE::Arithmetic { .. }
         | QE::Case { .. }) => {
             unreachable!("resolve reached a scalar QueryExpr variant directly: {other:?}")
         }
@@ -394,7 +398,7 @@ fn resolve_group_keys(
 ///
 /// Uses [`resolve_group_keys_promql`] rather than the strict
 /// [`resolve_group_keys`], unlike every other group-key site in `resolve`
-/// (`Sample.by`, `Sort.partition_by`, `WindowFunc.partition_by`): a key
+/// (`PromqlSeriesSample.by`, `Sort.partition_by`, `SQLWindowFunc.partition_by`): a key
 /// absent from a **closed** schema (e.g. the output of a nested cross-series
 /// aggregate that collapsed the label) is provably absent from every row, so
 /// PromQL drops it from the grouping rather than rejecting the query (issue

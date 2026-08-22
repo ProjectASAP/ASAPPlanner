@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
-use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, ScalarValue};
+use asap_types::pre_asap::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 
 use crate::error::SqlError as LoweringError;
 
@@ -55,23 +55,23 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
                     parts.iter().map(|e| df_expr_to_unresolved(e)).collect();
                 Ok(Unresolved::BoolOr(lowered?))
             }
-            Operator::Eq => compare(left, CompareOp::Eq, right),
-            Operator::NotEq => compare(left, CompareOp::Ne, right),
-            Operator::Lt => compare(left, CompareOp::Lt, right),
-            Operator::LtEq => compare(left, CompareOp::Le, right),
-            Operator::Gt => compare(left, CompareOp::Gt, right),
-            Operator::GtEq => compare(left, CompareOp::Ge, right),
+            Operator::Eq => compare(left, CompareOpKind::Eq, right),
+            Operator::NotEq => compare(left, CompareOpKind::Ne, right),
+            Operator::Lt => compare(left, CompareOpKind::Lt, right),
+            Operator::LtEq => compare(left, CompareOpKind::Le, right),
+            Operator::Gt => compare(left, CompareOpKind::Gt, right),
+            Operator::GtEq => compare(left, CompareOpKind::Ge, right),
             // BinaryExpr LIKE/ILIKE operators (from optimizer rewrites)
-            Operator::LikeMatch => compare(left, CompareOp::Like, right),
-            Operator::ILikeMatch => compare(left, CompareOp::ILike, right),
-            Operator::NotLikeMatch => compare(left, CompareOp::NotLike, right),
-            Operator::NotILikeMatch => compare(left, CompareOp::NotILike, right),
+            Operator::LikeMatch => compare(left, CompareOpKind::Like, right),
+            Operator::ILikeMatch => compare(left, CompareOpKind::ILike, right),
+            Operator::NotLikeMatch => compare(left, CompareOpKind::NotLike, right),
+            Operator::NotILikeMatch => compare(left, CompareOpKind::NotILike, right),
             // Arithmetic
-            Operator::Plus => arith(left, ArithOp::Add, right),
-            Operator::Minus => arith(left, ArithOp::Sub, right),
-            Operator::Multiply => arith(left, ArithOp::Mul, right),
-            Operator::Divide => arith(left, ArithOp::Div, right),
-            Operator::Modulo => arith(left, ArithOp::Mod, right),
+            Operator::Plus => arith(left, ArithmeticOpKind::Add, right),
+            Operator::Minus => arith(left, ArithmeticOpKind::Sub, right),
+            Operator::Multiply => arith(left, ArithmeticOpKind::Mul, right),
+            Operator::Divide => arith(left, ArithmeticOpKind::Div, right),
+            Operator::Modulo => arith(left, ArithmeticOpKind::Mod, right),
             other => Err(LoweringError::UnsupportedFeature(format!(
                 "operator: {other:?}"
             ))),
@@ -80,10 +80,10 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
         // SQL LIKE / ILIKE (dedicated expr node from the SQL parser)
         Expr::Like(like) => {
             let op = match (like.negated, like.case_insensitive) {
-                (false, false) => CompareOp::Like,
-                (true, false) => CompareOp::NotLike,
-                (false, true) => CompareOp::ILike,
-                (true, true) => CompareOp::NotILike,
+                (false, false) => CompareOpKind::Like,
+                (true, false) => CompareOpKind::NotLike,
+                (false, true) => CompareOpKind::ILike,
+                (true, true) => CompareOpKind::NotILike,
             };
             compare(&like.expr, op, &like.pattern)
         }
@@ -98,8 +98,8 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
                 Unresolved::Literal(ScalarValue::Float64(v)) => {
                     Ok(Unresolved::Literal(ScalarValue::Float64(-v)))
                 }
-                other => Ok(Unresolved::Arith {
-                    op: ArithOp::Mul,
+                other => Ok(Unresolved::Arithmetic {
+                    op: ArithmeticOpKind::Mul,
                     left: Rc::new(Unresolved::Literal(ScalarValue::Int64(-1))),
                     right: Rc::new(other),
                 }),
@@ -174,12 +174,12 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
         Expr::Between(b) => {
             // Normalize: `x BETWEEN low AND high` → `x >= low AND x <= high`.
             // `x NOT BETWEEN low AND high` → `x < low OR x > high`.
-            let x_low = compare(&b.expr, CompareOp::Ge, &b.low)?;
-            let x_high = compare(&b.expr, CompareOp::Le, &b.high)?;
+            let x_low = compare(&b.expr, CompareOpKind::Ge, &b.low)?;
+            let x_high = compare(&b.expr, CompareOpKind::Le, &b.high)?;
             if b.negated {
                 // NOT BETWEEN: invert each side
-                let lt = compare(&b.expr, CompareOp::Lt, &b.low)?;
-                let gt = compare(&b.expr, CompareOp::Gt, &b.high)?;
+                let lt = compare(&b.expr, CompareOpKind::Lt, &b.low)?;
+                let gt = compare(&b.expr, CompareOpKind::Gt, &b.high)?;
                 Ok(Unresolved::BoolOr(vec![lt, gt]))
             } else {
                 Ok(Unresolved::BoolAnd(vec![x_low, x_high]))
@@ -213,7 +213,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
 
 pub(super) fn compare(
     left: &Expr,
-    op: CompareOp,
+    op: CompareOpKind,
     right: &Expr,
 ) -> Result<Unresolved, LoweringError> {
     Ok(Unresolved::Compare {
@@ -223,8 +223,12 @@ pub(super) fn compare(
     })
 }
 
-pub(super) fn arith(left: &Expr, op: ArithOp, right: &Expr) -> Result<Unresolved, LoweringError> {
-    Ok(Unresolved::Arith {
+pub(super) fn arith(
+    left: &Expr,
+    op: ArithmeticOpKind,
+    right: &Expr,
+) -> Result<Unresolved, LoweringError> {
+    Ok(Unresolved::Arithmetic {
         op,
         left: Rc::new(df_expr_to_unresolved(left)?),
         right: Rc::new(df_expr_to_unresolved(right)?),

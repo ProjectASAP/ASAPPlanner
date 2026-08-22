@@ -7,7 +7,7 @@
 //!   bound, name-based [`ColumnRef`] before).
 //! - [`agg_intent`] — the aggregation-intent vocabulary.
 //! - [`expr_ir`] — the [`ColumnRef`] column-reference type and the scalar
-//!   operator/literal vocabulary ([`ScalarValue`], [`CompareOp`], [`ArithOp`])
+//!   operator/literal vocabulary ([`ScalarValue`], [`CompareOpKind`], [`ArithmeticOpKind`])
 //!   [`QueryExpr`]'s scalar variants are built from.
 //! - [`schema`] — the per-edge [`Schema`] every node carries.
 //! - [`binder`] / [`column_resolution`] — name resolution: turn a `ColumnRef`
@@ -45,7 +45,7 @@ pub use column_resolution::{
     output_schema_for_aggregate, resolve_column_ref, resolve_column_refs, resolve_expr,
     ResolveError,
 };
-pub use expr_ir::{ArithOp, ColumnRef, CompareOp, ScalarValue};
+pub use expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 pub use query_expr::{
     aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
     InfoMatcher, JoinKind, Predicate, ProjectItem, QueryExpr, QueryExprError, Reduction,

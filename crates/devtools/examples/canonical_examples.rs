@@ -1,7 +1,7 @@
 // cargo run -p asap-lower --example canonical_examples
 //
 // One-off: pretty-print the QueryExpr for one canonical query per variant,
-// plus custom Join/SetOp/Distinct/CTE probes, to eyeball the actual shape.
+// plus custom Join/SetOp/Dedup/CTE probes, to eyeball the actual shape.
 
 use asap_devtools::lower_promql;
 use asap_frontend_sql::{lower_sql_dialect, SqlCatalog};
@@ -48,25 +48,25 @@ fn bgp_catalog() -> SqlCatalog {
 async fn main() {
     let promql_examples: &[(&str, &str)] = &[
         ("Scan", "up"),
-        ("BinaryOp + Scalar", "up > 1"),
-        ("EvalTime", "time()"),
+        ("BinaryOp + PromqlScalar", "up > 1"),
+        ("QueryTimestamp", "time()"),
         ("Aggregate", "sum(up)"),
         (
-            "Relabel",
+            "PromqlRelabel",
             r#"label_replace(up, "foo", "$1", "bar", "(.*)")"#,
         ),
-        ("Sample", "limitk(3, up)"),
-        ("InfoJoin", "info(up)"),
+        ("PromqlSeriesSample", "limitk(3, up)"),
+        ("PromqlInfoEnrich", "info(up)"),
         ("Sort + Limit (topk)", "topk(3, up)"),
-        ("Subquery", "avg_over_time(up[5m:1m])"),
+        ("PromqlSubquery", "avg_over_time(up[5m:1m])"),
         ("TimeRange", "rate(http_requests_total[5m])"),
         ("TimeShift", "up offset 5m"),
         (
-            "Merge",
+            "Concat",
             r#"histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0.9)"#,
         ),
-        ("VectorFromScalar", "vector(1)"),
-        ("ScalarFromVector", "scalar(up)"),
+        ("PromqlVectorFromScalar", "vector(1)"),
+        ("PromqlScalarFromVector", "scalar(up)"),
     ];
     for (label, q) in promql_examples {
         println!("=== {label} === promql> {q}");
@@ -82,11 +82,11 @@ async fn main() {
     let sql_examples: &[(&str, &str, &str)] = &[
         ("Filter + Scan", "packets", "SELECT * FROM packets WHERE proto = 'tcp'"),
         ("Project", "packets", "SELECT srcip, dstip FROM packets"),
-        ("WindowFunc", "packets", "SELECT srcip, LAG(time) OVER (PARTITION BY srcip ORDER BY time) FROM packets"),
+        ("SQLWindowFunc", "packets", "SELECT srcip, LAG(time) OVER (PARTITION BY srcip ORDER BY time) FROM packets"),
         ("Join (custom)", "bgp", "SELECT u.prefix FROM bgp_updates u JOIN bgp_rib_state r ON u.prefix = r.prefix"),
         ("SetOp / UNION (custom)", "packets", "SELECT srcip FROM packets UNION SELECT dstip FROM packets"),
         ("SetOp / UNION ALL (custom)", "packets", "SELECT srcip FROM packets UNION ALL SELECT dstip FROM packets"),
-        ("Distinct, row-level (custom)", "packets", "SELECT DISTINCT srcip, dstip FROM packets"),
+        ("Dedup, row-level (custom)", "packets", "SELECT DISTINCT srcip, dstip FROM packets"),
         ("CTE (custom)", "packets", "WITH totals AS (SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip) SELECT * FROM totals WHERE cnt > 10"),
         ("CTE referenced twice / diamond (custom)", "packets", "WITH a AS (SELECT srcip, COUNT(*) AS c FROM packets GROUP BY srcip) SELECT x.srcip FROM a x JOIN a y ON x.srcip = y.srcip"),
         ("Nested subquery, no CTE syntax (custom)", "packets", "SELECT * FROM (SELECT srcip, COUNT(*) AS cnt FROM packets GROUP BY srcip) t WHERE cnt > 10"),
