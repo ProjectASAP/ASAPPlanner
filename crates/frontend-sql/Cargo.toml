@@ -11,6 +11,9 @@ edition = "2021"
 asap-types = { path = "../types" }
 asap-sql-function-catalog = { path = "../sql-function-catalog" }
 datafusion = "43"
+# `AggIntent::Extension.payload` for ClickHouse's argMax/argMin (issue #232)
+# -- opaque JSON, matching how `asap-types` itself carries it.
+serde_json = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

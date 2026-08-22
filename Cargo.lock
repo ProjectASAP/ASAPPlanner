@@ -340,6 +340,7 @@ dependencies = [
  "asap-types",
  "datafusion",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
 ]

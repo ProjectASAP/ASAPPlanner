@@ -1466,3 +1466,91 @@ async fn count_if_composes_with_group_by() {
     assert_eq!(*by, GroupKeys::by(vec![0]));
     assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
 }
+
+// ── Issue #232: argMax/argMin -- AggIntent::Extension, not a first-class
+// core variant. A repo-wide search (PromQL front end, other SQL dialects,
+// docs) turned up no second deployment model wanting this two-column,
+// row-selecting shape, so per `AggIntent::Extension`'s own "core only grows
+// for intents ≥2 deployment models actually use" bar, it stays an opaque
+// `Extension` rather than a new `ArgMax`/`ArgMin` core variant. Unlike
+// `countIf`/`uniqExact`, there is no native DataFusion aggregate shape to
+// rewrite to (`RewriteKind::PassThrough`) -- `lower_agg_intent` builds the
+// `AggIntent` directly from the ClickHouse name. ─────────────────────────
+
+#[tokio::test]
+async fn arg_max_lowers_to_an_extension_intent() {
+    // No existing `AggIntent` reducer fits: every one folds one column to a
+    // value derived from itself, while `argMax(arg, val)` returns a
+    // *different* column's value, selected by which row maximizes a second.
+    let qe = lower_clickhouse(
+        "SELECT service, argMax(service, latency) AS busiest FROM metrics GROUP BY service",
+    )
+    .await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert_eq!(
+        *by,
+        GroupKeys::by(vec![1]),
+        "grouped by `service` (schema index 1)"
+    );
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [AggIntent::Extension { ext_kind, .. }] if ext_kind == "arg_max"
+        ),
+        "expected Extension {{ ext_kind: \"arg_max\", .. }}, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn arg_min_lowers_to_its_own_extension_kind() {
+    let qe = lower_clickhouse("SELECT argMin(service, latency) FROM metrics").await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(by.is_empty());
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [AggIntent::Extension { ext_kind, .. }] if ext_kind == "arg_min"
+        ),
+        "expected Extension {{ ext_kind: \"arg_min\", .. }}, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn arg_max_payload_preserves_both_column_names() {
+    // Core never resolves an `Extension`'s payload, so both columns are kept
+    // as validated bare-column `ColumnRef`s in `payload`, not run through
+    // positional `ColumnId` binding -- see `lower_arg_selector`'s doc.
+    let qe = lower_clickhouse("SELECT argMax(service, latency) AS m FROM metrics").await;
+    let (_, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    let AggIntent::Extension { payload, .. } = &measures[0] else {
+        panic!("expected an Extension intent, got {:?}", measures[0]);
+    };
+    let named = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|c| c.get("Named"))
+            .and_then(|n| n.as_str())
+            .map(str::to_string)
+    };
+    assert_eq!(named("arg_col"), Some("service".to_string()));
+    assert_eq!(named("val_col"), Some("latency".to_string()));
+}
+
+#[tokio::test]
+async fn arg_max_rejects_a_non_column_argument() {
+    // Same "bare column only" rule as every other reducer (`reducer_col`,
+    // issue #115) -- an expression argument is rejected, not silently
+    // dropped or materialized into the wrong column.
+    let err = lower_sql_dialect(
+        "SELECT argMax(service, latency * 2) FROM metrics",
+        &catalog(),
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("argMax over a non-column expression must be rejected");
+    assert!(
+        format!("{err}").contains("non-column expression"),
+        "got {err}"
+    );
+}

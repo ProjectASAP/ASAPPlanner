@@ -182,8 +182,13 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // caveat" section) -- getting these functions' *names* to lower to a
     // structurally correct `FunctionCall` node is what's in scope here, not
     // array/map indexing or interval-literal conversion.
-    expect(Category::Lowered, 145);
-    expect(Category::Plan, 40);
+    // `argMax` support (issue #232 -- `AggIntent::Extension`, catalog-driven
+    // `RewriteKind::PassThrough`) clears the "unknown function: argmax" `Plan`
+    // failure for all 3 corpus occurrences: every one has both arguments as
+    // bare columns of the scanned table, so all 3 lower end to end with no
+    // companion gap (unlike `splitByChar`'s array-indexing gap, #230).
+    expect(Category::Lowered, 148);
+    expect(Category::Plan, 37);
     expect(Category::Schema, 0);
     expect(Category::Parse, 0);
     // One query that used to fail at `uniqExact` (`Plan`) now clears that
