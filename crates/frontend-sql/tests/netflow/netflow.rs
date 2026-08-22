@@ -199,10 +199,10 @@ fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
         } => Some((reduction.expect_reduce(), measures)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
-        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Dedup { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::Subquery { child, .. } => first_aggregate(child),
+        | QueryExpr::PromqlSubquery { child, .. } => first_aggregate(child),
         _ => None,
     }
 }
@@ -269,13 +269,13 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
         | QueryExpr::TimeRange { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::Subquery { child, .. }
-        | QueryExpr::Distinct { child, .. }
-        | QueryExpr::WindowFunc { child, .. }
-        | QueryExpr::Relabel { child, .. }
-        | QueryExpr::Sample { child, .. }
+        | QueryExpr::PromqlSubquery { child, .. }
+        | QueryExpr::Dedup { child, .. }
+        | QueryExpr::SQLWindowFunc { child, .. }
+        | QueryExpr::PromqlRelabel { child, .. }
+        | QueryExpr::PromqlSeriesSample { child, .. }
         | QueryExpr::TimeShift { child, .. }
-        | QueryExpr::InfoJoin { child, .. } => visit(child, f),
+        | QueryExpr::PromqlInfoEnrich { child, .. } => visit(child, f),
         QueryExpr::BinaryOp { lhs, rhs, .. }
         | QueryExpr::Join {
             left: lhs,
@@ -290,13 +290,13 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
             visit(lhs, f);
             visit(rhs, f);
         }
-        QueryExpr::Merge { children } => {
+        QueryExpr::Concat { children } => {
             for child in children {
                 visit(child, f);
             }
         }
-        QueryExpr::VectorFromScalar(child) | QueryExpr::ScalarFromVector(child) => visit(child, f),
-        QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
+        QueryExpr::PromqlVectorFromScalar(child) | QueryExpr::PromqlScalarFromVector(child) => visit(child, f),
+        QueryExpr::Scan { .. } | QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp => {}
         // Scalar expression variants (issue #205) aren't relational nodes;
         // this visitor only walks the relational tree, so stop here.
         QueryExpr::Column(_)
@@ -310,7 +310,7 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
         | QueryExpr::Cast { .. }
         | QueryExpr::InList { .. }
         | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arith { .. }
+        | QueryExpr::Arithmetic { .. }
         | QueryExpr::Case { .. } => {}
     }
 }

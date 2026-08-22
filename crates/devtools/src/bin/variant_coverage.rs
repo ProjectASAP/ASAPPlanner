@@ -14,26 +14,26 @@ use std::collections::BTreeSet;
 
 const ALL_VARIANTS: &[&str] = &[
     "Scan",
-    "Scalar",
-    "EvalTime",
-    "VectorFromScalar",
-    "ScalarFromVector",
-    "Relabel",
-    "InfoJoin",
-    "Sample",
+    "PromqlScalar",
+    "QueryTimestamp",
+    "PromqlVectorFromScalar",
+    "PromqlScalarFromVector",
+    "PromqlRelabel",
+    "PromqlInfoEnrich",
+    "PromqlSeriesSample",
     "Filter",
     "Project",
     "Aggregate",
-    "Distinct",
-    "Merge",
+    "Dedup",
+    "Concat",
     "Join",
     "SetOp",
     "Sort",
     "Limit",
-    "Subquery",
+    "PromqlSubquery",
     "TimeRange",
     "TimeShift",
-    "WindowFunc",
+    "SQLWindowFunc",
     "BinaryOp",
 ];
 
@@ -42,30 +42,30 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
         QueryExpr::Scan { .. } => {
             seen.insert("Scan");
         }
-        QueryExpr::Scalar(_) => {
-            seen.insert("Scalar");
+        QueryExpr::PromqlScalar(_) => {
+            seen.insert("PromqlScalar");
         }
-        QueryExpr::EvalTime => {
-            seen.insert("EvalTime");
+        QueryExpr::QueryTimestamp => {
+            seen.insert("QueryTimestamp");
         }
-        QueryExpr::VectorFromScalar(inner) => {
-            seen.insert("VectorFromScalar");
+        QueryExpr::PromqlVectorFromScalar(inner) => {
+            seen.insert("PromqlVectorFromScalar");
             walk(inner, seen);
         }
-        QueryExpr::ScalarFromVector(inner) => {
-            seen.insert("ScalarFromVector");
+        QueryExpr::PromqlScalarFromVector(inner) => {
+            seen.insert("PromqlScalarFromVector");
             walk(inner, seen);
         }
-        QueryExpr::Relabel { child, .. } => {
-            seen.insert("Relabel");
+        QueryExpr::PromqlRelabel { child, .. } => {
+            seen.insert("PromqlRelabel");
             walk(child, seen);
         }
-        QueryExpr::InfoJoin { child, .. } => {
-            seen.insert("InfoJoin");
+        QueryExpr::PromqlInfoEnrich { child, .. } => {
+            seen.insert("PromqlInfoEnrich");
             walk(child, seen);
         }
-        QueryExpr::Sample { child, .. } => {
-            seen.insert("Sample");
+        QueryExpr::PromqlSeriesSample { child, .. } => {
+            seen.insert("PromqlSeriesSample");
             walk(child, seen);
         }
         QueryExpr::Filter { child, .. } => {
@@ -80,12 +80,12 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
             seen.insert("Aggregate");
             walk(child, seen);
         }
-        QueryExpr::Distinct { child, .. } => {
-            seen.insert("Distinct");
+        QueryExpr::Dedup { child, .. } => {
+            seen.insert("Dedup");
             walk(child, seen);
         }
-        QueryExpr::Merge { children } => {
-            seen.insert("Merge");
+        QueryExpr::Concat { children } => {
+            seen.insert("Concat");
             children.iter().for_each(|c| walk(c, seen));
         }
         QueryExpr::Join { left, right, .. } => {
@@ -106,8 +106,8 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
             seen.insert("Limit");
             walk(child, seen);
         }
-        QueryExpr::Subquery { child, .. } => {
-            seen.insert("Subquery");
+        QueryExpr::PromqlSubquery { child, .. } => {
+            seen.insert("PromqlSubquery");
             walk(child, seen);
         }
         QueryExpr::TimeRange { child, .. } => {
@@ -118,8 +118,8 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
             seen.insert("TimeShift");
             walk(child, seen);
         }
-        QueryExpr::WindowFunc { child, .. } => {
-            seen.insert("WindowFunc");
+        QueryExpr::SQLWindowFunc { child, .. } => {
+            seen.insert("SQLWindowFunc");
             walk(child, seen);
         }
         QueryExpr::BinaryOp { lhs, rhs, .. } => {
@@ -140,7 +140,7 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
         | QueryExpr::Cast { .. }
         | QueryExpr::InList { .. }
         | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arith { .. }
+        | QueryExpr::Arithmetic { .. }
         | QueryExpr::Case { .. } => {}
     }
 }

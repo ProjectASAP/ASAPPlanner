@@ -99,7 +99,7 @@ pub enum SummaryExpr {
     },
 
     /// ⊕ — union of summaries across stages / shards. Distinct from the
-    /// pre-ASAP `Merge` because summary union has type constraints: all
+    /// pre-ASAP `Concat` because summary union has type constraints: all
     /// inputs must agree on `family` (kind + params) and the catalog flag
     /// `mergeable` must be true. Inserted by a deployment's own stage
     /// allocator (not modeled in this crate) on cut edges.

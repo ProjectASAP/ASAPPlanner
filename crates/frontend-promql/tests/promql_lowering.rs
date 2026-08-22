@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use asap_types::pre_asap::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, QueryExpr, Reduction, ScalarValue, Source,
+    AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, QueryExpr, Reduction, ScalarValue, Source,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{BatchEntry, Query, QueryLanguage, QueryRequirements, QueryWorkload};
@@ -46,7 +46,7 @@ fn regex_matcher_lowers_to_regex_compareop() {
     let QueryExpr::Compare { left, op, right } = predicates[0].0.as_ref() else {
         panic!("expected Compare, got {:?}", predicates[0].0);
     };
-    assert_eq!(*op, CompareOp::Regex);
+    assert_eq!(*op, CompareOpKind::Regex);
     // The label matcher's column is resolved positionally against the scan schema.
     let path_id = schema.column_id("path").expect("path in scan schema");
     assert!(matches!(left.as_ref(), QueryExpr::Column(id) if *id == path_id));
@@ -526,7 +526,7 @@ fn binary_op_division() {
     let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Div));
+    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div));
     assert!(
         matches!(lhs.as_ref(), QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::Rate]))
     );
@@ -904,20 +904,20 @@ fn topk_over_bare_selector_ranks_raw_samples() {
 
 /// The `(label value, intent)` of each `histogram_quantiles` branch.
 fn quantile_branches(q: &QueryExpr) -> Vec<(String, AggIntent)> {
-    let QueryExpr::Merge { children } = q else {
-        panic!("expected a Merge at the root, got {q:?}");
+    let QueryExpr::Concat { children } = q else {
+        panic!("expected a Concat at the root, got {q:?}");
     };
     children
         .iter()
         .map(|c| {
-            let QueryExpr::Relabel { value, child, .. } = c else {
-                panic!("expected Relabel per branch, got {c:?}");
+            let QueryExpr::PromqlRelabel { value, child, .. } = c else {
+                panic!("expected PromqlRelabel per branch, got {c:?}");
             };
             let QueryExpr::Literal(ScalarValue::Utf8(v)) = value.as_ref() else {
                 panic!("expected a literal label value, got {value:?}");
             };
             let QueryExpr::Aggregate { measures, .. } = child.as_ref() else {
-                panic!("expected an Aggregate under the Relabel, got {child:?}");
+                panic!("expected an Aggregate under the PromqlRelabel, got {child:?}");
             };
             (v.clone(), measures[0].clone())
         })
@@ -959,11 +959,11 @@ fn histogram_quantiles_over_classic_buckets_interpolates() {
 
 #[test]
 fn histogram_quantiles_branches_are_union_compatible() {
-    // `Merge` derives its schema from the first child, so every branch must
+    // `Concat` derives its schema from the first child, so every branch must
     // agree on column names — the φ lives in the label, not the column name.
     let q = lower(r#"histogram_quantiles(testhistogram3, "q", 0.5, 0.9)"#);
-    let QueryExpr::Merge { children } = &q else {
-        panic!("expected Merge");
+    let QueryExpr::Concat { children } = &q else {
+        panic!("expected Concat");
     };
     let shapes: Vec<Vec<String>> = children
         .iter()
@@ -988,11 +988,11 @@ fn histogram_quantiles_branches_are_union_compatible() {
 #[test]
 fn histogram_quantiles_uses_the_given_label_name() {
     let q = lower(r#"histogram_quantiles(h, "phi", 0.5)"#);
-    let QueryExpr::Merge { children } = &q else {
-        panic!("expected Merge");
+    let QueryExpr::Concat { children } = &q else {
+        panic!("expected Concat");
     };
-    let QueryExpr::Relabel { dst, .. } = &children[0] else {
-        panic!("expected Relabel");
+    let QueryExpr::PromqlRelabel { dst, .. } = &children[0] else {
+        panic!("expected PromqlRelabel");
     };
     assert_eq!(dst, "phi");
 }

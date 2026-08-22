@@ -24,7 +24,7 @@ to one source language.
 **[Time-related nodes](#time-related-nodes)**
 - [`TimeRange`](#timerange) — a range-vector lookback over the time axis (PromQL `[5m]`).
 - [`TimeShift`](#timeshift) — shifts *when* a selector is evaluated (PromQL `offset`/`@`).
-- [`Subquery`](#subquery) — re-evaluates an instant-vector expression over a range at a given step.
+- [`PromqlSubquery`](#promqlsubquery) — re-evaluates an instant-vector expression over a range at a given step.
 
 **[Relational nodes](#relational-nodes)** — common to both SQL and PromQL
 - [`Scan`](#scan) — identifies the logical data source.
@@ -33,22 +33,22 @@ to one source language.
 - [`BinaryOp`](#binaryop) — arithmetic / comparison / boolean composition of two inputs.
 - [`Sort`](#sort) — generic (non-heavy-hitter) order-by, optionally per-group.
 - [`Limit`](#limit) — caps the row count, with an offset.
-- [`Distinct`](#distinct) — row-level deduplication.
+- [`Dedup`](#dedup) — row-level deduplication.
 - [`Join`](#join) — logical join of two inputs.
 - [`SetOp`](#setop) — SQL's typed set operations (`UNION`/`INTERSECT`/`EXCEPT`).
-- [`Merge`](#merge) — exact, untyped `UNION ALL` of union-compatible branches.
+- [`Concat`](#concat) — exact, untyped `UNION ALL` of union-compatible branches.
 
 **[PromQL-specific nodes](#promql-specific-nodes)**
-- [`Scalar`](#scalar) — a scalar constant leaf.
-- [`EvalTime`](#evaltime) — the query evaluation time as a scalar (PromQL `time()`).
-- [`VectorFromScalar`](#vectorfromscalar) — promotes a scalar to a label-less instant vector.
-- [`ScalarFromVector`](#scalarfromvector) — collapses a single-series vector to a scalar.
-- [`Relabel`](#relabel) — per-series label rewrite (PromQL `label_replace`/`label_join`).
-- [`InfoJoin`](#infojoin) — left-join label enrichment from an info metric.
-- [`Sample`](#sample) — keeps a subset of whole series, not a reduction.
+- [`PromqlScalar`](#promqlscalar) — a scalar constant leaf.
+- [`QueryTimestamp`](#querytimestamp) — the query evaluation time as a scalar (PromQL `time()`).
+- [`PromqlVectorFromScalar`](#promqlvectorfromscalar) — promotes a scalar to a label-less instant vector.
+- [`PromqlScalarFromVector`](#promqlscalarfromvector) — collapses a single-series vector to a scalar.
+- [`PromqlRelabel`](#promqlrelabel) — per-series label rewrite (PromQL `label_replace`/`label_join`).
+- [`PromqlInfoEnrich`](#promqlinfoenrich) — left-join label enrichment from an info metric.
+- [`PromqlSeriesSample`](#promqlseriessample) — keeps a subset of whole series, not a reduction.
 
 **[SQL-specific nodes](#sql-specific-nodes)**
-- [`WindowFunc`](#windowfunc) — SQL analytic window function (`OVER (...)`).
+- [`SQLWindowFunc`](#sqlwindowfunc) — SQL analytic window function (`OVER (...)`).
 
 ## Aggregation-related nodes
 
@@ -215,7 +215,7 @@ up offset 5m
 - `shift` — the offset/`@` anchor to apply (moves *when* `child` is evaluated).
 - `child` — the selector being shifted.
 
-### Subquery
+### PromqlSubquery
 
 PromQL sub-query syntax `<expr>[range:resolution]` — a logical pass-through that lets a
 range function apply to the result of an already-evaluated instant-vector expression at a
@@ -345,10 +345,10 @@ topk(3, up)
 - `offset` — how many leading rows to skip first.
 - `child` — the input being capped.
 
-### Distinct
+### Dedup
 
 δ — row-level deduplication (SQL `SELECT DISTINCT`). Distinct from `AggIntent::Cardinality`
-(`COUNT(DISTINCT col)`), which collapses to a single number — `Distinct` still returns
+(`COUNT(DISTINCT col)`), which collapses to a single number — `Dedup` still returns
 multiple rows.
 
 ```sql
@@ -375,8 +375,8 @@ SELECT u.prefix FROM bgp_updates u JOIN bgp_rib_state r ON u.prefix = r.prefix
 
 ### SetOp
 
-SQL's typed set operations — `UNION`/`INTERSECT`/`EXCEPT` — as opposed to `Merge`'s untyped
-concatenation. `UNION` (dedup) further wraps a `SetOp` in a `Distinct`; `UNION ALL` does not.
+SQL's typed set operations — `UNION`/`INTERSECT`/`EXCEPT` — as opposed to `Concat`'s untyped
+concatenation. `UNION` (dedup) further wraps a `SetOp` in a `Dedup`; `UNION ALL` does not.
 
 ```sql
 SELECT srcip FROM packets UNION ALL SELECT dstip FROM packets
@@ -388,7 +388,7 @@ SELECT srcip FROM packets UNION ALL SELECT dstip FROM packets
 - `left` — the left branch.
 - `right` — the right branch.
 
-### Merge
+### Concat
 
 ⊕ — exact, n-ary `UNION ALL` of independent, union-compatible branches; rows concatenate,
 never dedup. Used when a single `Aggregate` can't express the shape — the canonical case is
@@ -405,7 +405,7 @@ histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0
 
 ## PromQL-specific nodes
 
-### Scalar
+### PromqlScalar
 
 A scalar constant leaf — a PromQL number literal, or a folded constant scalar expression.
 Appears as a `BinaryOp` operand for `<vector> op <scalar>` thresholds and unit conversions.
@@ -416,7 +416,7 @@ up > 1
 
 **Fields:** a single unnamed `f64` — the constant value.
 
-### EvalTime
+### QueryTimestamp
 
 The query **evaluation time** as a scalar — PromQL `time()` — and the implicit input of the
 no-argument calendar functions (`hour()`, `day_of_week()`, ...).
@@ -425,7 +425,7 @@ no-argument calendar functions (`hour()`, `day_of_week()`, ...).
 time()
 ```
 
-### VectorFromScalar
+### PromqlVectorFromScalar
 
 The scalar→instant-vector bridge — PromQL `vector(s)`. Promotes a scalar-typed child to a
 single label-less series carrying that value at every step, e.g. for dead-man's-switch
@@ -437,7 +437,7 @@ vector(1)
 
 **Fields:** a single unnamed child `QueryExpr` — the scalar-typed expression being promoted to a vector.
 
-### ScalarFromVector
+### PromqlScalarFromVector
 
 The instant-vector→scalar bridge — PromQL `scalar(v)`. Collapses a single-element vector to
 its value (NaN at runtime if the input isn't exactly one series).
@@ -448,7 +448,7 @@ scalar(up)
 
 **Fields:** a single unnamed child `QueryExpr` — the single-series vector being collapsed to a scalar.
 
-### Relabel
+### PromqlRelabel
 
 ρ — a per-series label rewrite. PromQL `label_replace`/`label_join`; every row passes
 through unchanged except for the destination label, whose new value is computed from the
@@ -463,7 +463,7 @@ label_replace(up, "foo", "$1", "bar", "(.*)")
 - `value` — the scalar expression computing the new label value from the child's labels.
 - `child` — the input series being relabeled.
 
-### InfoJoin
+### PromqlInfoEnrich
 
 PromQL `info(v, [selector])` — left-join label enrichment. Each series in the child is
 enriched with labels from the matching info metric(s) (`target_info` by default).
@@ -476,7 +476,7 @@ info(up)
 - `selector` — matchers picking which info metric(s) to enrich from; empty = the default `target_info`.
 - `child` — the input series being enriched.
 
-### Sample
+### PromqlSeriesSample
 
 Series-sampling selection — PromQL `limitk`/`limit_ratio`. Keeps a subset of whole series
 per group (or globally); not a ranking (`TopK`) and not a reduction, since the output schema
@@ -493,7 +493,7 @@ limitk(3, up)
 
 ## SQL-specific nodes
 
-### WindowFunc
+### SQLWindowFunc
 
 SQL analytic window function: `func(args) OVER (PARTITION BY ... ORDER BY ...)`. Output
 schema is the child schema plus one new column for the window expression's result.

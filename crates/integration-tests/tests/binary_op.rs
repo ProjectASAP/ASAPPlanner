@@ -11,7 +11,7 @@ use std::time::Duration;
 use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
 use asap_types::pre_asap::{
-    AggIntent, ArithOp, BinaryOpKind, CompareOp, GroupSide, QueryExpr, Reduction, Source,
+    AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, GroupSide, QueryExpr, Reduction, Source,
     VectorGrouping, VectorMatch, VectorMatchKind,
 };
 use asap_types::types::AccuracyTarget;
@@ -57,7 +57,7 @@ fn sum_by_job(metric: &str) -> QueryExpr {
 #[test]
 fn q18_div_bare_scans() {
     let expected = QueryExpr::BinaryOp {
-        op: BinaryOpKind::Arith(ArithOp::Div),
+        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         lhs: Rc::new(scan("http_requests_total", &[])),
         rhs: Rc::new(scan("http_requests_total", &[])),
         vector_match: None,
@@ -69,7 +69,7 @@ fn q18_div_bare_scans() {
 #[test]
 fn q19_add_with_on_match() {
     let expected = QueryExpr::BinaryOp {
-        op: BinaryOpKind::Arith(ArithOp::Add),
+        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
         lhs: Rc::new(scan("http_requests_total", &[])),
         rhs: Rc::new(scan("http_requests_total", &[])),
         vector_match: Some(VectorMatch {
@@ -88,7 +88,7 @@ fn q19_add_with_on_match() {
 #[test]
 fn q20_div_two_rates() {
     let expected = QueryExpr::BinaryOp {
-        op: BinaryOpKind::Arith(ArithOp::Div),
+        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         lhs: Rc::new(rate_agg("http_requests_total")),
         rhs: Rc::new(rate_agg("http_errors_total")),
         vector_match: None,
@@ -105,7 +105,7 @@ fn q_gt_comparison() {
     assert_eq!(
         lower("http_requests_total > http_errors_total"),
         QueryExpr::BinaryOp {
-            op: BinaryOpKind::Compare(CompareOp::Gt),
+            op: BinaryOpKind::Compare(CompareOpKind::Gt),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("http_errors_total", &[])),
             vector_match: None,
@@ -118,7 +118,7 @@ fn q_lt_comparison() {
     assert_eq!(
         lower("http_requests_total < http_errors_total"),
         QueryExpr::BinaryOp {
-            op: BinaryOpKind::Compare(CompareOp::Lt),
+            op: BinaryOpKind::Compare(CompareOpKind::Lt),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("http_errors_total", &[])),
             vector_match: None,
@@ -131,7 +131,7 @@ fn q_ge_comparison() {
     assert_eq!(
         lower("http_requests_total >= http_errors_total"),
         QueryExpr::BinaryOp {
-            op: BinaryOpKind::Compare(CompareOp::Ge),
+            op: BinaryOpKind::Compare(CompareOpKind::Ge),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("http_errors_total", &[])),
             vector_match: None,
@@ -144,7 +144,7 @@ fn q_le_comparison() {
     assert_eq!(
         lower("http_requests_total <= http_errors_total"),
         QueryExpr::BinaryOp {
-            op: BinaryOpKind::Compare(CompareOp::Le),
+            op: BinaryOpKind::Compare(CompareOpKind::Le),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("http_errors_total", &[])),
             vector_match: None,
@@ -158,7 +158,7 @@ fn q_add_with_ignoring() {
     assert_eq!(
         lower("http_requests_total + ignoring(job) http_errors_total"),
         QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arith(ArithOp::Add),
+            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("http_errors_total", &[])),
             vector_match: Some(VectorMatch {
@@ -176,7 +176,7 @@ fn q_mul_group_left() {
     assert_eq!(
         lower("http_requests_total * on(job) group_left() node_info"),
         QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arith(ArithOp::Mul),
+            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
             lhs: Rc::new(scan("http_requests_total", &[])),
             rhs: Rc::new(scan("node_info", &[])),
             vector_match: Some(VectorMatch {
@@ -197,7 +197,7 @@ fn q_mul_group_right() {
     assert_eq!(
         lower("node_info * on(job) group_right() http_requests_total"),
         QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arith(ArithOp::Mul),
+            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
             lhs: Rc::new(scan("node_info", &[])),
             rhs: Rc::new(scan("http_requests_total", &[])),
             vector_match: Some(VectorMatch {
@@ -217,7 +217,7 @@ fn q_mul_group_right() {
 #[test]
 fn q21_div_two_sum_by_job() {
     let expected = QueryExpr::BinaryOp {
-        op: BinaryOpKind::Arith(ArithOp::Div),
+        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
         lhs: Rc::new(sum_by_job("http_requests_total")),
         rhs: Rc::new(sum_by_job("http_errors_total")),
         vector_match: None,
@@ -229,13 +229,13 @@ fn q21_div_two_sum_by_job() {
 }
 
 // #36 — unary negation lowers as `expr * -1`: a Mul BinaryOp of the vector
-//   against Scalar(-1), no vector match. The vector side keeps its schema.
+//   against PromqlScalar(-1), no vector match. The vector side keeps its schema.
 #[test]
 fn q36_unary_negation_is_multiply_by_minus_one() {
     let expected = QueryExpr::BinaryOp {
-        op: BinaryOpKind::Arith(ArithOp::Mul),
+        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
         lhs: Rc::new(scan("some_metric", &[])),
-        rhs: Rc::new(QueryExpr::Scalar(-1.0)),
+        rhs: Rc::new(QueryExpr::PromqlScalar(-1.0)),
         vector_match: None,
     };
     assert_eq!(lower("-some_metric"), expected);
@@ -251,9 +251,9 @@ fn q36_sum_of_negation_nests() {
         output_names: vec!["".into()],
         having: None,
         child: Rc::new(QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arith(ArithOp::Mul),
+            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
             lhs: Rc::new(scan("node_cpu_seconds_total", &[])),
-            rhs: Rc::new(QueryExpr::Scalar(-1.0)),
+            rhs: Rc::new(QueryExpr::PromqlScalar(-1.0)),
             vector_match: None,
         }),
     };

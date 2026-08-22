@@ -27,7 +27,7 @@
 #![allow(non_snake_case)]
 
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
-use asap_types::pre_asap::{AggIntent, BinaryOpKind, CompareOp, QueryExpr, Reduction};
+use asap_types::pre_asap::{AggIntent, BinaryOpKind, CompareOpKind, QueryExpr, Reduction};
 use asap_types::types::AccuracyTarget;
 
 const CORPUS: &str = include_str!("data/awesome_prometheus_alerts.txt");
@@ -62,13 +62,13 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             | QueryExpr::Filter { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }
-            | QueryExpr::Subquery { child, .. }
-            | QueryExpr::Distinct { child, .. }
-            | QueryExpr::WindowFunc { child, .. }
+            | QueryExpr::PromqlSubquery { child, .. }
+            | QueryExpr::Dedup { child, .. }
+            | QueryExpr::SQLWindowFunc { child, .. }
             | QueryExpr::Project { child, .. }
-            | QueryExpr::Relabel { child, .. }
-            | QueryExpr::Sample { child, .. }
-            | QueryExpr::InfoJoin { child, .. } => go(child, out),
+            | QueryExpr::PromqlRelabel { child, .. }
+            | QueryExpr::PromqlSeriesSample { child, .. }
+            | QueryExpr::PromqlInfoEnrich { child, .. } => go(child, out),
             QueryExpr::BinaryOp { lhs, rhs, .. }
             | QueryExpr::Join {
                 left: lhs,
@@ -83,13 +83,13 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
                 go(lhs, out);
                 go(rhs, out);
             }
-            QueryExpr::Merge { children } => children.iter().for_each(|c| go(c, out)),
-            QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
+            QueryExpr::Concat { children } => children.iter().for_each(|c| go(c, out)),
+            QueryExpr::PromqlVectorFromScalar(inner) | QueryExpr::PromqlScalarFromVector(inner) => {
                 go(inner, out)
             }
             // `AggIntent` only ever lives in `Aggregate.measures`, never in a
             // scalar position (issue #205) — nothing to collect there.
-            QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
+            QueryExpr::Scan { .. } | QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp => {}
             QueryExpr::Column(_)
             | QueryExpr::Literal(_)
             | QueryExpr::Compare { .. }
@@ -101,7 +101,7 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             | QueryExpr::Cast { .. }
             | QueryExpr::InList { .. }
             | QueryExpr::FunctionCall { .. }
-            | QueryExpr::Arith { .. }
+            | QueryExpr::Arithmetic { .. }
             | QueryExpr::Case { .. } => {}
         }
     }
@@ -176,7 +176,7 @@ fn vector_vs_vector_comparison_lowers_to_binaryop() {
     let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Compare(CompareOp::Gt));
+    assert_eq!(*op, BinaryOpKind::Compare(CompareOpKind::Gt));
     assert!(matches!(lhs.as_ref(), QueryExpr::Scan { .. }));
     assert!(matches!(rhs.as_ref(), QueryExpr::Scan { .. }));
 }
@@ -187,7 +187,7 @@ fn kube_replica_mismatch_comparison_lowers() {
     let qe = ok("kube_replicaset_spec_replicas != kube_replicaset_status_ready_replicas");
     assert!(matches!(
         &qe,
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Compare(CompareOp::Ne)
+        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Compare(CompareOpKind::Ne)
     ));
 }
 
@@ -217,7 +217,7 @@ fn error_ratio_core_lowers() {
     let QueryExpr::BinaryOp { op, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
-    assert!(matches!(op, BinaryOpKind::Arith(_)));
+    assert!(matches!(op, BinaryOpKind::Arithmetic(_)));
     assert_eq!(
         intents(&qe)
             .iter()
@@ -262,7 +262,7 @@ fn all_targets_missing_core_lowers() {
 #[test]
 fn scalar_threshold_comparisons_lower_to_binaryop_scalar() {
     // ~822/949 corpus queries are `<vector> <cmp> <scalar>`. The numeric
-    // threshold is now a `Scalar` operand of the `BinaryOp` (issue #35) — the
+    // threshold is now a `PromqlScalar` operand of the `BinaryOp` (issue #35) — the
     // single biggest unblock for real alerts.
     for q in [
         "prometheus_config_last_reload_successful != 1",
@@ -273,7 +273,7 @@ fn scalar_threshold_comparisons_lower_to_binaryop_scalar() {
             panic!("expected a BinaryOp for {q:?}");
         };
         assert!(
-            matches!(rhs.as_ref(), QueryExpr::Scalar(_)),
+            matches!(rhs.as_ref(), QueryExpr::PromqlScalar(_)),
             "scalar threshold operand for {q:?}, got {rhs:?}"
         );
     }
@@ -323,12 +323,12 @@ fn predict_linear_function_body_lowers_with_horizon() {
 #[test]
 fn vector_literal_lowers_to_a_labelless_vector() {
     // `vector(1)` — used in dead-man's-switch ("always firing") alerts. Now
-    // lowers to a `VectorFromScalar` over the scalar `1` (issue #48).
+    // lowers to a `PromqlVectorFromScalar` over the scalar `1` (issue #48).
     let qe = ok("vector(1)");
-    let QueryExpr::VectorFromScalar(inner) = &qe else {
-        panic!("expected VectorFromScalar, got {qe:?}");
+    let QueryExpr::PromqlVectorFromScalar(inner) = &qe else {
+        panic!("expected PromqlVectorFromScalar, got {qe:?}");
     };
-    assert!(matches!(inner.as_ref(), QueryExpr::Scalar(v) if *v == 1.0));
+    assert!(matches!(inner.as_ref(), QueryExpr::PromqlScalar(v) if *v == 1.0));
     // The result is a vector: it carries a time index (unlike a bare scalar).
     assert!(qe.output_schema().unwrap().time_index.is_some());
 }

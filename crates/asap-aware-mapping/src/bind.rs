@@ -270,7 +270,7 @@ mod tests {
     use super::*;
     use asap_types::post_asap::{ExactKind, ExactParams, SketchKind, SketchParams};
     use asap_types::pre_asap::agg_intent::default_quantile;
-    use asap_types::pre_asap::expr_ir::{CompareOp, ScalarValue};
+    use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
     use asap_types::pre_asap::query_expr::{Predicate, Source};
     use asap_types::pre_asap::schema::{Column, DataType};
     use asap_types::types::AccuracyTarget;
@@ -721,7 +721,7 @@ mod tests {
         let q = QueryExpr::Filter {
             pred: Predicate(Rc::new(QueryExpr::Compare {
                 left: Rc::new(QueryExpr::Column(0)),
-                op: CompareOp::Gt,
+                op: CompareOpKind::Gt,
                 right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(0.5))),
             })),
             child: Rc::new(agg(vec![], default_quantile(0.99), metric_scan(&[]))),

@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
-use asap_types::pre_asap::{CompareOp, Predicate, QueryExpr, ScalarValue, Source};
+use asap_types::pre_asap::{CompareOpKind, Predicate, QueryExpr, ScalarValue, Source};
 use asap_types::types::AccuracyTarget;
 
 fn lower(q: &str) -> QueryExpr {
@@ -30,7 +30,7 @@ fn bare_scan(metric: &str, labels: &[&str]) -> QueryExpr {
 fn eq_pred(col_id: usize, value: &str) -> Predicate {
     Predicate(Rc::new(QueryExpr::Compare {
         left: Rc::new(QueryExpr::Column(col_id)),
-        op: CompareOp::Eq,
+        op: CompareOpKind::Eq,
         right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(value.into()))),
     }))
 }
@@ -38,7 +38,7 @@ fn eq_pred(col_id: usize, value: &str) -> Predicate {
 fn ne_pred(col_id: usize, value: &str) -> Predicate {
     Predicate(Rc::new(QueryExpr::Compare {
         left: Rc::new(QueryExpr::Column(col_id)),
-        op: CompareOp::Ne,
+        op: CompareOpKind::Ne,
         right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(value.into()))),
     }))
 }
@@ -46,7 +46,7 @@ fn ne_pred(col_id: usize, value: &str) -> Predicate {
 fn regex_pred(col_id: usize, pattern: &str) -> Predicate {
     Predicate(Rc::new(QueryExpr::Compare {
         left: Rc::new(QueryExpr::Column(col_id)),
-        op: CompareOp::Regex,
+        op: CompareOpKind::Regex,
         right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(pattern.into()))),
     }))
 }
@@ -54,7 +54,7 @@ fn regex_pred(col_id: usize, pattern: &str) -> Predicate {
 fn notregex_pred(col_id: usize, pattern: &str) -> Predicate {
     Predicate(Rc::new(QueryExpr::Compare {
         left: Rc::new(QueryExpr::Column(col_id)),
-        op: CompareOp::NotRegex,
+        op: CompareOpKind::NotRegex,
         right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(pattern.into()))),
     }))
 }

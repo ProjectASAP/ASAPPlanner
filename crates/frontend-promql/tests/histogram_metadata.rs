@@ -30,7 +30,7 @@ fn quantile_kind(qe: &QueryExpr) -> &'static str {
             | QueryExpr::Filter { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }
-            | QueryExpr::Subquery { child, .. }
+            | QueryExpr::PromqlSubquery { child, .. }
             | QueryExpr::Project { child, .. } => walk(child),
             _ => None,
         }

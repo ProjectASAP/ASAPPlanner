@@ -50,7 +50,7 @@ use asap_types::pre_asap::query_expr::{
 };
 use asap_types::pre_asap::schema::{DataType, Schema};
 use asap_types::pre_asap::{
-    ColumnRef, CompareOp, JoinKind, ScalarValue, SetOpKind, WindowFuncKind,
+    ColumnRef, CompareOpKind, JoinKind, ScalarValue, SetOpKind, WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
@@ -211,7 +211,7 @@ impl<'a> SqlLowerer<'a> {
             LogicalPlan::Limit(limit) => self.lower_limit(limit),
             LogicalPlan::Distinct(d) => match d {
                 Distinct::On(_) => Err(LoweringError::UnsupportedFeature("DISTINCT ON".into())),
-                Distinct::All(input) => Ok(Unresolved::Distinct {
+                Distinct::All(input) => Ok(Unresolved::Dedup {
                     cols: vec![],
                     child: Rc::new(self.lower_plan(input)?),
                 }),
@@ -386,7 +386,7 @@ impl<'a> SqlLowerer<'a> {
             kind: JoinKind::Semi,
             pred: Predicate(Rc::new(Unresolved::Compare {
                 left: Rc::new(df_expr_to_unresolved(&is.expr)?),
-                op: CompareOp::Eq,
+                op: CompareOpKind::Eq,
                 right: Rc::new(Unresolved::Column(ColumnRef::Named(
                     IN_SUBQUERY_KEY.to_string(),
                 ))),
@@ -500,7 +500,7 @@ impl<'a> SqlLowerer<'a> {
             .map(|(l, r)| {
                 Ok(Unresolved::Compare {
                     left: Rc::new(df_expr_to_unresolved(l)?),
-                    op: CompareOp::Eq,
+                    op: CompareOpKind::Eq,
                     right: Rc::new(df_expr_to_unresolved(r)?),
                 })
             })
@@ -586,7 +586,7 @@ impl<'a> SqlLowerer<'a> {
             .last()
             .map(|f| f.name().clone())
             .unwrap_or_else(|| "window".into());
-        Ok(Unresolved::WindowFunc {
+        Ok(Unresolved::SQLWindowFunc {
             func,
             args,
             partition_by: partition_by.into(),
@@ -710,10 +710,10 @@ impl<'a> SqlLowerer<'a> {
     ///
     /// One scan produces several grouping levels; `Aggregate.by` holds a single
     /// key set. So each level becomes its own `Aggregate`, and the levels are
-    /// `Merge`d. A level that omits a key still has to *emit* it — as `NULL`, per
+    /// `Concat`ed. A level that omits a key still has to *emit* it — as `NULL`, per
     /// SQL — so each branch is wrapped in a `Project` that reinstates the missing
     /// keys as typed nulls and restores the canonical column order. That keeps
-    /// the branches union-compatible, which `Merge` requires (it derives its
+    /// the branches union-compatible, which `Concat` requires (it derives its
     /// schema from the first child).
     ///
     /// `Aggregate.child` is duplicated per level — the same trade
@@ -825,7 +825,7 @@ impl<'a> SqlLowerer<'a> {
             })
             .collect::<Result<Vec<_>, LoweringError>>()?;
 
-        Ok(Unresolved::Merge { children: branches })
+        Ok(Unresolved::Concat { children: branches })
     }
 
     fn lower_sort(&self, sort: &logical_expr::Sort) -> Result<Unresolved, LoweringError> {
@@ -849,7 +849,7 @@ impl<'a> SqlLowerer<'a> {
         Ok(Unresolved::Sort {
             keys,
             // SQL `ORDER BY` is a global sort; per-group ranking would come from a
-            // window function (`WindowFunc`), not a bare Sort.
+            // window function (`SQLWindowFunc`), not a bare Sort.
             partition_by: GroupKeys::none(),
             child: Rc::new(self.lower_plan(&sort.input)?),
         })

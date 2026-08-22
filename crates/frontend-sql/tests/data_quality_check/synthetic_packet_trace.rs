@@ -84,13 +84,13 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             | QueryExpr::Filter { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }
-            | QueryExpr::Subquery { child, .. }
-            | QueryExpr::Distinct { child, .. }
-            | QueryExpr::WindowFunc { child, .. }
+            | QueryExpr::PromqlSubquery { child, .. }
+            | QueryExpr::Dedup { child, .. }
+            | QueryExpr::SQLWindowFunc { child, .. }
             | QueryExpr::Project { child, .. }
-            | QueryExpr::Relabel { child, .. }
-            | QueryExpr::Sample { child, .. }
-            | QueryExpr::InfoJoin { child, .. } => go(child, out),
+            | QueryExpr::PromqlRelabel { child, .. }
+            | QueryExpr::PromqlSeriesSample { child, .. }
+            | QueryExpr::PromqlInfoEnrich { child, .. } => go(child, out),
             QueryExpr::BinaryOp { lhs, rhs, .. }
             | QueryExpr::Join {
                 left: lhs,
@@ -105,11 +105,11 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
                 go(lhs, out);
                 go(rhs, out);
             }
-            QueryExpr::Merge { children } => children.iter().for_each(|c| go(c, out)),
-            QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
+            QueryExpr::Concat { children } => children.iter().for_each(|c| go(c, out)),
+            QueryExpr::PromqlVectorFromScalar(inner) | QueryExpr::PromqlScalarFromVector(inner) => {
                 go(inner, out)
             }
-            QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
+            QueryExpr::Scan { .. } | QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp => {}
             // Scalar expression variants (issue #205): `AggIntent` only ever
             // lives in `Aggregate.measures`, never nested inside a scalar
             // expression tree, so there's nothing to recurse into here.
@@ -124,7 +124,7 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             | QueryExpr::Cast { .. }
             | QueryExpr::InList { .. }
             | QueryExpr::FunctionCall { .. }
-            | QueryExpr::Arith { .. }
+            | QueryExpr::Arithmetic { .. }
             | QueryExpr::Case { .. } => {}
         }
     }
@@ -144,26 +144,26 @@ fn first_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
         } => Some((reduction.expect_reduce(), measures)),
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
-        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Dedup { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::WindowFunc { child, .. }
-        | QueryExpr::Subquery { child, .. } => first_aggregate(child),
+        | QueryExpr::SQLWindowFunc { child, .. }
+        | QueryExpr::PromqlSubquery { child, .. } => first_aggregate(child),
         _ => None,
     }
 }
 
-/// Whether a `WindowFunc` (analytic `OVER (…)`) node appears anywhere.
+/// Whether a `SQLWindowFunc` (analytic `OVER (…)`) node appears anywhere.
 fn has_window_func(qe: &QueryExpr) -> bool {
     match qe {
-        QueryExpr::WindowFunc { .. } => true,
+        QueryExpr::SQLWindowFunc { .. } => true,
         QueryExpr::Project { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Aggregate { child, .. }
-        | QueryExpr::Distinct { child, .. }
+        | QueryExpr::Dedup { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::Subquery { child, .. } => has_window_func(child),
+        | QueryExpr::PromqlSubquery { child, .. } => has_window_func(child),
         _ => false,
     }
 }
@@ -287,7 +287,7 @@ async fn bytes_per_source_ip_is_sum() {
 #[tokio::test]
 async fn stateful_interarrival_uses_a_window_function() {
     // SI-AINT — the inter-arrival CTE uses `LAG(time) OVER (PARTITION BY srcip
-    // ORDER BY time)`, which lowers to an analytic `WindowFunc` node.
+    // ORDER BY time)`, which lowers to an analytic `SQLWindowFunc` node.
     let qe = lower(
         "WITH gaps AS (\
             SELECT srcip, time - LAG(time) OVER (PARTITION BY srcip ORDER BY time) AS gap \
@@ -299,7 +299,7 @@ async fn stateful_interarrival_uses_a_window_function() {
     .await;
     assert!(
         has_window_func(&qe),
-        "the LAG(...) OVER (...) inter-arrival gap must lower to a WindowFunc, got {qe:?}"
+        "the LAG(...) OVER (...) inter-arrival gap must lower to a SQLWindowFunc, got {qe:?}"
     );
 }
 

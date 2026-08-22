@@ -143,22 +143,22 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
             super::query_expr::Source::TimeSeries { metric } => metric.as_str(),
             super::query_expr::Source::Table { table_ref } => table_ref.as_str(),
         }),
-        QE::Scalar(_) | QE::EvalTime => None,
-        QE::VectorFromScalar(child) | QE::ScalarFromVector(child) => leftmost_scan_name(child),
-        QE::Relabel { child, .. }
-        | QE::InfoJoin { child, .. }
-        | QE::Sample { child, .. }
+        QE::PromqlScalar(_) | QE::QueryTimestamp => None,
+        QE::PromqlVectorFromScalar(child) | QE::PromqlScalarFromVector(child) => leftmost_scan_name(child),
+        QE::PromqlRelabel { child, .. }
+        | QE::PromqlInfoEnrich { child, .. }
+        | QE::PromqlSeriesSample { child, .. }
         | QE::Filter { child, .. }
         | QE::Project { child, .. }
         | QE::Aggregate { child, .. }
-        | QE::Distinct { child, .. }
+        | QE::Dedup { child, .. }
         | QE::Sort { child, .. }
         | QE::Limit { child, .. }
-        | QE::Subquery { child, .. }
+        | QE::PromqlSubquery { child, .. }
         | QE::TimeRange { child, .. }
         | QE::TimeShift { child, .. }
-        | QE::WindowFunc { child, .. } => leftmost_scan_name(child),
-        QE::Merge { children } => children.first().and_then(leftmost_scan_name),
+        | QE::SQLWindowFunc { child, .. } => leftmost_scan_name(child),
+        QE::Concat { children } => children.first().and_then(leftmost_scan_name),
         QE::Join { left, .. } | QE::SetOp { left, .. } | QE::BinaryOp { lhs: left, .. } => {
             leftmost_scan_name(left)
         }
@@ -177,7 +177,7 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
         | QE::Cast { .. }
         | QE::InList { .. }
         | QE::FunctionCall { .. }
-        | QE::Arith { .. }
+        | QE::Arithmetic { .. }
         | QE::Case { .. } => None,
     }
 }
@@ -186,9 +186,9 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
 /// resolves positionally — every place a front end constructing
 /// [`QueryExpr<ColumnRef>`](super::query_expr::QueryExpr) directly (issue
 /// #179) puts a name-based reference: `Scan.predicates`, `Aggregate`'s
-/// `reduction`/`having`/per-measure `col`, `Distinct.cols`, `Sample.by`,
+/// `reduction`/`having`/per-measure `col`, `Dedup.cols`, `PromqlSeriesSample.by`,
 /// `Filter.pred`, `Project.cols`, `Sort.keys`/`partition_by`,
-/// `WindowFunc.args`/`partition_by`/`order_by`, `Join.pred`, `Relabel.value`.
+/// `SQLWindowFunc.args`/`partition_by`/`order_by`, `Join.pred`, `PromqlRelabel.value`.
 /// The Binder seeds these into the usage-derived leaf so positional
 /// resolution downstream is total.
 pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<String> {
@@ -234,11 +234,11 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
                 }
                 walk(child, out);
             }
-            QE::Distinct { cols, child } => {
+            QE::Dedup { cols, child } => {
                 cols.iter().for_each(|c| push_ref_name(c, out));
                 walk(child, out);
             }
-            QE::Sample { by, child, .. } => {
+            QE::PromqlSeriesSample { by, child, .. } => {
                 group_keys(by, out);
                 walk(child, out);
             }
@@ -263,7 +263,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
                 group_keys(partition_by, out);
                 walk(child, out);
             }
-            QE::WindowFunc {
+            QE::SQLWindowFunc {
                 args,
                 partition_by,
                 order_by,
@@ -279,7 +279,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
                 }
                 walk(child, out);
             }
-            QE::Relabel { value, child, .. } => {
+            QE::PromqlRelabel { value, child, .. } => {
                 named(value, out);
                 walk(child, out);
             }
@@ -290,14 +290,14 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
                 walk(left, out);
                 walk(right, out);
             }
-            QE::Scalar(_) | QE::EvalTime => {}
-            QE::VectorFromScalar(child) | QE::ScalarFromVector(child) => walk(child, out),
-            QE::InfoJoin { child, .. }
+            QE::PromqlScalar(_) | QE::QueryTimestamp => {}
+            QE::PromqlVectorFromScalar(child) | QE::PromqlScalarFromVector(child) => walk(child, out),
+            QE::PromqlInfoEnrich { child, .. }
             | QE::Limit { child, .. }
-            | QE::Subquery { child, .. }
+            | QE::PromqlSubquery { child, .. }
             | QE::TimeRange { child, .. }
             | QE::TimeShift { child, .. } => walk(child, out),
-            QE::Merge { children } => children.iter().for_each(|c| walk(c, out)),
+            QE::Concat { children } => children.iter().for_each(|c| walk(c, out)),
             QE::SetOp { left, right, .. } => {
                 walk(left, out);
                 walk(right, out);
@@ -321,7 +321,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
             | QE::Cast { .. }
             | QE::InList { .. }
             | QE::FunctionCall { .. }
-            | QE::Arith { .. }
+            | QE::Arithmetic { .. }
             | QE::Case { .. } => {
                 unreachable!("walk reached a scalar QueryExpr variant directly: {node:?}")
             }

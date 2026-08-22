@@ -36,7 +36,7 @@ use std::time::Duration;
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
 use asap_types::pre_asap::schema::DataType;
 use asap_types::pre_asap::{
-    AggIntent, ArithOp, AtModifier, BinaryOpKind, CompareOp, MathFunc, QueryExpr, Reduction,
+    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, MathFunc, QueryExpr, Reduction,
     SampleKind, Source, TimeFunc,
 };
 use asap_types::types::AccuracyTarget;
@@ -77,13 +77,13 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::Subquery { child, .. }
-        | QueryExpr::Distinct { child, .. }
-        | QueryExpr::WindowFunc { child, .. }
+        | QueryExpr::PromqlSubquery { child, .. }
+        | QueryExpr::Dedup { child, .. }
+        | QueryExpr::SQLWindowFunc { child, .. }
         | QueryExpr::Project { child, .. }
-        | QueryExpr::Relabel { child, .. }
-        | QueryExpr::Sample { child, .. }
-        | QueryExpr::InfoJoin { child, .. } => collect(child, out),
+        | QueryExpr::PromqlRelabel { child, .. }
+        | QueryExpr::PromqlSeriesSample { child, .. }
+        | QueryExpr::PromqlInfoEnrich { child, .. } => collect(child, out),
         QueryExpr::BinaryOp { lhs, rhs, .. } => {
             collect(lhs, out);
             collect(rhs, out);
@@ -92,13 +92,13 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
             collect(left, out);
             collect(right, out);
         }
-        QueryExpr::Merge { children } => children.iter().for_each(|c| collect(c, out)),
-        QueryExpr::VectorFromScalar(inner) | QueryExpr::ScalarFromVector(inner) => {
+        QueryExpr::Concat { children } => children.iter().for_each(|c| collect(c, out)),
+        QueryExpr::PromqlVectorFromScalar(inner) | QueryExpr::PromqlScalarFromVector(inner) => {
             collect(inner, out)
         }
         // `AggIntent` only ever lives in `Aggregate.measures`, never in a
         // scalar position (issue #205) — nothing to collect there.
-        QueryExpr::Scan { .. } | QueryExpr::Scalar(_) | QueryExpr::EvalTime => {}
+        QueryExpr::Scan { .. } | QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp => {}
         QueryExpr::Column(_)
         | QueryExpr::Literal(_)
         | QueryExpr::Compare { .. }
@@ -110,7 +110,7 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         | QueryExpr::Cast { .. }
         | QueryExpr::InList { .. }
         | QueryExpr::FunctionCall { .. }
-        | QueryExpr::Arith { .. }
+        | QueryExpr::Arithmetic { .. }
         | QueryExpr::Case { .. } => {}
     }
 }
@@ -134,7 +134,7 @@ fn first_scan(e: &QueryExpr) -> (String, usize) {
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Sort { child, .. }
         | QueryExpr::Limit { child, .. }
-        | QueryExpr::Subquery { child, .. } => first_scan(child),
+        | QueryExpr::PromqlSubquery { child, .. } => first_scan(child),
         other => panic!("no Scan reachable from {other:?}"),
     }
 }
@@ -143,13 +143,13 @@ fn has<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, pred: F) -> bool {
     intents(e).iter().any(pred)
 }
 
-/// Whether the tree contains a `Mul`-by-`Scalar(-1)` anywhere — the shape unary
+/// Whether the tree contains a `Mul`-by-`PromqlScalar(-1)` anywhere — the shape unary
 /// negation lowers to (issue #36).
 fn negates_via_scalar(e: &QueryExpr) -> bool {
-    let is_neg_one = |q: &QueryExpr| matches!(q, QueryExpr::Scalar(v) if (*v + 1.0).abs() < 1e-12);
+    let is_neg_one = |q: &QueryExpr| matches!(q, QueryExpr::PromqlScalar(v) if (*v + 1.0).abs() < 1e-12);
     match e {
         QueryExpr::BinaryOp { op, lhs, rhs, .. } => {
-            (*op == BinaryOpKind::Arith(ArithOp::Mul) && (is_neg_one(lhs) || is_neg_one(rhs)))
+            (*op == BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul) && (is_neg_one(lhs) || is_neg_one(rhs)))
                 || negates_via_scalar(lhs)
                 || negates_via_scalar(rhs)
         }
@@ -158,7 +158,7 @@ fn negates_via_scalar(e: &QueryExpr) -> bool {
         | QueryExpr::Limit { child, .. }
         | QueryExpr::TimeRange { child, .. }
         | QueryExpr::TimeShift { child, .. }
-        | QueryExpr::Subquery { child, .. }
+        | QueryExpr::PromqlSubquery { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::Project { child, .. } => negates_via_scalar(child),
         _ => false,
@@ -576,7 +576,7 @@ fn vector_arithmetic() {
     let QueryExpr::BinaryOp { op, .. } = &qe else {
         panic!("expected BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Add));
+    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Add));
 }
 
 #[test]
@@ -590,7 +590,7 @@ fn on_matching_with_group_left() {
     else {
         panic!("expected BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Div));
+    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div));
     let vm = vector_match.as_ref().expect("on(...) group_left present");
     assert_eq!(vm.labels, vec!["instance".to_string(), "job".to_string()]);
     assert!(
@@ -604,7 +604,7 @@ fn vector_comparison_filters() {
     // SEMANTICS: `>` between two vectors keeps the LHS series where it holds.
     let qe = ok("go_goroutines > go_threads");
     assert!(
-        matches!(&qe, QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Compare(CompareOp::Gt))
+        matches!(&qe, QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Compare(CompareOpKind::Gt))
     );
 }
 
@@ -612,7 +612,7 @@ fn vector_comparison_filters() {
 fn unary_negation_lowers_as_multiply_by_minus_one() {
     // SEMANTICS (PromQL, issue #36): `-expr` flips the sign of every sample.
     // Now that a scalar operand exists (#35), it lowers as `expr * -1` — a `Mul`
-    // BinaryOp of the (label-preserving) vector against `Scalar(-1)`. These are
+    // BinaryOp of the (label-preserving) vector against `PromqlScalar(-1)`. These are
     // the five cases the old `__GAP` test pinned as rejected.
     for q in [
         "-rate(http_errors_total[5m])",
@@ -622,14 +622,14 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
         "sum(-node_cpu_seconds_total)",
     ] {
         let qe = ok(q);
-        // A `Mul`-by-`-1` against a `Scalar(-1)` appears somewhere in every tree.
+        // A `Mul`-by-`-1` against a `PromqlScalar(-1)` appears somewhere in every tree.
         assert!(
             negates_via_scalar(&qe),
             "no `* -1` negation found in {q}: {qe:?}"
         );
     }
 
-    // `-some_metric` at the root: `Scan * Scalar(-1)`, schema follows the vector.
+    // `-some_metric` at the root: `Scan * PromqlScalar(-1)`, schema follows the vector.
     let QueryExpr::BinaryOp {
         op,
         lhs,
@@ -639,14 +639,14 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
     else {
         panic!("expected a BinaryOp for `-some_metric`");
     };
-    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Mul));
+    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
     assert!(
         matches!(lhs.as_ref(), QueryExpr::Scan { .. }),
         "vector on the left"
     );
     assert!(
-        matches!(rhs.as_ref(), QueryExpr::Scalar(v) if (*v + 1.0).abs() < 1e-12),
-        "negation multiplies by Scalar(-1), got {rhs:?}"
+        matches!(rhs.as_ref(), QueryExpr::PromqlScalar(v) if (*v + 1.0).abs() < 1e-12),
+        "negation multiplies by PromqlScalar(-1), got {rhs:?}"
     );
     assert!(
         vector_match.is_none(),
@@ -675,7 +675,7 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
     assert!(matches!(
         child.as_ref(),
         QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arith(ArithOp::Mul),
+            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
             ..
         }
     ));
@@ -684,10 +684,10 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
 #[test]
 fn unary_negation_of_constant_folds_to_scalar() {
     // `-(10*1024*1024)` — the operand is constant-foldable, so negation collapses
-    // to a single negated `Scalar` leaf (no `BinaryOp`), just like a bare literal.
+    // to a single negated `PromqlScalar` leaf (no `BinaryOp`), just like a bare literal.
     assert!(matches!(
         ok("-(10*1024*1024)"),
-        QueryExpr::Scalar(v) if (v + 10_485_760.0).abs() < 1e-6
+        QueryExpr::PromqlScalar(v) if (v + 10_485_760.0).abs() < 1e-6
     ));
 }
 
@@ -698,12 +698,12 @@ fn double_unary_negation_nests() {
     let QueryExpr::BinaryOp { op, lhs, .. } = &ok("- -some_metric") else {
         panic!("expected outer BinaryOp for `- -some_metric`");
     };
-    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Mul));
+    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
     assert!(
         matches!(
             lhs.as_ref(),
             QueryExpr::BinaryOp {
-                op: BinaryOpKind::Arith(ArithOp::Mul),
+                op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
                 ..
             }
         ),
@@ -747,20 +747,20 @@ fn count_maps_to_cardinality_and_inherits_accuracy() {
 
 #[test]
 fn scalar_literal_operand_lowers_as_binaryop_scalar() {
-    // Issue #35: `<vector> op <scalar>` — the numeric threshold is a `Scalar`
+    // Issue #35: `<vector> op <scalar>` — the numeric threshold is a `PromqlScalar`
     // operand of the `BinaryOp`, and constant arithmetic (`10*1024*1024`) is
     // folded. The output schema is the vector side's.
     let qe = ok("node_filesystem_avail_bytes > 10*1024*1024");
     let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Compare(CompareOp::Gt));
+    assert_eq!(*op, BinaryOpKind::Compare(CompareOpKind::Gt));
     assert!(
         matches!(lhs.as_ref(), QueryExpr::Scan { .. }),
         "vector on the left"
     );
     assert!(
-        matches!(rhs.as_ref(), QueryExpr::Scalar(v) if (*v - 10_485_760.0).abs() < 1e-6),
+        matches!(rhs.as_ref(), QueryExpr::PromqlScalar(v) if (*v - 10_485_760.0).abs() < 1e-6),
         "folded scalar threshold on the right, got {rhs:?}"
     );
     // Schema derivation follows the vector side (a scalar contributes no labels).
@@ -770,13 +770,13 @@ fn scalar_literal_operand_lowers_as_binaryop_scalar() {
 #[test]
 fn scalar_arithmetic_scales_the_vector() {
     // `rate(m[5m]) * 100` — a unit conversion. Arithmetic BinaryOp of the vector
-    // with a `Scalar(100)`.
+    // with a `PromqlScalar(100)`.
     let qe = ok("rate(m[5m]) * 100");
     let QueryExpr::BinaryOp { op, rhs, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Mul));
-    assert!(matches!(rhs.as_ref(), QueryExpr::Scalar(v) if (*v - 100.0).abs() < 1e-9));
+    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
+    assert!(matches!(rhs.as_ref(), QueryExpr::PromqlScalar(v) if (*v - 100.0).abs() < 1e-9));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1003,7 +1003,7 @@ fn aggregate_over_binary_op_nests() {
 fn subquery_wraps_inner_query() {
     // SEMANTICS: `<inst>[range:res]` evaluates the inner query across a range.
     let qe = ok("rate(demo_api_request_duration_seconds_count[5m])[1h:]");
-    assert!(matches!(&qe, QueryExpr::Subquery { .. }));
+    assert!(matches!(&qe, QueryExpr::PromqlSubquery { .. }));
     assert!(has(&qe, |i| matches!(i, AggIntent::Rate)));
 }
 
@@ -1012,7 +1012,7 @@ fn over_time_of_subquery_reduces_per_series() {
     // SEMANTICS (PromQL): `max_over_time(rate(...)[1h:])` chains a sub-query into
     // a range-vector function — the sub-query evaluates `rate` across a 1h range,
     // then `max_over_time` takes the max of those samples *per series*. It lowers
-    // to a per-series `Max` reduction over a `Subquery` (issue #27).
+    // to a per-series `Max` reduction over a `PromqlSubquery` (issue #27).
     let qe = ok("max_over_time(rate(demo_api_request_duration_seconds_count[5m])[1h:])");
     let QueryExpr::Aggregate {
         reduction,
@@ -1032,8 +1032,8 @@ fn over_time_of_subquery_reduces_per_series() {
     // The reduction rides directly on the sub-query (the structural range marker
     // that keeps it label-preserving), which wraps the inner `rate`.
     assert!(
-        matches!(child.as_ref(), QueryExpr::Subquery { .. }),
-        "the `Max` reduces over a Subquery, got {child:?}"
+        matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }),
+        "the `Max` reduces over a PromqlSubquery, got {child:?}"
     );
     assert!(intents(&qe).iter().any(|i| matches!(i, AggIntent::Rate)));
 }
@@ -1041,7 +1041,7 @@ fn over_time_of_subquery_reduces_per_series() {
 #[test]
 fn quantile_over_time_of_subquery_carries_phi() {
     // The `quantile_over_time` φ parameter is read from arg 0; the sub-query is
-    // arg 1. It lowers to a per-series `Quantile(φ)` over the `Subquery`.
+    // arg 1. It lowers to a per-series `Quantile(φ)` over the `PromqlSubquery`.
     let qe = ok("quantile_over_time(0.9, rate(demo[5m])[1h:])");
     let QueryExpr::Aggregate {
         measures, child, ..
@@ -1052,7 +1052,7 @@ fn quantile_over_time_of_subquery_carries_phi() {
     assert!(
         matches!(measures.as_slice(), [AggIntent::Quantile { q, .. }] if (*q - 0.9).abs() < 1e-9)
     );
-    assert!(matches!(child.as_ref(), QueryExpr::Subquery { .. }));
+    assert!(matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }));
 }
 
 #[test]
@@ -1088,7 +1088,7 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     };
     assert_eq!(inner_reduction, &Reduction::PerEntity);
     assert!(matches!(inner_measures.as_slice(), [AggIntent::Max { .. }]));
-    assert!(matches!(inner_child.as_ref(), QueryExpr::Subquery { .. }));
+    assert!(matches!(inner_child.as_ref(), QueryExpr::PromqlSubquery { .. }));
 }
 
 #[test]
@@ -1102,7 +1102,7 @@ fn nested_subquery_from_prometheus_docs() {
     // `[10m:]` uses the **default resolution** (no explicit step). Each level
     // lowers to its own node, so the whole spine pins as:
     //
-    //   Max ∘ Subquery{10m, res: None} ∘ Deriv ∘ Subquery{30s, res: 5s}
+    //   Max ∘ PromqlSubquery{10m, res: None} ∘ Deriv ∘ PromqlSubquery{30s, res: 5s}
     //       ∘ Rate ∘ TimeRange{5s} ∘ Scan
     //
     // Every reduction is per-series (no grouping), so the output schema stays
@@ -1121,13 +1121,13 @@ fn nested_subquery_from_prometheus_docs() {
     assert_eq!(reduction, &Reduction::PerEntity);
     assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
 
-    let QueryExpr::Subquery {
+    let QueryExpr::PromqlSubquery {
         range,
         resolution,
         child,
     } = child.as_ref()
     else {
-        panic!("expected the outer `[10m:]` Subquery, got {child:?}");
+        panic!("expected the outer `[10m:]` PromqlSubquery, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(600));
     assert_eq!(*resolution, None, "`[10m:]` keeps the default resolution");
@@ -1144,13 +1144,13 @@ fn nested_subquery_from_prometheus_docs() {
     assert_eq!(reduction, &Reduction::PerEntity);
     assert!(matches!(measures.as_slice(), [AggIntent::Deriv]));
 
-    let QueryExpr::Subquery {
+    let QueryExpr::PromqlSubquery {
         range,
         resolution,
         child,
     } = child.as_ref()
     else {
-        panic!("expected the inner `[30s:5s]` Subquery, got {child:?}");
+        panic!("expected the inner `[30s:5s]` PromqlSubquery, got {child:?}");
     };
     assert_eq!(*range, Duration::from_secs(30));
     assert_eq!(*resolution, Some(Duration::from_secs(5)));
@@ -1450,7 +1450,7 @@ fn counter_derivative_composes_in_binary_ops() {
     let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &ratio else {
         panic!("expected BinaryOp, got {ratio:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Arith(ArithOp::Div));
+    assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Div));
     assert!(
         matches!(lhs.as_ref(), QueryExpr::Aggregate { measures, .. } if measures.as_slice() == [AggIntent::Delta])
     );
@@ -1480,7 +1480,7 @@ fn range_functions_over_a_subquery_reduce_per_series() {
     // Issue #55 — the whole range-vector family accepts a sub-query argument
     // (generalizing `*_over_time`, #42): `rate`/`increase`/`irate` and the
     // counter-derivatives. Each lowers to a per-series `Aggregate{[f]}` directly
-    // over the `Subquery` — the sub-query is the range context, so there is NO
+    // over the `PromqlSubquery` — the sub-query is the range context, so there is NO
     // separate `TimeRange` (that would double the range).
     for (q, want) in [
         ("rate(sum(m)[5m:])", AggIntent::Rate),
@@ -1512,8 +1512,8 @@ fn range_functions_over_a_subquery_reduce_per_series() {
             "{q}: wrong intent"
         );
         assert!(
-            matches!(child.as_ref(), QueryExpr::Subquery { .. }),
-            "{q}: reduces directly over the Subquery (no TimeRange), got {child:?}"
+            matches!(child.as_ref(), QueryExpr::PromqlSubquery { .. }),
+            "{q}: reduces directly over the PromqlSubquery (no TimeRange), got {child:?}"
         );
     }
 }
@@ -1690,8 +1690,8 @@ fn clamp_and_round_carry_their_params() {
 
 #[test]
 fn pi_lowers_to_a_scalar_constant() {
-    // `pi()` is the constant π — a `Scalar` leaf, not a `Math` intent.
-    assert!(matches!(ok("pi()"), QueryExpr::Scalar(v) if (v - std::f64::consts::PI).abs() < 1e-12));
+    // `pi()` is the constant π — a `PromqlScalar` leaf, not a `Math` intent.
+    assert!(matches!(ok("pi()"), QueryExpr::PromqlScalar(v) if (v - std::f64::consts::PI).abs() < 1e-12));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1731,7 +1731,7 @@ fn absent_keeps_matcher_labels_for_the_synthesized_output() {
 fn time_lowers_to_the_eval_time_scalar() {
     // SEMANTICS: `time()` is the query evaluation timestamp as a scalar — a leaf,
     // not an aggregate over any series.
-    assert!(matches!(ok("time()"), QueryExpr::EvalTime));
+    assert!(matches!(ok("time()"), QueryExpr::QueryTimestamp));
     // …and it is scalar-shaped: a single float `value`, no time index.
     let sch = ok("time()").output_schema().unwrap();
     assert_eq!(sch.columns.len(), 1);
@@ -1748,8 +1748,8 @@ fn time_minus_vector_is_the_uptime_pattern() {
     let QueryExpr::BinaryOp { lhs, op, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
-    assert!(matches!(lhs.as_ref(), QueryExpr::EvalTime));
-    assert!(matches!(op, BinaryOpKind::Arith(ArithOp::Sub)));
+    assert!(matches!(lhs.as_ref(), QueryExpr::QueryTimestamp));
+    assert!(matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub)));
     assert!(qe.output_schema().is_ok());
 }
 
@@ -1780,7 +1780,7 @@ fn calendar_functions_lower_to_time_fn_intents() {
 #[test]
 fn no_arg_calendar_function_reads_the_eval_time() {
     // `day_of_week()` with no argument computes over the evaluation time itself,
-    // so it is a `TimeFn` aggregate whose child is the `EvalTime` scalar.
+    // so it is a `TimeFn` aggregate whose child is the `QueryTimestamp` scalar.
     let qe = ok("day_of_week()");
     let QueryExpr::Aggregate {
         measures, child, ..
@@ -1792,7 +1792,7 @@ fn no_arg_calendar_function_reads_the_eval_time() {
         measures.as_slice(),
         [AggIntent::TimeFn(TimeFunc::DayOfWeek)]
     ));
-    assert!(matches!(child.as_ref(), QueryExpr::EvalTime));
+    assert!(matches!(child.as_ref(), QueryExpr::QueryTimestamp));
 }
 
 #[test]
@@ -1813,10 +1813,10 @@ fn vector_promotes_a_scalar_to_a_vector() {
     // SEMANTICS: `vector(s)` is the scalar→instant-vector bridge — a label-less
     // single series carrying the scalar's value.
     let qe = ok("vector(1)");
-    let QueryExpr::VectorFromScalar(inner) = &qe else {
-        panic!("expected VectorFromScalar, got {qe:?}");
+    let QueryExpr::PromqlVectorFromScalar(inner) = &qe else {
+        panic!("expected PromqlVectorFromScalar, got {qe:?}");
     };
-    assert!(matches!(inner.as_ref(), QueryExpr::Scalar(v) if *v == 1.0));
+    assert!(matches!(inner.as_ref(), QueryExpr::PromqlScalar(v) if *v == 1.0));
     // Vector-typed: schema has a time index (a scalar leaf has none).
     let sch = qe.output_schema().unwrap();
     assert!(sch.time_index.is_some());
@@ -1827,12 +1827,12 @@ fn vector_promotes_a_scalar_to_a_vector() {
 fn scalar_collapses_a_vector_to_a_scalar() {
     // SEMANTICS: `scalar(v)` is the instant-vector→scalar bridge.
     let qe = ok("scalar(node_load1)");
-    let QueryExpr::ScalarFromVector(inner) = &qe else {
-        panic!("expected ScalarFromVector, got {qe:?}");
+    let QueryExpr::PromqlScalarFromVector(inner) = &qe else {
+        panic!("expected PromqlScalarFromVector, got {qe:?}");
     };
     let (metric, _) = first_scan(inner);
     assert_eq!(metric, "node_load1");
-    // Scalar-typed: single `value` column, no time index.
+    // PromqlScalar-typed: single `value` column, no time index.
     let sch = qe.output_schema().unwrap();
     assert!(sch.time_index.is_none());
     assert_eq!(sch.columns.len(), 1);
@@ -1842,14 +1842,14 @@ fn scalar_collapses_a_vector_to_a_scalar() {
 #[test]
 fn vector_zero_is_a_vector_operand_of_a_set_op() {
     // `up or vector(0)` — the dead-man's-switch. `or` is a set op between two
-    // vectors, so `vector(0)` must be a vector (a `VectorFromScalar`), never a
+    // vectors, so `vector(0)` must be a vector (a `PromqlVectorFromScalar`), never a
     // folded scalar operand.
     let qe = ok("up or vector(0)");
     let QueryExpr::BinaryOp { rhs, op, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Or);
-    assert!(matches!(rhs.as_ref(), QueryExpr::VectorFromScalar(_)));
+    assert!(matches!(rhs.as_ref(), QueryExpr::PromqlVectorFromScalar(_)));
 }
 
 #[test]
@@ -1860,7 +1860,7 @@ fn scalar_of_a_vector_feeds_a_threshold_comparison() {
     let QueryExpr::BinaryOp { lhs, rhs, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
-    assert!(matches!(rhs.as_ref(), QueryExpr::ScalarFromVector(_)));
+    assert!(matches!(rhs.as_ref(), QueryExpr::PromqlScalarFromVector(_)));
     // The BinaryOp output schema follows the vector (lhs) side, not the scalar.
     let (metric, _) = first_scan(lhs);
     assert_eq!(metric, "node_load1");
@@ -1870,12 +1870,12 @@ fn scalar_of_a_vector_feeds_a_threshold_comparison() {
 #[test]
 fn info_lowers_to_a_label_enrichment_join() {
     // `info(v, [selector])` is a label-enrichment *join* against the info
-    // metric(s) — it lowers to an `InfoJoin` over the (unchanged) input vector
+    // metric(s) — it lowers to an `PromqlInfoEnrich` over the (unchanged) input vector
     // (issue #84). The value/time axis pass through; the enriched labels are
     // runtime, so the schema stays the child's.
     let qe = ok("info(rate(http_requests_total[5m]))");
-    let QueryExpr::InfoJoin { selector, child } = &qe else {
-        panic!("expected an InfoJoin, got {qe:?}");
+    let QueryExpr::PromqlInfoEnrich { selector, child } = &qe else {
+        panic!("expected an PromqlInfoEnrich, got {qe:?}");
     };
     assert!(selector.is_empty(), "no selector → default target_info");
     // The child is the untouched input (a per-series rate reduction here).
@@ -1890,8 +1890,8 @@ fn info_selector_carries_the_info_side_matchers() {
     // matchers are kept symbolically (not run through the single-metric selector
     // path).
     let qe = ok(r#"info(build_info, {__name__=~".+_info", another_data=~".+"})"#);
-    let QueryExpr::InfoJoin { selector, .. } = &qe else {
-        panic!("expected an InfoJoin, got {qe:?}");
+    let QueryExpr::PromqlInfoEnrich { selector, .. } = &qe else {
+        panic!("expected an PromqlInfoEnrich, got {qe:?}");
     };
     assert_eq!(
         selector.len(),
@@ -1900,7 +1900,7 @@ fn info_selector_carries_the_info_side_matchers() {
     );
     assert!(selector
         .iter()
-        .any(|m| m.label == "__name__" && m.op == CompareOp::Regex));
+        .any(|m| m.label == "__name__" && m.op == CompareOpKind::Regex));
     assert!(selector.iter().any(|m| m.label == "another_data"));
 }
 
@@ -1915,11 +1915,11 @@ fn info_composes_under_an_aggregation_and_over_a_time_shift() {
     // (issue #40) — the enrichment composes over the shifted selector.
     assert!(matches!(
         ok("info(metric @ 60)"),
-        QueryExpr::InfoJoin { .. }
+        QueryExpr::PromqlInfoEnrich { .. }
     ));
     assert!(matches!(
         ok("info(metric offset 1m)"),
-        QueryExpr::InfoJoin { .. }
+        QueryExpr::PromqlInfoEnrich { .. }
     ));
 }
 
@@ -2009,17 +2009,17 @@ fn count_values_label_colliding_with_a_group_key_is_not_duplicated() {
 fn limitk_and_limit_ratio_lower_to_series_sampling() {
     // `limitk`/`limit_ratio` are series-*sampling* selection — a subset of whole
     // series kept unchanged (NOT a ranking), so they lower to the dedicated
-    // `Sample` node, never `topk`'s `Sort → Limit` (issue #86).
+    // `PromqlSeriesSample` node, never `topk`'s `Sort → Limit` (issue #86).
     assert!(matches!(
         ok("limitk(2, http_requests)"),
-        QueryExpr::Sample {
+        QueryExpr::PromqlSeriesSample {
             kind: SampleKind::LimitK(2),
             ..
         }
     ));
     assert!(matches!(
         ok("limit_ratio(0.1, http_requests)"),
-        QueryExpr::Sample { kind: SampleKind::LimitRatio(r), .. } if (r - 0.1).abs() < 1e-9
+        QueryExpr::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r - 0.1).abs() < 1e-9
     ));
     // Series-preserving: the output schema equals the input's (ts, value).
     let sch = ok("limitk(2, http_requests)").output_schema().unwrap();
@@ -2033,11 +2033,11 @@ fn limit_ratio_keeps_a_negative_ratio_and_clamps_out_of_range() {
     // be normalised away. Out-of-range magnitudes clamp to [-1, 1] (Prometheus).
     assert!(matches!(
         ok("limit_ratio(-0.5, http_requests)"),
-        QueryExpr::Sample { kind: SampleKind::LimitRatio(r), .. } if (r + 0.5).abs() < 1e-9
+        QueryExpr::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r + 0.5).abs() < 1e-9
     ));
     assert!(matches!(
         ok("limit_ratio(1.1, http_requests)"),
-        QueryExpr::Sample { kind: SampleKind::LimitRatio(r), .. } if (r - 1.0).abs() < 1e-9
+        QueryExpr::PromqlSeriesSample { kind: SampleKind::LimitRatio(r), .. } if (r - 1.0).abs() < 1e-9
     ));
 }
 
@@ -2045,12 +2045,12 @@ fn limit_ratio_keeps_a_negative_ratio_and_clamps_out_of_range() {
 fn limitk_by_carries_the_grouping_and_composes_in_a_set_op() {
     // `limitk by (group)` samples per group; the grouping label is seeded.
     let qe = ok("limitk by (group) (2, http_requests)");
-    let QueryExpr::Sample { by, .. } = &qe else {
-        panic!("expected a Sample, got {qe:?}");
+    let QueryExpr::PromqlSeriesSample { by, .. } = &qe else {
+        panic!("expected a PromqlSeriesSample, got {qe:?}");
     };
     assert!(!by.is_empty(), "grouped sampling keeps its `by` keys");
     // `count(limitk(2, v) and v)` — the surviving series' identity matters, so
-    // the Sample must be preserved under the set op (it must lower, not reject).
+    // the PromqlSeriesSample must be preserved under the set op (it must lower, not reject).
     assert!(has(
         &ok("count(limitk(2, http_requests) and http_requests)"),
         |i| matches!(i, AggIntent::Cardinality { .. })
@@ -2060,7 +2060,7 @@ fn limitk_by_carries_the_grouping_and_composes_in_a_set_op() {
 #[test]
 fn dynamic_and_non_finite_sample_params_are_rejected() {
     // A dynamic k/ratio (not a compile-time constant) or a NaN can't be a static
-    // `Sample` param — rejected rather than mislowered.
+    // `PromqlSeriesSample` param — rejected rather than mislowered.
     let _ = rejected("limitk(NaN, http_requests)");
     let _ = rejected("limitk(scalar(foo), http_requests)");
     let _ = rejected("limit_ratio(time() % 17 / 17, http_requests)");
@@ -2070,15 +2070,15 @@ fn dynamic_and_non_finite_sample_params_are_rejected() {
 // T. Label-rewrite functions: label_replace / label_join   (functions.test; #50)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Descend single-child nodes to the first `Relabel`.
+/// Descend single-child nodes to the first `PromqlRelabel`.
 fn first_relabel(e: &QueryExpr) -> &QueryExpr {
     match e {
-        QueryExpr::Relabel { .. } => e,
+        QueryExpr::PromqlRelabel { .. } => e,
         QueryExpr::Aggregate { child, .. }
         | QueryExpr::Filter { child, .. }
         | QueryExpr::TimeRange { child, .. }
         | QueryExpr::TimeShift { child, .. } => first_relabel(child),
-        other => panic!("no Relabel reachable from {other:?}"),
+        other => panic!("no PromqlRelabel reachable from {other:?}"),
     }
 }
 
@@ -2092,8 +2092,8 @@ fn label_replace_is_a_relabel_over_the_vector() {
     // SEMANTICS: `label_replace(v, dst, repl, src, regex)` rewrites the `dst`
     // label per series from a regex over `src`; the sample value is untouched.
     let qe = ok(r#"label_replace(up, "host", "$1", "instance", "(.+):.*")"#);
-    let QueryExpr::Relabel { dst, value, child } = &qe else {
-        panic!("expected a Relabel, got {qe:?}");
+    let QueryExpr::PromqlRelabel { dst, value, child } = &qe else {
+        panic!("expected a PromqlRelabel, got {qe:?}");
     };
     assert_eq!(dst, "host");
     // The child is the untouched vector.
@@ -2113,8 +2113,8 @@ fn label_join_concatenates_source_labels() {
     // SEMANTICS: `label_join(v, dst, sep, src…)` joins the source labels with
     // `sep` into `dst`.
     let qe = ok(r#"label_join(up, "combined", "-", "job", "instance")"#);
-    let QueryExpr::Relabel { dst, value, .. } = &qe else {
-        panic!("expected a Relabel, got {qe:?}");
+    let QueryExpr::PromqlRelabel { dst, value, .. } = &qe else {
+        panic!("expected a PromqlRelabel, got {qe:?}");
     };
     assert_eq!(dst, "combined");
     assert!(is_fn_named(value, "label_join"));
@@ -2127,9 +2127,9 @@ fn label_replace_composes_under_an_aggregation() {
     // `sum by (host) (label_replace(up, "host", "$1", "instance", "(.+):.*"))` —
     // relabel first, then group by the synthesized label.
     let qe = ok(r#"sum by (host) (label_replace(up, "host", "$1", "instance", "(.+):.*"))"#);
-    // A Relabel sits below the outer Sum.
+    // A PromqlRelabel sits below the outer Sum.
     let relabel = first_relabel(&qe);
-    assert!(matches!(relabel, QueryExpr::Relabel { dst, .. } if dst == "host"));
+    assert!(matches!(relabel, QueryExpr::PromqlRelabel { dst, .. } if dst == "host"));
     assert!(has(&qe, |i| matches!(i, AggIntent::Sum { .. })));
     let sch = qe.output_schema().unwrap();
     assert!(sch.columns.iter().any(|c| c.name == "host"));
@@ -2224,25 +2224,25 @@ fn sort_by_label_desc_is_descending() {
 #[test]
 fn min_of_max_of_fold_constant_scalars() {
     // `min_of`/`max_of` are n-ary scalar reducers. When every argument is a
-    // constant they constant-fold to a `Scalar` leaf, just like scalar
+    // constant they constant-fold to a `PromqlScalar` leaf, just like scalar
     // arithmetic (#35) — the only form the intent algebra can hold (#89).
-    assert!(matches!(ok("min_of(3, 5)"), QueryExpr::Scalar(v) if v == 3.0));
-    assert!(matches!(ok("max_of(3, 5)"), QueryExpr::Scalar(v) if v == 5.0));
-    assert!(matches!(ok("min_of(-2, -5)"), QueryExpr::Scalar(v) if v == -5.0));
+    assert!(matches!(ok("min_of(3, 5)"), QueryExpr::PromqlScalar(v) if v == 3.0));
+    assert!(matches!(ok("max_of(3, 5)"), QueryExpr::PromqlScalar(v) if v == 5.0));
+    assert!(matches!(ok("min_of(-2, -5)"), QueryExpr::PromqlScalar(v) if v == -5.0));
     // Nested folds and use as a threshold operand.
-    assert!(matches!(ok("max_of(min_of(2, 3), 10)"), QueryExpr::Scalar(v) if v == 10.0));
+    assert!(matches!(ok("max_of(min_of(2, 3), 10)"), QueryExpr::PromqlScalar(v) if v == 10.0));
     let qe = ok("up > max_of(1, 2)");
     let QueryExpr::BinaryOp { rhs, .. } = &qe else {
         panic!("{qe:?}")
     };
-    assert!(matches!(rhs.as_ref(), QueryExpr::Scalar(v) if *v == 2.0));
+    assert!(matches!(rhs.as_ref(), QueryExpr::PromqlScalar(v) if *v == 2.0));
 }
 
 #[test]
 fn min_of_max_of_ignore_nan_like_the_min_max_aggregators() {
     // A NaN argument is skipped (Prometheus `min`/`max` NaN semantics).
-    assert!(matches!(ok("max_of(3, NaN)"), QueryExpr::Scalar(v) if v == 3.0));
-    assert!(matches!(ok("min_of(NaN, 3)"), QueryExpr::Scalar(v) if v == 3.0));
+    assert!(matches!(ok("max_of(3, NaN)"), QueryExpr::PromqlScalar(v) if v == 3.0));
+    assert!(matches!(ok("min_of(NaN, 3)"), QueryExpr::PromqlScalar(v) if v == 3.0));
 }
 
 #[test]

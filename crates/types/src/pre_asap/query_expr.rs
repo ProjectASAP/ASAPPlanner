@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::agg_intent::AggIntent;
-use super::expr_ir::{ArithOp, ColumnRef, CompareOp, ScalarValue};
+use super::expr_ir::{ArithmeticOpKind, ColumnRef, CompareOpKind, ScalarValue};
 use super::schema::{Column, ColumnId, DataType, Schema};
 
 /// The column-reference resolution state a [`QueryExpr<C>`] tree carries —
@@ -54,8 +54,8 @@ impl ColState for ColumnRef {
 pub enum QueryExprError {
     #[error("by-column id {0} out of range (input has {1} columns)")]
     InvalidGroupByColumn(ColumnId, usize),
-    #[error("Merge requires at least one child")]
-    EmptyMerge,
+    #[error("Concat requires at least one child")]
+    EmptyConcat,
     /// [`QueryExpr::output_schema`] called on (or reached, while recursing, a
     /// child that is) one of the scalar variants (issue #205) — those have no
     /// independent row schema of their own; a scalar expression's *type* only
@@ -69,7 +69,7 @@ pub enum QueryExprError {
 
 /// Positional grouping keys, shared by every "operate per group" operator:
 /// `Aggregate.by` (reduce per group), `Sort.partition_by` (rank per group —
-/// including generic `topk`/`bottomk`), and `WindowFunc.partition_by` (window
+/// including generic `topk`/`bottomk`), and `SQLWindowFunc.partition_by` (window
 /// per group). One spelling so grouping has a single home to evolve. Empty
 /// (and `by`) = no grouping (a global operation).
 ///
@@ -84,8 +84,8 @@ pub enum QueryExprError {
 /// every label *except* those listed; the complement can't be enumerated at
 /// lowering time under an open (usage-derived) schema, so it is deferred to the
 /// runtime — the excluded positions are stored, the kept set stays open. Only
-/// `Aggregate` ever produces the `without` form; `Sort` / `WindowFunc` /
-/// `Sample` groupings are always `by`.
+/// `Aggregate` ever produces the `without` form; `Sort` / `SQLWindowFunc` /
+/// `PromqlSeriesSample` groupings are always `by`.
 ///
 /// Serialises as a bare array for the (overwhelmingly common) `by` case —
 /// wire-compatible with the `Vec<ColumnId>` this field held before — and as
@@ -243,16 +243,16 @@ impl Source {
 }
 
 /// Operator on the query-level `BinaryOp` node. Reuses the scalar IR's
-/// [`ArithOp`] / [`CompareOp`] so every arithmetic/comparison operator has
+/// [`ArithmeticOpKind`] / [`CompareOpKind`] so every arithmetic/comparison operator has
 /// exactly one representation (and one `Display`) across the IR; the remaining
 /// variants are PromQL vector-set / power ops with no scalar-IR counterpart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOpKind {
-    /// Arithmetic — `Add/Sub/Mul/Div/Mod` (shared with `QueryExpr::Arith`).
-    Arith(ArithOp),
+    /// Arithmetic — `Add/Sub/Mul/Div/Mod` (shared with `QueryExpr::Arithmetic`).
+    Arithmetic(ArithmeticOpKind),
     /// Comparison — `Eq/Ne/Lt/Le/Gt/Ge` + `Like/ILike/Regex` family (shared
     /// with `QueryExpr::Compare`).
-    Compare(CompareOp),
+    Compare(CompareOpKind),
     /// PromQL logical-set intersection (`and`).
     And,
     /// PromQL logical-set union (`or`).
@@ -268,7 +268,7 @@ pub enum BinaryOpKind {
 impl std::fmt::Display for BinaryOpKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BinaryOpKind::Arith(op) => write!(f, "{op}"),
+            BinaryOpKind::Arithmetic(op) => write!(f, "{op}"),
             BinaryOpKind::Compare(op) => write!(f, "{op}"),
             BinaryOpKind::And => f.write_str("AND"),
             BinaryOpKind::Or => f.write_str("OR"),
@@ -333,7 +333,7 @@ pub enum WindowFuncKind {
 }
 
 /// A symbolic label matcher on the **info metric** side of an
-/// [`QueryExpr::InfoJoin`] (issue #84). Unlike a `Scan` predicate it is not
+/// [`QueryExpr::PromqlInfoEnrich`] (issue #84). Unlike a `Scan` predicate it is not
 /// resolved positionally — it references the info metric's labels (`__name__`
 /// picks the metric, the rest constrain data labels), which aren't in the input
 /// vector's schema; the post-ASAP binder applies it against the info metric.
@@ -341,12 +341,12 @@ pub enum WindowFuncKind {
 pub struct InfoMatcher {
     pub label: String,
     /// One of `Eq` / `Ne` / `Regex` / `NotRegex` (PromQL `=`/`!=`/`=~`/`!~`).
-    pub op: CompareOp,
+    pub op: CompareOpKind,
     pub value: String,
 }
 
 /// Series-sampling selection mode (PromQL `limitk` / `limit_ratio`, issue #86).
-/// A [`QueryExpr::Sample`] keeps a *subset of whole series*, unchanged — it does
+/// A [`QueryExpr::PromqlSeriesSample`] keeps a *subset of whole series*, unchanged — it does
 /// not rank or reduce, so it is distinct from `TopK` and from `Sort → Limit`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -525,24 +525,24 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// A scalar constant leaf — a PromQL number literal or a folded constant
     /// scalar expression (`10*1024*1024`). Appears as a [`BinaryOp`](Self::BinaryOp)
     /// operand for `<vector> op <scalar>` thresholds / unit conversions (#35).
-    Scalar(f64),
+    PromqlScalar(f64),
 
     /// The query **evaluation time** as a scalar (PromQL `time()`) — a runtime
     /// value, not a constant. Also the implicit input of the no-argument
     /// calendar functions (`hour()`, `day_of_week()`, …). Issue #46.
-    EvalTime,
+    QueryTimestamp,
 
     /// PromQL `vector(s)` — the scalar→instant-vector bridge. Promotes a
     /// scalar-typed child to a single label-less series carrying the scalar's
     /// value at every step. Lets a scalar participate where a vector is required
     /// (`up or vector(0)` dead-man's-switch). Issue #48.
-    VectorFromScalar(Rc<QueryExpr<C>>),
+    PromqlVectorFromScalar(Rc<QueryExpr<C>>),
 
     /// PromQL `scalar(v)` — the instant-vector→scalar bridge. Collapses a
     /// single-element vector to its value (NaN at runtime if the input is not
     /// exactly one series). Lets a vector feed a scalar position (`vector` /
     /// aggregation `k` args, thresholds). Issue #48.
-    ScalarFromVector(Rc<QueryExpr<C>>),
+    PromqlScalarFromVector(Rc<QueryExpr<C>>),
 
     /// ρ — a per-series **label rewrite** (PromQL `label_replace` /
     /// `label_join`). Every input row passes through unchanged except for the
@@ -551,7 +551,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// `label_replace` → a `label_replace(src, regex, replacement)` function
     /// call (regex capture-expansion), `label_join` → a `label_join(sep, srcs…)`
     /// concatenation. Sample values and the time axis are untouched. Issue #50.
-    Relabel {
+    PromqlRelabel {
         /// The label written by this rewrite (PromQL `dst_label`).
         dst: String,
         value: Rc<QueryExpr<C>>,
@@ -568,7 +568,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// resolves them from the info metric's schema. The output keeps
     /// `child`'s (open) schema: the
     /// grafted labels appear at runtime.
-    InfoJoin {
+    PromqlInfoEnrich {
         #[serde(default)]
         selector: Vec<InfoMatcher>,
         child: Rc<QueryExpr<C>>,
@@ -578,7 +578,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// Keeps a subset of whole series per `by` group (empty = global), passing
     /// each surviving series through unchanged. Not a ranking (`TopK`) and not a
     /// reduction: the output schema equals the child's.
-    Sample {
+    PromqlSeriesSample {
         #[serde(default)]
         by: GroupKeys<C>,
         kind: SampleKind,
@@ -619,7 +619,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
 
     /// δ — SQL `DISTINCT` / row deduplication. Positional like every other
     /// column reference here; empty = dedup on all columns (`SELECT DISTINCT *`).
-    Distinct {
+    Dedup {
         cols: Vec<C>,
         child: Rc<QueryExpr<C>>,
     },
@@ -641,9 +641,9 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// A row may appear in several branches, so no branch's unique key survives
     /// the union — `unique_keys` is dropped, as in `SetOp`.
     ///
-    /// Empty children is an error ([`QueryExprError::EmptyMerge`]), not an
+    /// Empty children is an error ([`QueryExprError::EmptyConcat`]), not an
     /// empty relation: there would be no schema to derive.
-    Merge { children: Vec<QueryExpr<C>> },
+    Concat { children: Vec<QueryExpr<C>> },
 
     /// Logical join. Post-ASAP binding picks the physical alternative.
     Join {
@@ -682,7 +682,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     },
 
     /// PromQL sub-query (`<expr>[range:resolution]`). Logical pass-through.
-    Subquery {
+    PromqlSubquery {
         range: Duration,
         #[serde(default)]
         resolution: Option<Duration>,
@@ -717,7 +717,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …)`.
     /// Output schema = child schema + one column named `output_name` (the name
     /// the enclosing `Project` references). Window frames are not modelled yet.
-    WindowFunc {
+    SQLWindowFunc {
         func: WindowFuncKind,
         /// Operand expressions (`LAG(value)` → `[Column(value_id)]`); empty for
         /// the rank-only functions (`ROW_NUMBER`/`RANK`/`DENSE_RANK`).
@@ -746,7 +746,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     // `ProjectItem`, `SortKey`). They're variants of this same tree now — a
     // scalar sub-expression is only ever reachable through one of those same
     // wrapper positions (`Filter.pred`, `ProjectItem.expr`, `Aggregate.having`,
-    // `Relabel.value`, `WindowFunc.args`, …), which is a *convention* this
+    // `PromqlRelabel.value`, `SQLWindowFunc.args`, …), which is a *convention* this
     // type no longer enforces at compile time the way the old, closed
     // `Expr<C>` variant set did — nothing stops constructing, say, a `Scan`
     // where a `Compare`'s `left` operand belongs. `output_schema` and every
@@ -766,7 +766,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// `left op right` — binary comparison.
     Compare {
         left: Rc<QueryExpr<C>>,
-        op: CompareOp,
+        op: CompareOpKind,
         right: Rc<QueryExpr<C>>,
     },
     /// Flat conjunction (logical AND). An empty list is vacuously true.
@@ -797,8 +797,8 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         args: Vec<QueryExpr<C>>,
     },
     /// Binary arithmetic: `left op right`.
-    Arith {
-        op: ArithOp,
+    Arithmetic {
+        op: ArithmeticOpKind,
         left: Rc<QueryExpr<C>>,
         right: Rc<QueryExpr<C>>,
     },
@@ -843,7 +843,7 @@ impl<C: ColState> QueryExpr<C> {
         match self {
             QueryExpr::Column(c) => vec![c],
             QueryExpr::Literal(_) => vec![],
-            QueryExpr::Compare { left, right, .. } | QueryExpr::Arith { left, right, .. } => {
+            QueryExpr::Compare { left, right, .. } | QueryExpr::Arithmetic { left, right, .. } => {
                 let mut v = left.columns_referenced();
                 v.extend(right.columns_referenced());
                 v
@@ -926,13 +926,13 @@ impl QueryExpr<ColumnId> {
             QueryExpr::Filter { child, .. }
             | QueryExpr::Sort { child, .. }
             | QueryExpr::Limit { child, .. }
-            | QueryExpr::Subquery { child, .. }
+            | QueryExpr::PromqlSubquery { child, .. }
             // Series sampling keeps a subset of whole series unchanged, so the
             // output schema (and row-uniqueness) is exactly the child's (#86).
-            | QueryExpr::Sample { child, .. }
+            | QueryExpr::PromqlSeriesSample { child, .. }
             // Info enrichment adds runtime info labels — the statically-known
             // schema is the child's (open), so it passes through (#84).
-            | QueryExpr::InfoJoin { child, .. }
+            | QueryExpr::PromqlInfoEnrich { child, .. }
             | QueryExpr::TimeRange { child, .. }
             // A time shift (`offset`/`@`) moves *when* the child is evaluated,
             // never its columns — schema passes through (#40).
@@ -944,7 +944,7 @@ impl QueryExpr<ColumnId> {
             // unset). The schema stays open (other labels remain runtime-only).
             // A rewrite can collapse two label sets into one, so row-uniqueness
             // is no longer provable — drop unique_keys.
-            QueryExpr::Relabel { dst, child, .. } => {
+            QueryExpr::PromqlRelabel { dst, child, .. } => {
                 let mut out = child.output_schema()?;
                 if let Some(existing) = out.columns.iter_mut().find(|c| c.name == *dst) {
                     existing.dtype = DataType::Utf8;
@@ -992,7 +992,7 @@ impl QueryExpr<ColumnId> {
                 })
             }
 
-            QueryExpr::Distinct { cols, child } => {
+            QueryExpr::Dedup { cols, child } => {
                 let mut out = child.output_schema()?;
                 // Deduplicating on `cols` makes them a unique key of the result.
                 if !cols.is_empty() {
@@ -1005,10 +1005,10 @@ impl QueryExpr<ColumnId> {
             // output shape is the first child's. A row can appear in more than
             // one branch, so no key of one branch is a key of the union: drop
             // unique_keys, exactly as `SetOp` does.
-            QueryExpr::Merge { children } => {
+            QueryExpr::Concat { children } => {
                 let mut s = children
                     .first()
-                    .ok_or(QueryExprError::EmptyMerge)
+                    .ok_or(QueryExprError::EmptyConcat)
                     .and_then(|c| c.output_schema())?;
                 s.unique_keys.clear();
                 Ok(s)
@@ -1066,7 +1066,7 @@ impl QueryExpr<ColumnId> {
                 })
             }
             // ψ-analytic — child schema + one appended window-output column.
-            QueryExpr::WindowFunc {
+            QueryExpr::SQLWindowFunc {
                 func,
                 args,
                 output_name,
@@ -1106,7 +1106,7 @@ impl QueryExpr<ColumnId> {
             // column so it can sit as a `BinaryOp` operand.
             // Both scalar leaves — a constant and the eval time — are a single
             // `value` column with no labels.
-            QueryExpr::Scalar(_) | QueryExpr::EvalTime => Ok(Schema {
+            QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp => Ok(Schema {
                 columns: vec![Column::new("value", DataType::Float64, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
@@ -1116,7 +1116,7 @@ impl QueryExpr<ColumnId> {
             // `vector(s)` yields a label-less instant vector: the (ts, value)
             // floor and nothing else. `closed` — its full label set (empty) is
             // known statically (#48).
-            QueryExpr::VectorFromScalar(_) => Ok(Schema {
+            QueryExpr::PromqlVectorFromScalar(_) => Ok(Schema {
                 columns: vec![
                     Column::new("ts", DataType::Timestamp, false),
                     Column::new("value", DataType::Float64, false),
@@ -1128,7 +1128,7 @@ impl QueryExpr<ColumnId> {
 
             // `scalar(v)` collapses to a single `value`, no time index — the same
             // scalar shape as a constant or `time()` (#48).
-            QueryExpr::ScalarFromVector(_) => Ok(Schema {
+            QueryExpr::PromqlScalarFromVector(_) => Ok(Schema {
                 columns: vec![Column::new("value", DataType::Float64, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
@@ -1141,7 +1141,7 @@ impl QueryExpr<ColumnId> {
             // non-scalar side.
             QueryExpr::BinaryOp { lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
                 (
-                    QueryExpr::Scalar(_) | QueryExpr::EvalTime | QueryExpr::ScalarFromVector(_),
+                    QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp | QueryExpr::PromqlScalarFromVector(_),
                     r,
                 ) => r.output_schema(),
                 (l, _) => l.output_schema(),
@@ -1159,7 +1159,7 @@ impl QueryExpr<ColumnId> {
             | QueryExpr::Cast { .. }
             | QueryExpr::InList { .. }
             | QueryExpr::FunctionCall { .. }
-            | QueryExpr::Arith { .. }
+            | QueryExpr::Arithmetic { .. }
             | QueryExpr::Case { .. } => Err(QueryExprError::ScalarHasNoRowSchema),
         }
     }
@@ -1385,7 +1385,7 @@ fn infer_expr_type(expr: &QueryExpr<ColumnId>, schema: &Schema) -> (DataType, bo
         | QueryExpr::IsNull(_)
         | QueryExpr::IsNotNull(_)
         | QueryExpr::InList { .. } => (DataType::Bool, true),
-        QueryExpr::Arith { left, right, .. } => {
+        QueryExpr::Arithmetic { left, right, .. } => {
             let (lt, ln) = infer_expr_type(left, schema);
             let (rt, rn) = infer_expr_type(right, schema);
             let dtype = if matches!(lt, DataType::Int64) && matches!(rt, DataType::Int64) {
@@ -1432,7 +1432,7 @@ fn default_proj_name(expr: &QueryExpr<ColumnId>, idx: usize, schema: &Schema) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pre_asap::expr_ir::{ArithOp, CompareOp};
+    use crate::pre_asap::expr_ir::{ArithmeticOpKind, CompareOpKind};
 
     fn col(name: &str, dtype: DataType, nullable: bool) -> Column {
         Column::new(name, dtype, nullable)
@@ -1458,12 +1458,12 @@ mod tests {
     }
 
     /// A row can appear in more than one branch, so no branch's unique key is a
-    /// key of the union. `Merge` took the first child's schema verbatim, which
-    /// let a `Distinct`'s key leak out and claim a uniqueness the merged rows do
+    /// key of the union. `Concat` took the first child's schema verbatim, which
+    /// let a `Dedup`'s key leak out and claim a uniqueness the merged rows do
     /// not have — `unique_keys` feeds CSE's producer-sharing legality check.
     #[test]
     fn merge_drops_the_branches_unique_keys() {
-        let branch = || QueryExpr::Distinct {
+        let branch = || QueryExpr::Dedup {
             cols: vec![0],
             child: Rc::new(scan(
                 vec![
@@ -1477,10 +1477,10 @@ mod tests {
         assert_eq!(
             branch().output_schema().unwrap().unique_keys,
             vec![vec![0]],
-            "a Distinct branch does have a unique key on its own"
+            "a Dedup branch does have a unique key on its own"
         );
 
-        let merged = QueryExpr::Merge {
+        let merged = QueryExpr::Concat {
             children: vec![branch(), branch()],
         };
         let schema = merged.output_schema().unwrap();
@@ -1495,11 +1495,11 @@ mod tests {
     /// Same rule as `SetOp`, which already dropped them.
     #[test]
     fn merge_and_setop_agree_on_unique_keys() {
-        let branch = || QueryExpr::Distinct {
+        let branch = || QueryExpr::Dedup {
             cols: vec![0],
             child: Rc::new(scan(vec![col("k", DataType::Utf8, false)], None, vec![])),
         };
-        let merged = QueryExpr::Merge {
+        let merged = QueryExpr::Concat {
             children: vec![branch(), branch()],
         };
         let setop = QueryExpr::SetOp {
@@ -1517,8 +1517,8 @@ mod tests {
     #[test]
     fn an_empty_merge_has_no_schema() {
         assert!(matches!(
-            QueryExpr::Merge { children: vec![] }.output_schema(),
-            Err(QueryExprError::EmptyMerge)
+            QueryExpr::Concat { children: vec![] }.output_schema(),
+            Err(QueryExprError::EmptyConcat)
         ));
     }
 
@@ -1544,8 +1544,8 @@ mod tests {
                 // arithmetic over value (col 2) → Float64
                 ProjectItem {
                     alias: Some("dbl".into()),
-                    expr: QueryExpr::Arith {
-                        op: ArithOp::Add,
+                    expr: QueryExpr::Arithmetic {
+                        op: ArithmeticOpKind::Add,
                         left: Rc::new(QueryExpr::Column(2)),
                         right: Rc::new(QueryExpr::Column(2)),
                     },
@@ -1555,7 +1555,7 @@ mod tests {
                     alias: Some("flag".into()),
                     expr: QueryExpr::Compare {
                         left: Rc::new(QueryExpr::Column(2)),
-                        op: CompareOp::Gt,
+                        op: CompareOpKind::Gt,
                         right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(0.0))),
                     },
                 },
