@@ -336,6 +336,7 @@ dependencies = [
 name = "asap-frontend-sql"
 version = "0.1.0"
 dependencies = [
+ "asap-sql-function-catalog",
  "asap-types",
  "datafusion",
  "serde",
@@ -351,6 +352,10 @@ dependencies = [
  "asap-frontend-promql",
  "asap-types",
 ]
+
+[[package]]
+name = "asap-sql-function-catalog"
+version = "0.1.0"
 
 [[package]]
 name = "asap-types"

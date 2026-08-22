@@ -1,0 +1,14 @@
+[package]
+name = "asap-sql-function-catalog"
+version = "0.1.0"
+edition = "2021"
+
+# The (SQL function name, arity) -> canonical AggIntent-shaped semantic
+# catalog `asap-frontend-sql` consults when lowering an aggregate call, plus
+# the ClickHouse-only-builtin -> native-DataFusion-shape rewrite table
+# (issue #225). No internal deps -- like `asap-types`, this is meant to be
+# consultable on its own (a future extraction tool populating it, a test
+# asserting a name is covered, ...) without pulling in DataFusion or the
+# front end that uses it. `asap-frontend-sql` depends on this crate, never
+# the other way around.
+[dependencies]

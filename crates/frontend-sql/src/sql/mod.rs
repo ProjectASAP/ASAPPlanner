@@ -33,16 +33,18 @@ use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column as DfColumn, DFSchema, ScalarValue as DfScalarValue};
 use datafusion::datasource::MemTable;
 use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::expr_rewriter::FunctionRewrite;
 use datafusion::logical_expr::{
-    self, AggregateUDF, Distinct, Expr, JoinType, LogicalPlan, Signature, SimpleAggregateUDF,
-    Volatility, WindowFunctionDefinition,
+    self, lit, AggregateUDF, Case, Distinct, Expr, JoinType, LogicalPlan, Signature,
+    SimpleAggregateUDF, TypeSignature, Volatility, WindowFunctionDefinition,
 };
 use datafusion::optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion::optimizer::{AnalyzerRule, OptimizerConfig};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
+use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{
     GroupKeys, Predicate, ProjectItem, Reduction, SortKey, Source,
@@ -116,9 +118,11 @@ impl<'a> SqlLowerer<'a> {
     /// Parse under a specific SQL dialect (e.g. `ClickhouseSQL`, which maps to
     /// sqlparser's vendored `ClickHouseDialect` — array-lambda syntax and
     /// `arr[-1]` indexing parse under it that don't parse generically). This
-    /// only changes *parsing*: ClickHouse-only builtin functions (`uniqExact`,
-    /// `countIf`, …) are still unknown to DataFusion's planner and still fail
-    /// there, and `ElasticSQL` has no vendored parser at all.
+    /// only changes *parsing*: a ClickHouse-only builtin function not listed
+    /// in `asap_sql_function_catalog::CLICKHOUSE_BUILTINS` (`uniqExact` and
+    /// `countIf` are; most of ClickHouse's builtin surface isn't yet) is
+    /// still unknown to DataFusion's planner and still fails there, and
+    /// `ElasticSQL` has no vendored parser at all.
     pub fn with_dialect(catalog: &'a SqlCatalog, dialect: SqlDialect) -> Self {
         Self { catalog, dialect }
     }
@@ -135,20 +139,23 @@ impl<'a> SqlLowerer<'a> {
     /// Runs `ApplyFunctionRewrites` — the single `AnalyzerRule` DataFusion's
     /// own `Analyzer` uses internally to apply `FunctionRewrite`s, called
     /// directly rather than through `Analyzer::execute_and_check` — over the
-    /// raw parsed plan before lowering, carrying only `UniqExactRewrite`.
-    /// `ctx.sql(...).into_unoptimized_plan()` alone returns `SqlToRel`'s
-    /// output untouched, and a `FunctionRewrite` only ever runs as part of
-    /// this rule, so calling it directly is unavoidable to make the rewrite
-    /// fire. Its `analyze()` already does a full `transform_up_with_subqueries`
-    /// over the whole plan, so it needs no wrapping `Analyzer` at all —
-    /// deliberately not `Analyzer::execute_and_check` (whether with the
-    /// default 5-rule analyzer or an empty one carrying just this rewrite):
-    /// that method runs an unconditional post-check (`check_plan`, hardcoded,
-    /// not itself a rule) that isn't wanted here — e.g. it independently
-    /// rejects a multi-column `IN (subquery)` before `lower_in_subquery`'s
-    /// own arity check would. Going straight to `ApplyFunctionRewrites`
-    /// avoids that entirely: zero behavior change for every query that
-    /// doesn't call `uniqExact`.
+    /// raw parsed plan before lowering, carrying only
+    /// `ClickHouseBuiltinRewrite` (catalog-driven, see its own doc — it
+    /// covers every `asap_sql_function_catalog::CLICKHOUSE_BUILTINS` entry,
+    /// not just one). `ctx.sql(...).into_unoptimized_plan()` alone returns
+    /// `SqlToRel`'s output untouched, and a `FunctionRewrite` only ever runs
+    /// as part of this rule, so calling it directly is unavoidable to make
+    /// the rewrite fire. Its `analyze()` already does a full
+    /// `transform_up_with_subqueries` over the whole plan, so it needs no
+    /// wrapping `Analyzer` at all — deliberately not
+    /// `Analyzer::execute_and_check` (whether with the default 5-rule
+    /// analyzer or an empty one carrying just this rewrite): that method
+    /// runs an unconditional post-check (`check_plan`, hardcoded, not itself
+    /// a rule) that isn't wanted here — e.g. it independently rejects a
+    /// multi-column `IN (subquery)` before `lower_in_subquery`'s own arity
+    /// check would. Going straight to `ApplyFunctionRewrites` avoids that
+    /// entirely: zero behavior change for every query that doesn't call a
+    /// catalog-listed ClickHouse builtin.
     pub async fn lower(
         &self,
         sql: &str,
@@ -157,7 +164,7 @@ impl<'a> SqlLowerer<'a> {
         let ctx = self.build_context()?;
         let df = ctx.sql(sql).await?;
         let plan = df.into_unoptimized_plan();
-        let rewriter = ApplyFunctionRewrites::new(vec![Arc::new(UniqExactRewrite)]);
+        let rewriter = ApplyFunctionRewrites::new(vec![Arc::new(ClickHouseBuiltinRewrite)]);
         let plan = rewriter.analyze(plan, ctx.state().options())?;
         let _guard = AccuracyGuard::install(accuracy.clone());
         self.lower_plan(&plan)
@@ -193,11 +200,14 @@ impl<'a> SqlLowerer<'a> {
             let mem_table = MemTable::try_new(arrow_schema, vec![])?;
             ctx.register_table(name.as_str(), Arc::new(mem_table))?;
         }
-        // Register a stub `uniqexact` UDAF purely so DataFusion's planner can
-        // resolve the function name during parsing — `lower()` rewrites every
-        // call site to `COUNT(DISTINCT ...)` via `UniqExactRewrite` before
-        // `lower_plan` sees it.
-        ctx.register_udaf(uniq_exact_udaf());
+        // Register a stub `AggregateUDF` for every catalog-listed
+        // ClickHouse-only builtin, purely so DataFusion's planner can
+        // resolve its name during parsing — `lower()` rewrites every call
+        // site to a native DataFusion aggregate via `ClickHouseBuiltinRewrite`
+        // before `lower_plan` sees it.
+        for builtin in asap_sql_function_catalog::CLICKHOUSE_BUILTINS {
+            ctx.register_udaf(clickhouse_builtin_stub_udaf(builtin.name, builtin.arity));
+        }
         Ok(ctx)
     }
 
@@ -867,41 +877,63 @@ impl<'a> SqlLowerer<'a> {
 }
 
 // ── ClickHouse-builtin compatibility, taught to DataFusion itself ──────────────
+//
+// Generalized over `asap_sql_function_catalog::CLICKHOUSE_BUILTINS` (issue
+// #225): adding support for one more ClickHouse-only builtin DataFusion
+// doesn't know at all is a catalog data entry (name, arity, `RewriteKind`)
+// plus, only if its rewrite target is a genuinely new shape, one match arm
+// in `ClickHouseBuiltinRewrite::rewrite` below — never a new stub-UDAF
+// constructor or a new `FunctionRewrite`-implementing type. `uniqExact`
+// (issue #221) and `countIf` both go through this one mechanism.
 
-/// A stub `uniqexact` UDAF, registered purely so DataFusion's planner can
-/// resolve the function name during `SqlToRel` conversion (it errors on an
-/// unknown function before a rewrite ever gets a chance to run). Every call
-/// site is replaced by `UniqExactRewrite` — via the `Analyzer` `lower()` runs
-/// after parsing — before physical planning could ever ask this UDAF for an
-/// `Accumulator`, so `accumulator` is unreachable.
-fn uniq_exact_udaf() -> AggregateUDF {
+/// A stub `AggregateUDF` for one `CLICKHOUSE_BUILTINS` entry, registered
+/// purely so DataFusion's planner can resolve the function name during
+/// `SqlToRel` conversion (it errors on an unknown function before a rewrite
+/// ever gets a chance to run). Every call site is replaced by
+/// `ClickHouseBuiltinRewrite` — via the `Analyzer` `lower()` runs after
+/// parsing — before physical planning could ever ask this UDAF for an
+/// `Accumulator`, so `accumulator` is unreachable for every catalog entry.
+fn clickhouse_builtin_stub_udaf(name: &'static str, arity: Arity) -> AggregateUDF {
     AggregateUDF::from(SimpleAggregateUDF::new_with_signature(
-        "uniqexact",
-        Signature::any(1, Volatility::Immutable),
+        name,
+        arity_to_signature(arity),
         ArrowDataType::Int64,
-        Arc::new(|_| {
+        Arc::new(move |_| {
             // ponytail: dead code by construction (see doc comment above) —
-            // a real accumulator would just reimplement COUNT(DISTINCT).
+            // a real accumulator would just reimplement whatever native
+            // shape `ClickHouseBuiltinRewrite` rewrites this call to.
             unimplemented!(
-                "uniqexact has no accumulator: every call site is rewritten to \
-                 COUNT(DISTINCT ...) before physical planning"
+                "{name} has no accumulator: every call site is rewritten to a native \
+                 DataFusion aggregate before physical planning"
             )
         }),
         vec![],
     ))
 }
 
-/// Rewrites `uniqexact(x)` to DataFusion's own `count(x) DISTINCT` — so
-/// ClickHouse's exact-distinct-count builtin becomes an ordinary DataFusion
-/// aggregate before the plan ever reaches `lower_agg_intent`, which already
-/// maps `count` + `distinct` to `AggIntent::Cardinality` and needs no
-/// ClickHouse-specific name of its own.
-#[derive(Debug)]
-struct UniqExactRewrite;
+/// A catalog [`Arity`] as the DataFusion `Signature` a stub UDAF is
+/// registered with.
+fn arity_to_signature(arity: Arity) -> Signature {
+    match arity {
+        Arity::Exact(n) => Signature::any(n, Volatility::Immutable),
+        Arity::Range { min, max } => Signature::one_of(
+            (min..=max).map(TypeSignature::Any).collect(),
+            Volatility::Immutable,
+        ),
+    }
+}
 
-impl FunctionRewrite for UniqExactRewrite {
+/// Rewrites every `asap_sql_function_catalog::CLICKHOUSE_BUILTINS` call to
+/// the native DataFusion aggregate shape its entry's `RewriteKind` names —
+/// so a ClickHouse-only builtin DataFusion doesn't know at all becomes an
+/// ordinary DataFusion aggregate before the plan ever reaches
+/// `lower_agg_intent`, which needs no ClickHouse-specific name of its own.
+#[derive(Debug)]
+struct ClickHouseBuiltinRewrite;
+
+impl FunctionRewrite for ClickHouseBuiltinRewrite {
     fn name(&self) -> &str {
-        "uniqexact -> count distinct"
+        "clickhouse builtin -> native DataFusion aggregate"
     }
 
     fn rewrite(
@@ -910,21 +942,49 @@ impl FunctionRewrite for UniqExactRewrite {
         _schema: &DFSchema,
         _config: &ConfigOptions,
     ) -> datafusion::common::Result<Transformed<Expr>> {
-        match expr {
-            Expr::AggregateFunction(f) if f.func.name() == "uniqexact" => {
-                Ok(Transformed::yes(Expr::AggregateFunction(
-                    AggregateFunction::new_udf(
-                        count_udaf(),
-                        f.args,
-                        true, // DISTINCT
-                        f.filter,
-                        f.order_by,
-                        f.null_treatment,
-                    ),
-                )))
+        let Expr::AggregateFunction(f) = expr else {
+            return Ok(Transformed::no(expr));
+        };
+        let Some(builtin) = asap_sql_function_catalog::lookup_clickhouse_builtin(f.func.name())
+        else {
+            return Ok(Transformed::no(Expr::AggregateFunction(f)));
+        };
+        let rewritten = match builtin.rewrite {
+            // `f(args...)` -> `count(args...) DISTINCT` — `lower_agg_intent`
+            // already maps `count` + `DISTINCT` to `AggIntent::Cardinality`.
+            RewriteKind::CountDistinct => AggregateFunction::new_udf(
+                count_udaf(),
+                f.args,
+                true,
+                f.filter,
+                f.order_by,
+                f.null_treatment,
+            ),
+            // `f(cond)` -> `sum(CASE WHEN cond THEN 1 ELSE 0 END)` — see
+            // `RewriteKind::CountIfToSum`'s doc for why a plain `count(...)
+            // FILTER (WHERE cond)` doesn't work here (`AggIntent::Count`
+            // never consults its argument).
+            RewriteKind::CountIfToSum => {
+                let cond = f.args.into_iter().next().expect(
+                    "countif's stub signature fixes its arity at 1 -- the planner \
+                     already rejected any other argument count before this rewrite runs",
+                );
+                let indicator = Expr::Case(Case::new(
+                    None,
+                    vec![(Box::new(cond), Box::new(lit(1i64)))],
+                    Some(Box::new(lit(0i64))),
+                ));
+                AggregateFunction::new_udf(
+                    sum_udaf(),
+                    vec![indicator],
+                    false,
+                    f.filter,
+                    f.order_by,
+                    f.null_treatment,
+                )
             }
-            other => Ok(Transformed::no(other)),
-        }
+        };
+        Ok(Transformed::yes(Expr::AggregateFunction(rewritten)))
     }
 }
 
@@ -932,20 +992,28 @@ impl FunctionRewrite for UniqExactRewrite {
 
 /// Map a DataFusion aggregate expression directly to the canonical
 /// [`AggIntent<ColumnRef>`] — issue #179's "dedicated function → canonical
-/// intent directly" front-end construction, no `AggFunc` intermediate.
-/// `resolve_root` resolves `col` to a positional `ColumnId`; the output name
-/// (DataFusion's own, e.g. `"sum(metrics.bytes)"`) is threaded separately as
-/// `Aggregate.output_names`, not carried here.
+/// intent directly" front-end construction, no `AggFunc` intermediate. The
+/// name → semantic mapping itself lives in `asap_sql_function_catalog`
+/// (issue #225) as flat data (`NATIVE_FUNCTIONS`); what stays here is
+/// call-site logic that isn't a function of the name alone — the DISTINCT
+/// modifier rule, the "reducer argument must be a bare column" rule
+/// (`reducer_col`), φ extraction from a literal argument, and the ambient
+/// `AccuracyTarget`. `resolve_root` resolves `col` to a positional
+/// `ColumnId`; the output name (DataFusion's own, e.g.
+/// `"sum(metrics.bytes)"`) is threaded separately as `Aggregate.output_names`,
+/// not carried here.
 fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> {
     match expr {
         Expr::Alias(a) => lower_agg_intent(&a.expr),
         Expr::AggregateFunction(agg_fn) => {
             let name = agg_fn.func.name().to_lowercase();
+            let semantic = asap_sql_function_catalog::lookup_native(&name)
+                .ok_or_else(|| LoweringError::UnsupportedAggregate(name.clone()))?;
             // The canonical intent algebra has no DISTINCT modifier for the
             // value reducers; only
             // COUNT(DISTINCT) maps (to Cardinality). Reject DISTINCT elsewhere
             // rather than silently lowering `SUM(DISTINCT x)` as `SUM(x)`.
-            if agg_fn.distinct && name != "count" {
+            if agg_fn.distinct && !matches!(semantic, AggSemantic::Count) {
                 return Err(LoweringError::UnsupportedAggregate(format!(
                     "DISTINCT {name}"
                 )));
@@ -959,61 +1027,52 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
             let col = |args: &[Expr]| -> Result<Option<ColumnRef>, LoweringError> {
                 reducer_col(&name, args).map(Some)
             };
-            Ok(match name.as_str() {
-                "count" if agg_fn.distinct => AggIntent::Cardinality {
+            Ok(match semantic {
+                AggSemantic::Count if agg_fn.distinct => AggIntent::Cardinality {
                     col: col(&agg_fn.args)?,
                     accuracy: current_accuracy(),
                 },
-                "count" => AggIntent::Count {
+                AggSemantic::Count => AggIntent::Count {
                     accuracy: current_accuracy(),
                 },
-                "sum" => AggIntent::Sum {
+                AggSemantic::Sum => AggIntent::Sum {
                     col: col(&agg_fn.args)?,
                 },
-                "min" => AggIntent::Min {
+                AggSemantic::Min => AggIntent::Min {
                     col: col(&agg_fn.args)?,
                 },
-                "max" => AggIntent::Max {
+                AggSemantic::Max => AggIntent::Max {
                     col: col(&agg_fn.args)?,
                 },
-                "avg" | "mean" => AggIntent::Avg {
+                AggSemantic::Avg => AggIntent::Avg {
                     col: col(&agg_fn.args)?,
                 },
-                "stddev" | "stddev_samp" => AggIntent::StdDev {
+                AggSemantic::StdDev { population } => AggIntent::StdDev {
                     col: col(&agg_fn.args)?,
-                    population: false,
+                    population,
                 },
-                "stddev_pop" => AggIntent::StdDev {
+                AggSemantic::Variance { population } => AggIntent::Variance {
                     col: col(&agg_fn.args)?,
-                    population: true,
+                    population,
                 },
-                "var" | "variance" | "var_samp" => AggIntent::Variance {
+                // `fixed_q = Some(0.5)` is `median`/`approx_median`. As with
+                // `approx_distinct` and `approx_percentile_cont`, the
+                // `approx_` prefix does not force an approximation: the
+                // sketch-vs-exact choice is the AccuracyTarget's (see
+                // `plan::boundary`), so both spellings share one intent
+                // (#111).
+                AggSemantic::Quantile { fixed_q } => AggIntent::Quantile {
                     col: col(&agg_fn.args)?,
-                    population: false,
-                },
-                "var_pop" => AggIntent::Variance {
-                    col: col(&agg_fn.args)?,
-                    population: true,
-                },
-                "approx_percentile_cont" | "percentile_cont" => AggIntent::Quantile {
-                    col: col(&agg_fn.args)?,
-                    q: extract_percentile_q(&agg_fn.args)?,
+                    q: match fixed_q {
+                        Some(q) => q,
+                        None => extract_percentile_q(&agg_fn.args)?,
+                    },
                     accuracy: current_accuracy(),
                 },
-                // `median(c)` is the φ=0.5 quantile. As with `approx_distinct` and
-                // `approx_percentile_cont`, the `approx_` prefix does not force an
-                // approximation: the sketch-vs-exact choice is the AccuracyTarget's
-                // (see `plan::boundary`), so both spellings share one intent (#111).
-                "median" | "approx_median" => AggIntent::Quantile {
-                    col: col(&agg_fn.args)?,
-                    q: 0.5,
-                    accuracy: current_accuracy(),
-                },
-                "approx_distinct" => AggIntent::Cardinality {
+                AggSemantic::Cardinality => AggIntent::Cardinality {
                     col: col(&agg_fn.args)?,
                     accuracy: current_accuracy(),
                 },
-                _ => return Err(LoweringError::UnsupportedAggregate(name)),
             })
         }
         _ => Err(LoweringError::UnsupportedAggregate(format!("{expr:?}"))),
