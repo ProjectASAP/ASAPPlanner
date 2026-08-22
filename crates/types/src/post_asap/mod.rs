@@ -12,10 +12,15 @@
 //! [`expr::SummaryNode`] / [`expr::SummaryExpr`] describe the summary
 //! computation.
 
+pub mod error_estimation;
 pub mod expr;
 pub mod schema;
 pub mod sketch;
 
+pub use error_estimation::{
+    classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,
+    cu_sketch_posterior_error_bound, traditional_a_priori_bound,
+};
 pub use expr::{SummaryExpr, SummaryNode};
 pub use schema::{SummaryFamilyType, SummaryField, SummarySchema};
 pub use sketch::{
