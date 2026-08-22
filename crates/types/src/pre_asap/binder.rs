@@ -11,7 +11,6 @@
 //! `SchemaCatalog` is future work; the `Binder` pass does not change when it
 //! lands, only the catalog impl swaps.
 
-
 use super::expr_ir::ColumnRef;
 use super::query_expr::UnresolvedQueryExpr;
 use super::schema::{Column, DataType, Schema};
