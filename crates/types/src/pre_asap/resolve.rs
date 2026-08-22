@@ -11,6 +11,42 @@
 //! generic, shape-preserving walk — every [`UnresolvedQueryExpr`] variant maps to the
 //! identical [`ResolvedQueryExpr`] variant — that resolves every [`ColumnRef`] to
 //! the [`Binder`](super::binder::Binder)-computed positional [`ColumnId`].
+//!
+//! ## Why positional `ColumnId`, not just carrying names all the way through (issue #216)
+//!
+//! A mature query engine can legitimately choose either design — DataFusion's
+//! own logical plan (what `asap-frontend-sql` walks to build its `QueryExpr`)
+//! and Calcite both keep names, with an optional table qualifier, all the way
+//! through logical optimization, only going positional once they lower to a
+//! physical plan. Resolving once, immediately after each front end's own
+//! `interpret` step, is the better trade for *this* codebase's shape — one
+//! front-end-facing tree feeding several independent downstream passes
+//! (`canonicalize`, the cost model, `dag_export`, schema/type inference,
+//! `asap-aware-mapping`'s summary binding) — for three concrete reasons:
+//!
+//! 1. **Names collide across joins.** Not hypothetical: `join_predicate_disambiguates_shared_column_name`
+//!    (`crates/frontend-sql/tests/sql_lowering.rs`) exists specifically because
+//!    `metrics.service` and `hosts.service` are both just `"service"` once their
+//!    schemas are concatenated. A bare name is ambiguous the moment two sources
+//!    share one; `ColumnId` is what makes "the second `service`, position 4, not
+//!    the first" a fact recorded once, instead of a lookup redone at every use site.
+//! 2. **A name's meaning changes going up the tree.** `Project` renames/aliases,
+//!    `Aggregate` collapses columns and introduces synthetic ones, `Join`
+//!    concatenates two schemas — a name valid at a `Scan` leaf isn't
+//!    automatically the right binding three nodes up; it has to be reinterpreted
+//!    against whatever schema is in scope at that node. Resolving bottom-up
+//!    pins each reference to "this exact column of this exact node's
+//!    already-derived output schema," so nothing downstream re-derives that scope.
+//! 3. **It concentrates scoping logic in one place instead of ~6.** Every
+//!    downstream pass just compares/indexes `ColumnId`s — O(1), unambiguous. If
+//!    they worked on names instead, each would need its own qualifier-aware,
+//!    join-collision-aware name resolver, or risk silently binding to the wrong
+//!    `"service"`.
+//!
+//! Removing this resolution step and carrying `ColumnRef` everywhere would
+//! therefore be a real regression for this repo's shape, not just a rename —
+//! every one of those downstream passes would have to reimplement the scoping
+//! this module already centralizes.
 
 use std::rc::Rc;
 
