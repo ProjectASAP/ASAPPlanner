@@ -522,10 +522,25 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         predicates: Vec<Predicate<C>>,
         schema: C::ScanSchema,
     },
-    /// A scalar constant leaf — a PromQL number literal or a folded constant
-    /// scalar expression (`10*1024*1024`). Appears as a [`BinaryOp`](Self::BinaryOp)
-    /// operand for `<vector> op <scalar>` thresholds / unit conversions (#35).
-    PromqlScalar(f64),
+    /// A scalar sub-expression sitting in an **operator-tree position** — a
+    /// [`BinaryOp`](Self::BinaryOp) operand for `<vector> op <scalar>`
+    /// thresholds / unit conversions (#35), a
+    /// [`PromqlVectorFromScalar`](Self::PromqlVectorFromScalar) child, or a
+    /// whole query's root (a bare PromQL scalar query, e.g. `5`).
+    ///
+    /// Formerly its own leaf variant, `PromqlScalar(f64)`. Issue #220: that
+    /// variant held exactly the same value [`Literal`](Self::Literal) does
+    /// (every PromQL scalar is `f64`), duplicating it for no reason but
+    /// *which tree position* it was allowed to appear in. This wrapper
+    /// carries that position instead of the value — the inner node is an
+    /// ordinary scalar sub-language expression (in practice always
+    /// `Literal(ScalarValue::Float64(_))`, since a front end only ever
+    /// constructs this fully constant-folded — see
+    /// [`promql_scalar`](Self::promql_scalar)) — and is what `output_schema`,
+    /// `canonicalize`, and `resolve` now key off to tell "this operand has
+    /// its own row schema" from "this is a nested scalar leaf with none,"
+    /// in place of the old `PromqlScalar` vs. `Literal` variant tag.
+    PromqlScalarBridge(Rc<QueryExpr<C>>),
 
     /// The query **evaluation time** as a scalar (PromQL `time()`) — a runtime
     /// value, not a constant. Also the implicit input of the no-argument
@@ -812,6 +827,30 @@ pub enum QueryExpr<C: ColState = ColumnId> {
 }
 
 impl<C: ColState> QueryExpr<C> {
+    /// Construct the [`PromqlScalarBridge`](Self::PromqlScalarBridge) leaf
+    /// for a bare PromQL numeric literal / folded constant scalar (issue
+    /// #220) — `Literal(ScalarValue::Float64(v))` at an operator-tree
+    /// position. The one constructor every front end / test that used to
+    /// write `QueryExpr::PromqlScalar(v)` should use instead.
+    pub fn promql_scalar(v: f64) -> Self {
+        QueryExpr::PromqlScalarBridge(Rc::new(QueryExpr::Literal(ScalarValue::Float64(v))))
+    }
+
+    /// The value of a [`PromqlScalarBridge`](Self::PromqlScalarBridge) leaf
+    /// wrapping a plain `Literal(ScalarValue::Float64(_))` — every one a
+    /// front end constructs today (see [`promql_scalar`](Self::promql_scalar)).
+    /// `None` for any other shape, including a `PromqlScalarBridge` wrapping
+    /// something else (not constructed today, but not precluded by the type).
+    pub fn as_promql_scalar(&self) -> Option<f64> {
+        match self {
+            QueryExpr::PromqlScalarBridge(inner) => match inner.as_ref() {
+                QueryExpr::Literal(ScalarValue::Float64(v)) => Some(*v),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// If this expression is a `BoolAnd`, return its elements; otherwise a
     /// single-element slice containing `self`.
     pub fn conjuncts(&self) -> &[QueryExpr<C>] {
@@ -1102,11 +1141,14 @@ impl QueryExpr<ColumnId> {
                 Ok(out)
             }
 
-            // A scalar constant has no series — model it as a single `value`
-            // column so it can sit as a `BinaryOp` operand.
-            // Both scalar leaves — a constant and the eval time — are a single
-            // `value` column with no labels.
-            QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp => Ok(Schema {
+            // A scalar bridge has no series — model it as a single `value`
+            // column so it can sit as a `BinaryOp` operand. Both scalar
+            // leaves — a bridged scalar sub-expression and the eval time —
+            // are a single `value` column with no labels. Every
+            // `PromqlScalarBridge` constructed today wraps a plain
+            // `Literal(Float64)` (issue #220), so the schema doesn't need to
+            // inspect the inner node.
+            QueryExpr::PromqlScalarBridge(_) | QueryExpr::QueryTimestamp => Ok(Schema {
                 columns: vec![Column::new("value", DataType::Float64, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
@@ -1141,7 +1183,9 @@ impl QueryExpr<ColumnId> {
             // non-scalar side.
             QueryExpr::BinaryOp { lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
                 (
-                    QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp | QueryExpr::PromqlScalarFromVector(_),
+                    QueryExpr::PromqlScalarBridge(_)
+                    | QueryExpr::QueryTimestamp
+                    | QueryExpr::PromqlScalarFromVector(_),
                     r,
                 ) => r.output_schema(),
                 (l, _) => l.output_schema(),
@@ -1909,5 +1953,97 @@ mod tests {
             s.unique_keys.is_empty(),
             "UNION does not preserve row identity"
         );
+    }
+
+    // ── PromqlScalarBridge / Literal dedup (issue #220) ─────────────────────
+
+    /// `QueryExpr::promql_scalar(v)` — what every front end now constructs in
+    /// place of the old `PromqlScalar(v)` leaf — wraps exactly
+    /// `Literal(ScalarValue::Float64(v))`: the same value a SQL-emitted typed
+    /// float literal in a scalar-sub-language position would carry, just at a
+    /// different tree position. `as_promql_scalar` is the round-trip inverse.
+    #[test]
+    fn promql_scalar_bridges_a_literal_float_at_an_operator_position() {
+        let bridge = QueryExpr::<ColumnId>::promql_scalar(2.5);
+        assert_eq!(
+            bridge,
+            QueryExpr::PromqlScalarBridge(Rc::new(QueryExpr::Literal(ScalarValue::Float64(2.5))))
+        );
+        assert_eq!(bridge.as_promql_scalar(), Some(2.5));
+
+        // The same value a SQL `Compare`/`Arithmetic` operand would carry, in
+        // its native (unwrapped, no row schema) scalar-sub-language position —
+        // no longer a different variant, just not bridged to this tree
+        // position.
+        let sql_literal = QueryExpr::<ColumnId>::Literal(ScalarValue::Float64(2.5));
+        assert_eq!(bridge.as_promql_scalar(), Some(2.5));
+        assert_ne!(
+            bridge, sql_literal,
+            "bridge and bare literal are distinct nodes"
+        );
+        // Not every shape is a scalar bridge: neither a bare `Literal` nor an
+        // operator node reports a value.
+        assert_eq!(sql_literal.as_promql_scalar(), None);
+        assert_eq!(scan(vec![], None, vec![]).as_promql_scalar(), None);
+    }
+
+    /// Pins the tree-position distinction issue #220 asks for: the very same
+    /// `Literal(ScalarValue::Float64(_))` value has a row schema when it sits
+    /// at the operator-tree position (wrapped in `PromqlScalarBridge` — a
+    /// `BinaryOp` operand, `PromqlVectorFromScalar` child, or a query root),
+    /// and has none when it sits bare, in a scalar-sub-language position
+    /// (`Compare`/`Arithmetic`/… operand) — no longer decided by which of two
+    /// duplicate variants was used, only by whether the wrapper is present.
+    #[test]
+    fn row_schema_rides_on_the_bridge_wrapper_not_the_literal_variant() {
+        let bridged = QueryExpr::<ColumnId>::promql_scalar(42.0);
+        let schema = bridged.output_schema().expect("bridge has a row schema");
+        assert_eq!(schema.columns.len(), 1);
+        assert_eq!(schema.columns[0].name, "value");
+        assert_eq!(schema.columns[0].dtype, DataType::Float64);
+        assert!(schema.time_index.is_none());
+
+        // The identical value, unwrapped (the scalar-sub-language position a
+        // `Compare`/`Arithmetic` operand would occupy) has no row schema of
+        // its own — it's a construction bug to call `output_schema` on it
+        // directly, caught as `ScalarHasNoRowSchema` rather than panicking.
+        let bare = QueryExpr::<ColumnId>::Literal(ScalarValue::Float64(42.0));
+        assert!(matches!(
+            bare.output_schema(),
+            Err(QueryExprError::ScalarHasNoRowSchema)
+        ));
+    }
+
+    /// `BinaryOp`'s schema derivation follows the non-scalar (vector) side
+    /// when the other operand is a `PromqlScalarBridge`, and a `VectorMatch`
+    /// modifier survives unchanged alongside it — the relational binary-op
+    /// path (issue #220's Instance 2, left as follow-up) is untouched by the
+    /// Instance-1 `PromqlScalar` → `PromqlScalarBridge` collapse.
+    #[test]
+    fn binary_op_schema_follows_the_vector_side_over_a_scalar_bridge_with_vector_match_intact() {
+        let vector = scan(
+            vec![
+                col("host", DataType::Utf8, false),
+                col("value", DataType::Float64, false),
+            ],
+            None,
+            vec![],
+        );
+        let vm = VectorMatch {
+            kind: VectorMatchKind::On,
+            labels: vec!["host".into()],
+            grouping: None,
+        };
+        let op = QueryExpr::BinaryOp {
+            op: BinaryOpKind::Compare(CompareOpKind::Gt),
+            lhs: Rc::new(vector.clone()),
+            rhs: Rc::new(QueryExpr::promql_scalar(1.0)),
+            vector_match: Some(vm.clone()),
+        };
+        assert_eq!(op.output_schema().unwrap(), vector.output_schema().unwrap());
+        let QueryExpr::BinaryOp { vector_match, .. } = &op else {
+            unreachable!()
+        };
+        assert_eq!(vector_match.as_ref(), Some(&vm));
     }
 }

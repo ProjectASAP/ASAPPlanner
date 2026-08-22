@@ -122,7 +122,15 @@ fn resolve(
             }
         }
 
-        QE::PromqlScalar(v) => QE::PromqlScalar(*v),
+        // `PromqlScalarBridge`'s child is a scalar-sub-language node (issue
+        // #220) sitting at this operator-tree position — resolved through
+        // `resolve_expr`, same as every other scalar position (`Predicate`,
+        // `ProjectItem.expr`, …), not the operator walk. In practice it's
+        // always a `Literal`, which has no `ColumnRef` to resolve, so
+        // `fallback` is never actually consulted here.
+        QE::PromqlScalarBridge(inner) => {
+            QE::PromqlScalarBridge(Rc::new(resolve_expr(inner, fallback)?))
+        }
         QE::QueryTimestamp => QE::QueryTimestamp,
 
         QE::PromqlVectorFromScalar(child) => {
@@ -551,4 +559,63 @@ fn resolve_agg_intent(
             payload: payload.clone(),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pre_asap::expr_ir::CompareOpKind;
+    use crate::pre_asap::query_expr::{
+        BinaryOpKind, QueryExpr, Source, VectorMatch, VectorMatchKind,
+    };
+
+    /// `resolve_root` over a `BinaryOp { <vector>, PromqlScalarBridge, vector_match }`
+    /// (issue #220): the bridged scalar operand resolves through the same
+    /// generic walk as every other node (its `Literal` child has no
+    /// `ColumnRef` to resolve, so it comes through unchanged), the vector
+    /// side's `ColumnRef`s resolve positionally, and the `VectorMatch`
+    /// modifier on the relational binary-op path survives resolution
+    /// untouched — Instance 2 of #220 (`BinaryOp` vs `Compare`/`Arithmetic`)
+    /// is out of scope for this change, so this pins that its behavior is
+    /// unaffected by the Instance-1 collapse.
+    #[test]
+    fn resolve_root_threads_a_scalar_bridge_operand_and_preserves_vector_match() {
+        let vm = VectorMatch {
+            kind: VectorMatchKind::Ignoring,
+            labels: vec!["job".into()],
+            grouping: None,
+        };
+        let unresolved: UnresolvedQueryExpr = QueryExpr::BinaryOp {
+            op: BinaryOpKind::Compare(CompareOpKind::Gt),
+            lhs: Rc::new(UnresolvedQueryExpr::Scan {
+                source: Source::TimeSeries {
+                    metric: "up".into(),
+                },
+                predicates: vec![],
+                schema: None,
+            }),
+            rhs: Rc::new(UnresolvedQueryExpr::promql_scalar(1.0)),
+            vector_match: Some(vm.clone()),
+        };
+
+        let resolved = resolve_root(&unresolved).expect("resolves");
+        let QueryExpr::BinaryOp {
+            lhs,
+            rhs,
+            vector_match,
+            ..
+        } = &resolved
+        else {
+            panic!("expected a resolved BinaryOp, got {resolved:?}");
+        };
+        assert!(matches!(lhs.as_ref(), QueryExpr::Scan { .. }));
+        assert_eq!(rhs.as_promql_scalar(), Some(1.0));
+        assert_eq!(vector_match.as_ref(), Some(&vm));
+
+        // Schema derivation still follows the vector side post-resolution.
+        assert_eq!(
+            resolved.output_schema().unwrap(),
+            lhs.output_schema().unwrap()
+        );
+    }
 }

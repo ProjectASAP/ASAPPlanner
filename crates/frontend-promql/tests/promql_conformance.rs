@@ -98,7 +98,7 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         }
         // `AggIntent` only ever lives in `Aggregate.measures`, never in a
         // scalar position (issue #205) — nothing to collect there.
-        QueryExpr::Scan { .. } | QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp => {}
+        QueryExpr::Scan { .. } | QueryExpr::PromqlScalarBridge(_) | QueryExpr::QueryTimestamp => {}
         QueryExpr::Column(_)
         | QueryExpr::Literal(_)
         | QueryExpr::Compare { .. }
@@ -143,11 +143,13 @@ fn has<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, pred: F) -> bool {
     intents(e).iter().any(pred)
 }
 
-/// Whether the tree contains a `Mul`-by-`PromqlScalar(-1)` anywhere — the shape unary
+/// Whether the tree contains a `Mul`-by-`PromqlScalarBridge(-1)` anywhere — the shape unary
 /// negation lowers to (issue #36).
 fn negates_via_scalar(e: &QueryExpr) -> bool {
-    let is_neg_one =
-        |q: &QueryExpr| matches!(q, QueryExpr::PromqlScalar(v) if (*v + 1.0).abs() < 1e-12);
+    let is_neg_one = |q: &QueryExpr| {
+        q.as_promql_scalar()
+            .is_some_and(|v| (v + 1.0).abs() < 1e-12)
+    };
     match e {
         QueryExpr::BinaryOp { op, lhs, rhs, .. } => {
             (*op == BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul)
@@ -614,7 +616,7 @@ fn vector_comparison_filters() {
 fn unary_negation_lowers_as_multiply_by_minus_one() {
     // SEMANTICS (PromQL, issue #36): `-expr` flips the sign of every sample.
     // Now that a scalar operand exists (#35), it lowers as `expr * -1` — a `Mul`
-    // BinaryOp of the (label-preserving) vector against `PromqlScalar(-1)`. These are
+    // BinaryOp of the (label-preserving) vector against `PromqlScalarBridge(-1)`. These are
     // the five cases the old `__GAP` test pinned as rejected.
     for q in [
         "-rate(http_errors_total[5m])",
@@ -624,14 +626,14 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
         "sum(-node_cpu_seconds_total)",
     ] {
         let qe = ok(q);
-        // A `Mul`-by-`-1` against a `PromqlScalar(-1)` appears somewhere in every tree.
+        // A `Mul`-by-`-1` against a `PromqlScalarBridge(-1)` appears somewhere in every tree.
         assert!(
             negates_via_scalar(&qe),
             "no `* -1` negation found in {q}: {qe:?}"
         );
     }
 
-    // `-some_metric` at the root: `Scan * PromqlScalar(-1)`, schema follows the vector.
+    // `-some_metric` at the root: `Scan * PromqlScalarBridge(-1)`, schema follows the vector.
     let QueryExpr::BinaryOp {
         op,
         lhs,
@@ -647,8 +649,9 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
         "vector on the left"
     );
     assert!(
-        matches!(rhs.as_ref(), QueryExpr::PromqlScalar(v) if (*v + 1.0).abs() < 1e-12),
-        "negation multiplies by PromqlScalar(-1), got {rhs:?}"
+        rhs.as_promql_scalar()
+            .is_some_and(|v| (v + 1.0).abs() < 1e-12),
+        "negation multiplies by PromqlScalarBridge(-1), got {rhs:?}"
     );
     assert!(
         vector_match.is_none(),
@@ -686,11 +689,10 @@ fn unary_negation_lowers_as_multiply_by_minus_one() {
 #[test]
 fn unary_negation_of_constant_folds_to_scalar() {
     // `-(10*1024*1024)` — the operand is constant-foldable, so negation collapses
-    // to a single negated `PromqlScalar` leaf (no `BinaryOp`), just like a bare literal.
-    assert!(matches!(
-        ok("-(10*1024*1024)"),
-        QueryExpr::PromqlScalar(v) if (v + 10_485_760.0).abs() < 1e-6
-    ));
+    // to a single negated `PromqlScalarBridge` leaf (no `BinaryOp`), just like a bare literal.
+    assert!(ok("-(10*1024*1024)")
+        .as_promql_scalar()
+        .is_some_and(|v| (v + 10_485_760.0).abs() < 1e-6));
 }
 
 #[test]
@@ -749,9 +751,9 @@ fn count_maps_to_cardinality_and_inherits_accuracy() {
 
 #[test]
 fn scalar_literal_operand_lowers_as_binaryop_scalar() {
-    // Issue #35: `<vector> op <scalar>` — the numeric threshold is a `PromqlScalar`
-    // operand of the `BinaryOp`, and constant arithmetic (`10*1024*1024`) is
-    // folded. The output schema is the vector side's.
+    // Issue #35: `<vector> op <scalar>` — the numeric threshold is a
+    // `PromqlScalarBridge` operand of the `BinaryOp`, and constant arithmetic
+    // (`10*1024*1024`) is folded. The output schema is the vector side's.
     let qe = ok("node_filesystem_avail_bytes > 10*1024*1024");
     let QueryExpr::BinaryOp { op, lhs, rhs, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
@@ -762,7 +764,8 @@ fn scalar_literal_operand_lowers_as_binaryop_scalar() {
         "vector on the left"
     );
     assert!(
-        matches!(rhs.as_ref(), QueryExpr::PromqlScalar(v) if (*v - 10_485_760.0).abs() < 1e-6),
+        rhs.as_promql_scalar()
+            .is_some_and(|v| (v - 10_485_760.0).abs() < 1e-6),
         "folded scalar threshold on the right, got {rhs:?}"
     );
     // Schema derivation follows the vector side (a scalar contributes no labels).
@@ -772,13 +775,15 @@ fn scalar_literal_operand_lowers_as_binaryop_scalar() {
 #[test]
 fn scalar_arithmetic_scales_the_vector() {
     // `rate(m[5m]) * 100` — a unit conversion. Arithmetic BinaryOp of the vector
-    // with a `PromqlScalar(100)`.
+    // with a `PromqlScalarBridge(100)`.
     let qe = ok("rate(m[5m]) * 100");
     let QueryExpr::BinaryOp { op, rhs, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
     assert_eq!(*op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul));
-    assert!(matches!(rhs.as_ref(), QueryExpr::PromqlScalar(v) if (*v - 100.0).abs() < 1e-9));
+    assert!(rhs
+        .as_promql_scalar()
+        .is_some_and(|v| (v - 100.0).abs() < 1e-9));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1695,10 +1700,10 @@ fn clamp_and_round_carry_their_params() {
 
 #[test]
 fn pi_lowers_to_a_scalar_constant() {
-    // `pi()` is the constant π — a `PromqlScalar` leaf, not a `Math` intent.
-    assert!(
-        matches!(ok("pi()"), QueryExpr::PromqlScalar(v) if (v - std::f64::consts::PI).abs() < 1e-12)
-    );
+    // `pi()` is the constant π — a `PromqlScalarBridge` leaf, not a `Math` intent.
+    assert!(ok("pi()")
+        .as_promql_scalar()
+        .is_some_and(|v| (v - std::f64::consts::PI).abs() < 1e-12));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1826,7 +1831,7 @@ fn vector_promotes_a_scalar_to_a_vector() {
     let QueryExpr::PromqlVectorFromScalar(inner) = &qe else {
         panic!("expected PromqlVectorFromScalar, got {qe:?}");
     };
-    assert!(matches!(inner.as_ref(), QueryExpr::PromqlScalar(v) if *v == 1.0));
+    assert_eq!(inner.as_promql_scalar(), Some(1.0));
     // Vector-typed: schema has a time index (a scalar leaf has none).
     let sch = qe.output_schema().unwrap();
     assert!(sch.time_index.is_some());
@@ -1842,7 +1847,7 @@ fn scalar_collapses_a_vector_to_a_scalar() {
     };
     let (metric, _) = first_scan(inner);
     assert_eq!(metric, "node_load1");
-    // PromqlScalar-typed: single `value` column, no time index.
+    // PromqlScalarBridge-typed: single `value` column, no time index.
     let sch = qe.output_schema().unwrap();
     assert!(sch.time_index.is_none());
     assert_eq!(sch.columns.len(), 1);
@@ -2234,25 +2239,28 @@ fn sort_by_label_desc_is_descending() {
 #[test]
 fn min_of_max_of_fold_constant_scalars() {
     // `min_of`/`max_of` are n-ary scalar reducers. When every argument is a
-    // constant they constant-fold to a `PromqlScalar` leaf, just like scalar
+    // constant they constant-fold to a `PromqlScalarBridge` leaf, just like scalar
     // arithmetic (#35) — the only form the intent algebra can hold (#89).
-    assert!(matches!(ok("min_of(3, 5)"), QueryExpr::PromqlScalar(v) if v == 3.0));
-    assert!(matches!(ok("max_of(3, 5)"), QueryExpr::PromqlScalar(v) if v == 5.0));
-    assert!(matches!(ok("min_of(-2, -5)"), QueryExpr::PromqlScalar(v) if v == -5.0));
+    assert_eq!(ok("min_of(3, 5)").as_promql_scalar(), Some(3.0));
+    assert_eq!(ok("max_of(3, 5)").as_promql_scalar(), Some(5.0));
+    assert_eq!(ok("min_of(-2, -5)").as_promql_scalar(), Some(-5.0));
     // Nested folds and use as a threshold operand.
-    assert!(matches!(ok("max_of(min_of(2, 3), 10)"), QueryExpr::PromqlScalar(v) if v == 10.0));
+    assert_eq!(
+        ok("max_of(min_of(2, 3), 10)").as_promql_scalar(),
+        Some(10.0)
+    );
     let qe = ok("up > max_of(1, 2)");
     let QueryExpr::BinaryOp { rhs, .. } = &qe else {
         panic!("{qe:?}")
     };
-    assert!(matches!(rhs.as_ref(), QueryExpr::PromqlScalar(v) if *v == 2.0));
+    assert_eq!(rhs.as_promql_scalar(), Some(2.0));
 }
 
 #[test]
 fn min_of_max_of_ignore_nan_like_the_min_max_aggregators() {
     // A NaN argument is skipped (Prometheus `min`/`max` NaN semantics).
-    assert!(matches!(ok("max_of(3, NaN)"), QueryExpr::PromqlScalar(v) if v == 3.0));
-    assert!(matches!(ok("min_of(NaN, 3)"), QueryExpr::PromqlScalar(v) if v == 3.0));
+    assert_eq!(ok("max_of(3, NaN)").as_promql_scalar(), Some(3.0));
+    assert_eq!(ok("min_of(NaN, 3)").as_promql_scalar(), Some(3.0));
 }
 
 #[test]

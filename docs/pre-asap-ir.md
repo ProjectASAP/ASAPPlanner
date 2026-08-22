@@ -39,7 +39,7 @@ to one source language.
 - [`Concat`](#concat) — exact, untyped `UNION ALL` of union-compatible branches.
 
 **[PromQL-specific nodes](#promql-specific-nodes)**
-- [`PromqlScalar`](#promqlscalar) — a scalar constant leaf.
+- [`PromqlScalarBridge`](#promqlscalarbridge) — a scalar sub-expression at an operator-tree position.
 - [`QueryTimestamp`](#querytimestamp) — the query evaluation time as a scalar (PromQL `time()`).
 - [`PromqlVectorFromScalar`](#promqlvectorfromscalar) — promotes a scalar to a label-less instant vector.
 - [`PromqlScalarFromVector`](#promqlscalarfromvector) — collapses a single-series vector to a scalar.
@@ -405,16 +405,20 @@ histogram_quantiles(rate(http_request_duration_seconds_bucket[5m]), "le", 0.5, 0
 
 ## PromQL-specific nodes
 
-### PromqlScalar
+### PromqlScalarBridge
 
-A scalar constant leaf — a PromQL number literal, or a folded constant scalar expression.
-Appears as a `BinaryOp` operand for `<vector> op <scalar>` thresholds and unit conversions.
+A scalar sub-expression (issue #220: in practice always `Literal(ScalarValue::Float64(_))` —
+a PromQL number literal, or a folded constant scalar expression) sitting at an **operator-tree
+position** — a `BinaryOp` operand for `<vector> op <scalar>` thresholds and unit conversions,
+a `PromqlVectorFromScalar` child, or a whole query's root. This wrapper is what marks the
+position; it no longer duplicates `Literal`'s value the way the old `PromqlScalar(f64)` variant
+did.
 
 ```promql
 up > 1
 ```
 
-**Fields:** a single unnamed `f64` — the constant value.
+**Fields:** a single unnamed child `QueryExpr` — the wrapped scalar sub-expression.
 
 ### QueryTimestamp
 

@@ -144,12 +144,17 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             });
             push_node(nodes, "Scan", label, detail, vec![])
         }
-        QueryExpr::PromqlScalar(v) => {
-            let detail = serde_json::json!({ "value": v });
+        // The bridged child is a scalar-sub-language node (issue #220), not
+        // an operator node `build` can recurse into — serialize it as opaque
+        // `detail` JSON, same as every other scalar-typed field
+        // (`Filter.pred`, `Project.cols`, …) rather than pushing it as a
+        // separate DAG node.
+        QueryExpr::PromqlScalarBridge(inner) => {
+            let detail = serde_json::json!({ "value": inner });
             push_node(
                 nodes,
-                "PromqlScalar",
-                format!("PromqlScalar({v})"),
+                "PromqlScalarBridge",
+                format!("PromqlScalarBridge({inner:?})"),
                 detail,
                 vec![],
             )

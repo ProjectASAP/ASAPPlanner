@@ -109,7 +109,9 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             QueryExpr::PromqlVectorFromScalar(inner) | QueryExpr::PromqlScalarFromVector(inner) => {
                 go(inner, out)
             }
-            QueryExpr::Scan { .. } | QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp => {}
+            QueryExpr::Scan { .. }
+            | QueryExpr::PromqlScalarBridge(_)
+            | QueryExpr::QueryTimestamp => {}
             // Scalar expression variants (issue #205): `AggIntent` only ever
             // lives in `Aggregate.measures`, never nested inside a scalar
             // expression tree, so there's nothing to recurse into here.
