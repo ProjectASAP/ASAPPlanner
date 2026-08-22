@@ -1481,3 +1481,87 @@ fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKi
         }
     }
 }
+
+// ── Issue #225, item 3: DataFusion registry drift detection ────────────────
+//
+// `asap_sql_function_catalog::NATIVE_FUNCTIONS` is hand-maintained data
+// mirroring what DataFusion's own aggregate-function registry resolves. That
+// mirror can only silently drift out of sync — a DataFusion version bump
+// that adds, renames, or removes a builtin aggregate leaves the catalog
+// looking fine while `lower_agg_intent` quietly gains or loses coverage. Of
+// the two introspectable sources the issue names, DataFusion's own registry
+// is the one with no external dependency: `SessionContext` already lists its
+// aggregate UDFs in-process, so the check below builds a real context the
+// same way `build_context` does and walks it directly — no live database,
+// no new CI infra, just `cargo test`. (ClickHouse's `system.functions` is
+// the other source; it needs a live ClickHouse instance, which is handled
+// separately by the dev-only `tools/clickhouse/extract_functions.py` script,
+// deliberately not wired into this test or into CI.)
+#[cfg(test)]
+mod catalog_drift {
+    use super::*;
+
+    /// Every aggregate function name DataFusion's planner resolves inside a
+    /// context built the same way `build_context` builds one must be
+    /// *accounted for* by the catalog: either `lookup_native` maps it to a
+    /// canonical semantic, it is one of our own `CLICKHOUSE_BUILTINS` stub
+    /// registrations (`build_context` registers those into the very same
+    /// context, so they show up here too), or it is explicitly listed in
+    /// `KNOWN_UNMAPPED_NATIVE_FUNCTIONS` with a reason.
+    ///
+    /// This does *not* assert the reverse (that every `NATIVE_FUNCTIONS`
+    /// entry is resolvable) — a name that stops resolving after a DataFusion
+    /// bump just becomes permanently unreachable dead data, not a lowering
+    /// hazard, so it's out of scope for a regression gate. It also does not
+    /// try to derive `AggSemantic` from anything DataFusion reports — that
+    /// judgment call stays with whoever adds the catalog entry.
+    #[test]
+    fn every_datafusion_aggregate_name_is_covered_by_the_catalog() {
+        let catalog = SqlCatalog::new();
+        let ctx = SqlLowerer::new(&catalog)
+            .build_context()
+            .expect("build_context with an empty table catalog cannot fail");
+        let state = ctx.state();
+        let mut uncovered: Vec<&str> = state
+            .aggregate_functions()
+            .keys()
+            .map(String::as_str)
+            .filter(|name| {
+                asap_sql_function_catalog::lookup_native(name).is_none()
+                    && asap_sql_function_catalog::lookup_clickhouse_builtin(name).is_none()
+                    && !asap_sql_function_catalog::KNOWN_UNMAPPED_NATIVE_FUNCTIONS.contains(name)
+            })
+            .collect();
+        uncovered.sort_unstable();
+        assert!(
+            uncovered.is_empty(),
+            "DataFusion resolves these aggregate names but the catalog doesn't know about them \
+             (crates/sql-function-catalog/src/lib.rs): {uncovered:?}\n\
+             Either add a `NativeFunction` entry mapping each to its `AggSemantic`, or -- if it's \
+             a deliberate non-goal (no `AggIntent` shape for it, or it's rejected elsewhere) -- \
+             add it to `KNOWN_UNMAPPED_NATIVE_FUNCTIONS` with a reason. This usually means a \
+             DataFusion version bump added or renamed a builtin aggregate."
+        );
+    }
+
+    /// Every `KNOWN_UNMAPPED_NATIVE_FUNCTIONS` entry earns its place by
+    /// actually being a name DataFusion resolves today — otherwise it is
+    /// stale documentation for a name that no longer exists (e.g. a prior
+    /// DataFusion version renamed it), not a real "deliberately not mapped"
+    /// decision, and should be removed.
+    #[test]
+    fn known_unmapped_entries_are_all_real_datafusion_names() {
+        let catalog = SqlCatalog::new();
+        let ctx = SqlLowerer::new(&catalog)
+            .build_context()
+            .expect("build_context with an empty table catalog cannot fail");
+        let resolved = ctx.state().aggregate_functions().clone();
+        for name in asap_sql_function_catalog::KNOWN_UNMAPPED_NATIVE_FUNCTIONS {
+            assert!(
+                resolved.contains_key(*name),
+                "`{name}` is listed in KNOWN_UNMAPPED_NATIVE_FUNCTIONS but DataFusion no longer \
+                 resolves it -- remove the stale entry"
+            );
+        }
+    }
+}
