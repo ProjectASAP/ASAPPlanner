@@ -254,6 +254,78 @@ pub const CLICKHOUSE_BUILTINS: &[ClickHouseBuiltin] = &[
     },
 ];
 
+/// Aggregate function names DataFusion's own planner resolves out of the box
+/// that this catalog deliberately does *not* map to a canonical
+/// [`AggSemantic`] -- either because `AggIntent` has no shape for them
+/// (a multi-column correlation/regression aggregate, a bitwise/boolean
+/// aggregate, a string concatenation aggregate, ...) or because this front
+/// end already rejects them explicitly elsewhere (`array_agg`, `grouping`).
+///
+/// This list exists for one reason: `asap-frontend-sql`'s DataFusion-registry
+/// drift test (issue #225, item 3 -- see
+/// `asap_frontend_sql::sql::catalog_drift`) walks a real `SessionContext`'s
+/// resolved aggregate names and requires every one to be either in
+/// [`NATIVE_FUNCTIONS`], a [`CLICKHOUSE_BUILTINS`] name, or listed here. A
+/// name landing here is a *recorded decision*, not a silenced test failure --
+/// each group below says why. Do not add an entry just to make the test
+/// pass; add a `NativeFunction` instead if the name should actually lower.
+///
+/// Two known, narrow gaps rather than a deliberate non-goal: `var_sample` and
+/// `var_population` are DataFusion's own alias spellings of `var_samp` /
+/// `var_pop` (see `variance.rs`'s `aliases()` in `datafusion-functions-
+/// aggregate`) that [`NATIVE_FUNCTIONS`] doesn't also list under those
+/// spellings. Surfaced here rather than silently added to
+/// [`NATIVE_FUNCTIONS`], since accepting a new spelling is a maintainer's
+/// call, not something this catalog should do on its own.
+pub const KNOWN_UNMAPPED_NATIVE_FUNCTIONS: &[&str] = &[
+    // Selector aggregates: this front end only supports these as window
+    // functions (`WindowFuncKind::FirstValue`/`LastValue`/`NthValue`, via
+    // `OVER (...)`), not as plain `GROUP BY` aggregates -- no `AggIntent`
+    // variant models "the value from a particular row" as a reduction.
+    "first_value",
+    "last_value",
+    "nth_value",
+    // Bitwise / boolean aggregates -- no corresponding `AggIntent` variant.
+    "bit_and",
+    "bit_or",
+    "bit_xor",
+    "bool_and",
+    "bool_or",
+    // Two-column correlation / linear-regression aggregates -- every
+    // `AggIntent` value reducer takes one input column (`reducer_col` in
+    // `asap-frontend-sql`), so these have no home yet.
+    "corr",
+    "covar",
+    "covar_pop",
+    "covar_samp",
+    "regr_avgx",
+    "regr_avgy",
+    "regr_count",
+    "regr_intercept",
+    "regr_r2",
+    "regr_slope",
+    "regr_sxx",
+    "regr_sxy",
+    "regr_syy",
+    // String concatenation -- no `AggIntent` equivalent.
+    "string_agg",
+    // The weighted-percentile variant of `approx_percentile_cont` (an extra
+    // weight-column argument); only the unweighted form is in
+    // `NATIVE_FUNCTIONS`.
+    "approx_percentile_cont_with_weight",
+    // Explicitly rejected elsewhere, not merely unmapped:
+    // `array_agg_is_deliberately_rejected` (asap-frontend-sql's
+    // sql_lowering tests) covers `array_agg`; `lower_grouping_sets`'s own
+    // doc comment covers `grouping` (`GROUPING(col)` -- observable only via
+    // the `__grouping_id` discriminator this front end drops).
+    "array_agg",
+    "grouping",
+    // Known narrow gaps (see doc comment above) -- alias spellings of
+    // `var_samp` / `var_pop` this catalog doesn't accept yet.
+    "var_sample",
+    "var_population",
+];
+
 /// Look up a native function name's canonical semantic (case-sensitive --
 /// callers normalize case first, as `asap-frontend-sql` already does via
 /// `.to_lowercase()`).
@@ -314,6 +386,40 @@ mod tests {
                 "{} listed as both native and ClickHouse-only",
                 b.name
             );
+        }
+    }
+
+    /// `KNOWN_UNMAPPED_NATIVE_FUNCTIONS` documents names this catalog
+    /// deliberately does *not* map -- it should never overlap with a table
+    /// that *does* map the same name (that would be a contradiction: mapped
+    /// and "known unmapped" at once), and shouldn't repeat itself either
+    /// (each name is a one-time recorded decision).
+    #[test]
+    fn known_unmapped_list_is_disjoint_from_the_mapped_tables_and_has_no_duplicates() {
+        for name in KNOWN_UNMAPPED_NATIVE_FUNCTIONS {
+            assert!(
+                lookup_native(name).is_none(),
+                "{name} is both in NATIVE_FUNCTIONS and KNOWN_UNMAPPED_NATIVE_FUNCTIONS"
+            );
+            assert!(
+                lookup_clickhouse_builtin(name).is_none(),
+                "{name} is both in CLICKHOUSE_BUILTINS and KNOWN_UNMAPPED_NATIVE_FUNCTIONS"
+            );
+        }
+        let mut sorted = KNOWN_UNMAPPED_NATIVE_FUNCTIONS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            KNOWN_UNMAPPED_NATIVE_FUNCTIONS.len(),
+            "KNOWN_UNMAPPED_NATIVE_FUNCTIONS has a duplicate entry"
+        );
+    }
+
+    #[test]
+    fn known_unmapped_names_are_lowercase() {
+        for name in KNOWN_UNMAPPED_NATIVE_FUNCTIONS {
+            assert_eq!(*name, name.to_lowercase(), "not lowercase: {name}");
         }
     }
 }
