@@ -350,7 +350,9 @@ version = "0.1.0"
 dependencies = [
  "asap-aware-mapping",
  "asap-frontend-promql",
+ "asap-frontend-sql",
  "asap-types",
+ "tokio",
 ]
 
 [[package]]
