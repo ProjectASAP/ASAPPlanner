@@ -36,9 +36,13 @@
 //!   `AggIntent → Implementation` (a summary family's own `(Kind, Params)`,
 //!   or an exact accumulator) sized to the `AccuracyTarget` (issue #98).
 //!   [`boundary::implementation_for`] is the per-node decision;
-//!   [`bind::implement_tree`] drives it over a whole tree — see the
-//!   terminology section below for why these two are named around
-//!   "implementation" rather than "bind".
+//!   [`bind::implement_tree`] drives it over a whole tree, and
+//!   [`bind::implement_workload`] drives it over a whole workload's roots —
+//!   memoized on `Rc` identity so two roots that
+//!   `asap_types::pre_asap::cse::share_common_subtrees` already collapsed
+//!   onto one shared subtree bind to one shared `SummaryNode` too (issue
+//!   #212, #222, #223) — see the terminology section below for why these are
+//!   named around "implementation" rather than "bind".
 //! - [`cost_model`] — the [`CostModel`](cost_model::CostModel) trait every
 //!   deployment's cost-based sketch selection plugs into (issues #6, #33).
 //!   `asap-plan` itself only ships [`DefaultCostModel`](cost_model::DefaultCostModel),
@@ -87,7 +91,10 @@ pub mod bind;
 pub mod boundary;
 pub mod cost_model;
 
-pub use bind::{implement_tree, implement_tree_with, ImplementError};
+pub use bind::{
+    implement_tree, implement_tree_with, implement_workload, implement_workload_with,
+    ImplementError,
+};
 pub use boundary::{
     implementation_for, implementation_for_with, summary_candidates, Implementation, Matcher,
 };

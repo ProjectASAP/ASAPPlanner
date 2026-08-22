@@ -91,6 +91,62 @@ pub fn implement_tree_with(
     logical(expr)
 }
 
+/// Bind a whole workload's worth of already-CSE'd roots
+/// ([`asap_types::pre_asap::cse::share_common_subtrees`]'s output), reusing
+/// one bound [`SummaryNode`] wherever two roots share the same `Rc` (issue
+/// #212, #222, #223 stage 2).
+///
+/// This is a real caller for `share_common_subtrees`, wired up deliberately:
+/// the pass's own landing plan calls out that its predecessor
+/// (`asap-plan::cse::dedupe_subtrees`) was deleted in #192 for being unwired
+/// dead code, and lands this memoization alongside it so that never becomes
+/// true again.
+///
+/// The memo key is `Rc::as_ptr` — pointer identity, not a second
+/// `PartialEq`/structural-equality pass. `share_common_subtrees` already made
+/// the (non-negotiable, `PartialEq`-checked) sharing decision; this only
+/// needs to recognize when it already bound the exact `Rc` a later root
+/// hands back, and is deliberately *not* a general "does an available
+/// `Implementation` satisfy this one" lookup — that subsumption question is
+/// `asap_aware_mapping::boundary::Matcher`'s documented, deliberately-unfilled
+/// job, not this one's.
+///
+/// Only whole-root sharing is memoized (matching two workload roots that are
+/// themselves the same `Rc<QueryExpr>` after CSE) — [`implement_tree`] is
+/// called at most once per distinct root pointer, but it still walks each
+/// such tree's own internal structure fresh; a subtree shared only *below*
+/// two different roots' top level does not additionally memoize inside that
+/// walk. Widening this to sub-root memoization is future work.
+pub fn implement_workload<Id>(
+    roots: Vec<(Id, Rc<QueryExpr>)>,
+) -> Vec<(Id, Result<Rc<SummaryNode>, ImplementError>)> {
+    implement_workload_with(roots, &DefaultCostModel)
+}
+
+/// Like [`implement_workload`], but ranks candidate summaries via
+/// `cost_model` instead of the built-in static preference order (see
+/// [`crate::cost_model`]).
+pub fn implement_workload_with<Id>(
+    roots: Vec<(Id, Rc<QueryExpr>)>,
+    cost_model: &dyn CostModel,
+) -> Vec<(Id, Result<Rc<SummaryNode>, ImplementError>)> {
+    let mut memo: std::collections::HashMap<*const QueryExpr, Rc<SummaryNode>> =
+        std::collections::HashMap::new();
+    roots
+        .into_iter()
+        .map(|(id, expr)| {
+            let ptr = Rc::as_ptr(&expr);
+            let result = match memo.get(&ptr) {
+                Some(cached) => Ok(Rc::clone(cached)),
+                None => implement_tree_with(&expr, cost_model).inspect(|node| {
+                    memo.insert(ptr, Rc::clone(node));
+                }),
+            };
+            (id, result)
+        })
+        .collect()
+}
+
 /// Translate an [`Implementation`] into the `(family, needs a
 /// SummaryEstimate readout)` pair [`bind_summary_agg`] needs, or `None` for
 /// `PassThrough` (the caller falls back to [`logical`]).
