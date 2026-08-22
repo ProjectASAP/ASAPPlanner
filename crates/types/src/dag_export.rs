@@ -146,7 +146,13 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         }
         QueryExpr::PromqlScalar(v) => {
             let detail = serde_json::json!({ "value": v });
-            push_node(nodes, "PromqlScalar", format!("PromqlScalar({v})"), detail, vec![])
+            push_node(
+                nodes,
+                "PromqlScalar",
+                format!("PromqlScalar({v})"),
+                detail,
+                vec![],
+            )
         }
         QueryExpr::QueryTimestamp => push_node(
             nodes,
@@ -189,7 +195,13 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         QueryExpr::PromqlInfoEnrich { selector, child } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "selector": selector });
-            push_node(nodes, "PromqlInfoEnrich", "PromqlInfoEnrich".into(), detail, vec![c])
+            push_node(
+                nodes,
+                "PromqlInfoEnrich",
+                "PromqlInfoEnrich".into(),
+                detail,
+                vec![c],
+            )
         }
         QueryExpr::PromqlSeriesSample { by, kind, child } => {
             let c = build(child, nodes);
@@ -315,7 +327,13 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "range": range, "resolution": resolution });
-            push_node(nodes, "PromqlSubquery", "PromqlSubquery".into(), detail, vec![c])
+            push_node(
+                nodes,
+                "PromqlSubquery",
+                "PromqlSubquery".into(),
+                detail,
+                vec![c],
+            )
         }
         QueryExpr::TimeRange { range, child } => {
             let c = build(child, nodes);

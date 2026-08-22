@@ -14,8 +14,8 @@ use std::time::Duration;
 use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
 use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, GroupKeys, Predicate, QueryExpr,
-    Reduction, ScalarValue, Source, TimeShift, VectorMatch, VectorMatchKind,
+    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, GroupKeys, Predicate,
+    QueryExpr, Reduction, ScalarValue, Source, TimeShift, VectorMatch, VectorMatchKind,
 };
 use asap_types::types::AccuracyTarget;
 

@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, QueryExpr, Reduction, ScalarValue, Source,
+    AggIntent, ArithmeticOpKind, BinaryOpKind, CompareOpKind, QueryExpr, Reduction, ScalarValue,
+    Source,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{BatchEntry, Query, QueryLanguage, QueryRequirements, QueryWorkload};

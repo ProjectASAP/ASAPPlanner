@@ -144,7 +144,9 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
             super::query_expr::Source::Table { table_ref } => table_ref.as_str(),
         }),
         QE::PromqlScalar(_) | QE::QueryTimestamp => None,
-        QE::PromqlVectorFromScalar(child) | QE::PromqlScalarFromVector(child) => leftmost_scan_name(child),
+        QE::PromqlVectorFromScalar(child) | QE::PromqlScalarFromVector(child) => {
+            leftmost_scan_name(child)
+        }
         QE::PromqlRelabel { child, .. }
         | QE::PromqlInfoEnrich { child, .. }
         | QE::PromqlSeriesSample { child, .. }
@@ -291,7 +293,9 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
                 walk(right, out);
             }
             QE::PromqlScalar(_) | QE::QueryTimestamp => {}
-            QE::PromqlVectorFromScalar(child) | QE::PromqlScalarFromVector(child) => walk(child, out),
+            QE::PromqlVectorFromScalar(child) | QE::PromqlScalarFromVector(child) => {
+                walk(child, out)
+            }
             QE::PromqlInfoEnrich { child, .. }
             | QE::Limit { child, .. }
             | QE::PromqlSubquery { child, .. }

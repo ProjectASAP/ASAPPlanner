@@ -71,7 +71,9 @@ use asap_types::pre_asap::query_expr::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, Reduction, SortKey, Source,
     TimeShift, UnresolvedQueryExpr as Unresolved, VectorGrouping, VectorMatch, VectorMatchKind,
 };
-use asap_types::pre_asap::{ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue};
+use asap_types::pre_asap::{
+    ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue,
+};
 use asap_types::types::AccuracyTarget;
 
 use crate::error::PromqlError as LoweringError;

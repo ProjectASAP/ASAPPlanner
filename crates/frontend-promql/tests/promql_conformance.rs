@@ -36,8 +36,8 @@ use std::time::Duration;
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
 use asap_types::pre_asap::schema::DataType;
 use asap_types::pre_asap::{
-    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, MathFunc, QueryExpr, Reduction,
-    SampleKind, Source, TimeFunc,
+    AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, MathFunc, QueryExpr,
+    Reduction, SampleKind, Source, TimeFunc,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -146,10 +146,12 @@ fn has<F: Fn(&AggIntent) -> bool>(e: &QueryExpr, pred: F) -> bool {
 /// Whether the tree contains a `Mul`-by-`PromqlScalar(-1)` anywhere — the shape unary
 /// negation lowers to (issue #36).
 fn negates_via_scalar(e: &QueryExpr) -> bool {
-    let is_neg_one = |q: &QueryExpr| matches!(q, QueryExpr::PromqlScalar(v) if (*v + 1.0).abs() < 1e-12);
+    let is_neg_one =
+        |q: &QueryExpr| matches!(q, QueryExpr::PromqlScalar(v) if (*v + 1.0).abs() < 1e-12);
     match e {
         QueryExpr::BinaryOp { op, lhs, rhs, .. } => {
-            (*op == BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul) && (is_neg_one(lhs) || is_neg_one(rhs)))
+            (*op == BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul)
+                && (is_neg_one(lhs) || is_neg_one(rhs)))
                 || negates_via_scalar(lhs)
                 || negates_via_scalar(rhs)
         }
@@ -1088,7 +1090,10 @@ fn aggregation_over_over_time_of_subquery_keeps_labels() {
     };
     assert_eq!(inner_reduction, &Reduction::PerEntity);
     assert!(matches!(inner_measures.as_slice(), [AggIntent::Max { .. }]));
-    assert!(matches!(inner_child.as_ref(), QueryExpr::PromqlSubquery { .. }));
+    assert!(matches!(
+        inner_child.as_ref(),
+        QueryExpr::PromqlSubquery { .. }
+    ));
 }
 
 #[test]
@@ -1691,7 +1696,9 @@ fn clamp_and_round_carry_their_params() {
 #[test]
 fn pi_lowers_to_a_scalar_constant() {
     // `pi()` is the constant π — a `PromqlScalar` leaf, not a `Math` intent.
-    assert!(matches!(ok("pi()"), QueryExpr::PromqlScalar(v) if (v - std::f64::consts::PI).abs() < 1e-12));
+    assert!(
+        matches!(ok("pi()"), QueryExpr::PromqlScalar(v) if (v - std::f64::consts::PI).abs() < 1e-12)
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1749,7 +1756,10 @@ fn time_minus_vector_is_the_uptime_pattern() {
         panic!("expected a BinaryOp, got {qe:?}");
     };
     assert!(matches!(lhs.as_ref(), QueryExpr::QueryTimestamp));
-    assert!(matches!(op, BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub)));
+    assert!(matches!(
+        op,
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub)
+    ));
     assert!(qe.output_schema().is_ok());
 }
 

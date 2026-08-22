@@ -223,7 +223,11 @@ pub(super) fn compare(
     })
 }
 
-pub(super) fn arith(left: &Expr, op: ArithmeticOpKind, right: &Expr) -> Result<Unresolved, LoweringError> {
+pub(super) fn arith(
+    left: &Expr,
+    op: ArithmeticOpKind,
+    right: &Expr,
+) -> Result<Unresolved, LoweringError> {
     Ok(Unresolved::Arithmetic {
         op,
         left: Rc::new(df_expr_to_unresolved(left)?),

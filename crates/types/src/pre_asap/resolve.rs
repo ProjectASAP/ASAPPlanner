@@ -89,8 +89,12 @@ fn resolve(
         QE::PromqlScalar(v) => QE::PromqlScalar(*v),
         QE::QueryTimestamp => QE::QueryTimestamp,
 
-        QE::PromqlVectorFromScalar(child) => QE::PromqlVectorFromScalar(Rc::new(resolve(child, fallback)?)),
-        QE::PromqlScalarFromVector(child) => QE::PromqlScalarFromVector(Rc::new(resolve(child, fallback)?)),
+        QE::PromqlVectorFromScalar(child) => {
+            QE::PromqlVectorFromScalar(Rc::new(resolve(child, fallback)?))
+        }
+        QE::PromqlScalarFromVector(child) => {
+            QE::PromqlScalarFromVector(Rc::new(resolve(child, fallback)?))
+        }
 
         QE::PromqlRelabel { dst, value, child } => {
             let child = resolve(child, fallback)?;
