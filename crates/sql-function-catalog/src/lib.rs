@@ -26,14 +26,18 @@
 //!   must be a bare column" rule are call-site logic, not per-function data,
 //!   and stay in `asap-frontend-sql`.
 //! - [`CLICKHOUSE_BUILTINS`] -- ClickHouse-only *aggregate* names DataFusion
-//!   doesn't know at all (`uniqExact`, `countIf`). Each entry additionally
-//!   carries a [`RewriteKind`]: the native DataFusion aggregate shape the
-//!   call rewrites to before `lower_agg_intent` (or DataFusion's own physical
-//!   planner) ever has to understand the ClickHouse name itself. This is
-//!   what generalizes `uniqExact`'s old bespoke `UniqExactRewrite` +
-//!   `uniq_exact_udaf` pair (issue #221): a new builtin that rewrites to an
-//!   already-handled shape is a new entry in this table, not a new
-//!   `FunctionRewrite` impl and a new stub-`AggregateUDF` constructor.
+//!   doesn't know at all (`uniqExact`, `countIf`, `argMax`, `argMin`). Each
+//!   entry additionally carries a [`RewriteKind`]: either the native
+//!   DataFusion aggregate shape the call rewrites to before
+//!   `lower_agg_intent` (or DataFusion's own physical planner) ever has to
+//!   understand the ClickHouse name itself -- this is what generalizes
+//!   `uniqExact`'s old bespoke `UniqExactRewrite` + `uniq_exact_udaf` pair
+//!   (issue #221): a new builtin that rewrites to an already-handled shape is
+//!   a new entry in this table, not a new `FunctionRewrite` impl and a new
+//!   stub-`AggregateUDF` constructor -- or [`RewriteKind::PassThrough`] for a
+//!   builtin with no native shape to rewrite to at all (`argMax`/`argMin`,
+//!   issue #232): the call survives unchanged and `lower_agg_intent` handles
+//!   the ClickHouse name itself directly.
 //! - [`CLICKHOUSE_SCALAR_BUILTINS`] -- ClickHouse-only *scalar* names
 //!   DataFusion doesn't know at all (`splitByChar`, `toDate`, `match`,
 //!   the `toStartOf*` family, `startsWith`, `positionCaseInsensitive`). No
@@ -229,6 +233,16 @@ pub enum RewriteKind {
     /// for any reducer over an expression (issue #110) -- so no new
     /// `AggIntent` variant or lowering path is needed either.
     CountIfToSum,
+    /// No native DataFusion aggregate shape to rewrite to at all -- the call
+    /// survives unchanged (`ClickHouseBuiltinRewrite` is a no-op for it) and
+    /// reaches `lower_agg_intent`, which builds an `AggIntent` directly from
+    /// the ClickHouse name itself. `argMax`/`argMin` (issue #232): a
+    /// two-column, row-selecting aggregate ("return `arg`'s value from the
+    /// row where `val` is maximal") that fits no existing single-column
+    /// `AggIntent` reducer shape and has no native DataFusion equivalent to
+    /// borrow one from -- unlike `CountDistinct`/`CountIfToSum`, there is no
+    /// "already-handled shape" for this rewrite to target.
+    PassThrough,
 }
 
 /// One [`CLICKHOUSE_BUILTINS`] entry.
@@ -258,6 +272,19 @@ pub const CLICKHOUSE_BUILTINS: &[ClickHouseBuiltin] = &[
         name: "countif",
         arity: Arity::Exact(1),
         rewrite: RewriteKind::CountIfToSum,
+    },
+    // argMax(arg, val) -- "arg's value from the row where val is maximal".
+    // No native DataFusion aggregate shape to rewrite to (issue #232), so
+    // `lower_agg_intent` builds `AggIntent::Extension` from these directly.
+    ClickHouseBuiltin {
+        name: "argmax",
+        arity: Arity::Exact(2),
+        rewrite: RewriteKind::PassThrough,
+    },
+    ClickHouseBuiltin {
+        name: "argmin",
+        arity: Arity::Exact(2),
+        rewrite: RewriteKind::PassThrough,
     },
 ];
 

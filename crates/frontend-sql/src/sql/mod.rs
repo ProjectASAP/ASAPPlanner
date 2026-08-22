@@ -1063,6 +1063,10 @@ impl FunctionRewrite for ClickHouseBuiltinRewrite {
             return Ok(Transformed::no(Expr::AggregateFunction(f)));
         };
         let rewritten = match builtin.rewrite {
+            // No native DataFusion shape to become — leave the call exactly
+            // as DataFusion's planner parsed it. `lower_agg_intent` handles
+            // the ClickHouse name (`argMax`/`argMin`) directly (issue #232).
+            RewriteKind::PassThrough => return Ok(Transformed::no(Expr::AggregateFunction(f))),
             // `f(args...)` -> `count(args...) DISTINCT` — `lower_agg_intent`
             // already maps `count` + `DISTINCT` to `AggIntent::Cardinality`.
             RewriteKind::CountDistinct => AggregateFunction::new_udf(
@@ -1120,6 +1124,14 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
         Expr::Alias(a) => lower_agg_intent(&a.expr),
         Expr::AggregateFunction(agg_fn) => {
             let name = agg_fn.func.name().to_lowercase();
+            // ClickHouse's row-selecting `argMax`/`argMin` — `RewriteKind::
+            // PassThrough` in the catalog, so the call reaches here under its
+            // own name rather than a native DataFusion aggregate. Handled
+            // before the `NATIVE_FUNCTIONS` lookup below since neither name
+            // is in that table (issue #232).
+            if let Some(intent) = lower_arg_selector(&name, &agg_fn.args)? {
+                return Ok(intent);
+            }
             let semantic = asap_sql_function_catalog::lookup_native(&name)
                 .ok_or_else(|| LoweringError::UnsupportedAggregate(name.clone()))?;
             // The canonical intent algebra has no DISTINCT modifier for the
@@ -1192,6 +1204,62 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
             "measure is not an aggregate function call: {expr}"
         ))),
     }
+}
+
+/// ClickHouse's row-selecting `argMax(arg, val)` / `argMin(arg, val)` —
+/// "return `arg`'s value from the row where `val` is maximal/minimal".
+/// `Some(name)` for `"argmax"`/`"argmin"`, `None` for every other name (the
+/// caller falls through to the ordinary `NATIVE_FUNCTIONS` path).
+///
+/// Unlike every existing `AggIntent` reducer (`Sum`/`Min`/`Max`/`Avg`/…),
+/// which folds *one* column to a value derived from itself, this is a
+/// two-column, row-selecting aggregate: it returns a *different* column's
+/// value, selected by which row maximizes/minimizes a second column. No
+/// existing `AggIntent` shape fits, and — per its own doc comment's
+/// "core only grows for intents ≥2 deployment models actually use" bar —
+/// a repo-wide search (PromQL front end, the other SQL dialects, docs) found
+/// no second deployment model wanting this shape, so this lowers to
+/// `AggIntent::Extension` rather than earning a first-class `ArgMax`/`ArgMin`
+/// core variant (issue #232). Core treats `Extension` opaquely: both columns
+/// are kept only as validated bare-column names in `payload` (`reducer_col`'s
+/// same "no expression arguments" rule, issue #115) — they are **not** run
+/// through `resolve_agg_intent`'s positional `ColumnRef` -> `ColumnId`
+/// binding the way a real reducer's `col` is, since `Extension` carries no
+/// typed column field for core to resolve. A deployment model that wants to
+/// actually bind/execute `argMax`/`argMin` is expected to re-derive that
+/// itself from `payload`, per `AggIntent::Extension`'s own doc.
+///
+/// Known scope gap, not chased down here (matching issue #230's precedent
+/// for other structural-only gaps like `splitByChar` array-indexing):
+/// `DerivedCols::rewrite_agg` (this module) only materializes/passes through
+/// an aggregate's *first* argument when deriving columns beneath the
+/// `Aggregate` node, so `val` here would be silently dropped from a `Project`
+/// DataFusion's planner inserts for some *other* reason in the same query
+/// (e.g. a sibling `SUM(a * b)`). Every corpus `argMax` use has both
+/// arguments as bare columns of the scanned table and no such `Project` is
+/// inserted, so this does not affect `bgp_jan2024_workload` today.
+fn lower_arg_selector(
+    name: &str,
+    args: &[Expr],
+) -> Result<Option<AggIntent<ColumnRef>>, LoweringError> {
+    let ext_kind = match name {
+        "argmax" => "arg_max",
+        "argmin" => "arg_min",
+        _ => return Ok(None),
+    };
+    let [arg, val] = args else {
+        unreachable!(
+            "{name}'s stub signature (asap_sql_function_catalog::CLICKHOUSE_BUILTINS) fixes \
+             its arity at 2 -- the planner already rejected any other argument count before \
+             lower_agg_intent runs"
+        );
+    };
+    let arg_col = reducer_col(name, std::slice::from_ref(arg))?;
+    let val_col = reducer_col(name, std::slice::from_ref(val))?;
+    Ok(Some(AggIntent::Extension {
+        ext_kind: ext_kind.to_string(),
+        payload: serde_json::json!({ "arg_col": arg_col, "val_col": val_col }),
+    }))
 }
 
 /// The name an `IN (subquery)`'s key column is projected under, so the join
