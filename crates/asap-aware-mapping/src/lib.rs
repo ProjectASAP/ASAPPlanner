@@ -30,8 +30,15 @@
 //!
 //! ## Status
 //!
-//! Two real occupants and one stub:
+//! Three real occupants and one stub:
 //!
+//! - [`applicability`] — "which known optimizations are applicable to this
+//!   workload" (issue #33): a small [`applicability::ApplicabilityRule`]
+//!   extension-point trait, with real rules wrapping [`boundary`]'s sketch
+//!   decision and `asap_types::pre_asap::cse::share_common_subtrees`'s
+//!   sharing decision as applicability findings — see that module's docs for
+//!   which catalog optimizations got a real rule and which are deliberately
+//!   deferred (no primitive to wrap yet).
 //! - [`boundary`] — the per-intent sketch-vs-exact (accuracy) decision:
 //!   `AggIntent → Implementation` (a summary family's own `(Kind, Params)`,
 //!   or an exact accumulator) sized to the `AccuracyTarget` (issue #98).
@@ -87,10 +94,16 @@
 //! `sketch_algebra::capability::Capability`/`is_satisfied_by` is the
 //! reference downstream implementation.
 
+pub mod applicability;
 pub mod bind;
 pub mod boundary;
 pub mod cost_model;
 
+pub use applicability::{
+    default_rules, find_applicable_optimizations, find_applicable_optimizations_with,
+    ApplicabilityFinding, ApplicabilityRule, OptimizationKind, SharedSubexpressionRule,
+    SketchApplicabilityRule,
+};
 pub use bind::{
     implement_tree, implement_tree_with, implement_workload, implement_workload_with,
     ImplementError,
