@@ -5,17 +5,30 @@
 //! `QueryExpr` already derives `Serialize`, but as a Rust-shaped tagged tree
 //! (`Rc` children nested inside each variant's own field). This module
 //! flattens that into an explicit node list + child-id edges — the shape a
-//! generic graph renderer wants — and additionally computes a bottom-up
-//! structural hash per node, so a caller with several exported queries can
-//! spot identical subtrees (a shared `Scan`, a repeated `Aggregate` shape,
-//! …) by comparing hashes rather than re-implementing `QueryExpr: PartialEq`
-//! structural comparison client-side. This hash is also the intended basis
-//! for a real CSE pass (issue #212, #222) — today it only drives
-//! `tools/dag-viewer`'s highlighting, a proxy for that, not the pass itself.
+//! generic graph renderer wants — and additionally tags each node with
+//! [`structural_hash`](crate::pre_asap::cse::structural_hash), so a caller
+//! with several exported queries can spot identical subtrees (a
+//! shared `Scan`, a repeated `Aggregate` shape, …) by comparing hashes
+//! rather than re-implementing `QueryExpr: PartialEq` structural comparison
+//! client-side.
+//!
+//! This is literally the same hashing
+//! [`share_common_subtrees`](crate::pre_asap::cse::share_common_subtrees)
+//! uses to bucket candidates in its `InternTable` (issue #223 stage 3) — not
+//! a parallel reimplementation. `tools/dag-viewer`'s "shared subtree"
+//! highlighting is still a *proxy* for real CSE, though: a hash match here
+//! only means two nodes are legal `InternTable` bucket-mates (same coarse
+//! hash), the same candidate-narrowing step `structural_hash` performs
+//! inside `InternTable::intern` — it does not mean `share_common_subtrees`
+//! actually ran on this data and merged them onto one `Rc` (that also
+//! requires the `PartialEq` check `InternTable::intern` performs, and the
+//! `Schema::has_unique_key` legality gate, neither of which this export
+//! step evaluates). See `tools/dag-viewer/README.md` for the up-to-date
+//! caveat.
 
 use serde::Serialize;
-use std::hash::{Hash, Hasher};
 
+use crate::pre_asap::cse::structural_hash;
 use crate::pre_asap::query_expr::{QueryExpr, Source};
 
 /// One flattened IR node. `detail` holds this node's own scalar fields
@@ -32,8 +45,12 @@ pub struct DagNode {
     /// Child node ids, in the variant's field order (e.g. `Join` is
     /// `[left, right]`).
     pub children: Vec<u32>,
-    /// Bottom-up structural hash: two nodes hash equally iff their `kind`,
-    /// `detail`, and (recursively) their children's hashes all match.
+    /// [`structural_hash`](crate::pre_asap::cse::structural_hash) of the
+    /// subtree rooted at this node — the exact same function `cse`'s
+    /// `InternTable` uses to bucket CSE candidates, so two nodes hash
+    /// equally here iff they would land in the same `InternTable` bucket.
+    /// See the module doc for what a hash match here does and doesn't
+    /// guarantee.
     pub hash: u64,
 }
 
@@ -73,15 +90,22 @@ pub fn export(expr: &QueryExpr) -> DagGraph {
     DagGraph { nodes, root }
 }
 
+/// Push one flattened node for `expr`. `expr` is the *whole* subtree this
+/// node represents (not just its own fields) — `hash` is
+/// [`structural_hash(expr)`](structural_hash), the identical function and
+/// the identical input `InternTable::intern` would hash for this same
+/// subtree, so this node's `hash` matches what `cse::share_common_subtrees`
+/// would bucket it under.
 fn push_node(
     nodes: &mut Vec<DagNode>,
+    expr: &QueryExpr,
     kind: &'static str,
     label: String,
     detail: serde_json::Value,
     children: Vec<u32>,
 ) -> u32 {
     let id = nodes.len() as u32;
-    let hash = structural_hash(kind, &detail, &children, nodes);
+    let hash = structural_hash(expr);
     nodes.push(DagNode {
         id,
         kind,
@@ -91,25 +115,6 @@ fn push_node(
         hash,
     });
     id
-}
-
-/// `detail.to_string()` is a stable, canonical string: `serde_json::Value`'s
-/// default map (no `preserve_order` feature) is a `BTreeMap`, so object keys
-/// always serialize in the same sorted order regardless of construction
-/// order.
-fn structural_hash(
-    kind: &str,
-    detail: &serde_json::Value,
-    children: &[u32],
-    nodes: &[DagNode],
-) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    kind.hash(&mut hasher);
-    detail.to_string().hash(&mut hasher);
-    for &c in children {
-        nodes[c as usize].hash.hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 fn source_label(source: &Source) -> String {
@@ -142,7 +147,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
                 "predicates": predicates,
                 "schema": schema,
             });
-            push_node(nodes, "Scan", label, detail, vec![])
+            push_node(nodes, expr, "Scan", label, detail, vec![])
         }
         // The bridged child is a scalar-sub-language node (issue #220), not
         // an operator node `build` can recurse into — serialize it as opaque
@@ -153,6 +158,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "value": inner });
             push_node(
                 nodes,
+                expr,
                 "PromqlScalarBridge",
                 format!("PromqlScalarBridge({inner:?})"),
                 detail,
@@ -161,6 +167,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         }
         QueryExpr::QueryTimestamp => push_node(
             nodes,
+            expr,
             "QueryTimestamp",
             "QueryTimestamp".into(),
             serde_json::json!({}),
@@ -170,6 +177,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let c = build(child, nodes);
             push_node(
                 nodes,
+                expr,
                 "PromqlVectorFromScalar",
                 "vector()".into(),
                 serde_json::json!({}),
@@ -180,6 +188,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let c = build(child, nodes);
             push_node(
                 nodes,
+                expr,
                 "PromqlScalarFromVector",
                 "scalar()".into(),
                 serde_json::json!({}),
@@ -191,6 +200,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "dst": dst, "value": value });
             push_node(
                 nodes,
+                expr,
                 "PromqlRelabel",
                 format!("PromqlRelabel(dst={dst})"),
                 detail,
@@ -202,6 +212,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "selector": selector });
             push_node(
                 nodes,
+                expr,
                 "PromqlInfoEnrich",
                 "PromqlInfoEnrich".into(),
                 detail,
@@ -213,6 +224,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "by": by, "kind": kind });
             push_node(
                 nodes,
+                expr,
                 "PromqlSeriesSample",
                 format!("PromqlSeriesSample({kind:?})"),
                 detail,
@@ -222,7 +234,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         QueryExpr::Filter { pred, child } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "pred": pred });
-            push_node(nodes, "Filter", "Filter".into(), detail, vec![c])
+            push_node(nodes, expr, "Filter", "Filter".into(), detail, vec![c])
         }
         QueryExpr::Project {
             cols,
@@ -233,6 +245,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "cols": cols, "qualifier": qualifier });
             push_node(
                 nodes,
+                expr,
                 "Project",
                 format!("Project({} cols)", cols.len()),
                 detail,
@@ -255,6 +268,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             });
             push_node(
                 nodes,
+                expr,
                 "Aggregate",
                 format!("Aggregate({} measures)", measures.len()),
                 detail,
@@ -266,6 +280,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "cols": cols });
             push_node(
                 nodes,
+                expr,
                 "Dedup",
                 format!("Dedup({} cols)", cols.len()),
                 detail,
@@ -275,7 +290,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         QueryExpr::Concat { children } => {
             let ids: Vec<u32> = children.iter().map(|c| build(c, nodes)).collect();
             let label = format!("Concat({} branches)", ids.len());
-            push_node(nodes, "Concat", label, serde_json::json!({}), ids)
+            push_node(nodes, expr, "Concat", label, serde_json::json!({}), ids)
         }
         QueryExpr::Join {
             kind,
@@ -286,7 +301,14 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let l = build(left, nodes);
             let r = build(right, nodes);
             let detail = serde_json::json!({ "kind": kind, "pred": pred });
-            push_node(nodes, "Join", format!("Join({kind:?})"), detail, vec![l, r])
+            push_node(
+                nodes,
+                expr,
+                "Join",
+                format!("Join({kind:?})"),
+                detail,
+                vec![l, r],
+            )
         }
         QueryExpr::SetOp {
             kind,
@@ -299,6 +321,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "kind": kind, "all": all });
             push_node(
                 nodes,
+                expr,
                 "SetOp",
                 format!("SetOp({kind:?})"),
                 detail,
@@ -314,6 +337,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "keys": keys, "partition_by": partition_by });
             push_node(
                 nodes,
+                expr,
                 "Sort",
                 format!("Sort({} keys)", keys.len()),
                 detail,
@@ -323,7 +347,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         QueryExpr::Limit { n, offset, child } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "n": n, "offset": offset });
-            push_node(nodes, "Limit", format!("Limit({n})"), detail, vec![c])
+            push_node(nodes, expr, "Limit", format!("Limit({n})"), detail, vec![c])
         }
         QueryExpr::PromqlSubquery {
             range,
@@ -334,6 +358,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "range": range, "resolution": resolution });
             push_node(
                 nodes,
+                expr,
                 "PromqlSubquery",
                 "PromqlSubquery".into(),
                 detail,
@@ -345,6 +370,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "range": range });
             push_node(
                 nodes,
+                expr,
                 "TimeRange",
                 format!("TimeRange({range:?})"),
                 detail,
@@ -354,7 +380,14 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
         QueryExpr::TimeShift { shift, child } => {
             let c = build(child, nodes);
             let detail = serde_json::json!({ "shift": shift });
-            push_node(nodes, "TimeShift", "TimeShift".into(), detail, vec![c])
+            push_node(
+                nodes,
+                expr,
+                "TimeShift",
+                "TimeShift".into(),
+                detail,
+                vec![c],
+            )
         }
         QueryExpr::SQLWindowFunc {
             func,
@@ -374,6 +407,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             });
             push_node(
                 nodes,
+                expr,
                 "SQLWindowFunc",
                 format!("SQLWindowFunc({func:?})"),
                 detail,
@@ -391,6 +425,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
             let detail = serde_json::json!({ "op": op.to_string(), "vector_match": vector_match });
             push_node(
                 nodes,
+                expr,
                 "BinaryOp",
                 format!("BinaryOp({op})"),
                 detail,
@@ -550,6 +585,61 @@ mod tests {
         assert_ne!(
             g1.nodes[g1.root as usize].hash,
             g2.nodes[g2.root as usize].hash
+        );
+    }
+
+    // ── Issue #223 stage 3: dag_export's hash literally *is* cse's hash ────
+
+    #[test]
+    fn root_hash_matches_cse_structural_hash_for_the_same_node() {
+        // Not just "hashes equal for equal inputs" (any two consistent hash
+        // functions would do that) — the exported root's `hash` must be the
+        // literal `u64` `crate::pre_asap::cse::structural_hash` produces for
+        // this exact node, because it's the same function call, not a
+        // parallel reimplementation that happens to agree.
+        let leaf = scan("metrics", value_col());
+        let graph = export(&leaf);
+        assert_eq!(
+            graph.nodes[graph.root as usize].hash,
+            structural_hash(&leaf),
+            "dag_export's root hash must equal cse::structural_hash(&leaf) directly"
+        );
+    }
+
+    #[test]
+    fn every_node_hash_matches_cse_structural_hash_on_its_own_subtree() {
+        // A multi-level tree: check the parity holds at every depth, not
+        // just the root — each `DagNode::hash` must equal
+        // `structural_hash` applied to the actual `QueryExpr` subtree that
+        // node represents.
+        let agg = QueryExpr::Aggregate {
+            reduction: Reduction::Reduce(GroupKeys::none()),
+            measures: vec![AggIntent::Count {
+                accuracy: AccuracyTarget::Exact,
+            }],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(scan("metrics", value_col())),
+        };
+        let root = QueryExpr::Filter {
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            child: Rc::new(agg.clone()),
+        };
+
+        let graph = export(&root);
+        assert_eq!(
+            graph.nodes[graph.root as usize].hash,
+            structural_hash(&root),
+            "Filter root hash must match cse::structural_hash(&root)"
+        );
+
+        let filter = &graph.nodes[graph.root as usize];
+        let agg_node = &graph.nodes[filter.children[0] as usize];
+        assert_eq!(
+            agg_node.hash,
+            structural_hash(&agg),
+            "the exported Aggregate node's hash must match cse::structural_hash \
+             on the Aggregate subtree it represents, not just the root"
         );
     }
 }

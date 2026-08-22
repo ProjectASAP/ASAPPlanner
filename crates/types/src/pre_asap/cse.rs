@@ -84,9 +84,13 @@
 //! ([`asap_aware_mapping::implement_workload`]) is a real caller, wired at
 //! the same time so this never becomes unwired dead code again (the original
 //! `asap-plan::cse::dedupe_subtrees` was deleted in #192 for exactly that).
-//! Stages 3 (`dag_export::structural_hash` unification) and 4 (`CostModel`
-//! CSE credit) are deliberately deferred follow-ups, not attempted here.
-//! Stage 4 (issue #237) is implemented in
+//! Stage 3 — [`dag_export`](crate::dag_export) computing its per-node `hash`
+//! by calling this module's [`structural_hash`] directly, instead of a
+//! parallel reimplementation — is also done, so `tools/dag-viewer`'s
+//! "shared subtree" highlighting now flags exactly the candidate pairs this
+//! module's own `InternTable` would bucket together (still only a hash
+//! match, not a guarantee of `share_common_subtrees`-actual sharing — see
+//! `dag_export`'s module doc). Stage 4 (issue #237) is implemented in
 //! `asap_aware_mapping::cost_model::CostModel::cse_share_decision` and its
 //! caller, `asap_aware_mapping::bind::implement_workload_with` — a real,
 //! Volcano/Cascades-style cost comparison over what this module detects, not
@@ -151,13 +155,17 @@ impl InternTable {
 ///
 /// `QueryExpr` carries `f64`s (`Literal(ScalarValue::Float64)`, `AggIntent::Quantile.q`, …), so it
 /// cannot derive `std::hash::Hash`. Serializing to a canonical JSON string
-/// and hashing that sidesteps the `f64` problem the same way
-/// `dag_export.rs`'s own `structural_hash` does — a deliberately independent
-/// implementation for now (this module's stage 1; unifying the two is stage
-/// 3 of issue #223's landing plan, not done here). A NaN/infinite `f64`
-/// makes JSON serialization fail; falling back to a fixed hash just puts
-/// every such node in one (larger, still `PartialEq`-disambiguated) bucket.
-fn structural_hash(node: &QueryExpr) -> u64 {
+/// and hashing that sidesteps the `f64` problem.
+///
+/// `pub(crate)` (not private) so [`dag_export`](crate::dag_export) can call
+/// this exact function for its exported nodes' `hash` field instead of
+/// maintaining its own parallel reimplementation — issue #223 stage 3. That
+/// makes `tools/dag-viewer`'s "shared subtree" highlighting reflect this
+/// module's real hashing, not a lookalike computed a different way; see the
+/// module doc's "Landing plan" section. A NaN/infinite `f64` makes JSON
+/// serialization fail; falling back to a fixed hash just puts every such
+/// node in one (larger, still `PartialEq`-disambiguated) bucket.
+pub(crate) fn structural_hash(node: &QueryExpr) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let canonical = serde_json::to_string(node).unwrap_or_default();
     canonical.hash(&mut hasher);
