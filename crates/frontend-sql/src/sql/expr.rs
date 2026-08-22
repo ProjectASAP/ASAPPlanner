@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
 
 use asap_types::pre_asap::{ArithOp, ColumnRef, CompareOp, ScalarValue};
@@ -98,8 +100,8 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
                 }
                 other => Ok(Unresolved::Arith {
                     op: ArithOp::Mul,
-                    left: Box::new(Unresolved::Literal(ScalarValue::Int64(-1))),
-                    right: Box::new(other),
+                    left: Rc::new(Unresolved::Literal(ScalarValue::Int64(-1))),
+                    right: Rc::new(other),
                 }),
             }
         }
@@ -109,7 +111,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             let operand = c
                 .expr
                 .as_ref()
-                .map(|e| df_expr_to_unresolved(e).map(Box::new))
+                .map(|e| df_expr_to_unresolved(e).map(Rc::new))
                 .transpose()?;
             let branches = c
                 .when_then_expr
@@ -121,7 +123,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             let else_expr = c
                 .else_expr
                 .as_ref()
-                .map(|e| df_expr_to_unresolved(e).map(Box::new))
+                .map(|e| df_expr_to_unresolved(e).map(Rc::new))
                 .transpose()?;
             Ok(Unresolved::Case {
                 operand,
@@ -130,11 +132,11 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             })
         }
 
-        Expr::Not(inner) => Ok(Unresolved::Not(Box::new(df_expr_to_unresolved(inner)?))),
+        Expr::Not(inner) => Ok(Unresolved::Not(Rc::new(df_expr_to_unresolved(inner)?))),
 
-        Expr::IsNull(inner) => Ok(Unresolved::IsNull(Box::new(df_expr_to_unresolved(inner)?))),
+        Expr::IsNull(inner) => Ok(Unresolved::IsNull(Rc::new(df_expr_to_unresolved(inner)?))),
 
-        Expr::IsNotNull(inner) => Ok(Unresolved::IsNotNull(Box::new(df_expr_to_unresolved(
+        Expr::IsNotNull(inner) => Ok(Unresolved::IsNotNull(Rc::new(df_expr_to_unresolved(
             inner,
         )?))),
 
@@ -142,7 +144,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             let inner = df_expr_to_unresolved(&c.expr)?;
             let to = arrow_to_dtype(&c.data_type)?;
             Ok(Unresolved::Cast {
-                expr: Box::new(inner),
+                expr: Rc::new(inner),
                 to,
                 try_cast: false,
             })
@@ -153,7 +155,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             let inner = df_expr_to_unresolved(&c.expr)?;
             let to = arrow_to_dtype(&c.data_type)?;
             Ok(Unresolved::Cast {
-                expr: Box::new(inner),
+                expr: Rc::new(inner),
                 to,
                 try_cast: true,
             })
@@ -163,7 +165,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             let expr = df_expr_to_unresolved(&il.expr)?;
             let list: Result<Vec<_>, _> = il.list.iter().map(df_expr_to_unresolved).collect();
             Ok(Unresolved::InList {
-                expr: Box::new(expr),
+                expr: Rc::new(expr),
                 list: list?,
                 negated: il.negated,
             })
@@ -215,17 +217,17 @@ pub(super) fn compare(
     right: &Expr,
 ) -> Result<Unresolved, LoweringError> {
     Ok(Unresolved::Compare {
-        left: Box::new(df_expr_to_unresolved(left)?),
+        left: Rc::new(df_expr_to_unresolved(left)?),
         op,
-        right: Box::new(df_expr_to_unresolved(right)?),
+        right: Rc::new(df_expr_to_unresolved(right)?),
     })
 }
 
 pub(super) fn arith(left: &Expr, op: ArithOp, right: &Expr) -> Result<Unresolved, LoweringError> {
     Ok(Unresolved::Arith {
         op,
-        left: Box::new(df_expr_to_unresolved(left)?),
-        right: Box::new(df_expr_to_unresolved(right)?),
+        left: Rc::new(df_expr_to_unresolved(left)?),
+        right: Rc::new(df_expr_to_unresolved(right)?),
     })
 }
 

@@ -23,6 +23,7 @@
 //! `topk(...)` converge without either front end special-casing the other's
 //! syntax.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
@@ -212,7 +213,7 @@ impl<'a> SqlLowerer<'a> {
                 Distinct::On(_) => Err(LoweringError::UnsupportedFeature("DISTINCT ON".into())),
                 Distinct::All(input) => Ok(Unresolved::Distinct {
                     cols: vec![],
-                    child: Box::new(self.lower_plan(input)?),
+                    child: Rc::new(self.lower_plan(input)?),
                 }),
             },
             LogicalPlan::Union(u) => {
@@ -226,8 +227,8 @@ impl<'a> SqlLowerer<'a> {
                     Ok(Unresolved::SetOp {
                         kind: SetOpKind::Union,
                         all: true,
-                        left: Box::new(left),
-                        right: Box::new(self.lower_plan(right_plan)?),
+                        left: Rc::new(left),
+                        right: Rc::new(self.lower_plan(right_plan)?),
                     })
                 })
             }
@@ -279,7 +280,7 @@ impl<'a> SqlLowerer<'a> {
                                 Ok(Unresolved::Project {
                                     cols,
                                     qualifier: Some(alias_name),
-                                    child: Box::new(inner),
+                                    child: Rc::new(inner),
                                 })
                             }
                         }
@@ -370,7 +371,7 @@ impl<'a> SqlLowerer<'a> {
                     expr: df_expr_to_unresolved(unalias(&p.expr[0]))?,
                 }],
                 qualifier: None,
-                child: Box::new(self.lower_plan(&p.input)?),
+                child: Rc::new(self.lower_plan(&p.input)?),
             },
             other => Unresolved::Project {
                 cols: vec![ProjectItem {
@@ -378,20 +379,20 @@ impl<'a> SqlLowerer<'a> {
                     expr: Unresolved::Column(ColumnRef::Named(key.name().clone())),
                 }],
                 qualifier: None,
-                child: Box::new(self.lower_plan(other)?),
+                child: Rc::new(self.lower_plan(other)?),
             },
         };
         Ok(Unresolved::Join {
             kind: JoinKind::Semi,
-            pred: Predicate(Box::new(Unresolved::Compare {
-                left: Box::new(df_expr_to_unresolved(&is.expr)?),
+            pred: Predicate(Rc::new(Unresolved::Compare {
+                left: Rc::new(df_expr_to_unresolved(&is.expr)?),
                 op: CompareOp::Eq,
-                right: Box::new(Unresolved::Column(ColumnRef::Named(
+                right: Rc::new(Unresolved::Column(ColumnRef::Named(
                     IN_SUBQUERY_KEY.to_string(),
                 ))),
             })),
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Rc::new(left),
+            right: Rc::new(right),
         })
     }
 
@@ -422,14 +423,14 @@ impl<'a> SqlLowerer<'a> {
         // the join condition is unconditionally true — same convention as an
         // unconditional `JOIN` (`lower_join`, below).
         let pred = match correlation {
-            Some(e) => Predicate(Box::new(df_expr_to_unresolved(&e)?)),
-            None => Predicate(Box::new(Unresolved::Literal(ScalarValue::Boolean(true)))),
+            Some(e) => Predicate(Rc::new(df_expr_to_unresolved(&e)?)),
+            None => Predicate(Rc::new(Unresolved::Literal(ScalarValue::Boolean(true)))),
         };
         Ok(Unresolved::Join {
             kind,
             pred,
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Rc::new(left),
+            right: Rc::new(right),
         })
     }
 
@@ -498,16 +499,16 @@ impl<'a> SqlLowerer<'a> {
             .iter()
             .map(|(l, r)| {
                 Ok(Unresolved::Compare {
-                    left: Box::new(df_expr_to_unresolved(l)?),
+                    left: Rc::new(df_expr_to_unresolved(l)?),
                     op: CompareOp::Eq,
-                    right: Box::new(df_expr_to_unresolved(r)?),
+                    right: Rc::new(df_expr_to_unresolved(r)?),
                 })
             })
             .collect::<Result<Vec<_>, LoweringError>>()?;
         if let Some(filter) = &join.filter {
             conjuncts.push(df_expr_to_unresolved(filter)?);
         }
-        let pred = Predicate(Box::new(match conjuncts.len() {
+        let pred = Predicate(Rc::new(match conjuncts.len() {
             // No condition (a CROSS JOIN) is unconditionally true.
             0 => Unresolved::Literal(ScalarValue::Boolean(true)),
             1 => conjuncts.pop().unwrap(),
@@ -516,8 +517,8 @@ impl<'a> SqlLowerer<'a> {
         Ok(Unresolved::Join {
             kind,
             pred,
-            left: Box::new(self.lower_plan(&join.left)?),
-            right: Box::new(self.lower_plan(&join.right)?),
+            left: Rc::new(self.lower_plan(&join.left)?),
+            right: Rc::new(self.lower_plan(&join.right)?),
         })
     }
 
@@ -530,7 +531,7 @@ impl<'a> SqlLowerer<'a> {
                 window.window_expr.len()
             )));
         }
-        let child = Box::new(self.lower_plan(&window.input)?);
+        let child = Rc::new(self.lower_plan(&window.input)?);
         let first = window
             .window_expr
             .first()
@@ -603,7 +604,7 @@ impl<'a> SqlLowerer<'a> {
         if proj.expr.iter().any(|e| matches!(e, Expr::Wildcard { .. })) {
             return self.lower_plan(&proj.input);
         }
-        let child = Box::new(self.lower_plan(&proj.input)?);
+        let child = Rc::new(self.lower_plan(&proj.input)?);
         let cols = proj
             .expr
             .iter()
@@ -675,7 +676,7 @@ impl<'a> SqlLowerer<'a> {
             .map(|e| derived.rewrite_agg(e))
             .collect::<Result<Vec<_>, LoweringError>>()?;
 
-        let child = Box::new(derived.wrap(input)?);
+        let child = Rc::new(derived.wrap(input)?);
         // DataFusion names the aggregate outputs in its own schema (e.g.
         // "sum(metrics.bytes)") — the same names the enclosing Projection
         // references. The schema is [group fields …, aggregate fields …], so
@@ -793,7 +794,7 @@ impl<'a> SqlLowerer<'a> {
                     measures: measures.clone(),
                     output_names: output_names.clone(),
                     having: None,
-                    child: Box::new(input.clone()),
+                    child: Rc::new(input.clone()),
                 };
                 // Reinstate omitted keys as typed nulls, in canonical order.
                 let cols = keys
@@ -805,7 +806,7 @@ impl<'a> SqlLowerer<'a> {
                             Unresolved::Column(ColumnRef::Named(name.clone()))
                         } else {
                             Unresolved::Cast {
-                                expr: Box::new(Unresolved::Literal(ScalarValue::Null)),
+                                expr: Rc::new(Unresolved::Literal(ScalarValue::Null)),
                                 to: dtype.clone(),
                                 try_cast: false,
                             }
@@ -819,7 +820,7 @@ impl<'a> SqlLowerer<'a> {
                 Ok(Unresolved::Project {
                     cols,
                     qualifier: None,
-                    child: Box::new(aggregate),
+                    child: Rc::new(aggregate),
                 })
             })
             .collect::<Result<Vec<_>, LoweringError>>()?;
@@ -850,7 +851,7 @@ impl<'a> SqlLowerer<'a> {
             // SQL `ORDER BY` is a global sort; per-group ranking would come from a
             // window function (`WindowFunc`), not a bare Sort.
             partition_by: GroupKeys::none(),
-            child: Box::new(self.lower_plan(&sort.input)?),
+            child: Rc::new(self.lower_plan(&sort.input)?),
         })
     }
 
@@ -860,7 +861,7 @@ impl<'a> SqlLowerer<'a> {
         Ok(Unresolved::Limit {
             n: eval_fetch(&limit.fetch).unwrap_or(usize::MAX),
             offset: eval_fetch(&limit.skip).unwrap_or(0),
-            child: Box::new(self.lower_plan(&limit.input)?),
+            child: Rc::new(self.lower_plan(&limit.input)?),
         })
     }
 }
@@ -1035,7 +1036,7 @@ fn filter_or_fold(pred: Unresolved, child: Unresolved) -> Unresolved {
             mut predicates,
             schema,
         } => {
-            predicates.push(Predicate(Box::new(pred)));
+            predicates.push(Predicate(Rc::new(pred)));
             Unresolved::Scan {
                 source,
                 predicates,
@@ -1043,8 +1044,8 @@ fn filter_or_fold(pred: Unresolved, child: Unresolved) -> Unresolved {
             }
         }
         other => Unresolved::Filter {
-            pred: Predicate(Box::new(pred)),
-            child: Box::new(other),
+            pred: Predicate(Rc::new(pred)),
+            child: Rc::new(other),
         },
     }
 }
@@ -1305,7 +1306,7 @@ impl DerivedCols {
         Ok(Unresolved::Project {
             cols: self.cols,
             qualifier: None,
-            child: Box::new(input),
+            child: Rc::new(input),
         })
     }
 }

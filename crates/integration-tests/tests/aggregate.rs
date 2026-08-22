@@ -8,6 +8,8 @@
 //! Single-stat PromQL aggregates always get `output_names: [""]` (no alias)
 //! and `having: None`.
 
+use std::rc::Rc;
+
 use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
 use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
@@ -33,7 +35,7 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
         measures: vec![intent],
         output_names: vec!["".into()],
         having: None,
-        child: Box::new(child),
+        child: Rc::new(child),
     }
 }
 

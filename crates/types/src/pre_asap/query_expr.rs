@@ -1,10 +1,19 @@
 //! The canonical pre-ASAP intent algebra IR.
 //!
-//! Language- and deployment-independent. Box-owned tree; column identity is **positional**
-//! (`Aggregate.reduction: Reduction`, wrapping `GroupKeys` for the
-//! grouped case), resolved by the [`Binder`](super::binder) against the
-//! self-contained [`Schema`] carried on each `Scan`.
+//! Language- and deployment-independent. `Rc`-owned tree — a child field is
+//! `Rc<QueryExpr<C>>` rather than `Box<QueryExpr<C>>` so a structurally
+//! identical sub-expression can be shared (the same `Rc`) across more than
+//! one parent, within one query or across a `QueryWorkload` batch, instead of
+//! being duplicated. Nothing in this module produces that sharing on its
+//! own — construction still allocates a fresh `Rc` per node, the same shape
+//! as the old `Box` tree — a separate CSE pass is what turns two
+//! independently constructed, structurally-equal subtrees into two
+//! references to one `Rc` (issue #212, #222). Column identity is
+//! **positional** (`Aggregate.reduction: Reduction`, wrapping `GroupKeys`
+//! for the grouped case), resolved by the [`Binder`](super::binder) against
+//! the self-contained [`Schema`] carried on each `Scan`.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -427,7 +436,7 @@ pub enum GroupSide {
 /// part of it — the box is what makes the recursive type's size finite there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
-pub struct Predicate<C: ColState = ColumnId>(pub Box<QueryExpr<C>>);
+pub struct Predicate<C: ColState = ColumnId>(pub Rc<QueryExpr<C>>);
 
 /// One item in a SELECT projection list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -527,13 +536,13 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// scalar-typed child to a single label-less series carrying the scalar's
     /// value at every step. Lets a scalar participate where a vector is required
     /// (`up or vector(0)` dead-man's-switch). Issue #48.
-    VectorFromScalar(Box<QueryExpr<C>>),
+    VectorFromScalar(Rc<QueryExpr<C>>),
 
     /// PromQL `scalar(v)` — the instant-vector→scalar bridge. Collapses a
     /// single-element vector to its value (NaN at runtime if the input is not
     /// exactly one series). Lets a vector feed a scalar position (`vector` /
     /// aggregation `k` args, thresholds). Issue #48.
-    ScalarFromVector(Box<QueryExpr<C>>),
+    ScalarFromVector(Rc<QueryExpr<C>>),
 
     /// ρ — a per-series **label rewrite** (PromQL `label_replace` /
     /// `label_join`). Every input row passes through unchanged except for the
@@ -545,8 +554,8 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     Relabel {
         /// The label written by this rewrite (PromQL `dst_label`).
         dst: String,
-        value: Box<QueryExpr<C>>,
-        child: Box<QueryExpr<C>>,
+        value: Rc<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
 
     /// PromQL `info(v, [selector])` — left-join **label enrichment** (#84). Each
@@ -562,7 +571,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     InfoJoin {
         #[serde(default)]
         selector: Vec<InfoMatcher>,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
 
     /// Series-sampling **selection** — PromQL `limitk` / `limit_ratio` (#86).
@@ -573,13 +582,13 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         #[serde(default)]
         by: GroupKeys<C>,
         kind: SampleKind,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
 
     /// σ — row-level filter. Output schema = child schema.
     Filter {
         pred: Predicate<C>,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
     /// π — column projection.
     Project {
@@ -588,7 +597,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         /// table / inline view). `None` for an ordinary SELECT list.
         #[serde(default)]
         qualifier: Option<String>,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
 
     /// γ + α — GROUP BY (positional) + aggregate intents.
@@ -605,14 +614,14 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         output_names: Vec<String>,
         #[serde(default)]
         having: Option<Predicate<C>>,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
 
     /// δ — SQL `DISTINCT` / row deduplication. Positional like every other
     /// column reference here; empty = dedup on all columns (`SELECT DISTINCT *`).
     Distinct {
         cols: Vec<C>,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
     /// ⊕ — exact, n-ary `UNION ALL` of independent branches. Rows are
     /// concatenated, never deduplicated; SQL's `UNION`/`INTERSECT`/`EXCEPT` are
@@ -640,14 +649,14 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     Join {
         kind: JoinKind,
         pred: Predicate<C>,
-        left: Box<QueryExpr<C>>,
-        right: Box<QueryExpr<C>>,
+        left: Rc<QueryExpr<C>>,
+        right: Rc<QueryExpr<C>>,
     },
     SetOp {
         kind: SetOpKind,
         all: bool,
-        left: Box<QueryExpr<C>>,
-        right: Box<QueryExpr<C>>,
+        left: Rc<QueryExpr<C>>,
+        right: Rc<QueryExpr<C>>,
     },
 
     /// Generic order-by for non-heavy-hitter cases.
@@ -664,12 +673,12 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         keys: Vec<SortKey<C>>,
         #[serde(default)]
         partition_by: GroupKeys<C>,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
     Limit {
         n: usize,
         offset: usize,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
 
     /// PromQL sub-query (`<expr>[range:resolution]`). Logical pass-through.
@@ -677,7 +686,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         range: Duration,
         #[serde(default)]
         resolution: Option<Duration>,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
 
     /// Temporal range selection — "look back `range` of history for this
@@ -689,7 +698,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// plain `Scan` or another `Aggregate` is a *cross-series* reduction.
     TimeRange {
         range: Duration,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
 
     /// PromQL `offset` / `@` **time shift** on a selector (issue #40). A
@@ -702,7 +711,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// selector when neither modifier is present).
     TimeShift {
         shift: TimeShift,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
 
     /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …)`.
@@ -718,14 +727,14 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         /// The output column's name — DataFusion's window-expr field name, so a
         /// `Project` above resolves it (cf. `Aggregate.output_names`).
         output_name: String,
-        child: Box<QueryExpr<C>>,
+        child: Rc<QueryExpr<C>>,
     },
 
     /// Arithmetic / comparison / boolean composition (PromQL binary ops).
     BinaryOp {
         op: BinaryOpKind,
-        lhs: Box<QueryExpr<C>>,
-        rhs: Box<QueryExpr<C>>,
+        lhs: Rc<QueryExpr<C>>,
+        rhs: Rc<QueryExpr<C>>,
         #[serde(default)]
         vector_match: Option<VectorMatch>,
     },
@@ -756,29 +765,29 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     Literal(ScalarValue),
     /// `left op right` — binary comparison.
     Compare {
-        left: Box<QueryExpr<C>>,
+        left: Rc<QueryExpr<C>>,
         op: CompareOp,
-        right: Box<QueryExpr<C>>,
+        right: Rc<QueryExpr<C>>,
     },
     /// Flat conjunction (logical AND). An empty list is vacuously true.
     BoolAnd(Vec<QueryExpr<C>>),
     /// Flat disjunction (logical OR). An empty list is vacuously false.
     BoolOr(Vec<QueryExpr<C>>),
     /// Logical NOT.
-    Not(Box<QueryExpr<C>>),
+    Not(Rc<QueryExpr<C>>),
     /// `expr IS NULL`.
-    IsNull(Box<QueryExpr<C>>),
+    IsNull(Rc<QueryExpr<C>>),
     /// `expr IS NOT NULL`.
-    IsNotNull(Box<QueryExpr<C>>),
+    IsNotNull(Rc<QueryExpr<C>>),
     /// `CAST(expr AS to)`; `try_cast` for SQL `TRY_CAST` (NULL on failure).
     Cast {
-        expr: Box<QueryExpr<C>>,
+        expr: Rc<QueryExpr<C>>,
         to: DataType,
         try_cast: bool,
     },
     /// `expr [NOT] IN (v1, v2, …)`.
     InList {
-        expr: Box<QueryExpr<C>>,
+        expr: Rc<QueryExpr<C>>,
         list: Vec<QueryExpr<C>>,
         negated: bool,
     },
@@ -790,15 +799,15 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// Binary arithmetic: `left op right`.
     Arith {
         op: ArithOp,
-        left: Box<QueryExpr<C>>,
-        right: Box<QueryExpr<C>>,
+        left: Rc<QueryExpr<C>>,
+        right: Rc<QueryExpr<C>>,
     },
     /// SQL `CASE` (both searched and simple forms). `operand` present for the
     /// simple form (`CASE expr WHEN …`), absent for searched.
     Case {
-        operand: Option<Box<QueryExpr<C>>>,
+        operand: Option<Rc<QueryExpr<C>>>,
         branches: Vec<(QueryExpr<C>, QueryExpr<C>)>,
-        else_expr: Option<Box<QueryExpr<C>>>,
+        else_expr: Option<Rc<QueryExpr<C>>>,
     },
 }
 
@@ -1456,7 +1465,7 @@ mod tests {
     fn merge_drops_the_branches_unique_keys() {
         let branch = || QueryExpr::Distinct {
             cols: vec![0],
-            child: Box::new(scan(
+            child: Rc::new(scan(
                 vec![
                     col("k", DataType::Utf8, false),
                     col("v", DataType::Int64, false),
@@ -1488,7 +1497,7 @@ mod tests {
     fn merge_and_setop_agree_on_unique_keys() {
         let branch = || QueryExpr::Distinct {
             cols: vec![0],
-            child: Box::new(scan(vec![col("k", DataType::Utf8, false)], None, vec![])),
+            child: Rc::new(scan(vec![col("k", DataType::Utf8, false)], None, vec![])),
         };
         let merged = QueryExpr::Merge {
             children: vec![branch(), branch()],
@@ -1496,8 +1505,8 @@ mod tests {
         let setop = QueryExpr::SetOp {
             kind: SetOpKind::Union,
             all: true,
-            left: Box::new(branch()),
-            right: Box::new(branch()),
+            left: Rc::new(branch()),
+            right: Rc::new(branch()),
         };
         assert_eq!(
             merged.output_schema().unwrap().unique_keys,
@@ -1537,21 +1546,21 @@ mod tests {
                     alias: Some("dbl".into()),
                     expr: QueryExpr::Arith {
                         op: ArithOp::Add,
-                        left: Box::new(QueryExpr::Column(2)),
-                        right: Box::new(QueryExpr::Column(2)),
+                        left: Rc::new(QueryExpr::Column(2)),
+                        right: Rc::new(QueryExpr::Column(2)),
                     },
                 },
                 // comparison → Bool (nullable under 3-valued logic)
                 ProjectItem {
                     alias: Some("flag".into()),
                     expr: QueryExpr::Compare {
-                        left: Box::new(QueryExpr::Column(2)),
+                        left: Rc::new(QueryExpr::Column(2)),
                         op: CompareOp::Gt,
-                        right: Box::new(QueryExpr::Literal(ScalarValue::Float64(0.0))),
+                        right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(0.0))),
                     },
                 },
             ],
-            child: Box::new(child),
+            child: Rc::new(child),
         };
         let s = q.output_schema().unwrap();
         assert_eq!(s.columns.len(), 3);
@@ -1618,7 +1627,7 @@ mod tests {
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
-            child: Box::new(scan_node),
+            child: Rc::new(scan_node),
         };
         let s = agg.output_schema().unwrap();
         let names: Vec<_> = s.columns.iter().map(|c| c.name.as_str()).collect();
@@ -1646,7 +1655,7 @@ mod tests {
                 offset_ms: 3_600_000,
                 at: Some(AtModifier::Timestamp(1_609_746_000_000)),
             },
-            child: Box::new(scan_node.clone()),
+            child: Rc::new(scan_node.clone()),
         };
         assert_eq!(
             shifted.output_schema().unwrap(),
@@ -1696,9 +1705,9 @@ mod tests {
             measures: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
-            child: Box::new(QueryExpr::TimeRange {
+            child: Rc::new(QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
-                child: Box::new(scan_node),
+                child: Rc::new(scan_node),
             }),
         };
         let s = rate.output_schema().unwrap();
@@ -1734,9 +1743,9 @@ mod tests {
             measures: vec![AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
-            child: Box::new(QueryExpr::TimeRange {
+            child: Rc::new(QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
-                child: Box::new(scan_node),
+                child: Rc::new(scan_node),
             }),
         };
         let s = avg_over_time.output_schema().unwrap();
@@ -1783,7 +1792,7 @@ mod tests {
             measures: vec![AggIntent::Rate],
             output_names: vec![],
             having: None,
-            child: Box::new(open_leaf),
+            child: Rc::new(open_leaf),
         };
         assert!(
             !rate.output_schema().unwrap().closed,
@@ -1795,7 +1804,7 @@ mod tests {
             measures: vec![AggIntent::Sum { col: None }],
             output_names: vec![],
             having: None,
-            child: Box::new(rate),
+            child: Rc::new(rate),
         };
         assert!(
             sum_by_job.output_schema().unwrap().closed,
@@ -1826,7 +1835,7 @@ mod tests {
                     expr: QueryExpr::Column(0),
                 },
             ],
-            child: Box::new(child),
+            child: Rc::new(child),
         };
         let s = q.output_schema().unwrap();
         assert_eq!(s.columns[0].name, "value");
@@ -1839,9 +1848,9 @@ mod tests {
         let right = scan(vec![col("b", DataType::Utf8, false)], None, vec![]);
         QueryExpr::Join {
             kind,
-            pred: Predicate(Box::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
-            left: Box::new(left),
-            right: Box::new(right),
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            left: Rc::new(left),
+            right: Rc::new(right),
         }
     }
 
@@ -1890,8 +1899,8 @@ mod tests {
         let q = QueryExpr::SetOp {
             kind: SetOpKind::Union,
             all: false,
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Rc::new(left),
+            right: Rc::new(right),
         };
         let s = q.output_schema().unwrap();
         assert_eq!(s.columns.len(), 2);

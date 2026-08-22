@@ -8,6 +8,7 @@
 //! both `job` and `status`:
 //!   schema = [ts(0), value(1), job(2), status(3)]
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use asap_frontend_promql::lower_promql;
@@ -28,7 +29,7 @@ fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
         measures: vec![intent],
         output_names: vec!["".into()],
         having: None,
-        child: Box::new(child),
+        child: Rc::new(child),
     }
 }
 
@@ -38,7 +39,7 @@ fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
         measures: vec![intent],
         output_names: vec!["".into()],
         having: None,
-        child: Box::new(child),
+        child: Rc::new(child),
     }
 }
 
@@ -57,7 +58,7 @@ fn q22_sum_by_job_over_rate() {
         AggIntent::Rate,
         QueryExpr::TimeRange {
             range: Duration::from_secs(300),
-            child: Box::new(scan),
+            child: Rc::new(scan),
         },
     );
     let expected = agg(vec![2], AggIntent::Sum { col: None }, inner_rate);
@@ -76,10 +77,10 @@ fn q23_sum_by_job_over_filtered_scan() {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },
-        predicates: vec![Predicate(Box::new(QueryExpr::Compare {
-            left: Box::new(QueryExpr::Column(3)),
+        predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
+            left: Rc::new(QueryExpr::Column(3)),
             op: CompareOp::Eq,
-            right: Box::new(QueryExpr::Literal(ScalarValue::Utf8("200".into()))),
+            right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("200".into()))),
         }))],
         schema: metric_schema(&["job", "status"]),
     };
@@ -101,10 +102,10 @@ fn q25_div_over_complex_subtrees() {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },
-        predicates: vec![Predicate(Box::new(QueryExpr::Compare {
-            left: Box::new(QueryExpr::Column(3)),
+        predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
+            left: Rc::new(QueryExpr::Column(3)),
             op: CompareOp::Eq,
-            right: Box::new(QueryExpr::Literal(ScalarValue::Utf8("200".into()))),
+            right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("200".into()))),
         }))],
         schema: metric_schema(&["job", "status"]),
     };
@@ -115,7 +116,7 @@ fn q25_div_over_complex_subtrees() {
             AggIntent::Rate,
             QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
-                child: Box::new(lhs_scan),
+                child: Rc::new(lhs_scan),
             },
         ),
     );
@@ -134,15 +135,15 @@ fn q25_div_over_complex_subtrees() {
             AggIntent::Rate,
             QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
-                child: Box::new(rhs_scan),
+                child: Rc::new(rhs_scan),
             },
         ),
     );
 
     let expected = QueryExpr::BinaryOp {
         op: BinaryOpKind::Arith(ArithOp::Div),
-        lhs: Box::new(lhs),
-        rhs: Box::new(rhs),
+        lhs: Rc::new(lhs),
+        rhs: Rc::new(rhs),
         vector_match: None,
     };
     assert_eq!(
@@ -171,7 +172,7 @@ fn q27_max_over_sum_by_job_over_rate() {
         AggIntent::Rate,
         QueryExpr::TimeRange {
             range: Duration::from_secs(300),
-            child: Box::new(scan),
+            child: Rc::new(scan),
         },
     );
     let sum_by_job = agg(vec![2], AggIntent::Sum { col: None }, inner_rate);
@@ -194,10 +195,10 @@ fn q53_outer_group_key_absent_from_nested_aggregate() {
         source: Source::TimeSeries {
             metric: "http_requests".into(),
         },
-        predicates: vec![Predicate(Box::new(QueryExpr::Compare {
-            left: Box::new(QueryExpr::Column(3)),
+        predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
+            left: Rc::new(QueryExpr::Column(3)),
             op: CompareOp::Eq,
-            right: Box::new(QueryExpr::Literal(ScalarValue::Utf8("api-server".into()))),
+            right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("api-server".into()))),
         }))],
         schema: metric_schema(&["group", "job"]),
     };
@@ -222,10 +223,10 @@ fn q52_outer_name_label_over_binary_op() {
         source: Source::TimeSeries {
             metric: metric.into(),
         },
-        predicates: vec![Predicate(Box::new(QueryExpr::Compare {
-            left: Box::new(QueryExpr::Column(2)), // env
+        predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
+            left: Rc::new(QueryExpr::Column(2)), // env
             op: CompareOp::Eq,
-            right: Box::new(QueryExpr::Literal(ScalarValue::Utf8(env.into()))),
+            right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8(env.into()))),
         }))],
         schema: metric_schema(&["env", "__name__"]),
     };
@@ -234,8 +235,8 @@ fn q52_outer_name_label_over_binary_op() {
         AggIntent::Sum { col: None },
         QueryExpr::BinaryOp {
             op: BinaryOpKind::Or,
-            lhs: Box::new(side("metric_a", "1")),
-            rhs: Box::new(side("metric_b", "2")),
+            lhs: Rc::new(side("metric_a", "1")),
+            rhs: Rc::new(side("metric_b", "2")),
             vector_match: Some(VectorMatch {
                 kind: VectorMatchKind::Ignoring,
                 labels: vec![],
@@ -266,7 +267,7 @@ fn q39_sum_without_instance_over_rate() {
         AggIntent::Rate,
         QueryExpr::TimeRange {
             range: Duration::from_secs(300),
-            child: Box::new(scan),
+            child: Rc::new(scan),
         },
     );
     let expected = QueryExpr::Aggregate {
@@ -274,7 +275,7 @@ fn q39_sum_without_instance_over_rate() {
         measures: vec![AggIntent::Sum { col: None }],
         output_names: vec!["".into()],
         having: None,
-        child: Box::new(inner_rate),
+        child: Rc::new(inner_rate),
     };
     assert_eq!(
         lower("sum without (instance) (rate(http_requests_total[5m]))"),
@@ -299,7 +300,7 @@ fn q40_week_over_week_offset() {
                     offset_ms: ms,
                     at: None,
                 },
-                child: Box::new(scan),
+                child: Rc::new(scan),
             },
             None => scan,
         };
@@ -307,14 +308,14 @@ fn q40_week_over_week_offset() {
             AggIntent::Rate,
             QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
-                child: Box::new(ranged),
+                child: Rc::new(ranged),
             },
         )
     };
     let expected = QueryExpr::BinaryOp {
         op: BinaryOpKind::Arith(ArithOp::Sub),
-        lhs: Box::new(rate_over(None)),
-        rhs: Box::new(rate_over(Some(604_800_000))), // 1w
+        lhs: Rc::new(rate_over(None)),
+        rhs: Rc::new(rate_over(Some(604_800_000))), // 1w
         vector_match: None,
     };
     assert_eq!(lower("rate(m[5m]) - rate(m[5m] offset 1w)"), expected,);
@@ -329,7 +330,7 @@ fn q40_at_modifier_absolute() {
             offset_ms: 0,
             at: Some(AtModifier::Timestamp(1_609_746_000_000)),
         },
-        child: Box::new(QueryExpr::Scan {
+        child: Rc::new(QueryExpr::Scan {
             source: Source::TimeSeries {
                 metric: "up".into(),
             },
@@ -349,10 +350,10 @@ fn q24_sum_by_job_over_rate_over_filtered_scan() {
         source: Source::TimeSeries {
             metric: "http_requests_total".into(),
         },
-        predicates: vec![Predicate(Box::new(QueryExpr::Compare {
-            left: Box::new(QueryExpr::Column(3)),
+        predicates: vec![Predicate(Rc::new(QueryExpr::Compare {
+            left: Rc::new(QueryExpr::Column(3)),
             op: CompareOp::Eq,
-            right: Box::new(QueryExpr::Literal(ScalarValue::Utf8("200".into()))),
+            right: Rc::new(QueryExpr::Literal(ScalarValue::Utf8("200".into()))),
         }))],
         schema: metric_schema(&["job", "status"]),
     };
@@ -360,7 +361,7 @@ fn q24_sum_by_job_over_rate_over_filtered_scan() {
         AggIntent::Rate,
         QueryExpr::TimeRange {
             range: Duration::from_secs(300),
-            child: Box::new(scan),
+            child: Rc::new(scan),
         },
     );
     let expected = agg(vec![2], AggIntent::Sum { col: None }, inner_rate);
@@ -389,7 +390,7 @@ fn q27_nested_subquery_prometheus_docs_example() {
         AggIntent::Rate,
         QueryExpr::TimeRange {
             range: Duration::from_secs(5),
-            child: Box::new(scan),
+            child: Rc::new(scan),
         },
     );
     let deriv = agg_per_entity(
@@ -397,7 +398,7 @@ fn q27_nested_subquery_prometheus_docs_example() {
         QueryExpr::Subquery {
             range: Duration::from_secs(30),
             resolution: Some(Duration::from_secs(5)),
-            child: Box::new(rate),
+            child: Rc::new(rate),
         },
     );
     let expected = agg_per_entity(
@@ -405,7 +406,7 @@ fn q27_nested_subquery_prometheus_docs_example() {
         QueryExpr::Subquery {
             range: Duration::from_secs(600),
             resolution: None,
-            child: Box::new(deriv),
+            child: Rc::new(deriv),
         },
     );
     assert_eq!(

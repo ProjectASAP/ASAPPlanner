@@ -55,6 +55,7 @@
 //! | `expr[r:res]` | `Subquery{r, res}` |
 //! | `<selector> offset <d>` / `<selector> @ <ts>`/`start()`/`end()` | `TimeShift{shift}` over the selector's `Scan` — pass-through schema; a ranged selector shifts under its `TimeRange` (issue #40) |
 
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use promql_parser::label::{MatchOp, Matcher};
@@ -281,15 +282,15 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
             Ok(v) => Ok(Unresolved::Scalar(-v)),
             Err(_) => Ok(Unresolved::BinaryOp {
                 op: BinaryOpKind::Arith(ArithOp::Mul),
-                lhs: Box::new(walk(&u.expr)?),
-                rhs: Box::new(Unresolved::Scalar(-1.0)),
+                lhs: Rc::new(walk(&u.expr)?),
+                rhs: Rc::new(Unresolved::Scalar(-1.0)),
                 vector_match: None,
             }),
         },
         Expr::Subquery(sq) => Ok(Unresolved::Subquery {
             range: sq.range,
             resolution: sq.step,
-            child: Box::new(walk(&sq.expr)?),
+            child: Rc::new(walk(&sq.expr)?),
         }),
         Expr::VectorSelector(vs) => {
             let (metric, matchers, shift) = vs_parts(vs)?;
@@ -299,7 +300,7 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
             let (metric, matchers, shift) = vs_parts(&ms.vs)?;
             Ok(Unresolved::TimeRange {
                 range: ms.range,
-                child: Box::new(filtered_source(metric, matchers, shift)),
+                child: Rc::new(filtered_source(metric, matchers, shift)),
             })
         }
         // A number literal is a scalar leaf (`v > 5`, or a bare scalar query
@@ -594,7 +595,7 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
         Outer::Sample { kind } => Unresolved::Sample {
             by: keys.into(),
             kind,
-            child: Box::new(child),
+            child: Rc::new(child),
         },
         Outer::TopK { k, descending } => {
             let sorted = Unresolved::Sort {
@@ -604,12 +605,12 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
                     nulls_first: false,
                 }],
                 partition_by: keys.into(),
-                child: Box::new(child),
+                child: Rc::new(child),
             };
             Unresolved::Limit {
                 n: k as usize,
                 offset: 0,
-                child: Box::new(sorted),
+                child: Rc::new(sorted),
             }
         }
     })
@@ -728,14 +729,14 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
                 // from the first branch — doesn't silently misdescribe the rest.
                 output_names: vec!["value".into()],
                 having: None,
-                child: Box::new(child),
+                child: Rc::new(child),
             };
             Ok(Unresolved::Relabel {
                 dst: label.clone(),
-                value: Box::new(Unresolved::Literal(ScalarValue::Utf8(open_metrics_float(
+                value: Rc::new(Unresolved::Literal(ScalarValue::Utf8(open_metrics_float(
                     phi,
                 )))),
-                child: Box::new(quantile),
+                child: Rc::new(quantile),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -863,8 +864,8 @@ fn is_typeconv_fn(name: &str) -> bool {
 fn walk_typeconv(call: &Call) -> Result<Unresolved> {
     let inner = walk(arg(call, 0)?)?;
     Ok(match call.func.name {
-        "vector" => Unresolved::VectorFromScalar(Box::new(inner)),
-        "scalar" => Unresolved::ScalarFromVector(Box::new(inner)),
+        "vector" => Unresolved::VectorFromScalar(Rc::new(inner)),
+        "scalar" => Unresolved::ScalarFromVector(Rc::new(inner)),
         other => return Err(LoweringError::UnsupportedFunction(other.to_string())),
     })
 }
@@ -882,7 +883,7 @@ fn is_sort_fn(name: &str) -> bool {
 /// lower to a bare `Sort` (no `Limit`) over the vector argument — a faithful,
 /// row-preserving reordering (issue #51).
 fn walk_sort(call: &Call) -> Result<Unresolved> {
-    let child = Box::new(walk(arg(call, 0)?)?);
+    let child = Rc::new(walk(arg(call, 0)?)?);
     let (by_value, ascending) = match call.func.name {
         "sort" => (true, true),
         "sort_desc" => (true, false),
@@ -924,7 +925,7 @@ fn walk_sort(call: &Call) -> Result<Unresolved> {
 /// matchers; the actual join against the info metric — on shared identifying
 /// labels — is resolved during post-ASAP binding (issue #84).
 fn walk_info(call: &Call) -> Result<Unresolved> {
-    let child = Box::new(walk(arg(call, 0)?)?);
+    let child = Rc::new(walk(arg(call, 0)?)?);
     let selector = match call.args.args.get(1) {
         Some(sel) => info_selector(sel)?,
         None => Vec::new(), // default: enrich from `target_info`
@@ -974,7 +975,7 @@ fn is_label_fn(name: &str) -> bool {
 /// values are untouched; the regex-match-or-passthrough and capture-expansion
 /// are post-ASAP/runtime concerns (issue #50).
 fn walk_label(call: &Call) -> Result<Unresolved> {
-    let child = Box::new(walk(arg(call, 0)?)?);
+    let child = Rc::new(walk(arg(call, 0)?)?);
     match call.func.name {
         "label_replace" => {
             let dst = str_arg(call, 1)?;
@@ -991,7 +992,7 @@ fn walk_label(call: &Call) -> Result<Unresolved> {
             };
             Ok(Unresolved::Relabel {
                 dst,
-                value: Box::new(value),
+                value: Rc::new(value),
                 child,
             })
         }
@@ -1014,7 +1015,7 @@ fn walk_label(call: &Call) -> Result<Unresolved> {
             };
             Ok(Unresolved::Relabel {
                 dst,
-                value: Box::new(value),
+                value: Rc::new(value),
                 child,
             })
         }
@@ -1249,8 +1250,8 @@ fn walk_binary(bin: &BinaryExpr) -> Result<Unresolved> {
     });
     Ok(Unresolved::BinaryOp {
         op,
-        lhs: Box::new(lhs),
-        rhs: Box::new(rhs),
+        lhs: Rc::new(lhs),
+        rhs: Rc::new(rhs),
         vector_match,
     })
 }
@@ -1434,7 +1435,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             Ok(Unresolved::Sample {
                 by: keys.into(),
                 kind,
-                child: Box::new(base),
+                child: Rc::new(base),
             })
         }
         Outer::TopK { k, descending } => {
@@ -1467,7 +1468,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                     }],
                     output_names: vec![],
                     having: None,
-                    child: Box::new(count_agg),
+                    child: Rc::new(count_agg),
                 })
             } else {
                 // The base over which we rank. A range-vector-function argument
@@ -1492,12 +1493,12 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                         nulls_first: false,
                     }],
                     partition_by: keys.into(),
-                    child: Box::new(base),
+                    child: Rc::new(base),
                 };
                 Ok(Unresolved::Limit {
                     n: k as usize,
                     offset: 0,
-                    child: Box::new(sorted),
+                    child: Rc::new(sorted),
                 })
             }
         }
@@ -1543,7 +1544,7 @@ fn windowed_aggregate(
     let child = match inner.window {
         Some(w) => Unresolved::TimeRange {
             range: w,
-            child: Box::new(base),
+            child: Rc::new(base),
         },
         None => base,
     };
@@ -1556,7 +1557,7 @@ fn windowed_aggregate(
         // instead.
         output_names: vec![String::new()],
         having: None,
-        child: Box::new(child),
+        child: Rc::new(child),
     }
 }
 
@@ -1574,7 +1575,7 @@ fn outer_aggregate(
         measures: vec![intent],
         output_names: vec![String::new()],
         having: None,
-        child: Box::new(child),
+        child: Rc::new(child),
     }
 }
 
@@ -1583,7 +1584,7 @@ fn filtered_source(metric: String, matchers: Vec<Unresolved>, shift: TimeShift) 
         source: Source::TimeSeries { metric },
         predicates: matchers
             .into_iter()
-            .map(|m| Predicate(Box::new(m)))
+            .map(|m| Predicate(Rc::new(m)))
             .collect(),
         // Usage-derived (PromQL is schemaless) — the Binder fills this in.
         schema: None,
@@ -1593,7 +1594,7 @@ fn filtered_source(metric: String, matchers: Vec<Unresolved>, shift: TimeShift) 
     } else {
         Unresolved::TimeShift {
             shift,
-            child: Box::new(scan),
+            child: Rc::new(scan),
         }
     }
 }
@@ -1815,9 +1816,9 @@ fn matcher_to_compare(m: &Matcher) -> Unresolved {
         MatchOp::NotRe(_) => CompareOp::NotRegex,
     };
     Unresolved::Compare {
-        left: Box::new(Unresolved::Column(ColumnRef::Named(m.name.clone()))),
+        left: Rc::new(Unresolved::Column(ColumnRef::Named(m.name.clone()))),
         op,
-        right: Box::new(Unresolved::Literal(ScalarValue::Utf8(m.value.clone()))),
+        right: Rc::new(Unresolved::Literal(ScalarValue::Utf8(m.value.clone()))),
     }
 }
 

@@ -7,6 +7,7 @@
 //! (`Count`, `Sum`, `Quantile`, …) — the `TimeRange` child is what marks them
 //! as per-series reductions.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use asap_frontend_promql::lower_promql;
@@ -34,9 +35,9 @@ fn range_agg(range_secs: u64, intent: AggIntent, metric: &str) -> QueryExpr {
         measures: vec![intent],
         output_names: vec!["".into()],
         having: None,
-        child: Box::new(QueryExpr::TimeRange {
+        child: Rc::new(QueryExpr::TimeRange {
             range: Duration::from_secs(range_secs),
-            child: Box::new(scan(metric)),
+            child: Rc::new(scan(metric)),
         }),
     }
 }

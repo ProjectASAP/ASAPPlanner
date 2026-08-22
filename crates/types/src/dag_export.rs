@@ -3,13 +3,15 @@
 //! `tools/dag-viewer` viewer — see issue #133) rather than walk it in Rust.
 //!
 //! `QueryExpr` already derives `Serialize`, but as a Rust-shaped tagged tree
-//! (`Box` children nested inside each variant's own field). This module
+//! (`Rc` children nested inside each variant's own field). This module
 //! flattens that into an explicit node list + child-id edges — the shape a
 //! generic graph renderer wants — and additionally computes a bottom-up
 //! structural hash per node, so a caller with several exported queries can
 //! spot identical subtrees (a shared `Scan`, a repeated `Aggregate` shape,
 //! …) by comparing hashes rather than re-implementing `QueryExpr: PartialEq`
-//! structural comparison client-side.
+//! structural comparison client-side. This hash is also the intended basis
+//! for a real CSE pass (issue #212, #222) — today it only drives
+//! `tools/dag-viewer`'s highlighting, a proxy for that, not the pass itself.
 
 use serde::Serialize;
 use std::hash::{Hash, Hasher};
@@ -392,6 +394,8 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::*;
     use crate::pre_asap::agg_intent::AggIntent;
     use crate::pre_asap::expr_ir::ScalarValue;
@@ -430,15 +434,15 @@ mod tests {
     #[test]
     fn chain_preserves_shape_and_child_links() {
         let expr = QueryExpr::Filter {
-            pred: Predicate(Box::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
-            child: Box::new(QueryExpr::Aggregate {
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            child: Rc::new(QueryExpr::Aggregate {
                 reduction: Reduction::Reduce(GroupKeys::none()),
                 measures: vec![AggIntent::Count {
                     accuracy: AccuracyTarget::Exact,
                 }],
                 output_names: vec![],
                 having: None,
-                child: Box::new(scan("metrics", value_col())),
+                child: Rc::new(scan("metrics", value_col())),
             }),
         };
         let graph = export(&expr);
@@ -505,11 +509,11 @@ mod tests {
         let q1 = QueryExpr::Limit {
             n: 10,
             offset: 0,
-            child: Box::new(shared_shape()),
+            child: Rc::new(shared_shape()),
         };
         let q2 = QueryExpr::Distinct {
             cols: vec![0],
-            child: Box::new(shared_shape()),
+            child: Rc::new(shared_shape()),
         };
 
         let g1 = export(&q1);

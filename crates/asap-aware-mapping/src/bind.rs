@@ -297,7 +297,7 @@ mod tests {
             measures: vec![intent],
             output_names: vec![],
             having: None,
-            child: Box::new(child),
+            child: Rc::new(child),
         }
     }
 
@@ -308,7 +308,7 @@ mod tests {
             measures: vec![intent],
             output_names: vec![],
             having: None,
-            child: Box::new(child),
+            child: Rc::new(child),
         }
     }
 
@@ -551,7 +551,7 @@ mod tests {
             AggIntent::Rate,
             QueryExpr::TimeRange {
                 range: Duration::from_secs(300),
-                child: Box::new(metric_scan(&["job"])),
+                child: Rc::new(metric_scan(&["job"])),
             },
         );
         let root = implement_tree(&q).unwrap();
@@ -588,7 +588,7 @@ mod tests {
             default_quantile(0.99),
             QueryExpr::TimeRange {
                 range: Duration::from_secs(10),
-                child: Box::new(metric_scan(&["job"])),
+                child: Rc::new(metric_scan(&["job"])),
             },
         );
         let root = implement_tree(&q).unwrap();
@@ -719,12 +719,12 @@ mod tests {
         // children, so the conservative fallback keeps the whole subtree
         // logical.
         let q = QueryExpr::Filter {
-            pred: Predicate(Box::new(QueryExpr::Compare {
-                left: Box::new(QueryExpr::Column(0)),
+            pred: Predicate(Rc::new(QueryExpr::Compare {
+                left: Rc::new(QueryExpr::Column(0)),
                 op: CompareOp::Gt,
-                right: Box::new(QueryExpr::Literal(ScalarValue::Float64(0.5))),
+                right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(0.5))),
             })),
-            child: Box::new(agg(vec![], default_quantile(0.99), metric_scan(&[]))),
+            child: Rc::new(agg(vec![], default_quantile(0.99), metric_scan(&[]))),
         };
         let root = implement_tree(&q).unwrap();
         assert!(matches!(root.expr, SummaryExpr::Logical(ref e) if **e == q));
@@ -734,7 +734,7 @@ mod tests {
     fn having_and_multi_intent_stay_logical() {
         let mut q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         if let QueryExpr::Aggregate { having, .. } = &mut q {
-            *having = Some(Predicate(Box::new(QueryExpr::Literal(
+            *having = Some(Predicate(Rc::new(QueryExpr::Literal(
                 ScalarValue::Boolean(true),
             ))));
         }
@@ -748,7 +748,7 @@ mod tests {
             measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
             output_names: vec![],
             having: None,
-            child: Box::new(metric_scan(&["job"])),
+            child: Rc::new(metric_scan(&["job"])),
         };
         assert!(matches!(
             implement_tree(&multi).unwrap().expr,
