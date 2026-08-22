@@ -86,6 +86,11 @@
 //! `asap-plan::cse::dedupe_subtrees` was deleted in #192 for exactly that).
 //! Stages 3 (`dag_export::structural_hash` unification) and 4 (`CostModel`
 //! CSE credit) are deliberately deferred follow-ups, not attempted here.
+//! Stage 4's rule-based-vs-cost-based framework was decided in issue #237
+//! (a hybrid — see `asap_aware_mapping::cost_model`'s module doc for the
+//! decision and the shape it implies); this module's own unconditional
+//! "share whenever legal" behavior is exactly that decision's cost-agnostic
+//! stage-1 default, unchanged by it.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};

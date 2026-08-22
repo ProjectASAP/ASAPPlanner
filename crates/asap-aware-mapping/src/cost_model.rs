@@ -31,6 +31,157 @@
 //! [`DefaultCostModel`], so a deployment that never plugs in its own cost
 //! model keeps today's static-preference-order behavior exactly, byte for
 //! byte.
+//!
+//! ## Decision (issue #237): rule-based vs. cost-based CSE sharing
+//!
+//! [`asap_types::pre_asap::cse::share_common_subtrees`] (issue #223 stages
+//! 1–2, landed in PR #235) already *detects* every structurally-identical,
+//! legally-shareable (`Schema::unique_keys`-gated) subtree and shares it
+//! **unconditionally** — there is no cost gate on top of legality yet. This
+//! section decides the framework for stage 4, "wire workload-level CSE
+//! credit into `CostModel`" (named as planned above, and in this crate's own
+//! module doc), the still-deferred step that turns "these two subtrees are
+//! the same computation" into "and it's actually worth maintaining one
+//! shared summary for them." It is a decision only — no code in this file
+//! changes as a result; a follow-up PR implements it.
+//!
+//! **The two textbook framings** (as posed in #237):
+//!
+//! | Framework | Mechanism | CSE policy |
+//! |---|---|---|
+//! | Volcano/Cascades (SQL Server, Snowflake, Calcite) | cost-based, explores a plan space via DP + memo | share iff a real cost comparison (materialize/maintain vs. recompute-per-site) favors it |
+//! | System R (classic) | heuristic, fixed rules over basic statistics | share whenever a fixed rule says to (e.g. "referenced more than once"), no per-case comparison |
+//!
+//! **Decision: a hybrid, matching #237's own suggestion — unconditional
+//! sharing below a cheap-recompute threshold, a real cost comparison above
+//! it.** Neither pure model fits this codebase on its own:
+//!
+//! - **Pure Volcano/Cascades is disproportionate.** This repo has no plan
+//!   enumeration or DP memo search anywhere — `CostModel` is deliberately a
+//!   narrow, single-shot ranking/sizing interface
+//!   ([`rank_candidates`](CostModel::rank_candidates)/[`size_params`](CostModel::size_params)),
+//!   not a cost-driven search engine, and building one solely to arbitrate a
+//!   binary "share or don't" per CSE candidate would be new infrastructure
+//!   out of proportion to the decision it answers.
+//! - **Pure System R (today's stage 1/2 behavior: always share when legal)
+//!   ignores a real, repo-specific asymmetry.** A shared summary here is not
+//!   a free win the way sharing a relational scan is in a textbook OLTP
+//!   optimizer — it is a sketch/accumulator that (per this crate's own
+//!   stated purpose: *workload*-level planning, not single-query) is
+//!   typically kept **continuously updated** as new data arrives, for as
+//!   long as the workload runs, regardless of how often it's actually read.
+//!   A structurally-shareable subtree that is cheap to recompute on demand,
+//!   or rarely queried, can cost more to keep alive as a standing shared
+//!   summary than to just recompute independently at each of its (few, or
+//!   cheap) use sites — exactly the case #237 calls out.
+//! - **The hybrid is what this crate already does one layer over**, for the
+//!   structurally analogous sketch-vs-exact question: [`boundary`](crate::boundary)/[`bind`](crate::bind)
+//!   don't run a full cost search either — they pick a cheap built-in
+//!   default and let a deployment's `CostModel` override specific decisions
+//!   ([`rank_candidates`](CostModel::rank_candidates)/[`size_params`](CostModel::size_params))
+//!   with real cost knowledge this
+//!   crate doesn't have. CSE-sharing is the same shape of question —
+//!   "realize this once, shared, or recompute it" is the same family of
+//!   decision as "realize this as a sketch, or exactly" — so it should be
+//!   answered the same way: a cheap default (share; the *legality* gate
+//!   already did the hard safety work) that a deployment overrides for the
+//!   candidates expensive enough for the override to matter.
+//!
+//! **Why the hybrid is also the layering-forced answer, not just the
+//! performance-preferred one.** `share_common_subtrees` lives in
+//! `asap-types::pre_asap` — a lower layer that this crate depends on, never
+//! the reverse (see this crate's own "arrows point up" layering invariant).
+//! It therefore *cannot* consult a `CostModel` (defined here, in
+//! `asap-aware-mapping`) even if it wanted to — detection is necessarily
+//! cost-agnostic. That forces stage 1/2's default to be System R-style
+//! ("share whenever legal," which is what it does today, correctly, as a
+//! stage-1/2 default) and forces the cost-aware override to live downstream,
+//! in this crate, applied *after* detection rather than fused into it. The
+//! hybrid isn't a compromise chosen for its own sake — it's what the
+//! existing crate boundary already requires; #237 just makes explicit that
+//! the downstream override should itself be threshold-gated rather than a
+//! blanket cost comparison on every candidate.
+//!
+//! ## Shape for stage 4 (not implemented here — for a follow-up PR)
+//!
+//! **Where it hooks in.** [`bind::implement_workload_with`](crate::bind::implement_workload_with)
+//! is where sharing currently becomes concrete: it walks a workload's
+//! already-CSE'd roots and, on a memo hit (`Rc::as_ptr` match — a root that
+//! `share_common_subtrees` already pointed at a subtree some earlier root
+//! also uses), unconditionally clones the cached `SummaryNode` instead of
+//! rebinding. That memo-hit branch is the natural call site for the stage-4
+//! decision: instead of an unconditional `Ok(Rc::clone(cached))`, consult
+//! `CostModel` and either reuse the cached summary or bind this occurrence
+//! independently via the ordinary `implement_tree_with` path (as if this
+//! occurrence hadn't been detected as shared at all). `implement_workload_with`'s
+//! own doc already flags that today's memoization is whole-root only — a
+//! subtree shared below two roots' top level isn't memoized yet
+//! ("widening this to sub-root memoization is future work"); stage 4's gate
+//! should apply at whichever memo-hit points exist at the time it lands,
+//! root-level today, any future sub-root memoization too.
+//!
+//! **New trait surface**, added the same way [`realize_extension`](CostModel::realize_extension)
+//! was (issue #150) — a new method with a default that preserves current
+//! behavior exactly, so `DefaultCostModel` and every deployment that doesn't
+//! override it keeps today's unconditional-share semantics byte for byte:
+//!
+//! ```text
+//! /// A detected, legality-gated CSE candidate — a subtree
+//! /// `share_common_subtrees` already collapsed onto one `Rc`, at the point
+//! /// a second (or later) consumer is about to reuse it.
+//! pub struct CseCandidate<'a> {
+//!     /// The shared pre-ASAP subtree itself.
+//!     pub subtree: &'a QueryExpr,
+//!     /// The `SummaryNode` this subtree already bound to on its first
+//!     /// occurrence — gives the cost model the concrete
+//!     /// `SummaryFamilyType`/`(kind, params)` actually at stake, not just
+//!     /// the pre-ASAP shape.
+//!     pub bound_summary: &'a SummaryNode,
+//!     /// How many use sites reference this subtree so far (always >= 2 —
+//!     /// only constructed on a memo hit; the first occurrence always
+//!     /// binds independently, there being nothing yet to compare against).
+//!     pub consumer_count: usize,
+//! }
+//!
+//! pub enum ShareDecision {
+//!     /// Reuse the cached `SummaryNode` (today's only behavior).
+//!     Share,
+//!     /// Bind this occurrence independently — the shared-maintenance cost
+//!     /// isn't worth it for this candidate.
+//!     RecomputeIndependently,
+//! }
+//!
+//! trait CostModel {
+//!     // ...existing methods...
+//!
+//!     /// Default: `Share`, unconditionally — preserves today's behavior.
+//!     /// A deployment with real cost knowledge overrides this with the
+//!     /// #237 hybrid rule: `Share` when an estimated recompute cost for
+//!     /// `candidate` is below a cheap threshold (no comparison needed —
+//!     /// System R-style); above the threshold, compare
+//!     /// `estimated_recompute_cost * consumer_count` against an estimated
+//!     /// shared-maintenance cost and pick whichever is cheaper
+//!     /// (Volcano/Cascades-style). The exact cost formulas are
+//!     /// deployment-specific, same as `size_params` today — this trait
+//!     /// commits to the two-tier *shape* of the decision, not fixed
+//!     /// numbers.
+//!     fn cse_share_decision(&self, candidate: &CseCandidate) -> ShareDecision {
+//!         ShareDecision::Share
+//!     }
+//! }
+//! ```
+//!
+//! This keeps the extension-point pattern this file already uses throughout
+//! (`rank_candidates`, `size_params`, `realize_extension`): core ships a
+//! cheap, safe default; a deployment with actual cost data opts into
+//! smarter behavior one method at a time, with zero forced changes anywhere
+//! else that constructs a `CostModel`.
+//!
+//! **Scope note.** This section is the decision for issue #237 only. It
+//! feeds into #223's stage 4 and does not implement `CseCandidate`,
+//! `ShareDecision`, `cse_share_decision`, or any change to
+//! `implement_workload_with` — those land in a follow-up PR, from this
+//! decision, not in this commit.
 
 use asap_types::post_asap::{SketchKind, SketchParams, SketchQuery};
 use asap_types::pre_asap::agg_intent::AggIntent;
