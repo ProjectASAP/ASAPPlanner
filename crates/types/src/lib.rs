@@ -13,10 +13,12 @@
 //!   that commit to a concrete `SummaryKind`/`SummaryParams` realization.
 //!   No execution logic lives in this workspace (see issue #190) — a
 //!   downstream deployment crate is expected to supply that.
-//!   [`post_asap::error_estimation`] is the one exception worth calling
-//!   out: pure, sketch-object-agnostic posterior error-bound math (issue
-//!   #239) that a future real sketch runtime's readout path can call
-//!   directly — see that module's docs for why it's unwired today.
+//!   [`post_asap::query_time`] is the one exception, folder-separated from
+//!   the rest of `post_asap` on purpose: pure, sketch-object-agnostic
+//!   posterior error-bound math (issue #239) that a future real sketch
+//!   runtime's readout path can call directly — see that module's docs
+//!   for the planning-time/execution-time boundary and why it's unwired
+//!   today.
 pub mod dag_export;
 pub mod post_asap;
 pub mod pre_asap;

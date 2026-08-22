@@ -358,14 +358,19 @@ pub fn default_size_params(
 /// [`posterior_aware_size_params`].
 ///
 /// This is **not** derived from Chen et al.'s posterior-error-estimation
-/// technique (issue #239, `asap_types::post_asap::error_estimation`) — that
-/// technique computes a tighter bound *at query time* from a sketch's real
-/// counter values, and this repo has no sketch runtime yet for a real
-/// counter array to size against (see that module's docs). This struct is
-/// this crate's own *plan-time* analogue of the same underlying intuition
-/// — an expected-case (skewed / non-adversarial) workload needs a smaller
-/// sketch than the adversarial worst case — expressed as an explicit,
-/// caller-supplied assumption rather than anything observed or proven.
+/// technique (issue #239, `asap_types::post_asap::query_time::error_estimation`)
+/// — that technique computes a tighter bound *at query time* from a
+/// sketch's real counter values, and this repo has no sketch runtime yet
+/// for a real counter array to size against (see that module's docs, and
+/// `asap_types::post_asap::query_time`'s module doc for why it's a
+/// deliberately separate folder from this crate's own *plan-time* code).
+/// This struct is this crate's own *plan-time* analogue of the same
+/// underlying intuition — an expected-case (skewed / non-adversarial)
+/// workload needs a smaller sketch than the adversarial worst case —
+/// expressed as an explicit, caller-supplied assumption rather than
+/// anything observed or proven. Issue #250 tracks actually connecting the
+/// two: feeding query-time-observed posterior error back into a future
+/// replan's `width_relaxation` instead of a bare caller guess.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExpectedCaseSizing {
     /// Fraction, in `(0, 1]`, of the traditional worst-case width
@@ -387,7 +392,8 @@ pub struct ExpectedCaseSizing {
 /// `Pr[error > ε·|F|₁] < δ` for *any* input, including an adversarial one
 /// built to maximize collisions (§3.3 of the posterior-error-estimation
 /// paper this issue is about — see
-/// `asap_types::post_asap::error_estimation`'s module docs). Shrinking
+/// `asap_types::post_asap::query_time::error_estimation`'s module docs).
+/// Shrinking
 /// width below that only keeps the same `(ε,δ)` guarantee if the real
 /// workload's collision load stays within `width_relaxation` of the
 /// worst-case assumption — this function does not check that, cannot check
