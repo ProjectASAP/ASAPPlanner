@@ -36,8 +36,10 @@ pub async fn lower_sql(
 /// Lower a single SQL query string under an explicit [`SqlDialect`].
 ///
 /// `ClickhouseSQL` parses via sqlparser's vendored `ClickHouseDialect`
-/// (array-lambda syntax, `arr[-1]` indexing) — it does not teach DataFusion's
-/// planner any ClickHouse-only builtin functions, which still fail to plan.
+/// (array-lambda syntax, `arr[-1]` indexing). It also teaches DataFusion's
+/// planner the ClickHouse-only builtin functions listed in
+/// `asap_sql_function_catalog::CLICKHOUSE_BUILTINS` (`uniqExact`, `countIf`)
+/// — every other ClickHouse-only builtin still fails to plan.
 /// `ElasticSQL` has no vendored parser and always returns `UnsupportedDialect`.
 pub async fn lower_sql_dialect(
     query: &str,

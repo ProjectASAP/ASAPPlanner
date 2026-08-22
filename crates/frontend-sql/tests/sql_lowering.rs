@@ -5,13 +5,14 @@
 //! the shared `resolve_root` produces the positional, resolved canonical
 //! tree (the same resolver the PromQL path uses).
 
-use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::{
     AggIntent, CompareOpKind, GroupKeys, JoinKind, QueryExpr, Reduction, ScalarValue, Source,
     WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::SqlDialect;
 
 fn col(name: &str, dtype: DataType) -> Column {
     Column::new(name, dtype, false)
@@ -1391,4 +1392,77 @@ async fn array_agg_is_deliberately_rejected() {
         format!("{err}").contains("unsupported aggregate: array_agg"),
         "expected a clean UnsupportedAggregate, got {err}"
     );
+}
+
+// ── Issue #225: catalog-driven ClickHouse builtins (countIf, generalizing
+// uniqExact from #221) ───────────────────────────────────────────────────
+
+async fn lower_clickhouse(sql: &str) -> QueryExpr {
+    lower_sql_dialect(
+        sql,
+        &catalog(),
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
+}
+
+#[tokio::test]
+async fn count_if_lowers_to_a_sum_over_a_derived_indicator_column() {
+    // ClickHouse's `countIf(cond)` has no DataFusion equivalent at all, so it
+    // goes through the same stub-UDAF + catalog-driven `FunctionRewrite`
+    // mechanism `uniqExact` (#221) does — rewritten, before `lower_agg_intent`
+    // ever runs, to `sum(CASE WHEN cond THEN 1 ELSE 0 END)`. Not a plain
+    // `count(...) FILTER (WHERE cond)`: `AggIntent::Count` never consults its
+    // argument (always a row count), so the filter would be silently dropped;
+    // summing a 0/1 indicator keeps `cond` observable through the ordinary
+    // `Sum` path instead.
+    let qe = lower_clickhouse("SELECT countIf(bytes > 100) AS big FROM metrics").await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert!(by.is_empty());
+    assert!(
+        matches!(measures.as_slice(), [AggIntent::Sum { col: Some(_) }]),
+        "expected a Sum bound to the derived indicator column, got {measures:?}"
+    );
+    let (_, materialized) = reducer_input_names(&qe);
+    assert!(
+        materialized,
+        "the indicator expression must be materialized in a Project beneath the Aggregate"
+    );
+}
+
+#[tokio::test]
+async fn two_count_ifs_with_different_conditions_stay_distinct_reducers() {
+    // The corpus pattern (`countIf(operation = 'A'), countIf(operation = 'W')`
+    // in one GROUP BY) needs each call's own condition to survive as its own
+    // derived column, not collapse onto a shared one.
+    let qe = lower_clickhouse(
+        "SELECT service, countIf(bytes > 100) AS big, countIf(bytes <= 100) AS small \
+         FROM metrics GROUP BY service",
+    )
+    .await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert_eq!(*by, GroupKeys::by(vec![0]));
+    assert!(
+        matches!(
+            measures.as_slice(),
+            [
+                AggIntent::Sum { col: Some(a) },
+                AggIntent::Sum { col: Some(b) }
+            ] if a != b
+        ),
+        "expected two distinct Sum reducers, got {measures:?}"
+    );
+}
+
+#[tokio::test]
+async fn count_if_composes_with_group_by() {
+    let qe = lower_clickhouse(
+        "SELECT service, countIf(bytes > 100) AS big FROM metrics GROUP BY service",
+    )
+    .await;
+    let (by, measures) = find_aggregate(&qe).expect("expected an Aggregate");
+    assert_eq!(*by, GroupKeys::by(vec![0]));
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
 }

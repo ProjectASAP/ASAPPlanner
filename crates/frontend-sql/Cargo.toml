@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 # SQL front end: L1 (parse + plan via DataFusion) → L2 relational, then the
-# shared L2→L3 converter — both in asap-types. Pulls DataFusion only — never promql-parser.
+# shared L2→L3 converter — both in asap-types. Pulls DataFusion, plus the
+# independent SQL function-name catalog (asap-sql-function-catalog, issue
+# #225) it consults when lowering an aggregate call — never promql-parser.
 [dependencies]
 asap-types = { path = "../types" }
+asap-sql-function-catalog = { path = "../sql-function-catalog" }
 datafusion = "43"
 
 [dev-dependencies]
