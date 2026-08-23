@@ -65,3 +65,5 @@ Multiple queries show up as tabs across the top.
 A node with a blue ring is structurally identical to a node in another loaded query. Turn it off with "Highlight shared subtrees" in the header.
 
 The side panel also shows the query's SQL or PromQL text under "Query source," plus a legend for every node category.
+
+Once two or more queries are loaded, the Single/Compare/Union buttons in the header switch between viewing one query at a time (default), several side by side in lanes with shared-subtree links drawn between them, or merged into one graph with shared nodes collapsed. See "Compare and Union mode" in README.md for details.
