@@ -45,7 +45,7 @@ use asap_types::pre_asap::schema::Schema;
 use thiserror::Error;
 
 use crate::boundary::{implementation_for_with, Implementation};
-use crate::cost_model::{CostModel, DefaultCostModel};
+use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 
 /// Errors from the pre-ASAP → post-ASAP binding pass.
 #[derive(Debug, Error)]
@@ -93,8 +93,9 @@ pub fn implement_tree_with(
 
 /// Bind a whole workload's worth of already-CSE'd roots
 /// ([`asap_types::pre_asap::cse::share_common_subtrees`]'s output), reusing
-/// one bound [`SummaryNode`] wherever two roots share the same `Rc` (issue
-/// #212, #222, #223 stage 2).
+/// one bound [`SummaryNode`] wherever two roots share the same `Rc` *and*
+/// `cost_model` decides it's worth it (issue #212, #222, #223 stages 2 and
+/// 4, #237).
 ///
 /// This is a real caller for `share_common_subtrees`, wired up deliberately:
 /// the pass's own landing plan calls out that its predecessor
@@ -111,35 +112,69 @@ pub fn implement_tree_with(
 /// `asap_aware_mapping::boundary::Matcher`'s documented, deliberately-unfilled
 /// job, not this one's.
 ///
+/// A first pass over `roots` counts each distinct `Rc<QueryExpr>` pointer's
+/// true `consumer_count` across the whole workload, so the
+/// [`CseCandidate`]/[`CostModel::cse_share_decision`] cost comparison (see
+/// `docs/cse-cost-model-decision.md`) sees the real total, not a running
+/// count that grows as roots are processed left to right. The decision is
+/// made once, the first time a shared pointer is bound, and cached alongside
+/// the bound `SummaryNode` so every later occurrence of that same `Rc`
+/// applies the same decision consistently — either every consumer reuses one
+/// shared `SummaryNode`, or every consumer (including the first) binds
+/// independently.
+///
 /// Only whole-root sharing is memoized (matching two workload roots that are
 /// themselves the same `Rc<QueryExpr>` after CSE) — [`implement_tree`] is
-/// called at most once per distinct root pointer, but it still walks each
-/// such tree's own internal structure fresh; a subtree shared only *below*
-/// two different roots' top level does not additionally memoize inside that
-/// walk. Widening this to sub-root memoization is future work.
+/// called at most once per distinct root pointer when the decision is
+/// `Share`, but it still walks each such tree's own internal structure
+/// fresh; a subtree shared only *below* two different roots' top level does
+/// not additionally memoize inside that walk. Widening this to sub-root
+/// memoization is future work.
 pub fn implement_workload<Id>(
     roots: Vec<(Id, Rc<QueryExpr>)>,
 ) -> Vec<(Id, Result<Rc<SummaryNode>, ImplementError>)> {
     implement_workload_with(roots, &DefaultCostModel)
 }
 
-/// Like [`implement_workload`], but ranks candidate summaries via
-/// `cost_model` instead of the built-in static preference order (see
+/// Like [`implement_workload`], but ranks candidate summaries — and decides
+/// CSE sharing — via `cost_model` instead of the built-in defaults (see
 /// [`crate::cost_model`]).
 pub fn implement_workload_with<Id>(
     roots: Vec<(Id, Rc<QueryExpr>)>,
     cost_model: &dyn CostModel,
 ) -> Vec<(Id, Result<Rc<SummaryNode>, ImplementError>)> {
-    let mut memo: std::collections::HashMap<*const QueryExpr, Rc<SummaryNode>> =
+    let mut consumer_count: std::collections::HashMap<*const QueryExpr, usize> =
+        std::collections::HashMap::new();
+    for (_, expr) in &roots {
+        *consumer_count.entry(Rc::as_ptr(expr)).or_insert(0) += 1;
+    }
+
+    let mut memo: std::collections::HashMap<*const QueryExpr, (Rc<SummaryNode>, ShareDecision)> =
         std::collections::HashMap::new();
     roots
         .into_iter()
         .map(|(id, expr)| {
             let ptr = Rc::as_ptr(&expr);
             let result = match memo.get(&ptr) {
-                Some(cached) => Ok(Rc::clone(cached)),
+                Some((cached, ShareDecision::Share)) => Ok(Rc::clone(cached)),
+                Some((_, ShareDecision::RecomputeIndependently)) => {
+                    implement_tree_with(&expr, cost_model)
+                }
                 None => implement_tree_with(&expr, cost_model).inspect(|node| {
-                    memo.insert(ptr, Rc::clone(node));
+                    let count = consumer_count[&ptr];
+                    let decision = if count > 1 {
+                        let candidate = CseCandidate {
+                            subtree: &expr,
+                            bound_summary: node,
+                            consumer_count: count,
+                        };
+                        cost_model.cse_share_decision(&candidate)
+                    } else {
+                        // Only one consumer: nothing to compare against, and
+                        // this branch is never consulted again for `ptr`.
+                        ShareDecision::Share
+                    };
+                    memo.insert(ptr, (Rc::clone(node), decision));
                 }),
             };
             (id, result)
@@ -865,5 +900,44 @@ mod tests {
             panic!("expected SummaryAgg, got {:?}", root.expr);
         };
         assert_eq!(col, &ColumnRef::Named("bytes".into()));
+    }
+
+    /// Issue #237, #223 stage 4: a `CostModel` that declines CSE sharing
+    /// makes `implement_workload_with` bind each occurrence independently,
+    /// even though the two roots are the exact same `Rc<QueryExpr>` (as
+    /// `share_common_subtrees` would hand back for two identical workload
+    /// entries) — the opposite of `DefaultCostModel`'s unconditional-share
+    /// behavior pinned by `crates/integration-tests/tests/cse.rs`.
+    #[test]
+    fn implement_workload_with_recomputes_independently_when_cost_model_declines_sharing() {
+        struct NeverShareCse;
+        impl CostModel for NeverShareCse {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchKind],
+            ) -> Vec<SketchKind> {
+                candidates.to_vec()
+            }
+            fn cse_share_decision(&self, _candidate: &CseCandidate) -> ShareDecision {
+                ShareDecision::RecomputeIndependently
+            }
+        }
+
+        let shared = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let bound = implement_workload_with(
+            vec![("a", Rc::clone(&shared)), ("b", Rc::clone(&shared))],
+            &NeverShareCse,
+        );
+        let [(_, ra), (_, rb)] = bound.as_slice() else {
+            panic!("expected 2 bound results");
+        };
+        let ra = ra.as_ref().expect("a failed to bind");
+        let rb = rb.as_ref().expect("b failed to bind");
+        assert!(
+            !Rc::ptr_eq(ra, rb),
+            "a CostModel that declines CSE sharing must bind each occurrence \
+             independently, even for two roots that are the same Rc<QueryExpr>"
+        );
     }
 }
