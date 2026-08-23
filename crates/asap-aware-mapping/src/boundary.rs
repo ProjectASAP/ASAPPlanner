@@ -353,6 +353,130 @@ pub fn default_size_params(
     }
 }
 
+/// A deployment's explicit bet about how "typical" (non-adversarial) its
+/// workload's collision pattern is expected to be, consumed only by
+/// [`posterior_aware_size_params`].
+///
+/// This is **not** derived from Chen et al.'s posterior-error-estimation
+/// technique (issue #239, `asap_types::post_asap::query_time::error_estimation`)
+/// — that technique computes a tighter bound *at query time* from a
+/// sketch's real counter values, and this repo has no sketch runtime yet
+/// for a real counter array to size against (see that module's docs, and
+/// `asap_types::post_asap::query_time`'s module doc for why it's a
+/// deliberately separate folder from this crate's own *plan-time* code).
+/// This struct is this crate's own *plan-time* analogue of the same
+/// underlying intuition — an expected-case (skewed / non-adversarial)
+/// workload needs a smaller sketch than the adversarial worst case —
+/// expressed as an explicit, caller-supplied assumption rather than
+/// anything observed or proven. Issue #250 tracks actually connecting the
+/// two: feeding query-time-observed posterior error back into a future
+/// replan's `width_relaxation` instead of a bare caller guess.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExpectedCaseSizing {
+    /// Fraction, in `(0, 1]`, of the traditional worst-case width
+    /// ([`cms_width`]) the caller is betting is enough. `1.0` (or any
+    /// value outside `(0, 1)`) reproduces the worst-case width exactly —
+    /// no risk taken. A smaller value shrinks the sketch proportionally,
+    /// at the cost documented on [`posterior_aware_size_params`].
+    pub width_relaxation: f64,
+}
+
+/// Opt-in alternative to [`default_size_params`] for the CMS-family kinds
+/// (`Cms` / `CmsWithHeap` / `CountSketch` / `CountSketchWithHeap`): sizes
+/// width to `assumption.width_relaxation` of the worst-case [`cms_width`],
+/// trading the unconditional worst-case `(ε,δ)` guarantee for a smaller
+/// sketch under an explicit, caller-stated non-adversarial-workload bet —
+/// see [`ExpectedCaseSizing`].
+///
+/// **The tradeoff, spelled out:** [`default_size_params`]'s width guarantees
+/// `Pr[error > ε·|F|₁] < δ` for *any* input, including an adversarial one
+/// built to maximize collisions (§3.3 of the posterior-error-estimation
+/// paper this issue is about — see
+/// `asap_types::post_asap::query_time::error_estimation`'s module docs).
+/// Shrinking
+/// width below that only keeps the same `(ε,δ)` guarantee if the real
+/// workload's collision load stays within `width_relaxation` of the
+/// worst-case assumption — this function does not check that, cannot check
+/// it (no data exists at plan time), and does not change the formal
+/// guarantee's statement; it only changes how much hardware is spent
+/// chasing it. Callers accept that gap explicitly by choosing
+/// `width_relaxation < 1.0`.
+///
+/// Depth ([`cms_depth`]) is left unchanged from [`default_size_params`]:
+/// depth trades away confidence *exponentially* (`Pr[all r rows bad] =
+/// p^r` — each extra row multiplies the failure probability down), a
+/// differently-shaped and materially riskier tradeoff than width's linear
+/// relaxation. Issue #239 asks for *a* tighter-sizing option under a
+/// stated assumption, not a full redesign of the depth/width tradeoff
+/// space, so depth relaxation is left as explicit future scope.
+///
+/// For every `SketchKind` outside the CMS family, this is identical to
+/// [`default_size_params`] — `width_relaxation` only ever touches the
+/// [`cms_width`]-sized formulas this issue is about.
+///
+/// [`default_size_params`]'s own behavior is completely unchanged by this
+/// function's existence — this is a separate, additive entry point, never
+/// called from [`default_size_params`] or [`implementation_for`].
+pub fn posterior_aware_size_params(
+    kind: SketchKind,
+    intent: &AggIntent,
+    eps: f64,
+    delta: f64,
+    assumption: ExpectedCaseSizing,
+) -> SketchParams {
+    let relaxed_width = |eps: f64| -> u32 {
+        let base = cms_width(eps);
+        let f = assumption.width_relaxation;
+        if !(f.is_finite() && f > 0.0 && f < 1.0) {
+            return base; // out-of-range bet: no relaxation, fall back to worst case
+        }
+        saturating_ceil(base as f64 * f, 2, base)
+    };
+    match kind {
+        SketchKind::Cms => SketchParams::Cms {
+            width: relaxed_width(eps),
+            depth: cms_depth(delta),
+        },
+        SketchKind::CmsWithHeap => {
+            let k = match intent {
+                AggIntent::TopK { k, .. } => *k,
+                _ => unreachable!("CmsWithHeap is only a TopK candidate"),
+            };
+            SketchParams::CmsWithHeap {
+                width: relaxed_width(eps),
+                depth: cms_depth(delta),
+                heap_size: k as u32,
+            }
+        }
+        SketchKind::CountSketch => SketchParams::CountSketch {
+            width: relaxed_width(eps),
+            depth: cms_depth(delta),
+        },
+        SketchKind::CountSketchWithHeap => {
+            let k = match intent {
+                AggIntent::TopK { k, .. } => *k,
+                _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
+            };
+            SketchParams::CountSketchWithHeap {
+                width: relaxed_width(eps),
+                depth: cms_depth(delta),
+                heap_size: k as u32,
+            }
+        }
+        // Every other kind is untouched by this issue's CMS-specific
+        // relaxation — defer to the existing formula verbatim. Spelled out
+        // exhaustively, matching `default_size_params`'s own match, rather
+        // than a wildcard arm: a future `SketchKind` variant then fails to
+        // compile *here* too, instead of silently inheriting worst-case
+        // sizing with no signal that this function never considered it.
+        SketchKind::Kll => default_size_params(kind, intent, eps, delta),
+        SketchKind::Hll => default_size_params(kind, intent, eps, delta),
+        SketchKind::DDSketch => default_size_params(kind, intent, eps, delta),
+        SketchKind::Theta => default_size_params(kind, intent, eps, delta),
+        SketchKind::Kmv => default_size_params(kind, intent, eps, delta),
+    }
+}
+
 // ── Parameter sizing ──────────────────────────────────────────────────────────
 //
 // Each function inverts the sketch family's standard error bound to the
@@ -712,6 +836,157 @@ mod tests {
                 kind: SketchKind::Kll,
                 params: SketchParams::Kll { k: 65_535 },
             }
+        );
+    }
+
+    // ── posterior_aware_size_params (issue #239, integration point 2) ──────
+
+    fn count_intent(e: f64) -> AggIntent {
+        AggIntent::Count { accuracy: eps(e) }
+    }
+
+    #[test]
+    fn posterior_aware_sizing_shrinks_width_under_stated_assumption() {
+        let intent = count_intent(0.01);
+        let worst_case = default_size_params(SketchKind::Cms, &intent, 0.01, 0.01);
+        let relaxed = posterior_aware_size_params(
+            SketchKind::Cms,
+            &intent,
+            0.01,
+            0.01,
+            ExpectedCaseSizing {
+                width_relaxation: 0.5,
+            },
+        );
+        match (worst_case, relaxed) {
+            (
+                SketchParams::Cms {
+                    width: w0,
+                    depth: d0,
+                },
+                SketchParams::Cms {
+                    width: w1,
+                    depth: d1,
+                },
+            ) => {
+                assert!(
+                    w1 < w0,
+                    "expected relaxed width {w1} to be strictly smaller than worst-case {w0}"
+                );
+                assert_eq!(d0, d1, "depth must be unaffected by width_relaxation");
+            }
+            other => panic!("expected Cms/Cms pair, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn posterior_aware_sizing_at_full_relaxation_matches_worst_case() {
+        // width_relaxation = 1.0 must reproduce default_size_params exactly
+        // — the "no risk taken" boundary.
+        let intent = count_intent(0.01);
+        let worst_case = default_size_params(SketchKind::Cms, &intent, 0.01, 0.01);
+        let relaxed = posterior_aware_size_params(
+            SketchKind::Cms,
+            &intent,
+            0.01,
+            0.01,
+            ExpectedCaseSizing {
+                width_relaxation: 1.0,
+            },
+        );
+        assert_eq!(worst_case, relaxed);
+    }
+
+    #[test]
+    fn posterior_aware_sizing_invalid_relaxation_falls_back_to_worst_case() {
+        let intent = count_intent(0.01);
+        let worst_case = default_size_params(SketchKind::Cms, &intent, 0.01, 0.01);
+        for bad in [0.0, -0.5, 1.5, f64::NAN, f64::INFINITY] {
+            let relaxed = posterior_aware_size_params(
+                SketchKind::Cms,
+                &intent,
+                0.01,
+                0.01,
+                ExpectedCaseSizing {
+                    width_relaxation: bad,
+                },
+            );
+            assert_eq!(
+                worst_case, relaxed,
+                "width_relaxation={bad} should fall back to the worst-case width"
+            );
+        }
+    }
+
+    #[test]
+    fn posterior_aware_sizing_applies_to_every_cms_family_kind() {
+        let cms_heap_intent = AggIntent::TopK {
+            k: 7,
+            accuracy: eps(0.01),
+        };
+        let assumption = ExpectedCaseSizing {
+            width_relaxation: 0.25,
+        };
+        // CountSketch
+        assert_eq!(
+            posterior_aware_size_params(
+                SketchKind::CountSketch,
+                &count_intent(0.01),
+                0.01,
+                0.01,
+                assumption
+            ),
+            SketchParams::CountSketch {
+                width: 68,
+                depth: 5
+            }, // ceil(272 * 0.25)
+        );
+        // CmsWithHeap / CountSketchWithHeap carry k through untouched.
+        match posterior_aware_size_params(
+            SketchKind::CmsWithHeap,
+            &cms_heap_intent,
+            0.01,
+            0.01,
+            assumption,
+        ) {
+            SketchParams::CmsWithHeap {
+                width,
+                depth,
+                heap_size,
+            } => {
+                assert_eq!(width, 68);
+                assert_eq!(depth, 5);
+                assert_eq!(heap_size, 7);
+            }
+            other => panic!("expected CmsWithHeap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn posterior_aware_sizing_leaves_non_cms_kinds_unchanged() {
+        // Kll/Hll/etc. have no width_relaxation concept — must be byte-for-
+        // byte identical to default_size_params.
+        let intent = default_quantile(0.99);
+        let assumption = ExpectedCaseSizing {
+            width_relaxation: 0.1,
+        };
+        assert_eq!(
+            posterior_aware_size_params(SketchKind::Kll, &intent, 0.01, 0.01, assumption),
+            default_size_params(SketchKind::Kll, &intent, 0.01, 0.01),
+        );
+    }
+
+    #[test]
+    fn default_size_params_unchanged_by_new_function_existing() {
+        // Regression pin: default_size_params's own worst-case behavior for
+        // existing callers must be untouched by adding
+        // posterior_aware_size_params alongside it.
+        assert_eq!(
+            default_size_params(SketchKind::Cms, &count_intent(0.001), 0.001, 0.001),
+            SketchParams::Cms {
+                width: 2719,
+                depth: 7
+            },
         );
     }
 }
