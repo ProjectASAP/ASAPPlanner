@@ -201,8 +201,9 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 /// `SELECT COUNT(DISTINCT service) FROM metrics` at ε = 0.01 lowers to
 /// `AggIntent::Cardinality` (`sql_lowering.rs::count_distinct_is_cardinality`)
 /// — unlike `Quantile`/`Count`/`TopK`, its preferred candidate is HLL, not
-/// KLL/CMS (`boundary::summary_candidates`), so this exercises a distinct
-/// branch of the sketch-vs-exact boundary than the quantile test above.
+/// KLL/CMS (`implementation::summary_candidates`), so this exercises a
+/// distinct branch of the sketch-vs-exact decision than the quantile test
+/// above.
 #[tokio::test]
 async fn sql_count_distinct_binds_hll_sketch_over_named_column() {
     let l3 = lower(

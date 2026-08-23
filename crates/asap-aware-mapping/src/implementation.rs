@@ -1,12 +1,13 @@
-//! Sketch-vs-exact boundary — the per-intent accuracy decision (issue #98).
+//! [`Implementation`] — how one [`AggIntent`] gets realized at post-ASAP
+//! binding time (issue #98): by an approximate summary (sketch, sample,
+//! wavelet, statistical model, …), by an exact mergeable accumulator, or by
+//! an ordinary exact operator (pass-through). This is a post-ASAP concern —
+//! the pre-ASAP IR carries only the intent + accuracy target, never the
+//! realization — and it's a per-node decision, made once per `AggIntent`,
+//! not a plan-wide one.
 //!
-//! The per-node choice of how an [`AggIntent`] is *realised*: by an
-//! approximate summary (sketch, sample, wavelet, statistical model, …), by
-//! an exact mergeable accumulator, or by an ordinary exact operator
-//! (pass-through). This is a post-ASAP concern: the pre-ASAP IR carries only
-//! the intent + accuracy target, never the realization.
-//!
-//! The decision consumes three inputs:
+//! [`implementation_for`]/[`implementation_for_with`] are where that
+//! decision actually gets made. Three inputs feed it:
 //!
 //! - the [`AccuracyTarget`] threaded onto the approximate-capable intents
 //!   (`Quantile` / `Cardinality` / `Count` / `TopK`) — `Exact` forbids a

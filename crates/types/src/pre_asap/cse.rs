@@ -52,7 +52,7 @@
 //! intentionally conservative: it only recognizes *exact* structural
 //! matches, not "a stricter-accuracy summary could also answer a looser
 //! request." That subsumption question already has a documented,
-//! deliberately-unfilled home (`asap_aware_mapping::boundary::Matcher`) —
+//! deliberately-unfilled home (`asap_aware_mapping::implementation::Matcher`) —
 //! CSE here does not attempt it.
 //!
 //! ## Legality: gated by `Schema::unique_keys`

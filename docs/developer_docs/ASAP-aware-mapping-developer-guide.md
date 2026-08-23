@@ -168,7 +168,7 @@ The two methods have intentionally different responsibilities.
   fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind>;
   ```
 
-- **`size_params`** — pick concrete parameters (e.g. sketch capacity) for one already-chosen `SketchKind`, given an accuracy target `(eps, delta)`. This is a separate hook from `rank_candidates` specifically so a deployment can override *just* sizing (e.g. an empirically-tuned table, or discrete capacity rungs a downstream catalog requires) without also forking candidate selection — same "one extension point per decision" shape as everything else in this trait. Default: `boundary::default_size_params`, this crate's built-in per-family sizing formulas.
+- **`size_params`** — pick concrete parameters (e.g. sketch capacity) for one already-chosen `SketchKind`, given an accuracy target `(eps, delta)`. This is a separate hook from `rank_candidates` specifically so a deployment can override *just* sizing (e.g. an empirically-tuned table, or discrete capacity rungs a downstream catalog requires) without also forking candidate selection — same "one extension point per decision" shape as everything else in this trait. Default: `implementation::default_size_params`, this crate's built-in per-family sizing formulas.
 
   ```rust
   fn size_params(&self, kind: SketchKind, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
@@ -226,7 +226,7 @@ A custom cost model does not necessarily need to override every hook. The curren
 
 ## 3. How the current pieces fit together
 
-There are two related paths in the current code, and it's worth being explicit about how they relate before looking at either one, since neither name says it outright: **the binding path is older and still the one thing that actually runs in production; the replacement-strategy path is new and additive, not a replacement for it** (`replacement.rs`'s own module docs put this as "why this exists alongside `boundary`/`bind`, not instead of them"). Both start from the same input (an `AggIntent`) and both eventually reuse the exact same underlying decision logic (`boundary::implementation_for_with`, `bind::implement_tree_with`) — they differ only in *how much of the answer* they keep:
+There are two related paths in the current code, and it's worth being explicit about how they relate before looking at either one, since neither name says it outright: **the binding path is older and still the one thing that actually runs in production; the replacement-strategy path is new and additive, not a replacement for it** (`replacement.rs`'s own module docs put this as "why this exists alongside `implementation`/`bind`, not instead of them"). Both start from the same input (an `AggIntent`) and both eventually reuse the exact same underlying decision logic (`implementation::implementation_for_with`, `bind::implement_tree_with`) — they differ only in *how much of the answer* they keep:
 
 - The **binding path** is what runs today when a query actually gets bound: it commits to one `Implementation` and discards every alternative a `CostModel` didn't pick, because something has to actually execute.
 - The **replacement-strategy path** is what `ReplacementStrategy::replacements()` (§2) produces: instead of committing to one, it *keeps every alternative* the binding path would have thrown away, packaged as `ReplacementSubDAG`s.
@@ -243,7 +243,7 @@ Conceptually:
 AggIntent
    |
    v
-boundary::implementation_for_with(...)
+implementation::implementation_for_with(...)
    |
    v
 one Implementation
@@ -283,7 +283,7 @@ The important rule is:
 
 > Strategies should reuse existing decision and binding logic where possible instead of reimplementing it.
 
-For example, `SketchFamilyStrategy` uses the existing boundary and binding machinery to enumerate each valid sketch realization.
+For example, `SketchFamilyStrategy` uses the existing implementation-selection and binding machinery to enumerate each valid sketch realization.
 
 ---
 
@@ -473,7 +473,7 @@ If another module already knows how to determine whether something is legal or h
 
 Do not create a second implementation of the same semantics inside the strategy.
 
-The existing `SketchFamilyStrategy` is the model to follow: it reuses the boundary candidate list and the existing binder.
+The existing `SketchFamilyStrategy` is the model to follow: it reuses `implementation.rs`'s existing candidate list and the existing binder.
 
 ---
 
@@ -526,13 +526,13 @@ Target Aggregate
 extract AggIntent
      |
      v
-boundary::implementation_for_with(...)
+implementation::implementation_for_with(...)
      |
      +--------------------------+
      |
      | approximate sketch case
      v
-boundary::summary_candidates(...)
+implementation::summary_candidates(...)
      |
      v
 bind each sketch candidate separately
@@ -545,7 +545,7 @@ For an approximate quantile, the current candidate list includes both KLL and DD
 
 The strategy returns both, even if the cost model ranks one ahead of the other.
 
-For cases where boundary selection has only one realization, such as an exact accumulator or pass-through, the strategy returns that single realization.
+For cases where the implementation decision has only one realization, such as an exact accumulator or pass-through, the strategy returns that single realization.
 
 ---
 
@@ -823,7 +823,7 @@ The replacement-strategy layer should still expose both valid alternatives where
 
 ---
 
-## 10. `Matcher` (`boundary.rs`)
+## 10. `Matcher` (`implementation.rs`)
 
 There is a third extension point in this crate, much smaller in surface area than `ReplacementStrategy` or `CostModel`, but worth knowing about:
 
@@ -833,9 +833,9 @@ pub trait Matcher {
 }
 ```
 
-`Matcher` answers a different question than everything above it: not "how do I *build* a summary for this intent" (that's `boundary`/`bind`/`ReplacementStrategy`), but "is there already a summary sitting around somewhere that answers this without building anything new?" This is the query-optimization-literature "answering queries using views" question, applied to summaries — the same idea as a database reusing an existing materialized view or index instead of recomputing from scratch.
+`Matcher` answers a different question than everything above it: not "how do I *build* a summary for this intent" (that's `implementation`/`bind`/`ReplacementStrategy`), but "is there already a summary sitting around somewhere that answers this without building anything new?" This is the query-optimization-literature "answering queries using views" question, applied to summaries — the same idea as a database reusing an existing materialized view or index instead of recomputing from scratch.
 
-Concrete example: a deployment already has a `DDSketch` built earlier for some other query on `latency`, and a new query needs `Kll` quantiles on `latency`. Can the existing `DDSketch` answer it without building a new `Kll` sketch? A pure sketch-algebra answer says yes — both are quantile sketches, mutually substitutable at the query level. But a deployment with its own storage-layout rules might say no, e.g. if its inventory ties a stored summary to a specific algorithm identity it won't re-interpret. `Matcher::is_satisfied_by(required, available)` is where a deployment plugs in whichever answer is actually true for its own storage layer — `required` is what a query needs (an `Implementation` `boundary`/`bind` computed), `available` is what already exists somewhere in that deployment's inventory.
+Concrete example: a deployment already has a `DDSketch` built earlier for some other query on `latency`, and a new query needs `Kll` quantiles on `latency`. Can the existing `DDSketch` answer it without building a new `Kll` sketch? A pure sketch-algebra answer says yes — both are quantile sketches, mutually substitutable at the query level. But a deployment with its own storage-layout rules might say no, e.g. if its inventory ties a stored summary to a specific algorithm identity it won't re-interpret. `Matcher::is_satisfied_by(required, available)` is where a deployment plugs in whichever answer is actually true for its own storage layer — `required` is what a query needs (an `Implementation` value that `implementation`/`bind` already computed), `available` is what already exists somewhere in that deployment's inventory.
 
 Unlike `CostModel`, this crate ships **no default body and no implementation** for `Matcher` at all — the answer genuinely depends on facts this crate deliberately doesn't settle (see the example above: a pure sketch-algebra answer and a deployment's own storage-layout rules can legitimately disagree, and this crate has no inventory concept of its own to judge between them). If you need this, you're implementing the whole trait for your deployment from scratch; there's no default to lean on and no existing implementation in this crate to copy from.
 
@@ -901,7 +901,7 @@ A new sketch family generally touches more than `ReplacementStrategy`.
 
 The strategy should not maintain its own private list of sketch kinds.
 
-`SketchFamilyStrategy` obtains sketch alternatives through the existing boundary interface:
+`SketchFamilyStrategy` obtains sketch alternatives through `implementation.rs`'s existing interface:
 
 ```rust
 summary_candidates(intent)
@@ -912,7 +912,7 @@ and binds them through the normal binder.
 Therefore, when adding a new built-in sketch family, the intended flow is:
 
 ```text
-1. Teach the boundary layer that the sketch is a valid candidate
+1. Teach `implementation.rs` that the sketch is a valid candidate
    for the relevant AggIntent.
 
 2. Teach the cost model how to rank and size it.
@@ -1158,7 +1158,7 @@ fn replacements(...) -> Vec<ReplacementSubDAG> {
 
 ### Mistake: maintaining a second sketch-applicability table
 
-If the boundary layer already defines which sketch families satisfy an `AggIntent`, reuse that source.
+If `implementation.rs` already defines which sketch families satisfy an `AggIntent`, reuse that source.
 
 Otherwise the binder and replacement strategy can silently disagree.
 
@@ -1240,7 +1240,7 @@ Use this table to find the right place for a change.
 | Add a new logical optimization | new `impl ReplacementStrategy` |
 | Add a new replacement for an existing target shape | `ReplacementStrategy::replacements` |
 | Change when a strategy applies | `ReplacementStrategy::matches` |
-| Add a new built-in sketch candidate | boundary summary-candidate mapping |
+| Add a new built-in sketch candidate | `implementation.rs`'s summary-candidate mapping |
 | Prefer one sketch family over another | `CostModel::rank_candidates` |
 | Change sketch sizing for an accuracy target | `CostModel::size_params` |
 | Add extension-defined implementation behavior | `CostModel::realize_extension` |
@@ -1250,7 +1250,7 @@ Use this table to find the right place for a change.
 | Change current share/recompute choice | `CostModel::cse_share_decision` |
 | Decide whether an available implementation satisfies a required one | `impl Matcher` |
 | Produce a normal bound summary candidate | reuse `bind::implement_tree_with` |
-| Enumerate valid sketch kinds | reuse `boundary::summary_candidates` |
+| Enumerate valid sketch kinds | reuse `implementation::summary_candidates` |
 | Build a target with no workload context | `TargetSubDAG::new` |
 | Build a target with known sharing context | `TargetSubDAG::with_consumer_count` |
 

@@ -8,7 +8,7 @@
 //! The traditional CMS/Count-Sketch/CU-Sketch guarantee is an *a priori*,
 //! worst-case bound derived before any data is seen: e.g. classic CMS sizing
 //! (`w = ⌈e/ε⌉` counters/row, `r = ⌈ln(1/δ)⌉` rows — exactly
-//! `crates/asap-aware-mapping/src/boundary.rs`'s `cms_width`/`cms_depth`)
+//! `crates/asap-aware-mapping/src/implementation.rs`'s `cms_width`/`cms_depth`)
 //! guarantees `Pr[error > ε·|F|₁] < δ` obliviously to the real data
 //! distribution, by construction assuming the adversarial worst case (§3,
 //! §3.3 of the paper).
@@ -47,7 +47,7 @@
 //! vendored CMS/CountSketch/CU-Sketch runtime and no counter-array data
 //! structure anywhere** — confirmed by inspecting
 //! `crates/types/src/post_asap/sketch.rs` (`SketchKind`, `SketchParams`,
-//! this module's neighbors) and `crates/asap-aware-mapping/src/boundary.rs`
+//! this module's neighbors) and `crates/asap-aware-mapping/src/implementation.rs`
 //! (`default_size_params`, `cms_width`, `cms_depth`): both are purely
 //! planning-time sizing metadata. There is no `A[row][col]` counter matrix
 //! anywhere in the workspace for these functions to be handed at query
@@ -65,7 +65,7 @@
 //! Integration point (2) — tighter *plan-time* sizing under an expected-case
 //! (non-adversarial) assumption — is wired for real, since it touches code
 //! that already exists: see
-//! `crates/asap-aware-mapping/src/boundary.rs::posterior_aware_size_params`.
+//! `crates/asap-aware-mapping/src/implementation.rs::posterior_aware_size_params`.
 
 // ── Posterior (query-time) estimators ───────────────────────────────────────
 
@@ -192,10 +192,10 @@ pub fn count_sketch_posterior_error_bound(row: &[i64], rows: u32, delta: f64) ->
 
 /// `⌈x⌉` clamped to `[lo, hi]`; NaN / non-positive `x` saturate to `hi` (a
 /// degenerate accuracy target means "as accurate as this family goes").
-/// Byte-for-byte the same policy as `boundary.rs`'s private
+/// Byte-for-byte the same policy as `implementation.rs`'s private
 /// `saturating_ceil` — duplicated here, not imported, for the same
 /// layering reason [`classic_cms_sizing`] itself is duplicated rather than
-/// calling `boundary.rs` directly.
+/// calling `implementation.rs` directly.
 fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
     if !x.is_finite() || x <= 0.0 {
         return hi;
@@ -205,19 +205,19 @@ fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
 
 /// The classic CMS `(ε, δ)` sizing formula (§3.3, restated just before
 /// Eq. 6; identical — formula *and* clamping — to
-/// `crates/asap-aware-mapping/src/boundary.rs`'s private
+/// `crates/asap-aware-mapping/src/implementation.rs`'s private
 /// `cms_width`/`cms_depth`, reimplemented here — deliberately, not by
 /// accident — because `asap-types` sits below `asap-aware-mapping` in the
 /// workspace's dependency layering and cannot import from it): `w = ⌈e/ε⌉`
 /// counters/row, clamped to `[2, 2²⁶]`; `r = ⌈ln(1/δ)⌉` rows, clamped to
 /// `[1, 32]`.
 ///
-/// Returns `(width, depth)`. Matching `boundary.rs`'s own clamp semantics
+/// Returns `(width, depth)`. Matching `implementation.rs`'s own clamp semantics
 /// exactly (not just its in-range formula) matters here specifically:
 /// this function's whole purpose is giving comparison/test code (and,
 /// per issue #250, a future replan) the traditional bound to compare
 /// this module's posterior bound against — an un-clamped reimplementation
-/// would silently diverge from `boundary.rs`'s real sizing outside a
+/// would silently diverge from `implementation.rs`'s real sizing outside a
 /// narrow "nothing saturates" range of `(eps, delta)`, exactly the range
 /// most tests default to, making the divergence easy to miss.
 pub fn classic_cms_sizing(eps: f64, delta: f64) -> (u32, u32) {
@@ -475,9 +475,9 @@ mod tests {
     // ── Traditional bound / classic sizing ──────────────────────────────────
 
     #[test]
-    fn classic_cms_sizing_matches_boundary_rs_formula() {
+    fn classic_cms_sizing_matches_implementation_rs_formula() {
         // Same worked example as
-        // `asap-aware-mapping::boundary::tests::epsilon_delta_sizes_cms_depth`
+        // `asap-aware-mapping::implementation::tests::epsilon_delta_sizes_cms_depth`
         // (eps=0.001, delta=0.001 ⇒ width=2719, depth=7), pinned here too so
         // the two independent (layering-forced) reimplementations can't
         // silently drift apart undetected.
@@ -486,12 +486,12 @@ mod tests {
     }
 
     #[test]
-    fn classic_cms_sizing_degenerate_inputs_saturate_like_boundary_rs() {
+    fn classic_cms_sizing_degenerate_inputs_saturate_like_implementation_rs() {
         // Degenerate width/depth saturate to their hi clamp (2^26 / 32),
-        // matching `boundary.rs`'s `saturating_ceil` exactly — not `0` (see
+        // matching `implementation.rs`'s `saturating_ceil` exactly — not `0` (see
         // the correctness fix on `classic_cms_sizing`'s doc comment: an
         // earlier version returned `(0, 0)` here, silently diverging from
-        // `boundary.rs`'s real degenerate-input behavior).
+        // `implementation.rs`'s real degenerate-input behavior).
         assert_eq!(classic_cms_sizing(0.0, 0.01), (1 << 26, 5));
         assert_eq!(classic_cms_sizing(0.01, 0.0), (272, 32));
         assert_eq!(classic_cms_sizing(0.01, 1.0), (272, 32));
@@ -500,13 +500,13 @@ mod tests {
 
     /// Pinned extreme-range values — the clamp actually engaging, not just
     /// the in-range formula — computed by hand against the same
-    /// `[2, 2²⁶]` / `[1, 32]` bounds `boundary.rs`'s `cms_width`/`cms_depth`
+    /// `[2, 2²⁶]` / `[1, 32]` bounds `implementation.rs`'s `cms_width`/`cms_depth`
     /// use, so a future edit that reintroduces the un-clamped bug (an
     /// earlier version of this function silently diverged from
-    /// `boundary.rs` outside the narrow range most other tests exercise)
+    /// `implementation.rs` outside the narrow range most other tests exercise)
     /// gets caught here.
     #[test]
-    fn classic_cms_sizing_clamps_extreme_ranges_like_boundary_rs() {
+    fn classic_cms_sizing_clamps_extreme_ranges_like_implementation_rs() {
         // eps=1e-10: raw width e/eps ≈ 2.7e10, hi-clamped to 2^26.
         assert_eq!(classic_cms_sizing(1e-10, 0.01), (1 << 26, 5));
         // eps=3.0: raw width e/3 < 1, lo-clamped to 2.

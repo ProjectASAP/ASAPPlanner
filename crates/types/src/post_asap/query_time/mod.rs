@@ -21,7 +21,7 @@
 //! doesn't exist yet in this workspace (see [`error_estimation`]'s own
 //! docs for exactly what's blocked and why).
 //!
-//! Contrast with `asap-aware-mapping::boundary::posterior_aware_size_params`
+//! Contrast with `asap-aware-mapping::implementation::posterior_aware_size_params`
 //! (issue #239, PR #248): that function is real, wired *planning*-time
 //! code — it lives in the planning crate, not here, and does not call
 //! into this module. It borrows the same underlying intuition (a

@@ -2,7 +2,7 @@
 //!
 //! Walks a canonical pre-ASAP [`QueryExpr`] and emits the summary-bound
 //! post-ASAP IR ([`SummaryExpr`] / [`SummaryNode`] in `asap-sketch`). Per
-//! node, the [`boundary`](crate::boundary) decision picks the realization:
+//! node, the [`implementation`](crate::implementation) decision picks the realization:
 //!
 //! - **Summary family** (sketch / sample / wavelet / statistical model) —
 //!   the `Aggregate` becomes a [`SummaryExpr::SummaryAgg`] carrying the
@@ -44,8 +44,8 @@ use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
 use asap_types::pre_asap::schema::Schema;
 use thiserror::Error;
 
-use crate::boundary::{implementation_for_with, Implementation};
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
+use crate::implementation::{implementation_for_with, Implementation};
 
 /// Errors from the pre-ASAP → post-ASAP binding pass.
 #[derive(Debug, Error)]
@@ -109,7 +109,7 @@ pub fn implement_tree_with(
 /// needs to recognize when it already bound the exact `Rc` a later root
 /// hands back, and is deliberately *not* a general "does an available
 /// `Implementation` satisfy this one" lookup — that subsumption question is
-/// `asap_aware_mapping::boundary::Matcher`'s documented, deliberately-unfilled
+/// `asap_aware_mapping::implementation::Matcher`'s documented, deliberately-unfilled
 /// job, not this one's.
 ///
 /// A first pass over `roots` counts each distinct `Rc<QueryExpr>` pointer's
@@ -321,7 +321,9 @@ fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> S
             cost_model.readout_extension(ext_kind, payload, col)
         }
         other => {
-            unreachable!("no summary realization for {other:?} (boundary::implementation_for)")
+            unreachable!(
+                "no summary realization for {other:?} (implementation::implementation_for)"
+            )
         }
     }
 }
@@ -329,7 +331,7 @@ fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> S
 /// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
 /// `SummaryFamilyType::Plain`. Public so a deployment can force a node it
 /// knows `implement_tree_in_with` would otherwise actively (mis)bind —
-/// e.g. an intent this crate's `boundary::implementation_for` maps to an
+/// e.g. an intent this crate's `implementation::implementation_for` maps to an
 /// accumulator kind the deployment's runtime doesn't actually implement —
 /// through the same fallback this crate's own dispatch uses, without
 /// duplicating the schema-lift logic.
@@ -534,9 +536,9 @@ mod tests {
             &self,
             ext_kind: &str,
             _payload: &serde_json::Value,
-        ) -> crate::boundary::Implementation {
+        ) -> crate::implementation::Implementation {
             if ext_kind == "frequency" {
-                crate::boundary::Implementation::Sketch {
+                crate::implementation::Implementation::Sketch {
                     kind: SketchKind::CountSketch,
                     params: SketchParams::CountSketch {
                         width: 256,
@@ -544,7 +546,7 @@ mod tests {
                     },
                 }
             } else {
-                crate::boundary::Implementation::PassThrough
+                crate::implementation::Implementation::PassThrough
             }
         }
 
@@ -716,8 +718,9 @@ mod tests {
 
     #[test]
     fn nested_aggregates_bind_per_node() {
-        // quantile(0.9, sum by (job) (m)) — the boundary fires per node over
-        // the nested tree: KLL over an exact Sum accumulator.
+        // quantile(0.9, sum by (job) (m)) — the implementation decision
+        // fires per node over the nested tree: KLL over an exact Sum
+        // accumulator.
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.9), inner);
         let root = implement_tree(&outer).unwrap();
