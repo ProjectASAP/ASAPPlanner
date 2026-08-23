@@ -164,6 +164,110 @@ fn structural_hash(node: &QueryExpr) -> u64 {
     hasher.finish()
 }
 
+/// Count of *unique* nodes reachable from `root`, deduplicated by `Rc`
+/// pointer identity (`Rc::as_ptr`) — the real size of the DAG rooted at
+/// `root`, not a tree-walk count.
+///
+/// After [`share_common_subtrees`] runs (or even before it, for a tree a
+/// front end already built with internal `Rc` sharing — e.g. re-running
+/// CSE, or a single-query repeated subexpression), `root` is generally a
+/// **DAG**, not a tree — that is this whole module's premise. Anything that
+/// walks `root` as if every reference were a fresh subtree (a naive
+/// recursive walk with no identity tracking, or a naive full
+/// `serde_json` serialization — `Rc`'s `Serialize` impl serializes the
+/// pointee's *value* at every occurrence, it does not dedupe by identity)
+/// re-visits/re-counts an already-shared descendant once per parent that
+/// references it, over-counting relative to the actual work of holding it
+/// in memory or recomputing it once. This function is the DAG-correct
+/// alternative: each unique node is counted exactly once, regardless of
+/// how many places within `root` reference it.
+///
+/// `pub` so cost-aware callers outside this crate (e.g.
+/// `asap_aware_mapping::CostModel::cse_recompute_cost`'s default) have a
+/// DAG-correct structural-size proxy available, instead of reaching for
+/// something tree-shaped like a raw serialization length.
+///
+/// Same operator-child traversal scope as [`share_common_subtrees`] itself
+/// (see the module doc's "Algorithm" section, and this module's private
+/// `rebuild_children`) — a scalar subexpression embedded in a wrapper
+/// position (`Predicate`, `ProjectItem.expr`, `Aggregate.having`, …) is not
+/// separately visited, matching this module's own stated scope; it's
+/// counted as part of its owning operator node, the same node
+/// `rebuild_children` treats as a single opaque leaf for interning
+/// purposes.
+pub fn dag_node_count(root: &QueryExpr) -> usize {
+    let mut seen: std::collections::HashSet<*const QueryExpr> = std::collections::HashSet::new();
+    count_unique(root, &mut seen)
+}
+
+/// One node's own contribution (`1`) plus each *not-yet-seen* operator
+/// child's contribution — exhaustive over every `QueryExpr` variant,
+/// enumerating the same fields [`rebuild_children`] does (kept as a
+/// separate, read-only traversal rather than threaded through
+/// `rebuild_children` itself, since that function consumes and rebuilds
+/// its input while this one only ever reads it).
+fn count_unique(node: &QueryExpr, seen: &mut std::collections::HashSet<*const QueryExpr>) -> usize {
+    use QueryExpr::*;
+
+    /// Visit one `Rc`-held child: counts (and recurses into) it only the
+    /// first time its pointer is seen, `0` on every later occurrence —
+    /// this is the actual dedup step.
+    fn visit(
+        child: &Rc<QueryExpr>,
+        seen: &mut std::collections::HashSet<*const QueryExpr>,
+    ) -> usize {
+        if seen.insert(Rc::as_ptr(child)) {
+            count_unique(child, seen)
+        } else {
+            0
+        }
+    }
+
+    1 + match node {
+        Scan { .. } | PromqlScalar(_) | QueryTimestamp => 0,
+        PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => visit(c, seen),
+        PromqlRelabel { child, .. }
+        | PromqlInfoEnrich { child, .. }
+        | PromqlSeriesSample { child, .. }
+        | Filter { child, .. }
+        | Project { child, .. }
+        | Aggregate { child, .. }
+        | Dedup { child, .. }
+        | Sort { child, .. }
+        | Limit { child, .. }
+        | PromqlSubquery { child, .. }
+        | TimeRange { child, .. }
+        | TimeShift { child, .. }
+        | SQLWindowFunc { child, .. } => visit(child, seen),
+        // `Concat`'s branches are stored by value (`Vec<QueryExpr>`, not
+        // `Rc<QueryExpr>` — see `rebuild_children`'s `intern_owned` use for
+        // this variant), so a branch has no `Rc` identity of its own to
+        // dedup on at this position; still recurse into each in case an
+        // `Rc`-shared descendant appears further down.
+        Concat { children } => children.iter().map(|c| count_unique(c, seen)).sum(),
+        Join { left, right, .. } | SetOp { left, right, .. } => {
+            visit(left, seen) + visit(right, seen)
+        }
+        BinaryOp { lhs, rhs, .. } => visit(lhs, seen) + visit(rhs, seen),
+        // Scalar variants (issue #205) — never descended into, matching
+        // `rebuild_children`'s own scope exactly (see its trailing match
+        // arm and this module's "Algorithm" section).
+        Column(_)
+        | Literal(_)
+        | Compare { .. }
+        | BoolAnd(_)
+        | BoolOr(_)
+        | Not(_)
+        | IsNull(_)
+        | IsNotNull(_)
+        | Cast { .. }
+        | InList { .. }
+        | FunctionCall { .. }
+        | Arithmetic { .. }
+        | Case { .. } => 0,
+    }
+}
+
 /// Recurse into `child`, then intern the result. `Rc::try_unwrap` recovers
 /// the owned node without cloning in the overwhelmingly common case — a
 /// tree freshly built by a front end / `resolve_root`, not yet shared by any
@@ -514,6 +618,67 @@ mod tests {
             Rc::ptr_eq(lhs, rhs),
             "the two structurally identical branches must collapse onto one Rc"
         );
+    }
+
+    // ── dag_node_count ───────────────────────────────────────────────────
+
+    #[test]
+    fn dag_node_count_is_the_naive_count_when_nothing_is_shared() {
+        // scan() alone: 1 node.
+        assert_eq!(dag_node_count(&scan()), 1);
+        // quantile_agg's own child is a fresh, unshared scan(): 2 nodes.
+        assert_eq!(dag_node_count(&quantile_agg(vec![1], Some(2), 0.5)), 2);
+    }
+
+    #[test]
+    fn dag_node_count_deduplicates_an_internally_shared_subtree() {
+        // Same shape as `single_query_shares_its_own_repeated_subtree`: a
+        // BinaryOp whose two branches are the *same* Rc after
+        // `share_common_subtrees` (2 nodes: Scan + Aggregate) — the root
+        // itself makes 3 unique nodes total (BinaryOp, Aggregate, Scan),
+        // not 5 (which a tree-walk / naive serialization, counting the
+        // shared branch's 2 nodes twice, would report).
+        let agg = quantile_agg(vec![1], Some(2), 0.5);
+        let root = QueryExpr::BinaryOp {
+            op: BinaryOpKind::Compare(crate::pre_asap::expr_ir::CompareOpKind::Eq),
+            lhs: Rc::new(agg.clone()),
+            rhs: Rc::new(agg),
+            vector_match: None,
+        };
+        let shared = share_common_subtrees(vec![("q", root)]);
+        let [(_, root)] = shared.as_slice() else {
+            panic!("expected 1 root");
+        };
+        assert_eq!(
+            dag_node_count(root),
+            3,
+            "the shared branch's 2 nodes must be counted once, not once per \
+             occurrence — got {} for {root:?}",
+            dag_node_count(root)
+        );
+    }
+
+    #[test]
+    fn dag_node_count_deduplicates_across_two_workload_roots() {
+        // Two workload roots sharing one Aggregate after
+        // `share_common_subtrees` (the `duplicate_workload_queries_...`
+        // shape from `crates/integration-tests/tests/cse.rs`, built
+        // directly here): each root's own `dag_node_count` must report the
+        // shared subtree's real size once, not double-count anything —
+        // there's nothing *to* double-count from a single root's own count
+        // in this case (no root references the shared node twice), so this
+        // pins the simpler, more common case that a per-candidate cost
+        // proxy (`CseCandidate::subtree` in `asap-aware-mapping`) actually
+        // exercises: counting one occurrence's own reachable DAG size.
+        let a = quantile_agg(vec![1], Some(2), 0.5);
+        let b = quantile_agg(vec![1], Some(2), 0.5);
+        let shared = share_common_subtrees(vec![("a", a), ("b", b)]);
+        let [(_, ra), (_, rb)] = shared.as_slice() else {
+            panic!("expected 2 roots");
+        };
+        assert!(Rc::ptr_eq(ra, rb), "fixture sanity: the two roots merged");
+        assert_eq!(dag_node_count(ra), 2);
+        assert_eq!(dag_node_count(rb), 2);
     }
 
     #[test]

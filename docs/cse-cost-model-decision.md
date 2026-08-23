@@ -80,9 +80,15 @@ independently (`RecomputeIndependently`) per that one decision.
 
 ## Defaults
 
-`cse_recompute_cost`'s default is a structural-size proxy (the length of the
-same canonical-JSON serialization `cse::structural_hash` already computes for
-the subtree — no second traversal). `cse_shared_maintenance_cost`'s default
+`cse_recompute_cost`'s default is a structural-size proxy: `cse::dag_node_count`,
+the number of *unique* nodes in the subtree's DAG (deduplicated by `Rc`
+pointer identity), not a raw serialization length. This distinction matters
+here specifically — a `CseCandidate`'s subtree is, by definition, something
+CSE already found sharing in, so it's generally a DAG, not a tree; a naive
+tree-shaped size measure (a full `serde_json` serialization, or a recursive
+walk with no identity tracking) would re-count any descendant the subtree
+already shares internally once per parent that reaches it, over-stating the
+real cost of holding or recomputing it once. `cse_shared_maintenance_cost`'s default
 is a small per-`SummaryFamilyType` weight table (exact accumulators cheapest,
 sketches/samples/wavelets/stat-models progressively more expensive to keep
 continuously updated) scaled to the same order of magnitude as typical

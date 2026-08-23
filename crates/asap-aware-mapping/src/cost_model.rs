@@ -85,33 +85,39 @@ pub enum ShareDecision {
 }
 
 /// Default [`CostModel::cse_recompute_cost`]: a structural-size proxy — the
-/// length of `subtree`'s canonical JSON serialization (the same style of
-/// serialization `asap_types::pre_asap::cse`'s own structural hashing uses
-/// to compare subtrees). Cheap to compute, needs no tree traversal of its
-/// own, and scales with the subtree's real structural complexity — a genuinely
-/// tiny leaf costs little to recompute, a deep multi-join subtree costs a
-/// lot. A deployment with real per-row/per-update cost knowledge should
+/// number of *unique* nodes in `subtree`'s DAG
+/// ([`asap_types::pre_asap::cse::dag_node_count`], the same module this
+/// candidate's sharing was detected in). Deliberately **not** a raw
+/// `serde_json` serialization length: after CSE, `subtree` is generally a
+/// DAG, not a tree (a `CseCandidate` only exists because something got
+/// shared), and a naive full serialization re-serializes — over-counts —
+/// any descendant `subtree` already shares internally, once per parent
+/// that references it, instead of once for the whole DAG. `dag_node_count`
+/// dedupes by `Rc` pointer identity, so it charges each unique node's
+/// contribution exactly once regardless of how many places within
+/// `subtree` reference it. Cheap to compute (one pass, no serialization),
+/// and still scales with real structural complexity — a genuinely tiny
+/// leaf costs little to recompute, a deep multi-join subtree costs a lot.
+/// A deployment with real per-row/per-update cost knowledge should
 /// override [`CostModel::cse_recompute_cost`] instead of relying on this.
 pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> f64 {
-    serde_json::to_string(subtree)
-        .map(|s| s.len() as f64)
-        .unwrap_or(1.0)
-        .max(1.0)
+    asap_types::pre_asap::cse::dag_node_count(subtree) as f64
 }
 
 /// Default [`CostModel::cse_shared_maintenance_cost`]: a small
 /// per-[`SummaryFamilyType`] weight, scaled to the same order of magnitude
-/// as [`default_cse_recompute_cost`]'s typical output, reflecting that
-/// families differ in how expensive they are to keep *continuously
-/// updated* for the life of a workload — an exact accumulator is the
-/// cheapest (an O(1) merge), sketches/samples cost more (a whole data
-/// structure to update per new row), wavelets/fitted models cost the most
-/// (coefficient/parameter maintenance). These weights are illustrative, not
-/// measured — a deployment with real memory/update-cost numbers should
-/// override [`CostModel::cse_shared_maintenance_cost`] instead of relying on
-/// this table.
+/// as [`default_cse_recompute_cost`]'s typical output (a small node
+/// count, not a byte length), reflecting that families differ in how
+/// expensive they are to keep *continuously updated* for the life of a
+/// workload — an exact accumulator is the cheapest (an O(1) merge),
+/// sketches/samples cost more (a whole data structure to update per new
+/// row), wavelets/fitted models cost the most (coefficient/parameter
+/// maintenance). These weights are illustrative, not measured — a
+/// deployment with real memory/update-cost numbers should override
+/// [`CostModel::cse_shared_maintenance_cost`] instead of relying on this
+/// table.
 pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> f64 {
-    const UNIT: f64 = 60.0;
+    const UNIT: f64 = 1.0;
     let weight = match family {
         SummaryFamilyType::Plain(_) => 1.0,
         SummaryFamilyType::ExactAggregate(..) => 1.0,
@@ -423,6 +429,49 @@ mod tests {
         assert!(default_cse_recompute_cost(&nested) > default_cse_recompute_cost(&leaf));
     }
 
+    /// The DAG-awareness this proxy exists for: a subtree that internally
+    /// re-references one shared descendant (e.g. after single-query CSE,
+    /// `x op x` collapsing both branches onto one `Rc`) must cost the same
+    /// as if that descendant only appeared once — not double, the way a
+    /// naive tree-shaped size measure (a full serialization, or an
+    /// identity-blind recursive walk) would count it.
+    #[test]
+    fn default_recompute_cost_does_not_double_count_an_internally_shared_descendant() {
+        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::pre_asap::query_expr::{JoinKind, Predicate};
+
+        let true_pred = || {
+            Predicate(std::rc::Rc::new(QueryExpr::Literal(ScalarValue::Boolean(
+                true,
+            ))))
+        };
+        let shared_leaf = std::rc::Rc::new(scan());
+        let no_sharing = QueryExpr::Join {
+            kind: JoinKind::Inner,
+            pred: true_pred(),
+            left: std::rc::Rc::new(scan()),
+            right: std::rc::Rc::new(scan()),
+        };
+        let with_sharing = QueryExpr::Join {
+            kind: JoinKind::Inner,
+            pred: true_pred(),
+            left: std::rc::Rc::clone(&shared_leaf),
+            right: std::rc::Rc::clone(&shared_leaf),
+        };
+        assert_eq!(
+            default_cse_recompute_cost(&no_sharing),
+            3.0,
+            "no sharing: Join + 2 independent Scans = 3 unique nodes"
+        );
+        assert_eq!(
+            default_cse_recompute_cost(&with_sharing),
+            2.0,
+            "internal sharing: Join + 1 shared Scan (referenced twice) = \
+             2 unique nodes, not 3 — a tree-shaped size measure would \
+             wrongly charge for the shared Scan twice"
+        );
+    }
+
     #[test]
     fn default_shared_maintenance_cost_orders_families_cheapest_to_priciest() {
         let exact = default_cse_shared_maintenance_cost(&SummaryFamilyType::ExactAggregate(
@@ -468,10 +517,10 @@ mod tests {
                     family: "gaussian_mixture".into(),
                 },
             )),
-            // A single, cheap-to-recompute leaf against an
-            // expensive-to-maintain family: maintenance should dominate
-            // (scan()'s recompute cost, 264, is well under StatModel's
-            // maintenance cost, 360).
+            // A single, cheap-to-recompute leaf (scan() alone is 1 DAG
+            // node, recompute_total = 1) against an expensive-to-maintain
+            // family (StatModel, maintenance cost 6.0): maintenance should
+            // dominate.
             consumer_count: 1,
         };
         assert_eq!(
