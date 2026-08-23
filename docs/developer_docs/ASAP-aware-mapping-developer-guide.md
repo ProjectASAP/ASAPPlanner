@@ -54,7 +54,7 @@ pub struct TargetSubDAG<'a> {
 
 `root` is the actual `Rc<QueryExpr>` from the workload.
 
-`consumer_count` records how many workload locations refer to that exact shared node.
+`consumer_count` counts **structural references**, not runtime reads/executions: how many places in the workload's `Rc<QueryExpr>` DAG point at this exact `root` node. Example — two separate top-level queries, `sum by (service) (rate(m[5m]))` and `avg by (service) (rate(m[5m]))`, share an identical `rate(m[5m])` subtree; after CSE (`share_common_subtrees`) collapses that into one `Rc<QueryExpr>`, both queries' trees point at the same node, so its `TargetSubDAG.consumer_count` is `2` — regardless of how many times either query actually executes.
 
 Use:
 
