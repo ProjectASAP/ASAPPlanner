@@ -111,7 +111,7 @@ use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::bind::implement_tree_with;
 use crate::boundary::{implementation_for_with, summary_candidates, Implementation};
-use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
+use crate::cost_model::{Cost, CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
 ///
@@ -441,11 +441,11 @@ impl CostModel for ForceSketchKind<'_> {
         self.inner.readout_extension(ext_kind, payload, col)
     }
 
-    fn cse_recompute_cost(&self, candidate: &CseCandidate) -> f64 {
+    fn cse_recompute_cost(&self, candidate: &CseCandidate) -> Cost {
         self.inner.cse_recompute_cost(candidate)
     }
 
-    fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> f64 {
+    fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> Cost {
         self.inner.cse_shared_maintenance_cost(candidate)
     }
 

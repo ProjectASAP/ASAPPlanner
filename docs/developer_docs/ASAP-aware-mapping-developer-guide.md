@@ -200,17 +200,19 @@ The two methods have intentionally different responsibilities.
   fn readout_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchQuery;
   ```
 
-- **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's subtree independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy. Returns a bare `f64` today (a unitless scalar compared directly against `cse_shared_maintenance_cost`'s own `f64`) — a richer cost type (e.g. a struct separating CPU/memory/network) would let deployments compare along more than one axis, but is a real signature change across every hook in this trait, not a doc fix; worth its own issue rather than deciding here.
+- **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's subtree independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.
 
   ```rust
-  fn cse_recompute_cost(&self, candidate: &CseCandidate) -> f64;
+  fn cse_recompute_cost(&self, candidate: &CseCandidate) -> Cost;
   ```
 
 - **`cse_shared_maintenance_cost`** — estimate the cost of maintaining one shared summary continuously for the life of the workload. Default: `default_cse_shared_maintenance_cost`, a per-family weight table.
 
   ```rust
-  fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> f64;
+  fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> Cost;
   ```
+
+  Both hooks return `Cost`, a newtype around `f64` rather than a bare `f64` — a deliberately minimal wrapper today (still one unitless scalar, `Cost(f64)`, comparable via `PartialOrd`/`Add`/`Mul<usize>`), but one that gives a future richer cost type (e.g. separate CPU/memory/network fields) a place to grow into without changing every hook's signature a second time.
 
 - **`cse_share_decision`** — decide whether to share one summary across all of a CSE candidate's consumers, or recompute independently at each. Default: composes the two cost hooks above (share iff shared-maintenance cost ≤ total recompute cost across every consumer) — override the two cost hooks and keep this comparison unless you need a genuinely different policy, not a different cost input.
 
@@ -788,7 +790,7 @@ Use to estimate the cost of computing a common subtree independently at each con
 fn cse_recompute_cost(
     &self,
     candidate: &CseCandidate,
-) -> f64;
+) -> Cost;
 ```
 
 ---
@@ -801,7 +803,7 @@ Use to estimate the cost of computing and maintaining a shared subtree.
 fn cse_shared_maintenance_cost(
     &self,
     candidate: &CseCandidate,
-) -> f64;
+) -> Cost;
 ```
 
 ---

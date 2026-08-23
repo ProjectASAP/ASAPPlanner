@@ -73,6 +73,42 @@ pub struct CseCandidate<'a> {
     pub consumer_count: usize,
 }
 
+/// A cost estimate produced by a [`CostModel`] hook. A newtype around `f64`
+/// rather than a bare `f64` return type, so a future cost dimension (e.g.
+/// separate CPU/memory/network estimates, once a deployment actually needs
+/// to compare along more than one axis) can be added as a field here
+/// without changing every hook's signature a second time. Today it's still
+/// a single unitless scalar — the same magnitude convention
+/// [`default_cse_recompute_cost`]/[`default_cse_shared_maintenance_cost`]
+/// already used as bare `f64`s, just wrapped.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct Cost(pub f64);
+
+impl Cost {
+    /// The cost of an operation that costs nothing at all.
+    pub const ZERO: Cost = Cost(0.0);
+}
+
+impl std::fmt::Display for Cost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::ops::Add for Cost {
+    type Output = Cost;
+    fn add(self, rhs: Cost) -> Cost {
+        Cost(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::Mul<usize> for Cost {
+    type Output = Cost;
+    fn mul(self, rhs: usize) -> Cost {
+        Cost(self.0 * rhs as f64)
+    }
+}
+
 /// The decision [`CostModel::cse_share_decision`] returns for one
 /// [`CseCandidate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,8 +136,8 @@ pub enum ShareDecision {
 /// leaf costs little to recompute, a deep multi-join subtree costs a lot.
 /// A deployment with real per-row/per-update cost knowledge should
 /// override [`CostModel::cse_recompute_cost`] instead of relying on this.
-pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> f64 {
-    asap_types::pre_asap::cse::dag_node_count(subtree) as f64
+pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> Cost {
+    Cost(asap_types::pre_asap::cse::dag_node_count(subtree) as f64)
 }
 
 /// Default [`CostModel::cse_shared_maintenance_cost`]: a small
@@ -116,7 +152,7 @@ pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> f64 {
 /// deployment with real memory/update-cost numbers should override
 /// [`CostModel::cse_shared_maintenance_cost`] instead of relying on this
 /// table.
-pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> f64 {
+pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
     const UNIT: f64 = 1.0;
     let weight = match family {
         SummaryFamilyType::Plain(_) => 1.0,
@@ -126,7 +162,7 @@ pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> f64 {
         SummaryFamilyType::Wavelet(..) => 5.0,
         SummaryFamilyType::StatModel(..) => 6.0,
     };
-    weight * UNIT
+    Cost(weight * UNIT)
 }
 
 /// Ranks the candidate summary families for one [`AggIntent`], best choice
@@ -212,7 +248,7 @@ pub trait CostModel {
     /// independently at a single use site. Default:
     /// [`default_cse_recompute_cost`] (a structural-size proxy). See
     /// `docs/design_docs/cse-cost-model-decision.md`.
-    fn cse_recompute_cost(&self, candidate: &CseCandidate) -> f64 {
+    fn cse_recompute_cost(&self, candidate: &CseCandidate) -> Cost {
         default_cse_recompute_cost(candidate.subtree)
     }
 
@@ -224,7 +260,7 @@ pub trait CostModel {
     /// state (falls back to the cheapest, `Plain`, weight if none does —
     /// e.g. `bound_summary` is a passthrough `Logical` node with nothing
     /// summary-shaped to maintain). See `docs/design_docs/cse-cost-model-decision.md`.
-    fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> f64 {
+    fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> Cost {
         let family = candidate
             .bound_summary
             .schema
@@ -252,7 +288,7 @@ pub trait CostModel {
     /// (keeping this comparison), or override this method directly for a
     /// wholly different policy.
     fn cse_share_decision(&self, candidate: &CseCandidate) -> ShareDecision {
-        let recompute_total = self.cse_recompute_cost(candidate) * candidate.consumer_count as f64;
+        let recompute_total = self.cse_recompute_cost(candidate) * candidate.consumer_count;
         let shared = self.cse_shared_maintenance_cost(candidate);
         if shared <= recompute_total {
             ShareDecision::Share
@@ -425,7 +461,7 @@ mod tests {
             cols: vec![0],
             child: std::rc::Rc::new(leaf.clone()),
         };
-        assert!(default_cse_recompute_cost(&leaf) > 0.0);
+        assert!(default_cse_recompute_cost(&leaf) > Cost::ZERO);
         assert!(default_cse_recompute_cost(&nested) > default_cse_recompute_cost(&leaf));
     }
 
@@ -460,12 +496,12 @@ mod tests {
         };
         assert_eq!(
             default_cse_recompute_cost(&no_sharing),
-            3.0,
+            Cost(3.0),
             "no sharing: Join + 2 independent Scans = 3 unique nodes"
         );
         assert_eq!(
             default_cse_recompute_cost(&with_sharing),
-            2.0,
+            Cost(2.0),
             "internal sharing: Join + 1 shared Scan (referenced twice) = \
              2 unique nodes, not 3 — a tree-shaped size measure would \
              wrongly charge for the shared Scan twice"
@@ -540,8 +576,8 @@ mod tests {
             ) -> Vec<SketchKind> {
                 candidates.to_vec()
             }
-            fn cse_recompute_cost(&self, _candidate: &CseCandidate) -> f64 {
-                1e9
+            fn cse_recompute_cost(&self, _candidate: &CseCandidate) -> Cost {
+                Cost(1e9)
             }
         }
 
