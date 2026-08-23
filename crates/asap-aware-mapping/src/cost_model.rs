@@ -39,7 +39,7 @@
 //! ([`asap_types::pre_asap::cse::share_common_subtrees`], issue #223 stages
 //! 1-2, PR #235) is actually worth sharing, via a real Volcano/Cascades-style
 //! cost comparison rather than a fixed rule. See
-//! `docs/cse-cost-model-decision.md` for the full design discussion (why
+//! `docs/design_docs/cse-cost-model-decision.md` for the full design discussion (why
 //! cost-based, why not a full plan-search engine, the layering constraint
 //! that forces detection to stay cost-agnostic). [`bind::implement_workload_with`](crate::bind::implement_workload_with)
 //! is the caller.
@@ -59,7 +59,7 @@ use crate::boundary::Implementation;
 /// the first time it binds a subtree that
 /// [`asap_types::pre_asap::cse::share_common_subtrees`] already collapsed
 /// onto one `Rc` for two or more workload roots. See
-/// `docs/cse-cost-model-decision.md`.
+/// `docs/design_docs/cse-cost-model-decision.md`.
 pub struct CseCandidate<'a> {
     /// The shared pre-ASAP subtree itself.
     pub subtree: &'a QueryExpr,
@@ -211,7 +211,7 @@ pub trait CostModel {
     /// Estimate the one-time cost of recomputing `candidate.subtree`
     /// independently at a single use site. Default:
     /// [`default_cse_recompute_cost`] (a structural-size proxy). See
-    /// `docs/cse-cost-model-decision.md`.
+    /// `docs/design_docs/cse-cost-model-decision.md`.
     fn cse_recompute_cost(&self, candidate: &CseCandidate) -> f64 {
         default_cse_recompute_cost(candidate.subtree)
     }
@@ -223,7 +223,7 @@ pub trait CostModel {
     /// `candidate.bound_summary`'s output schema actually carries summary
     /// state (falls back to the cheapest, `Plain`, weight if none does —
     /// e.g. `bound_summary` is a passthrough `Logical` node with nothing
-    /// summary-shaped to maintain). See `docs/cse-cost-model-decision.md`.
+    /// summary-shaped to maintain). See `docs/design_docs/cse-cost-model-decision.md`.
     fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> f64 {
         let family = candidate
             .bound_summary
@@ -242,7 +242,7 @@ pub trait CostModel {
     /// Decide whether to reuse one shared `SummaryNode` across every
     /// consumer of `candidate`, or bind each occurrence independently — a
     /// Volcano/Cascades-style cost comparison (issue #237, #223 stage 4; see
-    /// `docs/cse-cost-model-decision.md`): share iff the estimated cost of
+    /// `docs/design_docs/cse-cost-model-decision.md`): share iff the estimated cost of
     /// maintaining one shared summary is no greater than the estimated total
     /// cost of recomputing it independently everywhere it's used.
     ///
