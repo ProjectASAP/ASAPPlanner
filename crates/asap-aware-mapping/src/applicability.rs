@@ -354,7 +354,7 @@ fn register_site(node: &Rc<QueryExpr>, location: &str, sites: &mut HashMap<usize
 fn walk_rc_children(node: &QueryExpr, location: &str, sites: &mut HashMap<usize, Vec<String>>) {
     use QueryExpr::*;
     match node {
-        Scan { .. } | PromqlScalar(_) | QueryTimestamp => {}
+        Scan { .. } | PromqlScalarBridge(_) | QueryTimestamp => {}
         PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => {
             register_site(c, &format!("{location} > child"), sites)
         }
@@ -422,7 +422,7 @@ fn for_each_operator_child(
     // `pre_asap::cse`'s module doc on why), which therefore has no pointer
     // identity of its own to dedup on at this position.
     match node {
-        Scan { .. } | PromqlScalar(_) | QueryTimestamp => {}
+        Scan { .. } | PromqlScalarBridge(_) | QueryTimestamp => {}
         PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => visit(
             c,
             Some(Rc::as_ptr(c) as usize),
