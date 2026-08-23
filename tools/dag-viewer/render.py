@@ -122,7 +122,15 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    workload = load_workload(args.files) if args.files else json.loads(sys.stdin.read())
+    try:
+        workload = load_workload(args.files) if args.files else json.loads(sys.stdin.read())
+    except FileNotFoundError as err:
+        print(f"render.py: {err.filename} — no such file (run dag_export first?)", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as err:
+        source = args.files[0] if len(args.files) == 1 else "input"
+        print(f"render.py: {source} isn't valid JSON — {err}", file=sys.stderr)
+        sys.exit(1)
     if not workload.get("queries"):
         print("render.py: no queries in input — nothing to render", file=sys.stderr)
         sys.exit(1)

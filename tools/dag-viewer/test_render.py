@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -162,6 +164,34 @@ class JsonScriptTests(unittest.TestCase):
         encoded = _json_script({"x": "</script>"})
         self.assertNotIn("</script>", encoded)
         self.assertEqual(json.loads(encoded), {"x": "</script>"})
+
+
+class MainCliTests(unittest.TestCase):
+    """Exercises main()'s own error handling via subprocess, rather than
+    calling main() in-process, since what's under test here is exactly the
+    CLI's user-facing stderr message + exit code, not internal state."""
+
+    def run_render_py(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(HERE / "render.py"), *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_missing_input_file_gives_a_clean_error_not_a_traceback(self):
+        result = self.run_render_py("/no/such/path/dag.json", "-o", "/dev/null")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no such file", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_malformed_json_gives_a_clean_error_not_a_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = Path(d) / "bad.json"
+            bad.write_text("{not json")
+            result = self.run_render_py(str(bad), "-o", "/dev/null")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("isn't valid JSON", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":
