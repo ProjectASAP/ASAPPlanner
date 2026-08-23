@@ -1,5 +1,19 @@
 # ASAP-Aware Mapping
 
+## Glossary
+
+- **Pre-ASAP plan**: The logical query plan before ASAP-aware optimizations are considered.
+- **Post-ASAP plan**: A logical plan that includes one or more ASAP-aware choices, such as summaries, sharing, roll-ups, or semantic rewrites.
+- **Target Sub-DAG**: A region of the pre-ASAP plan where a transformation may apply.
+- **Alternative**: One valid local realization of a Target Sub-DAG. For example, a quantile aggregation may have KLL, DDSketch, and exact aggregation as alternatives.
+- **Transformation**: A rule that recognizes a Target Sub-DAG and produces one or more valid alternatives.
+- **Candidate Plan**: A complete post-ASAP plan formed by choosing compatible alternatives across the plan.
+- **Cost Model**: A model used to compare valid candidate plans according to criteria such as storage, update cost, query latency, and accuracy.
+
+The distinction between **Alternative** and **Candidate Plan** is important: an alternative is a local choice at one decision point, while a candidate plan is a complete plan that combines choices across all relevant decision points.
+
+---
+
 ## Overview
 
 ASAP-aware mapping decides **whether and how a query intent can be answered using summaries instead of scanning raw data**.
@@ -25,7 +39,7 @@ Which alternative is preferable depends on requirements such as accuracy, latenc
 ASAP-aware mapping therefore answers two questions:
 
 1. **What transformations are valid?**
-2. **What combinations of those transformations form useful candidate plans?**
+2. **What combinations of alternatives form useful candidate plans?**
 
 It does **not** assign physical resources such as CPU or memory to operators. Physical resource allocation belongs to a later planning stage.
 
@@ -37,7 +51,7 @@ The mapping layer should support three capabilities.
 
 ### 1. Discover valid alternatives
 
-For each relevant part of a query plan, determine which exact or approximate implementations can preserve the query's required semantics.
+For each relevant part of a query plan, determine which exact or approximate realizations preserve the query's required semantics.
 
 For example:
 
@@ -52,7 +66,7 @@ Quantile(latency, 0.99)
     → DDSketch
 ```
 
-A query intent may therefore have more than one valid realization.
+A query intent may therefore have more than one valid alternative.
 
 ### 2. Explore interactions between alternatives
 
@@ -88,22 +102,22 @@ Applicability reporting should describe opportunities already discovered by the 
 
 ## Target Sub-DAG
 
-A **Target Sub-DAG** is a region of the pre-ASAP plan that may be transformed.
+A **Target Sub-DAG** is a region of the pre-ASAP plan where a transformation may apply.
 
 Examples include:
 
-- an aggregation that could be replaced by a sketch,
+- an aggregation that could be answered by a sketch,
 - two computations that could share common work,
 - several group-by computations that could be related through roll-up,
-- or an expression that has a semantically equivalent alternative representation.
+- or an expression that has a semantically equivalent representation.
 
 The target may consist of a single operator or several connected operators.
 
 ---
 
-## Replacement Sub-DAG
+## Alternative
 
-A **Replacement Sub-DAG** is one valid realization of a Target Sub-DAG.
+An **Alternative** is one valid local realization of a Target Sub-DAG.
 
 For example:
 
@@ -112,7 +126,7 @@ Target:
 
 Quantile(latency, 0.99)
 
-Possible replacements:
+Alternatives:
 
 KLL(latency)
 DDSketch(latency)
@@ -127,7 +141,7 @@ Target:
 Aggregate(source, by=[service, region])
 Aggregate(source, by=[service])
 
-Possible replacements:
+Alternatives:
 
 1. Compute both independently
 
@@ -137,15 +151,15 @@ Possible replacements:
       Aggregate(..., by=[service])
 ```
 
-A replacement represents a semantic alternative, not necessarily an approximation.
+An alternative represents a semantic choice, not necessarily an approximation.
 
 ---
 
-## Replacement Strategy
+## Transformation
 
-A **Replacement Strategy** describes a class of transformations.
+A **Transformation** describes a class of plan changes.
 
-Conceptually, a strategy answers:
+Conceptually, a transformation answers:
 
 > When a particular structure appears in a plan, what valid alternatives can replace it?
 
@@ -158,7 +172,33 @@ Examples include:
 - choosing different ways to organize subpopulations,
 - choosing different time representations.
 
-A strategy proposes valid alternatives. It does not decide which alternative is globally best.
+A transformation proposes valid alternatives. It does not decide which candidate plan is globally best.
+
+---
+
+## Candidate Plan
+
+A **Candidate Plan** is a complete post-ASAP plan formed by choosing a compatible set of alternatives across the plan.
+
+For example, one candidate plan may choose:
+
+```text
+Quantile implementation:
+    KLL
+
+Subpopulation organization:
+    shared multi-subpopulation summary
+
+Related group-bys:
+    roll up from finer-grained aggregation
+
+Semantic form:
+    rewrite avg as sum/count
+```
+
+Another candidate plan may make different choices at any of these decision points.
+
+The planner compares candidate plans, not isolated alternatives, when interactions between decisions matter.
 
 ---
 
@@ -178,19 +218,19 @@ Depending on the planning stage, costs may include:
 
 The cost model is intentionally separate from transformation legality.
 
-A replacement strategy answers:
+A transformation answers:
 
-> Is this plan valid?
+> Is this alternative valid?
 
 The cost model answers:
 
-> How attractive is this valid plan relative to the alternatives?
+> How attractive is the resulting candidate plan relative to other valid candidate plans?
 
 This separation allows the same planning framework to support different cost models, including heuristic, analytical, and empirically learned models.
 
 ---
 
-# Candidate-Plan Search
+# Candidate Plan Search
 
 The central design principle is that ASAP-aware mapping should **preserve alternatives long enough to reason about their interactions**.
 
@@ -210,7 +250,7 @@ Choosing KLL immediately because it appears locally cheapest may be wrong if ano
 
 Similarly, deciding independently whether to share two computations may miss a better plan produced after semantic rewriting.
 
-The planner should therefore construct a search space containing valid alternatives and evaluate combinations of those alternatives.
+The planner should therefore construct a search space of local alternatives and evaluate the complete candidate plans formed from their compatible combinations.
 
 ---
 
@@ -236,7 +276,7 @@ For example:
 
 The planner should represent common structure once and attach alternatives only at the decision points where plans differ.
 
-Conceptually, each decision point forms an **alternative group**:
+Conceptually, each decision point forms an **alternative group** containing its local choices:
 
 ```text
 Group A: Quantile implementation
@@ -253,7 +293,7 @@ Group C: Related aggregations
     - compute once and roll up
 ```
 
-A candidate plan corresponds to a compatible selection across these groups.
+A candidate plan is formed by selecting one compatible alternative from each relevant group.
 
 This avoids representing every full plan independently when most of their structure is identical.
 
@@ -281,7 +321,7 @@ time representation
 
 A locally optimal choice may prevent a globally better combination.
 
-The planner should therefore retain alternatives until enough context exists to compare them as complete candidate plans.
+The planner should therefore retain local alternatives until enough context exists to compare the complete candidate plans they produce.
 
 The design may prune clearly dominated alternatives, but pruning should preserve choices that could become useful because of interactions elsewhere in the plan.
 
@@ -847,7 +887,7 @@ Build shared candidate-plan search space
 Apply accuracy and semantic constraints
         |
         v
-Estimate candidate-plan costs
+Estimate candidate plan costs
         |
         v
 Rank or select candidate post-ASAP plans
