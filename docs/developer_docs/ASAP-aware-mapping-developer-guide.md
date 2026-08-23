@@ -10,7 +10,7 @@ It is written for developers who want to:
 - add a new kind of replacement without duplicating existing planner logic,
 - and write the tests expected for a new extension.
 
-The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and future search design, see the separate design document, [`docs/asap_aware_mapping.md`](asap_aware_mapping.md).
+The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and future search design, see the separate design document, [`docs/design_docs/asap_aware_mapping.md`](../design_docs/asap_aware_mapping.md).
 
 Code samples named `My*` or `Prefer*` (`MyStrategy`, `MyCostModel`, `PreferDDSketch`, …) below are illustrative sketches of a pattern, not code that ships in this crate. Samples that name a real type (`SketchFamilyStrategy`, `ForceSketchKind`, `SharedSubtreeStrategy`, …) are copied verbatim from `replacement.rs`/`cost_model.rs`.
 
