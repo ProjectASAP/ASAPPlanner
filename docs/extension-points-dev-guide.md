@@ -1,14 +1,26 @@
-# Writing a `ReplacementStrategy` (dev guide)
+# Extension points (dev guide)
 
-This is the practical companion to [`docs/asap_aware_mapping.md`](asap_aware_mapping.md)
-(design rationale for *why* this vocabulary exists) and the module docs on
-[`crates/asap-aware-mapping/src/replacement.rs`](../crates/asap-aware-mapping/src/replacement.rs)
-(the authoritative reference for the exact contract of each type). Read those
-first if you haven't. This doc exists for one narrower question: **you're
-implementing #253/#254/#256/#257 or a similar optimization — what do you
-actually write?**
+`crates/asap-aware-mapping` has three extension points a contributor or a
+downstream deployment plugs into: [`ReplacementStrategy`](#replacementstrategy),
+[`CostModel`](#costmodel), and [`Matcher`](#matcher-boundaryrs). All three
+share the same shape — a small trait, a default or no-default body, and one
+job each: `ReplacementStrategy` reports *what's possible*, `CostModel`
+decides *what's preferable*, `Matcher` decides *what already satisfies a
+requirement*. This doc is the practical "what do I actually write" companion
+to [`docs/asap_aware_mapping.md`](asap_aware_mapping.md) (the design
+rationale for *why* this vocabulary exists) and each type's own rustdoc (the
+authoritative reference for its exact contract). Read those first if you
+haven't.
 
-## The three types, as a contributor uses them
+## `ReplacementStrategy`
+
+Defined in [`crates/asap-aware-mapping/src/replacement.rs`](../crates/asap-aware-mapping/src/replacement.rs).
+Relevant if you're implementing #253 (semantic rewrite), #254 (roll-up),
+#256 (Hydra grouping), #257 (applicability-as-a-view), or any future
+optimization that should show up as a candidate in the eventual search
+(#252).
+
+### The three types, as a contributor uses them
 
 ```rust
 pub struct TargetSubDAG<'a> {
@@ -37,7 +49,7 @@ does not walk a workload, does not rank, does not decide. Those are, in
 order, the future search engine's job (#252), a `CostModel`'s job, and the
 search engine's job again.
 
-## The contract, made explicit
+### The contract, made explicit
 
 - **`matches` must be cheap and side-effect-free.** The future search engine
   (#252) will call it on every `TargetSubDAG` in a workload, against every
@@ -70,7 +82,7 @@ search engine's job again.
   its own terms first, then wrap it in a thin `ReplacementStrategy`
   `impl`, the same way these two do.
 
-## Worked example: `SharedSubtreeStrategy`
+### Worked example: `SharedSubtreeStrategy`
 
 This is the smallest real strategy in the module — a good template to copy
 from.
@@ -137,7 +149,7 @@ What to notice, as a pattern to reuse:
    inside `replacements` looks redundant next to `matches`, but it's what
    keeps `replacements` safe to call on its own — see the contract above.
 
-## Testing a new strategy
+### Testing a new strategy
 
 Follow the hand-rolled-fixture style `bind.rs`/`boundary.rs`/`cost_model.rs`
 already use — build a small `QueryExpr` tree by hand, wrap it in a
@@ -157,7 +169,7 @@ already use — build a small `QueryExpr` tree by hand, wrap it in a
   dedup logic. A hand-set `consumer_count` alone can't catch a bug in how
   that value gets computed for real.
 
-## What you are not responsible for
+### What you are not responsible for
 
 - **Discovering `TargetSubDAG`s across a workload.** Your strategy receives
   one `TargetSubDAG` at a time; walking a whole workload's tree to find
@@ -170,11 +182,120 @@ already use — build a small `QueryExpr` tree by hand, wrap it in a
   and call directly (e.g. from a test, or from `applicability.rs`) — there
   is no registry or dispatcher yet.
 
+## `CostModel`
+
+Defined in [`crates/asap-aware-mapping/src/cost_model.rs`](../crates/asap-aware-mapping/src/cost_model.rs).
+Relevant if you're wiring a deployment (ASAPCollector, ASAPFusion, …) with
+real cost knowledge (bandwidth budget, memory footprint, site count,
+observed drift, …) into candidate selection, instead of accepting this
+crate's built-in static preferences.
+
+### The extension-point discipline
+
+`asap-aware-mapping` deliberately has no cost model *implementation* of its
+own beyond [`DefaultCostModel`] — ranking real candidates by real cost needs
+deployment knowledge this crate doesn't have and, per the crate's layering
+invariant, shouldn't acquire. `CostModel` is the one interface every
+deployment plugs its own knowledge into instead of forking `boundary`/`bind`.
+Every method has a default body that reproduces today's static behavior
+exactly — implement only the hooks you actually need to change:
+
+```rust
+pub trait CostModel {
+    // No default: candidate selection needs a real answer.
+    fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind>;
+
+    // Defaults to asap-plan's built-in per-family sizing formulas.
+    fn size_params(&self, kind: SketchKind, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams { ... }
+
+    // Defaults to Implementation::PassThrough for AggIntent::Extension.
+    fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Implementation { ... }
+
+    // Panics if realize_extension ever returned Sketch without this being overridden too.
+    fn readout_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchQuery { ... }
+
+    // CSE sharing cost hooks (issue #237) — defaults are structural-size /
+    // per-family-weight proxies; override with real cost knowledge.
+    fn cse_recompute_cost(&self, candidate: &CseCandidate) -> f64 { ... }
+    fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> f64 { ... }
+    fn cse_share_decision(&self, candidate: &CseCandidate) -> ShareDecision { ... } // composes the two above
+}
+```
+
+### The contract, made explicit
+
+- **`rank_candidates` may reorder or drop entries, never invent one.**
+  Returning a `SketchKind` that wasn't in `candidates` will panic downstream
+  (`boundary::implementation_for_with` has no sizing logic for an unknown
+  kind). Returning an empty `Vec` is valid — it means "no candidate is
+  acceptable here."
+- **Prefer overriding the narrowest hook.** `cse_share_decision`'s default
+  body composes `cse_recompute_cost` and `cse_shared_maintenance_cost` into
+  a Volcano/Cascades-style comparison (share iff maintaining one shared
+  summary costs no more than recomputing it everywhere it's used) — a
+  deployment with real cost numbers should override the two cost hooks and
+  keep the comparison, not reimplement the comparison itself. Override
+  `cse_share_decision` directly only for a genuinely different policy (e.g.
+  something other than a cost threshold). See
+  [`docs/cse-cost-model-decision.md`](cse-cost-model-decision.md) for the
+  full design discussion behind this split.
+- **`realize_extension` and `readout_extension` are a matched pair.** If you
+  override `realize_extension` to return `Implementation::Sketch` for some
+  `ext_kind`, you MUST also override `readout_extension` for that same
+  `ext_kind` — the default panics loudly (not silently) the first time that
+  intent is actually read out, specifically so a mismatch is caught instead
+  of misinterpreting `payload`.
+- **Delegate, don't reimplement, when adapting an existing `CostModel`.**
+  `SketchFamilyStrategy`'s `ForceSketchKind` (in `replacement.rs`) is the
+  reference example: it wraps another `&dyn CostModel`, overrides only
+  `rank_candidates` to force one specific kind first, and forwards every
+  other method to the wrapped model unchanged — so a deployment's own
+  sizing/extension behavior still applies while one method's behavior is
+  steered. Reach for this pattern before writing a `CostModel` from scratch
+  when you only need to adjust one hook's behavior.
+
+### Testing a new `CostModel`
+
+`cost_model.rs`'s own tests are the reference style: construct a minimal
+`CostModel` `impl` inline in the test (only overriding the method(s) under
+test), build fixture `QueryExpr`/`SummaryNode` values by hand, and assert
+directly on the method's return value — e.g.
+`custom_cost_model_can_reorder_candidates`,
+`custom_cost_model_can_override_sizing_independently_of_ranking`, and
+`cse_share_decision_default_body_composes_the_two_cost_hooks`. For the
+default-preserving behavior of any method you don't override, add a test
+asserting it matches the crate's built-in default exactly (see
+`default_cost_model_preserves_static_order`) — that's the guarantee a
+deployment relies on when it only overrides one hook.
+
+## `Matcher` (`boundary.rs`)
+
+Defined in [`crates/asap-aware-mapping/src/boundary.rs`](../crates/asap-aware-mapping/src/boundary.rs).
+Much smaller surface than the other two, but shares the same "extension
+point instead of a fork" role, so it's worth knowing it exists:
+
+```rust
+pub trait Matcher {
+    fn is_satisfied_by(&self, required: &Implementation, available: &Implementation) -> bool;
+}
+```
+
+Unlike `CostModel`, `asap-plan` ships **no implementation and no default
+body** for this trait at all — whether an available summary satisfies a
+required one (e.g. does an available `DDSketch` satisfy a required `Kll`
+request? does a multi-population accumulator satisfy a single-population
+query?) depends on facts this crate deliberately doesn't settle: a pure
+sketch-algebra answer and a deployment's own storage-layout rules can
+legitimately disagree. If you need this, you're implementing the whole
+trait for your deployment from scratch — there's no default to lean on and
+no existing implementation in this crate to use as a worked example.
+
 ## Where this fits
 
 `docs/asap_aware_mapping.md` is the design doc this vocabulary implements
 (read it for *why* `ReplacementStrategy` is shaped as "exhaustive, not
 decisive," why the eventual search is MEMO-style and iterative, and how a
-`CostModel` fits in). This guide is the narrower "how do I add one" doc for
-whoever's picking up #253 (semantic rewrite), #254 (roll-up), #256 (Hydra
-grouping), or #257 (applicability-as-a-view) next.
+`CostModel` fits into that search). This guide is the narrower "how do I
+add one" doc — for `ReplacementStrategy`, aimed at whoever's picking up
+#253/#254/#256/#257 next; for `CostModel`, aimed at whoever's wiring a real
+deployment's cost knowledge into candidate selection.
