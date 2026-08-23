@@ -102,33 +102,53 @@ identity and **not** the output of a real common-subexpression-elimination
 pass — see the next section for why, and don't read the UI's "shared" /
 "merged" language as claiming otherwise.
 
-## Shared-subtree highlighting is a proxy, not real CSE
+## Shared-subtree highlighting is a real-hash proxy, not real CSE (yet)
 
 The highlight (and Compare/Union mode's notion of "shared") is computed by
-hashing each node's `(kind, detail, children)` bottom-up and matching hashes
-across queries — see the doc comment on `crates/types/src/dag_export.rs`.
-This is **not** the same guarantee a real CSE pass gives:
+matching each node's `hash` across queries (a node is "shared" once its
+hash shows up under ≥ 2 distinct query names).
+That `hash` is no longer a viewer-only reimplementation: as of issue #223
+stage 3, `dag_export`'s per-node `hash` is computed by calling
+`asap_types::pre_asap::cse::structural_hash` directly — the exact same
+function, on the exact same input, that
+`asap_types::pre_asap::cse::share_common_subtrees`'s `InternTable` uses to
+bucket its own merge candidates (`crates/types/src/dag_export.rs`,
+`crates/types/src/pre_asap/cse.rs`). Two nodes with equal `hash` here really
+are exactly the pair `InternTable::intern` would go on to run its
+`PartialEq` check against.
 
-1. **No `PartialEq` + legality re-check.** A real CSE pass (once one exists
-   and is wired into an end-to-end multi-root planning path — see
-   `asap_types::pre_asap::cse::share_common_subtrees` and issue #223) follows
-   a hash match with a full `PartialEq` check and a legality gate (e.g. can
-   this actually be hoisted without changing semantics) before treating two
-   subtrees as the same. The viewer only has the hash, so a hash collision
-   or a node that hashes alike but isn't legally shareable would still show
-   up as "shared"/"merged" here.
-2. **No real `Rc` identity crosses this tool's process boundary.** Each
-   query given to the `dag_export` binary is lowered and exported
-   independently, and the viewer's multi-file-load feature merges JSON
-   produced by entirely separate invocations. There's no `Rc<QueryExpr>` for
-   the viewer to compare pointer identity on — hash equality is the only
-   signal available to it, by construction, regardless of how the hash
-   itself is computed.
+It's still a **proxy**, though, for two independent reasons — a hash match
+here does not by itself mean `share_common_subtrees` ran and actually merged
+those nodes onto one `Rc`:
 
-If/when real CSE output (a `CseWorkloadPlan`'s `bindings`/`Ref`s) is
-available from an end-to-end planning path, Union mode's converging-edges
-view is a natural place to render that directly instead of (or alongside)
-this hash-based proxy.
+1. **The `PartialEq` + legality gate isn't re-run.** `structural_hash` is
+   deliberately only a coarse bucketing filter (hash collisions are
+   possible, and never disambiguated here); the viewer trusts a hash match
+   as "structurally identical" without also re-checking `PartialEq` or
+   `Schema::has_unique_key()` the way `InternTable::intern` does before
+   actually sharing an `Rc`. A node with no provable unique key (e.g. an
+   ungrouped `Aggregate`) can still show up highlighted here even though
+   real CSE would never hoist it.
+2. **No real `Rc` identity crosses this tool's process boundaries.** Each
+   `--sql`/`--promql` query given to the `dag_export` binary is lowered and
+   exported independently — `share_common_subtrees` is never actually
+   invoked in this path — and the viewer's own multi-file-load feature
+   merges JSON produced by entirely separate `dag_export` invocations (or
+   even separate machines/times). There is no `Rc<QueryExpr>` for the
+   viewer to compare pointer identity on; hash equality is the only signal
+   available to it, by construction, regardless of how the hash is
+   computed.
+
+Closing this fully — real `Rc::ptr_eq`-based highlighting reflecting an
+actual `share_common_subtrees` run — would mean threading `Rc` pointer
+identity from a single in-process `share_common_subtrees` call through
+`dag_export`'s node-flattening and into the exported JSON (a new field
+alongside `hash`), and having the `dag_export` binary actually call
+`share_common_subtrees` across all queries given in one invocation before
+exporting. That's a reasonable follow-up but a materially bigger change than
+this hash-unification step (new export API, binary changes, and a viewer
+highlighting-logic change) and orthogonal to it, so it's left for a future
+issue rather than folded into #223 stage 3.
 
 ## Vendored dependencies
 

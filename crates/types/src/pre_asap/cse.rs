@@ -84,9 +84,13 @@
 //! ([`asap_aware_mapping::implement_workload`]) is a real caller, wired at
 //! the same time so this never becomes unwired dead code again (the original
 //! `asap-plan::cse::dedupe_subtrees` was deleted in #192 for exactly that).
-//! Stages 3 (`dag_export::structural_hash` unification) and 4 (`CostModel`
-//! CSE credit) are deliberately deferred follow-ups, not attempted here.
-//! Stage 4 (issue #237) is implemented in
+//! Stage 3 — [`dag_export`](crate::dag_export) computing its per-node `hash`
+//! by calling this module's [`structural_hash`] directly, instead of a
+//! parallel reimplementation — is also done, so `tools/dag-viewer`'s
+//! "shared subtree" highlighting now flags exactly the candidate pairs this
+//! module's own `InternTable` would bucket together (still only a hash
+//! match, not a guarantee of `share_common_subtrees`-actual sharing — see
+//! `dag_export`'s module doc). Stage 4 (issue #237) is implemented in
 //! `asap_aware_mapping::cost_model::CostModel::cse_share_decision` and its
 //! caller, `asap_aware_mapping::bind::implement_workload_with` — a real,
 //! Volcano/Cascades-style cost comparison over what this module detects, not
@@ -112,12 +116,20 @@ use super::query_expr::QueryExpr;
 /// nodes just means a (harmless) linear scan of a few extra candidates.
 struct InternTable {
     buckets: HashMap<u64, Vec<Rc<QueryExpr>>>,
+    /// Memoizes [`structural_hash`] per already-hashed `Rc` pointer, shared
+    /// across every [`intern`](Self::intern) call for the table's whole
+    /// lifetime — see [`structural_hash`]'s own doc on why this matters:
+    /// without it, hashing an `N`-node bottom-up pass costs `O(N)` work
+    /// *per node* (every already-interned descendant gets re-walked), not
+    /// `O(1)` amortized.
+    hash_cache: HashCache,
 }
 
 impl InternTable {
     fn new() -> Self {
         Self {
             buckets: HashMap::new(),
+            hash_cache: HashMap::new(),
         }
     }
 
@@ -126,7 +138,7 @@ impl InternTable {
     /// sharing is legal (see "Legality" above) — return the existing `Rc`
     /// instead of allocating a new one.
     fn intern(&mut self, node: QueryExpr) -> Rc<QueryExpr> {
-        let hash = structural_hash(&node);
+        let hash = structural_hash(&node, &mut self.hash_cache);
         // A node with no provable unique key is never *returned* as a match
         // for something else — it may still go on to occupy a fresh slot in
         // the bucket (harmless; it just never gets found by a later
@@ -146,21 +158,249 @@ impl InternTable {
     }
 }
 
+/// [`structural_hash`]'s memoization cache: maps an already-hashed node's
+/// `Rc` pointer to its computed hash. Not tied to any one `QueryExpr` — a
+/// fresh, empty cache is correct to start with anywhere; what matters is
+/// letting it *persist* across every node in one bottom-up pass (as
+/// [`InternTable`] does via its own `hash_cache` field), rather than
+/// starting a new one per call.
+pub(crate) type HashCache = HashMap<*const QueryExpr, u64>;
+
 /// Coarse structural hash used only to bucket [`InternTable::intern`]'s
 /// candidate search — never the actual sharing decision (`PartialEq` is).
 ///
 /// `QueryExpr` carries `f64`s (`Literal(ScalarValue::Float64)`, `AggIntent::Quantile.q`, …), so it
 /// cannot derive `std::hash::Hash`. Serializing to a canonical JSON string
-/// and hashing that sidesteps the `f64` problem the same way
-/// `dag_export.rs`'s own `structural_hash` does — a deliberately independent
-/// implementation for now (this module's stage 1; unifying the two is stage
-/// 3 of issue #223's landing plan, not done here). A NaN/infinite `f64`
-/// makes JSON serialization fail; falling back to a fixed hash just puts
-/// every such node in one (larger, still `PartialEq`-disambiguated) bucket.
-fn structural_hash(node: &QueryExpr) -> u64 {
+/// and hashing that sidesteps the `f64` problem — but only for `node`'s own
+/// tag and non-child fields, *not* its children's full values: each
+/// `Rc`-backed child's contribution is its own [`structural_hash`], looked
+/// up in `cache` if already computed there (memoized by `Rc` pointer
+/// identity) rather than recursed into again.
+///
+/// This is the DAG-aware fix a naive "just serialize the whole subtree"
+/// hash would get wrong: after [`share_common_subtrees`] (or even before
+/// it — a front end can emit internal `Rc` sharing directly, e.g. a
+/// repeated subexpression within one query), `node` is generally a DAG,
+/// not a tree. A full-subtree serialization re-serializes — re-walks —
+/// any descendant `node` already shares internally once per parent that
+/// references it; called once per node in a bottom-up pass (as
+/// [`InternTable::intern`] and [`dag_export`](crate::dag_export) both do),
+/// that costs `O(subtree size)` *per node* instead of `O(1)` amortized —
+/// quadratic-or-worse for a deep chain, compounding further with any real
+/// internal sharing. Memoizing each child's hash by pointer identity in
+/// `cache` (persisted across the whole pass by the caller, not reset per
+/// node) makes each node's own contribution `O(1)` beyond its children's
+/// already-known hashes, giving `O(N)` total for `N` nodes — matching
+/// [`dag_node_count`]'s own DAG-vs-tree fix (issue #212/#223/#237's stage
+/// 4) in spirit, applied to hashing instead of counting.
+///
+/// `pub(crate)` (not private) so [`dag_export`](crate::dag_export) can call
+/// this exact function for its exported nodes' `hash` field instead of
+/// maintaining its own parallel reimplementation — issue #223 stage 3. That
+/// makes `tools/dag-viewer`'s "shared subtree" highlighting reflect this
+/// module's real hashing, not a lookalike computed a different way; see the
+/// module doc's "Landing plan" section. A NaN/infinite `f64` makes JSON
+/// serialization fail; falling back to a fixed hash just puts every such
+/// node in one (larger, still `PartialEq`-disambiguated) bucket.
+///
+/// Exhaustive over every `QueryExpr` variant, matching [`rebuild_children`]
+/// in which fields count as an operator child (must stay in sync — a new
+/// variant fails to compile in both places until both are extended).
+pub(crate) fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
+    use QueryExpr::*;
+
+    fn child_hash(child: &Rc<QueryExpr>, cache: &mut HashCache) -> u64 {
+        let ptr = Rc::as_ptr(child);
+        if let Some(&h) = cache.get(&ptr) {
+            return h;
+        }
+        let h = structural_hash(child, cache);
+        cache.insert(ptr, h);
+        h
+    }
+
+    /// Hash `own_fields` (this node's own tag and non-child scalar
+    /// fields — anything JSON-serializable and small, i.e. never a
+    /// `QueryExpr` subtree) via the same canonical-JSON-string trick the
+    /// whole-subtree version used, just applied to `O(1)` fields instead
+    /// of `O(subtree size)`.
+    fn hash_own_fields(hasher: &mut impl Hasher, own_fields: &impl serde::Serialize) {
+        serde_json::to_string(own_fields)
+            .unwrap_or_default()
+            .hash(hasher);
+    }
+
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let canonical = serde_json::to_string(node).unwrap_or_default();
-    canonical.hash(&mut hasher);
+    match node {
+        Scan {
+            source,
+            predicates,
+            schema,
+        } => hash_own_fields(&mut hasher, &("Scan", source, predicates, schema)),
+        PromqlVectorFromScalar(c) => {
+            "PromqlVectorFromScalar".hash(&mut hasher);
+            child_hash(c, cache).hash(&mut hasher);
+        }
+        PromqlScalarFromVector(c) => {
+            "PromqlScalarFromVector".hash(&mut hasher);
+            child_hash(c, cache).hash(&mut hasher);
+        }
+        PromqlRelabel { dst, value, child } => {
+            hash_own_fields(&mut hasher, &("PromqlRelabel", dst, value));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        PromqlInfoEnrich { selector, child } => {
+            hash_own_fields(&mut hasher, &("PromqlInfoEnrich", selector));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        PromqlSeriesSample { by, kind, child } => {
+            hash_own_fields(&mut hasher, &("PromqlSeriesSample", by, kind));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        Filter { pred, child } => {
+            hash_own_fields(&mut hasher, &("Filter", pred));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        Project {
+            cols,
+            qualifier,
+            child,
+        } => {
+            hash_own_fields(&mut hasher, &("Project", cols, qualifier));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        Aggregate {
+            reduction,
+            measures,
+            output_names,
+            having,
+            child,
+        } => {
+            hash_own_fields(
+                &mut hasher,
+                &("Aggregate", reduction, measures, output_names, having),
+            );
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        Dedup { cols, child } => {
+            hash_own_fields(&mut hasher, &("Dedup", cols));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        Concat { children } => {
+            "Concat".hash(&mut hasher);
+            for c in children {
+                // Stored by value, not `Rc` — see `rebuild_children`'s
+                // `intern_owned` use for this variant — so there's no
+                // pointer to memoize on here; recurse directly. Any
+                // `Rc`-typed descendant beneath `c` still gets memoized
+                // once this call reaches it.
+                structural_hash(c, cache).hash(&mut hasher);
+            }
+        }
+        Join {
+            kind,
+            pred,
+            left,
+            right,
+        } => {
+            hash_own_fields(&mut hasher, &("Join", kind, pred));
+            child_hash(left, cache).hash(&mut hasher);
+            child_hash(right, cache).hash(&mut hasher);
+        }
+        SetOp {
+            kind,
+            all,
+            left,
+            right,
+        } => {
+            hash_own_fields(&mut hasher, &("SetOp", kind, all));
+            child_hash(left, cache).hash(&mut hasher);
+            child_hash(right, cache).hash(&mut hasher);
+        }
+        Sort {
+            keys,
+            partition_by,
+            child,
+        } => {
+            hash_own_fields(&mut hasher, &("Sort", keys, partition_by));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        Limit { n, offset, child } => {
+            hash_own_fields(&mut hasher, &("Limit", n, offset));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        PromqlSubquery {
+            range,
+            resolution,
+            child,
+        } => {
+            hash_own_fields(&mut hasher, &("PromqlSubquery", range, resolution));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        TimeRange { range, child } => {
+            hash_own_fields(&mut hasher, &("TimeRange", range));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        TimeShift { shift, child } => {
+            hash_own_fields(&mut hasher, &("TimeShift", shift));
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        SQLWindowFunc {
+            func,
+            args,
+            partition_by,
+            order_by,
+            output_name,
+            child,
+        } => {
+            hash_own_fields(
+                &mut hasher,
+                &(
+                    "SQLWindowFunc",
+                    func,
+                    args,
+                    partition_by,
+                    order_by,
+                    output_name,
+                ),
+            );
+            child_hash(child, cache).hash(&mut hasher);
+        }
+        BinaryOp {
+            op,
+            lhs,
+            rhs,
+            vector_match,
+        } => {
+            hash_own_fields(&mut hasher, &("BinaryOp", op, vector_match));
+            child_hash(lhs, cache).hash(&mut hasher);
+            child_hash(rhs, cache).hash(&mut hasher);
+        }
+        // `QueryTimestamp`, `PromqlScalarBridge`, and the scalar variants
+        // (issue #205) are all leaves for this traversal's purposes — none
+        // has an operator child to look up in `cache` — so hashing the
+        // whole node via `serde_json` in one shot is already `O(node
+        // size)`, not `O(subtree size)`: exactly the same cost the
+        // per-variant `hash_own_fields` calls above pay, just without
+        // needing to spell out each field individually. Matches
+        // `rebuild_children`'s and `dag_node_count`'s identical scope
+        // decision for these variants ("never descended into").
+        QueryTimestamp
+        | PromqlScalarBridge(_)
+        | Column(_)
+        | Literal(_)
+        | Compare { .. }
+        | BoolAnd(_)
+        | BoolOr(_)
+        | Not(_)
+        | IsNull(_)
+        | IsNotNull(_)
+        | Cast { .. }
+        | InList { .. }
+        | FunctionCall { .. }
+        | Arithmetic { .. }
+        | Case { .. } => hash_own_fields(&mut hasher, node),
+    }
     hasher.finish()
 }
 
@@ -620,6 +860,83 @@ mod tests {
         assert!(
             Rc::ptr_eq(lhs, rhs),
             "the two structurally identical branches must collapse onto one Rc"
+        );
+    }
+
+    // ── structural_hash (DAG-aware memoization) ─────────────────────────
+
+    #[test]
+    fn structural_hash_is_stable_across_cache_states() {
+        // The hash of a given *value* must not depend on whether its cache
+        // started warm or cold — memoization changes how much work is
+        // redone, never what a node's hash actually is.
+        let agg = quantile_agg(vec![1], Some(2), 0.5);
+        let mut cold = HashMap::new();
+        let mut warm = HashMap::new();
+        // Prime `warm` with an unrelated node first, so it's non-empty but
+        // holds nothing relevant to `agg`.
+        structural_hash(&scan(), &mut warm);
+        assert_eq!(
+            structural_hash(&agg, &mut cold),
+            structural_hash(&agg, &mut warm),
+            "hash must be independent of unrelated cache state"
+        );
+    }
+
+    #[test]
+    fn structural_hash_of_an_internally_shared_tree_matches_the_unshared_equivalent() {
+        // The same BinaryOp-with-shared-branches shape as
+        // `dag_node_count_deduplicates_an_internally_shared_subtree` below:
+        // hashing it (however the memoization internally short-circuits the
+        // second branch) must produce the exact same value as hashing a
+        // structurally-identical tree built with *no* sharing at all — the
+        // whole point of memoization is not changing the answer, only the
+        // work needed to reach it.
+        let agg = quantile_agg(vec![1], Some(2), 0.5);
+        let shared_root = QueryExpr::BinaryOp {
+            op: BinaryOpKind::Compare(crate::pre_asap::expr_ir::CompareOpKind::Eq),
+            lhs: Rc::new(agg.clone()),
+            rhs: Rc::new(agg.clone()),
+            vector_match: None,
+        };
+        let unshared_root = QueryExpr::BinaryOp {
+            op: BinaryOpKind::Compare(crate::pre_asap::expr_ir::CompareOpKind::Eq),
+            lhs: Rc::new(agg.clone()),
+            rhs: Rc::new(agg), // a second, independently-allocated Rc with an equal value
+            vector_match: None,
+        };
+        let mut cache = HashMap::new();
+        assert_eq!(
+            structural_hash(&shared_root, &mut cache),
+            structural_hash(&unshared_root, &mut HashMap::new()),
+        );
+    }
+
+    #[test]
+    fn structural_hash_memoizes_a_shared_descendant_exactly_once() {
+        // Direct proof the cache is actually doing its job: hashing a
+        // BinaryOp whose two branches are the *same* Rc (2 underlying
+        // nodes: Scan + Aggregate) should populate the cache with exactly
+        // 2 entries — the shared branch's nodes, cached once each when
+        // first reached — not a fresh entry (or a fresh, redundant
+        // recursive walk) for the second occurrence.
+        let agg = quantile_agg(vec![1], Some(2), 0.5);
+        let shared = Rc::new(agg);
+        let root = QueryExpr::BinaryOp {
+            op: BinaryOpKind::Compare(crate::pre_asap::expr_ir::CompareOpKind::Eq),
+            lhs: Rc::clone(&shared),
+            rhs: Rc::clone(&shared),
+            vector_match: None,
+        };
+        let mut cache = HashMap::new();
+        structural_hash(&root, &mut cache);
+        assert_eq!(
+            cache.len(),
+            2,
+            "expected exactly one cache entry per unique node in the shared \
+             branch (Aggregate + its Scan child), got {} entries: {:?}",
+            cache.len(),
+            cache
         );
     }
 
