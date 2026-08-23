@@ -9,3 +9,6 @@
 # Python bytecode cache (tools/clickhouse/extract_functions.py)
 __pycache__/
 *.pyc
+
+# Claude Code session-local subagent worktrees — ephemeral, not repo content
+/.claude/worktrees/
