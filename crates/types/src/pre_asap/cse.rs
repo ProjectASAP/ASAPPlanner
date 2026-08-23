@@ -224,7 +224,10 @@ fn count_unique(node: &QueryExpr, seen: &mut std::collections::HashSet<*const Qu
     }
 
     1 + match node {
-        Scan { .. } | PromqlScalar(_) | QueryTimestamp => 0,
+        // `PromqlScalarBridge`'s child is a scalar-sub-language node (issue
+        // #220), never descended into — same treatment `rebuild_children`
+        // gives it (see that function's comment on this same variant).
+        Scan { .. } | PromqlScalarBridge(_) | QueryTimestamp => 0,
         PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => visit(c, seen),
         PromqlRelabel { child, .. }
         | PromqlInfoEnrich { child, .. }
