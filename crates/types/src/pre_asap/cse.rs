@@ -4,7 +4,7 @@
 //!
 //! CSE only runs on an already-bound, already-canonicalized tree —
 //! structural matching is meaningless before canonicalization has converged
-//! semantically-equivalent queries onto one shape (`docs/pre-asap-ir.md`
+//! semantically-equivalent queries onto one shape (`docs/design_docs/pre-asap-ir.md`
 //! design principle 3; `median(latency)` and `approx_percentile_cont(latency,
 //! 0.5)` already lower to an identical `AggIntent::Quantile` today, per
 //! `sql_lowering.rs`'s `median_is_the_same_intent_as_an_explicit_half_percentile`
@@ -94,7 +94,7 @@
 //! `asap_aware_mapping::cost_model::CostModel::cse_share_decision` and its
 //! caller, `asap_aware_mapping::bind::implement_workload_with` — a real,
 //! Volcano/Cascades-style cost comparison over what this module detects, not
-//! a fixed rule. See `docs/cse-cost-model-decision.md`. This module's own
+//! a fixed rule. See `docs/design_docs/cse-cost-model-decision.md`. This module's own
 //! unconditional "share whenever legal" behavior is unchanged: detection
 //! stays cost-agnostic by construction (this crate cannot depend on
 //! `asap-aware-mapping`'s `CostModel`), and the cost-aware decision is

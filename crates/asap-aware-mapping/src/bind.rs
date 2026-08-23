@@ -115,7 +115,7 @@ pub fn implement_tree_with(
 /// A first pass over `roots` counts each distinct `Rc<QueryExpr>` pointer's
 /// true `consumer_count` across the whole workload, so the
 /// [`CseCandidate`]/[`CostModel::cse_share_decision`] cost comparison (see
-/// `docs/cse-cost-model-decision.md`) sees the real total, not a running
+/// `docs/design_docs/cse-cost-model-decision.md`) sees the real total, not a running
 /// count that grows as roots are processed left to right. The decision is
 /// made once, the first time a shared pointer is bound, and cached alongside
 /// the bound `SummaryNode` so every later occurrence of that same `Rc`
