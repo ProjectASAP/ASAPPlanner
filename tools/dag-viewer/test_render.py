@@ -5,11 +5,17 @@ description for how the shared viewer.js/node-style.js logic itself was
 checked). These tests only cover what render.py adds on top of index.html:
 merging input files and correctly inlining/embedding into one HTML page.
 
-Run with: python3 -m unittest tools/dag-viewer/test_render.py
-(or `python3 -m pytest tools/dag-viewer/` if pytest is available -- these
-are plain `unittest.TestCase`s, either runner works). Not wired into CI,
-matching tools/clickhouse/test_extract_functions.py's convention -- this
-repo doesn't run Python in CI at all today.
+Run with (from the repo root): python3 -m unittest discover -s tools/dag-viewer -p 'test_render.py'
+(or `cd tools/dag-viewer && python3 -m unittest test_render`, or
+`python3 -m pytest tools/dag-viewer/` if pytest is available -- these are
+plain `unittest.TestCase`s, any of those runners work). Plain
+`python3 -m unittest tools/dag-viewer/test_render.py` does NOT work run
+from the repo root: unittest resolves that path to a bare `test_render`
+module without adding tools/dag-viewer/ to sys.path, so this file's own
+`from render import ...` below fails with `ModuleNotFoundError: No module
+named 'render'` -- discover's `-s` (or a plain module name run from inside
+the directory) puts the right directory on sys.path instead. Not wired
+into CI -- this repo doesn't run Python in CI at all today.
 """
 
 from __future__ import annotations
