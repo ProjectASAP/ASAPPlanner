@@ -143,7 +143,10 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
             super::query_expr::Source::TimeSeries { metric } => metric.as_str(),
             super::query_expr::Source::Table { table_ref } => table_ref.as_str(),
         }),
-        QE::PromqlScalar(_) | QE::QueryTimestamp => None,
+        // A scalar bridge's child is a scalar-sub-language leaf (in practice
+        // always a `Literal`, issue #220) — never a `Scan`, same as
+        // `QueryTimestamp`.
+        QE::PromqlScalarBridge(_) | QE::QueryTimestamp => None,
         QE::PromqlVectorFromScalar(child) | QE::PromqlScalarFromVector(child) => {
             leftmost_scan_name(child)
         }
@@ -292,7 +295,13 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
                 walk(left, out);
                 walk(right, out);
             }
-            QE::PromqlScalar(_) | QE::QueryTimestamp => {}
+            QE::QueryTimestamp => {}
+            // The bridged child is a genuine scalar-sub-language position now
+            // (issue #220) — peel its column refs off with `named`, same as
+            // every other scalar-typed field (`Scan.predicates`,
+            // `Filter.pred`, …). In practice it's always a `Literal`, which
+            // references no columns, so this is a no-op today.
+            QE::PromqlScalarBridge(inner) => named(inner, out),
             QE::PromqlVectorFromScalar(child) | QE::PromqlScalarFromVector(child) => {
                 walk(child, out)
             }

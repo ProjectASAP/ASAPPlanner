@@ -38,7 +38,7 @@
 //! | `increase(m[w])` | `Aggregate{[Increase], TimeRange{w}}` |
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], TimeRange{w}}` — per-series counter-derivative intents (issue #44) |
 //! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is a post-ASAP concern (issue #47) |
-//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `PromqlScalar` leaf |
+//! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `PromqlScalarBridge` leaf |
 //! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `QueryTimestamp` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
 //! | `vector(s)` / `scalar(v)` | `PromqlVectorFromScalar` / `PromqlScalarFromVector` — the scalar⇄vector bridges (issue #48) |
 //! | `label_replace(v,…)` / `label_join(v,…)` | `PromqlRelabel{dst, value}` — per-series label rewrite; value unchanged (issue #50) |
@@ -264,10 +264,10 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         Expr::Call(call) if is_typeconv_fn(call.func.name) => walk_typeconv(call),
         Expr::Call(call) if is_label_fn(call.func.name) => walk_label(call),
         Expr::Call(call) if is_sort_fn(call.func.name) => walk_sort(call),
-        // A bare `min_of`/`max_of(consts…)` scalar query folds to a `PromqlScalar`
+        // A bare `min_of`/`max_of(consts…)` scalar query folds to a `PromqlScalarBridge`
         // leaf; a non-constant argument makes `num_expr` fail → rejected (#89).
         Expr::Call(call) if is_scalar_reducer_fn(call.func.name) => {
-            Ok(Unresolved::PromqlScalar(num_expr(expr)?))
+            Ok(Unresolved::promql_scalar(num_expr(expr)?))
         }
         Expr::Call(call) if call.func.name == "info" => walk_info(call),
         Expr::Call(call) => walk_call(call),
@@ -277,15 +277,15 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         // identity and `-<literal>` to a negated `NumberLiteral`, so this wraps a
         // sub-expression whose samples must be sign-flipped. Now that a scalar
         // operand exists (#35), express it as `x * -1` — a constant-foldable
-        // operand (`-(10*1024)`) collapses to a negated `PromqlScalar` leaf; anything
-        // else is a vector, sign-flipped by a `Mul` against `PromqlScalar(-1)`. `Mul`
+        // operand (`-(10*1024)`) collapses to a negated `PromqlScalarBridge` leaf; anything
+        // else is a vector, sign-flipped by a `Mul` against `PromqlScalarBridge(-1)`. `Mul`
         // is commutative, so operand order carries no hazard (#36).
         Expr::Unary(u) => match num_expr(&u.expr) {
-            Ok(v) => Ok(Unresolved::PromqlScalar(-v)),
+            Ok(v) => Ok(Unresolved::promql_scalar(-v)),
             Err(_) => Ok(Unresolved::BinaryOp {
                 op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
                 lhs: Rc::new(walk(&u.expr)?),
-                rhs: Rc::new(Unresolved::PromqlScalar(-1.0)),
+                rhs: Rc::new(Unresolved::promql_scalar(-1.0)),
                 vector_match: None,
             }),
         },
@@ -308,7 +308,7 @@ fn walk(expr: &Expr) -> Result<Unresolved> {
         // A number literal is a scalar leaf (`v > 5`, or a bare scalar query
         // `5`). String literals only appear as function args (`label_replace`,
         // …), which are not supported, so reject them (issue #35).
-        Expr::NumberLiteral(n) => Ok(Unresolved::PromqlScalar(n.val)),
+        Expr::NumberLiteral(n) => Ok(Unresolved::promql_scalar(n.val)),
         Expr::StringLiteral(_) => Err(LoweringError::UnsupportedFeature(
             "bare string literal".into(),
         )),
@@ -1061,10 +1061,10 @@ fn is_math_fn(name: &str) -> bool {
 
 /// A math / trig function — a per-series element-wise value transform, lowered
 /// to a per-series `Aggregate{[Math(f)]}` over the (instant) argument vector.
-/// `pi()` is the constant π, lowered to a `PromqlScalar` leaf (issue #45).
+/// `pi()` is the constant π, lowered to a `PromqlScalarBridge` leaf (issue #45).
 fn walk_math(call: &Call) -> Result<Unresolved> {
     if call.func.name == "pi" {
-        return Ok(Unresolved::PromqlScalar(std::f64::consts::PI));
+        return Ok(Unresolved::promql_scalar(std::f64::consts::PI));
     }
     let func = match call.func.name {
         "abs" => MathFunc::Abs,
@@ -1921,10 +1921,10 @@ fn is_scalar_reducer_fn(name: &str) -> bool {
 }
 
 /// A `BinaryOp` operand: fold a pure-scalar expression (`5`, `10*1024*1024`) to
-/// a `PromqlScalar` leaf, otherwise walk it as a vector (issue #35).
+/// a `PromqlScalarBridge` leaf, otherwise walk it as a vector (issue #35).
 fn scalar_or_vector(expr: &Expr) -> Result<Unresolved> {
     match num_expr(expr) {
-        Ok(v) => Ok(Unresolved::PromqlScalar(v)),
+        Ok(v) => Ok(Unresolved::promql_scalar(v)),
         Err(_) => walk(expr),
     }
 }

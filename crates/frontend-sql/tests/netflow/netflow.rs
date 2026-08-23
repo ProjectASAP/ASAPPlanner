@@ -298,7 +298,7 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
         QueryExpr::PromqlVectorFromScalar(child) | QueryExpr::PromqlScalarFromVector(child) => {
             visit(child, f)
         }
-        QueryExpr::Scan { .. } | QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp => {}
+        QueryExpr::Scan { .. } | QueryExpr::PromqlScalarBridge(_) | QueryExpr::QueryTimestamp => {}
         // Scalar expression variants (issue #205) aren't relational nodes;
         // this visitor only walks the relational tree, so stop here.
         QueryExpr::Column(_)

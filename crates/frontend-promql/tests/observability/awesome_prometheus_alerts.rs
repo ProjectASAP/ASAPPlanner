@@ -89,7 +89,9 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             }
             // `AggIntent` only ever lives in `Aggregate.measures`, never in a
             // scalar position (issue #205) — nothing to collect there.
-            QueryExpr::Scan { .. } | QueryExpr::PromqlScalar(_) | QueryExpr::QueryTimestamp => {}
+            QueryExpr::Scan { .. }
+            | QueryExpr::PromqlScalarBridge(_)
+            | QueryExpr::QueryTimestamp => {}
             QueryExpr::Column(_)
             | QueryExpr::Literal(_)
             | QueryExpr::Compare { .. }
@@ -262,8 +264,8 @@ fn all_targets_missing_core_lowers() {
 #[test]
 fn scalar_threshold_comparisons_lower_to_binaryop_scalar() {
     // ~822/949 corpus queries are `<vector> <cmp> <scalar>`. The numeric
-    // threshold is now a `PromqlScalar` operand of the `BinaryOp` (issue #35) — the
-    // single biggest unblock for real alerts.
+    // threshold is now a `PromqlScalarBridge` operand of the `BinaryOp` (issue
+    // #35) — the single biggest unblock for real alerts.
     for q in [
         "prometheus_config_last_reload_successful != 1",
         "increase(prometheus_tsdb_compactions_failed_total[1m]) > 0",
@@ -273,7 +275,7 @@ fn scalar_threshold_comparisons_lower_to_binaryop_scalar() {
             panic!("expected a BinaryOp for {q:?}");
         };
         assert!(
-            matches!(rhs.as_ref(), QueryExpr::PromqlScalar(_)),
+            matches!(rhs.as_ref(), QueryExpr::PromqlScalarBridge(_)),
             "scalar threshold operand for {q:?}, got {rhs:?}"
         );
     }
@@ -328,7 +330,7 @@ fn vector_literal_lowers_to_a_labelless_vector() {
     let QueryExpr::PromqlVectorFromScalar(inner) = &qe else {
         panic!("expected PromqlVectorFromScalar, got {qe:?}");
     };
-    assert!(matches!(inner.as_ref(), QueryExpr::PromqlScalar(v) if *v == 1.0));
+    assert_eq!(inner.as_promql_scalar(), Some(1.0));
     // The result is a vector: it carries a time index (unlike a bare scalar).
     assert!(qe.output_schema().unwrap().time_index.is_some());
 }

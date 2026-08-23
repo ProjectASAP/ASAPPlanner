@@ -140,7 +140,7 @@ impl InternTable {
 /// Coarse structural hash used only to bucket [`InternTable::intern`]'s
 /// candidate search — never the actual sharing decision (`PartialEq` is).
 ///
-/// `QueryExpr` carries `f64`s (`PromqlScalar`, `AggIntent::Quantile.q`, …), so it
+/// `QueryExpr` carries `f64`s (`Literal(ScalarValue::Float64)`, `AggIntent::Quantile.q`, …), so it
 /// cannot derive `std::hash::Hash`. Serializing to a canonical JSON string
 /// and hashing that sidesteps the `f64` problem the same way
 /// `dag_export.rs`'s own `structural_hash` does — a deliberately independent
@@ -199,7 +199,7 @@ fn intern_bottom_up(table: &mut InternTable, expr: QueryExpr) -> Rc<QueryExpr> {
 fn rebuild_children(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
     use QueryExpr::*;
     match expr {
-        Scan { .. } | PromqlScalar(_) | QueryTimestamp => expr,
+        Scan { .. } | QueryTimestamp => expr,
         PromqlVectorFromScalar(c) => PromqlVectorFromScalar(intern_child(table, c)),
         PromqlScalarFromVector(c) => PromqlScalarFromVector(intern_child(table, c)),
         PromqlRelabel { dst, value, child } => PromqlRelabel {
@@ -331,6 +331,11 @@ fn rebuild_children(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
             rhs: intern_child(table, rhs),
             vector_match,
         },
+        // `PromqlScalarBridge`'s child is a scalar-sub-language node (issue
+        // #220) — same "never descended into" treatment as the scalar
+        // variants below; the whole bridge node is still interned as a unit
+        // by the `table.intern(rebuilt)` call in `intern_bottom_up`.
+        PromqlScalarBridge(_) => expr,
         // Scalar variants (issue #205) — never descended into; see the
         // module doc's "Algorithm" section on scope. Left byte-for-byte
         // unchanged: predicate / project-list / sort-key / window-arg

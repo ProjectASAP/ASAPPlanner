@@ -229,13 +229,13 @@ fn q21_div_two_sum_by_job() {
 }
 
 // #36 — unary negation lowers as `expr * -1`: a Mul BinaryOp of the vector
-//   against PromqlScalar(-1), no vector match. The vector side keeps its schema.
+//   against PromqlScalarBridge(-1), no vector match. The vector side keeps its schema.
 #[test]
 fn q36_unary_negation_is_multiply_by_minus_one() {
     let expected = QueryExpr::BinaryOp {
         op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
         lhs: Rc::new(scan("some_metric", &[])),
-        rhs: Rc::new(QueryExpr::PromqlScalar(-1.0)),
+        rhs: Rc::new(QueryExpr::promql_scalar(-1.0)),
         vector_match: None,
     };
     assert_eq!(lower("-some_metric"), expected);
@@ -253,7 +253,7 @@ fn q36_sum_of_negation_nests() {
         child: Rc::new(QueryExpr::BinaryOp {
             op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
             lhs: Rc::new(scan("node_cpu_seconds_total", &[])),
-            rhs: Rc::new(QueryExpr::PromqlScalar(-1.0)),
+            rhs: Rc::new(QueryExpr::promql_scalar(-1.0)),
             vector_match: None,
         }),
     };

@@ -82,7 +82,10 @@ fn rc_mut(r: &mut Rc<QueryExpr>) -> &mut QueryExpr {
 fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
     use QueryExpr::*;
     match expr {
-        Scan { .. } | PromqlScalar(_) | QueryTimestamp => vec![],
+        // `PromqlScalarBridge`'s child is a scalar-sub-language node (issue
+        // #220), not the relational skeleton — same "no children to recurse
+        // into" treatment as the scalar variants below.
+        Scan { .. } | QueryTimestamp | PromqlScalarBridge(_) => vec![],
         PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => vec![rc_mut(c)],
         PromqlRelabel { child, .. }
         | Filter { child, .. }
