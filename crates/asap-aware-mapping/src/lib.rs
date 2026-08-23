@@ -30,8 +30,22 @@
 //!
 //! ## Status
 //!
-//! Two real occupants and one stub:
+//! Three real occupants and one stub:
 //!
+//! - [`replacement`] — the `TargetSubDAG`/`ReplacementSubDAG`/
+//!   `ReplacementStrategy` vocabulary `docs/asap_aware_mapping.md` stubs out
+//!   under "Key concepts (not yet implemented)", implemented for real (issue
+//!   #251, part of #33): a small extension-point trait reporting *every*
+//!   semantically valid replacement for a target sub-DAG, not just the one
+//!   [`boundary::implementation_for_with`]/[`bind::implement_tree_with`]
+//!   commit to. Two real strategies wrap those exact decision points instead
+//!   of re-deciding anything:
+//!   [`replacement::SketchFamilyStrategy`] (every candidate summary family
+//!   for a bindable `Aggregate`) and [`replacement::SharedSubtreeStrategy`]
+//!   (the build-independently-vs-build-once-and-share candidate pair for a
+//!   CSE-detected shared subtree). No search/ranking logic lives here — see
+//!   that module's docs for what's deliberately left to a future
+//!   Cascades/Volcano-style search engine.
 //! - [`boundary`] — the per-intent sketch-vs-exact (accuracy) decision:
 //!   `AggIntent → Implementation` (a summary family's own `(Kind, Params)`,
 //!   or an exact accumulator) sized to the `AccuracyTarget` (issue #98).
@@ -90,6 +104,7 @@
 pub mod bind;
 pub mod boundary;
 pub mod cost_model;
+pub mod replacement;
 
 pub use bind::{
     implement_tree, implement_tree_with, implement_workload, implement_workload_with,
@@ -99,3 +114,7 @@ pub use boundary::{
     implementation_for, implementation_for_with, summary_candidates, Implementation, Matcher,
 };
 pub use cost_model::{CostModel, DefaultCostModel};
+pub use replacement::{
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy,
+    SketchFamilyStrategy, TargetSubDAG,
+};
