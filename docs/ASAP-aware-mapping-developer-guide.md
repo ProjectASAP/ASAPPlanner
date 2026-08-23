@@ -160,55 +160,49 @@ The two methods have intentionally different responsibilities.
 
 ### `CostModel`
 
-`CostModel` controls ranking, sizing, and cost-sensitive decisions.
+`CostModel` controls ranking, sizing, and cost-sensitive decisions. Every hook but one has a default body that reproduces this crate's built-in static behavior — override only what you need to change:
 
-The current strategy code exercises the following hooks:
+- **`rank_candidates`** — order a set of sketch candidates for one `AggIntent`, best choice first. **No default** — this is the one hook every `CostModel` must implement; candidate selection needs a real answer from somewhere.
 
-```rust
-fn rank_candidates(
-    &self,
-    intent: &AggIntent,
-    candidates: &[SketchKind],
-) -> Vec<SketchKind>;
+  ```rust
+  fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind>;
+  ```
 
-fn size_params(
-    &self,
-    kind: SketchKind,
-    intent: &AggIntent,
-    eps: f64,
-    delta: f64,
-) -> SketchParams;
+- **`size_params`** — pick concrete parameters (e.g. sketch capacity) for one already-chosen `SketchKind`, given an accuracy target `(eps, delta)`. Default: `boundary::default_size_params`, this crate's built-in per-family sizing formulas.
 
-fn realize_extension(
-    &self,
-    ext_kind: &str,
-    payload: &serde_json::Value,
-) -> Implementation;
+  ```rust
+  fn size_params(&self, kind: SketchKind, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
+  ```
 
-fn readout_extension(
-    &self,
-    ext_kind: &str,
-    payload: &serde_json::Value,
-    col: &ColumnRef,
-) -> SketchQuery;
+- **`realize_extension`** — decide what post-ASAP `Implementation` a deployment-defined `AggIntent::Extension` maps to (a shape core has no built-in opinion on). Default: `Implementation::PassThrough`.
 
-fn cse_recompute_cost(
-    &self,
-    candidate: &CseCandidate,
-) -> f64;
+  ```rust
+  fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Implementation;
+  ```
 
-fn cse_shared_maintenance_cost(
-    &self,
-    candidate: &CseCandidate,
-) -> f64;
+- **`readout_extension`** — build the query-time read for an `Extension` intent this same `CostModel` already realized as `Sketch` via `realize_extension`. "Readout" means the query-time **read** path — how an already-bound summary answers a query — as distinct from `realize_extension`, which decides how the summary is **built and maintained**; the two are a matched pair, so overriding `realize_extension` to return `Sketch` for some `ext_kind` requires overriding this for that same `ext_kind` too. Default: panics (deliberately — a silent wrong answer here is worse than a loud crash) if that pairing was left incomplete.
 
-fn cse_share_decision(
-    &self,
-    candidate: &CseCandidate,
-) -> ShareDecision;
-```
+  ```rust
+  fn readout_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchQuery;
+  ```
 
-*"Readout" here means the query-time **read** path — how an already-bound summary answers a query — as distinct from `realize_extension`, which decides how the summary is **built and maintained**. `realize_extension` and `readout_extension` are a matched pair: `realize_extension` picks what gets maintained, `readout_extension` says how to query it.
+- **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's subtree independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.
+
+  ```rust
+  fn cse_recompute_cost(&self, candidate: &CseCandidate) -> f64;
+  ```
+
+- **`cse_shared_maintenance_cost`** — estimate the cost of maintaining one shared summary continuously for the life of the workload. Default: `default_cse_shared_maintenance_cost`, a per-family weight table.
+
+  ```rust
+  fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> f64;
+  ```
+
+- **`cse_share_decision`** — decide whether to share one summary across all of a CSE candidate's consumers, or recompute independently at each. Default: composes the two cost hooks above (share iff shared-maintenance cost ≤ total recompute cost across every consumer) — override the two cost hooks and keep this comparison unless you need a genuinely different policy, not a different cost input.
+
+  ```rust
+  fn cse_share_decision(&self, candidate: &CseCandidate) -> ShareDecision;
+  ```
 
 A custom cost model does not necessarily need to override every hook. The current tests include a model that overrides only `rank_candidates`, relying on defaults for the rest.
 
