@@ -160,7 +160,7 @@ The two methods have intentionally different responsibilities.
 
 ### `CostModel`
 
-`CostModel` controls ranking, sizing, and cost-sensitive decisions. Every hook but one has a default body that reproduces this crate's built-in static behavior — override only what you need to change:
+`CostModel`'s job is broader than its name suggests — it's the one extension point every deployment-specific numeric/configuration decision plugs into, not just "which candidate is cheapest." Sizing counts as a cost decision for the same reason ranking does: a bigger sketch (more memory, more update cost) buys more accuracy, and how you want to spend that budget is exactly the kind of real-world cost knowledge this crate deliberately doesn't hardcode — see the crate doc's layering note at the top of `cost_model.rs` (`asap-plan` depends only on `asap_ir`, never on a runtime or deployment model, so it can't know real costs itself). Every hook but one has a default body that reproduces this crate's built-in static behavior — override only what you need to change:
 
 - **`rank_candidates`** — order a set of sketch candidates for one `AggIntent`, best choice first. **No default** — this is the one hook every `CostModel` must implement; candidate selection needs a real answer from somewhere.
 
@@ -168,13 +168,27 @@ The two methods have intentionally different responsibilities.
   fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind>;
   ```
 
-- **`size_params`** — pick concrete parameters (e.g. sketch capacity) for one already-chosen `SketchKind`, given an accuracy target `(eps, delta)`. Default: `boundary::default_size_params`, this crate's built-in per-family sizing formulas.
+- **`size_params`** — pick concrete parameters (e.g. sketch capacity) for one already-chosen `SketchKind`, given an accuracy target `(eps, delta)`. This is a separate hook from `rank_candidates` specifically so a deployment can override *just* sizing (e.g. an empirically-tuned table, or discrete capacity rungs a downstream catalog requires) without also forking candidate selection — same "one extension point per decision" shape as everything else in this trait. Default: `boundary::default_size_params`, this crate's built-in per-family sizing formulas.
 
   ```rust
   fn size_params(&self, kind: SketchKind, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
   ```
 
 - **`realize_extension`** — decide what post-ASAP `Implementation` a deployment-defined `AggIntent::Extension` maps to (a shape core has no built-in opinion on). Default: `Implementation::PassThrough`.
+
+  `AggIntent::Extension { ext_kind: String, payload: serde_json::Value }` is the escape hatch for an intent shape only *your* deployment needs — core's `AggIntent` enum deliberately doesn't grow a variant for every capability a single deployment wants (issue #131), so instead a deployment tags its own shape with a `ext_kind` string and puts whatever it needs in `payload`; core treats both opaquely. Example: a deployment wants an approximate-frequency intent core has no variant for. It tags queries with `Extension { ext_kind: "frequency".into(), payload: ... }`, then overrides `realize_extension` to recognize that tag:
+
+  ```rust
+  fn realize_extension(&self, ext_kind: &str, _payload: &serde_json::Value) -> Implementation {
+      if ext_kind == "frequency" {
+          Implementation::Sketch { kind: SketchKind::CountSketch, params: /* ... */ }
+      } else {
+          Implementation::PassThrough  // fall back to the default for anything else
+      }
+  }
+  ```
+
+  Every `ext_kind` your deployment doesn't recognize should still fall through to `Implementation::PassThrough` (the default), not panic — only the `ext_kind`s you've deliberately implemented get a real realization.
 
   ```rust
   fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Implementation;
@@ -186,7 +200,7 @@ The two methods have intentionally different responsibilities.
   fn readout_extension(&self, ext_kind: &str, payload: &serde_json::Value, col: &ColumnRef) -> SketchQuery;
   ```
 
-- **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's subtree independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy.
+- **`cse_recompute_cost`** — estimate the one-time cost of recomputing a CSE candidate's subtree independently at a single consumer. Default: `default_cse_recompute_cost`, a structural-size proxy. Returns a bare `f64` today (a unitless scalar compared directly against `cse_shared_maintenance_cost`'s own `f64`) — a richer cost type (e.g. a struct separating CPU/memory/network) would let deployments compare along more than one axis, but is a real signature change across every hook in this trait, not a doc fix; worth its own issue rather than deciding here.
 
   ```rust
   fn cse_recompute_cost(&self, candidate: &CseCandidate) -> f64;
@@ -210,7 +224,12 @@ A custom cost model does not necessarily need to override every hook. The curren
 
 ## 3. How the current pieces fit together
 
-There are two related paths in the current code.
+There are two related paths in the current code, and it's worth being explicit about how they relate before looking at either one, since neither name says it outright: **the binding path is older and still the one thing that actually runs in production; the replacement-strategy path is new and additive, not a replacement for it** (`replacement.rs`'s own module docs put this as "why this exists alongside `boundary`/`bind`, not instead of them"). Both start from the same input (an `AggIntent`) and both eventually reuse the exact same underlying decision logic (`boundary::implementation_for_with`, `bind::implement_tree_with`) — they differ only in *how much of the answer* they keep:
+
+- The **binding path** is what runs today when a query actually gets bound: it commits to one `Implementation` and discards every alternative a `CostModel` didn't pick, because something has to actually execute.
+- The **replacement-strategy path** is what `ReplacementStrategy::replacements()` (§2) produces: instead of committing to one, it *keeps every alternative* the binding path would have thrown away, packaged as `ReplacementSubDAG`s.
+
+This is exactly the "alternatives"/"candidates" language in [the design doc](../design_docs/asap_aware_mapping.md): a `ReplacementSubDAG` **is** one candidate; a `TargetSubDAG` with its full `replacements()` list **is** the set of alternatives for one spot in the plan. The design doc describes a *future* search (not built yet, tracked separately) that would compare whole candidate plans built from these alternatives — the two paths below are what that future search would draw on, not the search itself.
 
 ### Binding path
 
@@ -327,7 +346,7 @@ is enough for the current shared-subtree strategy.
 
 Keep `matches` cheap and unsurprising.
 
-It should answer applicability, not perform ranking or choose a winner.
+It should answer *whether the strategy applies here* in the plain English sense — not `applicability.rs`'s formal `ApplicabilityRule`/`ApplicabilityFinding` concept (issue #247, a separate reporting layer covered in the design doc's "Applicability reporting" section). `matches` isn't that machinery and doesn't need to produce anything it consumes; it should also not perform ranking or choose a winner.
 
 ---
 
@@ -536,7 +555,7 @@ That is correct for normal binding, but a replacement strategy needs to bind **e
 
 `ForceSketchKind` is a small `CostModel` adapter used for that purpose. It's real code — copied verbatim from `replacement.rs`.
 
-It overrides only ranking:
+The trick: `implement_tree_with` always binds whichever candidate `rank_candidates` puts *first* — there's no way to tell it directly "bind KLL this time." So to bind KLL specifically, wrap the real cost model in a `ForceSketchKind { kind: Kll, inner: real_cost_model }` and pass *that* into `implement_tree_with` instead. `ForceSketchKind::rank_candidates` forces `kind` (here, `Kll`) to the front of whatever `inner` would have ranked, so `implement_tree_with`'s "take the first candidate" logic ends up binding `Kll` — while every other decision (sizing, extension realization, …) still comes from `inner` unchanged, since only `rank_candidates` is overridden. Do this once per candidate (`ForceSketchKind { kind: Kll, .. }`, then separately `ForceSketchKind { kind: DDSketch, .. }`) and each gets bound through the exact same real machinery, one at a time, without touching `implement_tree_with`'s internals at all. It overrides only ranking:
 
 ```rust
 fn rank_candidates(
@@ -596,7 +615,10 @@ Replacement::Rewrite(
 
 This strategy does **not** decide whether sharing is cheaper.
 
-That decision belongs to the cost model.
+That decision belongs to the cost model — and today, `CostModel::cse_share_decision`'s default body already makes it, via a real cost comparison (§9), every time the *production binding path* (§3) sees a shared subtree. So it's fair to ask: isn't "build independently" (#2) already the exception, not the default — and doesn't that comparison already decide things? It's worth being precise about what "default" means here:
+
+- `target.root` arriving with `consumer_count >= 2` means CSE detection (`share_common_subtrees`) already merged it onto one shared `Rc` *before* this strategy ever runs — so "build once and share" (#1) costs nothing to produce (`Rc::clone` of what's already there); "build independently" (#2) is the one requiring real work (an actual deep clone).
+- But `cse_share_decision`'s cost comparison is a *separate, already-existing* mechanism that only the production binding path consults — it isn't something `SharedSubtreeStrategy` calls or defers to. This strategy has to enumerate **both** regardless of which one is cheap to construct or which one that other comparison would currently pick, because per §1's core rule, a strategy is never allowed to pre-decide based on cost — collapsing to just #1 here would be exactly the "cost-based pruning inside a strategy" anti-pattern §5 Rule 2 forbids, even though today's separate binding path already has an answer. The whole reason this module exists (§0) is to keep both alternatives around for a future search to compare *in the context of a full plan* — which might disagree with `cse_share_decision`'s isolated, pairwise-only comparison.
 
 This example is useful when implementing transformations such as:
 
@@ -809,9 +831,11 @@ pub trait Matcher {
 }
 ```
 
-`Matcher` decides whether an already-available `Implementation` satisfies a required one (e.g. does an available `DDSketch` satisfy a request for `Kll`? does a multi-population accumulator satisfy a single-population query?).
+`Matcher` answers a different question than everything above it: not "how do I *build* a summary for this intent" (that's `boundary`/`bind`/`ReplacementStrategy`), but "is there already a summary sitting around somewhere that answers this without building anything new?" This is the query-optimization-literature "answering queries using views" question, applied to summaries — the same idea as a database reusing an existing materialized view or index instead of recomputing from scratch.
 
-Unlike `CostModel`, this crate ships **no default body and no implementation** for `Matcher` at all — the answer depends on facts this crate deliberately doesn't settle (a pure sketch-algebra answer and a deployment's own storage-layout rules can legitimately disagree). If you need this, you're implementing the whole trait for your deployment from scratch; there's no default to lean on and no existing implementation in this crate to copy from.
+Concrete example: a deployment already has a `DDSketch` built earlier for some other query on `latency`, and a new query needs `Kll` quantiles on `latency`. Can the existing `DDSketch` answer it without building a new `Kll` sketch? A pure sketch-algebra answer says yes — both are quantile sketches, mutually substitutable at the query level. But a deployment with its own storage-layout rules might say no, e.g. if its inventory ties a stored summary to a specific algorithm identity it won't re-interpret. `Matcher::is_satisfied_by(required, available)` is where a deployment plugs in whichever answer is actually true for its own storage layer — `required` is what a query needs (an `Implementation` `boundary`/`bind` computed), `available` is what already exists somewhere in that deployment's inventory.
+
+Unlike `CostModel`, this crate ships **no default body and no implementation** for `Matcher` at all — the answer genuinely depends on facts this crate deliberately doesn't settle (see the example above: a pure sketch-algebra answer and a deployment's own storage-layout rules can legitimately disagree, and this crate has no inventory concept of its own to judge between them). If you need this, you're implementing the whole trait for your deployment from scratch; there's no default to lean on and no existing implementation in this crate to copy from.
 
 ---
 
