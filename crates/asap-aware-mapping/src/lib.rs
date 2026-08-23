@@ -33,7 +33,7 @@
 //! Three real occupants and one stub:
 //!
 //! - [`replacement`] — the `TargetSubDAG`/`ReplacementSubDAG`/
-//!   `ReplacementStrategy` vocabulary `docs/asap_aware_mapping.md` stubs out
+//!   `ReplacementStrategy` vocabulary `docs/design_docs/asap_aware_mapping.md` stubs out
 //!   under "Key concepts (not yet implemented)", implemented for real (issue
 //!   #251, part of #33): a small extension-point trait reporting *every*
 //!   semantically valid replacement for a target sub-DAG, not just the one

@@ -1,5 +1,5 @@
 //! `TargetSubDAG` / `ReplacementSubDAG` / `ReplacementStrategy` — the
-//! candidate-replacement vocabulary `docs/asap_aware_mapping.md` stubs out
+//! candidate-replacement vocabulary `docs/design_docs/asap_aware_mapping.md` stubs out
 //! under "Key concepts (not yet implemented)", implemented for real (issue
 //! #251, part of #33).
 //!
@@ -12,7 +12,7 @@
 //! *binding* a query (something has to actually run), but it means the
 //! alternatives a cost model didn't pick are thrown away the moment they're
 //! computed. A search/optimization engine (Cascades/Volcano-style, tracked
-//! separately — see `docs/asap_aware_mapping.md`'s "Pseudocode for
+//! separately — see `docs/design_docs/asap_aware_mapping.md`'s "Pseudocode for
 //! Replacement Plan Searching") needs the *opposite* shape: every
 //! semantically valid alternative for a sub-DAG, so a later cost-based search
 //! can explore and compare them instead of being stuck with whatever
@@ -79,7 +79,7 @@
 //!
 //! ## Non-goals (tracked separately, not attempted here)
 //!
-//! - **No search/selection logic.** `docs/asap_aware_mapping.md`'s
+//! - **No search/selection logic.** `docs/design_docs/asap_aware_mapping.md`'s
 //!   replacement-plan-searching pseudocode — trying every `ReplacementStrategy`
 //!   against every candidate plan, deduplicating, iterating to a fixpoint,
 //!   then ranking by a `CostModel` — is a Cascades/Volcano-style search
