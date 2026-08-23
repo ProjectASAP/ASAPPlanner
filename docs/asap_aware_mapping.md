@@ -6,20 +6,20 @@ The input is a pre-ASAP plan and the output is a set of candidate post-ASAP plan
 Based on any given accuracy targets, it can also assign parameters to those sketches (implemented today — `boundary::implementation_for`'s `bind_summary_with` sizes each candidate via `CostModel::size_params`; see `default_size_params`'s per-family formulas).
 This layer **does not** assign physical resources like CPU and memory to nodes in the plan.
 
-This document tracks issue #33 ("add logic to detect which optimizations/summaries are applicable to a query workload"); the sub-issues cited below are where each piece below is actually being implemented.
+This document tracks issue #33 ("add logic to detect which optimizations/summaries are applicable to a query workload"). The sub-issues cited below are where each piece below is actually being implemented.
 
 ## Key concepts
 
 - TargetSubDAG: Pre-ASAP sub-DAG that is a candidate to be replaced by a post-ASAP sub-DAG
 - ReplacementSubDAG: Candidate post-ASAP sub-DAG to replace a pre-ASAP sub-DAG
-- ReplacementStrategy: Each strategy defines one TargetSubDAG match and every valid ReplacementSubDAG for it (not ranked, not filtered — every strategy's job is to be exhaustive, not to decide)
+- ReplacementStrategy: Each strategy defines one TargetSubDAG match and every valid ReplacementSubDAG for it. ReplacementStratey only suggests strategies, it does not rank or filter them or decide which is best.
 - CostModel: Estimates the cost of a post-ASAP plan. Can be based on heuristics or empirical estimates
 
-Tracked as **#251**: today, the two decisions this crate already owns — `boundary::implementation_for` (which summary family/kind realizes an `AggIntent`) and `cse::share_common_subtrees` (which subtrees can be shared) — each collapse straight to one answer instead of exposing themselves as a `ReplacementStrategy` with a candidate list. #251 generalizes both into the trait above, as the first two real `impl ReplacementStrategy`s (no new decision procedure, same discipline `applicability.rs` (#247) already used for these two).
+Currently, this crate has logic for two decisions: (a) which summary family/kind realizes an `AggIntent` (`boundary::implementation_for`), and (b) which subtrees can be shared (`cse::share_common_subtrees`). These are implemented as separate code. #251 generalizes both of these to use the `ReplacementStrategy` trait.
 
 ## Replacement plan search
 
-Tracked as **#252**, implementing the pseudocode below for real:
+Tracked as **#252**.
 
 ```
 input_replacement_strategies: List[ReplacementStrategy]
@@ -91,7 +91,7 @@ chosen implementation
 Selecting a sketch:
 - Different sketches (KLL vs DDSketch) — today only *ranked* (`CostModel::rank_candidates` takes the head); exposed as real alternative candidates once #251 lands
 - Different parameters for same sketch
-- Hydra vs sketch-per-subpopulation (exact treatment of subpopulations) — tracked as **#256**: a new axis orthogonal to `SketchKind`/`SamplingKind`/…, `GroupingStrategy::{PerSubpopulationInstance, SharedMultiSubpopulation}` (named for sharing across a query's own subpopulations, not multi-tenant in the deployment-isolation sense), with `HydraKind`/`HydraParams` mirroring the existing per-family `(Kind, Params)` pattern
+- Hydra vs sketch-per-subpopulation (exact treatment of subpopulations) — tracked as **#256**: a new axis orthogonal to `SketchKind`/`SamplingKind`/…, `GroupingStrategy::{PerSubpopulationInstance, SharedMultiSubpopulation}` (named for sharing across a query's own subpopulations), with `HydraKind`/`HydraParams` mirroring the existing per-family `(Kind, Params)` pattern
 - Single-level Hydra (what the paper talks about) or multi-level Hydra (e.g. CMS on top of CMS on top of CMS) — not yet tracked; a refinement of #256's `HydraParams` once single-level lands
 - Sliding window vs tumbling window computation (this is specific to ASAPCollector and ASAPQuery's precompute engine) — not yet tracked here
 - Sliding window sketches (e.g. Promsketch) vs exact treatment of time — not yet tracked here
