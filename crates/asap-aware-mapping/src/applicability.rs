@@ -73,7 +73,7 @@
 //! [`boundary`]: crate::boundary
 //! [`bind`]: crate::bind
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::rc::Rc;
 
@@ -184,12 +184,26 @@ impl ApplicabilityRule for SketchApplicabilityRule<'_> {
 
     fn evaluate(&self, roots: &[(String, Rc<QueryExpr>)]) -> Vec<ApplicabilityFinding> {
         let mut findings = Vec::new();
+        // One `visited` set shared across every root — not reset per root —
+        // so a bindable `Aggregate` reachable from more than one place (two
+        // different roots after `share_common_subtrees`, or two branches of
+        // the same root, e.g. `median(x) / median(x)`) is only ever reported
+        // once. It really is bound exactly once (stage 2/4's memoization in
+        // `bind::implement_workload_with` reuses or, per a `CostModel`'s
+        // `cse_share_decision`, independently rebinds it — either way, one
+        // decision per shared `Rc`, not one per path that reaches it), so
+        // reporting "sketch-approximation is applicable" once per path would
+        // overstate the number of independent opportunities. Same dedup
+        // rationale as `SharedSubexpressionRule`'s `register_site`, applied
+        // here too since this traversal has the identical DAG-not-tree shape.
+        let mut visited: HashSet<usize> = HashSet::new();
         for (id, root) in roots {
             collect_sketch_findings(
                 root,
                 &format!("root {id:?}"),
                 self.cost_model,
                 &mut findings,
+                &mut visited,
             );
         }
         findings
@@ -201,12 +215,16 @@ impl ApplicabilityRule for SketchApplicabilityRule<'_> {
 /// itself requires — a multi-intent or `HAVING`-bearing `Aggregate`, or one
 /// under a logical parent that would subsume it, stays logical at actual
 /// binding time too, so it is not reported here either), recursing through
-/// every operator position a nested `Aggregate` could appear in.
+/// every operator position a nested `Aggregate` could appear in. `visited`
+/// (shared across the whole call, not reset per node) skips re-descending
+/// into a child already reached via a different path — see the dedup
+/// rationale on [`SketchApplicabilityRule::evaluate`].
 fn collect_sketch_findings(
     node: &QueryExpr,
     location: &str,
     cost_model: &dyn CostModel,
     findings: &mut Vec<ApplicabilityFinding>,
+    visited: &mut HashSet<usize>,
 ) {
     if let QueryExpr::Aggregate {
         measures, having, ..
@@ -227,8 +245,17 @@ fn collect_sketch_findings(
             }
         }
     }
-    for_each_operator_child(node, location, |child, child_location| {
-        collect_sketch_findings(child, &child_location, cost_model, findings);
+    for_each_operator_child(node, location, |child, ptr, child_location| {
+        // A `None` ptr (a `Concat` branch, stored by value — see
+        // `for_each_operator_child`'s own doc) has no `Rc` identity of its
+        // own to dedup on, so it's always walked; an `Rc`-backed child is
+        // only walked the first time its pointer is seen.
+        if let Some(ptr) = ptr {
+            if !visited.insert(ptr) {
+                return;
+            }
+        }
+        collect_sketch_findings(child, &child_location, cost_model, findings, visited);
     });
 }
 
@@ -384,14 +411,23 @@ fn walk_rc_children(node: &QueryExpr, location: &str, sites: &mut HashMap<usize,
 fn for_each_operator_child(
     node: &QueryExpr,
     location: &str,
-    mut visit: impl FnMut(&QueryExpr, String),
+    mut visit: impl FnMut(&QueryExpr, Option<usize>, String),
 ) {
     use QueryExpr::*;
+    // `Some(Rc::as_ptr(rc) as usize)` for an `Rc`-backed child position, so
+    // a caller (`collect_sketch_findings`) can dedup on it the same way
+    // `walk_rc_children`/`register_site` dedup on `Rc::as_ptr` directly —
+    // `None` for `Concat`'s branches, the one operator position stored by
+    // value instead (`Vec<QueryExpr>`, never itself `Rc`-aliased — see
+    // `pre_asap::cse`'s module doc on why), which therefore has no pointer
+    // identity of its own to dedup on at this position.
     match node {
         Scan { .. } | PromqlScalar(_) | QueryTimestamp => {}
-        PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => {
-            visit(c, format!("{location} > child"))
-        }
+        PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => visit(
+            c,
+            Some(Rc::as_ptr(c) as usize),
+            format!("{location} > child"),
+        ),
         PromqlRelabel { child, .. }
         | PromqlInfoEnrich { child, .. }
         | PromqlSeriesSample { child, .. }
@@ -404,19 +440,39 @@ fn for_each_operator_child(
         | TimeShift { child, .. }
         | SQLWindowFunc { child, .. }
         | Sort { child, .. }
-        | Limit { child, .. } => visit(child, format!("{location} > child")),
+        | Limit { child, .. } => visit(
+            child,
+            Some(Rc::as_ptr(child) as usize),
+            format!("{location} > child"),
+        ),
         Concat { children } => {
             for (i, c) in children.iter().enumerate() {
-                visit(c, format!("{location} > concat[{i}]"));
+                visit(c, None, format!("{location} > concat[{i}]"));
             }
         }
         Join { left, right, .. } | SetOp { left, right, .. } => {
-            visit(left, format!("{location} > left"));
-            visit(right, format!("{location} > right"));
+            visit(
+                left,
+                Some(Rc::as_ptr(left) as usize),
+                format!("{location} > left"),
+            );
+            visit(
+                right,
+                Some(Rc::as_ptr(right) as usize),
+                format!("{location} > right"),
+            );
         }
         BinaryOp { lhs, rhs, .. } => {
-            visit(lhs, format!("{location} > lhs"));
-            visit(rhs, format!("{location} > rhs"));
+            visit(
+                lhs,
+                Some(Rc::as_ptr(lhs) as usize),
+                format!("{location} > lhs"),
+            );
+            visit(
+                rhs,
+                Some(Rc::as_ptr(rhs) as usize),
+                format!("{location} > rhs"),
+            );
         }
         Column(_)
         | Literal(_)
@@ -582,6 +638,38 @@ mod tests {
         assert!(findings
             .iter()
             .all(|f| f.optimization != OptimizationKind::SketchApproximation));
+    }
+
+    /// A sketch-applicable `Aggregate` reachable via two paths that
+    /// `share_common_subtrees` collapses onto one `Rc` — the same
+    /// `median(x) / median(x)` shape `pre_asap::cse`'s own
+    /// `single_query_shares_its_own_repeated_subtree` test uses — must be
+    /// reported once, not once per path. It is bound exactly once (one
+    /// `CostModel::cse_share_decision`, per `bind::implement_workload_with`),
+    /// so reporting it twice would overstate the number of independent
+    /// sketch-approximation opportunities in this workload.
+    #[test]
+    fn a_shared_sketchable_aggregate_is_reported_only_once() {
+        let quantile = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
+        let root = QueryExpr::BinaryOp {
+            op: asap_types::pre_asap::query_expr::BinaryOpKind::Compare(
+                asap_types::pre_asap::expr_ir::CompareOpKind::Eq,
+            ),
+            lhs: Rc::new(quantile.clone()),
+            rhs: Rc::new(quantile),
+            vector_match: None,
+        };
+        let findings = find_applicable_optimizations(vec![("ratio", root)]);
+        let sketch: Vec<_> = findings
+            .iter()
+            .filter(|f| f.optimization == OptimizationKind::SketchApproximation)
+            .collect();
+        assert_eq!(
+            sketch.len(),
+            1,
+            "a single shared Aggregate must produce one finding, not one \
+             per path that reaches it: got {findings:?}"
+        );
     }
 
     // ── SharedSubexpressionRule ─────────────────────────────────────────
