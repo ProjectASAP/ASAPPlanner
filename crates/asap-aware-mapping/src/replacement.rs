@@ -3,23 +3,12 @@
 //! under "Key concepts (not yet implemented)", implemented for real (issue
 //! #251, part of #33).
 //!
-//! ## Why this exists alongside [`implementation`] and [`bind`], not instead of them
+//! ## This is where every `Implementation` gets decided — `bind` is a selector over it
 //!
-//! [`implementation::implementation_for_with`] and
-//! [`bind::implement_tree_with`] each commit to exactly **one** answer per
-//! decision point — a single [`Implementation`], a single bound
-//! [`SummaryNode`] — ranked via a [`CostModel`]. That is exactly right for
-//! *binding* a query (something has to actually run), but it means the
-//! alternatives a cost model didn't pick are thrown away the moment they're
-//! computed. A search/optimization engine (Cascades/Volcano-style, tracked
-//! separately — see `docs/design_docs/asap_aware_mapping.md`'s "Pseudocode for
-//! Replacement Plan Searching") needs the *opposite* shape: every
-//! semantically valid alternative for a sub-DAG, so a later cost-based search
-//! can explore and compare them instead of being stuck with whatever
-//! [`implementation`]/[`bind`] already locked in.
-//!
-//! This module is that alternative shape, built by **wrapping** the existing
-//! decision points rather than re-deciding anything:
+//! [`implementation::implementations_for_with`] is the one place this crate
+//! enumerates every valid [`Implementation`] for an [`AggIntent`], exhaustive
+//! and ranked (most-preferred first via a [`CostModel`]). This module wraps
+//! that list into the exhaustive-candidate shape a future search needs:
 //!
 //! - [`TargetSubDAG`] — a reference to a pre-ASAP [`QueryExpr`] node that is a
 //!   candidate for replacement, plus how many places in the workload already
@@ -28,11 +17,10 @@
 //!   doesn't carry.
 //! - [`ReplacementSubDAG`] — one candidate replacement for a `TargetSubDAG`:
 //!   either a fully bound [`SummaryNode`] (the same output
-//!   [`bind::implement_tree_with`] produces, for one particular candidate
-//!   instead of the one a `CostModel` ranked first) or a pre-ASAP
-//!   [`QueryExpr`] rewrite (still logical, structurally different from the
-//!   target but semantically equivalent) — see [`Replacement`] — plus a
-//!   human-readable `rationale`.
+//!   [`bind::implement_tree_with`] itself keeps, for one particular candidate
+//!   instead of the one it kept) or a pre-ASAP [`QueryExpr`] rewrite (still
+//!   logical, structurally different from the target but semantically
+//!   equivalent) — see [`Replacement`] — plus a human-readable `rationale`.
 //! - [`ReplacementStrategy`] — `matches` + `replacements`, the same
 //!   extension-point shape [`CostModel`] and [`Matcher`](crate::implementation::Matcher)
 //!   already use in this crate (and the same shape issue #33's
@@ -41,25 +29,35 @@
 //!   `impl ReplacementStrategy`, not a restructuring of this trait or of any
 //!   existing strategy. `replacements` is **exhaustive, not ranked, not
 //!   filtered** — reporting "every valid candidate" is core's job; picking
-//!   the best one is a [`CostModel`]'s job, deliberately out of scope here
-//!   (see "Non-goals" below).
+//!   the best one is a [`CostModel`]'s job (see "Selection" below).
+//!
+//! ## Selection: `bind::implement_tree_with` keeps the head, nothing else
+//!
+//! [`bind::implement_tree_with`] does not compute an `Implementation`
+//! independently — it builds a `TargetSubDAG` for the node being bound,
+//! calls [`SketchFamilyStrategy::replacements`], and keeps the first
+//! (`cost_model`-preferred) candidate; everything else it discards. That's
+//! the *only* difference between "the binding path" and "the
+//! replacement-strategy path": how much of this module's own output each one
+//! keeps. Both bottom out in the exact same low-level primitive,
+//! [`bind::bind_with_implementation`] — given an *already-decided*
+//! `Implementation`, turn it into a `SummaryNode` — which this module calls
+//! once per candidate it enumerates, and `bind::implement_tree_with` calls
+//! once for the one candidate it kept. See `bind.rs`'s own module docs for
+//! the reverse half of this relationship.
+//!
+//! This means an ordinary bind now sizes and fully constructs *every*
+//! sketch candidate at every sketch-capable node (not just the one it keeps)
+//! — a deliberate tradeoff, made so there is exactly one place in this crate
+//! that decides what an `AggIntent` may become, at the cost of extra work
+//! per bind proportional to each node's own candidate count.
 //!
 //! ## The two strategies, and why these two
 //!
-//! Both wrap an existing, already-correct decision procedure into the
-//! exhaustive-candidate shape — neither re-derives anything:
-//!
-//! - [`SketchFamilyStrategy`] wraps [`implementation::implementation_for_with`] /
-//!   [`implementation::summary_candidates`]'s exhaustive match over the
-//!   [`AggIntent`] vocabulary. For the same bindable-`Aggregate` shape
-//!   [`bind::implement_tree_with`] itself requires (single intent, no
-//!   `HAVING`), it returns every candidate [`implementation::implementation_for_with`]
-//!   could have committed to instead of the one it did: every `SketchKind`
-//!   [`implementation::summary_candidates`] lists for the intent when the boundary
-//!   decision is approximate, or the single exact-accumulator /
-//!   pass-through outcome when that's the *only* realization
-//!   [`implementation::implementation_for_with`]'s dispatch produces for this
-//!   intent (there is nothing else to enumerate in that case).
+//! - [`SketchFamilyStrategy`] wraps [`implementation::implementations_for_with`]'s
+//!   exhaustive, ranked list directly: for the same bindable-`Aggregate`
+//!   shape [`bind::implement_tree_with`] itself requires (single intent, no
+//!   `HAVING`), every entry becomes its own bound candidate.
 //! - [`SharedSubtreeStrategy`] wraps
 //!   `asap_types::pre_asap::cse::share_common_subtrees`'s sharing decision.
 //!   Wherever a [`TargetSubDAG`] already has two or more consumers (i.e.
@@ -79,14 +77,14 @@
 //!
 //! ## Non-goals (tracked separately, not attempted here)
 //!
-//! - **No search/selection logic.** `docs/design_docs/asap_aware_mapping.md`'s
+//! - **No search/selection-across-a-whole-plan logic.** `docs/design_docs/asap_aware_mapping.md`'s
 //!   replacement-plan-searching pseudocode — trying every `ReplacementStrategy`
 //!   against every candidate plan, deduplicating, iterating to a fixpoint,
 //!   then ranking by a `CostModel` — is a Cascades/Volcano-style search
-//!   engine, tracked as a separate follow-up. This module only needs
-//!   `replacements()` to be exhaustive and correct for one `TargetSubDAG` at
-//!   a time, mirroring [`implementation::implementation_for_with`]'s own
-//!   "exhaustive match, no silent fallthrough" discipline.
+//!   engine, tracked as a separate follow-up. `bind::implement_tree_with`'s
+//!   "keep the head" selection is a single-node stand-in for that, not the
+//!   real thing: it never compares whole candidate *plans*, only one node's
+//!   own candidates against each other via `cost_model.rank_candidates`.
 //! - **No workload-wide `TargetSubDAG` discovery pass.** Finding every
 //!   candidate node in a whole workload (walking every root, deduplicating by
 //!   `Rc` identity, computing real consumer counts) is exactly what PR #247's
@@ -96,29 +94,20 @@
 //!   This module's own tests build `TargetSubDAG`s directly, the same
 //!   hand-rolled-fixture style `bind.rs`/`implementation.rs`/`cost_model.rs`'s own
 //!   tests already use.
-//! - **[`implementation`]/[`bind`]'s existing single-pick *outward-facing*
-//!   behavior is unchanged.** [`implementation::implementation_for`] and
-//!   [`bind::implement_tree_with`] still return exactly the same
-//!   `Implementation`/`SummaryNode` they always did, for the same inputs.
-//!   What changed is internal: [`bind::implement_tree_with`] and this
-//!   module's [`SketchFamilyStrategy`] now both bottom out in the same
-//!   [`bind::bind_with_implementation`] primitive — the binding path
-//!   resolves one ranked `Implementation` and hands it there; this module
-//!   sizes every candidate `Implementation` itself and hands each one there
-//!   in turn — rather than this module working around the binding path via
-//!   a `CostModel`-forcing adapter, as it used to.
+//! - **[`implementation::implementations_for_with`]'s own outward-facing
+//!   behavior is unchanged.** Same inputs still produce the same exhaustive,
+//!   ranked list. What changed is who calls it and how much of the result
+//!   they keep — see "Selection" above.
 
 use std::rc::Rc;
 
-use asap_types::post_asap::{SketchKind, SummaryNode};
+use asap_types::post_asap::SummaryNode;
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::bind::{bind_with_implementation, bindable_intent};
 use crate::cost_model::{CostModel, DefaultCostModel};
-use crate::implementation::{
-    accuracy_budget, accuracy_target, implementation_for_with, summary_candidates, Implementation,
-};
+use crate::implementation::{implementations_for_with, Implementation};
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
 ///
@@ -168,9 +157,9 @@ impl<'a> TargetSubDAG<'a> {
 /// What a [`ReplacementSubDAG`] actually substitutes a [`TargetSubDAG`] with.
 ///
 /// Generalizes [`bind::implement_tree_with`]'s and
-/// [`implementation::implementation_for_with`]'s two possible *kinds* of answer —
-/// a post-ASAP binding decision, or a still-pre-ASAP structural alternative —
-/// from "the one they commit to" into "one candidate among several".
+/// [`implementation::implementations_for_with`]'s two possible *kinds* of
+/// answer — a post-ASAP binding decision, or a still-pre-ASAP structural
+/// alternative — from "the one kept" into "one candidate among several".
 #[derive(Debug, Clone)]
 pub enum Replacement {
     /// A fully bound post-ASAP summary decision — the same
@@ -226,12 +215,11 @@ pub trait ReplacementStrategy {
 /// every caller (same pattern `applicability::SketchApplicabilityRule` uses).
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 
-/// Wraps [`implementation::implementation_for_with`]/[`implementation::summary_candidates`]'s
-/// exhaustive match over the [`AggIntent`] vocabulary: for a bindable
-/// `Aggregate`, every candidate summary realization instead of just the one
-/// [`implementation::implementation_for_with`] commits to.
+/// Wraps [`implementation::implementations_for_with`]'s exhaustive, ranked
+/// list directly: for a bindable `Aggregate`, every valid candidate summary
+/// realization as its own [`ReplacementSubDAG`].
 ///
-/// Ranks (only to *order the enumeration*, never to drop a candidate) via a
+/// Ranked (only to *order the enumeration*, never to drop a candidate) via a
 /// [`CostModel`] — [`DefaultCostModel`] unless constructed with
 /// [`SketchFamilyStrategy::new`] — so a deployment-specific cost model's
 /// other hooks (`size_params`, `realize_extension`, `readout_extension`) are
@@ -255,8 +243,8 @@ impl SketchFamilyStrategy<'static> {
 impl<'a> SketchFamilyStrategy<'a> {
     /// A strategy that ranks/binds via `cost_model` instead of the built-in
     /// static preference order — the same customization point
-    /// [`bind::implement_tree_with`] and [`implementation::implementation_for_with`]
-    /// already offer.
+    /// [`bind::implement_tree_with`] and
+    /// [`implementation::implementations_for_with`] already offer.
     pub fn new(cost_model: &'a dyn CostModel) -> Self {
         Self { cost_model }
     }
@@ -271,139 +259,69 @@ impl ReplacementStrategy for SketchFamilyStrategy<'_> {
         let Some(intent) = bindable_intent(target.root) else {
             return Vec::new();
         };
-        // Exhaustive over `Implementation`'s variants — the same "no silent
-        // fallthrough" discipline `implementation::implementation_for_with`'s own
-        // match uses. Only `Sketch` has more than one candidate to enumerate
-        // (`summary_candidates`); every other variant is the *only*
-        // realization `implementation::implementation_for_with`'s dispatch
-        // produces for this intent, so there's nothing else to offer — bind
-        // the one `implementation` this branch already computed rather than
-        // re-deriving it a second time.
-        let implementation = implementation_for_with(intent, self.cost_model);
-        match &implementation {
-            Implementation::Sketch { .. } => summary_candidates(intent)
-                .iter()
-                .filter_map(|kind| {
-                    sketch_candidate(target.root, intent, kind.clone(), self.cost_model)
+        // `implementations_for_with` is already exhaustive and ranked — no
+        // separate dispatch needed here. Only `Sketch` has more than one
+        // candidate in practice (every other variant's own dispatch produces
+        // exactly one `Implementation`), but this loop doesn't need to know
+        // that; it just binds whatever the list contains.
+        implementations_for_with(intent, self.cost_model)
+            .into_iter()
+            .filter_map(|implementation| {
+                let rationale = describe_implementation(intent, &implementation);
+                let node =
+                    bind_with_implementation(target.root, implementation, self.cost_model).ok()?;
+                Some(ReplacementSubDAG {
+                    replacement: Replacement::Summary(node),
+                    rationale,
                 })
-                .collect(),
-            Implementation::ExactAggregate { kind, .. } => single_candidate(
-                target.root,
-                implementation.clone(),
-                self.cost_model,
-                format!(
-                    "{} realizes as an exact {kind:?} accumulator — the only realization \
-                     implementation::implementation_for produces for this intent (no approximate \
-                     candidate applies)",
-                    describe_intent(intent)
-                ),
-            ),
-            Implementation::PassThrough => single_candidate(
-                target.root,
-                implementation.clone(),
-                self.cost_model,
-                format!(
-                    "{} has no summary realization and stays a logical pass-through — the \
-                     only realization implementation::implementation_for produces for this intent",
-                    describe_intent(intent)
-                ),
-            ),
-            Implementation::Sample { kind, .. } => single_candidate(
-                target.root,
-                implementation.clone(),
-                self.cost_model,
-                format!(
-                    "{} realizes as a {kind:?} sample — the only realization the plugged-in \
-                     CostModel produced for this intent",
-                    describe_intent(intent)
-                ),
-            ),
-            Implementation::Wavelet { kind, .. } => single_candidate(
-                target.root,
-                implementation.clone(),
-                self.cost_model,
-                format!(
-                    "{} realizes as a {kind:?} wavelet transform — the only realization the \
-                     plugged-in CostModel produced for this intent",
-                    describe_intent(intent)
-                ),
-            ),
-            Implementation::StatModel { kind, .. } => single_candidate(
-                target.root,
-                implementation.clone(),
-                self.cost_model,
-                format!(
-                    "{} realizes as a {kind:?} statistical model — the only realization the \
-                     plugged-in CostModel produced for this intent",
-                    describe_intent(intent)
-                ),
-            ),
-        }
+            })
+            .collect()
     }
 }
 
-/// Bind `root` to the already-computed `implementation` (no candidate to
-/// steer towards) — the "only option" path for any [`Implementation`]
-/// category besides `Sketch`. Schema derivation cannot fail for a target
-/// that was already a legitimate part of the workload's tree, but
-/// [`bind_with_implementation`]'s signature is fallible (`ImplementError`),
-/// so a failure here — never expected in practice — degrades to "no
-/// candidate" rather than a panic, same conservatism as the rest of this
-/// strategy.
-fn single_candidate(
-    root: &QueryExpr,
-    implementation: Implementation,
-    cost_model: &dyn CostModel,
-    rationale: String,
-) -> Vec<ReplacementSubDAG> {
-    bind_with_implementation(root, implementation, cost_model)
-        .ok()
-        .map(|node| ReplacementSubDAG {
-            replacement: Replacement::Summary(node),
-            rationale,
-        })
-        .into_iter()
-        .collect()
-}
-
-/// Bind `root` to `kind` — one entry of
-/// [`summary_candidates(intent)`](summary_candidates) — sized the same way
-/// [`implementation::bind_summary_with`] would (via
-/// [`implementation::accuracy_budget`] and `cost_model.size_params`), then
-/// handed to [`bind_with_implementation`] — the same primitive
-/// [`bind::implement_tree_with`] itself bottoms out in for whichever
-/// candidate `cost_model` ranks first. This reuses that whole decision
-/// procedure (schema derivation, column resolution, readout construction)
-/// unchanged; it only supplies a different top-level `Implementation` than
-/// the ranked-first one.
-fn sketch_candidate(
-    root: &QueryExpr,
-    intent: &AggIntent,
-    kind: SketchKind,
-    cost_model: &dyn CostModel,
-) -> Option<ReplacementSubDAG> {
-    let accuracy = accuracy_target(intent)?;
-    let (eps, delta) = accuracy_budget(accuracy);
-    let params = cost_model.size_params(kind.clone(), intent, eps, delta);
-    let implementation = Implementation::Sketch {
-        kind: kind.clone(),
-        params,
-    };
-    let node = bind_with_implementation(root, implementation, cost_model).ok()?;
-    Some(ReplacementSubDAG {
-        replacement: Replacement::Summary(node),
-        rationale: format!(
+/// A human-readable rationale for one candidate `Implementation`, for
+/// [`ReplacementSubDAG::rationale`] text.
+fn describe_implementation(intent: &AggIntent, implementation: &Implementation) -> String {
+    match implementation {
+        Implementation::Sketch { kind, .. } => format!(
             "{} realizes as a {kind:?} sketch — one of implementation::summary_candidates' \
-             alternatives for this intent (asap_aware_mapping::implementation::implementation_for)",
+             alternatives for this intent \
+             (asap_aware_mapping::implementation::implementations_for_with)",
             describe_intent(intent)
         ),
-    })
+        Implementation::ExactAggregate { kind, .. } => format!(
+            "{} realizes as an exact {kind:?} accumulator — the only realization \
+             implementation::implementations_for_with produces for this intent (no approximate \
+             candidate applies)",
+            describe_intent(intent)
+        ),
+        Implementation::PassThrough => format!(
+            "{} has no summary realization and stays a logical pass-through — the \
+             only realization implementation::implementations_for_with produces for this intent",
+            describe_intent(intent)
+        ),
+        Implementation::Sample { kind, .. } => format!(
+            "{} realizes as a {kind:?} sample — the only realization the plugged-in \
+             CostModel produced for this intent",
+            describe_intent(intent)
+        ),
+        Implementation::Wavelet { kind, .. } => format!(
+            "{} realizes as a {kind:?} wavelet transform — the only realization the \
+             plugged-in CostModel produced for this intent",
+            describe_intent(intent)
+        ),
+        Implementation::StatModel { kind, .. } => format!(
+            "{} realizes as a {kind:?} statistical model — the only realization the \
+             plugged-in CostModel produced for this intent",
+            describe_intent(intent)
+        ),
+    }
 }
 
 /// A short human-readable label for an `AggIntent`, for
 /// [`ReplacementSubDAG::rationale`] text. Not exhaustive by design (unlike
 /// this crate's other `AggIntent` matches, e.g.
-/// [`implementation::implementation_for_with`]'s) — this is prose for a
+/// [`implementation::implementations_for_with`]'s) — this is prose for a
 /// rationale string, not a decision, so an unlisted variant just falls back
 /// to its `Debug` tag rather than forcing every future intent to be named
 /// here too (same rationale, and same shape, as
@@ -479,6 +397,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_types::post_asap::SketchKind;
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
     use asap_types::pre_asap::query_expr::{Reduction, Source};
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -558,7 +477,7 @@ mod tests {
     fn approximate_quantile_enumerates_every_summary_candidate() {
         // Quantile's candidate list is [Kll, DDSketch] (implementation::summary_candidates) —
         // every entry must come back as its own bound SummaryNode candidate,
-        // not just Kll (the CostModel-ranked head implementation_for_with commits to).
+        // not just Kll (the CostModel-ranked head implementations_for_with commits to).
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
@@ -604,8 +523,8 @@ mod tests {
 
     #[test]
     fn exact_accuracy_target_yields_exactly_one_pass_through_candidate() {
-        // Exact quantile has no sketch candidate at all — implementation_for
-        // commits to PassThrough, the only option, so exactly one candidate.
+        // Exact quantile has no sketch candidate at all — implementations_for_with
+        // produces PassThrough, the only option, so exactly one candidate.
         let intent = AggIntent::Quantile {
             col: None,
             q: 0.99,
@@ -646,7 +565,7 @@ mod tests {
 
     /// A custom `CostModel` doesn't change *which* candidates are enumerated
     /// (still every `summary_candidates` entry) — only which one
-    /// `implementation_for_with` itself would have picked, and how each
+    /// `implementations_for_with` itself would prefer first, and how each
     /// candidate's own params are sized.
     struct PreferDDSketch;
     impl CostModel for PreferDDSketch {
@@ -682,19 +601,16 @@ mod tests {
         assert_eq!(kinds.len(), 2);
     }
 
-    /// Enumerating a candidate for the *target* node must only steer that
-    /// node's own decision — a nested aggregate underneath it still gets the
-    /// `cost_model`-ranked default, not the target's forced candidate. This
-    /// is the behavior [`sketch_candidate`]'s [`bind_with_implementation`]
-    /// call gets for free (only the top node's `Implementation` is forced;
-    /// `bind_summary_agg`'s recursion into the child re-ranks normally via
-    /// `cost_model`) — the old `ForceSketchKind`-`CostModel`-adapter
-    /// implementation forced *every* `rank_candidates` call for the whole
-    /// recursive bind, which would have silently forced a nested Quantile to
-    /// DDSketch too whenever the outer target's DDSketch candidate was
-    /// enumerated.
+    /// Enumerating candidates for the *target* node must only steer that
+    /// node's own decision — a nested aggregate underneath it still gets its
+    /// own independent (`cost_model`-ranked) enumeration, not whatever the
+    /// caller happened to pick for the outer target. This is the behavior
+    /// [`bind::bind_with_implementation`]'s recursion (via
+    /// `bind::select_and_bind`) gets for free: only the top node's
+    /// `Implementation` is ever forced from outside; the child is always
+    /// re-enumerated fresh.
     #[test]
-    fn forcing_the_targets_candidate_does_not_leak_into_a_nested_aggregate() {
+    fn enumerating_the_targets_candidates_does_not_leak_into_a_nested_aggregate() {
         // outer: quantile(0.99, ...) over inner: quantile(0.5, m) — both
         // Quantile, so both share the [Kll, DDSketch] candidate list.
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
@@ -715,7 +631,7 @@ mod tests {
         assert_eq!(
             summary_family_kind(node),
             SketchKind::DDSketch,
-            "the outer (target) node must be the forced candidate"
+            "the outer (target) node must be the DDSketch candidate"
         );
 
         let asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr
@@ -730,7 +646,7 @@ mod tests {
             summary_family_kind(child),
             SketchKind::Kll,
             "the nested inner aggregate must still get the cost-model-ranked \
-             default (Kll), not inherit the outer target's forced DDSketch"
+             default (Kll), not inherit the outer target's DDSketch candidate"
         );
     }
 

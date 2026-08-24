@@ -2,7 +2,9 @@
 //!
 //! Walks a canonical pre-ASAP [`QueryExpr`] and emits the summary-bound
 //! post-ASAP IR ([`SummaryExpr`] / [`SummaryNode`] in `asap-sketch`). Per
-//! node, the [`implementation`](crate::implementation) decision picks the realization:
+//! node, [`replacement::SketchFamilyStrategy`](crate::replacement::SketchFamilyStrategy)
+//! enumerates every valid realization and this pass keeps the first
+//! (`cost_model`-preferred) one:
 //!
 //! - **Summary family** (sketch / sample / wavelet / statistical model) —
 //!   the `Aggregate` becomes a [`SummaryExpr::SummaryAgg`] carrying the
@@ -20,7 +22,25 @@
 //!
 //! Binding recurses through the `Aggregate` spine, so nested aggregates each
 //! get their own decision (`quantile(0.9, sum by (svc) (rate(m[5m]))))` binds
-//! KLL over an exact `Sum` accumulator over an exact `Rate` accumulator).
+//! KLL over an exact `Sum` accumulator over an exact `Rate` accumulator) —
+//! and each nested node's own candidate enumeration and selection is
+//! independent of its parent's.
+//!
+//! ## This pass is a selector over `ReplacementStrategy`, not a separate decision path
+//!
+//! [`implement_tree_with`] does not compute an `Implementation` on its own.
+//! It builds a [`TargetSubDAG`](crate::replacement::TargetSubDAG) for the
+//! node being bound, asks
+//! [`replacement::SketchFamilyStrategy`](crate::replacement::SketchFamilyStrategy)
+//! for every candidate [`Replacement`](crate::replacement::Replacement), and
+//! keeps the first one — the same list a caller who wants every alternative
+//! (rather than just the first) would get from calling
+//! `SketchFamilyStrategy::replacements` directly. [`bind_with_implementation`]
+//! is the shared low-level primitive both this pass and `SketchFamilyStrategy`
+//! bottom out in: given an *already-decided* [`Implementation`], turn it into
+//! a `SummaryNode`. See [`crate::replacement`]'s module docs for the reverse
+//! half of this relationship — `SketchFamilyStrategy` calls back into this
+//! module for that primitive and for [`bindable_intent`].
 //!
 //! ## Conservative fallbacks
 //!
@@ -45,7 +65,10 @@ use asap_types::pre_asap::schema::Schema;
 use thiserror::Error;
 
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
-use crate::implementation::{implementation_for_with, Implementation};
+use crate::implementation::Implementation;
+use crate::replacement::{
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
+};
 
 /// Errors from the pre-ASAP → post-ASAP binding pass.
 #[derive(Debug, Error)]
@@ -84,43 +107,67 @@ pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementErro
 /// Like [`implement_tree`], but ranks candidate summaries via `cost_model` (see
 /// [`crate::cost_model`]) instead of the built-in static preference order.
 ///
-/// Thin: resolve *which* [`Implementation`] `cost_model` ranks first for
-/// `expr`'s intent, then hand it to [`bind_with_implementation`] — the same
-/// primitive [`crate::replacement::SketchFamilyStrategy`] calls once per
-/// *candidate* `Implementation` instead of just the ranked-first one. This is
-/// the one place the two paths' outputs are actually assembled into a
-/// `SummaryNode`; ranking is the only thing that differs between them.
+/// A thin selector, not a second decision path — see the module docs. Binds
+/// a fresh `Rc<QueryExpr>` for `expr` (cheap: `QueryExpr::clone` only clones
+/// the top node, every descendant stays `Rc`-shared) so
+/// [`TargetSubDAG`](crate::replacement::TargetSubDAG) has the identity it
+/// needs; a caller that already holds `expr` as an `Rc` (e.g.
+/// [`implement_workload_with`]) should prefer passing that `Rc` straight
+/// into `SketchFamilyStrategy` itself to skip the extra clone.
 pub fn implement_tree_with(
     expr: &QueryExpr,
     cost_model: &dyn CostModel,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
-    match bindable_intent(expr) {
-        Some(intent) => bind_with_implementation(
-            expr,
-            implementation_for_with(intent, cost_model),
-            cost_model,
-        ),
-        None => logical(expr),
+    select_and_bind(&Rc::new(expr.clone()), cost_model)
+}
+
+/// The actual selector: build a [`TargetSubDAG`] for `root`, ask
+/// [`SketchFamilyStrategy`] for every candidate, and keep the first
+/// (`cost_model`-preferred) one. `root` must already be the caller's own
+/// `Rc` — never fabricated per recursion step — so this stays a single
+/// allocation at the outermost [`implement_tree_with`] call, not one per
+/// node.
+fn select_and_bind(
+    root: &Rc<QueryExpr>,
+    cost_model: &dyn CostModel,
+) -> Result<Rc<SummaryNode>, ImplementError> {
+    let target = TargetSubDAG::new(root);
+    match SketchFamilyStrategy::new(cost_model)
+        .replacements(&target)
+        .into_iter()
+        .next()
+    {
+        Some(ReplacementSubDAG {
+            replacement: Replacement::Summary(node),
+            ..
+        }) => Ok(node),
+        Some(ReplacementSubDAG {
+            replacement: Replacement::Rewrite(_),
+            ..
+        }) => {
+            unreachable!("SketchFamilyStrategy never returns a Rewrite candidate")
+        }
+        // No candidate at all: `root` isn't `bindable_intent` shape (or its
+        // intent has no realization `implementations_for_with` can't
+        // produce — never happens, that match is exhaustive) — the same
+        // conservative fallback `SketchFamilyStrategy::matches` uses.
+        None => logical(root),
     }
 }
 
-/// Bind `expr` to an already-decided [`Implementation`] for its top intent,
-/// instead of deriving one via [`implementation_for_with`]. The shared
-/// low-level primitive: [`implement_tree_with`] computes the
-/// `cost_model`-ranked `Implementation` and calls this;
-/// [`crate::replacement::SketchFamilyStrategy`] sizes each candidate
-/// `Implementation` itself (see
-/// [`implementation::accuracy_budget`](crate::implementation::accuracy_budget))
-/// and calls this once per candidate — one function turns a chosen
-/// `Implementation` into a `SummaryNode`, used by both the single-answer
-/// production path and the exhaustive-candidate path.
+/// Bind `expr` to an already-decided [`Implementation`] for its top intent.
+/// The shared low-level primitive: [`select_and_bind`] (and so
+/// [`implement_tree_with`]) calls this with whichever candidate it kept;
+/// [`crate::replacement::SketchFamilyStrategy`] calls this once per
+/// candidate it enumerates. One function turns a chosen `Implementation`
+/// into a `SummaryNode`, used identically by both.
 ///
 /// `expr` must still be the [`bindable_intent`] shape for `implementation` to
-/// have any effect; anything else falls back to [`logical`], same as
-/// [`implement_tree_with`]. Only `expr`'s own top-level decision is forced —
-/// recursion into `expr`'s child re-ranks normally via `cost_model`, the same
-/// as an ordinary [`implement_tree_with`] call, so forcing one target's
-/// candidate never leaks into that target's own nested aggregates.
+/// have any effect; anything else falls back to [`logical`]. Only `expr`'s
+/// own top-level decision is forced — recursion into `expr`'s child goes
+/// back through [`select_and_bind`] (fresh candidate enumeration, not a
+/// forced pick), so choosing one candidate for a target never leaks into
+/// that target's own nested aggregates.
 pub fn bind_with_implementation(
     expr: &QueryExpr,
     implementation: Implementation,
@@ -214,9 +261,9 @@ pub fn implement_workload_with<Id>(
             let result = match memo.get(&ptr) {
                 Some((cached, ShareDecision::Share)) => Ok(Rc::clone(cached)),
                 Some((_, ShareDecision::RecomputeIndependently)) => {
-                    implement_tree_with(&expr, cost_model)
+                    select_and_bind(&expr, cost_model)
                 }
-                None => implement_tree_with(&expr, cost_model).inspect(|node| {
+                None => select_and_bind(&expr, cost_model).inspect(|node| {
                     let count = consumer_count[&ptr];
                     let decision = if count > 1 {
                         let candidate = CseCandidate {
@@ -269,7 +316,7 @@ fn bind_summary_agg(
     node: &QueryExpr,
     reduction: &Reduction,
     intent: &AggIntent,
-    child: &QueryExpr,
+    child: &Rc<QueryExpr>,
     family: SummaryFamilyType,
     estimate: bool,
     cost_model: &dyn CostModel,
@@ -301,7 +348,7 @@ fn bind_summary_agg(
     // place that decides this; nothing downstream re-derives it.
     let agg = Rc::new(SummaryNode {
         expr: SummaryExpr::SummaryAgg {
-            child: implement_tree_with(child, cost_model)?,
+            child: select_and_bind(child, cost_model)?,
             family,
             col,
             reduction: reduction.clone(),
@@ -378,7 +425,7 @@ fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> S
         }
         other => {
             unreachable!(
-                "no summary realization for {other:?} (implementation::implementation_for)"
+                "no summary realization for {other:?} (implementation::implementations_for_with)"
             )
         }
     }
@@ -386,11 +433,11 @@ fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> S
 
 /// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
 /// `SummaryFamilyType::Plain`. Public so a deployment can force a node it
-/// knows `implement_tree_in_with` would otherwise actively (mis)bind —
-/// e.g. an intent this crate's `implementation::implementation_for` maps to an
-/// accumulator kind the deployment's runtime doesn't actually implement —
-/// through the same fallback this crate's own dispatch uses, without
-/// duplicating the schema-lift logic.
+/// knows [`implement_tree_with`] would otherwise actively (mis)bind —
+/// e.g. an intent this crate's `implementation::implementations_for_with`
+/// maps to an accumulator kind the deployment's runtime doesn't actually
+/// implement — through the same fallback this crate's own dispatch uses,
+/// without duplicating the schema-lift logic.
 pub fn logical(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     let schema = expr.output_schema()?;
     Ok(Rc::new(SummaryNode {

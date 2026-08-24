@@ -9,7 +9,7 @@
 //! interface every deployment's cost model plugs into, so [`implementation`]'s
 //! summary selection has exactly one extension point instead of forcing
 //! each downstream (ASAPCollector + ASAPQuery-backend, ASAPFusion, …) to
-//! fork [`implementation::implementation_for`].
+//! fork [`implementation::implementations_for_with`].
 //!
 //! This trait is scoped to the approximate-**sketch** family specifically
 //! ([`CostModel::rank_candidates`]/[`size_params`](CostModel::size_params)
@@ -26,8 +26,7 @@
 //! than overloading these ones across incompatible `Kind`/`Params` types.
 //!
 //! Every entry point that doesn't take an explicit `&dyn CostModel`
-//! ([`implementation_for`](crate::implementation::implementation_for),
-//! [`implement_tree`](crate::bind::implement_tree)) runs against
+//! ([`implement_tree`](crate::bind::implement_tree)) runs against
 //! [`DefaultCostModel`], so a deployment that never plugs in its own cost
 //! model keeps today's static-preference-order behavior exactly, byte for
 //! byte.
@@ -172,7 +171,7 @@ pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
 /// intent, in an arbitrary static preference order (issue #98's "one home"
 /// for the candidate set). A `CostModel` re-orders that list under real,
 /// deployment-specific cost knowledge this crate has no way to know about —
-/// [`implementation::implementation_for_with`] implements whichever candidate ends
+/// [`implementation::implementations_for_with`] implements whichever candidate ends
 /// up first after ranking.
 pub trait CostModel {
     /// Rank `candidates` (as returned by
@@ -183,9 +182,9 @@ pub trait CostModel {
     /// available in their deployment, but MUST NOT invent a candidate that
     /// wasn't in the input — an unknown [`SketchKind`] has no
     /// [`SketchParams`](asap_types::post_asap::SketchParams) sizing logic in
-    /// [`implementation::implementation_for_with`] and binding it will panic.
+    /// [`implementation::implementations_for_with`] and binding it will panic.
     /// Returning an empty `Vec` means "no candidate is acceptable";
-    /// `implementation_for_with` treats that the same as `candidates`
+    /// `implementations_for_with` treats that the same as `candidates`
     /// having been empty to begin with.
     fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind>;
 
@@ -196,7 +195,7 @@ pub trait CostModel {
     /// Splitting sizing out from candidate selection lets a deployment own
     /// its own parameter-sizing math (e.g. an empirically-tuned table, or
     /// discrete rungs required by a downstream catalog) without forking
-    /// [`implementation::implementation_for_with`] — the same "one extension
+    /// [`implementation::implementations_for_with`] — the same "one extension
     /// point" rationale as `rank_candidates`, one level deeper. Default:
     /// [`implementation::default_size_params`], `asap-plan`'s built-in formulas
     /// (unchanged) — a deployment that only needs to reorder candidates,
@@ -213,7 +212,7 @@ pub trait CostModel {
 
     /// Realize an `AggIntent::Extension { ext_kind, payload }` — a
     /// deployment-specific intent shape core has no realization opinion
-    /// for (issue #131). `implementation::implementation_for_with` consults this
+    /// for (issue #131). `implementation::implementations_for_with` consults this
     /// for every `Extension` node instead of hardcoding `PassThrough`
     /// (issue #150). Default: `PassThrough` — preserves today's behavior
     /// for every deployment that doesn't override this, exactly like
