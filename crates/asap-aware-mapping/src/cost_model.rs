@@ -172,28 +172,28 @@ pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
     Cost(weight * UNIT)
 }
 
-/// Ranks the candidate summary families for one [`AggIntent`], best choice
+/// Ranks the candidate sketch algorithms for one [`AggIntent`], best choice
 /// first.
 ///
-/// [`replacement::summary_candidates`] returns every family that *can* answer an
+/// [`replacement::summary_candidates`] returns every algorithm that *can* answer an
 /// intent, in an arbitrary static preference order (issue #98's "one home"
 /// for the candidate set). A `CostModel` re-orders that list under real,
 /// deployment-specific cost knowledge this crate has no way to know about —
-/// `replacement::implementations_for_with` implements whichever candidate ends
-/// up first after ranking.
+/// `replacement::implementations_for_with` constructs every candidate in the
+/// resulting order.
 pub trait CostModel {
     /// Rank `candidates` (as returned by
     /// [`summary_candidates`](crate::replacement::summary_candidates)) for
     /// `intent`, best choice first.
     ///
-    /// Implementations MAY reorder freely and MAY drop entries that aren't
-    /// available in their deployment, but MUST NOT invent a candidate that
-    /// wasn't in the input — an unknown [`SketchAlgorithm`] has no
-    /// [`SketchParams`](asap_types::post_asap::SketchParams) sizing logic in
-    /// `replacement::implementations_for_with` and binding it will panic.
-    /// Returning an empty `Vec` means "no candidate is acceptable";
-    /// `implementations_for_with` treats that the same as `candidates`
-    /// having been empty to begin with.
+    /// Implementations MAY reorder freely, but MUST return exactly the input
+    /// candidates: no additions, removals, or duplicates. Candidate legality
+    /// and availability belong to replacement generation, not costing; letting
+    /// this hook filter would violate [`ReplacementStrategy`]'s exhaustive,
+    /// never-prune contract. This invariant is checked at every production call
+    /// site, and a violation panics with a contract error.
+    ///
+    /// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
     fn rank_candidates(
         &self,
         intent: &AggIntent,
@@ -348,6 +348,25 @@ pub trait CostModel {
     }
 }
 
+/// Apply [`CostModel::rank_candidates`] and enforce its permutation-only
+/// contract at the boundary where planner code consumes the result.
+pub(crate) fn validated_candidate_ranking(
+    cost_model: &dyn CostModel,
+    intent: &AggIntent,
+    candidates: &[SketchAlgorithm],
+) -> Vec<SketchAlgorithm> {
+    let ranked = cost_model.rank_candidates(intent, candidates);
+    let mut expected = candidates.to_vec();
+    let mut actual = ranked.clone();
+    expected.sort();
+    actual.sort();
+    assert_eq!(
+        actual, expected,
+        "CostModel::rank_candidates must return a permutation of its input; candidate generation is exhaustive and cost models may not add, remove, or duplicate candidates"
+    );
+    ranked
+}
+
 /// The default cost model: preserves [`summary_candidates`]'s built-in static
 /// order and [`replacement::default_size_params`]'s built-in sizing unchanged.
 ///
@@ -450,8 +469,50 @@ mod tests {
     fn custom_cost_model_can_reorder_candidates() {
         let intent = default_cardinality();
         let candidates = summary_candidates(&intent);
-        let ranked = AlwaysPreferLast.rank_candidates(&intent, candidates);
+        let ranked = validated_candidate_ranking(&AlwaysPreferLast, &intent, candidates);
         assert_eq!(ranked.first(), candidates.last());
+    }
+
+    struct DropsLast;
+
+    impl CostModel for DropsLast {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            candidates[..candidates.len() - 1].to_vec()
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "must return a permutation of its input")]
+    fn candidate_ranking_rejects_filtering() {
+        let intent = default_cardinality();
+        let candidates = summary_candidates(&intent);
+        validated_candidate_ranking(&DropsLast, &intent, candidates);
+    }
+
+    struct DuplicatesFirst;
+
+    impl CostModel for DuplicatesFirst {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            let mut ranked = candidates.to_vec();
+            ranked.push(candidates[0].clone());
+            ranked
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "must return a permutation of its input")]
+    fn candidate_ranking_rejects_additions_and_duplicates() {
+        let intent = default_cardinality();
+        let candidates = summary_candidates(&intent);
+        validated_candidate_ranking(&DuplicatesFirst, &intent, candidates);
     }
 
     /// A deployment that only overrides `rank_candidates` keeps

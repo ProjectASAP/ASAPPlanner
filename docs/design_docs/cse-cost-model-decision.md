@@ -2,7 +2,7 @@
 
 ## Context
 
-[`asap_types::pre_asap::cse::share_common_subtrees`](../crates/types/src/pre_asap/cse.rs)
+[`asap_types::pre_asap::cse::share_common_subtrees`](../../crates/types/src/pre_asap/cse.rs)
 (issue #223 stages 1-2, PR #235) already *detects* every structurally-identical,
 legally-shareable (`Schema::unique_keys`-gated) subtree and shares it
 **unconditionally** — there is no cost gate on top of legality. This document
@@ -20,7 +20,7 @@ decides the framework for stage 4, "wire workload-level CSE credit into
 ## Decision: cost-based (Volcano/Cascades), implemented for real
 
 This lands as an actual cost comparison, not a documented-but-unimplemented
-shape. [`CostModel::cse_share_decision`](../crates/asap-aware-mapping/src/cost_model.rs)
+shape. [`CostModel::cse_share_decision`](../../crates/asap-aware-mapping/src/cost_model.rs)
 compares two real, overridable cost estimates for every CSE candidate with
 two or more consumers:
 
@@ -46,19 +46,14 @@ cost comparison does, without needing a separately hardcoded cheap-threshold
 carve-out — a cheap-to-recompute candidate naturally loses the comparison on
 its own.
 
-Why this doesn't need its own, separate search infrastructure: **this
-paragraph predates issue #252's MEMO-based search engine** (`PlanSpace`/
-`MemoGroup`, now living in `replacement.rs` — a real Volcano/Cascades-style
-candidate space, since folded in from what was PR #263). That engine exists
-for enumerating and ranking the *much* larger candidate space (every summary
-family choice at every site, workload-wide). This specific decision — share
-vs. don't, for one already-detected CSE candidate — still doesn't need to be
-re-derived by that machinery: it's binary, so `PlanSpace::cost_sorted`'s
-ranking step reuses one direct `CostModel::cse_share_decision` comparison per
-group rather than a separate search, the same policy this section originally
-argued for (weigh real costs, don't apply a fixed rule) — it's just now one
-ranking step *inside* the bigger search engine's output, not a standalone
-decision with no search engine around it at all. `search_workload_with`'s
+This decision does not need search infrastructure of its own. Issue #252's
+MEMO-based search engine (`PlanSpace`/`MemoGroup` in `replacement.rs`) already
+enumerates and ranks the larger, workload-wide candidate space. The choice
+between sharing and recomputing one already-detected CSE candidate is binary,
+so `PlanSpace::cost_sorted` reuses one direct
+`CostModel::cse_share_decision` comparison per group. This preserves the
+policy described here—compare costs rather than applying a fixed rule—inside
+the larger search engine. `search_workload_with`'s
 target-discovery pass still computes the true `consumer_count` for each
 candidate via a whole-workload traversal before any ranking happens — the
 decision is made from full knowledge of the workload's sharing structure, the
@@ -75,7 +70,7 @@ gate) and the cost-aware decision is applied downstream, in
 
 ## Where it hooks in
 
-[`PlanSpace::cost_sorted`](../crates/asap-aware-mapping/src/replacement.rs)
+[`PlanSpace::cost_sorted`](../../crates/asap-aware-mapping/src/replacement.rs)
 is where this hooks in today. `search_workload_with` computes each shared
 subtree's true `consumer_count` across the whole workload up front (the same
 role `implement_workload_with`'s pre-pass used to play, before that function
@@ -83,15 +78,14 @@ was retired along with `bind.rs` — this crate no longer commits to one
 physically-materialized answer at all; picking and building one final
 `SummaryNode` per shared subtree is a downstream deployment's job, not this
 crate's). For a `MemoGroup` whose candidates are a
-[`SharedSubtreeStrategy`](../crates/asap-aware-mapping/src/replacement.rs)
+[`SharedSubtreeStrategy`](../../crates/asap-aware-mapping/src/replacement.rs)
 share-vs-recompute pair, `cost_sorted`'s ranking step (`rank_group`/
 `cse_preference`) asks `CostModel::cse_share_decision` once per group — using
 one representative bound `SummaryNode` built just for that comparison, not
 cached anywhere — and sorts the pair so the preferred candidate (`Share` or
 `RecomputeIndependently`) comes first. Both candidates are still returned;
-ranking never drops one (see Rule 2 in `docs/design_docs/asap_aware_mapping.md`'s
-mental-model section — a `CostModel` orders and parameterizes, it never
-prunes).
+ranking never drops one: a `CostModel` orders and parameterizes candidates; it
+does not prune them.
 
 ## Defaults
 

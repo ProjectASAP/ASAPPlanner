@@ -686,7 +686,11 @@ fn sketch_implementations(
     cost_model: &dyn CostModel,
 ) -> Vec<Implementation> {
     let (eps, delta) = accuracy_budget(accuracy);
-    let ranked = cost_model.rank_candidates(intent, summary_candidates(intent));
+    let ranked = crate::cost_model::validated_candidate_ranking(
+        cost_model,
+        intent,
+        summary_candidates(intent),
+    );
     ranked
         .into_iter()
         .map(|algorithm| {
@@ -1685,7 +1689,7 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
             })
             .collect();
         if let Some(kinds) = kinds {
-            let order = cost_model.rank_candidates(intent, &kinds);
+            let order = crate::cost_model::validated_candidate_ranking(cost_model, intent, &kinds);
             ranked.sort_by_key(|c| {
                 let kind = match &c.replacement {
                     Replacement::Summary(node) => sketch_kind_of(node),

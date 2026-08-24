@@ -101,7 +101,7 @@ The diagram below follows one query (or a whole workload) all the way from its f
                                    v
               explanation::explain_replacements /
               explain_replacements_with — reads PlanSpace, copies each
-              surviving candidate's own rationale, tags the result
+              relevant candidate's own rationale, tags the result
               with node_hash
                                    |
                                    v
@@ -317,7 +317,7 @@ In short: `ReplacementStrategy` enumerates, packages, and binds every candidate,
 
 `CostModel` covers every deployment-specific numeric or configuration decision—not only which candidate is cheapest. For example, sketch sizing trades memory and update cost for accuracy, so it belongs here too.
 
-The crate cannot hardcode real deployment costs: `asap-plan` depends on `asap_ir`, not on a runtime or deployment model. Most hooks therefore provide the crate's built-in static behavior as a default. Override only the decisions your deployment needs to change.
+The crate cannot hardcode real deployment costs: `asap-aware-mapping` depends on `asap-types`, not on a runtime or deployment model. Most hooks therefore provide the crate's built-in static behavior as a default. Override only the decisions your deployment needs to change.
 
 | Hook | Use it to | Default? |
 |---|---|---|
@@ -328,6 +328,7 @@ The crate cannot hardcode real deployment costs: `asap-plan` depends on `asap_ir
 | `cse_recompute_cost` | Estimate independent recomputation | Yes |
 | `cse_shared_maintenance_cost` | Estimate shared maintenance | Yes |
 | `cse_share_decision` | Choose sharing or recomputation | Yes |
+| `estimate_cost` | Attach a comparable numeric cost to a replacement | Returns `NaN`; `DefaultCostModel` provides real values |
 
 - **`rank_candidates`** — order the sketch candidates for one `AggIntent`, best first. This is the only required hook.
 
@@ -379,7 +380,7 @@ The crate cannot hardcode real deployment costs: `asap-plan` depends on `asap_ir
   fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> Cost;
   ```
 
-  Both hooks return `Cost`, currently a unitless `f64` newtype. The wrapper allows the type to grow later—for example, to separate CPU, memory, and network cost—without changing every hook signature.
+  Both hooks return `Cost`, currently a unitless `f64` newtype. The wrapper allows the type to grow later—for example, to separate CPU, memory, and network costs—without changing every hook signature.
 
 - **`cse_share_decision`** — choose between one shared summary and independent recomputation at each consumer. By default, it shares when maintenance cost is no greater than total recomputation cost. Override the two cost inputs first; override this decision hook only when you need a different policy.
 
@@ -387,7 +388,17 @@ The crate cannot hardcode real deployment costs: `asap-plan` depends on `asap_ir
   fn cse_share_decision(&self, candidate: &CseCandidate) -> ShareDecision;
   ```
 
-A custom cost model does not necessarily need to override every hook. The current tests include a model that overrides only `rank_candidates`, relying on defaults for the rest.
+- **`estimate_cost`** — attach a comparable numeric cost to an already-constructed replacement. `PlanSpace::cost_sorted` calls it for every candidate and keeps the returned values aligned with the ranked candidates. The trait default returns `f64::NAN` deliberately; override it when a custom model's callers need displayable or otherwise consumable numeric costs. `DefaultCostModel` provides real values derived from its CSE cost hooks.
+
+  ```rust
+  fn estimate_cost(
+      &self,
+      candidate: &ReplacementSubDAG,
+      target: &TargetSubDAG<'_>,
+  ) -> f64;
+  ```
+
+A custom cost model does not necessarily need to override every hook. The current tests include a model that overrides only `rank_candidates`, relying on defaults for the rest. Such a minimal model inherits `estimate_cost`'s `NaN` placeholder; it must also override `estimate_cost` if consumers require numeric costs.
 
 ---
 
@@ -443,7 +454,7 @@ pub enum SketchKind {
 
 `SketchKind::new(algorithm, params)` is the one place an `(algorithm, params)` pair gets classified into its category — construct through it rather than naming a variant directly, so a new algorithm can't drift out of sync with its category. `.algorithm()`/`.params()` pull the committed pair back out regardless of which category variant it's in.
 
-Where this matters in practice: `CostModel::rank_candidates`/`size_params`, `implementation::implementations_for_with`, and `SketchAlgorithmStrategy`'s candidate enumeration all operate one level down, at **algorithm** — `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` only shows up once an algorithm has actually been picked and sized — on `Implementation::Sketch(SketchKind)` and `SummaryFamilyType::Sketch(SketchKind)`, both single-field wrapping the already-committed kind.
+Where this matters in practice: `CostModel::rank_candidates`/`size_params`, `replacement.rs`'s private `implementations_for_with`, and `SketchAlgorithmStrategy`'s candidate enumeration all operate one level down, at **algorithm** — `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` only shows up once an algorithm has actually been picked and sized — on `Implementation::Sketch(SketchKind)` and `SummaryFamilyType::Sketch(SketchKind)`, both single-field wrappers around the already-committed kind.
 
 No other family needs this extra level today — `Sample`/`Wavelet`/`StatModel` are each a flat `(Kind, Params)` pair, same shape `Sketch` used to be before this split. `Sketch` grew a third level because it's the one family with more than one algorithm per purpose (KLL vs. DDSketch both answer `Quantile`).
 
@@ -1073,7 +1084,7 @@ fn rank_candidates(
 
 The returned vector should rank candidates from most to least preferred.
 
-It should rank candidates that were supplied to it rather than invent unrelated sketch algorithms.
+It must return a permutation of the supplied candidates: every input candidate exactly once, with no additions or removals. Planner call sites enforce this contract and panic if a cost model violates it.
 
 ---
 
@@ -1183,6 +1194,22 @@ fn cse_share_decision(
 ```
 
 The replacement-strategy layer should still expose both valid alternatives where appropriate. This hook is the cost-sensitive decision point for code paths that need to commit to one answer.
+
+---
+
+#### `estimate_cost`
+
+Use when callers need a comparable numeric cost for each replacement, in addition to relative ordering.
+
+```rust
+fn estimate_cost(
+    &self,
+    candidate: &ReplacementSubDAG,
+    target: &TargetSubDAG<'_>,
+) -> f64;
+```
+
+The default returns `f64::NAN`, making the absence of a numeric model explicit. Override this hook when passing the model to `PlanSpace::cost_sorted` if downstream code displays or otherwise consumes the `costs` values. Prefer to derive the result from the same inputs used by `rank_candidates` and the CSE cost hooks so numeric costs do not disagree with relative ordering.
 
 ---
 
@@ -1410,10 +1437,11 @@ When adding a new cost model:
 
 - [ ] Override only the hooks whose behavior should change.
 - [ ] Keep semantic applicability outside the cost model.
-- [ ] Use `rank_candidates` for family preference.
+- [ ] Use `rank_candidates` for algorithm preference; return every input candidate exactly once.
 - [ ] Use `size_params` for accuracy-to-parameter mapping.
 - [ ] Use extension hooks for extension-defined implementations/readouts.
 - [ ] Use CSE hooks for recompute-vs.-sharing costs.
+- [ ] Override `estimate_cost` if consumers require numeric costs instead of `NaN`.
 - [ ] Test the hook directly.
 - [ ] Test integration through a consumer such as `SketchAlgorithmStrategy`.
 - [ ] Verify that changing cost preferences does not silently remove valid replacement candidates.

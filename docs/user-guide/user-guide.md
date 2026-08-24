@@ -87,16 +87,18 @@ cargo run -p asap-devtools --example canonical_examples
 
 ## As a library
 
-Neither crate is published to crates.io — depend on them by path (inside this workspace) or by git:
+These crates are not published to crates.io—depend on them by path (inside this workspace) or by Git:
 
 ```toml
 # from another crate in this workspace
 asap-frontend-promql = { path = "../frontend-promql" }   # or asap-frontend-sql
 asap-aware-mapping = { path = "../asap-aware-mapping" }
+asap-types = { path = "../types" }
 
 # from an external codebase
 asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-frontend-promql" }
 asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-aware-mapping" }
+asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-types" }
 ```
 
 ### Step 1 — get the pre-ASAP IR
@@ -146,10 +148,6 @@ else {
 };
 // post_asap: Rc<SummaryNode> — the SummaryExpr DAG
 ```
-
-`implementations_for_with(&AggIntent, &dyn CostModel) -> Vec<Implementation>` is the lower-level
-enumeration `SketchAlgorithmStrategy` wraps, if you only need the per-node decision (sketch, exact
-accumulator, or pass-through) without binding it into a `SummaryNode`.
 
 `SketchAlgorithmStrategy::new(&dyn CostModel)` (vs. `default_cost_model()`) is the extension point for
 a deployment that wants its own candidate ranking or parameter sizing instead of this crate's
