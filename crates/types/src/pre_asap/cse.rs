@@ -164,7 +164,10 @@ impl InternTable {
 /// letting it *persist* across every node in one bottom-up pass (as
 /// [`InternTable`] does via its own `hash_cache` field), rather than
 /// starting a new one per call.
-pub(crate) type HashCache = HashMap<*const QueryExpr, u64>;
+///
+/// `pub` (not `pub(crate)`) for the same reason [`structural_hash`] itself
+/// is — see that function's doc.
+pub type HashCache = HashMap<*const QueryExpr, u64>;
 
 /// Coarse structural hash used only to bucket [`InternTable::intern`]'s
 /// candidate search — never the actual sharing decision (`PartialEq` is).
@@ -194,19 +197,26 @@ pub(crate) type HashCache = HashMap<*const QueryExpr, u64>;
 /// [`dag_node_count`]'s own DAG-vs-tree fix (issue #212/#223/#237's stage
 /// 4) in spirit, applied to hashing instead of counting.
 ///
-/// `pub(crate)` (not private) so [`dag_export`](crate::dag_export) can call
-/// this exact function for its exported nodes' `hash` field instead of
-/// maintaining its own parallel reimplementation — issue #223 stage 3. That
-/// makes `tools/dag-viewer`'s "shared subtree" highlighting reflect this
-/// module's real hashing, not a lookalike computed a different way; see the
-/// module doc's "Landing plan" section. A NaN/infinite `f64` makes JSON
-/// serialization fail; falling back to a fixed hash just puts every such
-/// node in one (larger, still `PartialEq`-disambiguated) bucket.
+/// `pub` (not private, not just `pub(crate)`) for two reasons: within this
+/// crate, [`dag_export`](crate::dag_export) calls this exact function for
+/// its exported nodes' `hash` field instead of maintaining its own parallel
+/// reimplementation (issue #223 stage 3) — that makes `tools/dag-viewer`'s
+/// "shared subtree" highlighting reflect this module's real hashing, not a
+/// lookalike computed a different way; see the module doc's "Landing plan"
+/// section. Outside this crate, `asap_aware_mapping::search`'s
+/// candidate-plan MEMO (issue #252) reuses this for deduping
+/// `ReplacementSubDAG` rewrites, rather than forking a second,
+/// independently-drifting structural hash — still governed by the same
+/// non-negotiable rule stated above: a caller MUST pair this with a real
+/// `PartialEq` check before treating two nodes as the same; this hash alone
+/// never decides anything. A NaN/infinite `f64` makes JSON serialization
+/// fail; falling back to a fixed hash just puts every such node in one
+/// (larger, still `PartialEq`-disambiguated) bucket.
 ///
 /// Exhaustive over every `QueryExpr` variant, matching [`rebuild_children`]
 /// in which fields count as an operator child (must stay in sync — a new
 /// variant fails to compile in both places until both are extended).
-pub(crate) fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
+pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
     use QueryExpr::*;
 
     fn child_hash(child: &Rc<QueryExpr>, cache: &mut HashCache) -> u64 {

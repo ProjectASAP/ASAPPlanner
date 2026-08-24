@@ -29,8 +29,6 @@
 //!
 //! ## Status
 //!
-//! Three real occupants and one stub:
-//!
 //! - [`implementation`] — [`implementation::implementations_for_with`] is
 //!   where every valid realization of an `AggIntent` gets decided: exhaustive
 //!   and ranked (most-preferred first via a `CostModel`), sized to the
@@ -68,6 +66,16 @@
 //!   deployment's cost-based sketch selection plugs into (issues #6, #33).
 //!   `asap-plan` itself only ships [`DefaultCostModel`](cost_model::DefaultCostModel),
 //!   which preserves [`implementation`]'s built-in static preference order.
+//! - [`search`] — the Cascades/Volcano-style candidate-plan search engine
+//!   (issue #252, part of #33) `docs/design_docs/asap_aware_mapping.md` stubs out as
+//!   pseudocode: [`search::search_workload`]/[`search::search_workload_with`]
+//!   walk a whole workload, discovering every [`replacement::TargetSubDAG`]
+//!   site and every candidate each registered [`ReplacementStrategy`]
+//!   proposes for it, deduped into a [`search::PlanSpace`] of Cascades-style
+//!   [`search::MemoGroup`]s rather than a flat list of whole plans. No new
+//!   decision logic lives here either — see that module's docs for how it
+//!   reuses [`replacement`]'s strategies and [`cost_model`]'s `CostModel`
+//!   for the final ranking step.
 //!
 //! ## Terminology — "bind" already means three different things nearby;
 //! this crate's own logical→physical step is named "implementation" instead
@@ -114,6 +122,7 @@ pub mod bind;
 pub mod cost_model;
 pub mod implementation;
 pub mod replacement;
+pub mod search;
 
 pub use bind::{implement_workload, implement_workload_with, ImplementError};
 pub use cost_model::{CostModel, DefaultCostModel};
@@ -121,4 +130,8 @@ pub use implementation::{implementations_for_with, summary_candidates, Implement
 pub use replacement::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy,
     SketchFamilyStrategy, TargetSubDAG,
+};
+pub use search::{
+    default_strategies, default_strategies_with, search_workload, search_workload_with, MemoGroup,
+    PlanSpace, RankedGroup, MAX_SEARCH_ITERATIONS,
 };
