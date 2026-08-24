@@ -294,7 +294,9 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pre_asap::query_expr::{GroupKeys, ProjectItem, Source};
+    use crate::pre_asap::query_expr::{
+        GroupKeys, ProjectItem, Source, WindowFrame, WindowFrameBound, WindowFrameUnits,
+    };
     use crate::pre_asap::schema::{Column, DataType, Schema};
     use crate::types::AccuracyTarget;
 
@@ -473,6 +475,16 @@ mod tests {
         }
     }
 
+    /// `ROW_NUMBER` ignores its frame clause, so the top-k rewrite doesn't care
+    /// what's in it; any concrete frame works as fixture data.
+    fn rownumber_frame() -> WindowFrame {
+        WindowFrame {
+            units: WindowFrameUnits::Rows,
+            start_bound: WindowFrameBound::Preceding(ScalarValue::Null),
+            end_bound: WindowFrameBound::Following(ScalarValue::Null),
+        }
+    }
+
     /// `Filter{ rn(3) <= 5 } { SQLWindowFunc{ RowNumber, PARTITION BY region(2),
     /// ORDER BY col(2) DESC } { agg } }`.
     fn rownumber_topk(agg: QueryExpr) -> QueryExpr {
@@ -485,6 +497,7 @@ mod tests {
                 ascending: false,
                 nulls_first: true,
             }],
+            frame: rownumber_frame(),
             output_name: "rn".into(),
             child: Rc::new(agg),
         };
@@ -567,6 +580,7 @@ mod tests {
                 ascending: false,
                 nulls_first: true,
             }],
+            frame: rownumber_frame(),
             output_name: "rn".into(),
             child: Rc::new(grouped(AggIntent::Count {
                 accuracy: AccuracyTarget::Exact,

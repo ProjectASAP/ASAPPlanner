@@ -350,6 +350,7 @@ pub(crate) fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
             args,
             partition_by,
             order_by,
+            frame,
             output_name,
             child,
         } => {
@@ -361,6 +362,7 @@ pub(crate) fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
                     args,
                     partition_by,
                     order_by,
+                    frame,
                     output_name,
                 ),
             );
@@ -666,6 +668,7 @@ fn rebuild_children(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
             args,
             partition_by,
             order_by,
+            frame,
             output_name,
             child,
         } => SQLWindowFunc {
@@ -673,6 +676,7 @@ fn rebuild_children(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
             args,
             partition_by,
             order_by,
+            frame,
             output_name,
             child: intern_child(table, child),
         },

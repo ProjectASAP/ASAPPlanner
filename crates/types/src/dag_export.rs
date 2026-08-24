@@ -440,6 +440,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             args,
             partition_by,
             order_by,
+            frame,
             output_name,
             child,
         } => {
@@ -449,6 +450,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
                 "args": args,
                 "partition_by": partition_by,
                 "order_by": order_by,
+                "frame": frame,
                 "output_name": output_name,
             });
             push_node(

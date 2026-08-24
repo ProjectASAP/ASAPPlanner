@@ -9,7 +9,7 @@ use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::{
     AggIntent, CompareOpKind, GroupKeys, JoinKind, QueryExpr, Reduction, ScalarValue, Source,
-    WindowFuncKind,
+    WindowFrameBound, WindowFrameUnits, WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
@@ -720,6 +720,72 @@ async fn window_aggregate_lowers_to_windowfunc() {
     };
     assert_eq!(*func, WindowFuncKind::Sum);
     assert_eq!(args, &vec![QueryExpr::Column(3)], "SUM(bytes) → arg col 3");
+}
+
+// ── Window frames (issue #268) ───────────────────────────────────────────────
+
+/// The frame clause must actually reach the IR, not just the display string:
+/// three window frames that differ semantically must lower to different
+/// `SQLWindowFunc.frame` values.
+#[tokio::test]
+async fn window_frame_is_captured_not_dropped() {
+    let default_frame =
+        lower("SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts) FROM metrics")
+            .await;
+    let two_preceding = lower(
+        "SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts \
+         ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM metrics",
+    )
+    .await;
+    let unbounded_following = lower(
+        "SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts \
+         ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM metrics",
+    )
+    .await;
+
+    let frame_of = |qe: &QueryExpr| {
+        let QueryExpr::SQLWindowFunc { frame, .. } = find_windowfunc(qe).unwrap() else {
+            unreachable!();
+        };
+        frame.clone()
+    };
+    let (a, b, c) = (
+        frame_of(&default_frame),
+        frame_of(&two_preceding),
+        frame_of(&unbounded_following),
+    );
+    assert_ne!(a, b, "default frame vs ROWS 2 PRECEDING must differ");
+    assert_ne!(
+        a, c,
+        "default frame vs ROWS CURRENT..UNBOUNDED FOLLOWING must differ"
+    );
+    assert_ne!(b, c);
+
+    assert_eq!(b.units, WindowFrameUnits::Rows);
+    assert_eq!(
+        b.start_bound,
+        WindowFrameBound::Preceding(ScalarValue::Int64(2))
+    );
+    assert_eq!(b.end_bound, WindowFrameBound::CurrentRow);
+
+    assert_eq!(c.start_bound, WindowFrameBound::CurrentRow);
+    assert_eq!(c.end_bound, WindowFrameBound::Following(ScalarValue::Null));
+}
+
+/// `GROUPS` frames aren't in this repo's SQL corpora and nothing downstream
+/// interprets frame semantics yet — rejected explicitly rather than silently
+/// mis-lowered.
+#[tokio::test]
+async fn groups_frame_is_rejected() {
+    let err = lower_sql(
+        "SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts \
+         GROUPS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("GROUPS frame unit must be rejected");
+    assert!(format!("{err}").contains("GROUPS"), "got {err}");
 }
 
 // ── Nested query functions: derived tables / inline views (issue #27) ───────────

@@ -342,6 +342,42 @@ pub enum WindowFuncKind {
     Max,
 }
 
+/// A window's frame-spec (`ROWS`/`RANGE BETWEEN … AND …`) — which rows around
+/// the current one an analytic window function reads. `GROUPS` is rejected at
+/// lowering time (issue #268): every SQL corpus in this repo uses only `ROWS`,
+/// and nothing downstream interprets frame semantics yet, so it isn't worth
+/// modelling untested.
+///
+/// Meaningless (but harmless) on the rank-only and navigation functions
+/// (`ROW_NUMBER`/`RANK`/`DENSE_RANK`/`LAG`/`LEAD`), which ignore the frame per
+/// SQL semantics — DataFusion still attaches one, stored here verbatim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowFrame {
+    pub units: WindowFrameUnits,
+    pub start_bound: WindowFrameBound,
+    pub end_bound: WindowFrameBound,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFrameUnits {
+    /// Boundaries count physical rows: `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW`.
+    Rows,
+    /// Boundaries count by value-distance on the (single) `ORDER BY` column:
+    /// `RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW`.
+    Range,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFrameBound {
+    /// `UNBOUNDED PRECEDING` is `Preceding(ScalarValue::Null)`.
+    Preceding(ScalarValue),
+    CurrentRow,
+    /// `UNBOUNDED FOLLOWING` is `Following(ScalarValue::Null)`.
+    Following(ScalarValue),
+}
+
 /// A symbolic label matcher on the **info metric** side of an
 /// [`QueryExpr::PromqlInfoEnrich`] (issue #84). Unlike a `Scan` predicate it is not
 /// resolved positionally — it references the info metric's labels (`__name__`
@@ -739,9 +775,9 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         child: Rc<QueryExpr<C>>,
     },
 
-    /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …)`.
-    /// Output schema = child schema + one column named `output_name` (the name
-    /// the enclosing `Project` references). Window frames are not modelled yet.
+    /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …
+    /// ROWS/RANGE BETWEEN …)`. Output schema = child schema + one column named
+    /// `output_name` (the name the enclosing `Project` references).
     SQLWindowFunc {
         func: WindowFuncKind,
         /// Operand expressions (`LAG(value)` → `[Column(value_id)]`); empty for
@@ -749,6 +785,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         args: Vec<QueryExpr<C>>,
         partition_by: GroupKeys<C>,
         order_by: Vec<SortKey<C>>,
+        frame: WindowFrame,
         /// The output column's name — DataFusion's window-expr field name, so a
         /// `Project` above resolves it (cf. `Aggregate.output_names`).
         output_name: String,

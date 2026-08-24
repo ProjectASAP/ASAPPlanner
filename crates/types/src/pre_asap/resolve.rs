@@ -337,6 +337,7 @@ fn resolve(
             args,
             partition_by,
             order_by,
+            frame,
             output_name,
             child,
         } => {
@@ -362,6 +363,7 @@ fn resolve(
                 args,
                 partition_by,
                 order_by,
+                frame: frame.clone(),
                 output_name: output_name.clone(),
                 child: Rc::new(child),
             }
