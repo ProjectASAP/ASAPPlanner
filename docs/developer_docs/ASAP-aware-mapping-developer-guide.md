@@ -43,7 +43,7 @@ Do not put cost-based pruning into a `ReplacementStrategy`. A strategy must enum
 
 ## 2. Architecture overview
 
-The diagram below follows one query—or a whole workload—from `TargetSubDAG` discovery through candidate generation, ranking, reporting, and downstream visualization. Section 3 focuses on the replacement-strategy path.
+The diagram below follows a workload of one or more query roots through target discovery, candidate generation, ranking, reporting, and downstream visualization. Section 3 focuses on the replacement-strategy path.
 
 ```mermaid
 flowchart TB
@@ -53,12 +53,9 @@ flowchart TB
   classDef choose fill:#fcebdc,stroke:#c46a25,color:#572d0c
   classDef report fill:#f2eafe,stroke:#7950b3,color:#34204f
 
-  SQ["One QueryExpr<br/>single-query API or child recursion"]:::input
-  WL["Whole workload<br/>Vec&lt;(Id, Rc&lt;QueryExpr&gt;)&gt;"]:::input
-  SQ --> NEW["TargetSubDAG::new<br/>consumer_count = 1"]:::generate
+  WL["Workload with one or more roots<br/>Vec&lt;(Id, Rc&lt;QueryExpr&gt;)&gt;"]:::input
   WL --> SEARCH["search_workload_with<br/>CSE + whole-DAG discovery"]:::generate
-  NEW --> TARGET[TargetSubDAG]:::generate
-  SEARCH --> TARGET
+  SEARCH --> TARGET["TargetSubDAG per discovered node<br/>measured consumer_count"]:::generate
 
   TARGET --> SKETCH["SketchAlgorithmStrategy<br/>construct every valid SummaryNode"]:::generate
   TARGET --> SHARED["SharedSubtreeStrategy<br/>share vs. recompute"]:::generate
@@ -99,35 +96,26 @@ For workload-wide search, `replacement::search_workload`/`search_workload_with` 
 
 ### Replacement-strategy path
 
-A `TargetSubDAG` comes from one of two entry points. The chosen path determines whether `consumer_count` is assumed to be one or discovered across a workload, which directly controls strategies such as `SharedSubtreeStrategy`:
+`search_workload_with` is the planner entry point that discovers targets. It runs CSE, walks the complete DAG under every root, and constructs each `TargetSubDAG` with its measured `consumer_count`. That count directly controls strategies such as `SharedSubtreeStrategy`:
 
 ```mermaid
 flowchart LR
-  classDef direct fill:#e8f1ff,stroke:#4b78b8,color:#172b4d
   classDef workload fill:#e7f7ef,stroke:#31835e,color:#173f2d
   classDef common fill:#fff6dd,stroke:#b78922,color:#513d0c
 
-  subgraph D[Direct, single-node path]
-    Q["QueryExpr root or recursive child"]:::direct
-    Q --> N["TargetSubDAG::new<br/>consumer_count = 1"]:::direct
-  end
-
-  subgraph W[Workload discovery path]
-    ROOTS["Vec&lt;(Id, Rc&lt;QueryExpr&gt;)&gt;"]:::workload
-    ROOTS --> CSE["Run CSE once"]:::workload
-    CSE --> WALK["Walk every root's whole DAG"]:::workload
-    WALK --> T["TargetSubDAG per node<br/>real consumer_count"]:::workload
-  end
-
-  N --> MATCH[ReplacementStrategy::matches]:::common
+  ROOTS["One or more QueryExpr roots"]:::workload
+  ROOTS --> CSE["Run CSE once"]:::workload
+  CSE --> WALK["Walk every root's whole DAG"]:::workload
+  WALK --> T["TargetSubDAG per node<br/>measured consumer_count"]:::workload
   T --> MATCH
+  MATCH[ReplacementStrategy::matches]:::common
   MATCH --> REPLACE[ReplacementStrategy::replacements]:::common
   REPLACE --> A[Candidate A]:::common
   REPLACE --> B[Candidate B]:::common
   REPLACE --> C[Candidate C]:::common
 ```
 
-The left path is what a caller with one query in hand uses directly (see `docs/user-guide/user-guide.md`'s "Step 2"), and what `realize_child` uses internally to bind a candidate's own child. The right path is `search_workload`/`search_workload_with` — it's the only place `consumer_count` is ever discovered rather than assumed, which is why `SharedSubtreeStrategy` only meaningfully matches something reached through it.
+`TargetSubDAG::new(&root)` remains available for invoking one strategy against one node in isolation; it sets `consumer_count` to `1`. Tests, focused tooling, and the internal `realize_child` helper use this form when workload sharing is irrelevant. It is not a target-discovery or plan-search entry point. Use `search_workload`/`search_workload_with` whenever strategies need workload context or accurate sharing counts.
 
 The important rule is:
 

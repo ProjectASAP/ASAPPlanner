@@ -301,15 +301,13 @@ pub enum ImplementError {
 /// needs the node's own `Rc` identity, not just its shape, has it available
 /// without the caller re-deriving it).
 ///
-/// `consumer_count` is how many locations across the workload already
-/// reference this exact `Rc` — 1 for an ordinary single-use node, 2+ when the
-/// caller already ran `share_common_subtrees` and found this subtree shared.
-/// A strategy that only cares about `root`'s own shape (e.g.
-/// [`SketchAlgorithmStrategy`]) can ignore it entirely; [`SharedSubtreeStrategy`]
-/// is the one strategy that consults it. Computing a *real* consumer count
-/// across a whole workload is a traversal this module deliberately does not
-/// own (see the module docs' "Non-goals") — [`TargetSubDAG::new`] defaults it
-/// to `1`, the safe assumption for a caller inspecting one node in isolation.
+/// `consumer_count` is how many locations across the workload reference this
+/// exact `Rc` — 1 for an ordinary single-use node and 2+ for a shared subtree.
+/// [`search_workload_with`] computes the workload-wide value during target
+/// discovery. [`TargetSubDAG::new`] defaults it to `1` for callers invoking a
+/// strategy against one node in isolation. A strategy that only cares about
+/// `root`'s shape (for example, [`SketchAlgorithmStrategy`]) can ignore the
+/// count; [`SharedSubtreeStrategy`] consults it directly.
 #[derive(Debug, Clone, Copy)]
 pub struct TargetSubDAG<'a> {
     pub root: &'a Rc<QueryExpr>,
@@ -326,9 +324,8 @@ impl<'a> TargetSubDAG<'a> {
         }
     }
 
-    /// A target with an explicit `consumer_count` — for a caller that already
-    /// knows (e.g. from `share_common_subtrees`, or from this module's own
-    /// test helpers) how many workload locations reference `root`.
+    /// A target with an explicit `consumer_count`, used by workload discovery
+    /// and by callers that already know how many locations reference `root`.
     pub fn with_consumer_count(root: &'a Rc<QueryExpr>, consumer_count: usize) -> Self {
         Self {
             root,
