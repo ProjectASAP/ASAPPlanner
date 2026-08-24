@@ -43,6 +43,41 @@ picker.
   mode (buttons next to the drop zone) to see them together instead of one
   at a time — see below.
 
+## Render a standalone page from Python
+
+`index.html` needs a browser attached — dropping a file onto it, or a
+sibling `dag.json` it can `fetch()`. Neither works if you're generating a
+graph from an environment with no browser to look at it in (piped over SSH,
+a CI job, an agent session): `render.py` bakes a `dag_export` JSON straight
+into a single portable HTML file instead, with the query data and every
+vendored script inlined — open the output directly, nothing else to fetch:
+
+```sh
+cargo run -p asap-devtools --bin dag_export -- --sql "..." --name q1 \
+  | python3 tools/dag-viewer/render.py -o rendered.html
+
+# or from files already on disk, opening straight into Union mode:
+python3 tools/dag-viewer/render.py dag1.json dag2.json -o rendered.html --mode union
+```
+
+It's the exact same UI as `index.html` — `--mode` just pre-selects every
+loaded query and switches the page's *initial* view; Single/Compare/Union,
+click-to-inspect, and the highlight toggle all still work after it opens.
+`index.html` and `render.py`'s output share one copy of the interaction
+logic (`viewer.js`) and the category table (`node-style.js`), so anything
+below in this doc — the mode descriptions, the shared-hash caveats — applies
+to both equally.
+
+Node/edge transitions (mode switches, the shared-subtree ring, layout on
+load) are animated in both — see `viewer.js`'s `LAYOUT_ANIMATION` and the
+`transition-property` entries in `buildCyStyle()` if you want to retune or
+disable that.
+
+Per-node cost isn't rendered anywhere in either page — `dag_export` doesn't
+emit one today (no cost estimator is wired into pre-ASAP IR yet). The side
+panel already dumps a clicked node's full `detail` verbatim, so a future
+`cost` field added there would show up with no viewer change needed.
+
 ## Visual style and node categories
 
 Node colors, icons, and shapes are adapted from
