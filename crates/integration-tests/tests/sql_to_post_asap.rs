@@ -1,30 +1,32 @@
 //! End-to-end SQL query-string → post-ASAP IR pin (issue #191).
 //!
-//! The SQL counterpart of `l4_binding.rs`: drives SQL text — `lower_sql`
-//! (text → pre-ASAP `QueryExpr`) → `SketchAlgorithmStrategy::replacements`
-//! (pre-ASAP → post-ASAP `SummaryExpr`, see [`bind`] below) — and pins the
-//! resulting sketch-vs-exact-accumulator binding shape node by node, the way
-//! `l4_binding.rs` does for PromQL.
+//! The SQL counterpart of `promql_to_post_asap.rs`: drives SQL text —
+//! `lower_sql` (text → pre-ASAP `QueryExpr`) →
+//! `SketchAlgorithmStrategy::replacements` (pre-ASAP → post-ASAP
+//! `SummaryExpr`, see [`realize`] below) — and pins the resulting
+//! sketch-vs-exact-accumulator shape node by node, the way
+//! `promql_to_post_asap.rs` does for PromQL.
 //!
 //! ## A structural wrinkle PromQL doesn't have
 //!
 //! `lower_promql` returns a *bare* `QueryExpr::Aggregate` for a top-level
-//! aggregation (`sum by (job) (m)`, `quantile(0.99, …)`), so [`bind`] can
+//! aggregation (`sum by (job) (m)`, `quantile(0.99, …)`), so [`realize`] can
 //! bind it directly at the tree root. `lower_sql` never does: DataFusion's
 //! planner always wraps even a single, unaliased aggregate in an identity
 //! `Project` (confirmed below), so a SQL tree's *root* is always `Project {
-//! child: Aggregate { .. } }`. Binding only fires `bind_summary_agg` when
-//! the node it's looking at is itself a bindable `QueryExpr::Aggregate` (see
-//! `bind.rs`'s module docs on the "logical parent subsumes bindable child"
-//! conservative fallback); a `Project` at the root is exactly such a logical
-//! parent, so feeding a raw `lower_sql` result straight into [`bind`] always
-//! yields a whole-tree `SummaryExpr::KeepPreAsap` — never a genuine sketch or
-//! accumulator binding.
+//! child: Aggregate { .. } }`. Construction only fires when the node
+//! `replacement.rs`'s `construct_summary` is looking at is itself a bindable
+//! `QueryExpr::Aggregate` (see `replacement.rs`'s module docs on the "logical
+//! parent subsumes bindable child" conservative fallback); a `Project` at the
+//! root is exactly such a logical parent, so feeding a raw `lower_sql` result
+//! straight into [`realize`] always yields a whole-tree
+//! `SummaryExpr::KeepPreAsap` — never a genuine sketch or accumulator
+//! binding.
 //!
 //! The tests below extract the inner `Aggregate` node the same way this
 //! crate's own `frontend-sql/tests/sql_lowering.rs` does (its
 //! `find_aggregate`/`find_aggregate_node` helpers) and hand that to
-//! [`bind`] directly, which is the shape a future Project-elision rewrite
+//! [`realize`] directly, which is the shape a future Project-elision rewrite
 //! (tracked with the rest of the post-ASAP rule engine, issues #6/#33) would
 //! present to this pass in production.
 
@@ -49,7 +51,7 @@ use asap_types::types::AccuracyTarget;
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
 /// single-answer pins below don't all repeat it by hand.
-fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     match SketchAlgorithmStrategy::default_cost_model()
@@ -113,24 +115,24 @@ fn inner_aggregate(qe: &QueryExpr) -> &QueryExpr {
 }
 
 /// Sanity + documentation: feeding a raw `lower_sql` root straight into
-/// [`bind`] never binds anything — the wrapping `Project` always subsumes
+/// [`realize`] never binds anything — the wrapping `Project` always subsumes
 /// the `Aggregate` beneath it into one logical passthrough. This is the
-/// "conservative fallback" `bind.rs`'s module docs describe, hitting
+/// "conservative fallback" `replacement.rs`'s module docs describe, hitting
 /// unconditionally for SQL because of the Project DataFusion always inserts.
 #[tokio::test]
 async fn sql_full_query_root_stays_logical_under_the_identity_projection() {
-    let l3 = lower(
+    let pre_asap = lower(
         "SELECT approx_percentile_cont(latency, 0.99) FROM metrics",
         AccuracyTarget::Epsilon(0.01),
     )
     .await;
     assert!(
-        matches!(l3, QueryExpr::Project { .. }),
+        matches!(pre_asap, QueryExpr::Project { .. }),
         "sanity: a SQL root is a Project, unlike lower_promql's bare Aggregate"
     );
-    let root = bind(&l3).expect("binding failed");
+    let root = realize(&pre_asap).expect("binding failed");
     assert!(
-        matches!(root.expr, SummaryExpr::KeepPreAsap(ref e) if **e == l3),
+        matches!(root.expr, SummaryExpr::KeepPreAsap(ref e) if **e == pre_asap),
         "bind does not look inside a Project to find a bindable Aggregate \
          child, so the whole Project{{Aggregate}} tree stays logical"
     );
@@ -145,20 +147,20 @@ async fn sql_full_query_root_stays_logical_under_the_identity_projection() {
 ///    └─ KeepPreAsap(Scan)                                → {ts, service, latency, bytes}
 /// ```
 ///
-/// The SQL counterpart of `l4_binding.rs`'s
+/// The SQL counterpart of `promql_to_post_asap.rs`'s
 /// `promql_quantile_of_rate_binds_kll_over_rate_accumulator`: same intent
 /// (`Quantile`), same KLL sizing (k=200 from ε=0.01), but the summarised
 /// column is the intent's own *named* SQL column rather than PromQL's
 /// synthetic sample value.
 #[tokio::test]
 async fn sql_quantile_binds_kll_sketch_over_named_column() {
-    let l3 = lower(
+    let pre_asap = lower(
         "SELECT approx_percentile_cont(latency, 0.99) FROM metrics",
         AccuracyTarget::Epsilon(0.01),
     )
     .await;
-    let agg = inner_aggregate(&l3);
-    let root = bind(agg).expect("binding failed");
+    let agg = inner_aggregate(&pre_asap);
+    let root = realize(agg).expect("binding failed");
 
     let SummaryExpr::SummaryEstimate {
         summary_input,
@@ -233,18 +235,18 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 /// `SELECT COUNT(DISTINCT service) FROM metrics` at ε = 0.01 lowers to
 /// `AggIntent::Cardinality` (`sql_lowering.rs::count_distinct_is_cardinality`)
 /// — unlike `Quantile`/`Count`/`TopK`, its preferred candidate is HLL, not
-/// KLL/CMS (`implementation::summary_candidates`), so this exercises a
+/// KLL/CMS (`replacement::summary_candidates`), so this exercises a
 /// distinct branch of the sketch-vs-exact decision than the quantile test
 /// above.
 #[tokio::test]
 async fn sql_count_distinct_binds_hll_sketch_over_named_column() {
-    let l3 = lower(
+    let pre_asap = lower(
         "SELECT COUNT(DISTINCT service) FROM metrics",
         AccuracyTarget::Epsilon(0.01),
     )
     .await;
-    let agg = inner_aggregate(&l3);
-    let root = bind(agg).expect("binding failed");
+    let agg = inner_aggregate(&pre_asap);
+    let root = realize(agg).expect("binding failed");
 
     let SummaryExpr::SummaryEstimate {
         summary_input,
@@ -289,17 +291,17 @@ async fn sql_count_distinct_binds_hll_sketch_over_named_column() {
 /// An exact workload binds zero sketches: `SUM(bytes) GROUP BY service` at
 /// `AccuracyTarget::Exact` still gets its mergeable exact accumulator, and
 /// `AVG(bytes)` (non-mergeable) stays a whole logical subtree untouched. SQL
-/// counterpart of `l4_binding.rs`'s
+/// counterpart of `promql_to_post_asap.rs`'s
 /// `promql_exact_workload_binds_accumulators_not_sketches`.
 #[tokio::test]
 async fn sql_exact_workload_binds_accumulators_not_sketches() {
-    let l3 = lower(
+    let pre_asap = lower(
         "SELECT service, SUM(bytes) FROM metrics GROUP BY service",
         AccuracyTarget::Exact,
     )
     .await;
-    let agg = inner_aggregate(&l3);
-    let root = bind(agg).expect("binding failed");
+    let agg = inner_aggregate(&pre_asap);
+    let root = realize(agg).expect("binding failed");
     let SummaryExpr::SummaryAgg {
         family, reduction, ..
     } = &root.expr
@@ -321,9 +323,9 @@ async fn sql_exact_workload_binds_accumulators_not_sketches() {
         "group keys pass through verbatim"
     );
 
-    let l3 = lower("SELECT AVG(bytes) FROM metrics", AccuracyTarget::Exact).await;
-    let agg = inner_aggregate(&l3);
-    let root = bind(agg).expect("binding failed");
+    let pre_asap = lower("SELECT AVG(bytes) FROM metrics", AccuracyTarget::Exact).await;
+    let agg = inner_aggregate(&pre_asap);
+    let root = realize(agg).expect("binding failed");
     assert!(
         matches!(root.expr, SummaryExpr::KeepPreAsap(_)),
         "avg has no mergeable accumulator — stays logical"

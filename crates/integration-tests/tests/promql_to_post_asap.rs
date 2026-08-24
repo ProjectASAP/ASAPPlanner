@@ -2,10 +2,9 @@
 //!
 //! Drives the full pipeline — PromQL text → pre-ASAP `QueryExpr`
 //! (`lower_promql`) → post-ASAP `SummaryExpr` DAG (via
-//! `SketchAlgorithmStrategy::replacements`, see [`bind`] below) — and pins the
-//! summary-bound shape node by node, including the family `(Kind, Params)`
-//! committed on each edge's schema. This is the design doc's §"L4 — sketch
-//! algebra" worked example, running for real.
+//! `SketchAlgorithmStrategy::replacements`, see [`realize`] below) — and pins
+//! the summary-bound shape node by node, including the family `(Kind,
+//! Params)` committed on each edge's schema.
 
 use std::rc::Rc;
 
@@ -28,7 +27,7 @@ use asap_types::types::AccuracyTarget;
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
 /// single-answer pins below don't all repeat it by hand.
-fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
     match SketchAlgorithmStrategy::default_cost_model()
@@ -67,12 +66,12 @@ fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
 /// counter-reset-aware accumulator (no estimate — its state is the value).
 #[test]
 fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
-    let l3 = lower_promql(
+    let pre_asap = lower_promql(
         "quantile(0.99, rate(http_requests_total[5m]))",
         AccuracyTarget::Epsilon(0.01),
     )
     .expect("lowering failed");
-    let root = bind(&l3).expect("binding failed");
+    let root = realize(&pre_asap).expect("binding failed");
 
     // Root: the sketch readout, back to a plain row shape.
     let SummaryExpr::SummaryEstimate {
@@ -174,9 +173,9 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
 /// `avg(m)` (non-mergeable) passes through as a whole logical subtree.
 #[test]
 fn promql_exact_workload_binds_accumulators_not_sketches() {
-    let l3 = lower_promql("sum by (job) (http_requests_total)", AccuracyTarget::Exact)
+    let pre_asap = lower_promql("sum by (job) (http_requests_total)", AccuracyTarget::Exact)
         .expect("lowering failed");
-    let root = bind(&l3).expect("binding failed");
+    let root = realize(&pre_asap).expect("binding failed");
     let SummaryExpr::SummaryAgg {
         family, reduction, ..
     } = &root.expr
@@ -198,9 +197,9 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
         "group keys pass through verbatim"
     );
 
-    let l3 =
+    let pre_asap =
         lower_promql("avg(http_requests_total)", AccuracyTarget::Exact).expect("lowering failed");
-    let root = bind(&l3).expect("binding failed");
+    let root = realize(&pre_asap).expect("binding failed");
     assert!(
         matches!(root.expr, SummaryExpr::KeepPreAsap(_)),
         "avg has no mergeable accumulator — stays logical"
