@@ -1,45 +1,27 @@
-//! The pre-ASAP → post-ASAP binding primitives (issue #98).
+//! Workload-level pre-ASAP → post-ASAP binding orchestration (issue #98).
 //!
-//! This module does **not** expose a "bind me one tree" entry point.
-//! [`replacement::SketchFamilyStrategy`](crate::replacement::SketchFamilyStrategy)
-//! is the only public way to get bound output for a target — it always
-//! returns every candidate [`ReplacementSubDAG`](crate::replacement::ReplacementSubDAG),
+//! This module does **not** expose a "bind me one tree" entry point for a
+//! single target. [`crate::replacement::SketchFamilyStrategy`] is the only
+//! public way to get bound output for one target — it always returns every
+//! candidate [`ReplacementSubDAG`](crate::replacement::ReplacementSubDAG),
 //! ranked; a caller that wants a single executable answer takes the first
 //! entry itself (`.into_iter().next()`) and decides what to do if the list
-//! is empty (this module's [`logical`] is the same pass-through fallback
-//! this crate's own dispatch would otherwise use). What this module
-//! provides is the shared low-level primitive that turns one *already-decided*
-//! candidate into a real [`SummaryNode`]:
+//! is empty ([`logical`] is the same pass-through fallback this crate's own
+//! dispatch would otherwise use — see `crate::replacement`'s own module docs
+//! for how deciding *and* constructing each candidate both happen inside
+//! that one strategy).
 //!
-//! - **Summary family** (sketch / sample / wavelet / statistical model) —
-//!   the `Aggregate` becomes a [`SummaryExpr::SummaryAgg`] carrying the
-//!   committed `family: SummaryFamilyType` (that family's own
-//!   `(kind, params)`), wrapped in a [`SummaryExpr::SummaryEstimate`] that
-//!   reads the answer back out (the summary-state column type does not
-//!   propagate past the estimate);
-//! - **Exact accumulator** — a `SummaryAgg` with `family:
-//!   SummaryFamilyType::ExactAggregate` (`Sum`/`Count`/`MinMax`/`Rate`/
-//!   `Increase`) and no estimate: the partial state *is* the value, so a
-//!   deployment's later finalization step is the identity;
-//! - **Pass-through** — the whole pre-ASAP subtree is wrapped as
-//!   [`SummaryExpr::Logical`], schema lifted with every column
-//!   `SummaryFamilyType::Plain`.
+//! What this module *does* provide is workload-wide orchestration:
 //!
-//! Construction recurses through the `Aggregate` spine, so nested aggregates
-//! each get their own independent candidate enumeration and selection
-//! (`quantile(0.9, sum by (svc) (rate(m[5m]))))` binds KLL over an exact
-//! `Sum` accumulator over an exact `Rate` accumulator) — see
-//! [`bind_with_implementation`].
-//!
-//! ## Why [`implement_workload`]/[`implement_workload_with`] are still here
+//! ## Why [`implement_workload`]/[`implement_workload_with`] are here
 //!
 //! Workload-level CSE sharing ([`asap_types::pre_asap::cse::share_common_subtrees`])
 //! memoizes on `Rc` pointer identity: two workload roots that collapsed onto
 //! the same `Rc<QueryExpr>` must resolve to the *same* canonical decision to
 //! be shareable at all — there is no meaningful "N candidates" answer to
-//! memoize against. So this one entry point keeps the old
-//! rank-and-take-first behavior internally (via a private selector), scoped
-//! to workload-wide CSE memoization specifically. It is not a general
+//! memoize against. So this one entry point keeps a rank-and-take-first
+//! behavior internally (via the private [`select_and_bind`]), scoped to
+//! workload-wide CSE memoization specifically. It is not a general
 //! "bind me one tree" API — for a single target, go through
 //! `SketchFamilyStrategy` and decide what to keep yourself.
 //!
@@ -52,21 +34,15 @@
 //! post-ASAP rule engine's job (#6/#33), not this pass's. Similarly
 //! conservative: multi-intent `Aggregate` nodes (SQL `SELECT SUM(a), AVG(b)`)
 //! and aggregates with a `HAVING` predicate (the filter would need the
-//! estimate first) stay logical.
+//! estimate first) stay logical — see [`crate::replacement::bindable_intent`].
 
 use std::rc::Rc;
 
-use asap_types::post_asap::{
-    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryField, SummaryNode, SummarySchema,
-};
-use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
-use asap_types::pre_asap::schema::Schema;
+use asap_types::post_asap::{SummaryExpr, SummaryNode};
+use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError};
 use thiserror::Error;
 
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
-use crate::implementation::Implementation;
 use crate::replacement::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
 };
@@ -79,30 +55,17 @@ pub enum ImplementError {
     Schema(#[from] QueryExprError),
 }
 
-/// The bindable shape [`crate::replacement::SketchFamilyStrategy`] targets:
-/// a single intent, no `HAVING`. A multi-intent node
-/// (SQL `SELECT SUM(a), AVG(b)`), or one with a `HAVING` predicate (the
-/// filter would need the estimate first), stays logical — see the module
-/// docs' "Conservative fallbacks".
-pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
-    if let QueryExpr::Aggregate {
-        measures, having, ..
-    } = node
-    {
-        if let ([intent], None) = (measures.as_slice(), having) {
-            return Some(intent);
-        }
-    }
-    None
-}
-
 /// Rank-and-take-first selector, scoped to [`implement_workload_with`]'s
-/// CSE memoization and to this module's own recursion into a node's child
-/// (see the module docs' "Why `implement_workload`/`implement_workload_with`
-/// are still here") — **not** a general single-answer API. `root` must
-/// already be the caller's own `Rc`, never fabricated per call, so this
-/// never allocates beyond what the caller already held.
-fn select_and_bind(
+/// CSE memoization and to [`crate::replacement`]'s own recursion into a
+/// node's child (see the module docs' "Why `implement_workload`/
+/// `implement_workload_with` are here") — **not** a general single-answer
+/// API. `root` must already be the caller's own `Rc`, never fabricated per
+/// call, so this never allocates beyond what the caller already held.
+///
+/// `pub(crate)`: [`crate::replacement`]'s own construction helper calls this
+/// to bind a target's child, so a nested aggregate gets its own independent
+/// enumeration instead of inheriting the parent's forced candidate.
+pub(crate) fn select_and_bind(
     root: &Rc<QueryExpr>,
     cost_model: &dyn CostModel,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
@@ -130,45 +93,6 @@ fn select_and_bind(
     }
 }
 
-/// Bind `expr` to an already-decided [`Implementation`] for its top intent.
-/// The shared low-level primitive: [`select_and_bind`] (workload-CSE
-/// memoization and this module's own recursion) calls this with whichever
-/// candidate it kept; [`crate::replacement::SketchFamilyStrategy`] calls
-/// this once per candidate it enumerates. One function turns a chosen
-/// `Implementation` into a `SummaryNode`, used identically by both.
-///
-/// `expr` must still be the [`bindable_intent`] shape for `implementation` to
-/// have any effect; anything else falls back to [`logical`]. Only `expr`'s
-/// own top-level decision is forced — recursion into `expr`'s child goes
-/// back through [`select_and_bind`] (fresh candidate enumeration, not a
-/// forced pick), so choosing one candidate for a target never leaks into
-/// that target's own nested aggregates.
-pub fn bind_with_implementation(
-    expr: &QueryExpr,
-    implementation: Implementation,
-    cost_model: &dyn CostModel,
-) -> Result<Rc<SummaryNode>, ImplementError> {
-    if let QueryExpr::Aggregate {
-        reduction,
-        measures,
-        having,
-        child,
-        ..
-    } = expr
-    {
-        // The bindable shape: exactly one intent, no HAVING. (Multi-intent
-        // nodes and HAVING stay logical — see the module docs.)
-        if let ([intent], None) = (measures.as_slice(), having) {
-            if let Some((family, estimate)) = summary_family(implementation) {
-                return bind_summary_agg(
-                    expr, reduction, intent, child, family, estimate, cost_model,
-                );
-            }
-        }
-    }
-    logical(expr)
-}
-
 /// Bind a whole workload's worth of already-CSE'd roots
 /// ([`asap_types::pre_asap::cse::share_common_subtrees`]'s output), reusing
 /// one bound [`SummaryNode`] wherever two roots share the same `Rc` *and*
@@ -187,7 +111,7 @@ pub fn bind_with_implementation(
 /// needs to recognize when it already bound the exact `Rc` a later root
 /// hands back, and is deliberately *not* a general "does an available
 /// `Implementation` satisfy this one" lookup — that subsumption question is
-/// `asap_aware_mapping::implementation::Matcher`'s documented, deliberately-unfilled
+/// `asap_aware_mapping::replacement::Matcher`'s documented, deliberately-unfilled
 /// job, not this one's.
 ///
 /// A first pass over `roots` counts each distinct `Rc<QueryExpr>` pointer's
@@ -260,152 +184,6 @@ pub fn implement_workload_with<Id>(
         .collect()
 }
 
-/// Translate an [`Implementation`] into the `(family, needs a
-/// SummaryEstimate readout)` pair [`bind_summary_agg`] needs, or `None` for
-/// `PassThrough` (the caller falls back to [`logical`]).
-///
-/// Every family's partial state needs a readout to recover a value, except
-/// `ExactAggregate` — its partial state *is* the value already, so no
-/// estimate step follows it.
-fn summary_family(implementation: Implementation) -> Option<(SummaryFamilyType, bool)> {
-    Some(match implementation {
-        Implementation::ExactAggregate { kind, params } => {
-            (SummaryFamilyType::ExactAggregate(kind, params), false)
-        }
-        Implementation::Sketch { kind, params } => (SummaryFamilyType::Sketch(kind, params), true),
-        Implementation::Sample { kind, params } => (SummaryFamilyType::Sample(kind, params), true),
-        Implementation::Wavelet { kind, params } => {
-            (SummaryFamilyType::Wavelet(kind, params), true)
-        }
-        Implementation::StatModel { kind, params } => {
-            (SummaryFamilyType::StatModel(kind, params), true)
-        }
-        Implementation::PassThrough => return None,
-    })
-}
-
-/// Emit `SummaryAgg` (recursively binding the child), plus the
-/// `SummaryEstimate` readout when `estimate` is set.
-#[allow(clippy::too_many_arguments)]
-fn bind_summary_agg(
-    node: &QueryExpr,
-    reduction: &Reduction,
-    intent: &AggIntent,
-    child: &Rc<QueryExpr>,
-    family: SummaryFamilyType,
-    estimate: bool,
-    cost_model: &dyn CostModel,
-) -> Result<Rc<SummaryNode>, ImplementError> {
-    let child_schema = child.output_schema()?;
-    // The single canonical pre-ASAP derivation (per-series vs cross-series,
-    // name overrides) already computes the row shape; binding only retypes
-    // the summary state column.
-    let per_series = matches!(reduction, Reduction::PerEntity);
-    let by: Vec<usize> = reduction
-        .group_keys()
-        .map(|g| g.to_vec())
-        .unwrap_or_default();
-    let out_schema = node.output_schema()?;
-    let state_idx = summary_col_index(&out_schema, &by, per_series);
-
-    let col = summarised_column(intent, &child_schema);
-    let query = estimate.then(|| readout(intent, &col, cost_model));
-
-    let mut state_schema = lift(&out_schema);
-    if let Some(field) = state_schema.fields.get_mut(state_idx) {
-        field.dtype = family.clone();
-    }
-
-    // `reduction` is carried onto `SummaryAgg` verbatim — not flattened to a
-    // bare `Vec<ColumnId>` — so `SummaryExecutor::find_candidates` can tell
-    // a genuine empty-`by` reduction apart from a per-entity shape with no
-    // grouping concept at all (issue #163). `bind_summary_agg` is the single
-    // place that decides this; nothing downstream re-derives it.
-    let agg = Rc::new(SummaryNode {
-        expr: SummaryExpr::SummaryAgg {
-            child: select_and_bind(child, cost_model)?,
-            family,
-            col,
-            reduction: reduction.clone(),
-        },
-        schema: state_schema,
-    });
-    match query {
-        // The readout: downstream of the estimate the schema is the plain
-        // pre-ASAP row shape again (the summary-state type does not
-        // propagate).
-        Some(query) => Ok(Rc::new(SummaryNode {
-            expr: SummaryExpr::SummaryEstimate {
-                summary_input: agg,
-                query,
-            },
-            schema: lift(&out_schema),
-        })),
-        None => Ok(agg),
-    }
-}
-
-/// Index of the summary-state column in the aggregate's output schema:
-/// cross-series output is `by ++ [agg]` (the column after the keys);
-/// a per-series reduction keeps every label and replaces the sample value
-/// (named `value` — mirror `per_series_reduction_schema`'s fallback).
-/// `per_series` is the caller's already-read `Reduction` (issue #165) —
-/// this never re-derives it, so it can't disagree with the caller.
-fn summary_col_index(out_schema: &Schema, by: &[usize], per_series: bool) -> usize {
-    if per_series {
-        out_schema
-            .column_id("value")
-            .or_else(|| (0..out_schema.columns.len()).find(|&i| Some(i) != out_schema.time_index))
-            .unwrap_or(0)
-    } else {
-        by.len()
-    }
-}
-
-/// The column fed into the summary: the intent's positional input column
-/// resolved to a name against the child schema, or the PromQL sample value.
-fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
-    match intent
-        .input_col()
-        .and_then(|id| child_schema.columns.get(id))
-    {
-        Some(c) => match &c.table {
-            Some(t) => ColumnRef::Qualified {
-                table: t.clone(),
-                name: c.name.clone(),
-            },
-            None => ColumnRef::Named(c.name.clone()),
-        },
-        None => ColumnRef::SampleValue,
-    }
-}
-
-/// The `SummaryEstimate` readout for a summary-bound intent.
-fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> SketchQuery {
-    match intent {
-        AggIntent::Quantile { q, .. } => SketchQuery::Quantile { q: *q },
-        AggIntent::Cardinality { .. } => SketchQuery::Cardinality,
-        AggIntent::TopK { k, .. } => SketchQuery::TopK { k: *k },
-        AggIntent::Count { .. } => SketchQuery::PointCount {
-            key: col.clone(),
-            value: None,
-        },
-        // Core doesn't know the shape of a deployment-specific `Extension`
-        // intent, so it can't build its readout either — delegate to the
-        // same `CostModel` that decided (via `realize_extension`) this
-        // intent gets a summary realization at all. See `readout_extension`'s
-        // doc for the invariant this depends on.
-        AggIntent::Extension { ext_kind, payload } => {
-            cost_model.readout_extension(ext_kind, payload, col)
-        }
-        other => {
-            unreachable!(
-                "no summary realization for {other:?} (implementation::implementations_for_with)"
-            )
-        }
-    }
-}
-
 /// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
 /// `SummaryFamilyType::Plain`. Public so a caller can fall back to this
 /// explicitly — e.g. when `SketchFamilyStrategy::replacements()` returns no
@@ -416,33 +194,20 @@ pub fn logical(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     let schema = expr.output_schema()?;
     Ok(Rc::new(SummaryNode {
         expr: SummaryExpr::Logical(Box::new(expr.clone())),
-        schema: lift(&schema),
+        schema: crate::replacement::lift(&schema),
     }))
-}
-
-fn lift(schema: &Schema) -> SummarySchema {
-    SummarySchema {
-        fields: schema
-            .columns
-            .iter()
-            .map(|c| SummaryField {
-                name: c.name.clone(),
-                dtype: SummaryFamilyType::Plain(c.dtype.clone()),
-                nullable: c.nullable,
-            })
-            .collect(),
-        time_index: schema.time_index,
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::post_asap::{ExactKind, ExactParams, SketchKind, SketchParams};
-    use asap_types::pre_asap::agg_intent::default_quantile;
-    use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
-    use asap_types::pre_asap::query_expr::{Predicate, Source};
-    use asap_types::pre_asap::schema::{Column, DataType};
+    use asap_types::post_asap::{
+        ExactKind, ExactParams, SketchKind, SketchParams, SketchQuery, SummaryFamilyType,
+    };
+    use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
+    use asap_types::pre_asap::expr_ir::{ColumnRef, CompareOpKind, ScalarValue};
+    use asap_types::pre_asap::query_expr::{Predicate, Reduction, Source};
+    use asap_types::pre_asap::schema::{Column, DataType, Schema};
     use asap_types::types::AccuracyTarget;
     use std::time::Duration;
 
@@ -482,7 +247,10 @@ mod tests {
         }
     }
 
-    fn field<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryField {
+    fn field<'a>(
+        schema: &'a asap_types::post_asap::SummarySchema,
+        name: &str,
+    ) -> &'a asap_types::post_asap::SummaryField {
         schema
             .fields
             .iter()
@@ -631,9 +399,9 @@ mod tests {
             &self,
             ext_kind: &str,
             _payload: &serde_json::Value,
-        ) -> crate::implementation::Implementation {
+        ) -> crate::replacement::Implementation {
             if ext_kind == "frequency" {
-                crate::implementation::Implementation::Sketch {
+                crate::replacement::Implementation::Sketch {
                     kind: SketchKind::CountSketch,
                     params: SketchParams::CountSketch {
                         width: 256,
@@ -641,7 +409,7 @@ mod tests {
                     },
                 }
             } else {
-                crate::implementation::Implementation::PassThrough
+                crate::replacement::Implementation::PassThrough
             }
         }
 

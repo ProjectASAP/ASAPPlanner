@@ -6,10 +6,10 @@
 //! needs knowledge this crate doesn't have and shouldn't acquire: the crate
 //! doc's layering invariant is that `asap-plan` depends only on [`asap_ir`],
 //! never on a runtime or a deployment model. What it *can* own is the
-//! interface every deployment's cost model plugs into, so [`implementation`]'s
+//! interface every deployment's cost model plugs into, so [`replacement`]'s
 //! summary selection has exactly one extension point instead of forcing
 //! each downstream (ASAPCollector + ASAPQuery-backend, ASAPFusion, …) to
-//! fork [`implementation::implementations_for_with`].
+//! fork `replacement::implementations_for_with`.
 //!
 //! This trait is scoped to the approximate-**sketch** family specifically
 //! ([`CostModel::rank_candidates`]/[`size_params`](CostModel::size_params)
@@ -51,7 +51,7 @@ use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
-use crate::implementation::Implementation;
+use crate::replacement::Implementation;
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
@@ -168,22 +168,22 @@ pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
 /// Ranks the candidate summary families for one [`AggIntent`], best choice
 /// first.
 ///
-/// [`implementation::summary_candidates`] returns every family that *can* answer an
+/// [`replacement::summary_candidates`] returns every family that *can* answer an
 /// intent, in an arbitrary static preference order (issue #98's "one home"
 /// for the candidate set). A `CostModel` re-orders that list under real,
 /// deployment-specific cost knowledge this crate has no way to know about —
-/// [`implementation::implementations_for_with`] implements whichever candidate ends
+/// `replacement::implementations_for_with` implements whichever candidate ends
 /// up first after ranking.
 pub trait CostModel {
     /// Rank `candidates` (as returned by
-    /// [`summary_candidates`](crate::implementation::summary_candidates)) for
+    /// [`summary_candidates`](crate::replacement::summary_candidates)) for
     /// `intent`, best choice first.
     ///
     /// Implementations MAY reorder freely and MAY drop entries that aren't
     /// available in their deployment, but MUST NOT invent a candidate that
     /// wasn't in the input — an unknown [`SketchKind`] has no
     /// [`SketchParams`](asap_types::post_asap::SketchParams) sizing logic in
-    /// [`implementation::implementations_for_with`] and binding it will panic.
+    /// `replacement::implementations_for_with` and binding it will panic.
     /// Returning an empty `Vec` means "no candidate is acceptable";
     /// `implementations_for_with` treats that the same as `candidates`
     /// having been empty to begin with.
@@ -196,9 +196,9 @@ pub trait CostModel {
     /// Splitting sizing out from candidate selection lets a deployment own
     /// its own parameter-sizing math (e.g. an empirically-tuned table, or
     /// discrete rungs required by a downstream catalog) without forking
-    /// [`implementation::implementations_for_with`] — the same "one extension
+    /// `replacement::implementations_for_with` — the same "one extension
     /// point" rationale as `rank_candidates`, one level deeper. Default:
-    /// [`implementation::default_size_params`], `asap-plan`'s built-in formulas
+    /// [`replacement::default_size_params`], `asap-plan`'s built-in formulas
     /// (unchanged) — a deployment that only needs to reorder candidates,
     /// not resize them, can leave this method unimplemented.
     fn size_params(
@@ -208,12 +208,12 @@ pub trait CostModel {
         eps: f64,
         delta: f64,
     ) -> SketchParams {
-        crate::implementation::default_size_params(kind, intent, eps, delta)
+        crate::replacement::default_size_params(kind, intent, eps, delta)
     }
 
     /// Realize an `AggIntent::Extension { ext_kind, payload }` — a
     /// deployment-specific intent shape core has no realization opinion
-    /// for (issue #131). `implementation::implementations_for_with` consults this
+    /// for (issue #131). `replacement::implementations_for_with` consults this
     /// for every `Extension` node instead of hardcoding `PassThrough`
     /// (issue #150). Default: `PassThrough` — preserves today's behavior
     /// for every deployment that doesn't override this, exactly like
@@ -299,9 +299,9 @@ pub trait CostModel {
 }
 
 /// The default cost model: preserves [`summary_candidates`]'s built-in static
-/// order and [`implementation::default_size_params`]'s built-in sizing unchanged.
+/// order and [`replacement::default_size_params`]'s built-in sizing unchanged.
 ///
-/// [`summary_candidates`]: crate::implementation::summary_candidates
+/// [`summary_candidates`]: crate::replacement::summary_candidates
 pub struct DefaultCostModel;
 
 impl CostModel for DefaultCostModel {
@@ -313,7 +313,7 @@ impl CostModel for DefaultCostModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::implementation::summary_candidates;
+    use crate::replacement::summary_candidates;
     use asap_types::pre_asap::agg_intent::default_cardinality;
 
     #[test]
@@ -356,7 +356,7 @@ mod tests {
         let intent = default_cardinality();
         assert_eq!(
             AlwaysPreferLast.size_params(SketchKind::Hll, &intent, 0.01, 0.01),
-            crate::implementation::default_size_params(SketchKind::Hll, &intent, 0.01, 0.01),
+            crate::replacement::default_size_params(SketchKind::Hll, &intent, 0.01, 0.01),
         );
     }
 
@@ -387,7 +387,7 @@ mod tests {
                     let k = if eps >= 0.01 { 200 } else { 2048 };
                     SketchParams::Kll { k }
                 }
-                other => crate::implementation::default_size_params(other, intent, eps, delta),
+                other => crate::replacement::default_size_params(other, intent, eps, delta),
             }
         }
     }
@@ -404,7 +404,7 @@ mod tests {
         // Untouched kinds still fall through to the default formula.
         assert_eq!(
             DiscreteKllRungs.size_params(SketchKind::Hll, &intent, 0.01, 0.01),
-            crate::implementation::default_size_params(SketchKind::Hll, &intent, 0.01, 0.01),
+            crate::replacement::default_size_params(SketchKind::Hll, &intent, 0.01, 0.01),
         );
     }
 
