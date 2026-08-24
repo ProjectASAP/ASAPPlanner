@@ -8,7 +8,7 @@ This guide explains how to extend ASAP-aware mapping in the current codebase. Us
 - add a new kind of replacement without duplicating existing planner logic,
 - write the tests expected for a new extension.
 
-The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and the replacement-plan-searching design this crate now implements, see the separate design document, [`docs/design_docs/asap_aware_mapping.md`](../design_docs/asap_aware_mapping.md).
+The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and replacement-plan-search design, see the separate design document, [`docs/design_docs/asap_aware_mapping.md`](../design_docs/asap_aware_mapping.md).
 
 Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are illustrative; they do not ship with this crate. Samples that use real types—such as `SketchAlgorithmStrategy`, `SharedSubtreeStrategy`, `implementations_for_with`, `PlanSpace`, and `search_workload`—are copied from `replacement.rs`, `explanation.rs`, or `cost_model.rs`.
 
@@ -43,7 +43,7 @@ Do not put cost-based pruning into a `ReplacementStrategy`. A strategy must enum
 
 ## 2. Architecture overview
 
-The diagram below follows one query (or a whole workload) all the way from its first `TargetSubDAG` through every component this PR's design adds, to a downstream consumer. It is the whole-PR picture; §3 below zooms into the replacement-strategy path specifically, with its own diagrams.
+The diagram below follows one query—or a whole workload—from `TargetSubDAG` discovery through candidate generation, ranking, reporting, and downstream visualization. Section 3 focuses on the replacement-strategy path.
 
 ```mermaid
 flowchart TB
@@ -93,13 +93,13 @@ In the [design document](../design_docs/asap_aware_mapping.md), each `Replacemen
 
 **Tradeoff:** a single-target bind sizes and constructs every valid sketch candidate before the caller keeps the first one. This costs more than constructing only the preferred candidate, but it means there is exactly one place in the crate that decides what an `AggIntent` may become and exactly one place bound output comes from. Child nodes repeat selection independently (via `replacement::realize_child`), so a choice at one target does not force choices in nested aggregates.
 
-This crate now also implements the whole-plan Cascades/Volcano-style search the design document describes (issue #252, part of #33): `replacement::search_workload`/`search_workload_with` discover every candidate `TargetSubDAG` across a whole workload and run every registered `ReplacementStrategy` against each to a fixpoint, deduping into a `PlanSpace` — one `MemoGroup` per distinct `TargetSubDAG`, holding every alternative discovered for it. `PlanSpace::cost_sorted` is the final `sorted_by(cost_model)` step. See `replacement.rs`'s own module docs ("Workload-wide search") for the full design: MEMO groups instead of a flat `2^N`-sized plan list, dedup discipline, termination, and cost-based ranking.
+For workload-wide search, `replacement::search_workload`/`search_workload_with` discover every candidate `TargetSubDAG`, run every registered `ReplacementStrategy` against each target to a fixpoint, and deduplicate the results into a `PlanSpace`. Each distinct target has one `MemoGroup` containing every discovered alternative. `PlanSpace::cost_sorted` ranks those candidates with the supplied cost model. This MEMO representation avoids materializing a flat list of `2^N` complete plans while preserving every independent choice.
 
-**No workload-wide single-answer selection lives in this crate any more.** An earlier version had `bind::implement_workload`/`implement_workload_with`, which picked and memoized one candidate per shared `Rc<QueryExpr>` root so CSE-collapsed roots got one consistent, physically-shared bound `SummaryNode`. That was removed: committing to one final answer per site — and physically materializing it — is a downstream deployment's call (it needs to weigh placement too, which this crate can't see), not something this crate should pre-decide with no real consumer of that single answer. Callers now get every candidate, ranked with cost, from `search_workload`/`search_workload_with`'s `PlanSpace`, and make the final pick themselves. The two remaining `.into_iter().next()`-shaped helpers in `replacement.rs` (`realize_child`, used for a single candidate's own child recursion during construction; `realize_one`, used internally by `cost_sorted`'s ranking step to get one representative bound node for a cost comparison) are narrow, single-target implementation details — neither is a "here's the workload's answer" entry point.
+**This crate does not select or materialize one final answer for a workload.** Callers receive every candidate, ranked with cost, from `search_workload`/`search_workload_with` and make the final choice using deployment information such as placement. The `.into_iter().next()` helpers in `replacement.rs` are narrow implementation details: `realize_child` selects a realization while recursively constructing one candidate, and `realize_one` obtains a representative bound node for a cost comparison. Neither chooses a final workload plan.
 
 ### Replacement-strategy path
 
-The diagram in the previous revision of this guide started at `TargetSubDAG`, as if that were the crate's real top-level input. It isn't — a `TargetSubDAG` is always produced by one of two real entry points, and which one matters (it decides `consumer_count`, which strategies like `SharedSubtreeStrategy` key their whole decision on):
+A `TargetSubDAG` comes from one of two entry points. The chosen path determines whether `consumer_count` is assumed to be one or discovered across a workload, which directly controls strategies such as `SharedSubtreeStrategy`:
 
 ```mermaid
 flowchart LR
@@ -416,7 +416,7 @@ pub enum SketchKind {
 
 Where this matters in practice: `CostModel::rank_candidates`/`size_params`, `replacement.rs`'s private `implementations_for_with`, and `SketchAlgorithmStrategy`'s candidate enumeration all operate one level down, at **algorithm** — `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` only shows up once an algorithm has actually been picked and sized — on `Implementation::Sketch(SketchKind)` and `SummaryFamilyType::Sketch(SketchKind)`, both single-field wrappers around the already-committed kind.
 
-No other family needs this extra level today — `Sample`/`Wavelet`/`StatModel` are each a flat `(Kind, Params)` pair, same shape `Sketch` used to be before this split. `Sketch` grew a third level because it's the one family with more than one algorithm per purpose (KLL vs. DDSketch both answer `Quantile`).
+`Sample`, `Wavelet`, and `StatModel` each use a flat `(Kind, Params)` pair. `Sketch` needs the additional algorithm level because multiple algorithms can serve the same purpose—for example, KLL and DDSketch both answer quantile queries.
 
 ---
 
@@ -457,9 +457,9 @@ Each `ReplacementExplanation::reason` is copied verbatim from the matching candi
 
 ### Why there is no `ExplanationRule` trait
 
-An earlier version of this module (superseded, PR #247, under the name `applicability.rs`) had its own extension-point trait for adding a new optimization to the report. It is gone. Once explanations are read off `PlanSpace`, a new explanation needs a new `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with` regardless — that is the only way a new kind of candidate reaches the `PlanSpace` this module reads. A second, explanation-specific extension point would just be a second place to register the same thing. `explain_replacements_with`'s own `strategies: &[Box<dyn ReplacementStrategy>]` parameter is where a caller plugs in something custom — the same customization point `search_workload_with` itself exposes.
+Explanations are derived from candidates already present in `PlanSpace`. A new candidate kind therefore requires an `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with`; a second explanation-specific trait would duplicate registration and could drift from the actual search space. Custom callers supply strategies through `explain_replacements_with`, using the same extension point exposed by `search_workload_with`.
 
-### What it still owns: `location` text
+### How it derives `location` text
 
 `PlanSpace`/`MemoGroup` track `Rc<QueryExpr>` pointer identity, not human-readable breadcrumbs. `explanation.rs` keeps one small, self-contained traversal, `collect_locations`, whose only job is turning "this `Rc`" into prose like `root "dash_a" > lhs` for `ReplacementExplanation::location`. It makes no explanation decision — it runs identically regardless of what any strategy found.
 
@@ -737,9 +737,9 @@ fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
 }
 ```
 
-`implementations_for_with` already did the hard part — enumerating and sizing every candidate, ranked. This loop's only job is to hand each one to `construct_summary(expr, implementation, cost_model)` — a private helper in the same file, not a separately-named public bridge in a different module — which derives the child schema, resolves the summarized column, builds the readout, recurses into the child, and assembles the `SummaryNode`. No per-candidate sizing logic lives here: sizing already happened inside `implementations_for_with`.
+`implementations_for_with` enumerates, sizes, and ranks every candidate. The loop passes each candidate to the private `construct_summary(expr, implementation, cost_model)` helper, which derives the child schema, resolves the summarized column, builds the readout, recurses into the child, and assembles the `SummaryNode`. Candidate sizing remains in `implementations_for_with`.
 
-Because only `expr`'s own top-level `Implementation` is ever supplied from outside — `construct_summary` recurses into `expr`'s child via `replacement::realize_child`, a fresh internal selection over that child's own candidates, not a forced one — enumerating a candidate for one target never leaks into that target's own nested aggregates. (An earlier version of this strategy forced ranking via a `CostModel`-wrapping adapter for the whole recursive bind, which had exactly that leak as a latent bug; today's design doesn't have the problem, because nothing below the top node is ever forced.)
+Only `expr`'s top-level `Implementation` is supplied to `construct_summary`. Child recursion goes through `replacement::realize_child`, which performs a fresh selection over the child's own candidates. A choice for one target therefore does not constrain implementations chosen for nested aggregates.
 
 This is the pattern to preserve when adding another strategy that needs to enumerate alternatives through an API that normally chooses one: get the exhaustive list from the same enumeration function the single-answer path uses, and construct each entry directly — never wrap the `CostModel` to trick a ranked-first path into producing what you want.
 
