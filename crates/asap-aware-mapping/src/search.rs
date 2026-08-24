@@ -510,9 +510,11 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchKind> {
 /// The strategies [`search_workload`] runs, in the built-in
 /// [`DefaultCostModel`] configuration — mirrors
 /// [`replacement`](crate::replacement)'s own two shipped
-/// [`ReplacementStrategy`] impls, the same way a hypothetical
-/// `applicability::default_rules()` mirrors *its* module's own rule set.
-/// Use [`default_strategies_with`] to plug in a deployment-specific
+/// [`ReplacementStrategy`] impls.
+/// [`crate::applicability::find_applicable_optimizations`] (issue #257) uses
+/// this same set (via [`search_workload`]) rather than keeping a second,
+/// applicability-specific list to stay in sync with. Use
+/// [`default_strategies_with`] to plug in a deployment-specific
 /// [`CostModel`] instead.
 pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
@@ -551,9 +553,10 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> PlanSpace<Id> {
 /// [`default_strategies_with`] to plug in a deployment-specific
 /// [`CostModel`] for candidate generation).
 ///
-/// Runs [`share_common_subtrees`] once over `roots` first — the same
-/// pattern a hypothetical `applicability::find_applicable_optimizations`
-/// uses, so every strategy sees the same already-deduplicated tree
+/// Runs [`share_common_subtrees`] once over `roots` first — so every
+/// strategy (and, transitively, every
+/// [`crate::applicability::ApplicabilityFinding`] this module's caller reads
+/// off the result) sees the same already-deduplicated tree
 /// [`crate::bind::implement_workload`] would — then discovers every site
 /// (see [`discover_sites`]) and runs the fixpoint loop the module docs
 /// describe, capped at [`MAX_SEARCH_ITERATIONS`] passes (see the module

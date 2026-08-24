@@ -29,6 +29,14 @@
 //!
 //! ## Status
 //!
+//! - [`applicability`] — a reporting *view* over [`search`]'s candidate-plan
+//!   space (issue #257, part of #33): translates every discovered
+//!   `TargetSubDAG` with a non-trivial candidate list into an
+//!   [`applicability::ApplicabilityFinding`] ("which optimizations are
+//!   applicable, where, and why"). Superseded PR #247's own rule-based
+//!   traversal, which re-walked the tree once per optimization before
+//!   [`search`] existed to read from instead — see that module's docs for
+//!   the full reframing.
 //! - [`implementation`] — [`implementation::implementations_for_with`] is
 //!   where every valid realization of an `AggIntent` gets decided: exhaustive
 //!   and ranked (most-preferred first via a `CostModel`), sized to the
@@ -118,12 +126,17 @@
 //! `sketch_algebra::capability::Capability`/`is_satisfied_by` is the
 //! reference downstream implementation.
 
+pub mod applicability;
 pub mod bind;
 pub mod cost_model;
 pub mod implementation;
 pub mod replacement;
 pub mod search;
 
+pub use applicability::{
+    find_applicable_optimizations, find_applicable_optimizations_with, ApplicabilityFinding,
+    OptimizationKind,
+};
 pub use bind::{implement_workload, implement_workload_with, ImplementError};
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use implementation::{implementations_for_with, summary_candidates, Implementation, Matcher};
