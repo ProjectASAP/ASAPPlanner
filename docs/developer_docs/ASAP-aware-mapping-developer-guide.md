@@ -328,20 +328,45 @@ This crate now also implements the whole-plan Cascades/Volcano-style search the 
 
 ### Replacement-strategy path
 
+The diagram in the previous revision of this guide started at `TargetSubDAG`, as if that were the crate's real top-level input. It isn't — a `TargetSubDAG` is always produced by one of two real entry points, and which one matters (it decides `consumer_count`, which strategies like `SharedSubtreeStrategy` key their whole decision on):
+
 ```text
-TargetSubDAG
-   |
-   v
-ReplacementStrategy::matches(...)
-   |
-   v
-ReplacementStrategy::replacements(...)
-   | (SketchAlgorithmStrategy: decide via implementations_for_with,
-   |  then construct each candidate's SummaryNode, in one method)
-   +---------------------------------------------+
-   |                    |                         |
-candidate A          candidate B              candidate C
+              TWO WAYS IN — a TargetSubDAG never appears out of nowhere
+ ┌──────────────────────────────┐    ┌────────────────────────────────────────┐
+ │ one QueryExpr node you       │    │ a whole workload:                      │
+ │ already have (one query's    │    │ Vec<(Id, Rc<QueryExpr>)>                │
+ │ root, or a child being       │    │ — one query, or many queries at once    │
+ │ constructed recursively)     │    └────────────────────┬─────────────────────┘
+ └───────────────┬───────────────┘                         │
+                 │                                          v
+                 │                        search_workload_with: runs the pre-ASAP
+                 │                        CSE pass once, then walks every root's
+                 │                        WHOLE DAG (not just root level) to find
+                 │                        every distinct node and its real,
+                 │                        cross-workload consumer_count
+                 v                                          │
+   TargetSubDAG::new(&root)                                 v
+   — consumer_count assumed 1          one TargetSubDAG per distinct node found
+   (the single-query API, and          anywhere in the workload, each already
+   `realize_child`'s recursion         carrying its real consumer_count
+   into a candidate's own child)
+                 │                                          │
+                 └────────────────────┬─────────────────────┘
+                                       v
+                (every TargetSubDAG, from either path, is handed to the same:)
+
+                       ReplacementStrategy::matches(...)
+                             |
+                             v
+                       ReplacementStrategy::replacements(...)
+                          | (SketchAlgorithmStrategy: decide via implementations_for_with,
+                          |  then construct each candidate's SummaryNode, in one method)
+                          +---------------------------------------------+
+                          |                    |                        |
+                     candidate A          candidate B              candidate C
 ```
+
+The left path is what a caller with one query in hand uses directly (see `docs/user-guide/user-guide.md`'s "Step 2"), and what `realize_child` uses internally to bind a candidate's own child. The right path is `search_workload`/`search_workload_with` (§3 above) — it's the only place `consumer_count` is ever discovered rather than assumed, which is why `SharedSubtreeStrategy` only meaningfully matches something reached through it.
 
 The important rule is:
 
