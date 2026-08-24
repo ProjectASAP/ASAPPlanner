@@ -9,7 +9,7 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::bind::{keep_pre_asap, ImplementError};
+use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
 };

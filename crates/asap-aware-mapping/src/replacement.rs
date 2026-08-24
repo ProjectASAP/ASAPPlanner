@@ -20,7 +20,7 @@
 //!    mechanically turns the already-decided `(kind, params)` into a real
 //!    [`SummaryNode`] — derives the child schema, resolves the summarized
 //!    column, builds the readout query, recurses into the child (via
-//!    [`select_and_bind`], so a nested aggregate gets its own
+//!    [`realize_child`], so a nested aggregate gets its own
 //!    independent enumeration, never the outer target's forced choice), and
 //!    assembles the `SummaryAgg`/`SummaryEstimate` node.
 //!
@@ -52,12 +52,17 @@
 //! A caller that wants one executable answer takes the first
 //! (`cost_model`-preferred) entry off `replacements()` itself
 //! (`.into_iter().next()`) — that "keep the head" step lives entirely on the
-//! calling side, not behind a second module-level entry point. `bind.rs`'s
-//! own [`crate::bind::implement_workload`]/[`crate::bind::implement_workload_with`]
-//! are the one place inside this crate that still perform that take-first
-//! step internally, because workload-wide CSE memoization needs one
-//! canonical decision per shared root to key sharing on (see `bind.rs`'s own
-//! module docs). Every other caller goes through
+//! calling side, not behind a second module-level entry point. This
+//! module's own [`realize_child`] performs that take-first step
+//! internally, but only for one, narrow, single-target purpose: recursing
+//! into a node's child while constructing one concrete candidate (see
+//! [`construct_summary_agg`]) and, symmetrically, recovering one
+//! representative bound node for a [`CostModel::cse_share_decision`]
+//! comparison (see [`realize_one`]) — never a workload-wide "commit to one
+//! final answer" step. Committing to one physically-materialized answer for
+//! a whole workload (previously `bind::implement_workload`/
+//! `implement_workload_with`) is out of this crate's scope — see the crate
+//! doc's `## Status` section for why. Every other caller goes through
 //! `SketchFamilyStrategy::replacements` directly and decides for itself.
 //!
 //! This means an ordinary single-target bind sizes and fully constructs
@@ -176,14 +181,10 @@
 //! that module's "Algorithm" section), discovering one `TargetSubDAG` per
 //! distinct `Rc` and a *real* `consumer_count`: how many operator-child
 //! positions anywhere in the workload reference that exact `Rc`, not just
-//! how many of the workload's own top-level roots happen to be it. This
-//! deliberately goes one step further than
-//! [`crate::bind::implement_workload_with`]'s own consumer-count pass,
-//! which only counts whole-root sharing (that function's own doc calls
-//! widening this "future work" for binding) — a `SharedSubtreeStrategy`
-//! candidate three levels under an unshared `Filter` is exactly as real a
-//! target as a shared whole root, so this module's discovery can't stop at
-//! the top level the way binding's does.
+//! how many of the workload's own top-level roots happen to be it — a
+//! `SharedSubtreeStrategy` candidate three levels under an unshared
+//! `Filter` is exactly as real a target as a shared whole root, so this
+//! module's discovery can't stop at the top level.
 //!
 //! `discover_targets` duplicates (rather than reuses) this module's own
 //! `#[cfg(test)]`-only `count_consumers` traversal (in the test module
@@ -247,10 +248,8 @@
 //!
 //! - A group whose candidates are the [`SharedSubtreeStrategy`]
 //!   share-vs-recompute pair is ranked by calling
-//!   [`CostModel::cse_share_decision`] — the exact comparison
-//!   [`crate::bind::implement_workload_with`] already uses for this same
-//!   decision — rather than re-deriving a competing comparison in this
-//!   module.
+//!   [`CostModel::cse_share_decision`] via this module's own
+//!   [`cse_preference`] — rather than re-deriving a competing comparison.
 //! - A group whose candidates are [`SketchFamilyStrategy`]'s sketch-family
 //!   candidates is ranked via [`CostModel::rank_candidates`] (the same hook
 //!   `implementations_for_with` itself consults), applied to the
@@ -270,18 +269,31 @@ use asap_types::post_asap::{
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
 use asap_types::pre_asap::schema::Schema;
 use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
+use thiserror::Error;
 
-use crate::bind::ImplementError;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
+
+/// Errors from the pre-ASAP → post-ASAP replacement/construction path
+/// ([`realize_child`] and [`keep_pre_asap`]). Moved here from the former
+/// `bind.rs` (issue #251): this is what a [`ReplacementStrategy`]
+/// implementor's own construction path can realistically fail with —
+/// schema derivation over a pre-ASAP [`QueryExpr`] — not something specific
+/// to workload-wide orchestration.
+#[derive(Debug, Error)]
+pub enum ImplementError {
+    /// Schema derivation failed while lifting an edge to `SummarySchema`.
+    #[error("schema derivation failed during pre-ASAP → post-ASAP binding: {0}")]
+    Schema(#[from] QueryExprError),
+}
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
 ///
 /// `root` is a reference into the workload's own [`QueryExpr`] tree (an
-/// `Rc<QueryExpr>`, the same currency [`crate::bind::implement_workload`] and
+/// `Rc<QueryExpr>`, the same currency [`search_workload`] and
 /// `asap_types::pre_asap::cse::share_common_subtrees` already thread through
 /// this crate's public API — not a bare `&QueryExpr` — so a strategy that
 /// needs the node's own `Rc` identity, not just its shape, has it available
@@ -1031,23 +1043,29 @@ fn describe_intent(intent: &AggIntent) -> String {
     }
 }
 
-// ── select_and_bind / keep_pre_asap: rank-and-take-first, and its fallback ──
+// ── realize_child / keep_pre_asap: rank-and-take-first, and its fallback ──
 
-/// Rank-and-take-first selector, scoped to
-/// [`crate::bind::implement_workload_with`]'s CSE memoization and to this
-/// module's own recursion into a node's child (via [`construct_summary_agg`])
-/// — **not** a general single-answer API. `root` must already be the
-/// caller's own `Rc`, never fabricated per call, so this never allocates
-/// beyond what the caller already held.
+/// Rank-and-take-first selector for a single [`QueryExpr`] node: enumerate
+/// every candidate via [`SketchFamilyStrategy::replacements`], keep the
+/// `cost_model`-preferred (first) one, and fall back to [`keep_pre_asap`]
+/// when there's no candidate at all — **not** a general single-answer API
+/// for a whole workload (that "commit to one final answer" step is a
+/// downstream deployment's job, out of this crate's scope — see the crate
+/// doc's `## Status` section). `root` must already be the caller's own
+/// `Rc`, never fabricated per call, so this never allocates beyond what the
+/// caller already held.
 ///
-/// `pub(crate)`: reachable both from this module's own construction helper
-/// (so a nested aggregate gets its own independent enumeration instead of
-/// inheriting the parent's forced candidate) and from `bind.rs`'s
-/// [`crate::bind::implement_workload_with`] (workload-wide CSE memoization
-/// needs one canonical decision per shared root to key sharing on — see
-/// that function's own module docs). Every other caller goes through
+/// `pub(crate)`: reachable from this module's own construction helper
+/// ([`construct_summary_agg`], so a nested aggregate gets its own
+/// independent enumeration instead of inheriting the parent's forced
+/// candidate), from this module's own [`realize_one`] (the representative
+/// bound `SummaryNode` [`cse_preference`] needs for a
+/// [`CostModel::cse_share_decision`] comparison), and from
+/// [`crate::cost_model::DefaultCostModel::estimate_cost`] (the same
+/// representative-node need, for a [`Replacement::Rewrite`] candidate's own
+/// cost estimate). Every other caller goes through
 /// [`SketchFamilyStrategy::replacements`] directly and decides for itself.
-pub(crate) fn select_and_bind(
+pub(crate) fn realize_child(
     root: &Rc<QueryExpr>,
     cost_model: &dyn CostModel,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
@@ -1076,9 +1094,7 @@ pub(crate) fn select_and_bind(
 }
 
 /// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
-/// `SummaryFamilyType::Plain`. `pub` — re-exported as
-/// [`crate::bind::keep_pre_asap`] for existing external callers that reach
-/// it through that module's path — so a caller can fall back to this
+/// `SummaryFamilyType::Plain`. `pub` so a caller can fall back to this
 /// explicitly — e.g. when `SketchFamilyStrategy::replacements()` returns no
 /// candidate for a target, or a deployment wants to force a node its own
 /// runtime can't actually implement — through the same fallback this
@@ -1096,7 +1112,12 @@ pub fn keep_pre_asap(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError
 /// The bindable shape [`SketchFamilyStrategy`] targets: a single intent, no
 /// `HAVING`. A multi-intent node (SQL `SELECT SUM(a), AVG(b)`), or one with a
 /// `HAVING` predicate (the filter would need the estimate first), stays
-/// logical — see the module docs' "Conservative fallbacks" in `bind.rs`.
+/// logical — conservative fallbacks: [`SummaryExpr::KeepPreAsap`] boxes a
+/// whole pre-ASAP subtree with no post-ASAP children, so a *logical*
+/// operator above a bindable aggregate (`Filter`/`BinaryOp`/… over a
+/// quantile) subsumes the aggregate into the logical wrapper unbound too —
+/// rewriting through logical parents is the post-ASAP rule engine's job
+/// (#6/#33), not this pass's.
 pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
     if let QueryExpr::Aggregate {
         measures, having, ..
@@ -1117,7 +1138,7 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
 /// `expr` must still be the [`bindable_intent`] shape for `implementation` to
 /// have any effect; anything else falls back to [`keep_pre_asap`].
 /// Only `expr`'s own top-level decision is forced — recursion into `expr`'s
-/// child goes back through [`select_and_bind`] (fresh candidate
+/// child goes back through [`realize_child`] (fresh candidate
 /// enumeration, not a forced pick), so choosing one candidate for a target
 /// never leaks into that target's own nested aggregates.
 fn construct_summary(
@@ -1209,7 +1230,7 @@ fn construct_summary_agg(
     // single place that decides this; nothing downstream re-derives it.
     let agg = Rc::new(SummaryNode {
         expr: SummaryExpr::SummaryAgg {
-            child: select_and_bind(child, cost_model)?,
+            child: realize_child(child, cost_model)?,
             family,
             col,
             reduction: reduction.clone(),
@@ -1621,8 +1642,8 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
     }
 
     // Shape 1: a `SharedSubtreeStrategy` share-vs-recompute pair (every
-    // candidate is a `Rewrite`) — rank via `CostModel::cse_share_decision`,
-    // the same comparison `bind::implement_workload_with` already uses.
+    // candidate is a `Rewrite`) — rank via `CostModel::cse_share_decision`
+    // (see `cse_preference` below).
     if ranked
         .iter()
         .all(|c| matches!(c.replacement, Replacement::Rewrite(_)))
@@ -1680,7 +1701,7 @@ fn cse_preference(group: &MemoGroup, cost_model: &dyn CostModel) -> Option<bool>
     if group.consumer_count < 2 {
         return None;
     }
-    let bound = bind_one(&group.target, cost_model)?;
+    let bound = realize_one(&group.target, cost_model)?;
     let candidate = CseCandidate {
         subtree: &group.target,
         bound_summary: &bound,
@@ -1696,12 +1717,12 @@ fn cse_preference(group: &MemoGroup, cost_model: &dyn CostModel) -> Option<bool>
 /// for `target` (to build a [`CseCandidate`] for
 /// [`CostModel::cse_share_decision`]), not the full ranked candidate list
 /// [`SketchFamilyStrategy::replacements`] returns — so this just reuses
-/// [`select_and_bind`], the same rank-and-take-first helper
+/// [`realize_child`], the same rank-and-take-first helper
 /// `construct_summary_agg`'s own recursion and
-/// `crate::bind::implement_workload_with` already use, wrapped to swallow
-/// the (here, uninteresting) error into `None`.
-fn bind_one(target: &Rc<QueryExpr>, cost_model: &dyn CostModel) -> Option<Rc<SummaryNode>> {
-    select_and_bind(target, cost_model).ok()
+/// [`crate::cost_model::DefaultCostModel::estimate_cost`] already use,
+/// wrapped to swallow the (here, uninteresting) error into `None`.
+fn realize_one(target: &Rc<QueryExpr>, cost_model: &dyn CostModel) -> Option<Rc<SummaryNode>> {
+    realize_child(target, cost_model).ok()
 }
 
 /// The `SketchKind` a bound [`Replacement::Summary`] candidate ultimately
@@ -1773,11 +1794,11 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> PlanSpace<Id> {
 ///
 /// Runs [`share_common_subtrees`] once over `roots` first — the same
 /// pattern a hypothetical `applicability::find_applicable_optimizations`
-/// uses, so every strategy sees the same already-deduplicated tree
-/// [`crate::bind::implement_workload`] would — then discovers every
-/// `TargetSubDAG` (see [`discover_targets`]) and runs the fixpoint loop the
-/// module docs describe, capped at [`MAX_SEARCH_ITERATIONS`] passes (see the
-/// module docs' "Termination" section). Deduping candidate plans this way needs no
+/// uses, so every strategy sees the same already-deduplicated tree — then
+/// discovers every `TargetSubDAG` (see [`discover_targets`]) and runs the
+/// fixpoint loop the module docs describe, capped at
+/// [`MAX_SEARCH_ITERATIONS`] passes (see the module docs' "Termination"
+/// section). Deduping candidate plans this way needs no
 /// [`CostModel`] at all — that only enters at two well-defined points: each
 /// [`ReplacementStrategy`] in `strategies` may already carry its own (e.g.
 /// [`SketchFamilyStrategy::new`]'s), and [`PlanSpace::cost_sorted`]'s final
@@ -2692,7 +2713,7 @@ mod tests {
     /// node's own decision — a nested aggregate underneath it still gets its
     /// own independent (`cost_model`-ranked) enumeration, not whatever the
     /// caller happened to pick for the outer target. This is the behavior
-    /// [`construct_summary`]'s recursion (via [`select_and_bind`])
+    /// [`construct_summary`]'s recursion (via [`realize_child`])
     /// gets for free: only the top node's `Implementation` is ever forced
     /// from outside; the child is always re-enumerated fresh.
     #[test]
@@ -3021,8 +3042,8 @@ mod tests {
         // A shared grouped Aggregate nested under two *different*,
         // unshared Filter parents — real consumer_count must come from
         // walking the whole DAG, not just root-level pointer identity
-        // (bind::implement_workload_with's own consumer-count pass would
-        // miss this; this module's discover_targets must not).
+        // (a naive whole-root-only consumer-count pass would miss this;
+        // this module's discover_targets must not).
         use asap_types::pre_asap::expr_ir::ScalarValue;
         use asap_types::pre_asap::query_expr::Predicate;
 
@@ -3357,5 +3378,545 @@ mod tests {
             next: std::cell::Cell::new(0),
         })];
         let _ = search_workload_with(vec![("q", root)], &strategies);
+    }
+    // ── realize_child / keep_pre_asap: end-to-end single-target realization ──
+    //
+    // Moved from the former `bind.rs` (issue #251): `bind.rs`'s own
+    // workload-wide orchestration (`implement_workload`/
+    // `implement_workload_with`) was deleted as out of this crate's scope
+    // (see the crate doc's `## Status` section), but these tests exercise
+    // `construct_summary_agg`'s schema derivation end to end through
+    // `realize_child` — production logic that still lives in this module —
+    // so they move here rather than disappear. Unlike `bind.rs` (an
+    // external caller that had to reconstruct the rank-and-take-first
+    // pattern by hand since `realize_child` is `pub(crate)`), these tests
+    // call `realize_child` directly.
+
+    fn agg_per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
+        QueryExpr::Aggregate {
+            reduction: ReductionTy::PerEntity,
+            measures: vec![intent],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(child),
+        }
+    }
+
+    fn field<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryField {
+        schema
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("no field {name:?} in {schema:?}"))
+    }
+
+    fn realize_first(
+        expr: &QueryExpr,
+        cost_model: &dyn CostModel,
+    ) -> Result<Rc<SummaryNode>, ImplementError> {
+        realize_child(&Rc::new(expr.clone()), cost_model)
+    }
+
+    fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+        realize_first(expr, &DefaultCostModel)
+    }
+
+    #[test]
+    fn quantile_realizes_kll_wrapped_in_estimate() {
+        // quantile by (job) (m) at ε=0.01 → Estimate(Quantile) over
+        // SummaryAgg(Kll{k:200}) over KeepPreAsap(Scan). job = col 2.
+        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
+        let root = realize(&q).unwrap();
+
+        let SummaryExpr::SummaryEstimate {
+            summary_input,
+            query,
+        } = &root.expr
+        else {
+            panic!("expected SummaryEstimate root, got {:?}", root.expr);
+        };
+        assert!(matches!(query, PostAsapSketchQuery::Quantile { q } if *q == 0.99));
+        // Estimate edge: plain row shape — group key + Float64 answer.
+        assert_eq!(
+            field(&root.schema, "quantile_0_99").dtype,
+            SummaryFamilyType::Plain(DataType::Float64)
+        );
+        assert_eq!(
+            field(&root.schema, "job").dtype,
+            SummaryFamilyType::Plain(DataType::Utf8)
+        );
+
+        let SummaryExpr::SummaryAgg {
+            child,
+            family,
+            col,
+            reduction,
+        } = &summary_input.expr
+        else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
+        };
+        assert_eq!(
+            family,
+            &SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+        );
+        assert_eq!(col, &ColumnRef::SampleValue);
+        assert_eq!(reduction, &ReductionTy::by(vec![2]));
+        // SummaryAgg edge: the state column carries the committed family.
+        assert_eq!(
+            field(&summary_input.schema, "quantile_0_99").dtype,
+            SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+        );
+        assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(ref e)
+            if matches!(**e, QueryExpr::Scan { .. })));
+    }
+
+    /// A deployment-supplied [`CostModel`] can override the default KLL
+    /// choice — `realize_first` (via `realize_child`) must actually consult
+    /// it, not just accept and ignore it (issue: cost model interface, see
+    /// `crate::cost_model`).
+    struct PreferDDSketchViaCostModel;
+
+    impl CostModel for PreferDDSketchViaCostModel {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchKind],
+        ) -> Vec<SketchKind> {
+            let mut v = candidates.to_vec();
+            if let Some(pos) = v.iter().position(|k| *k == SketchKind::DDSketch) {
+                let ddsketch = v.remove(pos);
+                v.insert(0, ddsketch);
+            }
+            v
+        }
+    }
+
+    #[test]
+    fn realize_with_custom_cost_model_overrides_default_summary_choice() {
+        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
+
+        // Default: KLL (see `quantile_realizes_kll_wrapped_in_estimate` above).
+        let default_root = realize(&q).unwrap();
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &default_root.expr else {
+            panic!("expected SummaryEstimate root, got {:?}", default_root.expr);
+        };
+        let SummaryExpr::SummaryAgg { family, .. } = &summary_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
+        };
+        assert!(matches!(
+            family,
+            SummaryFamilyType::Sketch(SketchKind::Kll, _)
+        ));
+
+        // With `PreferDDSketchViaCostModel`: DDSketch instead, same query.
+        let custom_root = realize_first(&q, &PreferDDSketchViaCostModel).unwrap();
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &custom_root.expr else {
+            panic!("expected SummaryEstimate root, got {:?}", custom_root.expr);
+        };
+        let SummaryExpr::SummaryAgg { family, .. } = &summary_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
+        };
+        assert_eq!(
+            family,
+            &SummaryFamilyType::Sketch(
+                SketchKind::DDSketch,
+                SketchParams::DDSketch { alpha: 0.01 }
+            )
+        );
+    }
+
+    /// A deployment-supplied `CostModel` can realize an `AggIntent::Extension`
+    /// intent as a real sketch instead of the default `PassThrough` (issue
+    /// #150) — `implementations_for_with` must consult `realize_extension`
+    /// for the `Extension` arm, and `readout` must consult
+    /// `readout_extension` to build its `SketchQuery` without panicking.
+    struct FrequencyCostModel;
+
+    impl CostModel for FrequencyCostModel {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchKind],
+        ) -> Vec<SketchKind> {
+            candidates.to_vec()
+        }
+
+        fn realize_extension(
+            &self,
+            ext_kind: &str,
+            _payload: &serde_json::Value,
+        ) -> Implementation {
+            if ext_kind == "frequency" {
+                Implementation::Sketch {
+                    kind: SketchKind::CountSketch,
+                    params: SketchParams::CountSketch {
+                        width: 256,
+                        depth: 4,
+                    },
+                }
+            } else {
+                Implementation::PassThrough
+            }
+        }
+
+        fn readout_extension(
+            &self,
+            ext_kind: &str,
+            payload: &serde_json::Value,
+            _col: &ColumnRef,
+        ) -> PostAsapSketchQuery {
+            assert_eq!(ext_kind, "frequency");
+            let value = payload["item"].as_str().map(str::to_string);
+            PostAsapSketchQuery::PointCount {
+                key: ColumnRef::Named("item".into()),
+                value,
+            }
+        }
+    }
+
+    #[test]
+    fn extension_intent_stays_logical_by_default() {
+        // Without a CostModel overriding `realize_extension`, an
+        // `Extension` intent must stay `PassThrough` -- today's behavior,
+        // unchanged.
+        let intent = AggIntent::Extension {
+            ext_kind: "frequency".to_string(),
+            payload: serde_json::json!({ "item": "checkout" }),
+        };
+        let q = agg(vec![], intent, metric_scan(&[]));
+        let root = realize(&q).unwrap();
+        assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
+    }
+
+    #[test]
+    fn extension_intent_realizes_via_custom_cost_model() {
+        let intent = AggIntent::Extension {
+            ext_kind: "frequency".to_string(),
+            payload: serde_json::json!({ "item": "checkout" }),
+        };
+        let q = agg(vec![], intent, metric_scan(&[]));
+        let root = realize_first(&q, &FrequencyCostModel).unwrap();
+
+        let SummaryExpr::SummaryEstimate {
+            summary_input,
+            query,
+        } = &root.expr
+        else {
+            panic!("expected SummaryEstimate root, got {:?}", root.expr);
+        };
+        assert!(matches!(
+            query,
+            PostAsapSketchQuery::PointCount { key: ColumnRef::Named(k), value: Some(v) }
+                if k == "item" && v == "checkout"
+        ));
+
+        let SummaryExpr::SummaryAgg { family, .. } = &summary_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
+        };
+        assert_eq!(
+            family,
+            &SummaryFamilyType::Sketch(
+                SketchKind::CountSketch,
+                SketchParams::CountSketch {
+                    width: 256,
+                    depth: 4
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn exact_sum_realizes_accumulator_without_estimate() {
+        let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
+        let root = realize(&q).unwrap();
+        let SummaryExpr::SummaryAgg { family, .. } = &root.expr else {
+            panic!(
+                "expected bare SummaryAgg (no estimate), got {:?}",
+                root.expr
+            );
+        };
+        assert_eq!(
+            family,
+            &SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        );
+        assert_eq!(
+            field(&root.schema, "sum").dtype,
+            SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        );
+    }
+
+    #[test]
+    fn per_series_rate_keeps_labels_and_retypes_value() {
+        // rate(m[5m]) — per-series: every label survives; the sample value
+        // column becomes the Rate accumulator state.
+        use std::time::Duration;
+        let q = agg_per_entity(
+            AggIntent::Rate,
+            QueryExpr::TimeRange {
+                range: Duration::from_secs(300),
+                child: Rc::new(metric_scan(&["job"])),
+            },
+        );
+        let root = realize(&q).unwrap();
+        let SummaryExpr::SummaryAgg { family, .. } = &root.expr else {
+            panic!("expected SummaryAgg, got {:?}", root.expr);
+        };
+        assert_eq!(
+            family,
+            &SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
+        );
+        assert_eq!(
+            root.schema
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ts", "value", "job"],
+        );
+        assert_eq!(
+            field(&root.schema, "value").dtype,
+            SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
+        );
+        assert_eq!(root.schema.time_index, Some(0));
+    }
+
+    /// Issue #163, case 1: a bare per-series range function (e.g.
+    /// `quantile_over_time(...)`) realizes to `SummaryAgg { reduction:
+    /// PerEntity, .. }` — proving the pre-ASAP `Reduction` this crate
+    /// already computes (issue #165) is carried onto the post-ASAP node
+    /// verbatim, not flattened back into an ambiguous bare `Vec<ColumnId>`.
+    #[test]
+    fn bare_per_series_aggregate_realizes_summary_agg_with_per_entity_reduction() {
+        use std::time::Duration;
+        let q = agg_per_entity(
+            default_quantile(0.99),
+            QueryExpr::TimeRange {
+                range: Duration::from_secs(10),
+                child: Rc::new(metric_scan(&["job"])),
+            },
+        );
+        let root = realize(&q).unwrap();
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            panic!("expected estimate root, got {:?}", root.expr);
+        };
+        let SummaryExpr::SummaryAgg { reduction, .. } = &summary_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
+        };
+        assert_eq!(reduction, &ReductionTy::PerEntity);
+    }
+
+    /// Issue #163, case 2: an aggregation operator explicitly invoked with
+    /// no `by(...)` (e.g. `count(hll_metric)`) realizes to `SummaryAgg {
+    /// reduction: Reduce(vec![]), .. }` — byte-identical `by: []` to the
+    /// previous test at the old `Vec<ColumnId>` shape; `reduction` is what
+    /// tells them apart now.
+    #[test]
+    fn explicit_empty_by_aggregate_realizes_summary_agg_with_reduce_reduction() {
+        let intent = AggIntent::Cardinality {
+            col: None,
+            accuracy: AccuracyTarget::Epsilon(0.01),
+        };
+        let q = agg(vec![], intent, metric_scan(&["job"]));
+        let root = realize(&q).unwrap();
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            panic!("expected estimate root, got {:?}", root.expr);
+        };
+        let SummaryExpr::SummaryAgg { reduction, .. } = &summary_input.expr else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
+        };
+        assert_eq!(reduction, &ReductionTy::by(vec![]));
+    }
+
+    #[test]
+    fn nested_aggregates_realize_per_node() {
+        // quantile(0.9, sum by (job) (m)) — the implementation decision
+        // fires per node over the nested tree: KLL over an exact Sum
+        // accumulator.
+        let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
+        let outer = agg(vec![], default_quantile(0.9), inner);
+        let root = realize(&outer).unwrap();
+
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            panic!("expected estimate root, got {:?}", root.expr);
+        };
+        let SummaryExpr::SummaryAgg { child, family, .. } = &summary_input.expr else {
+            panic!("expected outer SummaryAgg, got {:?}", summary_input.expr);
+        };
+        assert!(matches!(
+            family,
+            SummaryFamilyType::Sketch(SketchKind::Kll, _)
+        ));
+        let SummaryExpr::SummaryAgg {
+            family: inner_family,
+            child: leaf,
+            ..
+        } = &child.expr
+        else {
+            panic!("expected inner SummaryAgg, got {:?}", child.expr);
+        };
+        assert_eq!(
+            inner_family,
+            &SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
+        );
+        assert!(matches!(leaf.expr, SummaryExpr::KeepPreAsap(_)));
+    }
+
+    /// Issue #115: the summary is built over the intent's own input column.
+    /// Before `Cardinality`/`Quantile` carried `col`, `summarised_column` always
+    /// fell through to `ColumnRef::SampleValue`, so an HLL was built over the
+    /// wrong column for every SQL `COUNT(DISTINCT c)`.
+    #[test]
+    fn sketch_realizes_over_the_intents_input_column() {
+        // `metric_scan(&["job"])` → columns [ts=0, value=1, job=2].
+        let cases = [
+            (Some(2), ColumnRef::Named("job".into())),
+            (Some(1), ColumnRef::Named("value".into())),
+            // PromQL convention: no column ⇒ the synthetic sample value.
+            (None, ColumnRef::SampleValue),
+        ];
+        for (col, want) in cases {
+            let intent = AggIntent::Cardinality {
+                col,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            };
+            let root = realize(&agg(vec![0], intent, metric_scan(&["job"]))).unwrap();
+            let bound = find_summary_col(&root)
+                .unwrap_or_else(|| panic!("expected a SummaryAgg for col={col:?}"));
+            assert_eq!(bound, want, "wrong summarised column for col={col:?}");
+        }
+    }
+
+    /// The `col` of the first `SummaryAgg` in the tree.
+    fn find_summary_col(node: &SummaryNode) -> Option<ColumnRef> {
+        match &node.expr {
+            SummaryExpr::SummaryAgg { col, .. } => Some(col.clone()),
+            SummaryExpr::SummaryEstimate { summary_input, .. } => find_summary_col(summary_input),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn pass_through_intents_stay_logical() {
+        // avg is exact but non-mergeable; histogram_quantile (classic
+        // buckets, #79) is never sketchable; exact quantile is exact by
+        // decree. All three stay whole logical subtrees.
+        for intent in [
+            AggIntent::Avg { col: None },
+            AggIntent::HistogramQuantile { q: 0.99 },
+            AggIntent::Quantile {
+                col: None,
+                q: 0.99,
+                accuracy: AccuracyTarget::Exact,
+            },
+        ] {
+            let q = agg(vec![2], intent.clone(), metric_scan(&["job"]));
+            let root = realize(&q).unwrap();
+            assert!(
+                matches!(root.expr, SummaryExpr::KeepPreAsap(ref e) if **e == q),
+                "expected KeepPreAsap passthrough for {intent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn logical_parent_subsumes_bindable_child() {
+        // Filter over a bindable quantile: `KeepPreAsap` has no post-ASAP
+        // children, so the conservative fallback keeps the whole subtree
+        // logical.
+        use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
+        use asap_types::pre_asap::query_expr::Predicate;
+        let q = QueryExpr::Filter {
+            pred: Predicate(Rc::new(QueryExpr::Compare {
+                left: Rc::new(QueryExpr::Column(0)),
+                op: CompareOpKind::Gt,
+                right: Rc::new(QueryExpr::Literal(ScalarValue::Float64(0.5))),
+            })),
+            child: Rc::new(agg(vec![], default_quantile(0.99), metric_scan(&[]))),
+        };
+        let root = realize(&q).unwrap();
+        assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(ref e) if **e == q));
+    }
+
+    #[test]
+    fn having_and_multi_intent_stay_logical() {
+        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::pre_asap::query_expr::Predicate;
+        let mut q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
+        if let QueryExpr::Aggregate { having, .. } = &mut q {
+            *having = Some(Predicate(Rc::new(QueryExpr::Literal(
+                ScalarValue::Boolean(true),
+            ))));
+        }
+        assert!(matches!(
+            realize(&q).unwrap().expr,
+            SummaryExpr::KeepPreAsap(_)
+        ));
+
+        let multi = QueryExpr::Aggregate {
+            reduction: ReductionTy::by(vec![2]),
+            measures: vec![AggIntent::Sum { col: None }, AggIntent::Avg { col: None }],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(metric_scan(&["job"])),
+        };
+        assert!(matches!(
+            realize(&multi).unwrap().expr,
+            SummaryExpr::KeepPreAsap(_)
+        ));
+    }
+
+    #[test]
+    fn topk_realizes_cms_with_heap_and_topk_readout() {
+        let q = agg(
+            vec![2],
+            AggIntent::TopK {
+                k: 5,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            metric_scan(&["job"]),
+        );
+        let root = realize(&q).unwrap();
+        let SummaryExpr::SummaryEstimate {
+            summary_input,
+            query,
+        } = &root.expr
+        else {
+            panic!("expected estimate root, got {:?}", root.expr);
+        };
+        assert!(matches!(query, PostAsapSketchQuery::TopK { k: 5 }));
+        assert!(matches!(
+            &summary_input.expr,
+            SummaryExpr::SummaryAgg {
+                family: SummaryFamilyType::Sketch(SketchKind::CmsWithHeap, _),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sql_reducer_resolves_named_input_column() {
+        // SUM(bytes) over a tabular scan: `col` resolves positionally to the
+        // named column, not the PromQL sample value.
+        let scan = QueryExpr::Scan {
+            source: Source::Table {
+                table_ref: "t".into(),
+            },
+            predicates: vec![],
+            schema: SchemaTy {
+                columns: vec![
+                    Column::new("host", DataType::Utf8, false),
+                    Column::new("bytes", DataType::Int64, false),
+                ],
+                time_index: None,
+                unique_keys: vec![],
+                closed: true,
+            },
+        };
+        let q = agg(vec![0], AggIntent::Sum { col: Some(1) }, scan);
+        let root = realize(&q).unwrap();
+        let SummaryExpr::SummaryAgg { col, .. } = &root.expr else {
+            panic!("expected SummaryAgg, got {:?}", root.expr);
+        };
+        assert_eq!(col, &ColumnRef::Named("bytes".into()));
     }
 }

@@ -10,8 +10,8 @@
 //! `sql_lowering.rs`'s `median_is_the_same_intent_as_an_explicit_half_percentile`
 //! test). [`share_common_subtrees`] is the single entry point, run once per
 //! workload batch (or once per query — see "Single-query CSE" below) *after*
-//! `resolve_root`, *before* `implement_workload`
-//! ([`asap_aware_mapping::implement_workload`]).
+//! `resolve_root`, *before* the pre-ASAP → post-ASAP replacement/search pass
+//! (`asap_aware_mapping::replacement`).
 //!
 //! ## Algorithm: classic hash-consing / value-numbering
 //!
@@ -81,20 +81,23 @@
 //! ## Landing plan (issue #223)
 //!
 //! This module is stage 1 of a 4-stage plan. Stage 2
-//! ([`asap_aware_mapping::implement_workload`]) is a real caller, wired at
-//! the same time so this never becomes unwired dead code again (the original
-//! `asap-plan::cse::dedupe_subtrees` was deleted in #192 for exactly that).
-//! Stage 3 — [`dag_export`](crate::dag_export) computing its per-node `hash`
-//! by calling this module's [`structural_hash`] directly, instead of a
-//! parallel reimplementation — is also done, so `tools/dag-viewer`'s
-//! "shared subtree" highlighting now flags exactly the candidate pairs this
-//! module's own `InternTable` would bucket together (still only a hash
-//! match, not a guarantee of `share_common_subtrees`-actual sharing — see
-//! `dag_export`'s module doc). Stage 4 (issue #237) is implemented in
-//! `asap_aware_mapping::cost_model::CostModel::cse_share_decision` and its
-//! caller, `asap_aware_mapping::bind::implement_workload_with` — a real,
-//! Volcano/Cascades-style cost comparison over what this module detects, not
-//! a fixed rule. See `docs/design_docs/cse-cost-model-decision.md`. This module's own
+//! (`asap_aware_mapping::replacement::search_workload_with`, which runs
+//! [`share_common_subtrees`] itself before searching) is a real caller,
+//! wired at the same time so this never becomes unwired dead code again
+//! (the original `asap-plan::cse::dedupe_subtrees` was deleted in #192 for
+//! exactly that). Stage 3 — [`dag_export`](crate::dag_export) computing its
+//! per-node `hash` by calling this module's [`structural_hash`] directly,
+//! instead of a parallel reimplementation — is also done, so
+//! `tools/dag-viewer`'s "shared subtree" highlighting now flags exactly the
+//! candidate pairs this module's own `InternTable` would bucket together
+//! (still only a hash match, not a guarantee of
+//! `share_common_subtrees`-actual sharing — see `dag_export`'s module doc).
+//! Stage 4 (issue #237) is implemented in
+//! `asap_aware_mapping::cost_model::CostModel::cse_share_decision`, called
+//! from `asap_aware_mapping::replacement::PlanSpace::cost_sorted` (via that
+//! module's own `cse_preference`) — a real, Volcano/Cascades-style cost
+//! comparison over what this module detects, not a fixed rule. See
+//! `docs/design_docs/cse-cost-model-decision.md`. This module's own
 //! unconditional "share whenever legal" behavior is unchanged: detection
 //! stays cost-agnostic by construction (this crate cannot depend on
 //! `asap-aware-mapping`'s `CostModel`), and the cost-aware decision is

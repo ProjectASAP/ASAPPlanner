@@ -27,7 +27,7 @@
 //!
 //! Every entry point that doesn't take an explicit `&dyn CostModel`
 //! ([`SketchFamilyStrategy::default_cost_model`](crate::replacement::SketchFamilyStrategy::default_cost_model),
-//! [`implement_workload`](crate::bind::implement_workload)) runs against
+//! [`search_workload`](crate::replacement::search_workload)) runs against
 //! [`DefaultCostModel`], so a deployment that never plugs in its own cost
 //! model keeps today's static-preference-order behavior exactly, byte for
 //! byte.
@@ -41,8 +41,10 @@
 //! cost comparison rather than a fixed rule. See
 //! `docs/design_docs/cse-cost-model-decision.md` for the full design discussion (why
 //! cost-based, why not a full plan-search engine, the layering constraint
-//! that forces detection to stay cost-agnostic). [`bind::implement_workload_with`](crate::bind::implement_workload_with)
-//! is the caller.
+//! that forces detection to stay cost-agnostic).
+//! [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)
+//! (via [`crate::replacement`]'s own `cse_preference`) and
+//! [`DefaultCostModel::estimate_cost`] are this crate's own callers.
 
 use std::rc::Rc;
 
@@ -54,13 +56,14 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::replacement::{
-    select_and_bind, Implementation, Replacement, ReplacementSubDAG, TargetSubDAG,
+    realize_child, Implementation, Replacement, ReplacementSubDAG, TargetSubDAG,
 };
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
-/// [`bind::implement_workload_with`](crate::bind::implement_workload_with)
-/// the first time it binds a subtree that
+/// [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)
+/// (via [`crate::replacement`]'s own `cse_preference`) the first time it
+/// needs a representative bound node for a subtree that
 /// [`asap_types::pre_asap::cse::share_common_subtrees`] already collapsed
 /// onto one `Rc` for two or more workload roots. See
 /// `docs/design_docs/cse-cost-model-decision.md`.
@@ -230,7 +233,7 @@ pub trait CostModel {
     /// same `CostModel` realized as `Implementation::Sketch` via
     /// [`realize_extension`](Self::realize_extension). Only ever called
     /// when `realize_extension` returned `Sketch` for the same
-    /// `(ext_kind, payload)` — `bind::readout` has no other way to build a
+    /// `(ext_kind, payload)` — `replacement::readout` has no other way to build a
     /// `SketchQuery` for a shape core doesn't know. A deployment that
     /// overrides `realize_extension` to return `Sketch` for some
     /// `ext_kind` MUST also override this for that same `ext_kind`, or
@@ -365,7 +368,7 @@ impl CostModel for DefaultCostModel {
     ///   [`default_cse_shared_maintenance_cost`] already orders candidates
     ///   by).
     /// - [`Replacement::Rewrite`]: recovers one representative bound
-    ///   `SummaryNode` for `target` via `select_and_bind` (the same
+    ///   `SummaryNode` for `target` via `realize_child` (the same
     ///   rank-and-take-first helper `replacement::bind_one` reuses for the
     ///   identical need), then charges
     ///   `cse_shared_maintenance_cost` for the candidate that shares
@@ -387,7 +390,7 @@ impl CostModel for DefaultCostModel {
                 (self.cse_recompute_cost(&cse) + self.cse_shared_maintenance_cost(&cse)).0
             }
             Replacement::Rewrite(rc) => {
-                let Ok(bound) = select_and_bind(target.root, self) else {
+                let Ok(bound) = realize_child(target.root, self) else {
                     return f64::NAN;
                 };
                 let cse = CseCandidate {

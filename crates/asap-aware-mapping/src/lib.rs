@@ -29,56 +29,54 @@
 //!
 //! ## Status
 //!
-//! - [`replacement`] — the `TargetSubDAG`/`ReplacementSubDAG`/
+//! This crate has two replacement/search capabilities — and deliberately no
+//! third one that commits to a single, final, physically-materialized
+//! answer for a whole workload:
+//!
+//! - [`replacement::ReplacementStrategy`] — per-target, never prunes,
+//!   exhaustive. The `TargetSubDAG`/`ReplacementSubDAG`/
 //!   `ReplacementStrategy` vocabulary `docs/design_docs/asap_aware_mapping.md` stubs out
 //!   under "Key concepts (not yet implemented)", implemented for real (issue
-//!   #251, part of #33) — plus, merged into the same module (issue #252,
-//!   part of #33), the workload-level search engine that decides *and*
-//!   constructs *and* searches across a whole workload's worth of targets,
-//!   all as one module's job. One module, three connected steps:
-//!   1. [`replacement::SketchFamilyStrategy::replacements`] both *decides*
-//!      what an `AggIntent` may become ([`replacement::implementations_for_with`],
-//!      exhaustive and ranked via a `CostModel`, sized to the
-//!      `AccuracyTarget`) and *constructs* each candidate's bound
-//!      [`SummaryNode`](asap_types::post_asap::SummaryNode) — every
-//!      candidate comes back, not just one.
-//!      [`replacement::SharedSubtreeStrategy`] does the analogous job for
-//!      the build-independently-vs-build-once-and-share choice at a
-//!      CSE-detected shared subtree.
-//!   2. [`replacement::search_workload`]/[`replacement::search_workload_with`]
-//!      *search* — discover every candidate `TargetSubDAG` across a whole
-//!      workload (not just one target in isolation) and run both strategies
-//!      above against each one, to a fixpoint, without ever materializing a
-//!      flat `2^N`-sized candidate-plan list: [`replacement::PlanSpace`] holds
-//!      one Cascades-style [`replacement::MemoGroup`] per distinct target,
-//!      each carrying every alternative discovered for it.
-//!   3. [`replacement::PlanSpace::cost_sorted`] is the final
-//!      `sorted_by(cost_model)` step, ranking each group's candidates
-//!      best-first via the same [`CostModel`](cost_model::CostModel) the
-//!      single-target steps above already consult — see
-//!      [`replacement`]'s own module docs for the full design (MEMO groups
-//!      vs. flat plans, dedup discipline, termination, cost-based ranking).
-//! - [`bind`] — has no "bind me one tree" entry point for a single target.
-//!   [`replacement::SketchFamilyStrategy`] is the only public way to get
-//!   bound output for a target, and it always returns *every* candidate; a
-//!   caller that wants one answer takes the first entry itself. What `bind`
-//!   provides is workload-wide orchestration:
-//!   [`bind::implement_workload`]/[`bind::implement_workload_with`], which
-//!   drive rank-and-take-first selection over a whole workload's roots,
-//!   memoized on `Rc` identity so two roots that
-//!   `asap_types::pre_asap::cse::share_common_subtrees` already collapsed
-//!   onto one shared subtree bind to one shared `SummaryNode` too (issue
-//!   #212, #222, #223) — memoization needs one canonical decision per
-//!   shared root to key sharing on, so that entry point is the one place a
-//!   single-answer selection still lives. Everything else `bind` used to
-//!   hold ([`replacement::select_and_bind`], the single-target rank-and-
-//!   take-first helper, and [`replacement::keep_pre_asap`], the pass-through
-//!   fallback) moved into [`replacement`] itself — both are single-target-
-//!   scoped helpers with no real workload-level state, the same category as
-//!   everything else that module owns; only the genuine cross-root
-//!   `Rc`-identity memoization state above still needs its own module. See
-//!   the terminology section below for why this crate's logical→physical
-//!   step is named "implementation" rather than "bind".
+//!   #251, part of #33). [`replacement::SketchFamilyStrategy::replacements`]
+//!   both *decides* what an `AggIntent` may become
+//!   ([`replacement::implementations_for_with`], exhaustive and ranked via a
+//!   `CostModel`, sized to the `AccuracyTarget`) and *constructs* each
+//!   candidate's bound [`SummaryNode`](asap_types::post_asap::SummaryNode) —
+//!   every candidate comes back, not just one.
+//!   [`replacement::SharedSubtreeStrategy`] does the analogous job for the
+//!   build-independently-vs-build-once-and-share choice at a CSE-detected
+//!   shared subtree.
+//! - [`replacement::search_workload`]/[`replacement::PlanSpace::cost_sorted`]
+//!   — workload-wide, every candidate + cost, never materializes one
+//!   physical answer. Merged into the same module (issue #252, part of
+//!   #33): [`replacement::search_workload`]/[`replacement::search_workload_with`]
+//!   *search* — discover every candidate `TargetSubDAG` across a whole
+//!   workload (not just one target in isolation) and run every registered
+//!   strategy against each one, to a fixpoint, without ever materializing a
+//!   flat `2^N`-sized candidate-plan list: [`replacement::PlanSpace`] holds
+//!   one Cascades-style [`replacement::MemoGroup`] per distinct
+//!   `TargetSubDAG`, each carrying every alternative discovered for it.
+//!   [`replacement::PlanSpace::cost_sorted`] is the final
+//!   `sorted_by(cost_model)` step, ranking each group's candidates
+//!   best-first via the same [`CostModel`](cost_model::CostModel) the
+//!   single-target steps above already consult — see [`replacement`]'s own
+//!   module docs for the full design (MEMO groups vs. flat plans, dedup
+//!   discipline, termination, cost-based ranking).
+//!
+//! **Picking *which* candidate, and materializing one final answer, is a
+//! downstream deployment's job, out of this crate's scope.** This crate's
+//! output boundary is [`replacement::PlanSpace`]: every candidate
+//! replacement plus its cost, meant for a downstream consumer (e.g. a
+//! DAG-visualization view, or a deployment's own physical binder). Which
+//! sketch to commit to *and* where to place it are a joint decision only a
+//! deployment can see the full picture for — picking one in isolation, with
+//! no real consumer of that single materialized answer inside this crate,
+//! is out of scope. (A prior workload-wide "keep first/cost-preferred
+//! candidate per node, memoized by `Rc` identity" entry point —
+//! `bind::implement_workload`/`implement_workload_with` — used to live here
+//! and was removed for exactly this reason; see the terminology table below
+//! for where that "one answer" step now belongs, downstream.)
+//!
 //! - [`cost_model`] — the [`CostModel`](cost_model::CostModel) trait every
 //!   deployment's cost-based sketch selection plugs into (issues #6, #33).
 //!   `asap-plan` itself only ships [`DefaultCostModel`](cost_model::DefaultCostModel),
@@ -94,7 +92,7 @@
 //! `asap-plan` and its downstream consumers (e.g. `ASAPQuery-backend`'s
 //! `control_plane`) independently reused the word "bind" for three
 //! *different*, layer-specific meanings — none of which is what this
-//! crate's [`replacement`]/[`bind`] modules do. To avoid becoming a
+//! crate's own [`replacement`] module does. To avoid becoming a
 //! fourth, colliding sense of the same word, this crate names its own
 //! logical intent → physical realization step after the term the
 //! query-optimization literature already uses for exactly that step:
@@ -109,8 +107,7 @@
 //! | **Implementation** — `replacement::implementations_for_with` | pre-ASAP → post-ASAP, *one node* | enumerating every concrete physical realization (a sketch family, an exact accumulator, or pass-through) for one [`AggIntent`](asap_types::pre_asap::agg_intent::AggIntent) | [`replacement`] |
 //! | **Replacement** — [`replacement::SketchFamilyStrategy::replacements`] | pre-ASAP → post-ASAP, *one target, every candidate* | wrap each `implementations_for_with` candidate into its own bound [`SummaryNode`](asap_types::post_asap::SummaryNode), ranked — a caller wanting one answer takes the first entry itself | [`replacement`] |
 //! | **Search** — [`replacement::search_workload`]/[`replacement::search_workload_with`] | pre-ASAP → post-ASAP, *whole workload, every candidate* | a Cascades/Volcano-style MEMO search: discover every candidate `TargetSubDAG` across a whole workload (not just one target in isolation), run every registered `ReplacementStrategy` against each to a fixpoint, and dedup into a [`replacement::PlanSpace`] — one [`replacement::MemoGroup`] per distinct `TargetSubDAG` holding every alternative discovered for it, never a flat `2^N`-sized list of whole candidate plans | [`replacement`] |
-//! | **`implement_workload`** — [`bind::implement_workload`] | pre-ASAP → post-ASAP, *whole workload, one answer* | walk every root of a `QueryWorkload`, keeping the first (`cost_model`-preferred) candidate per node, sharing one bound `SummaryNode` across roots CSE already collapsed onto one `Rc<QueryExpr>` — emits the complete post-ASAP `SummaryExpr`/`SummaryNode` DAG | [`bind`] |
-//! | **Bind #2** (downstream, not in this crate) | post-ASAP → deployment placement | a *deployment's* own physical binder, additionally deciding **placement** (edge vs. backend, wire format, …) — a genuinely different, deployment-specific decision this crate doesn't model at all | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
+//! | **Bind #2** (downstream, not in this crate) | post-ASAP → deployment placement | a *deployment's* own physical binder, deciding **which** candidate to commit to *and* **placement** (edge vs. backend, wire format, …) for a whole workload — a genuinely different, deployment-specific decision this crate doesn't model at all (this is also where a prior workload-wide "keep first/cost-preferred candidate per node" step, `bind::implement_workload`/`implement_workload_with`, would belong if a deployment still wants that exact behavior — it isn't shipped by this crate) | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
 //!
 //! A related question (tracked alongside issues #6/#33): whether this
 //! crate should also own a **matching** predicate — "does an already
@@ -129,15 +126,13 @@
 //! `sketch_algebra::capability::Capability`/`is_satisfied_by` is the
 //! reference downstream implementation.
 
-pub mod bind;
 pub mod cost_model;
 pub mod replacement;
 
-pub use bind::{implement_workload, implement_workload_with, ImplementError};
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
-    summary_candidates, Implementation, Matcher, MemoGroup, PlanSpace, RankedGroup, Replacement,
-    ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy, SketchFamilyStrategy,
-    TargetSubDAG, MAX_SEARCH_ITERATIONS,
+    summary_candidates, ImplementError, Implementation, Matcher, MemoGroup, PlanSpace, RankedGroup,
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy,
+    SketchFamilyStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
 };

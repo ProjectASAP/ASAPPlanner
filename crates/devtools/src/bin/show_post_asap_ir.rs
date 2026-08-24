@@ -20,7 +20,7 @@
 // `metrics(ts, service, region, latency, bytes)` catalog — the same table
 // used in cross_language.rs and topk_ir.rs.
 
-use asap_aware_mapping::bind::keep_pre_asap;
+use asap_aware_mapping::replacement::keep_pre_asap;
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
 };
