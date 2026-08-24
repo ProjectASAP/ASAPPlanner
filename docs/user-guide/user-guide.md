@@ -140,7 +140,7 @@ let Some(ReplacementSubDAG { replacement: Replacement::Summary(post_asap), .. })
     candidates.into_iter().next()
 else {
     // No candidate (e.g. the node isn't a bindable Aggregate) — fall back to
-    // `asap_aware_mapping::bind::logical(&root)`, the same conservative
+    // `asap_aware_mapping::bind::keep_pre_asap(&root)`, the same conservative
     // pass-through this crate's own dispatch uses.
     panic!("no candidate for this target");
 };
@@ -166,7 +166,7 @@ root, since sharing needs one canonical decision to key on.
 
 Match on `post_asap.expr` (a `SummaryExpr`):
 
-- `Logical(Box<QueryExpr>)` — this subtree wasn't rewritten; execute it exactly.
+- `KeepPreAsap(Box<QueryExpr>)` — this subtree wasn't rewritten; execute it exactly.
 - `SummaryAgg { summary, params, .. }` — an exact accumulator (`summary.is_exact()`) or an
   approximate sketch, sized to the query's `AccuracyTarget`.
 - `SummaryEstimate { summary_input, query }` — wraps a sketch `SummaryAgg`; `query` is what to

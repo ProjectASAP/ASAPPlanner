@@ -907,7 +907,7 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
 /// method enumerates.
 ///
 /// `expr` must still be the [`bindable_intent`] shape for `implementation` to
-/// have any effect; anything else falls back to [`crate::bind::logical`].
+/// have any effect; anything else falls back to [`crate::bind::keep_pre_asap`].
 /// Only `expr`'s own top-level decision is forced — recursion into `expr`'s
 /// child goes back through [`crate::bind::select_and_bind`] (fresh candidate
 /// enumeration, not a forced pick), so choosing one candidate for a target
@@ -935,12 +935,12 @@ fn construct_summary(
             }
         }
     }
-    crate::bind::logical(expr)
+    crate::bind::keep_pre_asap(expr)
 }
 
 /// Translate an [`Implementation`] into the `(family, needs a
 /// SummaryEstimate readout)` pair [`construct_summary_agg`] needs, or `None`
-/// for `PassThrough` (the caller falls back to [`crate::bind::logical`]).
+/// for `PassThrough` (the caller falls back to [`crate::bind::keep_pre_asap`]).
 ///
 /// Every family's partial state needs a readout to recover a value, except
 /// `ExactAggregate` — its partial state *is* the value already, so no
@@ -1084,7 +1084,7 @@ fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> P
 
 /// Lift a pre-ASAP [`Schema`] to a [`SummarySchema`] with every column
 /// `SummaryFamilyType::Plain` — shared by [`construct_summary_agg`] and
-/// [`crate::bind::logical`] (`pub(crate)` for that cross-module reuse).
+/// [`crate::bind::keep_pre_asap`] (`pub(crate)` for that cross-module reuse).
 pub(crate) fn lift(schema: &Schema) -> SummarySchema {
     SummarySchema {
         fields: schema
@@ -1797,7 +1797,7 @@ mod tests {
             &replacements[0].replacement,
             Replacement::Summary(node) if matches!(
                 node.expr,
-                asap_types::post_asap::SummaryExpr::Logical(_)
+                asap_types::post_asap::SummaryExpr::KeepPreAsap(_)
             )
         ));
         assert!(replacements[0].rationale.contains("only realization"));

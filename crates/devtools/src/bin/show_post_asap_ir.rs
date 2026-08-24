@@ -5,7 +5,7 @@
 // `asap-aware-mapping` pre-ASAP → post-ASAP binding pass and prints the
 // resulting **post-ASAP IR** (the sketch-bound IR: `SummaryExpr`/`SummaryNode`
 // — the concrete `SummaryKind`/`SummaryParams` committed per aggregate, or
-// `Logical` for whatever the pass left untouched). See `show_pre_asap_ir`
+// `KeepPreAsap` for whatever the pass left untouched). See `show_pre_asap_ir`
 // for the sketch-agnostic IR one layer upstream.
 //
 // File format: one query per line, prefixed with "sql>" or "promql>".
@@ -20,7 +20,7 @@
 // `metrics(ts, service, region, latency, bytes)` catalog — the same table
 // used in cross_language.rs and topk_ir.rs.
 
-use asap_aware_mapping::bind::logical;
+use asap_aware_mapping::bind::keep_pre_asap;
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
 };
@@ -51,7 +51,7 @@ fn bind(expr: &QueryExpr) -> Result<Rc<asap_types::post_asap::SummaryNode>, Stri
             replacement: Replacement::Summary(node),
             ..
         }) => Ok(node),
-        _ => logical(&root).map_err(|e| e.to_string()),
+        _ => keep_pre_asap(&root).map_err(|e| e.to_string()),
     }
 }
 

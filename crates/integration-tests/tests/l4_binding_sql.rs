@@ -18,7 +18,7 @@
 //! `bind.rs`'s module docs on the "logical parent subsumes bindable child"
 //! conservative fallback); a `Project` at the root is exactly such a logical
 //! parent, so feeding a raw `lower_sql` result straight into [`bind`] always
-//! yields a whole-tree `SummaryExpr::Logical` — never a genuine sketch or
+//! yields a whole-tree `SummaryExpr::KeepPreAsap` — never a genuine sketch or
 //! accumulator binding.
 //!
 //! The tests below extract the inner `Aggregate` node the same way this
@@ -30,7 +30,7 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::bind::{logical, ImplementError};
+use asap_aware_mapping::bind::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
 };
@@ -61,7 +61,7 @@ fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
             replacement: Replacement::Summary(node),
             ..
         }) => Ok(node),
-        _ => logical(&root),
+        _ => keep_pre_asap(&root),
     }
 }
 
@@ -130,7 +130,7 @@ async fn sql_full_query_root_stays_logical_under_the_identity_projection() {
     );
     let root = bind(&l3).expect("binding failed");
     assert!(
-        matches!(root.expr, SummaryExpr::Logical(ref e) if **e == l3),
+        matches!(root.expr, SummaryExpr::KeepPreAsap(ref e) if **e == l3),
         "bind does not look inside a Project to find a bindable Aggregate \
          child, so the whole Project{{Aggregate}} tree stays logical"
     );
@@ -142,7 +142,7 @@ async fn sql_full_query_root_stays_logical_under_the_identity_projection() {
 /// ```text
 /// SummaryEstimate { query: Quantile{0.99} }            → {…: Float64}
 /// └─ SummaryAgg { Kll{k:200}, col: metrics.latency }    → {…: Sketch(Kll, {k:200})}
-///    └─ Logical(Scan)                                   → {ts, service, latency, bytes}
+///    └─ KeepPreAsap(Scan)                                → {ts, service, latency, bytes}
 /// ```
 ///
 /// The SQL counterpart of `l4_binding.rs`'s
@@ -210,10 +210,10 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
         SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
     );
 
-    let SummaryExpr::Logical(logical_leaf) = &child.expr else {
-        panic!("expected Logical leaf, got {:?}", child.expr);
+    let SummaryExpr::KeepPreAsap(kept_leaf) = &child.expr else {
+        panic!("expected KeepPreAsap leaf, got {:?}", child.expr);
     };
-    assert!(matches!(logical_leaf.as_ref(), QueryExpr::Scan { .. }));
+    assert!(matches!(kept_leaf.as_ref(), QueryExpr::Scan { .. }));
     assert!(
         child
             .schema
@@ -316,7 +316,7 @@ async fn sql_exact_workload_binds_accumulators_not_sketches() {
     let agg = inner_aggregate(&l3);
     let root = bind(agg).expect("binding failed");
     assert!(
-        matches!(root.expr, SummaryExpr::Logical(_)),
+        matches!(root.expr, SummaryExpr::KeepPreAsap(_)),
         "avg has no mergeable accumulator — stays logical"
     );
 }

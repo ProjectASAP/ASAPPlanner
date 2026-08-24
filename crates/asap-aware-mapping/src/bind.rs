@@ -6,7 +6,7 @@
 //! candidate [`ReplacementSubDAG`](crate::replacement::ReplacementSubDAG),
 //! ranked; a caller that wants a single executable answer takes the first
 //! entry itself (`.into_iter().next()`) and decides what to do if the list
-//! is empty ([`logical`] is the same pass-through fallback this crate's own
+//! is empty ([`keep_pre_asap`] is the same pass-through fallback this crate's own
 //! dispatch would otherwise use — see `crate::replacement`'s own module docs
 //! for how deciding *and* constructing each candidate both happen inside
 //! that one strategy).
@@ -27,7 +27,7 @@
 //!
 //! ## Conservative fallbacks
 //!
-//! [`SummaryExpr::Logical`] boxes a whole pre-ASAP subtree — it has no
+//! [`SummaryExpr::KeepPreAsap`] boxes a whole pre-ASAP subtree — it has no
 //! post-ASAP children — so a *logical* operator above a bindable aggregate
 //! (`Filter`/`BinaryOp`/… over a quantile) subsumes the aggregate into the
 //! logical wrapper unbound. Rewriting through logical parents is the
@@ -89,7 +89,7 @@ pub(crate) fn select_and_bind(
         // intent has no realization `implementations_for_with` can't
         // produce — never happens, that match is exhaustive) — the same
         // conservative fallback `SketchFamilyStrategy::matches` uses.
-        None => logical(root),
+        None => keep_pre_asap(root),
     }
 }
 
@@ -190,10 +190,10 @@ pub fn implement_workload_with<Id>(
 /// candidate for a target, or a deployment wants to force a node its own
 /// runtime can't actually implement — through the same fallback this
 /// crate's own dispatch uses, without duplicating the schema-lift logic.
-pub fn logical(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+pub fn keep_pre_asap(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     let schema = expr.output_schema()?;
     Ok(Rc::new(SummaryNode {
-        expr: SummaryExpr::Logical(Box::new(expr.clone())),
+        expr: SummaryExpr::KeepPreAsap(Box::new(expr.clone())),
         schema: crate::replacement::lift(&schema),
     }))
 }
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn quantile_binds_kll_wrapped_in_estimate() {
         // quantile by (job) (m) at ε=0.01 → Estimate(Quantile) over
-        // SummaryAgg(Kll{k:200}) over Logical(Scan). job = col 2.
+        // SummaryAgg(Kll{k:200}) over KeepPreAsap(Scan). job = col 2.
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let root = bind(&q).unwrap();
 
@@ -320,7 +320,7 @@ mod tests {
             field(&summary_input.schema, "quantile_0_99").dtype,
             SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
         );
-        assert!(matches!(child.expr, SummaryExpr::Logical(ref e)
+        assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(ref e)
             if matches!(**e, QueryExpr::Scan { .. })));
     }
 
@@ -439,7 +439,7 @@ mod tests {
         };
         let q = agg(vec![], intent, metric_scan(&[]));
         let root = bind(&q).unwrap();
-        assert!(matches!(root.expr, SummaryExpr::Logical(_)));
+        assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
     #[test]
@@ -610,7 +610,7 @@ mod tests {
             inner_family,
             &SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
         );
-        assert!(matches!(leaf.expr, SummaryExpr::Logical(_)));
+        assert!(matches!(leaf.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
     /// Issue #115: the summary is built over the intent's own input column.
@@ -664,15 +664,15 @@ mod tests {
             let q = agg(vec![2], intent.clone(), metric_scan(&["job"]));
             let root = bind(&q).unwrap();
             assert!(
-                matches!(root.expr, SummaryExpr::Logical(ref e) if **e == q),
-                "expected Logical passthrough for {intent:?}"
+                matches!(root.expr, SummaryExpr::KeepPreAsap(ref e) if **e == q),
+                "expected KeepPreAsap passthrough for {intent:?}"
             );
         }
     }
 
     #[test]
     fn logical_parent_subsumes_bindable_child() {
-        // Filter over a bindable quantile: `Logical` has no post-ASAP
+        // Filter over a bindable quantile: `KeepPreAsap` has no post-ASAP
         // children, so the conservative fallback keeps the whole subtree
         // logical.
         let q = QueryExpr::Filter {
@@ -684,7 +684,7 @@ mod tests {
             child: Rc::new(agg(vec![], default_quantile(0.99), metric_scan(&[]))),
         };
         let root = bind(&q).unwrap();
-        assert!(matches!(root.expr, SummaryExpr::Logical(ref e) if **e == q));
+        assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(ref e) if **e == q));
     }
 
     #[test]
@@ -695,7 +695,10 @@ mod tests {
                 ScalarValue::Boolean(true),
             ))));
         }
-        assert!(matches!(bind(&q).unwrap().expr, SummaryExpr::Logical(_)));
+        assert!(matches!(
+            bind(&q).unwrap().expr,
+            SummaryExpr::KeepPreAsap(_)
+        ));
 
         let multi = QueryExpr::Aggregate {
             reduction: Reduction::by(vec![2]),
@@ -706,7 +709,7 @@ mod tests {
         };
         assert!(matches!(
             bind(&multi).unwrap().expr,
-            SummaryExpr::Logical(_)
+            SummaryExpr::KeepPreAsap(_)
         ));
     }
 

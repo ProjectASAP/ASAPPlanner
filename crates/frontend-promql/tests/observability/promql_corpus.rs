@@ -15,7 +15,7 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::bind::{logical, ImplementError};
+use asap_aware_mapping::bind::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
 };
@@ -42,7 +42,7 @@ fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
             replacement: Replacement::Summary(node),
             ..
         }) => Ok(node),
-        _ => logical(&root),
+        _ => keep_pre_asap(&root),
     }
 }
 
@@ -92,7 +92,7 @@ fn tally(corpus: &str) -> Tally {
 struct BindTally {
     /// Root bound to `SummaryAgg`/`SummaryEstimate` — the pass did something.
     transformed: usize,
-    /// Root stayed `Logical` — the pass left the query untouched.
+    /// Root stayed `KeepPreAsap` — the pass left the query untouched.
     unchanged: usize,
     /// [`bind`] returned `Err` (schema derivation failed).
     errored: usize,
@@ -105,7 +105,7 @@ fn bind_tally(corpus: &str, accuracy: AccuracyTarget) -> BindTally {
             continue;
         };
         match bind(&tree) {
-            Ok(bound) if matches!(bound.expr, SummaryExpr::Logical(_)) => t.unchanged += 1,
+            Ok(bound) if matches!(bound.expr, SummaryExpr::KeepPreAsap(_)) => t.unchanged += 1,
             Ok(_) => t.transformed += 1,
             Err(_) => t.errored += 1,
         }

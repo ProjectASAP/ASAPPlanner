@@ -258,7 +258,7 @@ pub trait CostModel {
     /// weight table), applied to whichever field of
     /// `candidate.bound_summary`'s output schema actually carries summary
     /// state (falls back to the cheapest, `Plain`, weight if none does —
-    /// e.g. `bound_summary` is a passthrough `Logical` node with nothing
+    /// e.g. `bound_summary` is a passthrough `KeepPreAsap` node with nothing
     /// summary-shaped to maintain). See `docs/design_docs/cse-cost-model-decision.md`.
     fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> Cost {
         let family = candidate
@@ -433,7 +433,7 @@ mod tests {
         SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child: std::rc::Rc::new(SummaryNode {
-                    expr: SummaryExpr::Logical(Box::new(scan())),
+                    expr: SummaryExpr::KeepPreAsap(Box::new(scan())),
                     schema: SummarySchema {
                         fields: vec![],
                         time_index: None,

@@ -9,7 +9,7 @@
 
 use std::rc::Rc;
 
-use asap_aware_mapping::bind::{logical, ImplementError};
+use asap_aware_mapping::bind::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
 };
@@ -40,7 +40,7 @@ fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
             replacement: Replacement::Summary(node),
             ..
         }) => Ok(node),
-        _ => logical(&root),
+        _ => keep_pre_asap(&root),
     }
 }
 
@@ -59,7 +59,7 @@ fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile_0_99: Float64}
 /// └─ SummaryAgg { Kll{k:200}, col: SampleValue }     → {quantile_0_99: Sketch(Kll, {k:200})}
 ///    └─ SummaryAgg { Rate, col: SampleValue }        → {ts, value: ExactAggregate(Rate), …}
-///       └─ Logical(TimeRange{5m} → Scan)             → {ts, value}
+///       └─ KeepPreAsap(TimeRange{5m} → Scan)         → {ts, value}
 /// ```
 ///
 /// The nested tree exercises both realizations: the approximate quantile
@@ -146,11 +146,11 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
 
     // The leaf: unrewritten pass-through — TimeRange marker over the Scan.
-    let SummaryExpr::Logical(logical_leaf) = &leaf.expr else {
-        panic!("expected Logical leaf, got {:?}", leaf.expr);
+    let SummaryExpr::KeepPreAsap(kept_leaf) = &leaf.expr else {
+        panic!("expected KeepPreAsap leaf, got {:?}", leaf.expr);
     };
-    let QueryExpr::TimeRange { range, child: scan } = logical_leaf.as_ref() else {
-        panic!("expected TimeRange leaf, got {logical_leaf:?}");
+    let QueryExpr::TimeRange { range, child: scan } = kept_leaf.as_ref() else {
+        panic!("expected TimeRange leaf, got {kept_leaf:?}");
     };
     assert_eq!(range.as_secs(), 300);
     assert!(matches!(scan.as_ref(), QueryExpr::Scan { .. }));
@@ -196,7 +196,7 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
         lower_promql("avg(http_requests_total)", AccuracyTarget::Exact).expect("lowering failed");
     let root = bind(&l3).expect("binding failed");
     assert!(
-        matches!(root.expr, SummaryExpr::Logical(_)),
+        matches!(root.expr, SummaryExpr::KeepPreAsap(_)),
         "avg has no mergeable accumulator — stays logical"
     );
 }

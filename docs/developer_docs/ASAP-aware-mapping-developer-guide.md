@@ -258,7 +258,7 @@ A custom cost model does not necessarily need to override every hook. The curren
 The crate has one source of truth for valid implementations, and deciding and constructing a candidate happen in the same step — not two steps bridged by a separately-named function:
 
 - `SketchFamilyStrategy::replacements(target)`, for a bindable `Aggregate`, calls `implementations_for_with(intent, cost_model)` (a `replacement.rs`-private function) to get every valid `Implementation`, ranked by preference and already sized to the target's own accuracy target — then, for each candidate, constructs its bound `SummaryNode` directly (child schema, summarized column, readout, recursion into the child) and returns it as a `ReplacementSubDAG`. It does not discard any candidate.
-- A caller that needs one executable answer uses `.into_iter().next()` and handles the empty case. The crate's conservative fallback is `bind::logical`.
+- A caller that needs one executable answer uses `.into_iter().next()` and handles the empty case. The crate's conservative fallback is `bind::keep_pre_asap`.
 
 In the [design document](../design_docs/asap_aware_mapping.md), each `ReplacementSubDAG` is a candidate. The complete `replacements()` result is the set of alternatives for one location in the plan.
 
