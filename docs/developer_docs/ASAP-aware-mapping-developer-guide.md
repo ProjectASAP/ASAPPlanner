@@ -1,16 +1,21 @@
 # ASAP-Aware Mapping: Developer Guide
 
-This guide explains how to extend ASAP-aware mapping in the current codebase. Use it when you want to:
+This guide explains how to extend ASAP-aware mapping: the planning layer that
+turns logical query operations into alternative implementations built from
+ASAP primitives, such as exact summaries and approximate sketches. Use it when
+you want to:
 
-- add a new `ReplacementStrategy`,
-- add or customize a `CostModel`,
+- add a new `ReplacementStrategy` (a source of valid plan alternatives),
+- add or customize a `CostModel` (deployment-specific ordering and sizing),
 - understand how strategies, binding, and costing interact,
 - add a new kind of replacement without duplicating existing planner logic,
 - write the tests expected for a new extension.
 
 The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and replacement-plan-search design, see the separate design document, [`docs/design_docs/asap_aware_mapping.md`](../design_docs/asap_aware_mapping.md).
 
-Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are illustrative; they do not ship with this crate. Samples that use real public types—such as `SketchAlgorithmStrategy`, `SharedSubtreeStrategy`, `PlanSpace`, and `search_workload`—follow the APIs exported by `asap-aware-mapping`.
+Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are
+illustrative; they do not ship with this crate. Samples that use real public
+types and functions follow the APIs exported by `asap-aware-mapping`.
 
 If you only need to find the right extension point, start with the [extension map](#7-current-extension-map) (Part 3 §7). If you are implementing a strategy, read Part 1 §1 (Mental model), Part 2 §1 (Glossary), and Part 3 §1 (Adding a new `ReplacementStrategy`) first.
 
@@ -44,6 +49,29 @@ Do not put cost-based pruning into a `ReplacementStrategy`. A strategy must enum
 ## 2. Architecture overview
 
 The diagram below follows a workload of one or more query roots through target discovery, candidate generation, ranking, reporting, and downstream visualization. Section 3 focuses on the replacement-strategy path.
+
+Terminology used in the diagram:
+
+- A **workload** is the set of named queries planned together. A **query root**
+  is the top-level `QueryExpr` (the logical query-expression type) for one of
+  those queries. **Pre-ASAP** means this logical input form, before the planner
+  binds an operation to a concrete ASAP implementation; **post-ASAP** means the
+  bound output form.
+- A **DAG** (directed acyclic graph) represents query operators whose subtrees
+  may be shared. **CSE** (common subexpression elimination) finds equivalent
+  subtrees and represents legal reuse by making them the same shared node.
+  Rust's `Rc<T>` (reference-counted pointer) records that shared node identity.
+- A **target** is one replaceable site. A **candidate** is one valid alternative
+  for it. `Replacement::Summary` is a bound post-ASAP summary—maintained state
+  such as an exact accumulator or an approximate sketch—while
+  `Replacement::Rewrite` is another pre-ASAP logical expression. A **sketch**
+  is a compact data structure that trades exactness for bounded error. A
+  query's **accuracy target** states the allowed error and failure probability.
+  A candidate's **rationale** is its human-readable explanation.
+- `PlanSpace` is a planner **memo**: a compact search structure with one
+  `MemoGroup` per target instead of one full plan per combination of choices.
+  A `node_hash` is a structural fingerprint used to narrow explanation lookup;
+  exact structural equality is still checked afterward.
 
 ```mermaid
 flowchart TB
@@ -116,7 +144,8 @@ search performs these steps:
 3. Construct one `TargetSubDAG` per distinct node, with the node's measured
    `consumer_count`.
 4. Run every registered `ReplacementStrategy` against each target to a
-   fixpoint.
+   **fixpoint**: repeat strategy application until it discovers no new
+   candidates.
 
 The discovery and strategy-invocation path is:
 
@@ -280,7 +309,7 @@ Quantile(...)
     -> KLL SummaryNode
 ```
 
-is a `Summary`.
+is a `Summary`; KLL (Karnin–Lang–Liberty) is a quantile-sketch algorithm.
 
 ```text
 compute independently
@@ -334,13 +363,25 @@ The two methods have intentionally different responsibilities.
 
 > What are all semantically valid alternatives for this target?
 
-`replacements` must be **exhaustive, not ranked, and not cost-filtered**.
+`replacements` must be **exhaustive and not cost-filtered**. When its output has
+a preferred order, that ordering must come from the supplied `CostModel`; the
+strategy must still return every valid candidate.
 
 ---
 
 ### `Implementation`
 
-One valid realization of an `AggIntent`. It may be an approximate sketch, an exact mergeable accumulator, or a pass-through with no summary. `SketchAlgorithmStrategy::replacements()` exposes each valid realization as a bound `ReplacementSubDAG`; it returns all candidates in preferred order without selecting a winner. At workload scale, `search_workload`/`search_workload_with` preserve the same never-prune contract across every `TargetSubDAG`. Selecting which candidate to build and where to place it remains a downstream deployment decision.
+One valid realization of an `AggIntent`, the pre-ASAP description of what an
+aggregation must compute without committing to a physical summary algorithm.
+An implementation may be an approximate sketch, an exact mergeable
+accumulator, or a pass-through that keeps the original operation instead of
+building a summary. **Binding** is the step that turns the intent into one of
+these concrete implementations. `SketchAlgorithmStrategy::replacements()`
+exposes each valid realization as a bound `ReplacementSubDAG`; it returns all
+candidates in preferred order without selecting a winner. At workload scale,
+`search_workload`/`search_workload_with` preserve the same never-prune contract
+across every `TargetSubDAG`. Selecting which candidate to build and where to
+place it remains a downstream deployment decision.
 
 In short: `ReplacementStrategy` enumerates, packages, and binds every candidate, and the caller selects when it needs a single executable answer. Part 1 §3 shows the complete flow.
 
@@ -361,7 +402,7 @@ The crate cannot hardcode real deployment costs: `asap-aware-mapping` depends on
 | `cse_recompute_cost` | Estimate independent recomputation | Yes |
 | `cse_shared_maintenance_cost` | Estimate shared maintenance | Yes |
 | `cse_share_decision` | Choose sharing or recomputation | Yes |
-| `estimate_cost` | Attach a comparable numeric cost to a replacement | Returns `NaN`; `DefaultCostModel` provides real values |
+| `estimate_cost` | Attach a comparable numeric cost to a replacement | Returns `NaN` (IEEE “not a number”); `DefaultCostModel` provides real values |
 
 - **`rank_candidates`** — order the sketch candidates for one `AggIntent`, best first. This is the only required hook.
 
@@ -369,7 +410,7 @@ The crate cannot hardcode real deployment costs: `asap-aware-mapping` depends on
   fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchAlgorithm]) -> Vec<SketchAlgorithm>;
   ```
 
-- **`size_params`** — choose parameters, such as sketch capacity, for an already-selected `SketchAlgorithm` and accuracy target `(eps, delta)`. It is separate from ranking so a deployment can customize sizing without changing algorithm preference. The trait provides a default implementation.
+- **`size_params`** — choose parameters, such as sketch capacity, for an already-selected `SketchAlgorithm` and accuracy target `(eps, delta)`, where `eps` is the tolerated error and `delta` is the tolerated probability of exceeding that error. It is separate from ranking so a deployment can customize sizing without changing algorithm preference. The trait provides a default implementation.
 
   ```rust
   fn size_params(&self, kind: SketchAlgorithm, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
@@ -475,7 +516,7 @@ Sketches separate their query category from the concrete algorithm and its param
 | --- | --- | --- |
 | **family** | `SummaryFamilyType` | `Sketch`, `Sample`, `Wavelet`, `StatModel`, `ExactAggregate` |
 | **category** | `SketchCategory` | `Quantile`, `Cardinality`, `Frequency`, `TopK` |
-| **algorithm** | `SketchAlgorithm` | `Kll` / `DDSketch` (both quantile); `Hll` / `Theta` / `Kmv` (all cardinality) |
+| **algorithm** | `SketchAlgorithm` | `Kll` / `DDSketch` (both quantile); `Hll` (HyperLogLog) / `Theta` / `Kmv` (K-Minimum Values), all cardinality |
 | **committed choice** | `SketchKind` | one validated category + algorithm + parameter combination |
 
 A `SketchKind` is a validated committed choice. Its public constructor,
