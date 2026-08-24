@@ -164,7 +164,14 @@ impl InternTable {
 /// letting it *persist* across every node in one bottom-up pass (as
 /// [`InternTable`] does via its own `hash_cache` field), rather than
 /// starting a new one per call.
-pub(crate) type HashCache = HashMap<*const QueryExpr, u64>;
+///
+/// `pub` (not `pub(crate)`) so `asap_aware_mapping`'s workload-search MEMO
+/// engine (`replacement::is_duplicate_rewrite`) can reuse this exact
+/// candidate-narrowing filter for its own dedup, instead of maintaining a
+/// parallel reimplementation — the same "one real hash, reused everywhere
+/// it's needed" rationale [`structural_hash`]'s own doc gives for
+/// [`dag_export`](crate::dag_export)'s `pub(crate)` reuse.
+pub type HashCache = HashMap<*const QueryExpr, u64>;
 
 /// Coarse structural hash used only to bucket [`InternTable::intern`]'s
 /// candidate search — never the actual sharing decision (`PartialEq` is).
@@ -194,19 +201,24 @@ pub(crate) type HashCache = HashMap<*const QueryExpr, u64>;
 /// [`dag_node_count`]'s own DAG-vs-tree fix (issue #212/#223/#237's stage
 /// 4) in spirit, applied to hashing instead of counting.
 ///
-/// `pub(crate)` (not private) so [`dag_export`](crate::dag_export) can call
+/// `pub` (not private) so [`dag_export`](crate::dag_export) can call
 /// this exact function for its exported nodes' `hash` field instead of
 /// maintaining its own parallel reimplementation — issue #223 stage 3. That
 /// makes `tools/dag-viewer`'s "shared subtree" highlighting reflect this
 /// module's real hashing, not a lookalike computed a different way; see the
 /// module doc's "Landing plan" section. A NaN/infinite `f64` makes JSON
 /// serialization fail; falling back to a fixed hash just puts every such
-/// node in one (larger, still `PartialEq`-disambiguated) bucket.
+/// node in one (larger, still `PartialEq`-disambiguated) bucket. Made `pub`
+/// (rather than staying `pub(crate)`) for one more reuse across the crate
+/// boundary: `asap_aware_mapping`'s workload-search MEMO engine
+/// (`replacement::is_duplicate_rewrite`) needs the identical
+/// candidate-narrowing filter this module's own [`InternTable::intern`]
+/// already uses, so it doesn't have to reinvent (and risk drifting from) it.
 ///
 /// Exhaustive over every `QueryExpr` variant, matching [`rebuild_children`]
 /// in which fields count as an operator child (must stay in sync — a new
 /// variant fails to compile in both places until both are extended).
-pub(crate) fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
+pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
     use QueryExpr::*;
 
     fn child_hash(child: &Rc<QueryExpr>, cache: &mut HashCache) -> u64 {

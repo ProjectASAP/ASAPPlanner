@@ -44,6 +44,8 @@
 //! that forces detection to stay cost-agnostic). [`bind::implement_workload_with`](crate::bind::implement_workload_with)
 //! is the caller.
 
+use std::rc::Rc;
+
 use asap_types::post_asap::{
     SketchKind, SketchParams, SketchQuery, SummaryFamilyType, SummaryNode,
 };
@@ -51,7 +53,9 @@ use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
-use crate::replacement::Implementation;
+use crate::replacement::{
+    select_and_bind, Implementation, Replacement, ReplacementSubDAG, TargetSubDAG,
+};
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
@@ -296,6 +300,45 @@ pub trait CostModel {
             ShareDecision::RecomputeIndependently
         }
     }
+
+    /// Estimate a comparable, numeric cost for one already-constructed
+    /// [`ReplacementSubDAG`] candidate at `target` — a real `f64`, not just a
+    /// relative rank, meant for a caller that wants to *display* "candidate A
+    /// costs ≈ X, candidate B costs ≈ Y" (e.g. a DAG-visualization view built
+    /// on [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)),
+    /// not just order candidates against each other — that ordering job
+    /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
+    /// [`SketchFamilyStrategy`](crate::replacement::SketchFamilyStrategy)
+    /// group) and [`cse_share_decision`](Self::cse_share_decision) (for a
+    /// [`SharedSubtreeStrategy`](crate::replacement::SharedSubtreeStrategy)
+    /// group).
+    ///
+    /// One method covers both candidate shapes this crate ships:
+    /// `candidate.replacement`'s [`Replacement::Summary`] arm (a
+    /// `SketchFamilyStrategy` candidate — the bound `SummaryNode` is right
+    /// there, nothing to reconstruct) and its [`Replacement::Rewrite`] arm
+    /// (a `SharedSubtreeStrategy` share-vs-recompute candidate — no bound
+    /// `SummaryNode` of its own, since sharing is a decision about a target
+    /// already bound some other way; a representative binding is recovered
+    /// from `target` itself). `target` is threaded through explicitly
+    /// (rather than only ever the target embedded in `candidate` — there
+    /// isn't one for a `Rewrite`) so both arms have the `consumer_count`
+    /// context a cost estimate needs to be meaningful.
+    ///
+    /// Default: **not a real cost model** — always returns `f64::NAN`.
+    /// `f64::partial_cmp` against `NAN` is always `None`, so a caller that
+    /// forgot to check whether its `CostModel` actually overrides this can't
+    /// silently treat the placeholder as a real comparison. A deployment
+    /// that wants numeric costs exposed should override this method;
+    /// [`DefaultCostModel`] does, reusing
+    /// [`cse_recompute_cost`](Self::cse_recompute_cost)/
+    /// [`cse_shared_maintenance_cost`](Self::cse_shared_maintenance_cost) —
+    /// the same arithmetic that already backs `cse_share_decision` — rather
+    /// than inventing a second, drifting cost formula.
+    fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
+        let _ = (candidate, target);
+        f64::NAN
+    }
 }
 
 /// The default cost model: preserves [`summary_candidates`]'s built-in static
@@ -307,6 +350,58 @@ pub struct DefaultCostModel;
 impl CostModel for DefaultCostModel {
     fn rank_candidates(&self, _intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind> {
         candidates.to_vec()
+    }
+
+    /// Real numbers, reusing [`CostModel::cse_recompute_cost`]/
+    /// [`CostModel::cse_shared_maintenance_cost`] — the same arithmetic
+    /// `cse_share_decision`'s default body already composes — rather than a
+    /// second formula:
+    ///
+    /// - [`Replacement::Summary`]: `cse_recompute_cost` (the one-time
+    ///   structural cost of building `target` at all) plus
+    ///   `cse_shared_maintenance_cost` of the candidate's own bound family
+    ///   (a pricier family — a sketch over an exact accumulator, say —
+    ///   costs more here, consistent with the per-family weighting
+    ///   [`default_cse_shared_maintenance_cost`] already orders candidates
+    ///   by).
+    /// - [`Replacement::Rewrite`]: recovers one representative bound
+    ///   `SummaryNode` for `target` via `select_and_bind` (the same
+    ///   rank-and-take-first helper `replacement::bind_one` reuses for the
+    ///   identical need), then charges
+    ///   `cse_shared_maintenance_cost` for the candidate that shares
+    ///   `target`'s own `Rc` (`Rc::ptr_eq`), or `cse_recompute_cost *
+    ///   consumer_count` for the one that doesn't — the same two terms
+    ///   `cse_share_decision` already compares against each other. `NaN`
+    ///   only if `target` itself can't be bound at all (schema derivation
+    ///   failed) — never expected for a target that's already part of a
+    ///   legitimate workload tree.
+    fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
+        let consumer_count = target.consumer_count.max(1);
+        match &candidate.replacement {
+            Replacement::Summary(node) => {
+                let cse = CseCandidate {
+                    subtree: target.root,
+                    bound_summary: node,
+                    consumer_count,
+                };
+                (self.cse_recompute_cost(&cse) + self.cse_shared_maintenance_cost(&cse)).0
+            }
+            Replacement::Rewrite(rc) => {
+                let Ok(bound) = select_and_bind(target.root, self) else {
+                    return f64::NAN;
+                };
+                let cse = CseCandidate {
+                    subtree: target.root,
+                    bound_summary: &bound,
+                    consumer_count,
+                };
+                if Rc::ptr_eq(rc, target.root) {
+                    self.cse_shared_maintenance_cost(&cse).0
+                } else {
+                    (self.cse_recompute_cost(&cse) * consumer_count).0
+                }
+            }
+        }
     }
 }
 
@@ -598,6 +693,115 @@ mod tests {
         assert_eq!(
             AlwaysExpensiveToRecompute.cse_share_decision(&candidate),
             ShareDecision::Share
+        );
+    }
+
+    // ── estimate_cost ────────────────────────────────────────────────────
+
+    /// The trait's default `estimate_cost` body is an explicit placeholder,
+    /// not a real cost model — a `CostModel` that only overrides
+    /// `rank_candidates` (the minimum required to implement the trait) must
+    /// still get `f64::NAN` back, never a value that looks like a real
+    /// estimate.
+    #[test]
+    fn estimate_cost_default_body_is_a_nan_placeholder() {
+        struct RankOnly;
+        impl CostModel for RankOnly {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchKind],
+            ) -> Vec<SketchKind> {
+                candidates.to_vec()
+            }
+        }
+
+        let root = Rc::new(scan());
+        let target = TargetSubDAG::new(&root);
+        let candidate = ReplacementSubDAG {
+            replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::Plain(
+                asap_types::pre_asap::DataType::Float64,
+            )))),
+            rationale: "whatever".into(),
+        };
+        assert!(RankOnly.estimate_cost(&candidate, &target).is_nan());
+    }
+
+    /// `DefaultCostModel::estimate_cost` for a [`Replacement::Summary`]
+    /// candidate reuses [`default_cse_shared_maintenance_cost`]'s own
+    /// per-family ordering: a candidate bound to a cheap-to-maintain family
+    /// (an exact accumulator) must cost less than one bound to an
+    /// expensive-to-maintain family (a fitted statistical model), same
+    /// target either way — consistent with
+    /// `default_shared_maintenance_cost_orders_families_cheapest_to_priciest`
+    /// above.
+    #[test]
+    fn estimate_cost_for_summary_orders_candidates_by_family_cheapest_to_priciest() {
+        let root = Rc::new(scan());
+        let target = TargetSubDAG::new(&root);
+
+        let cheap = ReplacementSubDAG {
+            replacement: Replacement::Summary(Rc::new(summary_node(
+                SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            ))),
+            rationale: "exact accumulator".into(),
+        };
+        let pricey = ReplacementSubDAG {
+            replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::StatModel(
+                asap_types::post_asap::StatModelKind::Parametric,
+                asap_types::post_asap::StatModelParams::Parametric {
+                    family: "gaussian_mixture".into(),
+                },
+            )))),
+            rationale: "fitted statistical model".into(),
+        };
+
+        let cheap_cost = DefaultCostModel.estimate_cost(&cheap, &target);
+        let pricey_cost = DefaultCostModel.estimate_cost(&pricey, &target);
+        assert!(
+            cheap_cost.is_finite() && pricey_cost.is_finite(),
+            "cheap={cheap_cost}, pricey={pricey_cost}"
+        );
+        assert!(
+            cheap_cost < pricey_cost,
+            "an ExactAggregate candidate should cost less than a StatModel one: \
+             exact={cheap_cost}, stat_model={pricey_cost}"
+        );
+    }
+
+    /// `DefaultCostModel::estimate_cost` for a [`Replacement::Rewrite`] pair
+    /// (the `SharedSubtreeStrategy` share-vs-recompute shape) agrees with
+    /// what `cse_share_decision` would already pick for the same target: with
+    /// many consumers of a cheap-to-recompute leaf, the "share" candidate
+    /// (the target's own `Rc`) must cost less than the "recompute
+    /// independently" one (a fresh `Rc`) — mirrors
+    /// `cse_share_decision_shares_when_recompute_dominates_maintenance`
+    /// above, through `estimate_cost` instead of `cse_share_decision`
+    /// directly.
+    #[test]
+    fn estimate_cost_for_rewrite_prefers_sharing_when_recompute_dominates_maintenance() {
+        let target_root = Rc::new(scan());
+        let target = TargetSubDAG::with_consumer_count(&target_root, 20);
+
+        let share = ReplacementSubDAG {
+            replacement: Replacement::Rewrite(Rc::clone(&target_root)),
+            rationale: "build once and share".into(),
+        };
+        let recompute = ReplacementSubDAG {
+            replacement: Replacement::Rewrite(Rc::new((*target_root).clone())),
+            rationale: "build independently".into(),
+        };
+
+        let share_cost = DefaultCostModel.estimate_cost(&share, &target);
+        let recompute_cost = DefaultCostModel.estimate_cost(&recompute, &target);
+        assert!(
+            share_cost.is_finite() && recompute_cost.is_finite(),
+            "share={share_cost}, recompute={recompute_cost}"
+        );
+        assert!(
+            share_cost < recompute_cost,
+            "with 20 consumers of a cheap-to-recompute leaf, sharing should cost less: \
+             share={share_cost}, recompute={recompute_cost}"
         );
     }
 }

@@ -20,8 +20,8 @@
 //! the same `Rc<QueryExpr>` must resolve to the *same* canonical decision to
 //! be shareable at all — there is no meaningful "N candidates" answer to
 //! memoize against. So this one entry point keeps a rank-and-take-first
-//! behavior internally (via the private [`select_and_bind`]), scoped to
-//! workload-wide CSE memoization specifically. It is not a general
+//! behavior internally (via [`crate::replacement::select_and_bind`]), scoped
+//! to workload-wide CSE memoization specifically. It is not a general
 //! "bind me one tree" API — for a single target, go through
 //! `SketchFamilyStrategy` and decide what to keep yourself.
 //!
@@ -35,17 +35,34 @@
 //! conservative: multi-intent `Aggregate` nodes (SQL `SELECT SUM(a), AVG(b)`)
 //! and aggregates with a `HAVING` predicate (the filter would need the
 //! estimate first) stay logical — see [`crate::replacement::bindable_intent`].
+//!
+//! ## Why this module is so small
+//!
+//! `select_and_bind`/`keep_pre_asap` themselves moved into
+//! [`crate::replacement`] — both are single-target-scoped helpers with no
+//! real workload-level state, the same category as everything else already
+//! living there. [`keep_pre_asap`] is re-exported here (`pub use
+//! crate::replacement::keep_pre_asap`) so `bind::keep_pre_asap` keeps
+//! resolving for existing external callers that reach it through this
+//! module's path; `select_and_bind` stays `pub(crate)` in `replacement.rs`,
+//! reachable from this module (its only other crate-internal caller,
+//! [`implement_workload_with`]) without a public re-export. What's left
+//! here — [`ImplementError`], [`implement_workload`]/
+//! [`implement_workload_with`], and this module's own tests — genuinely
+//! belongs in its own module: `implement_workload`/`implement_workload_with`
+//! own cross-root `Rc`-identity memoization state a per-target module has
+//! no business holding (see "Why `implement_workload`/`implement_workload_with`
+//! are here" above).
 
 use std::rc::Rc;
 
-use asap_types::post_asap::{SummaryExpr, SummaryNode};
+use asap_types::post_asap::SummaryNode;
 use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError};
 use thiserror::Error;
 
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
-use crate::replacement::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
-};
+pub use crate::replacement::keep_pre_asap;
+use crate::replacement::select_and_bind;
 
 /// Errors from the pre-ASAP → post-ASAP binding pass.
 #[derive(Debug, Error)]
@@ -53,44 +70,6 @@ pub enum ImplementError {
     /// Schema derivation failed while lifting an edge to `SummarySchema`.
     #[error("schema derivation failed during pre-ASAP → post-ASAP binding: {0}")]
     Schema(#[from] QueryExprError),
-}
-
-/// Rank-and-take-first selector, scoped to [`implement_workload_with`]'s
-/// CSE memoization and to [`crate::replacement`]'s own recursion into a
-/// node's child (see the module docs' "Why `implement_workload`/
-/// `implement_workload_with` are here") — **not** a general single-answer
-/// API. `root` must already be the caller's own `Rc`, never fabricated per
-/// call, so this never allocates beyond what the caller already held.
-///
-/// `pub(crate)`: [`crate::replacement`]'s own construction helper calls this
-/// to bind a target's child, so a nested aggregate gets its own independent
-/// enumeration instead of inheriting the parent's forced candidate.
-pub(crate) fn select_and_bind(
-    root: &Rc<QueryExpr>,
-    cost_model: &dyn CostModel,
-) -> Result<Rc<SummaryNode>, ImplementError> {
-    let target = TargetSubDAG::new(root);
-    match SketchFamilyStrategy::new(cost_model)
-        .replacements(&target)
-        .into_iter()
-        .next()
-    {
-        Some(ReplacementSubDAG {
-            replacement: Replacement::Summary(node),
-            ..
-        }) => Ok(node),
-        Some(ReplacementSubDAG {
-            replacement: Replacement::Rewrite(_),
-            ..
-        }) => {
-            unreachable!("SketchFamilyStrategy never returns a Rewrite candidate")
-        }
-        // No candidate at all: `root` isn't `bindable_intent` shape (or its
-        // intent has no realization `implementations_for_with` can't
-        // produce — never happens, that match is exhaustive) — the same
-        // conservative fallback `SketchFamilyStrategy::matches` uses.
-        None => keep_pre_asap(root),
-    }
 }
 
 /// Bind a whole workload's worth of already-CSE'd roots
@@ -184,25 +163,12 @@ pub fn implement_workload_with<Id>(
         .collect()
 }
 
-/// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
-/// `SummaryFamilyType::Plain`. Public so a caller can fall back to this
-/// explicitly — e.g. when `SketchFamilyStrategy::replacements()` returns no
-/// candidate for a target, or a deployment wants to force a node its own
-/// runtime can't actually implement — through the same fallback this
-/// crate's own dispatch uses, without duplicating the schema-lift logic.
-pub fn keep_pre_asap(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
-    let schema = expr.output_schema()?;
-    Ok(Rc::new(SummaryNode {
-        expr: SummaryExpr::KeepPreAsap(Box::new(expr.clone())),
-        schema: crate::replacement::lift(&schema),
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use asap_types::post_asap::{
-        ExactKind, ExactParams, SketchKind, SketchParams, SketchQuery, SummaryFamilyType,
+        ExactKind, ExactParams, SketchKind, SketchParams, SketchQuery, SummaryExpr,
+        SummaryFamilyType,
     };
     use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
     use asap_types::pre_asap::expr_ir::{ColumnRef, CompareOpKind, ScalarValue};

@@ -8,9 +8,9 @@ This guide explains how to extend ASAP-aware mapping in the current codebase. Us
 - add a new kind of replacement without duplicating existing planner logic,
 - write the tests expected for a new extension.
 
-The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and future search design, see the separate design document, [`docs/design_docs/asap_aware_mapping.md`](../design_docs/asap_aware_mapping.md).
+The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and the replacement-plan-searching design this crate now implements, see the separate design document, [`docs/design_docs/asap_aware_mapping.md`](../design_docs/asap_aware_mapping.md).
 
-Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are illustrative; they do not ship with this crate. Samples that use real types—such as `SketchFamilyStrategy`, `SharedSubtreeStrategy`, and `implementations_for_with`—are copied from `replacement.rs`, `bind.rs`, or `cost_model.rs`.
+Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are illustrative; they do not ship with this crate. Samples that use real types—such as `SketchFamilyStrategy`, `SharedSubtreeStrategy`, `implementations_for_with`, `PlanSpace`, and `search_workload`—are copied from `replacement.rs`, `bind.rs`, or `cost_model.rs`.
 
 If you only need to find the right extension point, start with the [extension map](#18-current-extension-map). If you are implementing a strategy, read sections 1–5 first.
 
@@ -258,15 +258,15 @@ A custom cost model does not necessarily need to override every hook. The curren
 The crate has one source of truth for valid implementations, and deciding and constructing a candidate happen in the same step — not two steps bridged by a separately-named function:
 
 - `SketchFamilyStrategy::replacements(target)`, for a bindable `Aggregate`, calls `implementations_for_with(intent, cost_model)` (a `replacement.rs`-private function) to get every valid `Implementation`, ranked by preference and already sized to the target's own accuracy target — then, for each candidate, constructs its bound `SummaryNode` directly (child schema, summarized column, readout, recursion into the child) and returns it as a `ReplacementSubDAG`. It does not discard any candidate.
-- A caller that needs one executable answer uses `.into_iter().next()` and handles the empty case. The crate's conservative fallback is `bind::keep_pre_asap`.
+- A caller that needs one executable answer uses `.into_iter().next()` and handles the empty case. The crate's conservative fallback is `replacement::keep_pre_asap`.
 
 In the [design document](../design_docs/asap_aware_mapping.md), each `ReplacementSubDAG` is a candidate. The complete `replacements()` result is the set of alternatives for one location in the plan.
 
-**Tradeoff:** a single-target bind sizes and constructs every valid sketch candidate before the caller keeps the first one. This costs more than constructing only the preferred candidate, but it means there is exactly one place in the crate that decides what an `AggIntent` may become and exactly one place bound output comes from. Child nodes repeat selection independently (via `bind::select_and_bind`), so a choice at one target does not force choices in nested aggregates.
+**Tradeoff:** a single-target bind sizes and constructs every valid sketch candidate before the caller keeps the first one. This costs more than constructing only the preferred candidate, but it means there is exactly one place in the crate that decides what an `AggIntent` may become and exactly one place bound output comes from. Child nodes repeat selection independently (via `replacement::select_and_bind`), so a choice at one target does not force choices in nested aggregates.
 
-This is not yet the whole-plan Cascades/Volcano-style search described in the design document. Today, `cost_model.rank_candidates` ranks one node at a time. Whole-plan candidate generation and selection remain future work.
+This crate now also implements the whole-plan Cascades/Volcano-style search the design document describes (issue #252, part of #33): `replacement::search_workload`/`search_workload_with` discover every candidate site across a whole workload and run every registered `ReplacementStrategy` against each to a fixpoint, deduping into a `PlanSpace` — one `MemoGroup` per distinct site, holding every alternative discovered for it. `PlanSpace::cost_sorted` is the final `sorted_by(cost_model)` step. See `replacement.rs`'s own module docs ("Workload-wide search") for the full design: MEMO groups instead of a flat `2^N`-sized plan list, dedup discipline, termination, and cost-based ranking.
 
-**One exception:** `bind::implement_workload` and `implement_workload_with` select the first candidate internally. Workload-wide CSE memoizes by `Rc` pointer identity, so roots that share an `Rc<QueryExpr>` must use the same canonical decision. Other callers use `SketchFamilyStrategy::replacements()` directly.
+**One exception:** `bind::implement_workload` and `implement_workload_with` select the first candidate internally. Workload-wide CSE memoizes by `Rc` pointer identity, so roots that share an `Rc<QueryExpr>` must use the same canonical decision. Other callers use `SketchFamilyStrategy::replacements()` (for one target) or `search_workload`/`search_workload_with` (for a whole workload's worth of candidates) directly.
 
 ### Replacement-strategy path
 
@@ -575,7 +575,7 @@ fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
 
 `implementations_for_with` already did the hard part — enumerating and sizing every candidate, ranked. This loop's only job is to hand each one to `construct_summary(expr, implementation, cost_model)` — a private helper in the same file, not a separately-named public bridge in a different module — which derives the child schema, resolves the summarized column, builds the readout, recurses into the child, and assembles the `SummaryNode`. No per-candidate sizing logic lives here: sizing already happened inside `implementations_for_with`.
 
-Because only `expr`'s own top-level `Implementation` is ever supplied from outside — `construct_summary` recurses into `expr`'s child via `bind::select_and_bind`, a fresh internal selection over that child's own candidates, not a forced one — enumerating a candidate for one target never leaks into that target's own nested aggregates. (An earlier version of this strategy forced ranking via a `CostModel`-wrapping adapter for the whole recursive bind, which had exactly that leak as a latent bug; today's design doesn't have the problem, because nothing below the top node is ever forced.)
+Because only `expr`'s own top-level `Implementation` is ever supplied from outside — `construct_summary` recurses into `expr`'s child via `replacement::select_and_bind`, a fresh internal selection over that child's own candidates, not a forced one — enumerating a candidate for one target never leaks into that target's own nested aggregates. (An earlier version of this strategy forced ranking via a `CostModel`-wrapping adapter for the whole recursive bind, which had exactly that leak as a latent bug; today's design doesn't have the problem, because nothing below the top node is ever forced.)
 
 This is the pattern to preserve when adding another strategy that needs to enumerate alternatives through an API that normally chooses one: get the exhaustive list from the same enumeration function the single-answer path uses, and construct each entry directly — never wrap the `CostModel` to trick a ranked-first path into producing what you want.
 
@@ -1249,6 +1249,9 @@ Use this table to find the right place for a change.
 | Decide whether an available implementation satisfies a required one | `impl Matcher` |
 | Produce a normal (ranked-first) bound summary for one target | `SketchFamilyStrategy::replacements(...).into_iter().next()` |
 | Bind a whole workload's roots, sharing across CSE-collapsed roots | reuse `bind::implement_workload`/`implement_workload_with` |
+| Search a whole workload for every candidate at every site (never pruning) | `replacement::search_workload`/`search_workload_with` |
+| Get every candidate ranked best-first, across a whole workload | `PlanSpace::cost_sorted` |
+| Get a real numeric cost per candidate, not just a relative rank | `CostModel::estimate_cost` |
 | Enumerate valid sketch kinds | reuse `replacement::summary_candidates` |
 | Build a target with no workload context | `TargetSubDAG::new` |
 | Build a target with known sharing context | `TargetSubDAG::with_consumer_count` |
