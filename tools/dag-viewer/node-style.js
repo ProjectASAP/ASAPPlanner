@@ -124,6 +124,27 @@ const ROOT_BADGE = {
   dark: { border: '#f87171' },
 };
 
+// `DagNote.kind` -> badge color, for a node whose `notes` array (issue #257 —
+// asap-aware-mapping's ReplacementExplanation, matched onto this node by
+// dag_export's own hash) is non-empty. Only the two kinds
+// asap_aware_mapping::ExplanationKind currently ships get their own entry;
+// NOTE_KIND_FALLBACK covers anything else (a future kind, or a node whose
+// notes mix more than one kind) without needing a new color per addition.
+const NOTE_KIND_COLOR = {
+  SketchApproximation: { light: '#a16207', dark: '#facc15' }, // reuses the 'aggregate' category hue
+  CommonSubexpressionReuse: { light: '#4f46e5', dark: '#a5b4fc' }, // reuses the 'set' category hue
+};
+const NOTE_KIND_FALLBACK = { light: '#334155', dark: '#cbd5e1' };
+const NOTE_BADGE_LABEL = {
+  SketchApproximation: 'Sketch alternative available',
+  CommonSubexpressionReuse: 'Shareable across consumers',
+};
+
+// Small "why" marker (a filled circle + exclamation mark) for a node whose
+// `notes` is non-empty — layered in the bottom-right corner, so it never
+// collides with the root badge (top-right) or the category icon (top-center).
+const NOTE_BADGE_ICON = (c) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><circle cx="24" cy="24" r="17" fill="${c}"/><path d="M24 14v16" stroke="white" stroke-width="4" stroke-linecap="round"/><circle cx="24" cy="35" r="2.6" fill="white"/></svg>`;
+
 function isDarkMode() {
   return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
 }
@@ -150,6 +171,30 @@ function categoryIconDataUri(name) {
 function rootBadgeIconDataUri() {
   const { border } = isDarkMode() ? ROOT_BADGE.dark : ROOT_BADGE.light;
   return svgDataUri(ROOT_BADGE_ICON(border));
+}
+
+// The color a `notes` badge/chip should use for `kind` — one of
+// ExplanationKind's two known variants, or NOTE_KIND_FALLBACK for anything
+// else (future kind, or `noteBadgeColor`'s own "mixed kinds" case below).
+function noteKindColor(kind) {
+  const c = NOTE_KIND_COLOR[kind] || NOTE_KIND_FALLBACK;
+  return isDarkMode() ? c.dark : c.light;
+}
+
+// The color for a node's *badge* (as opposed to one note's own chip): the
+// shared color if every note on the node is the same kind, otherwise the
+// fallback — a node need not itself distinguish "two sketch findings" from
+// "a sketch finding and a reuse finding" the way the side-panel detail
+// (which lists each note individually) does.
+function noteBadgeColor(notes) {
+  const kinds = new Set((notes || []).map((n) => n.kind));
+  if (kinds.size === 1) return noteKindColor(notes[0].kind);
+  const c = NOTE_KIND_FALLBACK;
+  return isDarkMode() ? c.dark : c.light;
+}
+
+function noteBadgeIconDataUri(notes) {
+  return svgDataUri(NOTE_BADGE_ICON(noteBadgeColor(notes)));
 }
 
 // Mirror the palette into CSS custom properties so plain-DOM chrome (legend,
