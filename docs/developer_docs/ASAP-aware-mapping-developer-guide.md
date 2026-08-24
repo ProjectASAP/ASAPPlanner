@@ -16,6 +16,20 @@ Code samples named `My*` or `Prefer*` (`MyStrategy`, `MyCostModel`, `PreferDDSke
 
 ---
 
+## Terminology
+
+Two words come up constantly below and are worth pinning down before anything else, since neither is self-explanatory from context alone:
+
+- **`implementation`** (the module `implementation.rs`) — the *per-node* decision of how one `AggIntent` gets realized: as an approximate sketch, an exact mergeable accumulator, or a pass-through (no summary at all). `implementation::implementation_for`/`implementation_for_with` make this decision for **one** node at a time; they don't walk anything. (This module used to be named `boundary.rs` — "the sketch-vs-exact boundary decision" — renamed to match its actual exported type, `Implementation`.)
+- **`bind` / "binding"** — this word is genuinely overloaded across this crate and its downstream consumers; `lib.rs`'s own "Terminology" section documents all three senses in full, but the short version:
+  1. *Name resolution* (classic RDBMS "Parse → Bind → Optimize" sense) — turning a column reference into a resolved schema column. Lives in `asap_types::pre_asap::binder::Binder`, **not** this crate.
+  2. *This crate's `bind.rs`* — `implement_tree`/`implement_tree_with` walk a **whole** `QueryExpr` tree, calling `implementation::implementation_for` per node, and emit the complete post-ASAP `SummaryExpr`/`SummaryNode` DAG. This is what "the binding path" means everywhere in this guide (§3 onward): the *existing, already-shipping* code path that commits to one `Implementation` per node because something has to actually execute.
+  3. *A downstream deployment's own physical binder* (post-ASAP → deployment placement, e.g. edge vs. backend) — a different, later decision this crate doesn't model at all.
+
+So: `implementation` decides **what** one node becomes; `bind`/`implement_tree` (sense 2) is **what walks a whole tree** applying that decision everywhere; `ReplacementStrategy` (this guide's main subject) is the newer, additive path that keeps every alternative `implementation` could have picked instead of collapsing to the one `bind` commits to.
+
+---
+
 ## 1. Mental model
 
 ASAP-aware mapping has two different jobs that should remain separate:
@@ -1253,13 +1267,3 @@ Use this table to find the right place for a change.
 | Enumerate valid sketch kinds | reuse `implementation::summary_candidates` |
 | Build a target with no workload context | `TargetSubDAG::new` |
 | Build a target with known sharing context | `TargetSubDAG::with_consumer_count` |
-
----
-
-## 19. Design rule to remember
-
-If there is one rule to keep in mind when extending this layer, it is:
-
-> **Strategies define the valid search space; cost models express preferences within that search space.**
-
-Keeping those responsibilities separate makes new optimizations composable, keeps one source of truth for semantics, and allows a future whole-plan search engine to compare interactions between choices rather than inheriting irreversible local decisions.
