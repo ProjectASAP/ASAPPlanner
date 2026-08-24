@@ -98,6 +98,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         family,
         col,
         reduction,
+        ..
     } = &summary_input.expr
     else {
         panic!("expected SummaryAgg, got {:?}", summary_input.expr);

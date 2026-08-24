@@ -578,7 +578,8 @@ mod tests {
     // ── CSE sharing (issue #237, #223 stage 4) ──────────────────────────
 
     use asap_types::post_asap::{
-        ExactKind, ExactParams, SketchKind, SummaryExpr, SummaryField, SummarySchema,
+        ExactKind, ExactParams, GroupingStrategy, SketchKind, SummaryExpr, SummaryField,
+        SummarySchema,
     };
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -611,6 +612,7 @@ mod tests {
                 family: family.clone(),
                 col: asap_types::pre_asap::expr_ir::ColumnRef::Named("value".into()),
                 reduction: asap_types::pre_asap::query_expr::Reduction::by(vec![]),
+                grouping: GroupingStrategy::default(),
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {

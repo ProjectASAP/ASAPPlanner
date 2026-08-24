@@ -264,9 +264,10 @@
 use std::collections::HashMap;
 
 use asap_types::post_asap::{
-    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchKind,
-    SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
-    SummaryFamilyType, SummaryField, SummaryNode, SummarySchema, WaveletKind, WaveletParams,
+    ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm,
+    SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams,
+    SummaryExpr, SummaryFamilyType, SummaryField, SummaryNode, SummarySchema, WaveletKind,
+    WaveletParams,
 };
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
@@ -540,11 +541,15 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// explicit realization is a compile error, and the coverage-matrix test pins
 /// each variant's category.
 ///
-/// Module-private: [`SketchAlgorithmStrategy::replacements`] is the only
-/// caller — a caller outside this module has no use for the bare
-/// `Implementation` list on its own, only for the bound
-/// [`ReplacementSubDAG`]s that strategy produces from it.
-fn implementations_for_with(intent: &AggIntent, cost_model: &dyn CostModel) -> Vec<Implementation> {
+/// `pub(crate)`: [`SketchAlgorithmStrategy::replacements`] is this module's
+/// own caller; `grouping::HydraGroupingStrategy` (issue #256) is the one
+/// caller outside it, needing the exact same already-ranked candidate list
+/// to find the `Implementation::Sketch` matching the Hydra-eligible kind it
+/// is building a candidate for.
+pub(crate) fn implementations_for_with(
+    intent: &AggIntent,
+    cost_model: &dyn CostModel,
+) -> Vec<Implementation> {
     match intent {
         // ── Approximate-capable intents — the AccuracyTarget decides ────────
         AggIntent::Quantile { accuracy, .. }
@@ -1047,7 +1052,10 @@ fn describe_implementation(intent: &AggIntent, implementation: &Implementation) 
 /// counterpart of its own: it reads a candidate's `rationale` — built from
 /// this text — straight off [`ReplacementSubDAG`], rather than re-describing
 /// the same intent a second time.
-fn describe_intent(intent: &AggIntent) -> String {
+///
+/// `pub(crate)`: `grouping::HydraGroupingStrategy` (issue #256) reuses this
+/// for its own rationale strings, for the same reason.
+pub(crate) fn describe_intent(intent: &AggIntent) -> String {
     match intent {
         AggIntent::Quantile { q, .. } => format!("quantile(q={q})"),
         AggIntent::Cardinality { .. } => "cardinality (distinct count)".to_string(),
@@ -1155,7 +1163,15 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
 /// child goes back through [`realize_child`] (fresh candidate
 /// enumeration, not a forced pick), so choosing one candidate for a target
 /// never leaks into that target's own nested aggregates.
-fn construct_summary(
+///
+/// `pub(crate)`: `grouping::HydraGroupingStrategy` (issue #256) is the one
+/// caller outside this module — the same first-class,
+/// one-candidate-at-a-time primitive [`SketchAlgorithmStrategy`] itself
+/// calls once per candidate, reused rather than duplicated so a Hydra
+/// candidate gets exactly the same schema derivation/column
+/// resolution/readout construction as every other candidate, patching only
+/// the `grouping` field this axis owns.
+pub(crate) fn construct_summary(
     expr: &QueryExpr,
     implementation: Implementation,
     cost_model: &dyn CostModel,
@@ -1248,6 +1264,7 @@ fn construct_summary_agg(
             family,
             col,
             reduction: reduction.clone(),
+            grouping: GroupingStrategy::default(),
         },
         schema: state_schema,
     });
@@ -3520,6 +3537,7 @@ mod tests {
             family,
             col,
             reduction,
+            ..
         } = &summary_input.expr
         else {
             panic!("expected SummaryAgg, got {:?}", summary_input.expr);

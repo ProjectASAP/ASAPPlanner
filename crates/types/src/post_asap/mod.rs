@@ -16,6 +16,15 @@
 //! `SummaryFamilyType::Sketch(SketchKind)`, not a flat `(kind, params)` pair
 //! — because `Sketch` is the one family with more than one algorithm per
 //! purpose today; no other family needs that extra level yet.
+//!
+//! A second, orthogonal axis lives here too: [`sketch::GroupingStrategy`]
+//! (issue #256) — *how many* physical instances of a chosen family/kind
+//! exist across a grouped aggregate's `by` subpopulations
+//! (`PerSubpopulationInstance`, today's only behavior, vs.
+//! `SharedMultiSubpopulation`/Hydra — see [`sketch::HydraKind`]/
+//! [`sketch::HydraParams`]), carried on [`expr::SummaryExpr::SummaryAgg`]
+//! alongside `reduction` rather than on `SummaryFamilyType`/`Implementation`
+//! — see `asap_aware_mapping::grouping`'s module docs for why.
 
 pub mod expr;
 pub mod query_time;
@@ -29,7 +38,7 @@ pub use query_time::{
 };
 pub use schema::{SummaryFamilyType, SummaryField, SummarySchema};
 pub use sketch::{
-    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory,
-    SketchKind, SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind,
-    WaveletParams,
+    default_hydra_params, hydra_kind_for, ExactKind, ExactParams, GroupingStrategy, HydraKind,
+    HydraParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory, SketchKind,
+    SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
 };

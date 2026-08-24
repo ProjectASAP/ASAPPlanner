@@ -186,6 +186,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
         family,
         col,
         reduction,
+        ..
     } = &summary_input.expr
     else {
         panic!("expected SummaryAgg, got {:?}", summary_input.expr);
