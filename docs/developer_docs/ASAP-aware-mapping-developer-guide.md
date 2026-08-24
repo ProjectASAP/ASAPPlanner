@@ -7,7 +7,7 @@ you want to:
 
 - add a new `ReplacementStrategy` (a source of valid plan alternatives),
 - add or customize a `CostModel` (deployment-specific ordering and sizing),
-- understand how strategies, binding, and costing interact,
+- understand how strategies, implementation, and costing interact,
 - add a new kind of replacement without duplicating existing planner logic,
 - write the tests expected for a new extension.
 
@@ -55,14 +55,14 @@ Terminology used in the diagram:
 - A **workload** is the set of named queries planned together. A **query root**
   is the top-level `QueryExpr` (the logical query-expression type) for one of
   those queries. **Pre-ASAP** means this logical input form, before the planner
-  binds an operation to a concrete ASAP implementation; **post-ASAP** means the
-  bound output form.
+  realizes an operation as a concrete ASAP implementation; **post-ASAP** means
+  the resulting implementation form.
 - A **DAG** (directed acyclic graph) represents query operators whose subtrees
   may be shared. **CSE** (common subexpression elimination) finds equivalent
   subtrees and represents legal reuse by making them the same shared node.
   Rust's `Rc<T>` (reference-counted pointer) records that shared node identity.
 - A **target** is one replaceable site. A **candidate** is one valid alternative
-  for it. `Replacement::Summary` is a bound post-ASAP summary—maintained state
+  for it. `Replacement::Summary` is a constructed post-ASAP summary—maintained state
   such as an exact accumulator or an approximate sketch—while
   `Replacement::Rewrite` is another pre-ASAP logical expression. A **sketch**
   is a compact data structure that trades exactness for bounded error. A
@@ -119,7 +119,7 @@ The generic `ReplacementStrategy` box is the extension point. The default
 registry currently supplies these concrete implementations separately:
 
 - `SketchAlgorithmStrategy` generates the legal summary realizations for a
-  bindable aggregate.
+  supported aggregate shape.
 - `SharedSubtreeStrategy` generates share-versus-recompute rewrites for a
   target with multiple consumers.
 
@@ -178,7 +178,8 @@ then returns all of its semantically valid alternatives from
 Each returned `ReplacementSubDAG` contains:
 
 - the `TargetSubDAG` being replaced,
-- a `Replacement` containing either a bound summary or a logical rewrite, and
+- a `Replacement` containing either a constructed post-ASAP summary or a
+  logical rewrite, and
 - the rationale for offering that replacement.
 
 The complete `replacements()` result is the candidate set produced by one
@@ -190,8 +191,8 @@ cost.
 
 The default registry contains two `ReplacementStrategy` implementations:
 
-- `SketchAlgorithmStrategy` matches bindable aggregates. Its
-  `replacements(target)` method constructs every legal bound `SummaryNode`,
+- `SketchAlgorithmStrategy` matches supported aggregate shapes. Its
+  `replacements(target)` method constructs every legal post-ASAP `SummaryNode`,
   including applicable sketch, exact-accumulator, and pass-through
   realizations. Candidates are sized and ordered for the target's accuracy
   requirement, but none are discarded.
@@ -201,7 +202,7 @@ The default registry contains two `ReplacementStrategy` implementations:
 
 The important rule is:
 
-> Strategies should reuse existing decision and binding logic where possible instead of reimplementing it.
+> Strategies should reuse existing decision and implementation logic where possible instead of reimplementing it.
 
 Both concrete strategies expose their alternatives through the same
 `ReplacementSubDAG` interface, so search and reporting do not need
@@ -298,7 +299,7 @@ pub enum Replacement {
 }
 ```
 
-Use `Replacement::Summary` when the alternative is already bound into a post-ASAP summary plan.
+Use `Replacement::Summary` when the alternative is a constructed post-ASAP summary plan.
 
 Use `Replacement::Rewrite` when the alternative is still a logical pre-ASAP `QueryExpr`.
 
@@ -375,15 +376,15 @@ One valid realization of an `AggIntent`, the pre-ASAP description of what an
 aggregation must compute without committing to a physical summary algorithm.
 An implementation may be an approximate sketch, an exact mergeable
 accumulator, or a pass-through that keeps the original operation instead of
-building a summary. **Binding** is the step that turns the intent into one of
-these concrete implementations. `SketchAlgorithmStrategy::replacements()`
-exposes each valid realization as a bound `ReplacementSubDAG`; it returns all
+building a summary. `implementations_for_with` enumerates these concrete
+realizations; `SketchAlgorithmStrategy::replacements()` constructs each one as
+a `ReplacementSubDAG`. It returns all
 candidates in preferred order without selecting a winner. At workload scale,
 `search_workload`/`search_workload_with` preserve the same never-prune contract
 across every `TargetSubDAG`. Selecting which candidate to build and where to
 place it remains a downstream deployment decision.
 
-In short: `ReplacementStrategy` enumerates, packages, and binds every candidate, and the caller selects when it needs a single executable answer. Part 1 §3 shows the complete flow.
+In short: `ReplacementStrategy` enumerates and constructs every candidate, and the caller selects when it needs a single executable answer. Part 1 §3 shows the complete flow.
 
 ---
 
@@ -617,7 +618,8 @@ There are four decisions to make.
 
 `matches` should contain the minimum structural and semantic checks needed to determine whether the strategy applies.
 
-For example, `SketchAlgorithmStrategy` only matches the aggregate shape that the existing binder can actually bind:
+For example, `SketchAlgorithmStrategy` only matches the aggregate shape that
+the existing implementation path can realize:
 
 - the node is an `Aggregate`,
 - it has one aggregation intent,
@@ -688,7 +690,7 @@ Return:
 Replacement::Summary(...)
 ```
 
-when the candidate is a fully bound post-ASAP summary.
+when the candidate is a fully constructed post-ASAP summary.
 
 Return:
 
@@ -698,7 +700,8 @@ Replacement::Rewrite(...)
 
 when the candidate is a logical pre-ASAP rewrite.
 
-This distinction matters because a rewrite may enable more transformations later, while a bound summary represents a concrete summary realization.
+This distinction matters because a rewrite may enable more transformations
+later, while a constructed summary represents a concrete summary realization.
 
 ---
 
@@ -760,11 +763,13 @@ This separation is the most important extension rule in this module.
 
 #### Rule 3: do not duplicate an existing decision procedure
 
-If another module already knows how to determine whether something is legal or how to bind it, wrap that logic.
+If another module already knows how to determine whether something is legal or
+how to realize it, wrap that logic.
 
 Do not create a second implementation of the same semantics inside the strategy.
 
-The existing `SketchAlgorithmStrategy` is the model to follow: it reuses `implementation.rs`'s existing candidate list and the existing binder.
+The existing `SketchAlgorithmStrategy` is the model to follow: it reuses
+`implementation.rs`'s existing candidate list and summary-construction path.
 
 ---
 
@@ -790,7 +795,8 @@ If your transformation requires context not currently represented in `TargetSubD
 
 ### Example: current `SketchAlgorithmStrategy`
 
-`SketchAlgorithmStrategy` is the reference implementation for a strategy that produces bound summaries.
+`SketchAlgorithmStrategy` is the reference implementation for a strategy that
+produces constructed post-ASAP summaries.
 
 Construction:
 
@@ -806,16 +812,16 @@ let model = MyCostModel; // illustrative
 let strategy = SketchAlgorithmStrategy::new(&model);
 ```
 
-The strategy matches bindable aggregate nodes.
+The strategy matches supported aggregate nodes.
 
 At a high level:
 
 ```mermaid
 flowchart LR
-  A["Input TargetSubDAG<br/>root is a bindable Aggregate"] --> B["SketchAlgorithmStrategy::matches<br/>check whether the target shape can produce summaries"]
+  A["Input TargetSubDAG<br/>root is a supported Aggregate"] --> B["SketchAlgorithmStrategy::matches<br/>check whether the target shape can produce summaries"]
   B -->|"true"| C["SketchAlgorithmStrategy::replacements<br/>use CostModel preferences and sizing while preserving<br/>every semantically valid realization"]
   B -->|"false"| NONE["Empty candidate list"]
-  C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a bound SummaryNode and rationale;<br/>all candidates retained in preferred order"]
+  C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed SummaryNode and rationale;<br/>all candidates retained in preferred order"]
 ```
 
 For an approximate quantile, the candidate list includes both KLL and DDSketch even though the cost model ranks one ahead of the other. When only one realization is legal, such as an exact accumulator or pass-through, the strategy returns that single candidate.
@@ -833,7 +839,7 @@ let candidates = strategy.replacements(&target);
 for candidate in candidates {
     match candidate.replacement {
         Replacement::Summary(summary) => {
-            // Inspect or execute this bound SummaryNode.
+            // Inspect or execute this constructed SummaryNode.
         }
         Replacement::Rewrite(_) => unreachable!(
             "SketchAlgorithmStrategy produces summary candidates"
@@ -842,7 +848,10 @@ for candidate in candidates {
 }
 ```
 
-The public contract is the behavior contributors should preserve: every legal candidate is returned, ordering follows the supplied `CostModel`, each summary is fully bound, and each candidate carries a useful rationale. Nested aggregate choices remain independent.
+The public contract is the behavior contributors should preserve: every legal
+candidate is returned, ordering follows the supplied `CostModel`, each summary
+is fully constructed, and each candidate carries a useful rationale. Nested
+aggregate choices remain independent.
 
 ---
 
@@ -879,10 +888,14 @@ Replacement::Rewrite(
 
 This strategy does **not** decide whether sharing is cheaper.
 
-That choice belongs to the cost model. The production binding path calls `CostModel::cse_share_decision` when it encounters a shared subtree. The strategy still returns both alternatives because enumeration and selection are separate steps:
+That preference belongs to the cost model.
+`PlanSpace::cost_sorted` calls `CostModel::cse_share_decision` when it ranks a
+share-versus-recompute candidate pair. The strategy still returns both
+alternatives because enumeration and ranking are separate steps:
 
 - `consumer_count >= 2` means `share_common_subtrees` has already merged the expression into one shared `Rc`. The shared alternative is therefore an `Rc::clone`; the independent alternative requires a deep clone.
-- `cse_share_decision` is used by the production binding path, not by `SharedSubtreeStrategy`.
+- `cse_share_decision` is used by the ranking path, not by
+  `SharedSubtreeStrategy`.
 - The strategy must return both valid alternatives even if the current cost model strongly prefers one. A future whole-plan search may choose differently from today's local comparison.
 
 This example is useful when implementing transformations such as:
@@ -1235,7 +1248,7 @@ fn cse_shared_maintenance_cost(
 
 #### `cse_share_decision`
 
-Use when the current binding/planning path needs the final share-vs.-recompute decision.
+Use when the ranking path needs a share-vs.-recompute preference.
 
 ```rust
 fn cse_share_decision(
@@ -1421,13 +1434,15 @@ fn replacements(...) -> Vec<ReplacementSubDAG> {
 
 If `implementation.rs` already defines which sketch algorithms satisfy an `AggIntent`, reuse that source.
 
-Otherwise the binder and replacement strategy can silently disagree.
+Otherwise implementation enumeration and the replacement strategy can
+silently disagree.
 
 ---
 
-### Mistake: reimplementing binding inside a strategy
+### Mistake: reimplementing summary construction inside a strategy
 
-If the candidate should produce a normal `SummaryNode`, use the existing binding path.
+If the candidate should produce a normal `SummaryNode`, use the existing
+summary-construction path.
 
 A strategy should steer or wrap that path when necessary, not recreate schema derivation, column resolution, readout construction, or parameter sizing.
 
@@ -1468,10 +1483,10 @@ When adding a new strategy:
 - [ ] Implement `ReplacementStrategy::replacements`.
 - [ ] Return every semantically valid replacement.
 - [ ] Return an empty vector for non-matching targets.
-- [ ] Use `Replacement::Summary` for bound post-ASAP output.
+- [ ] Use `Replacement::Summary` for constructed post-ASAP output.
 - [ ] Use `Replacement::Rewrite` for logical pre-ASAP alternatives.
 - [ ] Add a useful rationale to every candidate.
-- [ ] Reuse existing legality/binding logic instead of duplicating it.
+- [ ] Reuse existing legality and implementation logic instead of duplicating it.
 - [ ] Keep ranking and cost-based pruning out of the strategy.
 - [ ] Test positive and negative applicability.
 - [ ] Test exhaustive enumeration.
@@ -1511,7 +1526,7 @@ Use this table to find the right place for a change.
 | Change shared-maintenance cost | `CostModel::cse_shared_maintenance_cost` |
 | Change current share/recompute choice | `CostModel::cse_share_decision` |
 | Decide whether an available implementation satisfies a required one | `impl Matcher` |
-| Produce a normal (ranked-first) bound summary for one target | `SketchAlgorithmStrategy::replacements(...).into_iter().next()` |
+| Produce a normal (ranked-first) post-ASAP summary for one target | `SketchAlgorithmStrategy::replacements(...).into_iter().next()` |
 | Search a whole workload for every candidate at every `TargetSubDAG` (never pruning) | `search_workload`/`search_workload_with` |
 | Get every candidate ranked best-first, across a whole workload | `PlanSpace::cost_sorted` |
 | Get a real numeric cost per candidate, not just a relative rank | `CostModel::estimate_cost` |
