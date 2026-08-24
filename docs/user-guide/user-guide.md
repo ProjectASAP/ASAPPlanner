@@ -1,51 +1,89 @@
 # User guide: getting the pre-ASAP and post-ASAP IR for a query
 
-Two ways to do this: no-code (the `asap-devtools` binaries) or as a library embedded in your own
-codebase.
+The `asap-devtools` package provides command-line tools for inspecting the pre-ASAP and post-ASAP IR generated for SQL and PromQL queries.
 
-## No-code: `asap-devtools` binaries
+## 1. Create a query file
 
-Write a file of `sql>`/`promql>`-prefixed queries (one per line; blank lines and `#` comments
-ignored):
+Create a text file containing one query per line. Prefix each query with `sql>` or `promql>`.
+
+For example, `queries.txt`:
 
 ```text
 promql> quantile(0.99, rate(http_requests_total[5m]))
 sql> SELECT service, COUNT(*) FROM metrics GROUP BY service
 ```
 
-**Pre-ASAP IR** (ASAP-agnostic `QueryExpr`/`AggIntent`):
+Blank lines and lines beginning with `#` are ignored.
+
+## 2. Show the pre-ASAP IR
+
+Run:
 
 ```sh
 cargo run -p asap-devtools --bin show_pre_asap_ir -- queries.txt
 ```
 
-**Post-ASAP IR** (ASAP-aware IR with `SummaryExpr`/`L4Node`, one layer downstream, with
-concrete `SummaryKind`/`SummaryParams` committed per aggregate):
+You can also provide the queries through stdin:
+
+```sh
+cargo run -p asap-devtools --bin show_pre_asap_ir < queries.txt
+```
+
+## 3. Show the post-ASAP IR
+
+Run:
 
 ```sh
 cargo run -p asap-devtools --bin show_post_asap_ir -- queries.txt
 ```
 
-Both accept stdin instead of a file (`... < queries.txt`). `show_post_asap_ir` lowers at
-ε = 0.01 rather than `Exact` — an exact target only ever exercises the mergeable-accumulator
-arm of the binding decision, never a real sketch, so it wouldn't show the interesting case.
+Or through stdin:
 
-### Other dev tools
+```sh
+cargo run -p asap-devtools --bin show_post_asap_ir < queries.txt
+```
 
-`crates/devtools` ships more debugging binaries and examples for poking at the lowering pipeline. Binaries (`cargo run -p asap-devtools --bin <name>`):
+`show_post_asap_ir` uses an approximation target of ε = 0.01 so that the output can exercise sketch-based implementations rather than only exact aggregation.
 
-- **`show_pre_asap_ir`** — see above
-- **`show_post_asap_ir`** — see above
-- **`dag_export`** — dumps pre-ASAP IRs for given `--sql`/`--promql` queries for
-  [`tools/dag-viewer`](../tools/dag-viewer/index.html), an interactive DAG viewer
-  (see [`tools/dag-viewer/RUNNING.md`](../tools/dag-viewer/RUNNING.md) for
-  end-to-end setup, including running it over a remote tunnel).
-- **`variant_coverage`** — parses and canonicalizes every query corpus in the repo to pre-ASAP IR and reports which `QueryExpr` variants get exercised.
+## Other useful commands
 
-Examples (`cargo run -p asap-devtools --example <name>`):
+### Export a query DAG
 
-- **`topk_ir`** — prints pre-ASAP IR for a hardcoded set of topk-shaped SQL/PromQL queries
-- **`canonical_examples`** — prints pre-ASAP IR for one canonical query per `QueryExpr` variant, and custom join/set-op/distinct/CTE probes, to eyeball their shape.
+Export pre-ASAP IR for SQL or PromQL queries for use with the interactive DAG viewer:
+
+```sh
+cargo run -p asap-devtools --bin dag_export -- --sql "<SQL query>"
+```
+
+or:
+
+```sh
+cargo run -p asap-devtools --bin dag_export -- --promql "<PromQL query>"
+```
+
+See [`tools/dag-viewer/RUNNING.md`](../../tools/dag-viewer/RUNNING.md) for instructions on running the DAG viewer.
+
+### Check IR variant coverage
+
+Parse the query corpora in the repository and report which pre-ASAP IR variants are exercised:
+
+```sh
+cargo run -p asap-devtools --bin variant_coverage
+```
+
+## Additional examples
+
+Print pre-ASAP IR for several top-k queries:
+
+```sh
+cargo run -p asap-devtools --example topk_ir
+```
+
+Print representative queries covering the pre-ASAP IR variants:
+
+```sh
+cargo run -p asap-devtools --example canonical_examples
+```
 
 ## As a library
 
