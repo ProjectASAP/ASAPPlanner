@@ -85,6 +85,16 @@
 //!   — exposes an actual numeric cost per candidate, not just a relative
 //!   rank, for a caller (e.g. a DAG-visualization view) that wants to show
 //!   "candidate A costs ≈ X" next to "candidate B costs ≈ Y".
+//! - [`applicability`] — a reporting *view* over [`replacement`]'s
+//!   candidate-plan space (issue #257, part of #33): translates every
+//!   discovered `TargetSubDAG` with a non-trivial candidate list into an
+//!   [`applicability::ApplicabilityFinding`] ("which optimizations are
+//!   applicable, where, and why"), meant for the same downstream consumer
+//!   (e.g. a DAG-visualization view) the crate doc's `## Status` section
+//!   above already names for [`replacement::PlanSpace`] itself. Superseded PR
+//!   #247's own rule-based traversal, which re-walked the tree once per
+//!   optimization before [`replacement::search_workload`] existed to read
+//!   from instead — see that module's docs for the full reframing.
 //!
 //! ## Terminology — "bind" already means three different things nearby;
 //! this crate's own logical→physical step is named "implementation" instead
@@ -126,9 +136,14 @@
 //! `sketch_algebra::capability::Capability`/`is_satisfied_by` is the
 //! reference downstream implementation.
 
+pub mod applicability;
 pub mod cost_model;
 pub mod replacement;
 
+pub use applicability::{
+    find_applicable_optimizations, find_applicable_optimizations_with, ApplicabilityFinding,
+    OptimizationKind,
+};
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,

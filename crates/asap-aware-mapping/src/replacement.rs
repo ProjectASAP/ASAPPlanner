@@ -42,12 +42,15 @@
 //!   equivalent) — see [`Replacement`] — plus a human-readable `rationale`.
 //! - [`ReplacementStrategy`] — `matches` + `replacements`, the same
 //!   extension-point shape [`CostModel`] and [`Matcher`] already use in this
-//!   crate (and the same shape issue #33's applicability-rule framework, PR
-//!   #247, uses for its own `ApplicabilityRule`): a new replacement source is
-//!   a new `impl ReplacementStrategy`, not a restructuring of this trait or of
-//!   any existing strategy. `replacements` is **exhaustive, not ranked, not
-//!   filtered** — reporting "every valid candidate" is core's job; picking
-//!   the best one is left to the caller.
+//!   crate: a new replacement source is a new `impl ReplacementStrategy`, not
+//!   a restructuring of this trait or of any existing strategy. `replacements`
+//!   is **exhaustive, not ranked, not filtered** — reporting "every valid
+//!   candidate" is core's job; picking the best one is left to the caller.
+//!   [`crate::applicability`] (issue #257) is this trait's own downstream
+//!   consumer, not a second extension point: it reports "which optimizations
+//!   are applicable" as a pure view over the candidates strategies registered
+//!   here already produced, rather than re-deriving applicability with a rule
+//!   of its own.
 //!
 //! A caller that wants one executable answer takes the first
 //! (`cost_model`-preferred) entry off `replacements()` itself
@@ -81,10 +84,9 @@
 //!   `asap_types::pre_asap::cse::share_common_subtrees`'s sharing decision.
 //!   Wherever a [`TargetSubDAG`] already has two or more consumers (i.e.
 //!   `share_common_subtrees` already collapsed two or more workload
-//!   locations onto the same `Rc<QueryExpr>` — PR #247's own
-//!   `SharedSubexpressionRule` traversal/dedup logic, over in the
-//!   applicability-rule framework, does the identical discovery; this
-//!   module's own tests reuse the same dedup logic to build realistic
+//!   locations onto the same `Rc<QueryExpr>` — [`discover_targets`] below
+//!   does the identical workload-wide discovery for [`search_workload_with`];
+//!   this module's own tests reuse the same dedup logic to build realistic
 //!   fixtures), it reports the two-way candidate CSE's own detection pass
 //!   deliberately declines to pick between on its own: build once and share
 //!   the already-interned subtree, or build it independently at each
@@ -355,8 +357,8 @@ pub enum Replacement {
 /// One candidate replacement for a [`TargetSubDAG`], plus a human-readable
 /// `rationale` explaining why it's a valid candidate (meant for a
 /// report/log/debugging a search engine's choices, not machine parsing —
-/// the same role an `ApplicabilityFinding`'s `reason` field plays for
-/// applicability findings, over in PR #247's applicability-rule framework).
+/// [`crate::applicability::ApplicabilityFinding::reason`] literally reuses
+/// this same string rather than inventing new prose of its own.
 #[derive(Debug, Clone)]
 pub struct ReplacementSubDAG {
     pub replacement: Replacement,
@@ -932,7 +934,7 @@ fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
 /// A single static instance so [`SketchAlgorithmStrategy::default_cost_model`]
 /// can hand out a `&'static dyn CostModel` without heap-allocating one —
 /// `DefaultCostModel` is a unit struct with no state, so one instance serves
-/// every caller (same pattern `applicability::SketchApplicabilityRule` uses).
+/// every caller.
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 
 /// Wraps [`implementations_for_with`]'s exhaustive, ranked list directly: for
@@ -1039,8 +1041,10 @@ fn describe_implementation(intent: &AggIntent, implementation: &Implementation) 
 /// this crate's other `AggIntent` matches, e.g. [`implementations_for_with`]'s)
 /// — this is prose for a rationale string, not a decision, so an unlisted
 /// variant just falls back to its `Debug` tag rather than forcing every
-/// future intent to be named here too (same rationale, and same shape, as
-/// `applicability`'s own private `describe_intent`).
+/// future intent to be named here too. [`crate::applicability`] needs no
+/// counterpart of its own: it reads a candidate's `rationale` — built from
+/// this text — straight off [`ReplacementSubDAG`], rather than re-describing
+/// the same intent a second time.
 fn describe_intent(intent: &AggIntent) -> String {
     match intent {
         AggIntent::Quantile { q, .. } => format!("quantile(q={q})"),
@@ -1346,9 +1350,9 @@ fn lift(schema: &Schema) -> SummarySchema {
 /// This strategy does not decide sharing itself, nor does it discover which
 /// nodes are shared — by the time a caller builds a `TargetSubDAG` with
 /// `consumer_count >= 2`, `share_common_subtrees` has already made that
-/// (legality-gated, `PartialEq`-checked) call; PR #247's
-/// `SharedSubexpressionRule` traversal discovers real consumer counts across
-/// a workload the same way (this module's own tests reuse the identical
+/// (legality-gated, `PartialEq`-checked) call; [`discover_targets`] below
+/// discovers real consumer counts across a workload the same way for
+/// [`search_workload_with`] (this module's own tests reuse the identical
 /// dedup logic to build realistic fixtures — see the module docs'
 /// "Non-goals" on why that traversal isn't itself part of this strategy).
 /// This strategy only reframes "two or more consumers already share this
@@ -1759,9 +1763,11 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
 
 /// The strategies [`search_workload`] runs, in the built-in
 /// [`DefaultCostModel`] configuration — mirrors this module's own two
-/// shipped [`ReplacementStrategy`] impls, the same way a hypothetical
-/// `applicability::default_rules()` mirrors *its* module's own rule set.
-/// Use [`default_strategies_with`] to plug in a deployment-specific
+/// shipped [`ReplacementStrategy`] impls.
+/// [`crate::applicability::find_applicable_optimizations`] (issue #257) uses
+/// this same set (via [`search_workload`]) rather than keeping a second,
+/// applicability-specific list to stay in sync with. Use
+/// [`default_strategies_with`] to plug in a deployment-specific
 /// [`CostModel`] instead.
 pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
@@ -1800,10 +1806,11 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> PlanSpace<Id> {
 /// [`default_strategies_with`] to plug in a deployment-specific
 /// [`CostModel`] for candidate generation).
 ///
-/// Runs [`share_common_subtrees`] once over `roots` first — the same
-/// pattern a hypothetical `applicability::find_applicable_optimizations`
-/// uses, so every strategy sees the same already-deduplicated tree — then
-/// discovers every `TargetSubDAG` (see [`discover_targets`]) and runs the
+/// Runs [`share_common_subtrees`] once over `roots` first — so every
+/// strategy (and, transitively, every
+/// [`crate::applicability::ApplicabilityFinding`] a caller reads off the
+/// result) sees the same already-deduplicated tree — then discovers every
+/// `TargetSubDAG` (see [`discover_targets`]) and runs the
 /// fixpoint loop the module docs describe, capped at
 /// [`MAX_SEARCH_ITERATIONS`] passes (see the module docs' "Termination"
 /// section). Deduping candidate plans this way needs no
@@ -2857,10 +2864,9 @@ mod tests {
         assert!(replacements[1].rationale.contains('3'));
     }
 
-    /// Builds realistic multi-consumer `TargetSubDAG`s the same way
-    /// `applicability::SharedSubexpressionRule`'s `register_site`/
-    /// `walk_rc_children` traversal does: dedup by `Rc::as_ptr`, walking
-    /// only the relational-skeleton operator children
+    /// Builds realistic multi-consumer `TargetSubDAG`s the same way this
+    /// module's own [`discover_targets`]/`walk` does: dedup by `Rc::as_ptr`,
+    /// walking only the relational-skeleton operator children
     /// `asap_types::pre_asap::cse::share_common_subtrees` itself scopes to,
     /// so a shared node nested below another shared node is only ever
     /// counted at the highest (maximal) point sharing starts. Test-only:

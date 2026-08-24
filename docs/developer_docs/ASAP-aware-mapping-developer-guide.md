@@ -383,7 +383,7 @@ is enough for the current shared-subtree strategy.
 
 Keep `matches` cheap and unsurprising.
 
-It should answer *whether the strategy applies here* in the plain English sense — not `applicability.rs`'s formal `ApplicabilityRule`/`ApplicabilityFinding` concept (issue #247, a separate reporting layer covered in the design doc's "Applicability reporting" section). `matches` isn't that machinery and doesn't need to produce anything it consumes; it should also not perform ranking or choose a winner.
+It should answer *whether the strategy applies here* in the plain English sense — not `applicability.rs`'s formal `ApplicabilityFinding` concept (issue #257, a separate reporting layer over this trait's own output — see §19). `matches` isn't that machinery and doesn't need to produce anything it consumes; it should also not perform ranking or choose a winner.
 
 ---
 
@@ -1283,3 +1283,51 @@ Use this table to find the right place for a change.
 | Enumerate valid sketch algorithms | reuse `replacement::summary_candidates` |
 | Build a target with no workload context | `TargetSubDAG::new` |
 | Build a target with known sharing context | `TargetSubDAG::with_consumer_count` |
+| Report which optimizations are applicable, where, and why | `applicability::find_applicable_optimizations`/`find_applicable_optimizations_with` |
+| Add a new kind of applicability finding | new `impl ReplacementStrategy`, wired into `default_strategies`/`default_strategies_with` — not a new applicability-specific trait, see §19 |
+
+---
+
+## 19. Applicability reporting (`applicability.rs`)
+
+`applicability::find_applicable_optimizations`/`find_applicable_optimizations_with` answer a different question than everything above: not "what could this target become" (`ReplacementStrategy::replacements`) but "which of the optimizations already discovered are worth telling a user about, and why." It is a **reporting view over `PlanSpace`**, not a second search or a second rule engine.
+
+### The rule
+
+> A `TargetSubDAG` is applicability-worthy exactly when its `PlanSpace` candidate list contains something beyond the trivial, no-op realization.
+
+Concretely, `applicability.rs` reads two shapes off each `MemoGroup`:
+
+- `OptimizationKind::SketchApproximation` — the group's candidates include a `Replacement::Summary` that actually realizes `SummaryFamilyType::Sketch(..)`, i.e. `SketchAlgorithmStrategy` found a real sketch alternative, not just an exact/pass-through candidate.
+- `OptimizationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the group's candidates include `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the group's own `target`).
+
+Each `ApplicabilityFinding::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `applicability.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.
+
+### Why there is no `ApplicabilityRule` trait
+
+An earlier version of this module (superseded, PR #247) had its own extension-point trait for adding a new optimization to the report. It is gone. Once findings are read off `PlanSpace`, a new applicability finding needs a new `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with` regardless — that is the only way a new kind of candidate reaches the `PlanSpace` this module reads. A second, applicability-specific extension point would just be a second place to register the same thing. `find_applicable_optimizations_with`'s own `strategies: &[Box<dyn ReplacementStrategy>]` parameter is where a caller plugs in something custom — the same customization point `search_workload_with` itself exposes.
+
+### What it still owns: `location` text
+
+`PlanSpace`/`MemoGroup` track `Rc<QueryExpr>` pointer identity, not human-readable breadcrumbs. `applicability.rs` keeps one small, self-contained traversal, `collect_locations`, whose only job is turning "this `Rc`" into prose like `root "dash_a" > lhs` for `ApplicabilityFinding::location`. It makes no applicability decision — it runs identically regardless of what any strategy found.
+
+### Using it
+
+```rust
+use asap_aware_mapping::{find_applicable_optimizations, OptimizationKind};
+
+let findings = find_applicable_optimizations(vec![("dashboard_p99", query)]);
+for finding in &findings {
+    match finding.optimization {
+        OptimizationKind::SketchApproximation => { /* ... */ }
+        OptimizationKind::CommonSubexpressionReuse => { /* ... */ }
+        _ => { /* OptimizationKind is #[non_exhaustive] */ }
+    }
+}
+```
+
+To plug in a deployment-specific strategy or `CostModel`, use `find_applicable_optimizations_with` with a strategy set built the same way `default_strategies_with` builds one — see §8 and §11.
+
+### Adding a new applicability finding
+
+There is no separate checklist here: follow [§4](#4-adding-a-new-replacementstrategy) to add the new `ReplacementStrategy`, wire it into `default_strategies`/`default_strategies_with` (§18), add an `OptimizationKind` variant, and extend `findings_from_plan_space` to recognize the new candidate shape. If the new strategy's `matches`/`replacements` are already correct and tested, the applicability finding falls out of the existing `PlanSpace` translation with no new discovery logic required.
