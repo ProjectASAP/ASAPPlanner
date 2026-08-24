@@ -12,7 +12,7 @@ It is written for developers who want to:
 
 The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and future search design, see the separate design document, [`docs/design_docs/asap_aware_mapping.md`](../design_docs/asap_aware_mapping.md).
 
-Code samples named `My*` or `Prefer*` (`MyStrategy`, `MyCostModel`, `PreferDDSketch`, …) below are illustrative sketches of a pattern, not code that ships in this crate. Samples that name a real type (`SketchFamilyStrategy`, `SharedSubtreeStrategy`, `bind_with_implementation`, …) are copied verbatim from `replacement.rs`/`bind.rs`/`cost_model.rs`.
+Code samples named `My*` or `Prefer*` (`MyStrategy`, `MyCostModel`, `PreferDDSketch`, …) below are illustrative sketches of a pattern, not code that ships in this crate. Samples that name a real type (`SketchAlgorithmStrategy`, `SharedSubtreeStrategy`, `bind_with_implementation`, …) are copied verbatim from `replacement.rs`/`bind.rs`/`cost_model.rs`.
 
 ---
 
@@ -21,7 +21,7 @@ Code samples named `My*` or `Prefer*` (`MyStrategy`, `MyCostModel`, `PreferDDSke
 Two words come up constantly below and are worth pinning down before anything else, since neither is self-explanatory from context alone:
 
 - **`implementation`** (the module `implementation.rs`) — every valid way one `AggIntent` could be realized: as an approximate sketch, an exact mergeable accumulator, or a pass-through (no summary at all). `implementation::implementations_for_with` computes this **one node at a time**, exhaustive and ranked; it doesn't walk anything, and it doesn't pick a favorite — picking is left to its callers.
-- **`bind` / "binding"** — this crate's own `bind.rs`. It has no "bind me one tree" entry point of its own: `replacement::SketchFamilyStrategy::replacements()` is the only public way to get bound output for a target, and it always returns *every* candidate; a caller that wants a single executable answer takes the first entry itself (see §3). What `bind.rs` provides is the shared low-level primitive, `bind_with_implementation`, that turns one already-decided candidate into a real `SummaryNode`, plus `implement_workload`/`implement_workload_with`, which drive that same take-the-head selection over a whole workload's roots (see §3's closing note on why those two still keep it internally). This is what "the binding path" means everywhere in this guide: the code that commits to one `Implementation` per node because something has to actually execute. (The word "bind" means other things elsewhere in this crate's downstream consumers — see `lib.rs`'s own "Terminology" section if you need the full picture — but within this guide, "bind"/"binding" always means this.)
+- **`bind` / "binding"** — this crate's own `bind.rs`. It has no "bind me one tree" entry point of its own: `replacement::SketchAlgorithmStrategy::replacements()` is the only public way to get bound output for a target, and it always returns *every* candidate; a caller that wants a single executable answer takes the first entry itself (see §3). What `bind.rs` provides is the shared low-level primitive, `bind_with_implementation`, that turns one already-decided candidate into a real `SummaryNode`, plus `implement_workload`/`implement_workload_with`, which drive that same take-the-head selection over a whole workload's roots (see §3's closing note on why those two still keep it internally). This is what "the binding path" means everywhere in this guide: the code that commits to one `Implementation` per node because something has to actually execute. (The word "bind" means other things elsewhere in this crate's downstream consumers — see `lib.rs`'s own "Terminology" section if you need the full picture — but within this guide, "bind"/"binding" always means this.)
 
 So: `implementation` enumerates **every** way one node could become something; `ReplacementStrategy` (this guide's main subject) wraps that list into one `ReplacementSubDAG` per candidate, keeping all of them; a caller that wants one answer takes the first entry itself — see §3 for exactly how these connect.
 
@@ -176,13 +176,13 @@ The two methods have intentionally different responsibilities.
 - **`rank_candidates`** — order a set of sketch candidates for one `AggIntent`, best choice first. **No default** — this is the one hook every `CostModel` must implement; candidate selection needs a real answer from somewhere.
 
   ```rust
-  fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind>;
+  fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchAlgorithm]) -> Vec<SketchAlgorithm>;
   ```
 
-- **`size_params`** — pick concrete parameters (e.g. sketch capacity) for one already-chosen `SketchKind`, given an accuracy target `(eps, delta)`. This is a separate hook from `rank_candidates` specifically so a deployment can override *just* sizing (e.g. an empirically-tuned table, or discrete capacity rungs a downstream catalog requires) without also forking candidate selection — same "one extension point per decision" shape as everything else in this trait. Default: `implementation::default_size_params`, this crate's built-in per-family sizing formulas.
+- **`size_params`** — pick concrete parameters (e.g. sketch capacity) for one already-chosen `SketchAlgorithm`, given an accuracy target `(eps, delta)`. This is a separate hook from `rank_candidates` specifically so a deployment can override *just* sizing (e.g. an empirically-tuned table, or discrete capacity rungs a downstream catalog requires) without also forking candidate selection — same "one extension point per decision" shape as everything else in this trait. Default: `implementation::default_size_params`, this crate's built-in per-family sizing formulas.
 
   ```rust
-  fn size_params(&self, kind: SketchKind, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
+  fn size_params(&self, kind: SketchAlgorithm, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
   ```
 
 - **`realize_extension`** — decide what post-ASAP `Implementation` a deployment-defined `AggIntent::Extension` maps to (a shape core has no built-in opinion on). Default: `Implementation::PassThrough`.
@@ -192,7 +192,7 @@ The two methods have intentionally different responsibilities.
   ```rust
   fn realize_extension(&self, ext_kind: &str, _payload: &serde_json::Value) -> Implementation {
       if ext_kind == "frequency" {
-          Implementation::Sketch { kind: SketchKind::CountSketch, params: /* ... */ }
+          Implementation::Sketch(SketchKind::Frequency(SketchAlgorithm::CountSketch, /* params */))
       } else {
           Implementation::PassThrough  // fall back to the default for anything else
       }
@@ -235,6 +235,35 @@ A custom cost model does not necessarily need to override every hook. The curren
 
 ---
 
+### Family, kind, and algorithm
+
+Three levels sit below "summary" in this crate's type vocabulary, and `Sketch` is the only family with all three:
+
+| Level | Type | Example |
+| --- | --- | --- |
+| **family** | `SummaryFamilyType` | `Sketch`, `Sample`, `Wavelet`, `StatModel`, `ExactAggregate` |
+| **kind** | `SketchKind` (only inside `Sketch`) | `Quantile`, `Cardinality`, `Frequency`, `TopK` |
+| **algorithm** | `SketchAlgorithm` (nested inside a `SketchKind`) | `Kll` / `DDSketch` (both `Quantile`); `Hll` / `Theta` / `Kmv` (all `Cardinality`) |
+
+A `SketchKind` isn't just a category tag — every value already carries the committed algorithm and its params:
+
+```rust
+pub enum SketchKind {
+    Quantile(SketchAlgorithm, SketchParams),
+    Cardinality(SketchAlgorithm, SketchParams),
+    Frequency(SketchAlgorithm, SketchParams),
+    TopK(SketchAlgorithm, SketchParams),
+}
+```
+
+`SketchKind::new(algorithm, params)` is the one place an `(algorithm, params)` pair gets classified into its category — construct through it rather than naming a variant directly, so a new algorithm can't drift out of sync with its category. `.algorithm()`/`.params()` pull the committed pair back out regardless of which category variant it's in.
+
+Where this matters in practice: `CostModel::rank_candidates`/`size_params`, `implementation::implementations_for_with`, and `SketchAlgorithmStrategy`'s candidate enumeration all operate one level down, at **algorithm** — `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` only shows up once an algorithm has actually been picked and sized — on `Implementation::Sketch(SketchKind)` and `SummaryFamilyType::Sketch(SketchKind)`, both single-field wrapping the already-committed kind.
+
+No other family needs this extra level today — `Sample`/`Wavelet`/`StatModel` are each a flat `(Kind, Params)` pair, same shape `Sketch` used to be before this split. `Sketch` grew a third level because it's the one family with more than one algorithm per purpose (KLL vs. DDSketch both answer `Quantile`).
+
+---
+
 ## 3. How the current pieces fit together
 
 There is one place this crate decides what an `AggIntent` may become —
@@ -246,7 +275,7 @@ only the replacement-strategy path:
 - **`implementation::implementations_for_with(intent, cost_model)`** enumerates
   every valid `Implementation` for `intent`, exhaustive and ranked
   (most-preferred first via `cost_model`).
-- **`replacement::SketchFamilyStrategy::replacements()`** (§2) wraps that list
+- **`replacement::SketchAlgorithmStrategy::replacements()`** (§2) wraps that list
   directly: every entry becomes its own bound `ReplacementSubDAG`, none
   discarded. This is the *only* public way to get bound output for a
   target — there is no second, single-answer entry point sitting behind it.
@@ -258,22 +287,22 @@ only the replacement-strategy path:
 
 This is exactly the "alternatives"/"candidates" language in [the design doc](../design_docs/asap_aware_mapping.md): a `ReplacementSubDAG` **is** one candidate; a `TargetSubDAG` with its full `replacements()` list **is** the set of alternatives for one spot in the plan.
 
-**The tradeoff, stated plainly:** because a single-target bind now goes through the same enumeration `SketchFamilyStrategy` uses, it sizes and fully constructs *every* sketch candidate at every sketch-capable node — not just the one a caller keeps — before that caller selects the head. That's strictly more work per bind than a version that only ever computed the preferred candidate, in exchange for there being exactly one place in this crate that decides what an `AggIntent` may become and exactly one place bound output comes from. Recursion into a node's child goes back through the same enumerate-then-select step fresh, so choosing (or forcing) a candidate for one target never leaks into that target's own nested aggregates.
+**The tradeoff, stated plainly:** because a single-target bind now goes through the same enumeration `SketchAlgorithmStrategy` uses, it sizes and fully constructs *every* sketch candidate at every sketch-capable node — not just the one a caller keeps — before that caller selects the head. That's strictly more work per bind than a version that only ever computed the preferred candidate, in exchange for there being exactly one place in this crate that decides what an `AggIntent` may become and exactly one place bound output comes from. Recursion into a node's child goes back through the same enumerate-then-select step fresh, so choosing (or forcing) a candidate for one target never leaks into that target's own nested aggregates.
 
 What this is *not*: the design doc's future Cascades/Volcano-style search engine — generate candidates via `ReplacementStrategy` across a *whole plan*, evaluate/select via `CostModel` across whole candidate plans — is a separate, not-yet-built piece of work. What exists today is a **single-node** stand-in for that selection (`cost_model.rank_candidates`, applied one node at a time), not the real thing.
 
-**One exception:** `bind::implement_workload`/`implement_workload_with` still keep the take-the-head step internally, because workload-wide CSE sharing memoizes on `Rc` pointer identity — two workload roots that collapsed onto the same `Rc<QueryExpr>` must resolve to the *same* canonical decision to be shareable at all, so there's no meaningful "N candidates" answer to memoize against. That's the one place inside this crate a single-answer selection still lives; every other caller goes through `SketchFamilyStrategy::replacements()` directly.
+**One exception:** `bind::implement_workload`/`implement_workload_with` still keep the take-the-head step internally, because workload-wide CSE sharing memoizes on `Rc` pointer identity — two workload roots that collapsed onto the same `Rc<QueryExpr>` must resolve to the *same* canonical decision to be shareable at all, so there's no meaningful "N candidates" answer to memoize against. That's the one place inside this crate a single-answer selection still lives; every other caller goes through `SketchAlgorithmStrategy::replacements()` directly.
 
 ### The shared low-level primitive: `bind_with_implementation`
 
-Underneath `SketchFamilyStrategy::replacements()` sits one more function, `bind::bind_with_implementation(expr, implementation, cost_model)` — *given* an already-decided `Implementation` for `expr`'s top intent, bind it into a `SummaryNode` (or fall back to a logical passthrough). It doesn't re-decide how a chosen `Implementation` becomes a `SummaryNode`; `replacements()` just calls it once per candidate:
+Underneath `SketchAlgorithmStrategy::replacements()` sits one more function, `bind::bind_with_implementation(expr, implementation, cost_model)` — *given* an already-decided `Implementation` for `expr`'s top intent, bind it into a `SummaryNode` (or fall back to a logical passthrough). It doesn't re-decide how a chosen `Implementation` becomes a `SummaryNode`; `replacements()` just calls it once per candidate:
 
 ```text
                     implementations_for_with(intent, cost_model)
                     every valid Implementation, ranked
                                      |
                                      v
-                    SketchFamilyStrategy::replacements()
+                    SketchAlgorithmStrategy::replacements()
                     keeps every candidate
                                      |
                                      v
@@ -309,7 +338,7 @@ The important rule is:
 
 > Strategies should reuse existing decision and binding logic where possible instead of reimplementing it.
 
-`SketchFamilyStrategy` follows this literally: it doesn't reimplement any part of binding — it hands `implementations_for_with`'s own list straight to `bind_with_implementation`, once per candidate.
+`SketchAlgorithmStrategy` follows this literally: it doesn't reimplement any part of binding — it hands `implementations_for_with`'s own list straight to `bind_with_implementation`, once per candidate.
 
 ---
 
@@ -352,7 +381,7 @@ There are four decisions to make.
 
 `matches` should contain the minimum structural and semantic checks needed to determine whether the strategy applies.
 
-For example, `SketchFamilyStrategy` only matches the aggregate shape that the existing binder can actually bind:
+For example, `SketchAlgorithmStrategy` only matches the aggregate shape that the existing binder can actually bind:
 
 - the node is an `Aggregate`,
 - it has one aggregation intent,
@@ -499,7 +528,7 @@ If another module already knows how to determine whether something is legal or h
 
 Do not create a second implementation of the same semantics inside the strategy.
 
-The existing `SketchFamilyStrategy` is the model to follow: it reuses `implementation.rs`'s existing candidate list and the existing binder.
+The existing `SketchAlgorithmStrategy` is the model to follow: it reuses `implementation.rs`'s existing candidate list and the existing binder.
 
 ---
 
@@ -523,22 +552,22 @@ If your transformation requires context not currently represented in `TargetSubD
 
 ---
 
-## 6. Example: current `SketchFamilyStrategy`
+## 6. Example: current `SketchAlgorithmStrategy`
 
-`SketchFamilyStrategy` is the reference implementation for a strategy that produces bound summaries.
+`SketchAlgorithmStrategy` is the reference implementation for a strategy that produces bound summaries.
 
 Construction:
 
 ```rust
 let strategy =
-    SketchFamilyStrategy::default_cost_model();
+    SketchAlgorithmStrategy::default_cost_model();
 ```
 
 or with a custom cost model:
 
 ```rust
 let model = MyCostModel; // illustrative
-let strategy = SketchFamilyStrategy::new(&model);
+let strategy = SketchAlgorithmStrategy::new(&model);
 ```
 
 The strategy matches bindable aggregate nodes.
@@ -570,7 +599,7 @@ For an approximate quantile, the current candidate list includes both KLL and DD
 
 ### How each candidate actually gets bound: `bind_with_implementation`
 
-`SketchFamilyStrategy`'s whole `replacements()` body is one loop:
+`SketchAlgorithmStrategy`'s whole `replacements()` body is one loop:
 
 ```rust
 fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
@@ -664,13 +693,13 @@ impl CostModel for PreferDDSketch {
     fn rank_candidates(
         &self,
         _intent: &AggIntent,
-        candidates: &[SketchKind],
-    ) -> Vec<SketchKind> {
+        candidates: &[SketchAlgorithm],
+    ) -> Vec<SketchAlgorithm> {
         let mut ranked = candidates.to_vec();
 
         if let Some(pos) =
             ranked.iter().position(
-                |k| *k == SketchKind::DDSketch
+                |k| *k == SketchAlgorithm::DDSketch
             )
         {
             let dd = ranked.remove(pos);
@@ -688,13 +717,13 @@ Then inject it into code that accepts a `&dyn CostModel`:
 let model = PreferDDSketch;
 
 let strategy =
-    SketchFamilyStrategy::new(&model);
+    SketchAlgorithmStrategy::new(&model);
 
 let replacements =
     strategy.replacements(&target);
 ```
 
-Important: changing `rank_candidates` changes the preferred ordering, but `SketchFamilyStrategy` still enumerates every valid sketch candidate.
+Important: changing `rank_candidates` changes the preferred ordering, but `SketchAlgorithmStrategy` still enumerates every valid sketch candidate.
 
 A custom cost model should not change which alternatives are semantically legal.
 
@@ -706,7 +735,7 @@ Use this as a practical guide.
 
 ### `rank_candidates`
 
-Use when you want to change the preference among valid sketch families.
+Use when you want to change the preference among valid sketch algorithms.
 
 Example:
 
@@ -721,8 +750,8 @@ Signature:
 fn rank_candidates(
     &self,
     intent: &AggIntent,
-    candidates: &[SketchKind],
-) -> Vec<SketchKind>;
+    candidates: &[SketchAlgorithm],
+) -> Vec<SketchAlgorithm>;
 ```
 
 The returned vector should rank candidates from most to least preferred.
@@ -733,14 +762,14 @@ It should rank candidates that were supplied to it rather than invent unrelated 
 
 ### `size_params`
 
-Use when the sketch family is already known and you want to choose its parameters from an accuracy target.
+Use when the sketch algorithm is already known and you want to choose its parameters from an accuracy target.
 
 Signature:
 
 ```rust
 fn size_params(
     &self,
-    kind: SketchKind,
+    kind: SketchAlgorithm,
     intent: &AggIntent,
     eps: f64,
     delta: f64,
@@ -756,7 +785,7 @@ Typical uses include:
 Conceptually:
 
 ```text
-SketchKind + AggIntent + accuracy target
+SketchAlgorithm + AggIntent + accuracy target
                  |
                  v
             SketchParams
@@ -912,13 +941,13 @@ That turns a cost decision into a legality decision and prevents later global pl
 
 ---
 
-## 12. Adding a new sketch family
+## 12. Adding a new sketch algorithm
 
-A new sketch family generally touches more than `ReplacementStrategy`.
+A new sketch algorithm generally touches more than `ReplacementStrategy`.
 
-The strategy should not maintain its own private list of sketch kinds.
+The strategy should not maintain its own private list of sketch algorithms.
 
-`SketchFamilyStrategy` obtains sketch alternatives through `implementation.rs`'s existing interface:
+`SketchAlgorithmStrategy` obtains sketch alternatives through `implementation.rs`'s existing interface:
 
 ```rust
 summary_candidates(intent)
@@ -926,23 +955,24 @@ summary_candidates(intent)
 
 and binds them through the normal binder.
 
-Therefore, when adding a new built-in sketch family, the intended flow is:
+Therefore, when adding a new built-in sketch algorithm, the intended flow is:
 
 ```text
-1. Teach `implementation.rs` that the sketch is a valid candidate
-   for the relevant AggIntent.
+1. Teach `implementation.rs` that the algorithm is a valid candidate
+   for the relevant AggIntent, and that `SketchKind::new` classifies
+   it into the right category.
 
 2. Teach the cost model how to rank and size it.
 
-3. Ensure the binder can realize the sketch family.
+3. Ensure the binder can realize the algorithm.
 
-4. SketchFamilyStrategy will then enumerate it through the
+4. SketchAlgorithmStrategy will then enumerate it through the
    existing candidate/binding path.
 ```
 
 This keeps one source of truth for sketch applicability.
 
-Do not special-case the new sketch inside `SketchFamilyStrategy` unless the strategy itself needs fundamentally new behavior.
+Do not special-case the new sketch inside `SketchAlgorithmStrategy` unless the strategy itself needs fundamentally new behavior.
 
 ---
 
@@ -953,7 +983,7 @@ The basic calling pattern is:
 ```rust
 let target = TargetSubDAG::new(&root);
 let strategy =
-    SketchFamilyStrategy::default_cost_model();
+    SketchAlgorithmStrategy::default_cost_model();
 
 if strategy.matches(&target) {
     let candidates =
@@ -1116,13 +1146,13 @@ For ranking:
 let ranked =
     model.rank_candidates(
         &intent,
-        &[SketchKind::Kll,
-          SketchKind::DDSketch],
+        &[SketchAlgorithm::Kll,
+          SketchAlgorithm::DDSketch],
     );
 
 assert_eq!(
     ranked[0],
-    SketchKind::DDSketch
+    SketchAlgorithm::DDSketch
 );
 ```
 
@@ -1132,7 +1162,7 @@ For example:
 
 ```rust
 let strategy =
-    SketchFamilyStrategy::new(&model);
+    SketchAlgorithmStrategy::new(&model);
 
 let replacements =
     strategy.replacements(&target);
@@ -1175,7 +1205,7 @@ fn replacements(...) -> Vec<ReplacementSubDAG> {
 
 ### Mistake: maintaining a second sketch-applicability table
 
-If `implementation.rs` already defines which sketch families satisfy an `AggIntent`, reuse that source.
+If `implementation.rs` already defines which sketch algorithms satisfy an `AggIntent`, reuse that source.
 
 Otherwise the binder and replacement strategy can silently disagree.
 
@@ -1243,7 +1273,7 @@ When adding a new cost model:
 - [ ] Use extension hooks for extension-defined implementations/readouts.
 - [ ] Use CSE hooks for recompute-vs.-sharing costs.
 - [ ] Test the hook directly.
-- [ ] Test integration through a consumer such as `SketchFamilyStrategy`.
+- [ ] Test integration through a consumer such as `SketchAlgorithmStrategy`.
 - [ ] Verify that changing cost preferences does not silently remove valid replacement candidates.
 
 ---
@@ -1258,7 +1288,7 @@ Use this table to find the right place for a change.
 | Add a new replacement for an existing target shape | `ReplacementStrategy::replacements` |
 | Change when a strategy applies | `ReplacementStrategy::matches` |
 | Add a new built-in sketch candidate | `implementation.rs`'s summary-candidate mapping |
-| Prefer one sketch family over another | `CostModel::rank_candidates` |
+| Prefer one sketch algorithm over another | `CostModel::rank_candidates` |
 | Change sketch sizing for an accuracy target | `CostModel::size_params` |
 | Add extension-defined implementation behavior | `CostModel::realize_extension` |
 | Add extension-defined readout behavior | `CostModel::readout_extension` |
@@ -1266,9 +1296,9 @@ Use this table to find the right place for a change.
 | Change shared-maintenance cost | `CostModel::cse_shared_maintenance_cost` |
 | Change current share/recompute choice | `CostModel::cse_share_decision` |
 | Decide whether an available implementation satisfies a required one | `impl Matcher` |
-| Produce a normal (ranked-first) bound summary for one target | `SketchFamilyStrategy::replacements(...).into_iter().next()` |
+| Produce a normal (ranked-first) bound summary for one target | `SketchAlgorithmStrategy::replacements(...).into_iter().next()` |
 | Bind a whole workload's roots, sharing across CSE-collapsed roots | reuse `bind::implement_workload`/`implement_workload_with` |
 | Bind a specific, already-chosen `Implementation` | reuse `bind::bind_with_implementation` |
-| Enumerate valid sketch kinds | reuse `implementation::summary_candidates` |
+| Enumerate valid sketch algorithms | reuse `implementation::summary_candidates` |
 | Build a target with no workload context | `TargetSubDAG::new` |
 | Build a target with known sharing context | `TargetSubDAG::with_consumer_count` |

@@ -33,7 +33,7 @@
 //!
 //! ## Selection: this crate reports every candidate; a caller keeps what it wants
 //!
-//! [`SketchFamilyStrategy::replacements`] builds a `TargetSubDAG` for the
+//! [`SketchAlgorithmStrategy::replacements`] builds a `TargetSubDAG` for the
 //! node being replaced, then enumerates [`implementation::implementations_for_with`]'s
 //! ranked list, calling [`bind::bind_with_implementation`] once per
 //! candidate — given an *already-decided* `Implementation`, turn it into a
@@ -46,7 +46,7 @@
 //! one place inside this crate that still performs that take-first step
 //! internally, because workload-wide CSE memoization needs one canonical
 //! decision per shared root to key sharing on (see `bind.rs`'s own module
-//! docs). Every other caller goes through `SketchFamilyStrategy::replacements`
+//! docs). Every other caller goes through `SketchAlgorithmStrategy::replacements`
 //! directly and decides for itself.
 //!
 //! This means an ordinary single-target bind now sizes and fully constructs
@@ -57,7 +57,7 @@
 //!
 //! ## The two strategies, and why these two
 //!
-//! - [`SketchFamilyStrategy`] wraps [`implementation::implementations_for_with`]'s
+//! - [`SketchAlgorithmStrategy`] wraps [`implementation::implementations_for_with`]'s
 //!   exhaustive, ranked list directly: for the same bindable-`Aggregate`
 //!   shape this crate binds (single intent, no `HAVING`), every entry
 //!   becomes its own bound candidate.
@@ -85,7 +85,7 @@
 //!   against every candidate plan, deduplicating, iterating to a fixpoint,
 //!   then ranking by a `CostModel` — is a Cascades/Volcano-style search
 //!   engine, tracked as a separate follow-up. Taking the first candidate off
-//!   [`SketchFamilyStrategy::replacements`] is a single-node stand-in for
+//!   [`SketchAlgorithmStrategy::replacements`] is a single-node stand-in for
 //!   that, not the real thing: it never compares whole candidate *plans*,
 //!   only one node's own candidates against each other via
 //!   `cost_model.rank_candidates`.
@@ -126,7 +126,7 @@ use crate::implementation::{implementations_for_with, Implementation};
 /// reference this exact `Rc` — 1 for an ordinary single-use node, 2+ when the
 /// caller already ran `share_common_subtrees` and found this subtree shared.
 /// A strategy that only cares about `root`'s own shape (e.g.
-/// [`SketchFamilyStrategy`]) can ignore it entirely; [`SharedSubtreeStrategy`]
+/// [`SketchAlgorithmStrategy`]) can ignore it entirely; [`SharedSubtreeStrategy`]
 /// is the one strategy that consults it. Computing a *real* consumer count
 /// across a whole workload is a traversal this module deliberately does not
 /// own (see the module docs' "Non-goals") — [`TargetSubDAG::new`] defaults it
@@ -197,7 +197,7 @@ pub struct ReplacementSubDAG {
 /// no restructuring of this trait or any existing strategy required.
 ///
 /// `replacements` is only meaningful when `matches` would return `true` for
-/// the same target; both [`SketchFamilyStrategy`] and [`SharedSubtreeStrategy`]
+/// the same target; both [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`]
 /// return an empty `Vec` rather than panicking when called on a target they
 /// don't match, so a caller that skips the `matches` check first still gets a
 /// safe (merely uninformative) answer instead of a crash.
@@ -211,9 +211,9 @@ pub trait ReplacementStrategy {
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG>;
 }
 
-// ── SketchFamilyStrategy ─────────────────────────────────────────────────
+// ── SketchAlgorithmStrategy ─────────────────────────────────────────────────
 
-/// A single static instance so [`SketchFamilyStrategy::default_cost_model`]
+/// A single static instance so [`SketchAlgorithmStrategy::default_cost_model`]
 /// can hand out a `&'static dyn CostModel` without heap-allocating one —
 /// `DefaultCostModel` is a unit struct with no state, so one instance serves
 /// every caller (same pattern `applicability::SketchApplicabilityRule` uses).
@@ -225,14 +225,14 @@ static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 ///
 /// Ranked (only to *order the enumeration*, never to drop a candidate) via a
 /// [`CostModel`] — [`DefaultCostModel`] unless constructed with
-/// [`SketchFamilyStrategy::new`] — so a deployment-specific cost model's
+/// [`SketchAlgorithmStrategy::new`] — so a deployment-specific cost model's
 /// other hooks (`size_params`, `realize_extension`, `readout_extension`) are
 /// still consulted while binding each candidate.
-pub struct SketchFamilyStrategy<'a> {
+pub struct SketchAlgorithmStrategy<'a> {
     cost_model: &'a dyn CostModel,
 }
 
-impl SketchFamilyStrategy<'static> {
+impl SketchAlgorithmStrategy<'static> {
     /// A strategy that ranks/binds via the built-in [`DefaultCostModel`] —
     /// what a deployment gets with no custom cost model plugged in.
     pub fn default_cost_model() -> Self {
@@ -242,7 +242,7 @@ impl SketchFamilyStrategy<'static> {
     }
 }
 
-impl<'a> SketchFamilyStrategy<'a> {
+impl<'a> SketchAlgorithmStrategy<'a> {
     /// A strategy that ranks/binds via `cost_model` instead of the built-in
     /// static preference order — the same customization point
     /// [`implementation::implementations_for_with`] already offers.
@@ -251,7 +251,7 @@ impl<'a> SketchFamilyStrategy<'a> {
     }
 }
 
-impl ReplacementStrategy for SketchFamilyStrategy<'_> {
+impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
         bindable_intent(target.root).is_some()
     }
@@ -284,11 +284,12 @@ impl ReplacementStrategy for SketchFamilyStrategy<'_> {
 /// [`ReplacementSubDAG::rationale`] text.
 fn describe_implementation(intent: &AggIntent, implementation: &Implementation) -> String {
     match implementation {
-        Implementation::Sketch { kind, .. } => format!(
-            "{} realizes as a {kind:?} sketch — one of implementation::summary_candidates' \
+        Implementation::Sketch(kind) => format!(
+            "{} realizes as a {:?} sketch — one of implementation::summary_candidates' \
              alternatives for this intent \
              (asap_aware_mapping::implementation::implementations_for_with)",
-            describe_intent(intent)
+            describe_intent(intent),
+            kind.algorithm()
         ),
         Implementation::ExactAggregate { kind, .. } => format!(
             "{} realizes as an exact {kind:?} accumulator — the only realization \
@@ -398,7 +399,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::post_asap::SketchKind;
+    use asap_types::post_asap::SketchAlgorithm;
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
     use asap_types::pre_asap::query_expr::{Reduction, Source};
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -428,18 +429,18 @@ mod tests {
         }
     }
 
-    // ── SketchFamilyStrategy ─────────────────────────────────────────────
+    // ── SketchAlgorithmStrategy ─────────────────────────────────────────────
 
     #[test]
     fn matches_a_bindable_aggregate() {
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        assert!(SketchFamilyStrategy::default_cost_model().matches(&target));
+        assert!(SketchAlgorithmStrategy::default_cost_model().matches(&target));
     }
 
     #[test]
     fn does_not_match_a_multi_intent_or_having_aggregate() {
-        let strategy = SketchFamilyStrategy::default_cost_model();
+        let strategy = SketchAlgorithmStrategy::default_cost_model();
 
         let multi = Rc::new(QueryExpr::Aggregate {
             reduction: Reduction::by(vec![2]),
@@ -468,8 +469,8 @@ mod tests {
     fn does_not_match_a_non_aggregate_node() {
         let scan = Rc::new(metric_scan(&["job"]));
         let target = TargetSubDAG::new(&scan);
-        assert!(!SketchFamilyStrategy::default_cost_model().matches(&target));
-        assert!(SketchFamilyStrategy::default_cost_model()
+        assert!(!SketchAlgorithmStrategy::default_cost_model().matches(&target));
+        assert!(SketchAlgorithmStrategy::default_cost_model()
             .replacements(&target)
             .is_empty());
     }
@@ -481,22 +482,22 @@ mod tests {
         // not just Kll (the CostModel-ranked head implementations_for_with commits to).
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
         assert_eq!(
             replacements.len(),
             2,
             "expected 2 candidates, got {replacements:?}"
         );
 
-        let kinds: Vec<SketchKind> = replacements
+        let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
-                Replacement::Summary(node) => summary_family_kind(node),
+                Replacement::Summary(node) => summary_family_algorithm(node),
                 Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
             })
             .collect();
-        assert!(kinds.contains(&SketchKind::Kll), "{kinds:?}");
-        assert!(kinds.contains(&SketchKind::DDSketch), "{kinds:?}");
+        assert!(kinds.contains(&SketchAlgorithm::Kll), "{kinds:?}");
+        assert!(kinds.contains(&SketchAlgorithm::DDSketch), "{kinds:?}");
         assert!(
             replacements.iter().all(|r| !r.rationale.is_empty()),
             "every candidate must carry a rationale"
@@ -507,17 +508,21 @@ mod tests {
     fn cardinality_enumerates_all_three_summary_candidates() {
         let q = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
-        let kinds: Vec<SketchKind> = replacements
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
-                Replacement::Summary(node) => summary_family_kind(node),
+                Replacement::Summary(node) => summary_family_algorithm(node),
                 Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
             })
             .collect();
         assert_eq!(
             kinds,
-            vec![SketchKind::Hll, SketchKind::Theta, SketchKind::Kmv],
+            vec![
+                SketchAlgorithm::Hll,
+                SketchAlgorithm::Theta,
+                SketchAlgorithm::Kmv
+            ],
             "expected every implementation::summary_candidates entry for Cardinality"
         );
     }
@@ -533,7 +538,7 @@ mod tests {
         };
         let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
         assert!(matches!(
             &replacements[0].replacement,
@@ -553,7 +558,7 @@ mod tests {
             metric_scan(&["job"]),
         ));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
         assert!(matches!(
             &replacements[0].replacement,
@@ -573,10 +578,10 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SketchKind],
-        ) -> Vec<SketchKind> {
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
             let mut v = candidates.to_vec();
-            if let Some(pos) = v.iter().position(|k| *k == SketchKind::DDSketch) {
+            if let Some(pos) = v.iter().position(|k| *k == SketchAlgorithm::DDSketch) {
                 let dd = v.remove(pos);
                 v.insert(0, dd);
             }
@@ -589,16 +594,16 @@ mod tests {
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let custom = PreferDDSketch;
-        let replacements = SketchFamilyStrategy::new(&custom).replacements(&target);
-        let kinds: Vec<SketchKind> = replacements
+        let replacements = SketchAlgorithmStrategy::new(&custom).replacements(&target);
+        let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
-                Replacement::Summary(node) => summary_family_kind(node),
+                Replacement::Summary(node) => summary_family_algorithm(node),
                 Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
             })
             .collect();
-        assert!(kinds.contains(&SketchKind::Kll));
-        assert!(kinds.contains(&SketchKind::DDSketch));
+        assert!(kinds.contains(&SketchAlgorithm::Kll));
+        assert!(kinds.contains(&SketchAlgorithm::DDSketch));
         assert_eq!(kinds.len(), 2);
     }
 
@@ -617,21 +622,21 @@ mod tests {
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], default_quantile(0.99), inner));
         let target = TargetSubDAG::new(&outer);
-        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
 
         let ddsketch = replacements
             .iter()
             .find(|r| {
                 matches!(&r.replacement, Replacement::Summary(node)
-                    if summary_family_kind(node) == SketchKind::DDSketch)
+                    if summary_family_algorithm(node) == SketchAlgorithm::DDSketch)
             })
             .expect("the outer target's DDSketch candidate must be present");
         let Replacement::Summary(node) = &ddsketch.replacement else {
             unreachable!("filtered on Replacement::Summary above");
         };
         assert_eq!(
-            summary_family_kind(node),
-            SketchKind::DDSketch,
+            summary_family_algorithm(node),
+            SketchAlgorithm::DDSketch,
             "the outer (target) node must be the DDSketch candidate"
         );
 
@@ -644,22 +649,23 @@ mod tests {
             panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
         assert_eq!(
-            summary_family_kind(child),
-            SketchKind::Kll,
+            summary_family_algorithm(child),
+            SketchAlgorithm::Kll,
             "the nested inner aggregate must still get the cost-model-ranked \
              default (Kll), not inherit the outer target's DDSketch candidate"
         );
     }
 
-    /// The `SummaryFamilyType`'s `SketchKind`, from the top `SummaryAgg`
-    /// reachable under a (possibly `SummaryEstimate`-wrapped) bound root.
-    fn summary_family_kind(node: &SummaryNode) -> SketchKind {
+    /// The `SummaryFamilyType`'s committed `SketchAlgorithm`, from the top
+    /// `SummaryAgg` reachable under a (possibly `SummaryEstimate`-wrapped)
+    /// bound root.
+    fn summary_family_algorithm(node: &SummaryNode) -> SketchAlgorithm {
         match &node.expr {
             asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                summary_family_kind(summary_input)
+                summary_family_algorithm(summary_input)
             }
             asap_types::post_asap::SummaryExpr::SummaryAgg { family, .. } => match family {
-                asap_types::post_asap::SummaryFamilyType::Sketch(kind, _) => kind.clone(),
+                asap_types::post_asap::SummaryFamilyType::Sketch(kind) => kind.algorithm().clone(),
                 other => panic!("expected a Sketch family, got {other:?}"),
             },
             other => panic!("expected SummaryAgg/SummaryEstimate, got {other:?}"),

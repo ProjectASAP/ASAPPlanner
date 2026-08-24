@@ -1,5 +1,5 @@
 use super::sketch::{
-    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchKind, SketchParams, StatModelKind,
+    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchKind, StatModelKind,
     StatModelParams, WaveletKind, WaveletParams,
 };
 use crate::pre_asap::DataType;
@@ -27,8 +27,11 @@ pub enum SummaryFamilyType {
     /// `Increase`) — the partial state *is* the value; no readout needed.
     ExactAggregate(ExactKind, ExactParams),
     /// Approximate sketch state (KLL/CMS/HLL/…), read out via a
-    /// `SummaryEstimate`.
-    Sketch(SketchKind, SketchParams),
+    /// `SummaryEstimate`. A [`SketchKind`] already carries the concrete
+    /// algorithm and params committed to, not just its category — a bound
+    /// node needs to know it's specifically KLL, not merely "some quantile
+    /// sketch".
+    Sketch(SketchKind),
     /// Sampling-based summary state (a retained row subset).
     Sample(SamplingKind, SamplingParams),
     /// Wavelet-transform summary state (a coefficient vector).

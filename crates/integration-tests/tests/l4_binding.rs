@@ -2,7 +2,7 @@
 //!
 //! Drives the full pipeline — PromQL text → pre-ASAP `QueryExpr`
 //! (`lower_promql`) → post-ASAP `SummaryExpr` DAG (via
-//! `SketchFamilyStrategy::replacements`, see [`bind`] below) — and pins the
+//! `SketchAlgorithmStrategy::replacements`, see [`bind`] below) — and pins the
 //! summary-bound shape node by node, including the family `(Kind, Params)`
 //! committed on each edge's schema. This is the design doc's §"L4 — sketch
 //! algebra" worked example, running for real.
@@ -11,12 +11,12 @@ use std::rc::Rc;
 
 use asap_aware_mapping::bind::{logical, ImplementError};
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
-    ExactKind, ExactParams, SketchKind, SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType,
-    SummaryNode, SummarySchema,
+    ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
+    SummaryFamilyType, SummaryNode, SummarySchema,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -24,14 +24,14 @@ use asap_types::pre_asap::schema::DataType;
 use asap_types::types::AccuracyTarget;
 
 /// This crate has no "bind me one tree" public API any more —
-/// `SketchFamilyStrategy::replacements` always returns every candidate, and
+/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
 /// single-answer pins below don't all repeat it by hand.
 fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
-    match SketchFamilyStrategy::default_cost_model()
+    match SketchAlgorithmStrategy::default_cost_model()
         .replacements(&target)
         .into_iter()
         .next()
@@ -105,7 +105,10 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+        &SummaryFamilyType::Sketch(SketchKind::Quantile(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll { k: 200 }
+        ))
     );
     assert_eq!(col, &ColumnRef::SampleValue);
     assert_eq!(
@@ -115,7 +118,10 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
     assert_eq!(
         dtype(&summary_input.schema, "quantile_0_99"),
-        &SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+        &SummaryFamilyType::Sketch(SketchKind::Quantile(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll { k: 200 }
+        ))
     );
 
     // The rate: exact counter-reset-aware accumulator, per-series (labels

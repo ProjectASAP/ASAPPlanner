@@ -8,7 +8,7 @@
 //! **Common sub-expression elimination (CSE) is not this crate's job.**
 //! Detection is a primary pass over the pre-ASAP `QueryExpr` IR itself
 //! (`asap_types::pre_asap`, design tracked in issue #223), run before a
-//! tree ever reaches [`replacement::SketchFamilyStrategy`] — see issue #222
+//! tree ever reaches [`replacement::SketchAlgorithmStrategy`] — see issue #222
 //! for why (batch query optimization needs to see shared work across a
 //! `QueryWorkload` before summary binding, not after). This crate may
 //! eventually run a second, narrower CSE pass of its own over an
@@ -39,7 +39,7 @@
 //! - [`replacement`] — the `TargetSubDAG`/`ReplacementSubDAG`/
 //!   `ReplacementStrategy` vocabulary `docs/design_docs/asap_aware_mapping.md` stubs out
 //!   under "Key concepts (not yet implemented)", implemented for real (issue
-//!   #251, part of #33): [`replacement::SketchFamilyStrategy`] wraps
+//!   #251, part of #33): [`replacement::SketchAlgorithmStrategy`] wraps
 //!   [`implementation::implementations_for_with`]'s list directly, keeping
 //!   *every* candidate as its own bound [`SummaryNode`](asap_types::post_asap::SummaryNode)
 //!   instead of just one — [`replacement::SharedSubtreeStrategy`] does the
@@ -48,7 +48,7 @@
 //!   lives here — see that module's docs for what's deliberately left to a
 //!   future Cascades/Volcano-style search engine.
 //! - [`bind`] — has no "bind me one tree" entry point of its own.
-//!   [`replacement::SketchFamilyStrategy`] is the only public way to get
+//!   [`replacement::SketchAlgorithmStrategy`] is the only public way to get
 //!   bound output for a target, and it always returns *every* candidate; a
 //!   caller that wants one answer takes the first entry itself. What
 //!   `bind` provides is the shared low-level primitive
@@ -89,7 +89,7 @@
 //! | **Parse** | parse | text (PromQL/SQL) → AST | `asap-frontend-promql` / `asap-frontend-sql` |
 //! | **Bind #1** | name resolution | `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → **Bind** → Optimize" pipeline sense (e.g. SQL Server's query-processor terminology) | [`asap_types::pre_asap::binder::Binder`](https://docs.rs/asap-types) |
 //! | **Implementation** — [`implementation::implementations_for_with`] | pre-ASAP → post-ASAP, *one node* | enumerating every concrete physical realization (a sketch family, an exact accumulator, or pass-through) for one [`AggIntent`](asap_types::pre_asap::agg_intent::AggIntent) | [`implementation`] |
-//! | **Replacement** — [`replacement::SketchFamilyStrategy::replacements`] | pre-ASAP → post-ASAP, *one target, every candidate* | wrap each [`implementation::implementations_for_with`] candidate into its own bound [`SummaryNode`](asap_types::post_asap::SummaryNode), ranked — a caller wanting one answer takes the first entry itself | [`replacement`] |
+//! | **Replacement** — [`replacement::SketchAlgorithmStrategy::replacements`] | pre-ASAP → post-ASAP, *one target, every candidate* | wrap each [`implementation::implementations_for_with`] candidate into its own bound [`SummaryNode`](asap_types::post_asap::SummaryNode), ranked — a caller wanting one answer takes the first entry itself | [`replacement`] |
 //! | **`implement_workload`** — [`bind::implement_workload`] | pre-ASAP → post-ASAP, *whole workload* | walk every root of a `QueryWorkload`, keeping the first (`cost_model`-preferred) candidate per node, sharing one bound `SummaryNode` across roots CSE already collapsed onto one `Rc<QueryExpr>` — emits the complete post-ASAP `SummaryExpr`/`SummaryNode` DAG | [`bind`] |
 //! | **Bind #2** (downstream, not in this crate) | post-ASAP → deployment placement | a *deployment's* own physical binder, additionally deciding **placement** (edge vs. backend, wire format, …) — a genuinely different, deployment-specific decision this crate doesn't model at all | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
 //!
@@ -120,5 +120,5 @@ pub use cost_model::{CostModel, DefaultCostModel};
 pub use implementation::{implementations_for_with, summary_candidates, Implementation, Matcher};
 pub use replacement::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy,
-    SketchFamilyStrategy, TargetSubDAG,
+    SketchAlgorithmStrategy, TargetSubDAG,
 };

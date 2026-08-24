@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use asap_aware_mapping::bind::{logical, ImplementError};
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
 use asap_types::post_asap::{SummaryExpr, SummaryNode};
@@ -25,7 +25,7 @@ use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::types::AccuracyTarget;
 
 /// This crate has no "bind me one tree" public API any more —
-/// `SketchFamilyStrategy::replacements` always returns every candidate, and
+/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so [`bind_tally`]
 /// gets one representative `Result` per query, matching what a totality
@@ -33,7 +33,7 @@ use asap_types::types::AccuracyTarget;
 fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
-    match SketchFamilyStrategy::default_cost_model()
+    match SketchAlgorithmStrategy::default_cost_model()
         .replacements(&target)
         .into_iter()
         .next()

@@ -1,7 +1,7 @@
 //! End-to-end SQL query-string → post-ASAP IR pin (issue #191).
 //!
 //! The SQL counterpart of `l4_binding.rs`: drives SQL text — `lower_sql`
-//! (text → pre-ASAP `QueryExpr`) → `SketchFamilyStrategy::replacements`
+//! (text → pre-ASAP `QueryExpr`) → `SketchAlgorithmStrategy::replacements`
 //! (pre-ASAP → post-ASAP `SummaryExpr`, see [`bind`] below) — and pins the
 //! resulting sketch-vs-exact-accumulator binding shape node by node, the way
 //! `l4_binding.rs` does for PromQL.
@@ -32,12 +32,12 @@ use std::rc::Rc;
 
 use asap_aware_mapping::bind::{logical, ImplementError};
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::post_asap::{
-    ExactKind, ExactParams, SketchKind, SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType,
-    SummaryNode, SummarySchema,
+    ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
+    SummaryFamilyType, SummaryNode, SummarySchema,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -45,14 +45,14 @@ use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 
 /// This crate has no "bind me one tree" public API any more —
-/// `SketchFamilyStrategy::replacements` always returns every candidate, and
+/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
 /// a caller decides what to keep. This test-only helper reproduces the
 /// take-the-first-(`cost_model`-preferred)-candidate pattern so the
 /// single-answer pins below don't all repeat it by hand.
 fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
-    match SketchFamilyStrategy::default_cost_model()
+    match SketchAlgorithmStrategy::default_cost_model()
         .replacements(&target)
         .into_iter()
         .next()
@@ -190,7 +190,10 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+        &SummaryFamilyType::Sketch(SketchKind::Quantile(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll { k: 200 }
+        ))
     );
     assert_eq!(
         col,
@@ -207,7 +210,10 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     );
     assert_eq!(
         summary_input.schema.fields[0].dtype,
-        SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+        SummaryFamilyType::Sketch(SketchKind::Quantile(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll { k: 200 }
+        ))
     );
 
     let SummaryExpr::Logical(logical_leaf) = &child.expr else {
@@ -265,7 +271,10 @@ async fn sql_count_distinct_binds_hll_sketch_over_named_column() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::Sketch(SketchKind::Hll, SketchParams::Hll { precision: 14 })
+        &SummaryFamilyType::Sketch(SketchKind::Cardinality(
+            SketchAlgorithm::Hll,
+            SketchParams::Hll { precision: 14 }
+        ))
     );
     assert_eq!(
         col,

@@ -10,7 +10,7 @@
 //! enumerated, exhaustive and ranked (most-preferred first) — this crate has
 //! no separate function that computes just "the one" `Implementation`
 //! independently of that list.
-//! [`crate::replacement::SketchFamilyStrategy`] is the sole public consumer:
+//! [`crate::replacement::SketchAlgorithmStrategy`] is the sole public consumer:
 //! it wraps every entry of this list into its own bound
 //! [`SummaryNode`](asap_types::post_asap::SummaryNode) and returns all of
 //! them, ranked — a caller wanting a single answer keeps the first one
@@ -42,8 +42,8 @@
 //! opinion on when that's the right choice.
 
 use asap_types::post_asap::{
-    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchKind, SketchParams, StatModelKind,
-    StatModelParams, WaveletKind, WaveletParams,
+    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchKind,
+    SketchParams, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
 };
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::types::AccuracyTarget;
@@ -62,11 +62,11 @@ pub enum Implementation {
         params: ExactParams,
     },
     /// An approximate sketch sized to the intent's [`AccuracyTarget`].
-    /// Needs a `SummaryEstimate` readout to recover a value.
-    Sketch {
-        kind: SketchKind,
-        params: SketchParams,
-    },
+    /// Needs a `SummaryEstimate` readout to recover a value. Already
+    /// classified into its [`SketchKind`] category (`SketchKind::new`
+    /// having been called) — construction always goes through that
+    /// classifier, never this variant directly.
+    Sketch(SketchKind),
     /// A sampling-based summary (a retained row subset). Needs a
     /// `SummaryEstimate` readout. Not chosen by any core `AggIntent`
     /// dispatch today — see the module docs.
@@ -138,17 +138,24 @@ pub trait Matcher {
 pub const DEFAULT_DELTA: f64 = 0.01;
 
 /// The sketch kinds that can serve an intent, most-preferred first.
-/// This is the `AggIntent → SketchKind` map of issue #98;
+/// This is the `AggIntent → SketchAlgorithm` map of issue #98;
 /// [`implementations_for_with`] sizes and ranks every entry via `cost_model`.
 /// Listed here so the candidate set has one home.
-pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchKind] {
+pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
     match intent {
-        AggIntent::Quantile { .. } => &[SketchKind::Kll, SketchKind::DDSketch],
-        AggIntent::Cardinality { .. } => &[SketchKind::Hll, SketchKind::Theta, SketchKind::Kmv],
+        AggIntent::Quantile { .. } => &[SketchAlgorithm::Kll, SketchAlgorithm::DDSketch],
+        AggIntent::Cardinality { .. } => &[
+            SketchAlgorithm::Hll,
+            SketchAlgorithm::Theta,
+            SketchAlgorithm::Kmv,
+        ],
         // Count-Sketch-with-heap is CMS-with-heap's balanced/zero-mean-error
         // alternative for the same heavy-hitter shape.
-        AggIntent::TopK { .. } => &[SketchKind::CmsWithHeap, SketchKind::CountSketchWithHeap],
-        AggIntent::Count { .. } => &[SketchKind::Cms, SketchKind::CountSketch],
+        AggIntent::TopK { .. } => &[
+            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountSketchWithHeap,
+        ],
+        AggIntent::Count { .. } => &[SketchAlgorithm::Cms, SketchAlgorithm::CountSketch],
         _ => &[],
     }
 }
@@ -157,7 +164,7 @@ pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchKind] {
 /// (`Quantile`/`Cardinality`/`Count`/`TopK`), or `None` for every other
 /// intent (no sketch candidate applies — [`implementations_for_with`]'s own
 /// match routes those elsewhere). Exposed so
-/// [`crate::replacement::SketchFamilyStrategy`] and
+/// [`crate::replacement::SketchAlgorithmStrategy`] and
 /// [`implementations_for_with`] resolve the exact same accuracy target,
 /// without either re-deriving it from scratch.
 pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
@@ -174,7 +181,7 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// (most-preferred first via `cost_model`) — the *only* place this crate
 /// decides what an `AggIntent` may become. Nothing in this crate computes
 /// "the one" `Implementation` independently of this list:
-/// [`crate::replacement::SketchFamilyStrategy`] keeps every entry as a
+/// [`crate::replacement::SketchAlgorithmStrategy`] keeps every entry as a
 /// candidate, and a caller that wants a single executable answer takes the
 /// head of *that* strategy's output itself — see its own module docs.
 ///
@@ -327,9 +334,9 @@ fn sketch_implementations(
     let ranked = cost_model.rank_candidates(intent, summary_candidates(intent));
     ranked
         .into_iter()
-        .map(|kind| {
-            let params = cost_model.size_params(kind.clone(), intent, eps, delta);
-            Implementation::Sketch { kind, params }
+        .map(|algorithm| {
+            let params = cost_model.size_params(algorithm.clone(), intent, eps, delta);
+            Implementation::Sketch(SketchKind::new(algorithm, params))
         })
         .collect()
 }
@@ -345,21 +352,21 @@ fn sketch_implementations(
 /// range. A non-positive ε saturates to the clamp maximum (tightest
 /// allowed).
 pub fn default_size_params(
-    kind: SketchKind,
+    kind: SketchAlgorithm,
     intent: &AggIntent,
     eps: f64,
     delta: f64,
 ) -> SketchParams {
     match kind {
-        SketchKind::Kll => SketchParams::Kll { k: kll_k(eps) },
-        SketchKind::Cms => SketchParams::Cms {
+        SketchAlgorithm::Kll => SketchParams::Kll { k: kll_k(eps) },
+        SketchAlgorithm::Cms => SketchParams::Cms {
             width: cms_width(eps),
             depth: cms_depth(delta),
         },
-        SketchKind::Hll => SketchParams::Hll {
+        SketchAlgorithm::Hll => SketchParams::Hll {
             precision: hll_precision(eps),
         },
-        SketchKind::CmsWithHeap => {
+        SketchAlgorithm::CmsWithHeap => {
             let k = match intent {
                 AggIntent::TopK { k, .. } => *k,
                 _ => unreachable!("CmsWithHeap is only a TopK candidate"),
@@ -373,20 +380,20 @@ pub fn default_size_params(
         // Non-preferred candidates (DDSketch / Theta / Kmv / CountSketch /
         // CountSketchWithHeap) are only reachable once a cost model picks
         // them; sized here so that wiring is local.
-        SketchKind::DDSketch => SketchParams::DDSketch { alpha: eps },
-        SketchKind::Theta => SketchParams::Theta { k: kmv_k(eps) },
-        SketchKind::Kmv => SketchParams::Kmv { k: kmv_k(eps) },
+        SketchAlgorithm::DDSketch => SketchParams::DDSketch { alpha: eps },
+        SketchAlgorithm::Theta => SketchParams::Theta { k: kmv_k(eps) },
+        SketchAlgorithm::Kmv => SketchParams::Kmv { k: kmv_k(eps) },
         // Count-Sketch is CMS's balanced/zero-mean-error alternative —
         // same (width, depth) shape, sized the same way for now (a
         // Count-Sketch-specific bound uses an L2-norm error guarantee
         // rather than CMS's L1-norm one; this is a placeholder pending
         // that refinement, same status as the other non-preferred
         // candidates above).
-        SketchKind::CountSketch => SketchParams::CountSketch {
+        SketchAlgorithm::CountSketch => SketchParams::CountSketch {
             width: cms_width(eps),
             depth: cms_depth(delta),
         },
-        SketchKind::CountSketchWithHeap => {
+        SketchAlgorithm::CountSketchWithHeap => {
             let k = match intent {
                 AggIntent::TopK { k, .. } => *k,
                 _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
@@ -457,7 +464,7 @@ pub struct ExpectedCaseSizing {
 /// stated assumption, not a full redesign of the depth/width tradeoff
 /// space, so depth relaxation is left as explicit future scope.
 ///
-/// For every `SketchKind` outside the CMS family, this is identical to
+/// For every `SketchAlgorithm` outside the CMS family, this is identical to
 /// [`default_size_params`] — `width_relaxation` only ever touches the
 /// [`cms_width`]-sized formulas this issue is about.
 ///
@@ -465,7 +472,7 @@ pub struct ExpectedCaseSizing {
 /// function's existence — this is a separate, additive entry point, never
 /// called from [`default_size_params`] or [`implementations_for_with`].
 pub fn posterior_aware_size_params(
-    kind: SketchKind,
+    kind: SketchAlgorithm,
     intent: &AggIntent,
     eps: f64,
     delta: f64,
@@ -480,11 +487,11 @@ pub fn posterior_aware_size_params(
         saturating_ceil(base as f64 * f, 2, base)
     };
     match kind {
-        SketchKind::Cms => SketchParams::Cms {
+        SketchAlgorithm::Cms => SketchParams::Cms {
             width: relaxed_width(eps),
             depth: cms_depth(delta),
         },
-        SketchKind::CmsWithHeap => {
+        SketchAlgorithm::CmsWithHeap => {
             let k = match intent {
                 AggIntent::TopK { k, .. } => *k,
                 _ => unreachable!("CmsWithHeap is only a TopK candidate"),
@@ -495,11 +502,11 @@ pub fn posterior_aware_size_params(
                 heap_size: k as u32,
             }
         }
-        SketchKind::CountSketch => SketchParams::CountSketch {
+        SketchAlgorithm::CountSketch => SketchParams::CountSketch {
             width: relaxed_width(eps),
             depth: cms_depth(delta),
         },
-        SketchKind::CountSketchWithHeap => {
+        SketchAlgorithm::CountSketchWithHeap => {
             let k = match intent {
                 AggIntent::TopK { k, .. } => *k,
                 _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
@@ -513,14 +520,14 @@ pub fn posterior_aware_size_params(
         // Every other kind is untouched by this issue's CMS-specific
         // relaxation — defer to the existing formula verbatim. Spelled out
         // exhaustively, matching `default_size_params`'s own match, rather
-        // than a wildcard arm: a future `SketchKind` variant then fails to
+        // than a wildcard arm: a future `SketchAlgorithm` variant then fails to
         // compile *here* too, instead of silently inheriting worst-case
         // sizing with no signal that this function never considered it.
-        SketchKind::Kll => default_size_params(kind, intent, eps, delta),
-        SketchKind::Hll => default_size_params(kind, intent, eps, delta),
-        SketchKind::DDSketch => default_size_params(kind, intent, eps, delta),
-        SketchKind::Theta => default_size_params(kind, intent, eps, delta),
-        SketchKind::Kmv => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::Kll => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::Hll => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::DDSketch => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::Theta => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::Kmv => default_size_params(kind, intent, eps, delta),
     }
 }
 
@@ -592,7 +599,7 @@ mod tests {
     /// Shorthand for asserting the realization *category*.
     #[derive(Debug, PartialEq)]
     enum Cat {
-        Sketch(SketchKind),
+        Sketch(SketchAlgorithm),
         Acc(ExactKind),
         Pass,
     }
@@ -600,7 +607,7 @@ mod tests {
     fn cat(intent: &AggIntent) -> Cat {
         match preferred(intent) {
             Implementation::ExactAggregate { kind, .. } => Cat::Acc(kind),
-            Implementation::Sketch { kind, .. } => Cat::Sketch(kind),
+            Implementation::Sketch(kind) => Cat::Sketch(kind.algorithm().clone()),
             Implementation::PassThrough => Cat::Pass,
             other => {
                 panic!("this coverage matrix expects only Exact/Sketch/PassThrough, got {other:?}")
@@ -618,7 +625,7 @@ mod tests {
         use AggIntent as A;
         use Cat::*;
         use ExactKind as E;
-        use SketchKind as K;
+        use SketchAlgorithm as K;
         let matrix: Vec<(A, Cat)> = vec![
             // approximate-capable, at an ε target → sketch
             (default_quantile(0.99), Sketch(K::Kll)),
@@ -765,10 +772,10 @@ mod tests {
         let approx = default_quantile(0.99); // ε = 0.01
         assert_eq!(
             preferred(&approx),
-            Implementation::Sketch {
-                kind: SketchKind::Kll,
-                params: SketchParams::Kll { k: 200 }, // design.md worked example
-            }
+            Implementation::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll { k: 200 }, // design.md worked example
+            ))
         );
 
         let looser = AggIntent::Quantile {
@@ -778,10 +785,10 @@ mod tests {
         };
         assert_eq!(
             preferred(&looser),
-            Implementation::Sketch {
-                kind: SketchKind::Kll,
-                params: SketchParams::Kll { k: 40 }, // ⌈2/0.05⌉
-            }
+            Implementation::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll { k: 40 }, // ⌈2/0.05⌉
+            ))
         );
     }
 
@@ -791,10 +798,10 @@ mod tests {
         // sizing must invert it back exactly.
         assert_eq!(
             preferred(&default_cardinality()),
-            Implementation::Sketch {
-                kind: SketchKind::Hll,
-                params: SketchParams::Hll { precision: 14 },
-            }
+            Implementation::Sketch(SketchKind::Cardinality(
+                SketchAlgorithm::Hll,
+                SketchParams::Hll { precision: 14 },
+            ))
         );
     }
 
@@ -808,13 +815,13 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch {
-                kind: SketchKind::Cms,
-                params: SketchParams::Cms {
+            Implementation::Sketch(SketchKind::Frequency(
+                SketchAlgorithm::Cms,
+                SketchParams::Cms {
                     width: 2719,
                     depth: 7
                 }, // ⌈e/0.001⌉, ⌈ln 1000⌉
-            }
+            ))
         );
         // Epsilon-only falls back to DEFAULT_DELTA → depth 5.
         let intent = AggIntent::Count {
@@ -822,13 +829,13 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch {
-                kind: SketchKind::Cms,
-                params: SketchParams::Cms {
+            Implementation::Sketch(SketchKind::Frequency(
+                SketchAlgorithm::Cms,
+                SketchParams::Cms {
                     width: 2719,
                     depth: 5
                 },
-            }
+            ))
         );
     }
 
@@ -839,15 +846,14 @@ mod tests {
             accuracy: eps(0.01),
         };
         match preferred(&intent) {
-            Implementation::Sketch {
-                kind: SketchKind::CmsWithHeap,
-                params:
-                    SketchParams::CmsWithHeap {
-                        width,
-                        depth,
-                        heap_size,
-                    },
-            } => {
+            Implementation::Sketch(SketchKind::TopK(
+                SketchAlgorithm::CmsWithHeap,
+                SketchParams::CmsWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+            )) => {
                 assert_eq!(heap_size, 25);
                 assert_eq!(width, 272); // ⌈e/0.01⌉
                 assert_eq!(depth, 5);
@@ -860,24 +866,31 @@ mod tests {
     fn candidate_lists_match_the_issue_map() {
         assert_eq!(
             summary_candidates(&default_quantile(0.5)),
-            &[SketchKind::Kll, SketchKind::DDSketch]
+            &[SketchAlgorithm::Kll, SketchAlgorithm::DDSketch]
         );
         assert_eq!(
             summary_candidates(&default_cardinality()),
-            &[SketchKind::Hll, SketchKind::Theta, SketchKind::Kmv]
+            &[
+                SketchAlgorithm::Hll,
+                SketchAlgorithm::Theta,
+                SketchAlgorithm::Kmv
+            ]
         );
         assert_eq!(
             summary_candidates(&AggIntent::TopK {
                 k: 5,
                 accuracy: eps(0.01)
             }),
-            &[SketchKind::CmsWithHeap, SketchKind::CountSketchWithHeap]
+            &[
+                SketchAlgorithm::CmsWithHeap,
+                SketchAlgorithm::CountSketchWithHeap
+            ]
         );
         assert_eq!(
             summary_candidates(&AggIntent::Count {
                 accuracy: eps(0.01)
             }),
-            &[SketchKind::Cms, SketchKind::CountSketch]
+            &[SketchAlgorithm::Cms, SketchAlgorithm::CountSketch]
         );
         assert!(summary_candidates(&AggIntent::Rate).is_empty());
     }
@@ -887,15 +900,15 @@ mod tests {
         // Quantile's candidate list is [Kll, DDSketch] — implementations_for_with
         // must return both, ranked with the DefaultCostModel's preferred
         // (Kll) first.
-        let kinds: Vec<SketchKind> =
+        let kinds: Vec<SketchAlgorithm> =
             implementations_for_with(&default_quantile(0.99), &DefaultCostModel)
                 .into_iter()
                 .map(|implementation| match implementation {
-                    Implementation::Sketch { kind, .. } => kind,
+                    Implementation::Sketch(kind) => kind.algorithm().clone(),
                     other => panic!("expected Sketch, got {other:?}"),
                 })
                 .collect();
-        assert_eq!(kinds, vec![SketchKind::Kll, SketchKind::DDSketch]);
+        assert_eq!(kinds, vec![SketchAlgorithm::Kll, SketchAlgorithm::DDSketch]);
     }
 
     #[test]
@@ -907,10 +920,10 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch {
-                kind: SketchKind::Kll,
-                params: SketchParams::Kll { k: 65_535 },
-            }
+            Implementation::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll { k: 65_535 },
+            ))
         );
     }
 
@@ -923,9 +936,9 @@ mod tests {
     #[test]
     fn posterior_aware_sizing_shrinks_width_under_stated_assumption() {
         let intent = count_intent(0.01);
-        let worst_case = default_size_params(SketchKind::Cms, &intent, 0.01, 0.01);
+        let worst_case = default_size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01);
         let relaxed = posterior_aware_size_params(
-            SketchKind::Cms,
+            SketchAlgorithm::Cms,
             &intent,
             0.01,
             0.01,
@@ -959,9 +972,9 @@ mod tests {
         // width_relaxation = 1.0 must reproduce default_size_params exactly
         // — the "no risk taken" boundary.
         let intent = count_intent(0.01);
-        let worst_case = default_size_params(SketchKind::Cms, &intent, 0.01, 0.01);
+        let worst_case = default_size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01);
         let relaxed = posterior_aware_size_params(
-            SketchKind::Cms,
+            SketchAlgorithm::Cms,
             &intent,
             0.01,
             0.01,
@@ -975,10 +988,10 @@ mod tests {
     #[test]
     fn posterior_aware_sizing_invalid_relaxation_falls_back_to_worst_case() {
         let intent = count_intent(0.01);
-        let worst_case = default_size_params(SketchKind::Cms, &intent, 0.01, 0.01);
+        let worst_case = default_size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01);
         for bad in [0.0, -0.5, 1.5, f64::NAN, f64::INFINITY] {
             let relaxed = posterior_aware_size_params(
-                SketchKind::Cms,
+                SketchAlgorithm::Cms,
                 &intent,
                 0.01,
                 0.01,
@@ -1005,7 +1018,7 @@ mod tests {
         // CountSketch
         assert_eq!(
             posterior_aware_size_params(
-                SketchKind::CountSketch,
+                SketchAlgorithm::CountSketch,
                 &count_intent(0.01),
                 0.01,
                 0.01,
@@ -1018,7 +1031,7 @@ mod tests {
         );
         // CmsWithHeap / CountSketchWithHeap carry k through untouched.
         match posterior_aware_size_params(
-            SketchKind::CmsWithHeap,
+            SketchAlgorithm::CmsWithHeap,
             &cms_heap_intent,
             0.01,
             0.01,
@@ -1046,8 +1059,8 @@ mod tests {
             width_relaxation: 0.1,
         };
         assert_eq!(
-            posterior_aware_size_params(SketchKind::Kll, &intent, 0.01, 0.01, assumption),
-            default_size_params(SketchKind::Kll, &intent, 0.01, 0.01),
+            posterior_aware_size_params(SketchAlgorithm::Kll, &intent, 0.01, 0.01, assumption),
+            default_size_params(SketchAlgorithm::Kll, &intent, 0.01, 0.01),
         );
     }
 
@@ -1057,7 +1070,7 @@ mod tests {
         // existing callers must be untouched by adding
         // posterior_aware_size_params alongside it.
         assert_eq!(
-            default_size_params(SketchKind::Cms, &count_intent(0.001), 0.001, 0.001),
+            default_size_params(SketchAlgorithm::Cms, &count_intent(0.001), 0.001, 0.001),
             SketchParams::Cms {
                 width: 2719,
                 depth: 7

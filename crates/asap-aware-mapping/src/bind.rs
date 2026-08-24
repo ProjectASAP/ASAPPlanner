@@ -1,7 +1,7 @@
 //! The pre-ASAP → post-ASAP binding primitives (issue #98).
 //!
 //! This module does **not** expose a "bind me one tree" entry point.
-//! [`replacement::SketchFamilyStrategy`](crate::replacement::SketchFamilyStrategy)
+//! [`replacement::SketchAlgorithmStrategy`](crate::replacement::SketchAlgorithmStrategy)
 //! is the only public way to get bound output for a target — it always
 //! returns every candidate [`ReplacementSubDAG`](crate::replacement::ReplacementSubDAG),
 //! ranked; a caller that wants a single executable answer takes the first
@@ -41,7 +41,7 @@
 //! rank-and-take-first behavior internally (via a private selector), scoped
 //! to workload-wide CSE memoization specifically. It is not a general
 //! "bind me one tree" API — for a single target, go through
-//! `SketchFamilyStrategy` and decide what to keep yourself.
+//! `SketchAlgorithmStrategy` and decide what to keep yourself.
 //!
 //! ## Conservative fallbacks
 //!
@@ -68,7 +68,7 @@ use thiserror::Error;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::implementation::Implementation;
 use crate::replacement::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
 
 /// Errors from the pre-ASAP → post-ASAP binding pass.
@@ -79,7 +79,7 @@ pub enum ImplementError {
     Schema(#[from] QueryExprError),
 }
 
-/// The bindable shape [`crate::replacement::SketchFamilyStrategy`] targets:
+/// The bindable shape [`crate::replacement::SketchAlgorithmStrategy`] targets:
 /// a single intent, no `HAVING`. A multi-intent node
 /// (SQL `SELECT SUM(a), AVG(b)`), or one with a `HAVING` predicate (the
 /// filter would need the estimate first), stays logical — see the module
@@ -107,7 +107,7 @@ fn select_and_bind(
     cost_model: &dyn CostModel,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
     let target = TargetSubDAG::new(root);
-    match SketchFamilyStrategy::new(cost_model)
+    match SketchAlgorithmStrategy::new(cost_model)
         .replacements(&target)
         .into_iter()
         .next()
@@ -120,12 +120,12 @@ fn select_and_bind(
             replacement: Replacement::Rewrite(_),
             ..
         }) => {
-            unreachable!("SketchFamilyStrategy never returns a Rewrite candidate")
+            unreachable!("SketchAlgorithmStrategy never returns a Rewrite candidate")
         }
         // No candidate at all: `root` isn't `bindable_intent` shape (or its
         // intent has no realization `implementations_for_with` can't
         // produce — never happens, that match is exhaustive) — the same
-        // conservative fallback `SketchFamilyStrategy::matches` uses.
+        // conservative fallback `SketchAlgorithmStrategy::matches` uses.
         None => logical(root),
     }
 }
@@ -133,7 +133,7 @@ fn select_and_bind(
 /// Bind `expr` to an already-decided [`Implementation`] for its top intent.
 /// The shared low-level primitive: [`select_and_bind`] (workload-CSE
 /// memoization and this module's own recursion) calls this with whichever
-/// candidate it kept; [`crate::replacement::SketchFamilyStrategy`] calls
+/// candidate it kept; [`crate::replacement::SketchAlgorithmStrategy`] calls
 /// this once per candidate it enumerates. One function turns a chosen
 /// `Implementation` into a `SummaryNode`, used identically by both.
 ///
@@ -272,7 +272,7 @@ fn summary_family(implementation: Implementation) -> Option<(SummaryFamilyType, 
         Implementation::ExactAggregate { kind, params } => {
             (SummaryFamilyType::ExactAggregate(kind, params), false)
         }
-        Implementation::Sketch { kind, params } => (SummaryFamilyType::Sketch(kind, params), true),
+        Implementation::Sketch(kind) => (SummaryFamilyType::Sketch(kind), true),
         Implementation::Sample { kind, params } => (SummaryFamilyType::Sample(kind, params), true),
         Implementation::Wavelet { kind, params } => {
             (SummaryFamilyType::Wavelet(kind, params), true)
@@ -408,7 +408,7 @@ fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> S
 
 /// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
 /// `SummaryFamilyType::Plain`. Public so a caller can fall back to this
-/// explicitly — e.g. when `SketchFamilyStrategy::replacements()` returns no
+/// explicitly — e.g. when `SketchAlgorithmStrategy::replacements()` returns no
 /// candidate for a target, or a deployment wants to force a node its own
 /// runtime can't actually implement — through the same fallback this
 /// crate's own dispatch uses, without duplicating the schema-lift logic.
@@ -438,7 +438,9 @@ fn lift(schema: &Schema) -> SummarySchema {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::post_asap::{ExactKind, ExactParams, SketchKind, SketchParams};
+    use asap_types::post_asap::{
+        ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams,
+    };
     use asap_types::pre_asap::agg_intent::default_quantile;
     use asap_types::pre_asap::expr_ir::{CompareOpKind, ScalarValue};
     use asap_types::pre_asap::query_expr::{Predicate, Source};
@@ -495,7 +497,7 @@ mod tests {
     /// pattern `select_and_bind` already implements, since `bind.rs`'s own
     /// tests are the one internal caller allowed to reach it directly.
     /// An external caller doesn't have this shortcut — it goes through
-    /// `SketchFamilyStrategy::replacements()` itself (see the module docs).
+    /// `SketchAlgorithmStrategy::replacements()` itself (see the module docs).
     fn bind_first(
         expr: &QueryExpr,
         cost_model: &dyn CostModel,
@@ -543,14 +545,20 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+            &SummaryFamilyType::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll { k: 200 }
+            ))
         );
         assert_eq!(col, &ColumnRef::SampleValue);
         assert_eq!(reduction, &Reduction::by(vec![2]));
         // SummaryAgg edge: the state column carries the committed family.
         assert_eq!(
             field(&summary_input.schema, "quantile_0_99").dtype,
-            SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+            SummaryFamilyType::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll { k: 200 }
+            ))
         );
         assert!(matches!(child.expr, SummaryExpr::Logical(ref e)
             if matches!(**e, QueryExpr::Scan { .. })));
@@ -566,10 +574,10 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SketchKind],
-        ) -> Vec<SketchKind> {
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
             let mut v = candidates.to_vec();
-            if let Some(pos) = v.iter().position(|k| *k == SketchKind::DDSketch) {
+            if let Some(pos) = v.iter().position(|k| *k == SketchAlgorithm::DDSketch) {
                 let ddsketch = v.remove(pos);
                 v.insert(0, ddsketch);
             }
@@ -591,7 +599,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(SketchKind::Kll, _)
+            SummaryFamilyType::Sketch(SketchKind::Quantile(SketchAlgorithm::Kll, _))
         ));
 
         // With `PreferDDSketch`: DDSketch instead, same query.
@@ -604,10 +612,10 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(
-                SketchKind::DDSketch,
+            &SummaryFamilyType::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::DDSketch,
                 SketchParams::DDSketch { alpha: 0.01 }
-            )
+            ))
         );
     }
 
@@ -622,8 +630,8 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SketchKind],
-        ) -> Vec<SketchKind> {
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
             candidates.to_vec()
         }
 
@@ -633,13 +641,13 @@ mod tests {
             _payload: &serde_json::Value,
         ) -> crate::implementation::Implementation {
             if ext_kind == "frequency" {
-                crate::implementation::Implementation::Sketch {
-                    kind: SketchKind::CountSketch,
-                    params: SketchParams::CountSketch {
+                crate::implementation::Implementation::Sketch(SketchKind::Frequency(
+                    SketchAlgorithm::CountSketch,
+                    SketchParams::CountSketch {
                         width: 256,
                         depth: 4,
                     },
-                }
+                ))
             } else {
                 crate::implementation::Implementation::PassThrough
             }
@@ -701,13 +709,13 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(
-                SketchKind::CountSketch,
+            &SummaryFamilyType::Sketch(SketchKind::Frequency(
+                SketchAlgorithm::CountSketch,
                 SketchParams::CountSketch {
                     width: 256,
                     depth: 4
                 }
-            )
+            ))
         );
     }
 
@@ -828,7 +836,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(SketchKind::Kll, _)
+            SummaryFamilyType::Sketch(SketchKind::Quantile(SketchAlgorithm::Kll, _))
         ));
         let SummaryExpr::SummaryAgg {
             family: inner_family,
@@ -964,7 +972,10 @@ mod tests {
         assert!(matches!(
             &summary_input.expr,
             SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(SketchKind::CmsWithHeap, _),
+                family: SummaryFamilyType::Sketch(SketchKind::TopK(
+                    SketchAlgorithm::CmsWithHeap,
+                    _
+                )),
                 ..
             }
         ));
@@ -1010,8 +1021,8 @@ mod tests {
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,
-                candidates: &[SketchKind],
-            ) -> Vec<SketchKind> {
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
                 candidates.to_vec()
             }
             fn cse_share_decision(&self, _candidate: &CseCandidate) -> ShareDecision {
