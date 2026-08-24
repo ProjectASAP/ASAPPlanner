@@ -1,9 +1,11 @@
 # ASAP-Aware Mapping: Developer Guide
 
 This guide explains how to extend ASAP-aware mapping: the planning layer that
-turns logical query operations into alternative implementations built from
-ASAP primitives, such as exact summaries and approximate sketches. Use it when
-you want to:
+turns logical query operations into alternative `Implementation` values built
+from ASAP primitives, such as exact summaries and approximate sketches. Here,
+an **implementation** is one candidate physical realization of one logical
+operation—not a selected workload plan or a deployed executable. Use this
+guide when you want to:
 
 - add a new `ReplacementStrategy` (a source of valid plan alternatives),
 - add or customize a `CostModel` (deployment-specific ordering and sizing),
@@ -383,6 +385,30 @@ candidates in preferred order without selecting a winner. At workload scale,
 `search_workload`/`search_workload_with` preserve the same never-prune contract
 across every `TargetSubDAG`. Selecting which candidate to build and where to
 place it remains a downstream deployment decision.
+
+This guide uses the Cascades/Volcano terminology:
+
+- An **implementation rule** maps a logical operation to a candidate physical
+  realization. For example, a quantile `AggIntent` may have KLL and DDSketch
+  `Implementation` values.
+- A **transformation rule** maps a logical operation to another logical
+  operation. In this crate, that kind of candidate is represented by
+  `Replacement::Rewrite`.
+- A **replacement candidate** packages either kind of result as a
+  `ReplacementSubDAG` for search. `PlanSpace` stores and ranks these candidates.
+- **Final selection and placement** happen downstream. An `Implementation`
+  therefore does not mean that the planner has committed the workload to that
+  choice.
+
+The concrete flow is:
+
+```text
+AggIntent
+  -> implementations_for_with(): enumerate Implementation values
+  -> SketchAlgorithmStrategy: construct ReplacementSubDAG candidates
+  -> PlanSpace: store and rank candidates
+  -> downstream deployment: select and place a final choice
+```
 
 In short: `ReplacementStrategy` enumerates and constructs every candidate, and the caller selects when it needs a single executable answer. Part 1 §3 shows the complete flow.
 
