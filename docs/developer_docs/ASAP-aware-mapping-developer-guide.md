@@ -16,15 +16,7 @@ If you only need to find the right extension point, start with the [extension ma
 
 ---
 
-## Terminology
-
-One term is central to this guide:
-
-- **Implementation**: one valid realization of an `AggIntent`. It may be an approximate sketch, an exact mergeable accumulator, or a pass-through with no summary. `implementations_for_with` (a `replacement.rs`-private function) enumerates the valid implementations for one node and ranks them. It does not walk the plan or select a winner. `SketchAlgorithmStrategy::replacements()` is its only caller: for one target, it constructs every candidate's `SummaryNode` directly and returns all of them — deciding and constructing happen in the same step, not two steps bridged by a separately-named function in another module. A caller that needs one result takes the first candidate. At workload scale, `search_workload`/`search_workload_with` extend the same "never prune" contract across every `TargetSubDAG` in the whole workload (see §3) — this crate stops at that full candidate space plus cost; it does not itself commit to one final, physically-shared answer per site. That commitment (which candidate to build, where to place it) is a downstream deployment's call, not this crate's.
-
-In short: `ReplacementStrategy` enumerates, packages, and binds every candidate, and the caller selects when it needs a single executable answer. Section 3 shows the complete flow.
-
----
+# Part 1 — Code Architecture
 
 ## 1. Mental model
 
@@ -49,7 +41,145 @@ Do not put cost-based pruning into a `ReplacementStrategy`. A strategy must enum
 
 ---
 
-## 2. Glossary
+## 2. Architecture overview
+
+The diagram below follows one query (or a whole workload) all the way from its first `TargetSubDAG` through every component this PR's design adds, to a downstream consumer. It is the whole-PR picture; §3 below zooms into the replacement-strategy path specifically, with its own diagrams.
+
+```text
+        WHOLE-PR ARCHITECTURE: from a query in hand (or a whole workload)
+        to a ranked, explainable set of candidates
+
+  one QueryExpr already in hand         a whole workload:
+  (single-query API, or                 Vec<(Id, Rc<QueryExpr>)>
+  realize_child's own recursion)        walked by search_workload_with
+              |                                    |
+              v                                    v
+  TargetSubDAG::new(&root)         discovers every distinct node's real,
+  (consumer_count assumed 1)       cross-workload consumer_count; one
+              |                    TargetSubDAG per distinct node found
+              |                                    |
+              +--------------------+---------------+
+                                   v
+                              TargetSubDAG
+                                   |
+                +------------------+-------------------+
+                v                                       v
+    SketchAlgorithmStrategy                 SharedSubtreeStrategy
+    ::replacements(target)                  ::replacements(target)
+                |                                       |
+    consults CostModel while                no cost logic at all — just
+    generating: calls                       enumerates "build once and
+    implementations_for_with(               share" vs. "build indepen-
+    intent, cost_model), then               dently for each consumer"
+    constructs each SummaryNode                         |
+                |                                       |
+                +------------------+--------------------+
+                                   v
+              unranked Vec<ReplacementSubDAG> candidates
+              (Replacement::Summary or Replacement::Rewrite —
+               every valid alternative kept, nothing pruned yet)
+                                   |
+                                   v
+              PlanSpace: one MemoGroup per distinct TargetSubDAG in
+              the whole workload, holding every candidate discovered
+              for it, still unranked
+                                   |
+                                   v
+              PlanSpace::cost_sorted(cost_model) dispatches by
+              candidate shape:
+                - a same-shape Rewrite pair (share vs. recompute)
+                      -> CostModel::cse_share_decision
+                - a same-shape run of Summary/sketch candidates
+                      -> CostModel::rank_candidates
+                - every candidate, regardless of shape, also gets
+                      -> CostModel::estimate_cost   (a real number)
+                                   |
+                                   v
+              RankedGroup { candidates: ranked best-first,
+                            costs: aligned index-for-index }
+                                   |
+                                   v
+              explanation::explain_replacements /
+              explain_replacements_with — reads PlanSpace, copies each
+              surviving candidate's own rationale, tags the result
+              with node_hash
+                                   |
+                                   v
+              a downstream consumer, e.g. crates/devtools's dag_export
+              binary -> tools/dag-viewer (matches an explanation to the
+              DagNode it's about by node_hash)
+```
+
+---
+
+## 3. How the current pieces fit together
+
+The crate has one source of truth for valid implementations, and deciding and constructing a candidate happen in the same step — not two steps bridged by a separately-named function:
+
+- `SketchAlgorithmStrategy::replacements(target)`, for a bindable `Aggregate`, calls `implementations_for_with(intent, cost_model)` (a `replacement.rs`-private function) to get every valid `Implementation`, ranked by preference and already sized to the target's own accuracy target — then, for each candidate, constructs its bound `SummaryNode` directly (child schema, summarized column, readout, recursion into the child) and returns it as a `ReplacementSubDAG`. It does not discard any candidate.
+- A caller that needs one executable answer uses `.into_iter().next()` and handles the empty case. The crate's conservative fallback is `replacement::keep_pre_asap`.
+
+In the [design document](../design_docs/asap_aware_mapping.md), each `ReplacementSubDAG` is a candidate. The complete `replacements()` result is the set of alternatives for one location in the plan.
+
+**Tradeoff:** a single-target bind sizes and constructs every valid sketch candidate before the caller keeps the first one. This costs more than constructing only the preferred candidate, but it means there is exactly one place in the crate that decides what an `AggIntent` may become and exactly one place bound output comes from. Child nodes repeat selection independently (via `replacement::realize_child`), so a choice at one target does not force choices in nested aggregates.
+
+This crate now also implements the whole-plan Cascades/Volcano-style search the design document describes (issue #252, part of #33): `replacement::search_workload`/`search_workload_with` discover every candidate `TargetSubDAG` across a whole workload and run every registered `ReplacementStrategy` against each to a fixpoint, deduping into a `PlanSpace` — one `MemoGroup` per distinct `TargetSubDAG`, holding every alternative discovered for it. `PlanSpace::cost_sorted` is the final `sorted_by(cost_model)` step. See `replacement.rs`'s own module docs ("Workload-wide search") for the full design: MEMO groups instead of a flat `2^N`-sized plan list, dedup discipline, termination, and cost-based ranking.
+
+**No workload-wide single-answer selection lives in this crate any more.** An earlier version had `bind::implement_workload`/`implement_workload_with`, which picked and memoized one candidate per shared `Rc<QueryExpr>` root so CSE-collapsed roots got one consistent, physically-shared bound `SummaryNode`. That was removed: committing to one final answer per site — and physically materializing it — is a downstream deployment's call (it needs to weigh placement too, which this crate can't see), not something this crate should pre-decide with no real consumer of that single answer. Callers now get every candidate, ranked with cost, from `search_workload`/`search_workload_with`'s `PlanSpace`, and make the final pick themselves. The two remaining `.into_iter().next()`-shaped helpers in `replacement.rs` (`realize_child`, used for a single candidate's own child recursion during construction; `realize_one`, used internally by `cost_sorted`'s ranking step to get one representative bound node for a cost comparison) are narrow, single-target implementation details — neither is a "here's the workload's answer" entry point.
+
+### Replacement-strategy path
+
+The diagram in the previous revision of this guide started at `TargetSubDAG`, as if that were the crate's real top-level input. It isn't — a `TargetSubDAG` is always produced by one of two real entry points, and which one matters (it decides `consumer_count`, which strategies like `SharedSubtreeStrategy` key their whole decision on):
+
+```text
+              TWO WAYS IN — a TargetSubDAG never appears out of nowhere
+ ┌──────────────────────────────┐    ┌────────────────────────────────────────┐
+ │ one QueryExpr node you       │    │ a whole workload:                      │
+ │ already have (one query's    │    │ Vec<(Id, Rc<QueryExpr>)>                │
+ │ root, or a child being       │    │ — one query, or many queries at once    │
+ │ constructed recursively)     │    └────────────────────┬─────────────────────┘
+ └───────────────┬───────────────┘                         │
+                 │                                          v
+                 │                        search_workload_with: runs the pre-ASAP
+                 │                        CSE pass once, then walks every root's
+                 │                        WHOLE DAG (not just root level) to find
+                 │                        every distinct node and its real,
+                 │                        cross-workload consumer_count
+                 v                                          │
+   TargetSubDAG::new(&root)                                 v
+   — consumer_count assumed 1          one TargetSubDAG per distinct node found
+   (the single-query API, and          anywhere in the workload, each already
+   `realize_child`'s recursion         carrying its real consumer_count
+   into a candidate's own child)
+                 │                                          │
+                 └────────────────────┬─────────────────────┘
+                                       v
+                (every TargetSubDAG, from either path, is handed to the same:)
+
+                       ReplacementStrategy::matches(...)
+                             |
+                             v
+                       ReplacementStrategy::replacements(...)
+                          | (SketchAlgorithmStrategy: decide via implementations_for_with,
+                          |  then construct each candidate's SummaryNode, in one method)
+                          +---------------------------------------------+
+                          |                    |                        |
+                     candidate A          candidate B              candidate C
+```
+
+The left path is what a caller with one query in hand uses directly (see `docs/user-guide/user-guide.md`'s "Step 2"), and what `realize_child` uses internally to bind a candidate's own child. The right path is `search_workload`/`search_workload_with` (§3 above) — it's the only place `consumer_count` is ever discovered rather than assumed, which is why `SharedSubtreeStrategy` only meaningfully matches something reached through it.
+
+The important rule is:
+
+> Strategies should reuse existing decision and binding logic where possible instead of reimplementing it.
+
+`SketchAlgorithmStrategy` follows this literally: `implementations_for_with` is the single source of truth for what an `AggIntent` may become, and every candidate it produces gets constructed the same way.
+
+---
+
+# Part 2 — Interfaces and Definitions
+
+## 1. Glossary
 
 ### `TargetSubDAG`
 
@@ -172,6 +302,14 @@ The two methods have intentionally different responsibilities.
 > What are all semantically valid alternatives for this target?
 
 `replacements` must be **exhaustive, not ranked, and not cost-filtered**.
+
+---
+
+### `Implementation`
+
+One valid realization of an `AggIntent`. It may be an approximate sketch, an exact mergeable accumulator, or a pass-through with no summary. `implementations_for_with` (a `replacement.rs`-private function) enumerates the valid implementations for one node and ranks them. It does not walk the plan or select a winner. `SketchAlgorithmStrategy::replacements()` is its only caller: for one target, it constructs every candidate's `SummaryNode` directly and returns all of them — deciding and constructing happen in the same step, not two steps bridged by a separately-named function in another module. A caller that needs one result takes the first candidate. At workload scale, `search_workload`/`search_workload_with` extend the same "never prune" contract across every `TargetSubDAG` in the whole workload (see Part 1 §3, "How the current pieces fit together") — this crate stops at that full candidate space plus cost; it does not itself commit to one final, physically-shared answer per site. That commitment (which candidate to build, where to place it) is a downstream deployment's call, not this crate's.
+
+In short: `ReplacementStrategy` enumerates, packages, and binds every candidate, and the caller selects when it needs a single executable answer. Part 1 §3 shows the complete flow.
 
 ---
 
@@ -311,72 +449,54 @@ No other family needs this extra level today — `Sample`/`Wavelet`/`StatModel` 
 
 ---
 
-## 3. How the current pieces fit together
+### `Matcher`
 
-The crate has one source of truth for valid implementations, and deciding and constructing a candidate happen in the same step — not two steps bridged by a separately-named function:
+`Matcher` is a smaller, separate extension point:
 
-- `SketchAlgorithmStrategy::replacements(target)`, for a bindable `Aggregate`, calls `implementations_for_with(intent, cost_model)` (a `replacement.rs`-private function) to get every valid `Implementation`, ranked by preference and already sized to the target's own accuracy target — then, for each candidate, constructs its bound `SummaryNode` directly (child schema, summarized column, readout, recursion into the child) and returns it as a `ReplacementSubDAG`. It does not discard any candidate.
-- A caller that needs one executable answer uses `.into_iter().next()` and handles the empty case. The crate's conservative fallback is `replacement::keep_pre_asap`.
-
-In the [design document](../design_docs/asap_aware_mapping.md), each `ReplacementSubDAG` is a candidate. The complete `replacements()` result is the set of alternatives for one location in the plan.
-
-**Tradeoff:** a single-target bind sizes and constructs every valid sketch candidate before the caller keeps the first one. This costs more than constructing only the preferred candidate, but it means there is exactly one place in the crate that decides what an `AggIntent` may become and exactly one place bound output comes from. Child nodes repeat selection independently (via `replacement::realize_child`), so a choice at one target does not force choices in nested aggregates.
-
-This crate now also implements the whole-plan Cascades/Volcano-style search the design document describes (issue #252, part of #33): `replacement::search_workload`/`search_workload_with` discover every candidate `TargetSubDAG` across a whole workload and run every registered `ReplacementStrategy` against each to a fixpoint, deduping into a `PlanSpace` — one `MemoGroup` per distinct `TargetSubDAG`, holding every alternative discovered for it. `PlanSpace::cost_sorted` is the final `sorted_by(cost_model)` step. See `replacement.rs`'s own module docs ("Workload-wide search") for the full design: MEMO groups instead of a flat `2^N`-sized plan list, dedup discipline, termination, and cost-based ranking.
-
-**No workload-wide single-answer selection lives in this crate any more.** An earlier version had `bind::implement_workload`/`implement_workload_with`, which picked and memoized one candidate per shared `Rc<QueryExpr>` root so CSE-collapsed roots got one consistent, physically-shared bound `SummaryNode`. That was removed: committing to one final answer per site — and physically materializing it — is a downstream deployment's call (it needs to weigh placement too, which this crate can't see), not something this crate should pre-decide with no real consumer of that single answer. Callers now get every candidate, ranked with cost, from `search_workload`/`search_workload_with`'s `PlanSpace`, and make the final pick themselves. The two remaining `.into_iter().next()`-shaped helpers in `replacement.rs` (`realize_child`, used for a single candidate's own child recursion during construction; `realize_one`, used internally by `cost_sorted`'s ranking step to get one representative bound node for a cost comparison) are narrow, single-target implementation details — neither is a "here's the workload's answer" entry point.
-
-### Replacement-strategy path
-
-The diagram in the previous revision of this guide started at `TargetSubDAG`, as if that were the crate's real top-level input. It isn't — a `TargetSubDAG` is always produced by one of two real entry points, and which one matters (it decides `consumer_count`, which strategies like `SharedSubtreeStrategy` key their whole decision on):
-
-```text
-              TWO WAYS IN — a TargetSubDAG never appears out of nowhere
- ┌──────────────────────────────┐    ┌────────────────────────────────────────┐
- │ one QueryExpr node you       │    │ a whole workload:                      │
- │ already have (one query's    │    │ Vec<(Id, Rc<QueryExpr>)>                │
- │ root, or a child being       │    │ — one query, or many queries at once    │
- │ constructed recursively)     │    └────────────────────┬─────────────────────┘
- └───────────────┬───────────────┘                         │
-                 │                                          v
-                 │                        search_workload_with: runs the pre-ASAP
-                 │                        CSE pass once, then walks every root's
-                 │                        WHOLE DAG (not just root level) to find
-                 │                        every distinct node and its real,
-                 │                        cross-workload consumer_count
-                 v                                          │
-   TargetSubDAG::new(&root)                                 v
-   — consumer_count assumed 1          one TargetSubDAG per distinct node found
-   (the single-query API, and          anywhere in the workload, each already
-   `realize_child`'s recursion         carrying its real consumer_count
-   into a candidate's own child)
-                 │                                          │
-                 └────────────────────┬─────────────────────┘
-                                       v
-                (every TargetSubDAG, from either path, is handed to the same:)
-
-                       ReplacementStrategy::matches(...)
-                             |
-                             v
-                       ReplacementStrategy::replacements(...)
-                          | (SketchAlgorithmStrategy: decide via implementations_for_with,
-                          |  then construct each candidate's SummaryNode, in one method)
-                          +---------------------------------------------+
-                          |                    |                        |
-                     candidate A          candidate B              candidate C
+```rust
+pub trait Matcher {
+    fn is_satisfied_by(&self, required: &Implementation, available: &Implementation) -> bool;
+}
 ```
 
-The left path is what a caller with one query in hand uses directly (see `docs/user-guide/user-guide.md`'s "Step 2"), and what `realize_child` uses internally to bind a candidate's own child. The right path is `search_workload`/`search_workload_with` (§3 above) — it's the only place `consumer_count` is ever discovered rather than assumed, which is why `SharedSubtreeStrategy` only meaningfully matches something reached through it.
+`Matcher` does not decide how to build a summary. It asks whether an existing summary can satisfy a required implementation without building anything new. This is similar to a database reusing a materialized view or index.
 
-The important rule is:
+For example, suppose a deployment already has a `DDSketch` for `latency`, while a new query requests KLL quantiles. Sketch algebra may allow substitution because both answer quantile queries. A deployment's storage rules may forbid it because stored summaries retain a specific algorithm identity. `Matcher::is_satisfied_by(required, available)` lets the deployment make that decision: `required` is what the query needs, and `available` is what the inventory already contains.
 
-> Strategies should reuse existing decision and binding logic where possible instead of reimplementing it.
-
-`SketchAlgorithmStrategy` follows this literally: `implementations_for_with` is the single source of truth for what an `AggIntent` may become, and every candidate it produces gets constructed the same way.
+The crate provides no default `Matcher` implementation because the answer depends on deployment-specific inventory and storage rules. If you need one, implement the complete trait for your deployment.
 
 ---
 
-## 4. Adding a new `ReplacementStrategy`
+## 2. Replacement explanations (`explanation.rs`)
+
+`explanation::explain_replacements`/`explain_replacements_with` answer a different question than everything above: not "what could this target become" (`ReplacementStrategy::replacements`) but "why does the replacement already discovered for this target exist, and where." It is a **reporting view over `PlanSpace`**, not a second search or a second rule engine — this crate's *explanation of a replacement*, not an applicability classifier deciding admissibility from scratch.
+
+### The rule
+
+> A `TargetSubDAG` is worth explaining exactly when its `PlanSpace` candidate list contains something beyond the trivial, no-op realization.
+
+Concretely, `explanation.rs` reads two shapes off each `MemoGroup`:
+
+- `ExplanationKind::SketchApproximation` — the group's candidates include a `Replacement::Summary` that actually realizes `SummaryFamilyType::Sketch(..)`, i.e. `SketchAlgorithmStrategy` found a real sketch alternative, not just an exact/pass-through candidate.
+- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the group's candidates include `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the group's own `target`).
+
+Each `ReplacementExplanation::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `explanation.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.
+
+`ReplacementExplanation` also carries `node_hash: u64` — `asap_types::pre_asap::cse::structural_hash` of the `TargetSubDAG`'s own `target` subtree, the identical function (and identical `Rc<QueryExpr>` input shape) `asap_types::dag_export::DagNode::hash` is computed with. A downstream consumer that independently exported the same `QueryExpr` (e.g. `tools/dag-viewer`'s `dag_export` devtools binary) can match an explanation to the exact `DagNode` it's about by comparing hashes, with no string-matching or path-guessing against `location` required — see `crates/devtools/src/bin/dag_export.rs` for the reference consumer.
+
+### Why there is no `ExplanationRule` trait
+
+An earlier version of this module (superseded, PR #247, under the name `applicability.rs`) had its own extension-point trait for adding a new optimization to the report. It is gone. Once explanations are read off `PlanSpace`, a new explanation needs a new `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with` regardless — that is the only way a new kind of candidate reaches the `PlanSpace` this module reads. A second, explanation-specific extension point would just be a second place to register the same thing. `explain_replacements_with`'s own `strategies: &[Box<dyn ReplacementStrategy>]` parameter is where a caller plugs in something custom — the same customization point `search_workload_with` itself exposes.
+
+### What it still owns: `location` text
+
+`PlanSpace`/`MemoGroup` track `Rc<QueryExpr>` pointer identity, not human-readable breadcrumbs. `explanation.rs` keeps one small, self-contained traversal, `collect_locations`, whose only job is turning "this `Rc`" into prose like `root "dash_a" > lhs` for `ReplacementExplanation::location`. It makes no explanation decision — it runs identically regardless of what any strategy found.
+
+---
+
+# Part 3 — How to Add X, Y, Z
+
+## 1. Adding a new `ReplacementStrategy`
 
 A new optimization should normally be introduced as a new implementation of `ReplacementStrategy`.
 
@@ -411,7 +531,7 @@ There are four decisions to make.
 
 ---
 
-### 4.1 Define the target shape
+### Define the target shape
 
 `matches` should contain the minimum structural and semantic checks needed to determine whether the strategy applies.
 
@@ -441,7 +561,7 @@ It should answer *whether the strategy applies here* in the plain English sense 
 
 ---
 
-### 4.2 Enumerate every valid alternative
+### Enumerate every valid alternative
 
 `replacements` should return every semantically valid candidate for a matched target.
 
@@ -478,7 +598,7 @@ and let costing decide later.
 
 ---
 
-### 4.3 Choose `Summary` vs. `Rewrite`
+### Choose `Summary` vs. `Rewrite`
 
 Return:
 
@@ -500,7 +620,7 @@ This distinction matters because a rewrite may enable more transformations later
 
 ---
 
-### 4.4 Add a rationale
+### Add a rationale
 
 Every `ReplacementSubDAG` should explain why the candidate exists.
 
@@ -526,11 +646,11 @@ Do not encode machine-readable state into the string.
 
 ---
 
-## 5. Strategy contract
+### Strategy contract
 
 Every new strategy should follow these rules.
 
-### Rule 1: `matches == false` should be safe
+#### Rule 1: `matches == false` should be safe
 
 The existing strategies return an empty vector when `replacements` is called on a target they do not match.
 
@@ -546,7 +666,7 @@ Do not panic simply because the caller skipped a prior `matches` call.
 
 ---
 
-### Rule 2: enumerate; do not rank
+#### Rule 2: enumerate; do not rank
 
 A strategy owns **legality and enumeration**.
 
@@ -556,7 +676,7 @@ This separation is the most important extension rule in this module.
 
 ---
 
-### Rule 3: do not duplicate an existing decision procedure
+#### Rule 3: do not duplicate an existing decision procedure
 
 If another module already knows how to determine whether something is legal or how to bind it, wrap that logic.
 
@@ -566,7 +686,7 @@ The existing `SketchAlgorithmStrategy` is the model to follow: it reuses `implem
 
 ---
 
-### Rule 4: preserve semantics
+#### Rule 4: preserve semantics
 
 Every returned replacement must be semantically valid for the target.
 
@@ -576,7 +696,7 @@ If a transformation is only valid under additional summary properties, grouping 
 
 ---
 
-### Rule 5: a strategy does not need to discover the whole workload
+#### Rule 5: a strategy does not need to discover the whole workload
 
 `TargetSubDAG` is passed into the strategy.
 
@@ -586,7 +706,7 @@ If your transformation requires context not currently represented in `TargetSubD
 
 ---
 
-## 6. Example: current `SketchAlgorithmStrategy`
+### Example: current `SketchAlgorithmStrategy`
 
 `SketchAlgorithmStrategy` is the reference implementation for a strategy that produces bound summaries.
 
@@ -631,7 +751,7 @@ For an approximate quantile, the current candidate list includes both KLL and DD
 
 ---
 
-### How each candidate actually gets constructed
+#### How each candidate actually gets constructed
 
 `SketchAlgorithmStrategy`'s whole `replacements()` body is one loop:
 
@@ -664,7 +784,7 @@ This is the pattern to preserve when adding another strategy that needs to enume
 
 ---
 
-## 7. Example: current `SharedSubtreeStrategy`
+### Example: current `SharedSubtreeStrategy`
 
 `SharedSubtreeStrategy` is the reference implementation for a logical rewrite strategy.
 
@@ -713,7 +833,169 @@ Each strategy can expose the alternatives without choosing between them.
 
 ---
 
-## 8. Adding a custom `CostModel`
+### Using a strategy
+
+The basic calling pattern is:
+
+```rust
+let target = TargetSubDAG::new(&root);
+let strategy =
+    SketchAlgorithmStrategy::default_cost_model();
+
+if strategy.matches(&target) {
+    let candidates =
+        strategy.replacements(&target);
+
+    for candidate in candidates {
+        println!("{}", candidate.rationale);
+    }
+}
+```
+
+A caller may also safely call `replacements` directly and treat an empty vector as "not applicable":
+
+```rust
+let candidates =
+    strategy.replacements(&target);
+
+if candidates.is_empty() {
+    // No candidate from this strategy.
+}
+```
+
+For strategies that require workload context:
+
+```rust
+let target =
+    TargetSubDAG::with_consumer_count(
+        &root,
+        consumer_count,
+    );
+```
+
+The caller is responsible for providing correct cross-workload metadata.
+
+---
+
+### Testing a new strategy
+
+Every new strategy should have focused tests for its contract.
+
+At minimum, test the following.
+
+#### Applicability
+
+A matching target should satisfy:
+
+```rust
+assert!(strategy.matches(&target));
+```
+
+A non-matching target should satisfy:
+
+```rust
+assert!(!strategy.matches(&target));
+```
+
+---
+
+#### Safe non-match behavior
+
+Also call `replacements` on a non-matching target:
+
+```rust
+assert!(
+    strategy.replacements(&target).is_empty()
+);
+```
+
+This verifies that the strategy does not depend on callers always invoking `matches` first.
+
+---
+
+#### Exhaustive candidate enumeration
+
+If the target has N valid alternatives:
+
+```rust
+let replacements =
+    strategy.replacements(&target);
+
+assert_eq!(replacements.len(), N);
+```
+
+Check the identities or kinds of all candidates, not just the preferred one.
+
+The current sketch-family tests explicitly verify that:
+
+- quantile returns both KLL and DDSketch,
+- cardinality returns HLL, Theta, and KMV.
+
+This is the most important regression test for a strategy.
+
+---
+
+#### Rationale
+
+Verify that every candidate has a non-empty rationale:
+
+```rust
+assert!(
+    replacements
+        .iter()
+        .all(|r| !r.rationale.is_empty())
+);
+```
+
+For a strategy whose explanation includes important context, also test that context.
+
+For example, the shared-subtree tests verify that the consumer count appears in the rationale.
+
+---
+
+#### Structural semantics
+
+For logical rewrites, test the structural property that distinguishes the alternatives.
+
+For example, the current shared-subtree tests verify:
+
+```rust
+Rc::ptr_eq(shared, &q)
+```
+
+for the shared candidate, and:
+
+```rust
+!Rc::ptr_eq(independent, &q)
+```
+
+plus structural equality for the independent candidate.
+
+Do not test only the rationale string; test the actual replacement semantics.
+
+---
+
+#### Custom cost model behavior
+
+If a strategy accepts a cost model, verify that a custom model changes the intended costing behavior without changing the exhaustive candidate set.
+
+The current sketch strategy does exactly this:
+
+```text
+custom model prefers DDSketch
+        |
+        v
+strategy still returns
+KLL + DDSketch
+```
+
+That is the expected separation between enumeration and ranking.
+
+---
+
+## 2. Adding or customizing a `CostModel`
+
+### Adding a custom `CostModel`
 
 Use a custom `CostModel` when you want to change preferences or cost assumptions without changing transformation legality.
 
@@ -764,11 +1046,11 @@ A custom cost model should not change which alternatives are semantically legal.
 
 ---
 
-## 9. Which `CostModel` hook should I implement?
+### Which `CostModel` hook should I implement?
 
 Use this as a practical guide.
 
-### `rank_candidates`
+#### `rank_candidates`
 
 Use when you want to change the preference among valid sketch algorithms.
 
@@ -795,7 +1077,7 @@ It should rank candidates that were supplied to it rather than invent unrelated 
 
 ---
 
-### `size_params`
+#### `size_params`
 
 Use when the sketch algorithm is already known and you want to choose its parameters from an accuracy target.
 
@@ -828,7 +1110,7 @@ SketchAlgorithm + AggIntent + accuracy target
 
 ---
 
-### `realize_extension`
+#### `realize_extension`
 
 Use for extension-defined implementation kinds.
 
@@ -846,7 +1128,7 @@ Use it for implementation families that are intentionally outside the built-in e
 
 ---
 
-### `readout_extension`
+#### `readout_extension`
 
 Use when an extension-defined summary also needs custom query/readout behavior.
 
@@ -863,7 +1145,7 @@ This complements `realize_extension`: realization defines what gets maintained; 
 
 ---
 
-### `cse_recompute_cost`
+#### `cse_recompute_cost`
 
 Use to estimate the cost of computing a common subtree independently at each consumer.
 
@@ -876,7 +1158,7 @@ fn cse_recompute_cost(
 
 ---
 
-### `cse_shared_maintenance_cost`
+#### `cse_shared_maintenance_cost`
 
 Use to estimate the cost of computing and maintaining a shared subtree.
 
@@ -889,7 +1171,7 @@ fn cse_shared_maintenance_cost(
 
 ---
 
-### `cse_share_decision`
+#### `cse_share_decision`
 
 Use when the current binding/planning path needs the final share-vs.-recompute decision.
 
@@ -904,25 +1186,90 @@ The replacement-strategy layer should still expose both valid alternatives where
 
 ---
 
-## 10. `Matcher` (`implementation.rs`)
+### Testing a new cost model
 
-`Matcher` is a smaller, separate extension point:
+A cost-model test should focus on the hook being customized.
+
+For ranking:
 
 ```rust
-pub trait Matcher {
-    fn is_satisfied_by(&self, required: &Implementation, available: &Implementation) -> bool;
-}
+let ranked =
+    model.rank_candidates(
+        &intent,
+        &[SketchAlgorithm::Kll,
+          SketchAlgorithm::DDSketch],
+    );
+
+assert_eq!(
+    ranked[0],
+    SketchAlgorithm::DDSketch
+);
 ```
 
-`Matcher` does not decide how to build a summary. It asks whether an existing summary can satisfy a required implementation without building anything new. This is similar to a database reusing a materialized view or index.
+Then test integration through a consumer of the cost model.
 
-For example, suppose a deployment already has a `DDSketch` for `latency`, while a new query requests KLL quantiles. Sketch algebra may allow substitution because both answer quantile queries. A deployment's storage rules may forbid it because stored summaries retain a specific algorithm identity. `Matcher::is_satisfied_by(required, available)` lets the deployment make that decision: `required` is what the query needs, and `available` is what the inventory already contains.
+For example:
 
-The crate provides no default `Matcher` implementation because the answer depends on deployment-specific inventory and storage rules. If you need one, implement the complete trait for your deployment.
+```rust
+let strategy =
+    SketchAlgorithmStrategy::new(&model);
+
+let replacements =
+    strategy.replacements(&target);
+```
+
+The important assertion is usually not that other valid candidates disappeared. They should not.
+
+Instead verify that:
+
+- the model changes ordering or parameters as intended,
+- all legal candidates remain available to the replacement layer.
+
+For sizing, test representative accuracy targets and assert the resulting `SketchParams`.
+
+For CSE costing, create a representative `CseCandidate` and test recompute cost, shared-maintenance cost, and the resulting `ShareDecision`.
 
 ---
 
-## 11. Adding both a strategy and a cost model
+## 3. Adding a new sketch algorithm
+
+A new sketch algorithm generally touches more than `ReplacementStrategy`.
+
+The strategy should not maintain its own private list of sketch algorithms.
+
+`SketchAlgorithmStrategy` obtains sketch alternatives through `replacement.rs`'s existing interface:
+
+```rust
+summary_candidates(intent)
+```
+
+and constructs them through the normal construction path.
+
+Therefore, when adding a new built-in sketch algorithm, the intended flow is:
+
+```text
+1. Teach `replacement.rs` that the sketch is a valid candidate
+   for the relevant AggIntent.
+
+2. Teach the cost model how to rank and size it.
+
+3. Ensure `construct_summary` can realize the algorithm.
+
+4. SketchAlgorithmStrategy will then enumerate it through the
+   existing candidate/construction path.
+```
+
+This keeps one source of truth for sketch applicability.
+
+Do not special-case the new sketch inside `SketchAlgorithmStrategy` unless the strategy itself needs fundamentally new behavior.
+
+### Verifying a new sketch algorithm
+
+After wiring the new algorithm into `summary_candidates` and giving the cost model a real `rank_candidates`/`size_params` opinion about it, check two things. First, that `SketchAlgorithmStrategy::replacements()` for a matching `TargetSubDAG` actually includes a candidate realizing the new algorithm — extend a test shaped like `replacement.rs`'s own test-module coverage-matrix tests (e.g. `agg_intent_to_summary_kind_coverage_matrix`) to cover the new algorithm's `AggIntent`. Second, that `cost_sorted`/`estimate_cost` produce sane, comparable numbers for the new candidate rather than a `NaN` placeholder or an outlier that swamps every other candidate.
+
+---
+
+## 4. Adding both a strategy and a cost model
 
 Some features require both.
 
@@ -976,246 +1323,7 @@ That turns a cost decision into a legality decision and prevents later global pl
 
 ---
 
-## 12. Adding a new sketch algorithm
-
-A new sketch algorithm generally touches more than `ReplacementStrategy`.
-
-The strategy should not maintain its own private list of sketch algorithms.
-
-`SketchAlgorithmStrategy` obtains sketch alternatives through `implementation.rs`'s existing interface:
-
-```rust
-summary_candidates(intent)
-```
-
-and binds them through the normal binder.
-
-Therefore, when adding a new built-in sketch algorithm, the intended flow is:
-
-```text
-1. Teach `implementation.rs` that the sketch is a valid candidate
-   for the relevant AggIntent.
-
-2. Teach the cost model how to rank and size it.
-
-3. Ensure the binder can realize the algorithm.
-
-4. SketchAlgorithmStrategy will then enumerate it through the
-   existing candidate/binding path.
-```
-
-This keeps one source of truth for sketch applicability.
-
-Do not special-case the new sketch inside `SketchAlgorithmStrategy` unless the strategy itself needs fundamentally new behavior.
-
----
-
-## 13. Using a strategy
-
-The basic calling pattern is:
-
-```rust
-let target = TargetSubDAG::new(&root);
-let strategy =
-    SketchAlgorithmStrategy::default_cost_model();
-
-if strategy.matches(&target) {
-    let candidates =
-        strategy.replacements(&target);
-
-    for candidate in candidates {
-        println!("{}", candidate.rationale);
-    }
-}
-```
-
-A caller may also safely call `replacements` directly and treat an empty vector as "not applicable":
-
-```rust
-let candidates =
-    strategy.replacements(&target);
-
-if candidates.is_empty() {
-    // No candidate from this strategy.
-}
-```
-
-For strategies that require workload context:
-
-```rust
-let target =
-    TargetSubDAG::with_consumer_count(
-        &root,
-        consumer_count,
-    );
-```
-
-The caller is responsible for providing correct cross-workload metadata.
-
----
-
-## 14. Testing a new strategy
-
-Every new strategy should have focused tests for its contract.
-
-At minimum, test the following.
-
-### Applicability
-
-A matching target should satisfy:
-
-```rust
-assert!(strategy.matches(&target));
-```
-
-A non-matching target should satisfy:
-
-```rust
-assert!(!strategy.matches(&target));
-```
-
----
-
-### Safe non-match behavior
-
-Also call `replacements` on a non-matching target:
-
-```rust
-assert!(
-    strategy.replacements(&target).is_empty()
-);
-```
-
-This verifies that the strategy does not depend on callers always invoking `matches` first.
-
----
-
-### Exhaustive candidate enumeration
-
-If the target has N valid alternatives:
-
-```rust
-let replacements =
-    strategy.replacements(&target);
-
-assert_eq!(replacements.len(), N);
-```
-
-Check the identities or kinds of all candidates, not just the preferred one.
-
-The current sketch-family tests explicitly verify that:
-
-- quantile returns both KLL and DDSketch,
-- cardinality returns HLL, Theta, and KMV.
-
-This is the most important regression test for a strategy.
-
----
-
-### Rationale
-
-Verify that every candidate has a non-empty rationale:
-
-```rust
-assert!(
-    replacements
-        .iter()
-        .all(|r| !r.rationale.is_empty())
-);
-```
-
-For a strategy whose explanation includes important context, also test that context.
-
-For example, the shared-subtree tests verify that the consumer count appears in the rationale.
-
----
-
-### Structural semantics
-
-For logical rewrites, test the structural property that distinguishes the alternatives.
-
-For example, the current shared-subtree tests verify:
-
-```rust
-Rc::ptr_eq(shared, &q)
-```
-
-for the shared candidate, and:
-
-```rust
-!Rc::ptr_eq(independent, &q)
-```
-
-plus structural equality for the independent candidate.
-
-Do not test only the rationale string; test the actual replacement semantics.
-
----
-
-### Custom cost model behavior
-
-If a strategy accepts a cost model, verify that a custom model changes the intended costing behavior without changing the exhaustive candidate set.
-
-The current sketch strategy does exactly this:
-
-```text
-custom model prefers DDSketch
-        |
-        v
-strategy still returns
-KLL + DDSketch
-```
-
-That is the expected separation between enumeration and ranking.
-
----
-
-## 15. Testing a new cost model
-
-A cost-model test should focus on the hook being customized.
-
-For ranking:
-
-```rust
-let ranked =
-    model.rank_candidates(
-        &intent,
-        &[SketchAlgorithm::Kll,
-          SketchAlgorithm::DDSketch],
-    );
-
-assert_eq!(
-    ranked[0],
-    SketchAlgorithm::DDSketch
-);
-```
-
-Then test integration through a consumer of the cost model.
-
-For example:
-
-```rust
-let strategy =
-    SketchAlgorithmStrategy::new(&model);
-
-let replacements =
-    strategy.replacements(&target);
-```
-
-The important assertion is usually not that other valid candidates disappeared. They should not.
-
-Instead verify that:
-
-- the model changes ordering or parameters as intended,
-- all legal candidates remain available to the replacement layer.
-
-For sizing, test representative accuracy targets and assert the resulting `SketchParams`.
-
-For CSE costing, create a representative `CseCandidate` and test recompute cost, shared-maintenance cost, and the resulting `ShareDecision`.
-
----
-
-## 16. Common mistakes
+## 5. Common mistakes
 
 ### Mistake: choosing the cheapest candidate inside a strategy
 
@@ -1279,7 +1387,7 @@ Use the distinction intentionally.
 
 ---
 
-## 17. Extension checklist
+## 6. Extension checklist
 
 When adding a new strategy:
 
@@ -1312,7 +1420,7 @@ When adding a new cost model:
 
 ---
 
-## 18. Current extension map
+## 7. Current extension map
 
 Use this table to find the right place for a change.
 
@@ -1321,7 +1429,7 @@ Use this table to find the right place for a change.
 | Add a new logical optimization | new `impl ReplacementStrategy` |
 | Add a new replacement for an existing target shape | `ReplacementStrategy::replacements` |
 | Change when a strategy applies | `ReplacementStrategy::matches` |
-| Add a new built-in sketch candidate | `implementation.rs`'s summary-candidate mapping |
+| Add a new built-in sketch candidate | `replacement.rs`'s summary-candidate mapping |
 | Prefer one sketch algorithm over another | `CostModel::rank_candidates` |
 | Change sketch sizing for an accuracy target | `CostModel::size_params` |
 | Add extension-defined implementation behavior | `CostModel::realize_extension` |
@@ -1342,30 +1450,7 @@ Use this table to find the right place for a change.
 
 ---
 
-## 19. Explaining a replacement (`explanation.rs`)
-
-`explanation::explain_replacements`/`explain_replacements_with` answer a different question than everything above: not "what could this target become" (`ReplacementStrategy::replacements`) but "why does the replacement already discovered for this target exist, and where." It is a **reporting view over `PlanSpace`**, not a second search or a second rule engine — this crate's *explanation of a replacement*, not an applicability classifier deciding admissibility from scratch.
-
-### The rule
-
-> A `TargetSubDAG` is worth explaining exactly when its `PlanSpace` candidate list contains something beyond the trivial, no-op realization.
-
-Concretely, `explanation.rs` reads two shapes off each `MemoGroup`:
-
-- `ExplanationKind::SketchApproximation` — the group's candidates include a `Replacement::Summary` that actually realizes `SummaryFamilyType::Sketch(..)`, i.e. `SketchAlgorithmStrategy` found a real sketch alternative, not just an exact/pass-through candidate.
-- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the group's candidates include `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the group's own `target`).
-
-Each `ReplacementExplanation::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `explanation.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.
-
-`ReplacementExplanation` also carries `node_hash: u64` — `asap_types::pre_asap::cse::structural_hash` of the `TargetSubDAG`'s own `target` subtree, the identical function (and identical `Rc<QueryExpr>` input shape) `asap_types::dag_export::DagNode::hash` is computed with. A downstream consumer that independently exported the same `QueryExpr` (e.g. `tools/dag-viewer`'s `dag_export` devtools binary) can match an explanation to the exact `DagNode` it's about by comparing hashes, with no string-matching or path-guessing against `location` required — see `crates/devtools/src/bin/dag_export.rs` for the reference consumer.
-
-### Why there is no `ExplanationRule` trait
-
-An earlier version of this module (superseded, PR #247, under the name `applicability.rs`) had its own extension-point trait for adding a new optimization to the report. It is gone. Once explanations are read off `PlanSpace`, a new explanation needs a new `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with` regardless — that is the only way a new kind of candidate reaches the `PlanSpace` this module reads. A second, explanation-specific extension point would just be a second place to register the same thing. `explain_replacements_with`'s own `strategies: &[Box<dyn ReplacementStrategy>]` parameter is where a caller plugs in something custom — the same customization point `search_workload_with` itself exposes.
-
-### What it still owns: `location` text
-
-`PlanSpace`/`MemoGroup` track `Rc<QueryExpr>` pointer identity, not human-readable breadcrumbs. `explanation.rs` keeps one small, self-contained traversal, `collect_locations`, whose only job is turning "this `Rc`" into prose like `root "dash_a" > lhs` for `ReplacementExplanation::location`. It makes no explanation decision — it runs identically regardless of what any strategy found.
+## 8. Using and extending explanation.rs
 
 ### Using it
 
