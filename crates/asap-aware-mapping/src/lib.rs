@@ -8,12 +8,11 @@
 //! **Common sub-expression elimination (CSE) is not this crate's job.**
 //! Detection is a primary pass over the pre-ASAP `QueryExpr` IR itself
 //! (`asap_types::pre_asap`, design tracked in issue #223), run before a
-//! tree ever reaches [`bind::implement_tree`] — see issue #222 for why
-//! (batch query optimization needs to see shared work across a
+//! tree ever reaches [`replacement::SketchFamilyStrategy`] — see issue #222
+//! for why (batch query optimization needs to see shared work across a
 //! `QueryWorkload` before summary binding, not after). This crate may
 //! eventually run a second, narrower CSE pass of its own over an
-//! already-[`implement_tree`](bind::implement_tree)'d
-//! `SummaryExpr`/`SummaryNode` DAG, recognizing sharing that's invisible
+//! already-bound `SummaryExpr`/`SummaryNode` DAG, recognizing sharing that's invisible
 //! at the pre-ASAP level by construction — e.g. `Quantile(x, 0.99)` and
 //! `Quantile(x, 0.95)` are structurally distinct `AggIntent`s but can
 //! still share one built sketch, read out twice. That post-ASAP pass is
@@ -48,18 +47,23 @@
 //!   CSE-detected shared subtree. No search/ranking-across-a-whole-plan logic
 //!   lives here — see that module's docs for what's deliberately left to a
 //!   future Cascades/Volcano-style search engine.
-//! - [`bind`] — [`bind::implement_tree`]/[`bind::implement_tree_with`] walk a
-//!   whole tree, keeping only the first (`cost_model`-preferred) candidate
-//!   [`replacement::SketchFamilyStrategy`] enumerates at each node — a thin
-//!   selector over `replacement`, not a second decision path (see
-//!   `bind.rs`'s and `replacement.rs`'s own module docs for the full
-//!   relationship). [`bind::implement_workload`] drives the same selection
-//!   over a whole workload's roots, memoized on `Rc` identity so two roots
-//!   that `asap_types::pre_asap::cse::share_common_subtrees` already
-//!   collapsed onto one shared subtree bind to one shared `SummaryNode` too
-//!   (issue #212, #222, #223) — see the terminology section below for why
-//!   this module (and `implement_tree`) are named around "implementation"
-//!   rather than "bind".
+//! - [`bind`] — has no "bind me one tree" entry point of its own.
+//!   [`replacement::SketchFamilyStrategy`] is the only public way to get
+//!   bound output for a target, and it always returns *every* candidate; a
+//!   caller that wants one answer takes the first entry itself. What
+//!   `bind` provides is the shared low-level primitive
+//!   ([`bind::bind_with_implementation`]) that turns one already-decided
+//!   candidate into a real [`SummaryNode`](asap_types::post_asap::SummaryNode),
+//!   plus [`bind::implement_workload`]/[`bind::implement_workload_with`],
+//!   which drive rank-and-take-first selection over a whole workload's
+//!   roots, memoized on `Rc` identity so two roots that
+//!   `asap_types::pre_asap::cse::share_common_subtrees` already collapsed
+//!   onto one shared subtree bind to one shared `SummaryNode` too (issue
+//!   #212, #222, #223) — memoization needs one canonical decision per
+//!   shared root to key sharing on, so that entry point is the one place a
+//!   single-answer selection still lives. See the terminology section below
+//!   for why this crate's logical→physical step (and this module) are named
+//!   around "implementation" rather than "bind".
 //! - [`cost_model`] — the [`CostModel`](cost_model::CostModel) trait every
 //!   deployment's cost-based sketch selection plugs into (issues #6, #33).
 //!   `asap-plan` itself only ships [`DefaultCostModel`](cost_model::DefaultCostModel),
@@ -85,7 +89,8 @@
 //! | **Parse** | parse | text (PromQL/SQL) → AST | `asap-frontend-promql` / `asap-frontend-sql` |
 //! | **Bind #1** | name resolution | `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → **Bind** → Optimize" pipeline sense (e.g. SQL Server's query-processor terminology) | [`asap_types::pre_asap::binder::Binder`](https://docs.rs/asap-types) |
 //! | **Implementation** — [`implementation::implementations_for_with`] | pre-ASAP → post-ASAP, *one node* | enumerating every concrete physical realization (a sketch family, an exact accumulator, or pass-through) for one [`AggIntent`](asap_types::pre_asap::agg_intent::AggIntent) | [`implementation`] |
-//! | **`implement_tree`** — [`bind::implement_tree`] | pre-ASAP → post-ASAP, *whole tree* | walk a whole `QueryExpr` tree, keeping the first candidate [`implementation::implementations_for_with`] produces per node, and emit the complete post-ASAP [`SummaryExpr`](asap_types::post_asap::SummaryExpr)/`SummaryNode` DAG — named after "implementation" too rather than reusing "bind" a second time | [`bind`] |
+//! | **Replacement** — [`replacement::SketchFamilyStrategy::replacements`] | pre-ASAP → post-ASAP, *one target, every candidate* | wrap each [`implementation::implementations_for_with`] candidate into its own bound [`SummaryNode`](asap_types::post_asap::SummaryNode), ranked — a caller wanting one answer takes the first entry itself | [`replacement`] |
+//! | **`implement_workload`** — [`bind::implement_workload`] | pre-ASAP → post-ASAP, *whole workload* | walk every root of a `QueryWorkload`, keeping the first (`cost_model`-preferred) candidate per node, sharing one bound `SummaryNode` across roots CSE already collapsed onto one `Rc<QueryExpr>` — emits the complete post-ASAP `SummaryExpr`/`SummaryNode` DAG | [`bind`] |
 //! | **Bind #2** (downstream, not in this crate) | post-ASAP → deployment placement | a *deployment's* own physical binder, additionally deciding **placement** (edge vs. backend, wire format, …) — a genuinely different, deployment-specific decision this crate doesn't model at all | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
 //!
 //! A related question (tracked alongside issues #6/#33): whether this
@@ -110,10 +115,7 @@ pub mod cost_model;
 pub mod implementation;
 pub mod replacement;
 
-pub use bind::{
-    implement_tree, implement_tree_with, implement_workload, implement_workload_with,
-    ImplementError,
-};
+pub use bind::{implement_workload, implement_workload_with, ImplementError};
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use implementation::{implementations_for_with, summary_candidates, Implementation, Matcher};
 pub use replacement::{

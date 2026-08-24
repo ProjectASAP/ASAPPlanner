@@ -21,9 +21,9 @@ Code samples named `My*` or `Prefer*` (`MyStrategy`, `MyCostModel`, `PreferDDSke
 Two words come up constantly below and are worth pinning down before anything else, since neither is self-explanatory from context alone:
 
 - **`implementation`** (the module `implementation.rs`) — every valid way one `AggIntent` could be realized: as an approximate sketch, an exact mergeable accumulator, or a pass-through (no summary at all). `implementation::implementations_for_with` computes this **one node at a time**, exhaustive and ranked; it doesn't walk anything, and it doesn't pick a favorite — picking is left to its callers.
-- **`bind` / "binding"** — this crate's own `bind.rs`: `implement_tree`/`implement_tree_with` walk a **whole** `QueryExpr` tree, and at each node, keep only the first (`cost_model`-preferred) entry from `implementation::implementations_for_with`'s list — the rest is a thin selector, not a second decision procedure (see §3). This is what "the binding path" means everywhere in this guide: the code path that commits to one `Implementation` per node because something has to actually execute. (The word "bind" means other things elsewhere in this crate's downstream consumers — see `lib.rs`'s own "Terminology" section if you need the full picture — but within this guide, "bind"/"binding" always means this.)
+- **`bind` / "binding"** — this crate's own `bind.rs`. It has no "bind me one tree" entry point of its own: `replacement::SketchFamilyStrategy::replacements()` is the only public way to get bound output for a target, and it always returns *every* candidate; a caller that wants a single executable answer takes the first entry itself (see §3). What `bind.rs` provides is the shared low-level primitive, `bind_with_implementation`, that turns one already-decided candidate into a real `SummaryNode`, plus `implement_workload`/`implement_workload_with`, which drive that same take-the-head selection over a whole workload's roots (see §3's closing note on why those two still keep it internally). This is what "the binding path" means everywhere in this guide: the code that commits to one `Implementation` per node because something has to actually execute. (The word "bind" means other things elsewhere in this crate's downstream consumers — see `lib.rs`'s own "Terminology" section if you need the full picture — but within this guide, "bind"/"binding" always means this.)
 
-So: `implementation` enumerates **every** way one node could become something; `bind`/`implement_tree` walks a whole tree, keeping only the first of each node's list; `ReplacementStrategy` (this guide's main subject) is the other consumer of that same list, keeping every entry instead of just the first — see §3 for exactly how these three connect.
+So: `implementation` enumerates **every** way one node could become something; `ReplacementStrategy` (this guide's main subject) wraps that list into one `ReplacementSubDAG` per candidate, keeping all of them; a caller that wants one answer takes the first entry itself — see §3 for exactly how these connect.
 
 ---
 
@@ -238,71 +238,53 @@ A custom cost model does not necessarily need to override every hook. The curren
 ## 3. How the current pieces fit together
 
 There is one place this crate decides what an `AggIntent` may become —
-[`implementation::implementations_for_with`] — and two consumers of its
-output that differ only in *how much of the list* they keep. Binding is
-**literally implemented in terms of the replacement-strategy path**, not a
-separate decision procedure that happens to agree with it:
+[`implementation::implementations_for_with`] — and one place bound output
+comes from. There is no separate "binding path" that computes its own
+answer and happens to agree with the replacement-strategy path; there is
+only the replacement-strategy path:
 
 - **`implementation::implementations_for_with(intent, cost_model)`** enumerates
   every valid `Implementation` for `intent`, exhaustive and ranked
   (most-preferred first via `cost_model`).
 - **`replacement::SketchFamilyStrategy::replacements()`** (§2) wraps that list
   directly: every entry becomes its own bound `ReplacementSubDAG`, none
-  discarded.
-- **`bind::implement_tree_with`** builds a `TargetSubDAG` for the node being
-  bound, calls `SketchFamilyStrategy::replacements()`, and keeps only the
-  *first* (`cost_model`-preferred) candidate — everything else it throws
-  away. It does not compute an `Implementation` on its own.
+  discarded. This is the *only* public way to get bound output for a
+  target — there is no second, single-answer entry point sitting behind it.
+- **A caller that wants one executable answer** takes the first
+  (`cost_model`-preferred) entry off `replacements()` itself
+  (`.into_iter().next()`) and decides what to do if the list comes back
+  empty (`bind::logical` is the same conservative pass-through fallback this
+  crate's own dispatch would otherwise use).
 
 This is exactly the "alternatives"/"candidates" language in [the design doc](../design_docs/asap_aware_mapping.md): a `ReplacementSubDAG` **is** one candidate; a `TargetSubDAG` with its full `replacements()` list **is** the set of alternatives for one spot in the plan.
 
-**The tradeoff, stated plainly:** because binding now goes through the same enumeration `SketchFamilyStrategy` uses, an ordinary bind sizes and fully constructs *every* sketch candidate at every sketch-capable node — not just the one it keeps — before selecting the head. That's strictly more work per bind than a version that only ever computed the preferred candidate, in exchange for there being exactly one place in this crate that decides what an `AggIntent` may become. Recursion into a node's child goes back through the same enumerate-then-select step fresh, so choosing (or forcing) a candidate for one target never leaks into that target's own nested aggregates.
+**The tradeoff, stated plainly:** because a single-target bind now goes through the same enumeration `SketchFamilyStrategy` uses, it sizes and fully constructs *every* sketch candidate at every sketch-capable node — not just the one a caller keeps — before that caller selects the head. That's strictly more work per bind than a version that only ever computed the preferred candidate, in exchange for there being exactly one place in this crate that decides what an `AggIntent` may become and exactly one place bound output comes from. Recursion into a node's child goes back through the same enumerate-then-select step fresh, so choosing (or forcing) a candidate for one target never leaks into that target's own nested aggregates.
 
 What this is *not*: the design doc's future Cascades/Volcano-style search engine — generate candidates via `ReplacementStrategy` across a *whole plan*, evaluate/select via `CostModel` across whole candidate plans — is a separate, not-yet-built piece of work. What exists today is a **single-node** stand-in for that selection (`cost_model.rank_candidates`, applied one node at a time), not the real thing.
 
+**One exception:** `bind::implement_workload`/`implement_workload_with` still keep the take-the-head step internally, because workload-wide CSE sharing memoizes on `Rc` pointer identity — two workload roots that collapsed onto the same `Rc<QueryExpr>` must resolve to the *same* canonical decision to be shareable at all, so there's no meaningful "N candidates" answer to memoize against. That's the one place inside this crate a single-answer selection still lives; every other caller goes through `SketchFamilyStrategy::replacements()` directly.
+
 ### The shared low-level primitive: `bind_with_implementation`
 
-Underneath both `implement_tree_with` and `SketchFamilyStrategy::replacements()` sits one more function, `bind::bind_with_implementation(expr, implementation, cost_model)` — *given* an already-decided `Implementation` for `expr`'s top intent, bind it into a `SummaryNode` (or fall back to a logical passthrough). Neither caller re-decides how a chosen `Implementation` becomes a `SummaryNode`; they only differ in **which** `Implementation`(s) they hand it, and how many times:
+Underneath `SketchFamilyStrategy::replacements()` sits one more function, `bind::bind_with_implementation(expr, implementation, cost_model)` — *given* an already-decided `Implementation` for `expr`'s top intent, bind it into a `SummaryNode` (or fall back to a logical passthrough). It doesn't re-decide how a chosen `Implementation` becomes a `SummaryNode`; `replacements()` just calls it once per candidate:
 
 ```text
                     implementations_for_with(intent, cost_model)
                     every valid Implementation, ranked
                                      |
-                    +----------------+----------------+
-                    |                                  |
-     SketchFamilyStrategy::replacements()    bind::implement_tree_with
-     keeps every candidate                    keeps candidate[0] only
-                    |                                  |
-                    v                                  v
-     bind_with_implementation(...)      bind_with_implementation(...)
-     once per candidate                  once, for the kept candidate
-                    |                                  |
-                    v                                  v
-          N ReplacementSubDAGs                  one bound SummaryNode
+                                     v
+                    SketchFamilyStrategy::replacements()
+                    keeps every candidate
+                                     |
+                                     v
+                    bind_with_implementation(...)
+                    once per candidate
+                                     |
+                                     v
+                    N ReplacementSubDAGs
+
+    a caller wanting one answer: replacements(...).into_iter().next()
 ```
-
-### Binding path
-
-```text
-AggIntent
-   |
-   v
-implementation::implementations_for_with(...)
-   |
-   v
-every ranked Implementation
-   |
-   v
-keep candidate[0]
-   |
-   v
-bind::bind_with_implementation(...)
-   |
-   v
-one bound SummaryNode
-```
-
----
 
 ### Replacement-strategy path
 
@@ -611,9 +593,9 @@ fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
 }
 ```
 
-`implementations_for_with` already did the hard part — enumerating and sizing every candidate, ranked. This loop's only job is to hand each one to `bind::bind_with_implementation(expr, implementation, cost_model)` — the same low-level primitive `bind::implement_tree_with` bottoms out in for whichever candidate it keeps (see §3) — and package the result. No per-candidate sizing logic lives here; there's nothing to keep in sync with the ordinary binding path, because both call the exact same enumeration function.
+`implementations_for_with` already did the hard part — enumerating and sizing every candidate, ranked. This loop's only job is to hand each one to `bind::bind_with_implementation(expr, implementation, cost_model)` — the shared low-level primitive every caller of this crate bottoms out in, whether it keeps one candidate or all of them (see §3) — and package the result. No per-candidate sizing logic lives here.
 
-Because only `expr`'s own top-level `Implementation` is ever supplied from outside — `bind_with_implementation` recurses into `expr`'s child via a fresh call back into the ordinary `implement_tree_with` selection, not a forced one — enumerating a candidate for one target never leaks into that target's own nested aggregates. (An earlier version of this strategy forced ranking via a `CostModel`-wrapping adapter for the whole recursive bind, which had exactly that leak as a latent bug; today's design doesn't have the problem, because nothing below the top node is ever forced.)
+Because only `expr`'s own top-level `Implementation` is ever supplied from outside — `bind_with_implementation` recurses into `expr`'s child via a fresh internal selection over that child's own candidates, not a forced one — enumerating a candidate for one target never leaks into that target's own nested aggregates. (An earlier version of this strategy forced ranking via a `CostModel`-wrapping adapter for the whole recursive bind, which had exactly that leak as a latent bug; today's design doesn't have the problem, because nothing below the top node is ever forced.)
 
 This is the pattern to preserve when adding another strategy that needs to enumerate alternatives through an API that normally chooses one: get the exhaustive list from the same enumeration function the single-answer path uses, and hand each entry to the shared low-level binding primitive — never wrap the `CostModel` to trick a ranked-first path into producing what you want.
 
@@ -1284,7 +1266,8 @@ Use this table to find the right place for a change.
 | Change shared-maintenance cost | `CostModel::cse_shared_maintenance_cost` |
 | Change current share/recompute choice | `CostModel::cse_share_decision` |
 | Decide whether an available implementation satisfies a required one | `impl Matcher` |
-| Produce a normal (ranked-first) bound summary | reuse `bind::implement_tree_with` |
+| Produce a normal (ranked-first) bound summary for one target | `SketchFamilyStrategy::replacements(...).into_iter().next()` |
+| Bind a whole workload's roots, sharing across CSE-collapsed roots | reuse `bind::implement_workload`/`implement_workload_with` |
 | Bind a specific, already-chosen `Implementation` | reuse `bind::bind_with_implementation` |
 | Enumerate valid sketch kinds | reuse `implementation::summary_candidates` |
 | Build a target with no workload context | `TargetSubDAG::new` |

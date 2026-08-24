@@ -85,26 +85,44 @@ allowed, `Epsilon(e)` / `EpsilonDelta{epsilon, delta}` otherwise.
 ### Step 2 — get the post-ASAP IR
 
 Feed the `QueryExpr` to `asap-aware-mapping`. This crate depends only on `asap-types`, never on a
-front end, so it's agnostic to which language produced the tree.
+front end, so it's agnostic to which language produced the tree. There is no "bind me one tree"
+entry point: `SketchFamilyStrategy::replacements()` always returns every valid candidate for a
+target, ranked, and you take the one you want.
 
 ```rust
-use asap_aware_mapping::implement_tree;
+use asap_aware_mapping::{Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG};
+use std::rc::Rc;
 
-let post_asap = implement_tree(&pre_asap)?; // Rc<L4Node> — the SummaryExpr DAG
+let root = Rc::new(pre_asap);
+let target = TargetSubDAG::new(&root);
+let candidates = SketchFamilyStrategy::default_cost_model().replacements(&target);
+
+// Take the cost-model-preferred candidate — the common case.
+let Some(ReplacementSubDAG { replacement: Replacement::Summary(post_asap), .. }) =
+    candidates.into_iter().next()
+else {
+    // No candidate (e.g. the node isn't a bindable Aggregate) — fall back to
+    // `asap_aware_mapping::bind::logical(&root)`, the same conservative
+    // pass-through this crate's own dispatch uses.
+    panic!("no candidate for this target");
+};
+// post_asap: Rc<SummaryNode> — the SummaryExpr DAG
 ```
 
-Two entry points, both re-exported from the crate root:
+`implementations_for_with(&AggIntent, &dyn CostModel) -> Vec<Implementation>` is the lower-level
+enumeration `SketchFamilyStrategy` wraps, if you only need the per-node decision (sketch, exact
+accumulator, or pass-through) without binding it into a `SummaryNode`.
 
-- `implementation_for(&AggIntent) -> Implementation` — the single-node decision (sketch, exact
-  accumulator, or pass-through) for one aggregation.
-- `implement_tree(&QueryExpr) -> Result<Rc<L4Node>, ImplementError>` — walks a whole tree, calling
-  the per-node decision at every `Aggregate` and emitting the full post-ASAP DAG.
+`SketchFamilyStrategy::new(&dyn CostModel)` (vs. `default_cost_model()`) is the extension point for
+a deployment that wants its own candidate ranking or parameter sizing instead of this crate's
+built-in static preference order (`DefaultCostModel` — what `default_cost_model()` uses).
+See the `CostModel` trait doc in `crates/asap-aware-mapping/src/cost_model.rs` for its overridable
+hooks (`rank_candidates`, `size_params`, `realize_extension`, …).
 
-Each has a `_with(..., &dyn CostModel)` variant. A `CostModel` is the extension point for a
-deployment that wants its own candidate ranking or parameter sizing instead of this crate's
-built-in static preference order (`DefaultCostModel` — what the plain, non-`_with` functions use).
-See the `CostModel` trait doc in `crates/asap-aware-mapping/src/cost_model.rs` for its three
-overridable hooks (`rank_candidates`, `size_params`, `realize_extension`).
+To bind every root of a whole workload at once — sharing one bound `SummaryNode` across roots CSE
+already collapsed onto the same `Rc<QueryExpr>` — use `asap_aware_mapping::implement_workload`/
+`implement_workload_with` instead; those two still keep only the cost-model-preferred candidate per
+root, since sharing needs one canonical decision to key on.
 
 ### Reading the result
 

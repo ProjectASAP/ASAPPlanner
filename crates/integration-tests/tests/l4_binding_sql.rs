@@ -1,43 +1,69 @@
 //! End-to-end SQL query-string → post-ASAP IR pin (issue #191).
 //!
 //! The SQL counterpart of `l4_binding.rs`: drives SQL text — `lower_sql`
-//! (text → pre-ASAP `QueryExpr`) → `asap_aware_mapping::implement_tree`
-//! (pre-ASAP → post-ASAP `SummaryExpr`) — and pins the resulting
-//! sketch-vs-exact-accumulator binding shape node by node, the way
+//! (text → pre-ASAP `QueryExpr`) → `SketchFamilyStrategy::replacements`
+//! (pre-ASAP → post-ASAP `SummaryExpr`, see [`bind`] below) — and pins the
+//! resulting sketch-vs-exact-accumulator binding shape node by node, the way
 //! `l4_binding.rs` does for PromQL.
 //!
 //! ## A structural wrinkle PromQL doesn't have
 //!
 //! `lower_promql` returns a *bare* `QueryExpr::Aggregate` for a top-level
-//! aggregation (`sum by (job) (m)`, `quantile(0.99, …)`), so `implement_tree`
-//! can bind it directly at the tree root. `lower_sql` never does: DataFusion's
+//! aggregation (`sum by (job) (m)`, `quantile(0.99, …)`), so [`bind`] can
+//! bind it directly at the tree root. `lower_sql` never does: DataFusion's
 //! planner always wraps even a single, unaliased aggregate in an identity
 //! `Project` (confirmed below), so a SQL tree's *root* is always `Project {
-//! child: Aggregate { .. } }`. `implement_tree` only fires
-//! `bind_summary_agg` when the node it's looking at is itself a bindable
-//! `QueryExpr::Aggregate` (see `bind.rs`'s module docs on the "logical parent
-//! subsumes bindable child" conservative fallback); a `Project` at the root
-//! is exactly such a logical parent, so feeding a raw `lower_sql` result
-//! straight into `implement_tree` always yields a whole-tree
-//! `SummaryExpr::Logical` — never a genuine sketch or accumulator binding.
+//! child: Aggregate { .. } }`. Binding only fires `bind_summary_agg` when
+//! the node it's looking at is itself a bindable `QueryExpr::Aggregate` (see
+//! `bind.rs`'s module docs on the "logical parent subsumes bindable child"
+//! conservative fallback); a `Project` at the root is exactly such a logical
+//! parent, so feeding a raw `lower_sql` result straight into [`bind`] always
+//! yields a whole-tree `SummaryExpr::Logical` — never a genuine sketch or
+//! accumulator binding.
 //!
 //! The tests below extract the inner `Aggregate` node the same way this
 //! crate's own `frontend-sql/tests/sql_lowering.rs` does (its
 //! `find_aggregate`/`find_aggregate_node` helpers) and hand that to
-//! `implement_tree` directly, which is the shape a future Project-elision
-//! rewrite (tracked with the rest of the post-ASAP rule engine, issues
-//! #6/#33) would present to this pass in production.
+//! [`bind`] directly, which is the shape a future Project-elision rewrite
+//! (tracked with the rest of the post-ASAP rule engine, issues #6/#33) would
+//! present to this pass in production.
 
-use asap_aware_mapping::implement_tree;
+use std::rc::Rc;
+
+use asap_aware_mapping::bind::{logical, ImplementError};
+use asap_aware_mapping::{
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
+};
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::post_asap::{
     ExactKind, ExactParams, SketchKind, SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType,
-    SummarySchema,
+    SummaryNode, SummarySchema,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
+
+/// This crate has no "bind me one tree" public API any more —
+/// `SketchFamilyStrategy::replacements` always returns every candidate, and
+/// a caller decides what to keep. This test-only helper reproduces the
+/// take-the-first-(`cost_model`-preferred)-candidate pattern so the
+/// single-answer pins below don't all repeat it by hand.
+fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+    let root = Rc::new(expr.clone());
+    let target = TargetSubDAG::new(&root);
+    match SketchFamilyStrategy::default_cost_model()
+        .replacements(&target)
+        .into_iter()
+        .next()
+    {
+        Some(ReplacementSubDAG {
+            replacement: Replacement::Summary(node),
+            ..
+        }) => Ok(node),
+        _ => logical(&root),
+    }
+}
 
 fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
     &schema
@@ -87,9 +113,9 @@ fn inner_aggregate(qe: &QueryExpr) -> &QueryExpr {
 }
 
 /// Sanity + documentation: feeding a raw `lower_sql` root straight into
-/// `implement_tree` never binds anything — the wrapping `Project` always
-/// subsumes the `Aggregate` beneath it into one logical passthrough. This is
-/// the "conservative fallback" `bind.rs`'s module docs describe, hitting
+/// [`bind`] never binds anything — the wrapping `Project` always subsumes
+/// the `Aggregate` beneath it into one logical passthrough. This is the
+/// "conservative fallback" `bind.rs`'s module docs describe, hitting
 /// unconditionally for SQL because of the Project DataFusion always inserts.
 #[tokio::test]
 async fn sql_full_query_root_stays_logical_under_the_identity_projection() {
@@ -102,11 +128,11 @@ async fn sql_full_query_root_stays_logical_under_the_identity_projection() {
         matches!(l3, QueryExpr::Project { .. }),
         "sanity: a SQL root is a Project, unlike lower_promql's bare Aggregate"
     );
-    let root = implement_tree(&l3).expect("binding failed");
+    let root = bind(&l3).expect("binding failed");
     assert!(
         matches!(root.expr, SummaryExpr::Logical(ref e) if **e == l3),
-        "implement_tree does not look inside a Project to find a bindable \
-         Aggregate child, so the whole Project{{Aggregate}} tree stays logical"
+        "bind does not look inside a Project to find a bindable Aggregate \
+         child, so the whole Project{{Aggregate}} tree stays logical"
     );
 }
 
@@ -132,7 +158,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     )
     .await;
     let agg = inner_aggregate(&l3);
-    let root = implement_tree(agg).expect("binding failed");
+    let root = bind(agg).expect("binding failed");
 
     let SummaryExpr::SummaryEstimate {
         summary_input,
@@ -212,7 +238,7 @@ async fn sql_count_distinct_binds_hll_sketch_over_named_column() {
     )
     .await;
     let agg = inner_aggregate(&l3);
-    let root = implement_tree(agg).expect("binding failed");
+    let root = bind(agg).expect("binding failed");
 
     let SummaryExpr::SummaryEstimate {
         summary_input,
@@ -264,7 +290,7 @@ async fn sql_exact_workload_binds_accumulators_not_sketches() {
     )
     .await;
     let agg = inner_aggregate(&l3);
-    let root = implement_tree(agg).expect("binding failed");
+    let root = bind(agg).expect("binding failed");
     let SummaryExpr::SummaryAgg {
         family, reduction, ..
     } = &root.expr
@@ -288,7 +314,7 @@ async fn sql_exact_workload_binds_accumulators_not_sketches() {
 
     let l3 = lower("SELECT AVG(bytes) FROM metrics", AccuracyTarget::Exact).await;
     let agg = inner_aggregate(&l3);
-    let root = implement_tree(agg).expect("binding failed");
+    let root = bind(agg).expect("binding failed");
     assert!(
         matches!(root.expr, SummaryExpr::Logical(_)),
         "avg has no mergeable accumulator — stays logical"

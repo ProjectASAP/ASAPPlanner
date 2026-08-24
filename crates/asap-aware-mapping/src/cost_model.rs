@@ -26,7 +26,8 @@
 //! than overloading these ones across incompatible `Kind`/`Params` types.
 //!
 //! Every entry point that doesn't take an explicit `&dyn CostModel`
-//! ([`implement_tree`](crate::bind::implement_tree)) runs against
+//! ([`SketchFamilyStrategy::default_cost_model`](crate::replacement::SketchFamilyStrategy::default_cost_model),
+//! [`implement_workload`](crate::bind::implement_workload)) runs against
 //! [`DefaultCostModel`], so a deployment that never plugs in its own cost
 //! model keeps today's static-preference-order behavior exactly, byte for
 //! byte.

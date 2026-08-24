@@ -9,10 +9,12 @@
 //! [`implementations_for_with`] is where every valid realization gets
 //! enumerated, exhaustive and ranked (most-preferred first) — this crate has
 //! no separate function that computes just "the one" `Implementation`
-//! independently of that list. [`crate::bind::implement_tree_with`] and
-//! [`crate::replacement::SketchFamilyStrategy`] both consume this same
-//! list; they differ only in how much of it they keep (see `bind.rs`'s and
-//! `replacement.rs`'s module docs). Three inputs feed it:
+//! independently of that list.
+//! [`crate::replacement::SketchFamilyStrategy`] is the sole public consumer:
+//! it wraps every entry of this list into its own bound
+//! [`SummaryNode`](asap_types::post_asap::SummaryNode) and returns all of
+//! them, ranked — a caller wanting a single answer keeps the first one
+//! itself (see `replacement.rs`'s module docs). Three inputs feed it:
 //!
 //! - the [`AccuracyTarget`] threaded onto the approximate-capable intents
 //!   (`Quantile` / `Cardinality` / `Count` / `TopK`) — `Exact` forbids a
@@ -172,11 +174,9 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// (most-preferred first via `cost_model`) — the *only* place this crate
 /// decides what an `AggIntent` may become. Nothing in this crate computes
 /// "the one" `Implementation` independently of this list:
-/// [`crate::bind::implement_tree_with`] takes the head for the single
-/// executable answer production binding needs;
 /// [`crate::replacement::SketchFamilyStrategy`] keeps every entry as a
-/// candidate. Both differ only in *how much of this list* they keep — see
-/// their own module docs.
+/// candidate, and a caller that wants a single executable answer takes the
+/// head of *that* strategy's output itself — see its own module docs.
 ///
 /// Exhaustive over the [`AggIntent`] vocabulary — adding a variant without an
 /// explicit realization is a compile error, and the coverage-matrix test pins

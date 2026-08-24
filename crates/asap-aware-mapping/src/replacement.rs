@@ -3,12 +3,14 @@
 //! under "Key concepts (not yet implemented)", implemented for real (issue
 //! #251, part of #33).
 //!
-//! ## This is where every `Implementation` gets decided — `bind` is a selector over it
+//! ## This is where every `Implementation` gets decided — and the only place bound output comes from
 //!
 //! [`implementation::implementations_for_with`] is the one place this crate
 //! enumerates every valid [`Implementation`] for an [`AggIntent`], exhaustive
 //! and ranked (most-preferred first via a [`CostModel`]). This module wraps
-//! that list into the exhaustive-candidate shape a future search needs:
+//! that list into the exhaustive-candidate shape a future search needs, and
+//! is the *only* public way to get bound output for a target — see
+//! "Selection" below.
 //!
 //! - [`TargetSubDAG`] — a reference to a pre-ASAP [`QueryExpr`] node that is a
 //!   candidate for replacement, plus how many places in the workload already
@@ -16,10 +18,8 @@
 //!   context [`SharedSubtreeStrategy`] needs that a bare node reference alone
 //!   doesn't carry.
 //! - [`ReplacementSubDAG`] — one candidate replacement for a `TargetSubDAG`:
-//!   either a fully bound [`SummaryNode`] (the same output
-//!   [`bind::implement_tree_with`] itself keeps, for one particular candidate
-//!   instead of the one it kept) or a pre-ASAP [`QueryExpr`] rewrite (still
-//!   logical, structurally different from the target but semantically
+//!   either a fully bound [`SummaryNode`] or a pre-ASAP [`QueryExpr`] rewrite
+//!   (still logical, structurally different from the target but semantically
 //!   equivalent) — see [`Replacement`] — plus a human-readable `rationale`.
 //! - [`ReplacementStrategy`] — `matches` + `replacements`, the same
 //!   extension-point shape [`CostModel`] and [`Matcher`](crate::implementation::Matcher)
@@ -29,35 +29,38 @@
 //!   `impl ReplacementStrategy`, not a restructuring of this trait or of any
 //!   existing strategy. `replacements` is **exhaustive, not ranked, not
 //!   filtered** — reporting "every valid candidate" is core's job; picking
-//!   the best one is a [`CostModel`]'s job (see "Selection" below).
+//!   the best one is left to the caller (see "Selection" below).
 //!
-//! ## Selection: `bind::implement_tree_with` keeps the head, nothing else
+//! ## Selection: this crate reports every candidate; a caller keeps what it wants
 //!
-//! [`bind::implement_tree_with`] does not compute an `Implementation`
-//! independently — it builds a `TargetSubDAG` for the node being bound,
-//! calls [`SketchFamilyStrategy::replacements`], and keeps the first
-//! (`cost_model`-preferred) candidate; everything else it discards. That's
-//! the *only* difference between "the binding path" and "the
-//! replacement-strategy path": how much of this module's own output each one
-//! keeps. Both bottom out in the exact same low-level primitive,
-//! [`bind::bind_with_implementation`] — given an *already-decided*
-//! `Implementation`, turn it into a `SummaryNode` — which this module calls
-//! once per candidate it enumerates, and `bind::implement_tree_with` calls
-//! once for the one candidate it kept. See `bind.rs`'s own module docs for
-//! the reverse half of this relationship.
+//! [`SketchFamilyStrategy::replacements`] builds a `TargetSubDAG` for the
+//! node being replaced, then enumerates [`implementation::implementations_for_with`]'s
+//! ranked list, calling [`bind::bind_with_implementation`] once per
+//! candidate — given an *already-decided* `Implementation`, turn it into a
+//! `SummaryNode`. Every candidate comes back; nothing is discarded here. A
+//! caller that wants one executable answer takes the first
+//! (`cost_model`-preferred) entry itself (`.into_iter().next()`) — that
+//! "keep the head" step now lives entirely on the calling side, not behind
+//! a second module-level entry point. `bind.rs`'s own
+//! [`bind::implement_workload`]/[`bind::implement_workload_with`] are the
+//! one place inside this crate that still performs that take-first step
+//! internally, because workload-wide CSE memoization needs one canonical
+//! decision per shared root to key sharing on (see `bind.rs`'s own module
+//! docs). Every other caller goes through `SketchFamilyStrategy::replacements`
+//! directly and decides for itself.
 //!
-//! This means an ordinary bind now sizes and fully constructs *every*
-//! sketch candidate at every sketch-capable node (not just the one it keeps)
-//! — a deliberate tradeoff, made so there is exactly one place in this crate
-//! that decides what an `AggIntent` may become, at the cost of extra work
-//! per bind proportional to each node's own candidate count.
+//! This means an ordinary single-target bind now sizes and fully constructs
+//! *every* sketch candidate at every sketch-capable node (not just the one a
+//! caller keeps) — a deliberate tradeoff, made so there is exactly one place
+//! in this crate that decides what an `AggIntent` may become, at the cost of
+//! extra work per bind proportional to each node's own candidate count.
 //!
 //! ## The two strategies, and why these two
 //!
 //! - [`SketchFamilyStrategy`] wraps [`implementation::implementations_for_with`]'s
 //!   exhaustive, ranked list directly: for the same bindable-`Aggregate`
-//!   shape [`bind::implement_tree_with`] itself requires (single intent, no
-//!   `HAVING`), every entry becomes its own bound candidate.
+//!   shape this crate binds (single intent, no `HAVING`), every entry
+//!   becomes its own bound candidate.
 //! - [`SharedSubtreeStrategy`] wraps
 //!   `asap_types::pre_asap::cse::share_common_subtrees`'s sharing decision.
 //!   Wherever a [`TargetSubDAG`] already has two or more consumers (i.e.
@@ -81,10 +84,11 @@
 //!   replacement-plan-searching pseudocode — trying every `ReplacementStrategy`
 //!   against every candidate plan, deduplicating, iterating to a fixpoint,
 //!   then ranking by a `CostModel` — is a Cascades/Volcano-style search
-//!   engine, tracked as a separate follow-up. `bind::implement_tree_with`'s
-//!   "keep the head" selection is a single-node stand-in for that, not the
-//!   real thing: it never compares whole candidate *plans*, only one node's
-//!   own candidates against each other via `cost_model.rank_candidates`.
+//!   engine, tracked as a separate follow-up. Taking the first candidate off
+//!   [`SketchFamilyStrategy::replacements`] is a single-node stand-in for
+//!   that, not the real thing: it never compares whole candidate *plans*,
+//!   only one node's own candidates against each other via
+//!   `cost_model.rank_candidates`.
 //! - **No workload-wide `TargetSubDAG` discovery pass.** Finding every
 //!   candidate node in a whole workload (walking every root, deduplicating by
 //!   `Rc` identity, computing real consumer counts) is exactly what PR #247's
@@ -156,15 +160,15 @@ impl<'a> TargetSubDAG<'a> {
 
 /// What a [`ReplacementSubDAG`] actually substitutes a [`TargetSubDAG`] with.
 ///
-/// Generalizes [`bind::implement_tree_with`]'s and
-/// [`implementation::implementations_for_with`]'s two possible *kinds* of
-/// answer — a post-ASAP binding decision, or a still-pre-ASAP structural
-/// alternative — from "the one kept" into "one candidate among several".
+/// Generalizes [`implementation::implementations_for_with`]'s two possible
+/// *kinds* of answer — a post-ASAP binding decision, or a still-pre-ASAP
+/// structural alternative — into "one candidate among several", each with
+/// its own [`ReplacementSubDAG`].
 #[derive(Debug, Clone)]
 pub enum Replacement {
-    /// A fully bound post-ASAP summary decision — the same
-    /// [`SummaryNode`] shape [`bind::implement_tree_with`] itself produces,
-    /// for one particular candidate realization of the target.
+    /// A fully bound post-ASAP summary decision — the same [`SummaryNode`]
+    /// shape [`bind::bind_with_implementation`] produces, for one particular
+    /// candidate realization of the target.
     Summary(Rc<SummaryNode>),
     /// A pre-ASAP rewrite: still a logical [`QueryExpr`], structurally
     /// different from the target's own `root` (e.g. sharing vs. not sharing
@@ -223,16 +227,14 @@ static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 /// [`CostModel`] — [`DefaultCostModel`] unless constructed with
 /// [`SketchFamilyStrategy::new`] — so a deployment-specific cost model's
 /// other hooks (`size_params`, `realize_extension`, `readout_extension`) are
-/// still consulted while binding each candidate, exactly as
-/// [`bind::implement_tree_with`] would.
+/// still consulted while binding each candidate.
 pub struct SketchFamilyStrategy<'a> {
     cost_model: &'a dyn CostModel,
 }
 
 impl SketchFamilyStrategy<'static> {
-    /// A strategy that ranks/binds via the built-in [`DefaultCostModel`],
-    /// matching what a deployment gets from [`bind::implement_tree`] with no
-    /// custom cost model plugged in.
+    /// A strategy that ranks/binds via the built-in [`DefaultCostModel`] —
+    /// what a deployment gets with no custom cost model plugged in.
     pub fn default_cost_model() -> Self {
         Self {
             cost_model: &DEFAULT_COST_MODEL,
@@ -243,8 +245,7 @@ impl SketchFamilyStrategy<'static> {
 impl<'a> SketchFamilyStrategy<'a> {
     /// A strategy that ranks/binds via `cost_model` instead of the built-in
     /// static preference order — the same customization point
-    /// [`bind::implement_tree_with`] and
-    /// [`implementation::implementations_for_with`] already offer.
+    /// [`implementation::implementations_for_with`] already offers.
     pub fn new(cost_model: &'a dyn CostModel) -> Self {
         Self { cost_model }
     }

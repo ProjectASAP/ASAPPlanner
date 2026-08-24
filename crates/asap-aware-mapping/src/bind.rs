@@ -1,10 +1,15 @@
-//! The pre-ASAP → post-ASAP binding pass (issue #98).
+//! The pre-ASAP → post-ASAP binding primitives (issue #98).
 //!
-//! Walks a canonical pre-ASAP [`QueryExpr`] and emits the summary-bound
-//! post-ASAP IR ([`SummaryExpr`] / [`SummaryNode`] in `asap-sketch`). Per
-//! node, [`replacement::SketchFamilyStrategy`](crate::replacement::SketchFamilyStrategy)
-//! enumerates every valid realization and this pass keeps the first
-//! (`cost_model`-preferred) one:
+//! This module does **not** expose a "bind me one tree" entry point.
+//! [`replacement::SketchFamilyStrategy`](crate::replacement::SketchFamilyStrategy)
+//! is the only public way to get bound output for a target — it always
+//! returns every candidate [`ReplacementSubDAG`](crate::replacement::ReplacementSubDAG),
+//! ranked; a caller that wants a single executable answer takes the first
+//! entry itself (`.into_iter().next()`) and decides what to do if the list
+//! is empty (this module's [`logical`] is the same pass-through fallback
+//! this crate's own dispatch would otherwise use). What this module
+//! provides is the shared low-level primitive that turns one *already-decided*
+//! candidate into a real [`SummaryNode`]:
 //!
 //! - **Summary family** (sketch / sample / wavelet / statistical model) —
 //!   the `Aggregate` becomes a [`SummaryExpr::SummaryAgg`] carrying the
@@ -20,27 +25,23 @@
 //!   [`SummaryExpr::Logical`], schema lifted with every column
 //!   `SummaryFamilyType::Plain`.
 //!
-//! Binding recurses through the `Aggregate` spine, so nested aggregates each
-//! get their own decision (`quantile(0.9, sum by (svc) (rate(m[5m]))))` binds
-//! KLL over an exact `Sum` accumulator over an exact `Rate` accumulator) —
-//! and each nested node's own candidate enumeration and selection is
-//! independent of its parent's.
+//! Construction recurses through the `Aggregate` spine, so nested aggregates
+//! each get their own independent candidate enumeration and selection
+//! (`quantile(0.9, sum by (svc) (rate(m[5m]))))` binds KLL over an exact
+//! `Sum` accumulator over an exact `Rate` accumulator) — see
+//! [`bind_with_implementation`].
 //!
-//! ## This pass is a selector over `ReplacementStrategy`, not a separate decision path
+//! ## Why [`implement_workload`]/[`implement_workload_with`] are still here
 //!
-//! [`implement_tree_with`] does not compute an `Implementation` on its own.
-//! It builds a [`TargetSubDAG`](crate::replacement::TargetSubDAG) for the
-//! node being bound, asks
-//! [`replacement::SketchFamilyStrategy`](crate::replacement::SketchFamilyStrategy)
-//! for every candidate [`Replacement`](crate::replacement::Replacement), and
-//! keeps the first one — the same list a caller who wants every alternative
-//! (rather than just the first) would get from calling
-//! `SketchFamilyStrategy::replacements` directly. [`bind_with_implementation`]
-//! is the shared low-level primitive both this pass and `SketchFamilyStrategy`
-//! bottom out in: given an *already-decided* [`Implementation`], turn it into
-//! a `SummaryNode`. See [`crate::replacement`]'s module docs for the reverse
-//! half of this relationship — `SketchFamilyStrategy` calls back into this
-//! module for that primitive and for [`bindable_intent`].
+//! Workload-level CSE sharing ([`asap_types::pre_asap::cse::share_common_subtrees`])
+//! memoizes on `Rc` pointer identity: two workload roots that collapsed onto
+//! the same `Rc<QueryExpr>` must resolve to the *same* canonical decision to
+//! be shareable at all — there is no meaningful "N candidates" answer to
+//! memoize against. So this one entry point keeps the old
+//! rank-and-take-first behavior internally (via a private selector), scoped
+//! to workload-wide CSE memoization specifically. It is not a general
+//! "bind me one tree" API — for a single target, go through
+//! `SketchFamilyStrategy` and decide what to keep yourself.
 //!
 //! ## Conservative fallbacks
 //!
@@ -78,9 +79,8 @@ pub enum ImplementError {
     Schema(#[from] QueryExprError),
 }
 
-/// The bindable shape this pass (and
-/// [`crate::replacement::SketchFamilyStrategy`], which targets the exact
-/// same shape) requires: a single intent, no `HAVING`. A multi-intent node
+/// The bindable shape [`crate::replacement::SketchFamilyStrategy`] targets:
+/// a single intent, no `HAVING`. A multi-intent node
 /// (SQL `SELECT SUM(a), AVG(b)`), or one with a `HAVING` predicate (the
 /// filter would need the estimate first), stays logical — see the module
 /// docs' "Conservative fallbacks".
@@ -96,37 +96,12 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
     None
 }
 
-/// Bind a single query to the post-ASAP IR. Ranks candidate summaries via
-/// [`DefaultCostModel`] (`asap-plan`'s built-in static preference order,
-/// unchanged); use [`implement_tree_with`] to plug in a deployment-specific
-/// [`CostModel`] instead.
-pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
-    implement_tree_with(expr, &DefaultCostModel)
-}
-
-/// Like [`implement_tree`], but ranks candidate summaries via `cost_model` (see
-/// [`crate::cost_model`]) instead of the built-in static preference order.
-///
-/// A thin selector, not a second decision path — see the module docs. Binds
-/// a fresh `Rc<QueryExpr>` for `expr` (cheap: `QueryExpr::clone` only clones
-/// the top node, every descendant stays `Rc`-shared) so
-/// [`TargetSubDAG`](crate::replacement::TargetSubDAG) has the identity it
-/// needs; a caller that already holds `expr` as an `Rc` (e.g.
-/// [`implement_workload_with`]) should prefer passing that `Rc` straight
-/// into `SketchFamilyStrategy` itself to skip the extra clone.
-pub fn implement_tree_with(
-    expr: &QueryExpr,
-    cost_model: &dyn CostModel,
-) -> Result<Rc<SummaryNode>, ImplementError> {
-    select_and_bind(&Rc::new(expr.clone()), cost_model)
-}
-
-/// The actual selector: build a [`TargetSubDAG`] for `root`, ask
-/// [`SketchFamilyStrategy`] for every candidate, and keep the first
-/// (`cost_model`-preferred) one. `root` must already be the caller's own
-/// `Rc` — never fabricated per recursion step — so this stays a single
-/// allocation at the outermost [`implement_tree_with`] call, not one per
-/// node.
+/// Rank-and-take-first selector, scoped to [`implement_workload_with`]'s
+/// CSE memoization and to this module's own recursion into a node's child
+/// (see the module docs' "Why `implement_workload`/`implement_workload_with`
+/// are still here") — **not** a general single-answer API. `root` must
+/// already be the caller's own `Rc`, never fabricated per call, so this
+/// never allocates beyond what the caller already held.
 fn select_and_bind(
     root: &Rc<QueryExpr>,
     cost_model: &dyn CostModel,
@@ -156,11 +131,11 @@ fn select_and_bind(
 }
 
 /// Bind `expr` to an already-decided [`Implementation`] for its top intent.
-/// The shared low-level primitive: [`select_and_bind`] (and so
-/// [`implement_tree_with`]) calls this with whichever candidate it kept;
-/// [`crate::replacement::SketchFamilyStrategy`] calls this once per
-/// candidate it enumerates. One function turns a chosen `Implementation`
-/// into a `SummaryNode`, used identically by both.
+/// The shared low-level primitive: [`select_and_bind`] (workload-CSE
+/// memoization and this module's own recursion) calls this with whichever
+/// candidate it kept; [`crate::replacement::SketchFamilyStrategy`] calls
+/// this once per candidate it enumerates. One function turns a chosen
+/// `Implementation` into a `SummaryNode`, used identically by both.
 ///
 /// `expr` must still be the [`bindable_intent`] shape for `implementation` to
 /// have any effect; anything else falls back to [`logical`]. Only `expr`'s
@@ -227,8 +202,8 @@ pub fn bind_with_implementation(
 /// independently.
 ///
 /// Only whole-root sharing is memoized (matching two workload roots that are
-/// themselves the same `Rc<QueryExpr>` after CSE) — [`implement_tree`] is
-/// called at most once per distinct root pointer when the decision is
+/// themselves the same `Rc<QueryExpr>` after CSE) — a root is bound at most
+/// once per distinct root pointer when the decision is
 /// `Share`, but it still walks each such tree's own internal structure
 /// fresh; a subtree shared only *below* two different roots' top level does
 /// not additionally memoize inside that walk. Widening this to sub-root
@@ -432,12 +407,11 @@ fn readout(intent: &AggIntent, col: &ColumnRef, cost_model: &dyn CostModel) -> S
 }
 
 /// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
-/// `SummaryFamilyType::Plain`. Public so a deployment can force a node it
-/// knows [`implement_tree_with`] would otherwise actively (mis)bind —
-/// e.g. an intent this crate's `implementation::implementations_for_with`
-/// maps to an accumulator kind the deployment's runtime doesn't actually
-/// implement — through the same fallback this crate's own dispatch uses,
-/// without duplicating the schema-lift logic.
+/// `SummaryFamilyType::Plain`. Public so a caller can fall back to this
+/// explicitly — e.g. when `SketchFamilyStrategy::replacements()` returns no
+/// candidate for a target, or a deployment wants to force a node its own
+/// runtime can't actually implement — through the same fallback this
+/// crate's own dispatch uses, without duplicating the schema-lift logic.
 pub fn logical(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     let schema = expr.output_schema()?;
     Ok(Rc::new(SummaryNode {
@@ -516,12 +490,29 @@ mod tests {
             .unwrap_or_else(|| panic!("no field {name:?} in {schema:?}"))
     }
 
+    /// This module no longer exposes a single-answer public API — the tests
+    /// below use the same "rank via `cost_model`, keep the first candidate"
+    /// pattern `select_and_bind` already implements, since `bind.rs`'s own
+    /// tests are the one internal caller allowed to reach it directly.
+    /// An external caller doesn't have this shortcut — it goes through
+    /// `SketchFamilyStrategy::replacements()` itself (see the module docs).
+    fn bind_first(
+        expr: &QueryExpr,
+        cost_model: &dyn CostModel,
+    ) -> Result<Rc<SummaryNode>, ImplementError> {
+        select_and_bind(&Rc::new(expr.clone()), cost_model)
+    }
+
+    fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+        bind_first(expr, &DefaultCostModel)
+    }
+
     #[test]
     fn quantile_binds_kll_wrapped_in_estimate() {
         // quantile by (job) (m) at ε=0.01 → Estimate(Quantile) over
         // SummaryAgg(Kll{k:200}) over Logical(Scan). job = col 2.
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let root = implement_tree(&q).unwrap();
+        let root = bind(&q).unwrap();
 
         let SummaryExpr::SummaryEstimate {
             summary_input,
@@ -566,8 +557,9 @@ mod tests {
     }
 
     /// A deployment-supplied [`CostModel`] can override the default KLL
-    /// choice — `implement_tree_with` must actually consult it, not just accept and
-    /// ignore it (issue: cost model interface, see `crate::cost_model`).
+    /// choice — `bind_first` (via `select_and_bind`) must actually consult it,
+    /// not just accept and ignore it (issue: cost model interface, see
+    /// `crate::cost_model`).
     struct PreferDDSketch;
 
     impl CostModel for PreferDDSketch {
@@ -590,7 +582,7 @@ mod tests {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
 
         // Default: KLL (see `quantile_binds_kll_wrapped_in_estimate` above).
-        let default_root = implement_tree(&q).unwrap();
+        let default_root = bind(&q).unwrap();
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &default_root.expr else {
             panic!("expected SummaryEstimate root, got {:?}", default_root.expr);
         };
@@ -603,7 +595,7 @@ mod tests {
         ));
 
         // With `PreferDDSketch`: DDSketch instead, same query.
-        let custom_root = implement_tree_with(&q, &PreferDDSketch).unwrap();
+        let custom_root = bind_first(&q, &PreferDDSketch).unwrap();
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &custom_root.expr else {
             panic!("expected SummaryEstimate root, got {:?}", custom_root.expr);
         };
@@ -621,9 +613,9 @@ mod tests {
 
     /// A deployment-supplied `CostModel` can realize an `AggIntent::Extension`
     /// intent as a real sketch instead of the default `PassThrough` (issue
-    /// #150) — `implement_tree_with` must consult `realize_extension` for
-    /// the `Extension` arm, and `readout` must consult `readout_extension`
-    /// to build its `SketchQuery` without panicking.
+    /// #150) — `implementations_for_with` must consult `realize_extension`
+    /// for the `Extension` arm, and `readout` must consult
+    /// `readout_extension` to build its `SketchQuery` without panicking.
     struct FrequencyCostModel;
 
     impl CostModel for FrequencyCostModel {
@@ -678,7 +670,7 @@ mod tests {
             payload: serde_json::json!({ "item": "checkout" }),
         };
         let q = agg(vec![], intent, metric_scan(&[]));
-        let root = implement_tree(&q).unwrap();
+        let root = bind(&q).unwrap();
         assert!(matches!(root.expr, SummaryExpr::Logical(_)));
     }
 
@@ -689,7 +681,7 @@ mod tests {
             payload: serde_json::json!({ "item": "checkout" }),
         };
         let q = agg(vec![], intent, metric_scan(&[]));
-        let root = implement_tree_with(&q, &FrequencyCostModel).unwrap();
+        let root = bind_first(&q, &FrequencyCostModel).unwrap();
 
         let SummaryExpr::SummaryEstimate {
             summary_input,
@@ -722,7 +714,7 @@ mod tests {
     #[test]
     fn exact_sum_binds_accumulator_without_estimate() {
         let q = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let root = implement_tree(&q).unwrap();
+        let root = bind(&q).unwrap();
         let SummaryExpr::SummaryAgg { family, .. } = &root.expr else {
             panic!(
                 "expected bare SummaryAgg (no estimate), got {:?}",
@@ -750,7 +742,7 @@ mod tests {
                 child: Rc::new(metric_scan(&["job"])),
             },
         );
-        let root = implement_tree(&q).unwrap();
+        let root = bind(&q).unwrap();
         let SummaryExpr::SummaryAgg { family, .. } = &root.expr else {
             panic!("expected SummaryAgg, got {:?}", root.expr);
         };
@@ -787,7 +779,7 @@ mod tests {
                 child: Rc::new(metric_scan(&["job"])),
             },
         );
-        let root = implement_tree(&q).unwrap();
+        let root = bind(&q).unwrap();
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
             panic!("expected estimate root, got {:?}", root.expr);
         };
@@ -809,7 +801,7 @@ mod tests {
             accuracy: AccuracyTarget::Epsilon(0.01),
         };
         let q = agg(vec![], intent, metric_scan(&["job"]));
-        let root = implement_tree(&q).unwrap();
+        let root = bind(&q).unwrap();
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
             panic!("expected estimate root, got {:?}", root.expr);
         };
@@ -826,7 +818,7 @@ mod tests {
         // accumulator.
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.9), inner);
-        let root = implement_tree(&outer).unwrap();
+        let root = bind(&outer).unwrap();
 
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
             panic!("expected estimate root, got {:?}", root.expr);
@@ -871,7 +863,7 @@ mod tests {
                 col,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             };
-            let root = implement_tree(&agg(vec![0], intent, metric_scan(&["job"]))).unwrap();
+            let root = bind(&agg(vec![0], intent, metric_scan(&["job"]))).unwrap();
             let bound = find_summary_col(&root)
                 .unwrap_or_else(|| panic!("expected a SummaryAgg for col={col:?}"));
             assert_eq!(bound, want, "wrong summarised column for col={col:?}");
@@ -902,7 +894,7 @@ mod tests {
             },
         ] {
             let q = agg(vec![2], intent.clone(), metric_scan(&["job"]));
-            let root = implement_tree(&q).unwrap();
+            let root = bind(&q).unwrap();
             assert!(
                 matches!(root.expr, SummaryExpr::Logical(ref e) if **e == q),
                 "expected Logical passthrough for {intent:?}"
@@ -923,7 +915,7 @@ mod tests {
             })),
             child: Rc::new(agg(vec![], default_quantile(0.99), metric_scan(&[]))),
         };
-        let root = implement_tree(&q).unwrap();
+        let root = bind(&q).unwrap();
         assert!(matches!(root.expr, SummaryExpr::Logical(ref e) if **e == q));
     }
 
@@ -935,10 +927,7 @@ mod tests {
                 ScalarValue::Boolean(true),
             ))));
         }
-        assert!(matches!(
-            implement_tree(&q).unwrap().expr,
-            SummaryExpr::Logical(_)
-        ));
+        assert!(matches!(bind(&q).unwrap().expr, SummaryExpr::Logical(_)));
 
         let multi = QueryExpr::Aggregate {
             reduction: Reduction::by(vec![2]),
@@ -948,7 +937,7 @@ mod tests {
             child: Rc::new(metric_scan(&["job"])),
         };
         assert!(matches!(
-            implement_tree(&multi).unwrap().expr,
+            bind(&multi).unwrap().expr,
             SummaryExpr::Logical(_)
         ));
     }
@@ -963,7 +952,7 @@ mod tests {
             },
             metric_scan(&["job"]),
         );
-        let root = implement_tree(&q).unwrap();
+        let root = bind(&q).unwrap();
         let SummaryExpr::SummaryEstimate {
             summary_input,
             query,
@@ -1001,7 +990,7 @@ mod tests {
             },
         };
         let q = agg(vec![0], AggIntent::Sum { col: Some(1) }, scan);
-        let root = implement_tree(&q).unwrap();
+        let root = bind(&q).unwrap();
         let SummaryExpr::SummaryAgg { col, .. } = &root.expr else {
             panic!("expected SummaryAgg, got {:?}", root.expr);
         };
