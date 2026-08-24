@@ -412,7 +412,7 @@ is enough for the current shared-subtree strategy.
 
 Keep `matches` cheap and unsurprising.
 
-It should answer *whether the strategy applies here* in the plain English sense — not `applicability.rs`'s formal `ApplicabilityFinding` concept (issue #257, a separate reporting layer over this trait's own output — see §19). `matches` isn't that machinery and doesn't need to produce anything it consumes; it should also not perform ranking or choose a winner.
+It should answer *whether the strategy applies here* in the plain English sense — not `explanation.rs`'s formal `ReplacementExplanation` concept (issue #257, a separate reporting layer over this trait's own output — see §19). `matches` isn't that machinery and doesn't need to produce anything it consumes; it should also not perform ranking or choose a winner.
 
 ---
 
@@ -1312,51 +1312,53 @@ Use this table to find the right place for a change.
 | Enumerate valid sketch algorithms | reuse `replacement::summary_candidates` |
 | Build a target with no workload context | `TargetSubDAG::new` |
 | Build a target with known sharing context | `TargetSubDAG::with_consumer_count` |
-| Report which optimizations are applicable, where, and why | `applicability::find_applicable_optimizations`/`find_applicable_optimizations_with` |
-| Add a new kind of applicability finding | new `impl ReplacementStrategy`, wired into `default_strategies`/`default_strategies_with` — not a new applicability-specific trait, see §19 |
+| Explain why a replacement exists, where, and why | `explanation::explain_replacements`/`explain_replacements_with` |
+| Add a new kind of replacement explanation | new `impl ReplacementStrategy`, wired into `default_strategies`/`default_strategies_with` — not a new explanation-specific trait, see §19 |
 
 ---
 
-## 19. Applicability reporting (`applicability.rs`)
+## 19. Explaining a replacement (`explanation.rs`)
 
-`applicability::find_applicable_optimizations`/`find_applicable_optimizations_with` answer a different question than everything above: not "what could this target become" (`ReplacementStrategy::replacements`) but "which of the optimizations already discovered are worth telling a user about, and why." It is a **reporting view over `PlanSpace`**, not a second search or a second rule engine.
+`explanation::explain_replacements`/`explain_replacements_with` answer a different question than everything above: not "what could this target become" (`ReplacementStrategy::replacements`) but "why does the replacement already discovered for this target exist, and where." It is a **reporting view over `PlanSpace`**, not a second search or a second rule engine — this crate's *explanation of a replacement*, not an applicability classifier deciding admissibility from scratch.
 
 ### The rule
 
-> A `TargetSubDAG` is applicability-worthy exactly when its `PlanSpace` candidate list contains something beyond the trivial, no-op realization.
+> A `TargetSubDAG` is worth explaining exactly when its `PlanSpace` candidate list contains something beyond the trivial, no-op realization.
 
-Concretely, `applicability.rs` reads two shapes off each `MemoGroup`:
+Concretely, `explanation.rs` reads two shapes off each `MemoGroup`:
 
-- `OptimizationKind::SketchApproximation` — the group's candidates include a `Replacement::Summary` that actually realizes `SummaryFamilyType::Sketch(..)`, i.e. `SketchAlgorithmStrategy` found a real sketch alternative, not just an exact/pass-through candidate.
-- `OptimizationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the group's candidates include `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the group's own `target`).
+- `ExplanationKind::SketchApproximation` — the group's candidates include a `Replacement::Summary` that actually realizes `SummaryFamilyType::Sketch(..)`, i.e. `SketchAlgorithmStrategy` found a real sketch alternative, not just an exact/pass-through candidate.
+- `ExplanationKind::CommonSubexpressionReuse` — `consumer_count >= 2` and the group's candidates include `SharedSubtreeStrategy`'s "build once and share" candidate (the `Replacement::Rewrite` whose `Rc` is the group's own `target`).
 
-Each `ApplicabilityFinding::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `applicability.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.
+Each `ReplacementExplanation::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `explanation.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.
 
-### Why there is no `ApplicabilityRule` trait
+`ReplacementExplanation` also carries `node_hash: u64` — `asap_types::pre_asap::cse::structural_hash` of the `TargetSubDAG`'s own `target` subtree, the identical function (and identical `Rc<QueryExpr>` input shape) `asap_types::dag_export::DagNode::hash` is computed with. A downstream consumer that independently exported the same `QueryExpr` (e.g. `tools/dag-viewer`'s `dag_export` devtools binary) can match an explanation to the exact `DagNode` it's about by comparing hashes, with no string-matching or path-guessing against `location` required — see `crates/devtools/src/bin/dag_export.rs` for the reference consumer.
 
-An earlier version of this module (superseded, PR #247) had its own extension-point trait for adding a new optimization to the report. It is gone. Once findings are read off `PlanSpace`, a new applicability finding needs a new `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with` regardless — that is the only way a new kind of candidate reaches the `PlanSpace` this module reads. A second, applicability-specific extension point would just be a second place to register the same thing. `find_applicable_optimizations_with`'s own `strategies: &[Box<dyn ReplacementStrategy>]` parameter is where a caller plugs in something custom — the same customization point `search_workload_with` itself exposes.
+### Why there is no `ExplanationRule` trait
+
+An earlier version of this module (superseded, PR #247, under the name `applicability.rs`) had its own extension-point trait for adding a new optimization to the report. It is gone. Once explanations are read off `PlanSpace`, a new explanation needs a new `impl ReplacementStrategy` wired into `default_strategies`/`default_strategies_with` regardless — that is the only way a new kind of candidate reaches the `PlanSpace` this module reads. A second, explanation-specific extension point would just be a second place to register the same thing. `explain_replacements_with`'s own `strategies: &[Box<dyn ReplacementStrategy>]` parameter is where a caller plugs in something custom — the same customization point `search_workload_with` itself exposes.
 
 ### What it still owns: `location` text
 
-`PlanSpace`/`MemoGroup` track `Rc<QueryExpr>` pointer identity, not human-readable breadcrumbs. `applicability.rs` keeps one small, self-contained traversal, `collect_locations`, whose only job is turning "this `Rc`" into prose like `root "dash_a" > lhs` for `ApplicabilityFinding::location`. It makes no applicability decision — it runs identically regardless of what any strategy found.
+`PlanSpace`/`MemoGroup` track `Rc<QueryExpr>` pointer identity, not human-readable breadcrumbs. `explanation.rs` keeps one small, self-contained traversal, `collect_locations`, whose only job is turning "this `Rc`" into prose like `root "dash_a" > lhs` for `ReplacementExplanation::location`. It makes no explanation decision — it runs identically regardless of what any strategy found.
 
 ### Using it
 
 ```rust
-use asap_aware_mapping::{find_applicable_optimizations, OptimizationKind};
+use asap_aware_mapping::{explain_replacements, ExplanationKind};
 
-let findings = find_applicable_optimizations(vec![("dashboard_p99", query)]);
-for finding in &findings {
-    match finding.optimization {
-        OptimizationKind::SketchApproximation => { /* ... */ }
-        OptimizationKind::CommonSubexpressionReuse => { /* ... */ }
-        _ => { /* OptimizationKind is #[non_exhaustive] */ }
+let explanations = explain_replacements(vec![("dashboard_p99", query)]);
+for explanation in &explanations {
+    match explanation.kind {
+        ExplanationKind::SketchApproximation => { /* ... */ }
+        ExplanationKind::CommonSubexpressionReuse => { /* ... */ }
+        _ => { /* ExplanationKind is #[non_exhaustive] */ }
     }
 }
 ```
 
-To plug in a deployment-specific strategy or `CostModel`, use `find_applicable_optimizations_with` with a strategy set built the same way `default_strategies_with` builds one — see §8 and §11.
+To plug in a deployment-specific strategy or `CostModel`, use `explain_replacements_with` with a strategy set built the same way `default_strategies_with` builds one — see §8 and §11.
 
-### Adding a new applicability finding
+### Adding a new kind of replacement explanation
 
-There is no separate checklist here: follow [§4](#4-adding-a-new-replacementstrategy) to add the new `ReplacementStrategy`, wire it into `default_strategies`/`default_strategies_with` (§18), add an `OptimizationKind` variant, and extend `findings_from_plan_space` to recognize the new candidate shape. If the new strategy's `matches`/`replacements` are already correct and tested, the applicability finding falls out of the existing `PlanSpace` translation with no new discovery logic required.
+There is no separate checklist here: follow [§4](#4-adding-a-new-replacementstrategy) to add the new `ReplacementStrategy`, wire it into `default_strategies`/`default_strategies_with` (§18), add an `ExplanationKind` variant, and extend `findings_from_plan_space` to recognize the new candidate shape. If the new strategy's `matches`/`replacements` are already correct and tested, the explanation falls out of the existing `PlanSpace` translation with no new discovery logic required.

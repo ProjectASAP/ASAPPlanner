@@ -46,10 +46,10 @@
 //!   a restructuring of this trait or of any existing strategy. `replacements`
 //!   is **exhaustive, not ranked, not filtered** — reporting "every valid
 //!   candidate" is core's job; picking the best one is left to the caller.
-//!   [`crate::applicability`] (issue #257) is this trait's own downstream
-//!   consumer, not a second extension point: it reports "which optimizations
-//!   are applicable" as a pure view over the candidates strategies registered
-//!   here already produced, rather than re-deriving applicability with a rule
+//!   [`crate::explanation`] (issue #257) is this trait's own downstream
+//!   consumer, not a second extension point: it explains why a replacement
+//!   exists as a pure view over the candidates strategies registered here
+//!   already produced, rather than re-deriving that explanation with a rule
 //!   of its own.
 //!
 //! A caller that wants one executable answer takes the first
@@ -357,7 +357,7 @@ pub enum Replacement {
 /// One candidate replacement for a [`TargetSubDAG`], plus a human-readable
 /// `rationale` explaining why it's a valid candidate (meant for a
 /// report/log/debugging a search engine's choices, not machine parsing —
-/// [`crate::applicability::ApplicabilityFinding::reason`] literally reuses
+/// [`crate::explanation::ReplacementExplanation::reason`] literally reuses
 /// this same string rather than inventing new prose of its own.
 #[derive(Debug, Clone)]
 pub struct ReplacementSubDAG {
@@ -1041,7 +1041,7 @@ fn describe_implementation(intent: &AggIntent, implementation: &Implementation) 
 /// this crate's other `AggIntent` matches, e.g. [`implementations_for_with`]'s)
 /// — this is prose for a rationale string, not a decision, so an unlisted
 /// variant just falls back to its `Debug` tag rather than forcing every
-/// future intent to be named here too. [`crate::applicability`] needs no
+/// future intent to be named here too. [`crate::explanation`] needs no
 /// counterpart of its own: it reads a candidate's `rationale` — built from
 /// this text — straight off [`ReplacementSubDAG`], rather than re-describing
 /// the same intent a second time.
@@ -1764,9 +1764,9 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
 /// The strategies [`search_workload`] runs, in the built-in
 /// [`DefaultCostModel`] configuration — mirrors this module's own two
 /// shipped [`ReplacementStrategy`] impls.
-/// [`crate::applicability::find_applicable_optimizations`] (issue #257) uses
+/// [`crate::explanation::explain_replacements`] (issue #257) uses
 /// this same set (via [`search_workload`]) rather than keeping a second,
-/// applicability-specific list to stay in sync with. Use
+/// explanation-specific list to stay in sync with. Use
 /// [`default_strategies_with`] to plug in a deployment-specific
 /// [`CostModel`] instead.
 pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
@@ -1808,7 +1808,7 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> PlanSpace<Id> {
 ///
 /// Runs [`share_common_subtrees`] once over `roots` first — so every
 /// strategy (and, transitively, every
-/// [`crate::applicability::ApplicabilityFinding`] a caller reads off the
+/// [`crate::explanation::ReplacementExplanation`] a caller reads off the
 /// result) sees the same already-deduplicated tree — then discovers every
 /// `TargetSubDAG` (see [`discover_targets`]) and runs the
 /// fixpoint loop the module docs describe, capped at
@@ -2938,7 +2938,7 @@ mod tests {
     #[test]
     fn realistic_cse_output_produces_a_two_consumer_target() {
         // Two workload roots that `share_common_subtrees` collapses onto one
-        // Rc (mirrors `applicability`'s and `cse`'s own fixtures): a grouped
+        // Rc (mirrors `explanation`'s and `cse`'s own fixtures): a grouped
         // Sum aggregate over the same scan, built independently at each root.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));

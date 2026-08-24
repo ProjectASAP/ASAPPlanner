@@ -1,8 +1,18 @@
-//! Optimization-applicability *reporting* over a workload's pre-ASAP query
-//! roots (issue #33: "Add logic to detect which optimizations are applicable
-//! to a query workload"; this module: issue #257).
+//! This crate's **explanation of a replacement**: for a `TargetSubDAG` that
+//! [`crate::replacement::search_workload`] found something to say about, why
+//! does that candidate exist? (issue #33: "Add logic to detect which
+//! optimizations are applicable to a query workload"; this module: issue
+//! #257.)
 //!
-//! ## The reframing: applicability *is* "this `TargetSubDAG`'s candidate
+//! This module does not answer "is optimization X applicable here, yes or
+//! no" — that framing implies a classifier deciding admissibility from
+//! scratch. What it actually does is narrower and more mechanical: reuse a
+//! matching candidate's own [`crate::replacement::ReplacementSubDAG::rationale`]
+//! to explain, in the candidate's own words, why a [`Replacement`] exists at
+//! a given target. No new prose is invented here; see "The reframing" below
+//! for exactly what's being reused and why.
+//!
+//! ## The reframing: an explanation *is* "this `TargetSubDAG`'s candidate
 //! list is non-trivial"
 //!
 //! Earlier (PR #247, superseded by this module — see "What this replaces"
@@ -28,17 +38,17 @@
 //! sketch families to choose between), or one candidate that is itself a
 //! genuine alternative to the status quo (share this already-shared subtree
 //! instead of recomputing it at every consumer), *is* an applicability
-//! finding — [`find_applicable_optimizations`] and
-//! [`find_applicable_optimizations_with`] just translate [`PlanSpace`]'s
+//! finding — [`explain_replacements`] and
+//! [`explain_replacements_with`] just translate [`PlanSpace`]'s
 //! [`MemoGroup`]s into that shape:
 //!
-//! - [`OptimizationKind::SketchApproximation`] — the `TargetSubDAG`'s
+//! - [`ExplanationKind::SketchApproximation`] — the `TargetSubDAG`'s
 //!   candidate list contains at least one [`Replacement::Summary`] that
 //!   actually realizes a sketch family (`SummaryFamilyType::Sketch`), i.e.
 //!   [`SketchAlgorithmStrategy`] found something to offer beyond whatever
 //!   exact/pass-through candidate [`crate::replacement`]'s own
 //!   `implementations_for_with` would have committed to on its own.
-//! - [`OptimizationKind::CommonSubexpressionReuse`] — the `TargetSubDAG`
+//! - [`ExplanationKind::CommonSubexpressionReuse`] — the `TargetSubDAG`
 //!   has two or more consumers *and* its candidate list contains the
 //!   [`SharedSubtreeStrategy`] "build once and share" candidate (the one
 //!   whose `Rc` is the group's own `target`) — i.e. sharing this subtree
@@ -55,13 +65,13 @@
 //!
 //! ## What this replaces, and what carries over unmodified
 //!
-//! [`ApplicabilityFinding`] and [`OptimizationKind`] keep PR #247's original
+//! [`ReplacementExplanation`] and [`ExplanationKind`] keep PR #247's original
 //! shape and contract — a struct/enum pair meant for a downstream
 //! DAG-visualization consumer, `#[non_exhaustive]` discipline (only an
 //! optimization backed by a real, registered [`ReplacementStrategy`] gets a
 //! variant; see the catalog table below for everything still deliberately
 //! unrepresented). So do the two top-level entry points,
-//! [`find_applicable_optimizations`] and [`find_applicable_optimizations_with`]
+//! [`explain_replacements`] and [`explain_replacements_with`]
 //! — same "workload roots in, findings out" contract, mirroring
 //! [`crate::replacement::search_workload`]/[`crate::replacement::search_workload_with`]'s
 //! own signature shape. Only the *data source* changed: this module now
@@ -75,8 +85,8 @@
 //! ## Why a second, applicability-specific rule trait doesn't exist here
 //!
 //! PR #247 gave this module its own extension-point trait, `ApplicabilityRule`
-//! (`fn optimization(&self) -> OptimizationKind` + `fn evaluate(&self, roots)
-//! -> Vec<ApplicabilityFinding>`), the same shape [`crate::cost_model::CostModel`]
+//! (`fn optimization(&self) -> ExplanationKind` + `fn evaluate(&self, roots)
+//! -> Vec<ReplacementExplanation>`), the same shape [`crate::cost_model::CostModel`]
 //! and [`crate::replacement::Matcher`] use elsewhere in this crate. Once
 //! findings are a *view* over [`PlanSpace`] rather than an independent
 //! computation, that trait would be a second extension point answering a
@@ -91,7 +101,7 @@
 //! would just be re-describing candidates the other (the strategy) already
 //! produced. So this module ships no extension-point trait of its own:
 //! [`ReplacementStrategy`] already *is* that extension point, one layer
-//! down, and [`find_applicable_optimizations_with`]'s own `strategies`
+//! down, and [`explain_replacements_with`]'s own `strategies`
 //! parameter is where a caller plugs in a custom one (or a custom
 //! `CostModel`, via [`crate::replacement::SketchAlgorithmStrategy::new`]) — the identical spot
 //! [`crate::replacement::search_workload_with`] itself exposes.
@@ -116,7 +126,7 @@
 //!    [`PlanSpace`]'s internal map — there is exactly one group per distinct
 //!    `Rc`, full stop, so a shared `Aggregate` reached via two different
 //!    `BinaryOp` branches (or two different workload roots) is exactly one
-//!    group, hence at most one [`OptimizationKind::SketchApproximation`]
+//!    group, hence at most one [`ExplanationKind::SketchApproximation`]
 //!    finding, no matter how many paths reach it.
 //!    [`tests::a_shared_sketchable_aggregate_is_reported_only_once`] pins
 //!    this directly.
@@ -126,7 +136,7 @@
 //!
 //! [`MemoGroup`]/[`PlanSpace`] deliberately track only `Rc<QueryExpr>`
 //! pointer identity — the currency the search itself needs — not
-//! caller-facing prose. [`ApplicabilityFinding::location`] is prose (a
+//! caller-facing prose. [`ReplacementExplanation::location`] is prose (a
 //! breadcrumb like `root "dash_a" > lhs`), so this module keeps one small,
 //! self-contained walk of its own, [`collect_locations`], whose *only* job
 //! is turning "this `Rc`" into "the human-readable place(s) it occurs" for a
@@ -146,10 +156,10 @@
 //! primitives with **no [`ReplacementStrategy`] implementation anywhere in
 //! this codebase today**. Faking a variant for one of them would report a
 //! finding this codebase cannot back with a real candidate, so none of the
-//! below get an [`OptimizationKind`] variant yet — each gets one once a real
+//! below get an [`ExplanationKind`] variant yet — each gets one once a real
 //! strategy exists and is wired into [`crate::replacement::default_strategies`]:
 //!
-//! | Catalog entry | Status | Where a future `OptimizationKind` would come from |
+//! | Catalog entry | Status | Where a future `ExplanationKind` would come from |
 //! |---|---|---|
 //! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | No `ReplacementStrategy` implementation in this codebase yet (tracked separately, issue #253) | Once wired into `default_strategies()`: any `Replacement::Rewrite` candidate that strategy proposes |
 //! | Roll-ups (fine-to-coarse group-by reuse) | No `ReplacementStrategy` implementation in this codebase yet (tracked separately, issue #254) | Once wired into `default_strategies()`: any `Replacement::Rewrite` candidate that strategy proposes |
@@ -177,11 +187,12 @@ use std::fmt::Display;
 use std::rc::Rc;
 
 use asap_types::post_asap::{SummaryExpr, SummaryFamilyType, SummaryNode};
+use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::replacement::{self, MemoGroup, PlanSpace, Replacement, ReplacementStrategy};
 
-/// Which optimization an [`ApplicabilityFinding`] is about.
+/// Which kind of replacement a [`ReplacementExplanation`] is about.
 ///
 /// `#[non_exhaustive]`: only optimizations with a real [`ReplacementStrategy`]
 /// behind them get a variant (see the module docs' "Catalog primitives
@@ -191,7 +202,7 @@ use crate::replacement::{self, MemoGroup, PlanSpace, Replacement, ReplacementStr
 /// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum OptimizationKind {
+pub enum ExplanationKind {
     /// A `TargetSubDAG`'s candidate list contains at least one
     /// [`Replacement::Summary`] that realizes a sketch family —
     /// [`crate::replacement::SketchAlgorithmStrategy`] found a genuine sketch
@@ -207,20 +218,30 @@ pub enum OptimizationKind {
     CommonSubexpressionReuse,
 }
 
-/// One positive applicability result: `optimization` is applicable at
-/// `location` (a human-readable breadcrumb into the workload — e.g.
-/// `root "dashboard_p99"` or `root "ratio" > lhs`), for `reason`
-/// (human-readable, meant for a report/log, not machine parsing — literally
-/// the matching candidate's own [`crate::replacement::ReplacementSubDAG::rationale`]).
+/// Why a [`Replacement`] of `kind` exists at `location` (a human-readable
+/// breadcrumb into the workload — e.g. `root "dashboard_p99"` or
+/// `root "ratio" > lhs`): `reason` (human-readable, meant for a report/log,
+/// not machine parsing — literally the matching candidate's own
+/// [`crate::replacement::ReplacementSubDAG::rationale`]).
+///
+/// `node_hash` is [`structural_hash`](asap_types::pre_asap::cse::structural_hash)
+/// of the `TargetSubDAG`'s own `target` subtree — the same function, on the
+/// same `Rc<QueryExpr>` shape, that [`asap_types::dag_export::DagNode::hash`]
+/// is computed with. A downstream consumer that independently exported the
+/// same `QueryExpr` (e.g. via `asap_types::dag_export::export`) can match
+/// this explanation to the exact `DagNode` it's about by comparing hashes —
+/// no string-matching or path-guessing against `location` required.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApplicabilityFinding {
-    pub optimization: OptimizationKind,
+pub struct ReplacementExplanation {
+    pub kind: ExplanationKind,
     pub location: String,
     pub reason: String,
+    pub node_hash: u64,
 }
 
-/// Determine which known optimizations are applicable to a workload's
-/// pre-ASAP query roots, using [`crate::replacement::default_strategies`].
+/// Explain every replacement [`crate::replacement::search_workload`] finds
+/// across a workload's pre-ASAP query roots, using
+/// [`crate::replacement::default_strategies`].
 ///
 /// `roots` — like [`crate::replacement::search_workload`]'s own `Id` type
 /// parameter — is caller-chosen: a `QueryWorkload` entry's own key, an index,
@@ -230,13 +251,13 @@ pub struct ApplicabilityFinding {
 /// Internally runs [`crate::replacement::search_workload`] to build the
 /// candidate-plan space, then reads findings off it — see the module docs'
 /// "The reframing" section for what that translation actually checks.
-pub fn find_applicable_optimizations<Id: Display>(
+pub fn explain_replacements<Id: Display>(
     roots: Vec<(Id, QueryExpr)>,
-) -> Vec<ApplicabilityFinding> {
-    find_applicable_optimizations_with(roots, &replacement::default_strategies())
+) -> Vec<ReplacementExplanation> {
+    explain_replacements_with(roots, &replacement::default_strategies())
 }
 
-/// Like [`find_applicable_optimizations`], but searches with `strategies`
+/// Like [`explain_replacements`], but searches with `strategies`
 /// instead of [`crate::replacement::default_strategies`] — the extension
 /// point for a deployment-specific [`ReplacementStrategy`], or a custom
 /// `CostModel` plugged into
@@ -244,10 +265,10 @@ pub fn find_applicable_optimizations<Id: Display>(
 /// [`crate::replacement::default_strategies_with`]).
 ///
 /// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
-pub fn find_applicable_optimizations_with<'s, Id: Display>(
+pub fn explain_replacements_with<'s, Id: Display>(
     roots: Vec<(Id, QueryExpr)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
-) -> Vec<ApplicabilityFinding> {
+) -> Vec<ReplacementExplanation> {
     let ided: Vec<(String, Rc<QueryExpr>)> = roots
         .into_iter()
         .map(|(id, expr)| (id.to_string(), Rc::new(expr)))
@@ -257,37 +278,45 @@ pub fn find_applicable_optimizations_with<'s, Id: Display>(
 }
 
 /// Translate every discovered [`MemoGroup`] in `space` into zero, one, or two
-/// [`ApplicabilityFinding`]s (a `TargetSubDAG` can be both sketch-approximable
+/// [`ReplacementExplanation`]s (a `TargetSubDAG` can be both sketch-approximable
 /// *and* shared — the two optimizations are independent axes, not mutually
 /// exclusive).
 ///
-/// `space`'s own `Id` is always `String` here: [`find_applicable_optimizations_with`]
+/// `space`'s own `Id` is always `String` here: [`explain_replacements_with`]
 /// already converted the caller's `Id: Display` into a `String` (via
 /// `to_string()`) before calling [`crate::replacement::search_workload_with`],
 /// so this function (and [`collect_locations`], which formats `id` with
 /// [`std::fmt::Debug`] for the breadcrumb text) doesn't need its own generic
 /// `Id` bound.
-fn findings_from_plan_space(space: &PlanSpace<String>) -> Vec<ApplicabilityFinding> {
+fn findings_from_plan_space(space: &PlanSpace<String>) -> Vec<ReplacementExplanation> {
     let locations = collect_locations(&space.roots);
+    // One cache for the whole pass, mirroring `dag_export::export`'s own
+    // `HashCache` reuse — this is a bottom-up pass over every discovered
+    // group, so amortizing the cache across groups (rather than resetting it
+    // per group) is real, not just a micro-optimization.
+    let mut hash_cache = HashCache::new();
     let mut findings = Vec::new();
     for group in space.groups() {
         let location = locations
             .get(&Rc::as_ptr(&group.target))
             .map(|locs| locs.join(", "))
             .unwrap_or_default();
+        let node_hash = structural_hash(&group.target, &mut hash_cache);
 
         if let Some(reason) = sketch_finding_reason(group) {
-            findings.push(ApplicabilityFinding {
-                optimization: OptimizationKind::SketchApproximation,
+            findings.push(ReplacementExplanation {
+                kind: ExplanationKind::SketchApproximation,
                 location: location.clone(),
                 reason,
+                node_hash,
             });
         }
         if let Some(reason) = shared_subexpr_finding_reason(group) {
-            findings.push(ApplicabilityFinding {
-                optimization: OptimizationKind::CommonSubexpressionReuse,
+            findings.push(ReplacementExplanation {
+                kind: ExplanationKind::CommonSubexpressionReuse,
                 location,
                 reason,
+                node_hash,
             });
         }
     }
@@ -497,10 +526,10 @@ mod tests {
     #[test]
     fn approximate_quantile_is_a_sketch_applicability_finding() {
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
-        let findings = find_applicable_optimizations(vec![("dashboard_p99", q)]);
+        let findings = explain_replacements(vec![("dashboard_p99", q)]);
         let sketch: Vec<_> = findings
             .iter()
-            .filter(|f| f.optimization == OptimizationKind::SketchApproximation)
+            .filter(|f| f.kind == ExplanationKind::SketchApproximation)
             .collect();
         assert_eq!(
             sketch.len(),
@@ -509,6 +538,29 @@ mod tests {
         );
         assert!(sketch[0].location.contains("dashboard_p99"));
         assert!(sketch[0].reason.to_lowercase().contains("kll"));
+    }
+
+    /// `node_hash` must be the literal `structural_hash` a downstream
+    /// consumer would compute over the *same* `QueryExpr` subtree via
+    /// `asap_types::dag_export::export` — the whole point of carrying it is
+    /// that two independent exports of the same tree agree, with no
+    /// string-matching against `location` required.
+    #[test]
+    fn node_hash_matches_dag_export_hash_for_the_same_subtree() {
+        let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
+        let graph = asap_types::dag_export::export(&q);
+        let expected_hash = graph.nodes[graph.root as usize].hash;
+
+        let findings = explain_replacements(vec![("dashboard_p99", q)]);
+        let sketch = findings
+            .iter()
+            .find(|f| f.kind == ExplanationKind::SketchApproximation)
+            .expect("expected a sketch finding");
+        assert_eq!(
+            sketch.node_hash, expected_hash,
+            "ReplacementExplanation::node_hash must match dag_export's DagNode::hash \
+             for the same QueryExpr subtree"
+        );
     }
 
     #[test]
@@ -522,11 +574,11 @@ mod tests {
             },
             metric_scan(&["job"]),
         );
-        let findings = find_applicable_optimizations(vec![("exact_p99", q)]);
+        let findings = explain_replacements(vec![("exact_p99", q)]);
         assert!(
             findings
                 .iter()
-                .all(|f| f.optimization != OptimizationKind::SketchApproximation),
+                .all(|f| f.kind != ExplanationKind::SketchApproximation),
             "an Exact accuracy target must not report sketch-applicability, got {findings:?}"
         );
     }
@@ -540,10 +592,10 @@ mod tests {
         // nested_aggregates_bind_per_node test uses.
         let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let outer = agg(vec![], default_quantile(0.9), inner);
-        let findings = find_applicable_optimizations(vec![("q", outer)]);
+        let findings = explain_replacements(vec![("q", outer)]);
         let sketch_count = findings
             .iter()
-            .filter(|f| f.optimization == OptimizationKind::SketchApproximation)
+            .filter(|f| f.kind == ExplanationKind::SketchApproximation)
             .count();
         assert_eq!(
             sketch_count, 1,
@@ -554,10 +606,10 @@ mod tests {
     #[test]
     fn pass_through_intent_reports_no_sketch_finding() {
         let q = agg(vec![2], AggIntent::Avg { col: None }, metric_scan(&["job"]));
-        let findings = find_applicable_optimizations(vec![("avg_latency", q)]);
+        let findings = explain_replacements(vec![("avg_latency", q)]);
         assert!(findings
             .iter()
-            .all(|f| f.optimization != OptimizationKind::SketchApproximation));
+            .all(|f| f.kind != ExplanationKind::SketchApproximation));
     }
 
     /// A sketch-applicable `Aggregate` reachable via two paths that CSE
@@ -577,10 +629,10 @@ mod tests {
             rhs: Rc::new(quantile),
             vector_match: None,
         };
-        let findings = find_applicable_optimizations(vec![("ratio", root)]);
+        let findings = explain_replacements(vec![("ratio", root)]);
         let sketch: Vec<_> = findings
             .iter()
-            .filter(|f| f.optimization == OptimizationKind::SketchApproximation)
+            .filter(|f| f.kind == ExplanationKind::SketchApproximation)
             .collect();
         assert_eq!(
             sketch.len(),
@@ -599,10 +651,10 @@ mod tests {
         // gate — and identical across both roots, so it is shareable.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let findings = find_applicable_optimizations(vec![("dash_a", a), ("dash_b", b)]);
+        let findings = explain_replacements(vec![("dash_a", a), ("dash_b", b)]);
         let reuse: Vec<_> = findings
             .iter()
-            .filter(|f| f.optimization == OptimizationKind::CommonSubexpressionReuse)
+            .filter(|f| f.kind == ExplanationKind::CommonSubexpressionReuse)
             .collect();
         assert_eq!(
             reuse.len(),
@@ -621,11 +673,11 @@ mod tests {
             AggIntent::Sum { col: None },
             metric_scan(&["route"]),
         );
-        let findings = find_applicable_optimizations(vec![("dash_a", a), ("dash_b", b)]);
+        let findings = explain_replacements(vec![("dash_a", a), ("dash_b", b)]);
         assert!(
             findings
                 .iter()
-                .all(|f| f.optimization != OptimizationKind::CommonSubexpressionReuse),
+                .all(|f| f.kind != ExplanationKind::CommonSubexpressionReuse),
             "structurally different queries must not report reuse, got {findings:?}"
         );
     }
@@ -637,10 +689,10 @@ mod tests {
         // must not report a finding either.
         let a = agg(vec![], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let findings = find_applicable_optimizations(vec![("a", a), ("b", b)]);
+        let findings = explain_replacements(vec![("a", a), ("b", b)]);
         assert!(findings
             .iter()
-            .all(|f| f.optimization != OptimizationKind::CommonSubexpressionReuse));
+            .all(|f| f.kind != ExplanationKind::CommonSubexpressionReuse));
     }
 
     #[test]
@@ -656,10 +708,10 @@ mod tests {
             rhs: Rc::new(branch),
             vector_match: None,
         };
-        let findings = find_applicable_optimizations(vec![("ratio", q)]);
+        let findings = explain_replacements(vec![("ratio", q)]);
         let reuse: Vec<_> = findings
             .iter()
-            .filter(|f| f.optimization == OptimizationKind::CommonSubexpressionReuse)
+            .filter(|f| f.kind == ExplanationKind::CommonSubexpressionReuse)
             .collect();
         assert_eq!(
             reuse.len(),
@@ -691,10 +743,10 @@ mod tests {
             pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(2)))),
             child: Rc::new(shared),
         };
-        let findings = find_applicable_optimizations(vec![("a", root_a), ("b", root_b)]);
+        let findings = explain_replacements(vec![("a", root_a), ("b", root_b)]);
         let reuse: Vec<_> = findings
             .iter()
-            .filter(|f| f.optimization == OptimizationKind::CommonSubexpressionReuse)
+            .filter(|f| f.kind == ExplanationKind::CommonSubexpressionReuse)
             .collect();
         assert_eq!(
             reuse.len(),
@@ -733,7 +785,7 @@ mod tests {
         let strategies: Vec<Box<dyn ReplacementStrategy + '_>> = vec![Box::new(
             crate::replacement::SketchAlgorithmStrategy::new(&custom_model),
         )];
-        let findings = find_applicable_optimizations_with(vec![("q", q)], &strategies);
+        let findings = explain_replacements_with(vec![("q", q)], &strategies);
         assert_eq!(findings.len(), 1);
         assert!(findings[0].reason.to_lowercase().contains("ddsketch"));
     }
