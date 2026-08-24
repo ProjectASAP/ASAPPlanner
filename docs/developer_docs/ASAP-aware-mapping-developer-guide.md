@@ -45,69 +45,39 @@ Do not put cost-based pruning into a `ReplacementStrategy`. A strategy must enum
 
 The diagram below follows one query (or a whole workload) all the way from its first `TargetSubDAG` through every component this PR's design adds, to a downstream consumer. It is the whole-PR picture; §3 below zooms into the replacement-strategy path specifically, with its own diagrams.
 
-```text
-        WHOLE-PR ARCHITECTURE: from a query in hand (or a whole workload)
-        to a ranked, explainable set of candidates
+```mermaid
+flowchart TB
+  classDef input fill:#e8f1ff,stroke:#4b78b8,color:#172b4d
+  classDef generate fill:#e7f7ef,stroke:#31835e,color:#173f2d
+  classDef store fill:#fff6dd,stroke:#b78922,color:#513d0c
+  classDef choose fill:#fcebdc,stroke:#c46a25,color:#572d0c
+  classDef report fill:#f2eafe,stroke:#7950b3,color:#34204f
 
-  one QueryExpr already in hand         a whole workload:
-  (single-query API, or                 Vec<(Id, Rc<QueryExpr>)>
-  realize_child's own recursion)        walked by search_workload_with
-              |                                    |
-              v                                    v
-  TargetSubDAG::new(&root)         discovers every distinct node's real,
-  (consumer_count assumed 1)       cross-workload consumer_count; one
-              |                    TargetSubDAG per distinct node found
-              |                                    |
-              +--------------------+---------------+
-                                   v
-                              TargetSubDAG
-                                   |
-                +------------------+-------------------+
-                v                                       v
-    SketchAlgorithmStrategy                 SharedSubtreeStrategy
-    ::replacements(target)                  ::replacements(target)
-                |                                       |
-    consults CostModel while                no cost logic at all — just
-    generating: calls                       enumerates "build once and
-    implementations_for_with(               share" vs. "build indepen-
-    intent, cost_model), then               dently for each consumer"
-    constructs each SummaryNode                         |
-                |                                       |
-                +------------------+--------------------+
-                                   v
-              unranked Vec<ReplacementSubDAG> candidates
-              (Replacement::Summary or Replacement::Rewrite —
-               every valid alternative kept, nothing pruned yet)
-                                   |
-                                   v
-              PlanSpace: one MemoGroup per distinct TargetSubDAG in
-              the whole workload, holding every candidate discovered
-              for it, still unranked
-                                   |
-                                   v
-              PlanSpace::cost_sorted(cost_model) dispatches by
-              candidate shape:
-                - a same-shape Rewrite pair (share vs. recompute)
-                      -> CostModel::cse_share_decision
-                - a same-shape run of Summary/sketch candidates
-                      -> CostModel::rank_candidates
-                - every candidate, regardless of shape, also gets
-                      -> CostModel::estimate_cost   (a real number)
-                                   |
-                                   v
-              RankedGroup { candidates: ranked best-first,
-                            costs: aligned index-for-index }
-                                   |
-                                   v
-              explanation::explain_replacements /
-              explain_replacements_with — reads PlanSpace, copies each
-              relevant candidate's own rationale, tags the result
-              with node_hash
-                                   |
-                                   v
-              a downstream consumer, e.g. crates/devtools's dag_export
-              binary -> tools/dag-viewer (matches an explanation to the
-              DagNode it's about by node_hash)
+  SQ["One QueryExpr<br/>single-query API or child recursion"]:::input
+  WL["Whole workload<br/>Vec&lt;(Id, Rc&lt;QueryExpr&gt;)&gt;"]:::input
+  SQ --> NEW["TargetSubDAG::new<br/>consumer_count = 1"]:::generate
+  WL --> SEARCH["search_workload_with<br/>CSE + whole-DAG discovery"]:::generate
+  NEW --> TARGET[TargetSubDAG]:::generate
+  SEARCH --> TARGET
+
+  TARGET --> SKETCH["SketchAlgorithmStrategy<br/>construct every valid SummaryNode"]:::generate
+  TARGET --> SHARED["SharedSubtreeStrategy<br/>share vs. recompute"]:::generate
+  CM([CostModel]):::choose -. "rank + size" .-> SKETCH
+  SKETCH --> CAND["Vec&lt;ReplacementSubDAG&gt;<br/>Summary or Rewrite; nothing pruned"]:::store
+  SHARED --> CAND
+  CAND --> MEMO["PlanSpace / MemoGroup<br/>all targets, all candidates"]:::store
+
+  MEMO --> SORT[PlanSpace::cost_sorted]:::choose
+  SORT --> RANK[rank_candidates]:::choose
+  SORT --> CSE[cse_share_decision]:::choose
+  SORT --> COST[estimate_cost]:::choose
+  RANK --> GROUP["RankedGroup<br/>best-first candidates + aligned costs"]:::choose
+  CSE --> GROUP
+  COST --> GROUP
+
+  MEMO --> EXPLAIN["explain_replacements<br/>kind + location + rationale + node_hash"]:::report
+  EXPLAIN --> EXPORT[dag_export]:::report
+  EXPORT --> VIEWER[dag-viewer]:::report
 ```
 
 ---
@@ -131,40 +101,30 @@ This crate now also implements the whole-plan Cascades/Volcano-style search the 
 
 The diagram in the previous revision of this guide started at `TargetSubDAG`, as if that were the crate's real top-level input. It isn't — a `TargetSubDAG` is always produced by one of two real entry points, and which one matters (it decides `consumer_count`, which strategies like `SharedSubtreeStrategy` key their whole decision on):
 
-```text
-              TWO WAYS IN — a TargetSubDAG never appears out of nowhere
- ┌──────────────────────────────┐    ┌────────────────────────────────────────┐
- │ one QueryExpr node you       │    │ a whole workload:                      │
- │ already have (one query's    │    │ Vec<(Id, Rc<QueryExpr>)>                │
- │ root, or a child being       │    │ — one query, or many queries at once    │
- │ constructed recursively)     │    └────────────────────┬─────────────────────┘
- └───────────────┬───────────────┘                         │
-                 │                                          v
-                 │                        search_workload_with: runs the pre-ASAP
-                 │                        CSE pass once, then walks every root's
-                 │                        WHOLE DAG (not just root level) to find
-                 │                        every distinct node and its real,
-                 │                        cross-workload consumer_count
-                 v                                          │
-   TargetSubDAG::new(&root)                                 v
-   — consumer_count assumed 1          one TargetSubDAG per distinct node found
-   (the single-query API, and          anywhere in the workload, each already
-   `realize_child`'s recursion         carrying its real consumer_count
-   into a candidate's own child)
-                 │                                          │
-                 └────────────────────┬─────────────────────┘
-                                       v
-                (every TargetSubDAG, from either path, is handed to the same:)
+```mermaid
+flowchart LR
+  classDef direct fill:#e8f1ff,stroke:#4b78b8,color:#172b4d
+  classDef workload fill:#e7f7ef,stroke:#31835e,color:#173f2d
+  classDef common fill:#fff6dd,stroke:#b78922,color:#513d0c
 
-                       ReplacementStrategy::matches(...)
-                             |
-                             v
-                       ReplacementStrategy::replacements(...)
-                          | (SketchAlgorithmStrategy: decide via implementations_for_with,
-                          |  then construct each candidate's SummaryNode, in one method)
-                          +---------------------------------------------+
-                          |                    |                        |
-                     candidate A          candidate B              candidate C
+  subgraph D[Direct, single-node path]
+    Q["QueryExpr root or recursive child"]:::direct
+    Q --> N["TargetSubDAG::new<br/>consumer_count = 1"]:::direct
+  end
+
+  subgraph W[Workload discovery path]
+    ROOTS["Vec&lt;(Id, Rc&lt;QueryExpr&gt;)&gt;"]:::workload
+    ROOTS --> CSE["Run CSE once"]:::workload
+    CSE --> WALK["Walk every root's whole DAG"]:::workload
+    WALK --> T["TargetSubDAG per node<br/>real consumer_count"]:::workload
+  end
+
+  N --> MATCH[ReplacementStrategy::matches]:::common
+  T --> MATCH
+  MATCH --> REPLACE[ReplacementStrategy::replacements]:::common
+  REPLACE --> A[Candidate A]:::common
+  REPLACE --> B[Candidate B]:::common
+  REPLACE --> C[Candidate C]:::common
 ```
 
 The left path is what a caller with one query in hand uses directly (see `docs/user-guide/user-guide.md`'s "Step 2"), and what `realize_child` uses internally to bind a candidate's own child. The right path is `search_workload`/`search_workload_with` — it's the only place `consumer_count` is ever discovered rather than assumed, which is why `SharedSubtreeStrategy` only meaningfully matches something reached through it.
@@ -739,23 +699,13 @@ The strategy matches bindable aggregate nodes.
 
 At a high level:
 
-```text
-Target Aggregate
-     |
-     v
-extract AggIntent
-     |
-     v
-implementations_for_with(...)
-     |
-     v
-every ranked Implementation
-     |
-     v
-construct each candidate's SummaryNode separately
-     |
-     v
-Vec<ReplacementSubDAG>
+```mermaid
+flowchart LR
+  A[Target Aggregate] --> B[Extract AggIntent]
+  B --> C[implementations_for_with]
+  C --> D[Every ranked Implementation]
+  D --> E[Construct each SummaryNode separately]
+  E --> F["Vec&lt;ReplacementSubDAG&gt;"]
 ```
 
 For an approximate quantile, the current candidate list includes both KLL and DDSketch — the strategy returns both, even though the cost model ranks one ahead of the other. For cases where `implementations_for_with` has only one realization, such as an exact accumulator or pass-through, the strategy returns that single realization. There is no separate per-category dispatch inside the strategy: whatever `implementations_for_with` produces, the strategy constructs, one entry at a time.
@@ -992,12 +942,10 @@ If a strategy accepts a cost model, verify that a custom model changes the inten
 
 The current sketch strategy does exactly this:
 
-```text
-custom model prefers DDSketch
-        |
-        v
-strategy still returns
-KLL + DDSketch
+```mermaid
+flowchart LR
+  MODEL[Custom model prefers DDSketch] --> ORDER["Rank: DDSketch, KLL"]
+  ORDER --> RESULT["Strategy returns both<br/>DDSketch + KLL"]
 ```
 
 That is the expected separation between enumeration and ranking.
@@ -1112,11 +1060,12 @@ Typical uses include:
 
 Conceptually:
 
-```text
-SketchAlgorithm + AggIntent + accuracy target
-                 |
-                 v
-            SketchParams
+```mermaid
+flowchart LR
+  ALG[SketchAlgorithm] --> SIZE[CostModel::size_params]
+  INTENT[AggIntent] --> SIZE
+  ACC[Accuracy target] --> SIZE
+  SIZE --> PARAMS[SketchParams]
 ```
 
 ---
@@ -1274,16 +1223,12 @@ and constructs them through the normal construction path.
 
 Therefore, when adding a new built-in sketch algorithm, the intended flow is:
 
-```text
-1. Teach `replacement.rs` that the sketch is a valid candidate
-   for the relevant AggIntent.
-
-2. Teach the cost model how to rank and size it.
-
-3. Ensure `construct_summary` can realize the algorithm.
-
-4. SketchAlgorithmStrategy will then enumerate it through the
-   existing candidate/construction path.
+```mermaid
+flowchart LR
+  MAP["Add algorithm to summary_candidates<br/>for the relevant AggIntent"]
+  MAP --> MODEL["Define CostModel ranking,<br/>sizing, and numeric cost"]
+  MODEL --> BUILD["Teach construct_summary<br/>to realize the algorithm"]
+  BUILD --> ENUM["SketchAlgorithmStrategy<br/>enumerates it automatically"]
 ```
 
 This keeps one source of truth for sketch applicability.
