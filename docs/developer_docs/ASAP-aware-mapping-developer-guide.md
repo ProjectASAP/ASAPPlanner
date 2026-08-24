@@ -99,22 +99,26 @@ registry currently supplies these concrete implementations separately:
 
 ## 3. How the current pieces fit together
 
-The public strategy API is the source of truth for valid replacements:
+The planner repeats one operation throughout the workload: find a target, ask
+each registered strategy for every valid replacement, and store those
+replacements as alternatives for that target. Ranking happens only after the
+complete alternative set has been built.
 
-- `SketchAlgorithmStrategy::replacements(target)` returns every valid bound `SummaryNode` for a bindable aggregate, ranked by preference and sized to the target's accuracy requirement. It does not discard any candidate.
-- A caller that needs one executable answer uses `.into_iter().next()` and handles the empty case according to its execution policy.
+### 3.1 Discover targets across the workload
 
-In the [design document](../design_docs/asap_aware_mapping.md), each `ReplacementSubDAG` is a candidate. The complete `replacements()` result is the set of alternatives for one location in the plan.
+Use `search_workload` or `search_workload_with` for normal planner search. The
+search performs these steps:
 
-**Tradeoff:** a single-target call sizes and constructs every valid sketch candidate before the caller keeps the first one. This costs more than constructing only the preferred candidate, but it preserves the complete choice set. Nested aggregates are evaluated independently, so a choice at one target does not force choices in its children.
+1. Run CSE once to merge structurally identical subtrees that may legally be
+   shared.
+2. Walk the complete DAG beneath every query root, including nodes below
+   unshared parents.
+3. Construct one `TargetSubDAG` per distinct node, with the node's measured
+   `consumer_count`.
+4. Run every registered `ReplacementStrategy` against each target to a
+   fixpoint.
 
-For workload-wide search, `search_workload`/`search_workload_with` discover every candidate `TargetSubDAG`, run every registered `ReplacementStrategy` against each target to a fixpoint, and deduplicate the results into a `PlanSpace`. Each distinct target has one `MemoGroup` containing every discovered alternative. `PlanSpace::cost_sorted` ranks those candidates with the supplied cost model. This MEMO representation avoids materializing a flat list of `2^N` complete plans while preserving every independent choice.
-
-**This crate does not select or materialize one final answer for a workload.** Callers receive every candidate, ranked with cost, from `search_workload`/`search_workload_with` and make the final choice using deployment information such as placement.
-
-### Replacement-strategy path
-
-`search_workload_with` is the planner entry point that discovers targets. It runs CSE, walks the complete DAG under every root, and constructs each `TargetSubDAG` with its measured `consumer_count`. That count directly controls strategies such as `SharedSubtreeStrategy`:
+The discovery and strategy-invocation path is:
 
 ```mermaid
 flowchart LR
@@ -132,13 +136,77 @@ flowchart LR
   REPLACE --> OUT["Candidate list for this strategy and target<br/>each ReplacementSubDAG carries the replacement and rationale"]:::common
 ```
 
-`TargetSubDAG::new(&root)` invokes a strategy against one node in isolation and sets `consumer_count` to `1`. It is useful for tests and focused tooling, but it is not a target-discovery or plan-search entry point. Use `search_workload`/`search_workload_with` whenever strategies need workload context or accurate sharing counts.
+`consumer_count` is workload information, not an estimate of runtime
+executions. It matters to strategies such as `SharedSubtreeStrategy`, which
+only has a share-versus-recompute choice when a target has multiple consumers.
+
+### 3.2 Generate candidates through `ReplacementStrategy`
+
+For each target, the planner first calls `matches(target)`. A matching strategy
+then returns all of its semantically valid alternatives from
+`replacements(target)`.
+
+Each returned `ReplacementSubDAG` contains:
+
+- the `TargetSubDAG` being replaced,
+- a `Replacement` containing either a bound summary or a logical rewrite, and
+- the rationale for offering that replacement.
+
+The complete `replacements()` result is the candidate set produced by one
+strategy for one target. A strategy may order or parameterize candidates with
+help from a `CostModel`, but it must not remove a valid candidate because of
+cost.
+
+### 3.3 Current concrete strategies
+
+The default registry contains two `ReplacementStrategy` implementations:
+
+- `SketchAlgorithmStrategy` matches bindable aggregates. Its
+  `replacements(target)` method constructs every legal bound `SummaryNode`,
+  including applicable sketch, exact-accumulator, and pass-through
+  realizations. Candidates are sized and ordered for the target's accuracy
+  requirement, but none are discarded.
+- `SharedSubtreeStrategy` uses `consumer_count` to identify shared targets. It
+  emits both build-once-and-share and recompute-independently rewrites when a
+  target has multiple consumers.
 
 The important rule is:
 
 > Strategies should reuse existing decision and binding logic where possible instead of reimplementing it.
 
-`SketchAlgorithmStrategy` follows this rule: it exposes every legal realization through `ReplacementStrategy::replacements`, and each result uses the same public `ReplacementSubDAG` shape.
+Both concrete strategies expose their alternatives through the same
+`ReplacementSubDAG` interface, so search and reporting do not need
+strategy-specific discovery logic.
+
+### 3.4 Store and rank the complete search space
+
+Workload search deduplicates candidates into a `PlanSpace`. Each distinct
+target has one `MemoGroup` containing all alternatives discovered for it. This
+MEMO representation preserves independent choices without materializing a flat
+list of `2^N` complete plans for `N` replaceable targets.
+
+`PlanSpace::cost_sorted` ranks each group's existing candidates with the
+supplied `CostModel`. It returns the same candidates in preferred order, with
+costs aligned by index; ranking does not select or remove a candidate.
+
+### 3.5 Single-target use and final selection
+
+`TargetSubDAG::new(&root)` creates a target for one isolated node and sets
+`consumer_count` to `1`. It is useful for tests and focused tooling, but it does
+not discover targets or provide workload-level sharing information. Use
+`search_workload` or `search_workload_with` whenever accurate consumer counts
+matter.
+
+A single-target caller that needs one executable answer may take the first
+candidate with `.into_iter().next()` and handle the empty case according to its
+execution policy. Constructing all candidates before taking the first costs
+more than constructing only the preferred candidate, but it keeps the strategy
+contract consistent and preserves the full choice set for other callers.
+
+**This crate does not select or materialize one final answer for a workload.**
+It returns the complete, ranked search space. A downstream deployment chooses
+the final alternatives using information such as placement and runtime
+constraints.
 
 ---
 
