@@ -7,23 +7,25 @@
 //! attribution, MOAS detection, prefix deaggregation, RIB visibility/churn.
 //!
 //! Unlike the DQC and netflow SQL corpora, this one does **not** pin full
-//! coverage: only queries 1, 2, 6, 12 (plain `COUNT`/`GROUP BY`/`ORDER
-//! BY`/`LIMIT`, plus `uniqExact` -- rewritten to `COUNT(DISTINCT ...)` by
+//! coverage: only queries 1, 2, 6, 11, 12 (plain `COUNT`/`GROUP BY`/`ORDER
+//! BY`/`LIMIT`, `uniqExact` -- rewritten to `COUNT(DISTINCT ...)` by
 //! DataFusion's own `Analyzer` before `lower_plan` runs, see
-//! `UniqExactRewrite` in `sql/mod.rs`) lower end to end. The other 11 fail
-//! for two distinct reasons -- distinct `DataFusionError` variants, not just
-//! "some `SqlError::DataFusion`" -- and `EXPECTED` below pins each query to
-//! its specific variant *and* a snippet of the error message, so a query
-//! silently drifting from one failure mode to the other (e.g. a grammar gap
-//! getting "fixed" into an unknown-function error, or vice versa) fails the
-//! test even though the aggregate 4/9/2 split wouldn't otherwise move:
-//!   - 9 queries hit `DataFusionError::Plan` ("unknown function"): they use
-//!     ClickHouse-only builtins (`toIntervalMinute`, `lagInFrame`,
-//!     `isIPAddressInRange`, `arrayJoin`, `arrayFilter`, ...) that parse fine
-//!     under the ClickHouse dialect but have no DataFusion planner equivalent
-//!     registered. (`toStartOfInterval` itself is registered -- issue #230 --
-//!     but query 7 nests an unregistered `toIntervalMinute(...)` call inside
-//!     it, so it still lands here, just one function name deeper.)
+//! `UniqExactRewrite` in `sql/mod.rs` -- and `lagInFrame`, via a stub
+//! `WindowUDF` and its own `WindowFuncKind` variant, issue #267) lower end
+//! to end. The other 10 fail for two distinct reasons -- distinct
+//! `DataFusionError` variants, not just "some `SqlError::DataFusion`" --
+//! and `EXPECTED` below pins each query to its specific variant *and* a
+//! snippet of the error message, so a query silently drifting from one
+//! failure mode to the other (e.g. a grammar gap getting "fixed" into an
+//! unknown-function error, or vice versa) fails the test even though the
+//! aggregate 5/8/2 split wouldn't otherwise move:
+//!   - 8 queries hit `DataFusionError::Plan` ("unknown function"): they use
+//!     ClickHouse-only builtins (`toIntervalMinute`, `isIPAddressInRange`,
+//!     `arrayJoin`, `arrayFilter`, ...) that parse fine under the ClickHouse
+//!     dialect but have no DataFusion planner equivalent registered.
+//!     (`toStartOfInterval` itself is registered -- issue #230 -- but query
+//!     7 nests an unregistered `toIntervalMinute(...)` call inside it, so it
+//!     still lands here, just one function name deeper.)
 //!   - 2 queries (14, 15) hit `DataFusionError::SQL` (a `ParserError`): they
 //!     use ClickHouse grammar the vendored sqlparser doesn't implement at
 //!     all -- a scalar/tuple `WITH <expr> AS <alias>` binding, and the
@@ -132,9 +134,11 @@ const EXPECTED: &[Expected] = &[
     Expected::UnknownFunction("arrayfilter"),      // 8
     Expected::UnknownFunction("isipaddressinrange"), // 9
     Expected::UnknownFunction("arrayfilter"),      // 10
-    Expected::UnknownFunction("laginframe"),       // 11
-    Expected::Lowered,                             // 12
-    Expected::UnknownFunction("arrayjoin"),        // 13
+    // `lagInFrame` now has its own stub `WindowUDF` + `WindowFuncKind`
+    // variant (issue #267), so this lowers end to end.
+    Expected::Lowered,                                              // 11
+    Expected::Lowered,                                              // 12
+    Expected::UnknownFunction("arrayjoin"),                         // 13
     Expected::UnsupportedGrammar("Expected: identifier, found: ("), // 14
     Expected::UnsupportedGrammar("Expected: a list of columns in parentheses"), // 15
 ];
@@ -192,19 +196,20 @@ async fn corpus_lowering_matches_the_pinned_per_query_outcome() {
     }
     eprintln!("bgp-analytics SQL corpus: {t:?}");
 
-    // Coverage ratchet -- queries 1, 2, 6, 12 lower (6 and 12's `uniqExact`
-    // calls are rewritten to `COUNT(DISTINCT ...)` before `lower_plan` ever
-    // sees them, see `UniqExactRewrite` in `sql/mod.rs`); further
-    // ClickHouse-builtin UDF support or vendored-grammar fixes should move the
-    // affected query's entry in `EXPECTED` to `Lowered` (raising `t.lowered`
-    // here) rather than just this summary.
+    // Coverage ratchet -- queries 1, 2, 6, 11, 12 lower (6 and 12's
+    // `uniqExact` calls are rewritten to `COUNT(DISTINCT ...)` before
+    // `lower_plan` ever sees them, see `UniqExactRewrite` in `sql/mod.rs`;
+    // 11's `lagInFrame` resolves via a stub `WindowUDF`, issue #267);
+    // further ClickHouse-builtin UDF support or vendored-grammar fixes
+    // should move the affected query's entry in `EXPECTED` to `Lowered`
+    // (raising `t.lowered` here) rather than just this summary.
     assert_eq!(
-        t.lowered, 4,
+        t.lowered, 5,
         "BGP analytics SQL coverage changed -- update EXPECTED if support for \
          a ClickHouse builtin or grammar gap was added: {t:?}"
     );
     assert_eq!(
-        t.unknown_function, 9,
+        t.unknown_function, 8,
         "BGP analytics SQL coverage changed: {t:?}"
     );
     assert_eq!(

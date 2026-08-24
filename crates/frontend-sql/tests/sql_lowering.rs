@@ -1554,3 +1554,39 @@ async fn arg_max_rejects_a_non_column_argument() {
         "got {err}"
     );
 }
+
+// ── Issue #267: lagInFrame/leadInFrame get distinct WindowFuncKind variants,
+// not conflated with ANSI Lag/Lead ──────────────────────────────────────────
+
+#[tokio::test]
+async fn lag_in_frame_lowers_to_its_own_kind_not_lag() {
+    let qe = lower_clickhouse(
+        "SELECT service, lagInFrame(bytes) OVER (PARTITION BY service ORDER BY ts) \
+         FROM metrics",
+    )
+    .await;
+    let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
+    let QueryExpr::SQLWindowFunc { func, args, .. } = win else {
+        unreachable!();
+    };
+    assert_eq!(*func, WindowFuncKind::LagInFrame);
+    assert_eq!(
+        args,
+        &vec![QueryExpr::Column(3)],
+        "lagInFrame(bytes) → arg col 3"
+    );
+}
+
+#[tokio::test]
+async fn lead_in_frame_lowers_to_its_own_kind_not_lead() {
+    let qe = lower_clickhouse(
+        "SELECT service, leadInFrame(bytes) OVER (PARTITION BY service ORDER BY ts) \
+         FROM metrics",
+    )
+    .await;
+    let win = find_windowfunc(&qe).expect("expected a SQLWindowFunc node");
+    let QueryExpr::SQLWindowFunc { func, .. } = win else {
+        unreachable!();
+    };
+    assert_eq!(*func, WindowFuncKind::LeadInFrame);
+}
