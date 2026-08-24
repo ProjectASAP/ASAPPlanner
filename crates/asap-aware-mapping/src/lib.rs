@@ -97,6 +97,17 @@
 //!   #247's own rule-based traversal, which re-walked the tree once per
 //!   optimization before [`replacement::search_workload`] existed to read
 //!   from instead — see that module's docs for the full reframing.
+//! - [`rollup`] — [`rollup::RollupStrategy`] wraps group-by-lattice roll-up
+//!   reuse (issue #254, part of #33) as a [`ReplacementStrategy`]: given a
+//!   coarser `Aggregate` target and a caller-supplied sibling set, proposes
+//!   re-deriving it from an already-computed, strictly finer sibling
+//!   `Aggregate` over the same shared child instead of an independent pass
+//!   over the raw source — the cross-aggregate sibling of
+//!   `pre_asap::cse::share_common_subtrees`'s identical-subtree sharing.
+//!   [`rollup::is_legal_rollup_source`] is the standalone legality predicate
+//!   other axes (e.g. issue #256's `GroupingStrategy`) are expected to
+//!   consult directly, so it and this module's `RollupStrategy` can never
+//!   disagree about which siblings qualify.
 //!
 //! ## Terminology — "bind" already means three different things nearby;
 //! this crate's own logical→physical step is named "implementation" instead
@@ -141,6 +152,7 @@
 pub mod cost_model;
 pub mod explanation;
 pub mod replacement;
+pub mod rollup;
 
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use explanation::{
