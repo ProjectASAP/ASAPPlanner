@@ -46,18 +46,23 @@ cost comparison does, without needing a separately hardcoded cheap-threshold
 carve-out — a cheap-to-recompute candidate naturally loses the comparison on
 its own.
 
-Why this doesn't need full Volcano/Cascades-scale infrastructure: this repo
-has no plan-enumeration/DP-search engine anywhere, and `CostModel` is
-deliberately a narrow, single-shot ranking/sizing interface
-(`rank_candidates`/`size_params`), not a cost-driven search engine. The
-decision here is binary (share vs. don't, per already-detected candidate),
-so a direct cost comparison captures the Volcano/Cascades *policy* — weigh
-real costs, don't apply a fixed rule — without requiring a memo-based search
-space this repo doesn't otherwise have. `implement_workload_with` still
-computes the true `consumer_count` for each candidate via a whole-workload
-pre-pass before deciding, rather than deciding on a running/partial count —
-the decision is made once, from full knowledge of the workload's sharing
-structure, the same way a real cost-based optimizer would.
+Why this doesn't need its own, separate search infrastructure: **this
+paragraph predates issue #252's MEMO-based search engine** (`PlanSpace`/
+`MemoGroup`, now living in `replacement.rs` — a real Volcano/Cascades-style
+candidate space, since folded in from what was PR #263). That engine exists
+for enumerating and ranking the *much* larger candidate space (every summary
+family choice at every site, workload-wide). This specific decision — share
+vs. don't, for one already-detected CSE candidate — still doesn't need to be
+re-derived by that machinery: it's binary, so `PlanSpace::cost_sorted`'s
+ranking step reuses one direct `CostModel::cse_share_decision` comparison per
+group rather than a separate search, the same policy this section originally
+argued for (weigh real costs, don't apply a fixed rule) — it's just now one
+ranking step *inside* the bigger search engine's output, not a standalone
+decision with no search engine around it at all. `search_workload_with`'s
+target-discovery pass still computes the true `consumer_count` for each
+candidate via a whole-workload traversal before any ranking happens — the
+decision is made from full knowledge of the workload's sharing structure, the
+same way a real cost-based optimizer would.
 
 ## Layering constraint
 
@@ -70,13 +75,23 @@ gate) and the cost-aware decision is applied downstream, in
 
 ## Where it hooks in
 
-[`bind::implement_workload_with`](../crates/asap-aware-mapping/src/bind.rs)
-computes each shared subtree's true `consumer_count` across the whole
-workload up front, then — the first time it binds that subtree — asks
-`CostModel::cse_share_decision` once and caches the resulting `ShareDecision`
-alongside the bound `SummaryNode`, so every later occurrence of the same
-`Rc<QueryExpr>` consistently reuses the cached summary (`Share`) or rebinds
-independently (`RecomputeIndependently`) per that one decision.
+[`PlanSpace::cost_sorted`](../crates/asap-aware-mapping/src/replacement.rs)
+is where this hooks in today. `search_workload_with` computes each shared
+subtree's true `consumer_count` across the whole workload up front (the same
+role `implement_workload_with`'s pre-pass used to play, before that function
+was retired along with `bind.rs` — this crate no longer commits to one
+physically-materialized answer at all; picking and building one final
+`SummaryNode` per shared subtree is a downstream deployment's job, not this
+crate's). For a `MemoGroup` whose candidates are a
+[`SharedSubtreeStrategy`](../crates/asap-aware-mapping/src/replacement.rs)
+share-vs-recompute pair, `cost_sorted`'s ranking step (`rank_group`/
+`cse_preference`) asks `CostModel::cse_share_decision` once per group — using
+one representative bound `SummaryNode` built just for that comparison, not
+cached anywhere — and sorts the pair so the preferred candidate (`Share` or
+`RecomputeIndependently`) comes first. Both candidates are still returned;
+ranking never drops one (see Rule 2 in `docs/design_docs/asap_aware_mapping.md`'s
+mental-model section — a `CostModel` orders and parameterizes, it never
+prunes).
 
 ## Defaults
 
@@ -99,6 +114,8 @@ either or both, same as `size_params` already lets a deployment override
 
 ## Scope
 
-This decision, and `cse_share_decision`'s wiring into `implement_workload_with`,
-close out #223's stage 4 and #212's original "add CSE" tracking issue. Stage
-3 (`dag_export::structural_hash` unification) landed separately in PR #244.
+This decision, and `cse_share_decision`'s wiring into `PlanSpace::cost_sorted`
+(originally into `implement_workload_with`, before `bind.rs` was retired —
+see above), close out #223's stage 4 and #212's original "add CSE" tracking
+issue. Stage 3 (`dag_export::structural_hash` unification) landed separately
+in PR #244.

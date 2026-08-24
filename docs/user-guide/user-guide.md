@@ -140,7 +140,7 @@ let Some(ReplacementSubDAG { replacement: Replacement::Summary(post_asap), .. })
     candidates.into_iter().next()
 else {
     // No candidate (e.g. the node isn't a bindable Aggregate) — fall back to
-    // `asap_aware_mapping::bind::keep_pre_asap(&root)`, the same conservative
+    // `asap_aware_mapping::replacement::keep_pre_asap(&root)`, the same conservative
     // pass-through this crate's own dispatch uses.
     panic!("no candidate for this target");
 };
@@ -157,10 +157,13 @@ built-in static preference order (`DefaultCostModel` — what `default_cost_mode
 See the `CostModel` trait doc in `crates/asap-aware-mapping/src/cost_model.rs` for its overridable
 hooks (`rank_candidates`, `size_params`, `realize_extension`, …).
 
-To bind every root of a whole workload at once — sharing one bound `SummaryNode` across roots CSE
-already collapsed onto the same `Rc<QueryExpr>` — use `asap_aware_mapping::implement_workload`/
-`implement_workload_with` instead; those two still keep only the cost-model-preferred candidate per
-root, since sharing needs one canonical decision to key on.
+To see every root of a whole workload at once — including the candidates CSE-shared subtrees get
+(a shared subtree's `MemoGroup` carries both the "share" and "recompute independently" options,
+ranked by `CostModel::cse_share_decision`) — use `asap_aware_mapping::search_workload`/
+`search_workload_with` instead; unlike the single-target path above, these return every discovered
+site's full candidate list (a `PlanSpace`), not one picked winner. Committing to one final,
+physically-materialized `SummaryNode` per shared subtree is out of this crate's scope — that's a
+downstream deployment's call, once it also knows where each candidate would be placed.
 
 ### Reading the result
 
