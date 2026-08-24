@@ -3,9 +3,9 @@
 //! under "Key concepts (not yet implemented)", implemented for real (issue
 //! #251, part of #33).
 //!
-//! ## One step, not two: `SketchFamilyStrategy::replacements()` decides *and* builds
+//! ## One step, not two: `SketchAlgorithmStrategy::replacements()` decides *and* builds
 //!
-//! For a bindable `Aggregate`, `SketchFamilyStrategy::replacements()` is the
+//! For a bindable `Aggregate`, `SketchAlgorithmStrategy::replacements()` is the
 //! single place this crate both decides what an `AggIntent` may become and
 //! turns each of those candidates into a real, executable
 //! [`ReplacementSubDAG`]:
@@ -63,7 +63,7 @@
 //! a whole workload (previously `bind::implement_workload`/
 //! `implement_workload_with`) is out of this crate's scope — see the crate
 //! doc's `## Status` section for why. Every other caller goes through
-//! `SketchFamilyStrategy::replacements` directly and decides for itself.
+//! `SketchAlgorithmStrategy::replacements` directly and decides for itself.
 //!
 //! This means an ordinary single-target bind sizes and fully constructs
 //! *every* sketch candidate at every sketch-capable node (not just the one a
@@ -73,7 +73,7 @@
 //!
 //! ## The two strategies, and why these two
 //!
-//! - [`SketchFamilyStrategy`] wraps [`implementations_for_with`]'s exhaustive,
+//! - [`SketchAlgorithmStrategy`] wraps [`implementations_for_with`]'s exhaustive,
 //!   ranked list directly: for the same bindable-`Aggregate` shape this crate
 //!   binds (single intent, no `HAVING`), every entry becomes its own bound
 //!   candidate.
@@ -100,7 +100,7 @@
 //!   unchanged.** Same inputs still produce the same exhaustive, ranked
 //!   list — only its home moved (from a separate `implementation` module
 //!   into this one) and its own visibility dropped to module-private, since
-//!   [`SketchFamilyStrategy`] is now its only caller.
+//!   [`SketchAlgorithmStrategy`] is now its only caller.
 //!
 //! ## Workload-wide search — merged in from the former `search.rs` (issue #252, part of #33)
 //!
@@ -214,7 +214,7 @@
 //! an alternative *for* the target just processed, not a new target of its
 //! own; see [`discover_new_descendant_targets`]) are scanned for pointers
 //! not already known, and any found become next round's frontier. Both shipped
-//! strategies are idempotent in exactly this sense: [`SketchFamilyStrategy`]
+//! strategies are idempotent in exactly this sense: [`SketchAlgorithmStrategy`]
 //! produces terminal [`Replacement::Summary`] candidates (no `QueryExpr`
 //! children to scan at all), and [`SharedSubtreeStrategy`]'s two
 //! [`Replacement::Rewrite`] candidates both reuse the target's own
@@ -250,10 +250,10 @@
 //!   share-vs-recompute pair is ranked by calling
 //!   [`CostModel::cse_share_decision`] via this module's own
 //!   [`cse_preference`] — rather than re-deriving a competing comparison.
-//! - A group whose candidates are [`SketchFamilyStrategy`]'s sketch-family
+//! - A group whose candidates are [`SketchAlgorithmStrategy`]'s sketch-family
 //!   candidates is ranked via [`CostModel::rank_candidates`] (the same hook
 //!   `implementations_for_with` itself consults), applied to the
-//!   candidates' own [`SketchKind`]s.
+//!   candidates' own [`SketchAlgorithm`]s.
 //! - Any other shape (a single candidate, or a mix this module doesn't have
 //!   a defined comparison for) keeps discovery order — there is nothing to
 //!   rank, or no [`CostModel`] hook this module knows how to apply; it never
@@ -262,8 +262,8 @@
 use std::collections::HashMap;
 
 use asap_types::post_asap::{
-    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchKind, SketchParams,
-    SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
+    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchKind,
+    SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
     SummaryFamilyType, SummaryField, SummaryNode, SummarySchema, WaveletKind, WaveletParams,
 };
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
@@ -303,7 +303,7 @@ pub enum ImplementError {
 /// reference this exact `Rc` — 1 for an ordinary single-use node, 2+ when the
 /// caller already ran `share_common_subtrees` and found this subtree shared.
 /// A strategy that only cares about `root`'s own shape (e.g.
-/// [`SketchFamilyStrategy`]) can ignore it entirely; [`SharedSubtreeStrategy`]
+/// [`SketchAlgorithmStrategy`]) can ignore it entirely; [`SharedSubtreeStrategy`]
 /// is the one strategy that consults it. Computing a *real* consumer count
 /// across a whole workload is a traversal this module deliberately does not
 /// own (see the module docs' "Non-goals") — [`TargetSubDAG::new`] defaults it
@@ -373,7 +373,7 @@ pub struct ReplacementSubDAG {
 /// of this trait or any existing strategy required.
 ///
 /// `replacements` is only meaningful when `matches` would return `true` for
-/// the same target; both [`SketchFamilyStrategy`] and [`SharedSubtreeStrategy`]
+/// the same target; both [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`]
 /// return an empty `Vec` rather than panicking when called on a target they
 /// don't match, so a caller that skips the `matches` check first still gets a
 /// safe (merely uninformative) answer instead of a crash.
@@ -399,7 +399,7 @@ pub trait ReplacementStrategy {
 /// [`implementations_for_with`] is where every valid realization gets
 /// enumerated, exhaustive and ranked (most-preferred first) — this crate has
 /// no separate function that computes just "the one" `Implementation`
-/// independently of that list. [`SketchFamilyStrategy`] is the sole
+/// independently of that list. [`SketchAlgorithmStrategy`] is the sole
 /// consumer: it wraps every entry of this list into its own bound
 /// [`SummaryNode`] and returns all of them, ranked — a caller wanting a
 /// single answer keeps the first one itself (see the module docs above).
@@ -414,11 +414,11 @@ pub enum Implementation {
         params: ExactParams,
     },
     /// An approximate sketch sized to the intent's [`AccuracyTarget`].
-    /// Needs a `SummaryEstimate` readout to recover a value.
-    Sketch {
-        kind: SketchKind,
-        params: SketchParams,
-    },
+    /// Needs a `SummaryEstimate` readout to recover a value. Already
+    /// classified into its [`SketchKind`] category (`SketchKind::new`
+    /// having been called) — construction always goes through that
+    /// classifier, never this variant directly.
+    Sketch(SketchKind),
     /// A sampling-based summary (a retained row subset). Needs a
     /// `SummaryEstimate` readout. Not chosen by any core `AggIntent`
     /// dispatch today — see the module docs.
@@ -490,17 +490,24 @@ pub trait Matcher {
 pub const DEFAULT_DELTA: f64 = 0.01;
 
 /// The sketch kinds that can serve an intent, most-preferred first.
-/// This is the `AggIntent → SketchKind` map of issue #98;
+/// This is the `AggIntent → SketchAlgorithm` map of issue #98;
 /// [`implementations_for_with`] sizes and ranks every entry via `cost_model`.
 /// Listed here so the candidate set has one home.
-pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchKind] {
+pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
     match intent {
-        AggIntent::Quantile { .. } => &[SketchKind::Kll, SketchKind::DDSketch],
-        AggIntent::Cardinality { .. } => &[SketchKind::Hll, SketchKind::Theta, SketchKind::Kmv],
+        AggIntent::Quantile { .. } => &[SketchAlgorithm::Kll, SketchAlgorithm::DDSketch],
+        AggIntent::Cardinality { .. } => &[
+            SketchAlgorithm::Hll,
+            SketchAlgorithm::Theta,
+            SketchAlgorithm::Kmv,
+        ],
         // Count-Sketch-with-heap is CMS-with-heap's balanced/zero-mean-error
         // alternative for the same heavy-hitter shape.
-        AggIntent::TopK { .. } => &[SketchKind::CmsWithHeap, SketchKind::CountSketchWithHeap],
-        AggIntent::Count { .. } => &[SketchKind::Cms, SketchKind::CountSketch],
+        AggIntent::TopK { .. } => &[
+            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountSketchWithHeap,
+        ],
+        AggIntent::Count { .. } => &[SketchAlgorithm::Cms, SketchAlgorithm::CountSketch],
         _ => &[],
     }
 }
@@ -525,7 +532,7 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// (most-preferred first via `cost_model`) — the *only* place this crate
 /// decides what an `AggIntent` may become. Nothing in this crate computes
 /// "the one" `Implementation` independently of this list:
-/// [`SketchFamilyStrategy`] keeps every entry as a candidate, and a caller
+/// [`SketchAlgorithmStrategy`] keeps every entry as a candidate, and a caller
 /// that wants a single executable answer takes the head of *that* strategy's
 /// output itself.
 ///
@@ -533,7 +540,7 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// explicit realization is a compile error, and the coverage-matrix test pins
 /// each variant's category.
 ///
-/// Module-private: [`SketchFamilyStrategy::replacements`] is the only
+/// Module-private: [`SketchAlgorithmStrategy::replacements`] is the only
 /// caller — a caller outside this module has no use for the bare
 /// `Implementation` list on its own, only for the bound
 /// [`ReplacementSubDAG`]s that strategy produces from it.
@@ -680,9 +687,9 @@ fn sketch_implementations(
     let ranked = cost_model.rank_candidates(intent, summary_candidates(intent));
     ranked
         .into_iter()
-        .map(|kind| {
-            let params = cost_model.size_params(kind.clone(), intent, eps, delta);
-            Implementation::Sketch { kind, params }
+        .map(|algorithm| {
+            let params = cost_model.size_params(algorithm.clone(), intent, eps, delta);
+            Implementation::Sketch(SketchKind::new(algorithm, params))
         })
         .collect()
 }
@@ -698,21 +705,21 @@ fn sketch_implementations(
 /// range. A non-positive ε saturates to the clamp maximum (tightest
 /// allowed).
 pub fn default_size_params(
-    kind: SketchKind,
+    kind: SketchAlgorithm,
     intent: &AggIntent,
     eps: f64,
     delta: f64,
 ) -> SketchParams {
     match kind {
-        SketchKind::Kll => SketchParams::Kll { k: kll_k(eps) },
-        SketchKind::Cms => SketchParams::Cms {
+        SketchAlgorithm::Kll => SketchParams::Kll { k: kll_k(eps) },
+        SketchAlgorithm::Cms => SketchParams::Cms {
             width: cms_width(eps),
             depth: cms_depth(delta),
         },
-        SketchKind::Hll => SketchParams::Hll {
+        SketchAlgorithm::Hll => SketchParams::Hll {
             precision: hll_precision(eps),
         },
-        SketchKind::CmsWithHeap => {
+        SketchAlgorithm::CmsWithHeap => {
             let k = match intent {
                 AggIntent::TopK { k, .. } => *k,
                 _ => unreachable!("CmsWithHeap is only a TopK candidate"),
@@ -726,20 +733,20 @@ pub fn default_size_params(
         // Non-preferred candidates (DDSketch / Theta / Kmv / CountSketch /
         // CountSketchWithHeap) are only reachable once a cost model picks
         // them; sized here so that wiring is local.
-        SketchKind::DDSketch => SketchParams::DDSketch { alpha: eps },
-        SketchKind::Theta => SketchParams::Theta { k: kmv_k(eps) },
-        SketchKind::Kmv => SketchParams::Kmv { k: kmv_k(eps) },
+        SketchAlgorithm::DDSketch => SketchParams::DDSketch { alpha: eps },
+        SketchAlgorithm::Theta => SketchParams::Theta { k: kmv_k(eps) },
+        SketchAlgorithm::Kmv => SketchParams::Kmv { k: kmv_k(eps) },
         // Count-Sketch is CMS's balanced/zero-mean-error alternative —
         // same (width, depth) shape, sized the same way for now (a
         // Count-Sketch-specific bound uses an L2-norm error guarantee
         // rather than CMS's L1-norm one; this is a placeholder pending
         // that refinement, same status as the other non-preferred
         // candidates above).
-        SketchKind::CountSketch => SketchParams::CountSketch {
+        SketchAlgorithm::CountSketch => SketchParams::CountSketch {
             width: cms_width(eps),
             depth: cms_depth(delta),
         },
-        SketchKind::CountSketchWithHeap => {
+        SketchAlgorithm::CountSketchWithHeap => {
             let k = match intent {
                 AggIntent::TopK { k, .. } => *k,
                 _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
@@ -810,7 +817,7 @@ pub struct ExpectedCaseSizing {
 /// stated assumption, not a full redesign of the depth/width tradeoff
 /// space, so depth relaxation is left as explicit future scope.
 ///
-/// For every `SketchKind` outside the CMS family, this is identical to
+/// For every `SketchAlgorithm` outside the CMS family, this is identical to
 /// [`default_size_params`] — `width_relaxation` only ever touches the
 /// [`cms_width`]-sized formulas this issue is about.
 ///
@@ -818,7 +825,7 @@ pub struct ExpectedCaseSizing {
 /// function's existence — this is a separate, additive entry point, never
 /// called from [`default_size_params`] or [`implementations_for_with`].
 pub fn posterior_aware_size_params(
-    kind: SketchKind,
+    kind: SketchAlgorithm,
     intent: &AggIntent,
     eps: f64,
     delta: f64,
@@ -833,11 +840,11 @@ pub fn posterior_aware_size_params(
         saturating_ceil(base as f64 * f, 2, base)
     };
     match kind {
-        SketchKind::Cms => SketchParams::Cms {
+        SketchAlgorithm::Cms => SketchParams::Cms {
             width: relaxed_width(eps),
             depth: cms_depth(delta),
         },
-        SketchKind::CmsWithHeap => {
+        SketchAlgorithm::CmsWithHeap => {
             let k = match intent {
                 AggIntent::TopK { k, .. } => *k,
                 _ => unreachable!("CmsWithHeap is only a TopK candidate"),
@@ -848,11 +855,11 @@ pub fn posterior_aware_size_params(
                 heap_size: k as u32,
             }
         }
-        SketchKind::CountSketch => SketchParams::CountSketch {
+        SketchAlgorithm::CountSketch => SketchParams::CountSketch {
             width: relaxed_width(eps),
             depth: cms_depth(delta),
         },
-        SketchKind::CountSketchWithHeap => {
+        SketchAlgorithm::CountSketchWithHeap => {
             let k = match intent {
                 AggIntent::TopK { k, .. } => *k,
                 _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
@@ -866,14 +873,14 @@ pub fn posterior_aware_size_params(
         // Every other kind is untouched by this issue's CMS-specific
         // relaxation — defer to the existing formula verbatim. Spelled out
         // exhaustively, matching `default_size_params`'s own match, rather
-        // than a wildcard arm: a future `SketchKind` variant then fails to
+        // than a wildcard arm: a future `SketchAlgorithm` variant then fails to
         // compile *here* too, instead of silently inheriting worst-case
         // sizing with no signal that this function never considered it.
-        SketchKind::Kll => default_size_params(kind, intent, eps, delta),
-        SketchKind::Hll => default_size_params(kind, intent, eps, delta),
-        SketchKind::DDSketch => default_size_params(kind, intent, eps, delta),
-        SketchKind::Theta => default_size_params(kind, intent, eps, delta),
-        SketchKind::Kmv => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::Kll => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::Hll => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::DDSketch => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::Theta => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::Kmv => default_size_params(kind, intent, eps, delta),
     }
 }
 
@@ -920,9 +927,9 @@ fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
     (x.ceil() as u32).clamp(lo, hi)
 }
 
-// ── SketchFamilyStrategy ─────────────────────────────────────────────────
+// ── SketchAlgorithmStrategy ─────────────────────────────────────────────────
 
-/// A single static instance so [`SketchFamilyStrategy::default_cost_model`]
+/// A single static instance so [`SketchAlgorithmStrategy::default_cost_model`]
 /// can hand out a `&'static dyn CostModel` without heap-allocating one —
 /// `DefaultCostModel` is a unit struct with no state, so one instance serves
 /// every caller (same pattern `applicability::SketchApplicabilityRule` uses).
@@ -934,14 +941,14 @@ static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 ///
 /// Ranked (only to *order the enumeration*, never to drop a candidate) via a
 /// [`CostModel`] — [`DefaultCostModel`] unless constructed with
-/// [`SketchFamilyStrategy::new`] — so a deployment-specific cost model's
+/// [`SketchAlgorithmStrategy::new`] — so a deployment-specific cost model's
 /// other hooks (`size_params`, `realize_extension`, `readout_extension`) are
 /// still consulted while binding each candidate.
-pub struct SketchFamilyStrategy<'a> {
+pub struct SketchAlgorithmStrategy<'a> {
     cost_model: &'a dyn CostModel,
 }
 
-impl SketchFamilyStrategy<'static> {
+impl SketchAlgorithmStrategy<'static> {
     /// A strategy that ranks/binds via the built-in [`DefaultCostModel`] —
     /// what a deployment gets with no custom cost model plugged in.
     pub fn default_cost_model() -> Self {
@@ -951,7 +958,7 @@ impl SketchFamilyStrategy<'static> {
     }
 }
 
-impl<'a> SketchFamilyStrategy<'a> {
+impl<'a> SketchAlgorithmStrategy<'a> {
     /// A strategy that ranks/binds via `cost_model` instead of the built-in
     /// static preference order — the same customization point
     /// [`implementations_for_with`] already offers.
@@ -960,7 +967,7 @@ impl<'a> SketchFamilyStrategy<'a> {
     }
 }
 
-impl ReplacementStrategy for SketchFamilyStrategy<'_> {
+impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
         bindable_intent(target.root).is_some()
     }
@@ -992,10 +999,11 @@ impl ReplacementStrategy for SketchFamilyStrategy<'_> {
 /// [`ReplacementSubDAG::rationale`] text.
 fn describe_implementation(intent: &AggIntent, implementation: &Implementation) -> String {
     match implementation {
-        Implementation::Sketch { kind, .. } => format!(
-            "{} realizes as a {kind:?} sketch — one of summary_candidates' \
+        Implementation::Sketch(kind) => format!(
+            "{} realizes as a {:?} sketch — one of summary_candidates' \
              alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)",
-            describe_intent(intent)
+            describe_intent(intent),
+            kind.algorithm()
         ),
         Implementation::ExactAggregate { kind, .. } => format!(
             "{} realizes as an exact {kind:?} accumulator — the only realization \
@@ -1046,7 +1054,7 @@ fn describe_intent(intent: &AggIntent) -> String {
 // ── realize_child / keep_pre_asap: rank-and-take-first, and its fallback ──
 
 /// Rank-and-take-first selector for a single [`QueryExpr`] node: enumerate
-/// every candidate via [`SketchFamilyStrategy::replacements`], keep the
+/// every candidate via [`SketchAlgorithmStrategy::replacements`], keep the
 /// `cost_model`-preferred (first) one, and fall back to [`keep_pre_asap`]
 /// when there's no candidate at all — **not** a general single-answer API
 /// for a whole workload (that "commit to one final answer" step is a
@@ -1064,13 +1072,13 @@ fn describe_intent(intent: &AggIntent) -> String {
 /// [`crate::cost_model::DefaultCostModel::estimate_cost`] (the same
 /// representative-node need, for a [`Replacement::Rewrite`] candidate's own
 /// cost estimate). Every other caller goes through
-/// [`SketchFamilyStrategy::replacements`] directly and decides for itself.
+/// [`SketchAlgorithmStrategy::replacements`] directly and decides for itself.
 pub(crate) fn realize_child(
     root: &Rc<QueryExpr>,
     cost_model: &dyn CostModel,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
     let target = TargetSubDAG::new(root);
-    match SketchFamilyStrategy::new(cost_model)
+    match SketchAlgorithmStrategy::new(cost_model)
         .replacements(&target)
         .into_iter()
         .next()
@@ -1083,19 +1091,19 @@ pub(crate) fn realize_child(
             replacement: Replacement::Rewrite(_),
             ..
         }) => {
-            unreachable!("SketchFamilyStrategy never returns a Rewrite candidate")
+            unreachable!("SketchAlgorithmStrategy never returns a Rewrite candidate")
         }
         // No candidate at all: `root` isn't `bindable_intent` shape (or its
         // intent has no realization `implementations_for_with` can't
         // produce — never happens, that match is exhaustive) — the same
-        // conservative fallback `SketchFamilyStrategy::matches` uses.
+        // conservative fallback `SketchAlgorithmStrategy::matches` uses.
         None => keep_pre_asap(root),
     }
 }
 
 /// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
 /// `SummaryFamilyType::Plain`. `pub` so a caller can fall back to this
-/// explicitly — e.g. when `SketchFamilyStrategy::replacements()` returns no
+/// explicitly — e.g. when `SketchAlgorithmStrategy::replacements()` returns no
 /// candidate for a target, or a deployment wants to force a node its own
 /// runtime can't actually implement — through the same fallback this
 /// crate's own dispatch uses, without duplicating the schema-lift logic.
@@ -1109,7 +1117,7 @@ pub fn keep_pre_asap(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError
 
 // ── Construction: turn one already-decided Implementation into a SummaryNode ─
 
-/// The bindable shape [`SketchFamilyStrategy`] targets: a single intent, no
+/// The bindable shape [`SketchAlgorithmStrategy`] targets: a single intent, no
 /// `HAVING`. A multi-intent node (SQL `SELECT SUM(a), AVG(b)`), or one with a
 /// `HAVING` predicate (the filter would need the estimate first), stays
 /// logical — conservative fallbacks: [`SummaryExpr::KeepPreAsap`] boxes a
@@ -1132,7 +1140,7 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
 
 /// Construct `expr`'s [`ReplacementSubDAG`] payload for one already-decided
 /// [`Implementation`] of its top intent — the mechanical half of
-/// [`SketchFamilyStrategy::replacements`], called once per candidate that
+/// [`SketchAlgorithmStrategy::replacements`], called once per candidate that
 /// method enumerates.
 ///
 /// `expr` must still be the [`bindable_intent`] shape for `implementation` to
@@ -1179,7 +1187,7 @@ fn summary_family(implementation: Implementation) -> Option<(SummaryFamilyType, 
         Implementation::ExactAggregate { kind, params } => {
             (SummaryFamilyType::ExactAggregate(kind, params), false)
         }
-        Implementation::Sketch { kind, params } => (SummaryFamilyType::Sketch(kind, params), true),
+        Implementation::Sketch(kind) => (SummaryFamilyType::Sketch(kind), true),
         Implementation::Sample { kind, params } => (SummaryFamilyType::Sample(kind, params), true),
         Implementation::Wavelet { kind, params } => {
             (SummaryFamilyType::Wavelet(kind, params), true)
@@ -1396,7 +1404,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
 /// A generous, documented backstop against a hypothetically ill-behaved
 /// future [`ReplacementStrategy`] (see the module docs' "Termination"
 /// section) — not a bound either shipped strategy could ever approach.
-/// [`SketchFamilyStrategy`] and [`SharedSubtreeStrategy`] both converge in
+/// [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`] both converge in
 /// exactly 2 passes over a fixed target set, regardless of workload size.
 pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 
@@ -1660,12 +1668,12 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
         return ranked;
     }
 
-    // Shape 2: `SketchFamilyStrategy`'s sketch-family candidates (every
-    // candidate is a `Summary` that realizes a `SketchKind`) — rank via
+    // Shape 2: `SketchAlgorithmStrategy`'s sketch-family candidates (every
+    // candidate is a `Summary` that realizes a `SketchAlgorithm`) — rank via
     // `CostModel::rank_candidates`, the same hook `implementations_for_with`
     // itself consults.
     if let Some(intent) = bindable_intent(&group.target) {
-        let kinds: Option<Vec<SketchKind>> = ranked
+        let kinds: Option<Vec<SketchAlgorithm>> = ranked
             .iter()
             .map(|c| match &c.replacement {
                 Replacement::Summary(node) => sketch_kind_of(node),
@@ -1716,7 +1724,7 @@ fn cse_preference(group: &MemoGroup, cost_model: &dyn CostModel) -> Option<bool>
 /// [`cse_preference`] only needs one representative bound [`SummaryNode`]
 /// for `target` (to build a [`CseCandidate`] for
 /// [`CostModel::cse_share_decision`]), not the full ranked candidate list
-/// [`SketchFamilyStrategy::replacements`] returns — so this just reuses
+/// [`SketchAlgorithmStrategy::replacements`] returns — so this just reuses
 /// [`realize_child`], the same rank-and-take-first helper
 /// `construct_summary_agg`'s own recursion and
 /// [`crate::cost_model::DefaultCostModel::estimate_cost`] already use,
@@ -1725,24 +1733,24 @@ fn realize_one(target: &Rc<QueryExpr>, cost_model: &dyn CostModel) -> Option<Rc<
     realize_child(target, cost_model).ok()
 }
 
-/// The `SketchKind` a bound [`Replacement::Summary`] candidate ultimately
+/// The `SketchAlgorithm` a bound [`Replacement::Summary`] candidate ultimately
 /// realizes, if any (`None` for an `ExactAggregate`/pass-through
-/// `Summary` — nothing to rank against another `SketchKind`).
+/// `Summary` — nothing to rank against another `SketchAlgorithm`).
 ///
-/// Mirrors this module's own `#[cfg(test)]`-only `summary_family_kind`
+/// Mirrors this module's own `#[cfg(test)]`-only `summary_family_algorithm`
 /// helper (in the test module below), which does the identical
 /// `SummaryEstimate`-unwrap-then-match for that module's own tests; that
 /// copy is test-only, so this needs its own for real (non-test) ranking
 /// code — the same "duplicate a small, self-contained traversal rather than
 /// restructure a test helper" call this file's own top doc already makes
 /// for [`discover_targets`].
-fn sketch_kind_of(node: &SummaryNode) -> Option<SketchKind> {
+fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_kind_of(summary_input),
         SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind, _),
+            family: SummaryFamilyType::Sketch(kind),
             ..
-        } => Some(kind.clone()),
+        } => Some(kind.algorithm().clone()),
         _ => None,
     }
 }
@@ -1757,19 +1765,19 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchKind> {
 /// [`CostModel`] instead.
 pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
-        Box::new(SketchFamilyStrategy::default_cost_model()),
+        Box::new(SketchAlgorithmStrategy::default_cost_model()),
         Box::new(SharedSubtreeStrategy),
     ]
 }
 
-/// Like [`default_strategies`], but [`SketchFamilyStrategy`] ranks/binds via
+/// Like [`default_strategies`], but [`SketchAlgorithmStrategy`] ranks/binds via
 /// `cost_model` instead of the built-in [`DefaultCostModel`] — the same
-/// customization point [`SketchFamilyStrategy::new`] itself offers.
+/// customization point [`SketchAlgorithmStrategy::new`] itself offers.
 pub fn default_strategies_with<'a>(
     cost_model: &'a dyn CostModel,
 ) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
     vec![
-        Box::new(SketchFamilyStrategy::new(cost_model)),
+        Box::new(SketchAlgorithmStrategy::new(cost_model)),
         Box::new(SharedSubtreeStrategy),
     ]
 }
@@ -1779,7 +1787,7 @@ pub fn default_strategies_with<'a>(
 /// Search a whole workload's pre-ASAP roots for every candidate replacement
 /// [`default_strategies`] can find, deduped into a [`PlanSpace`]. Candidate
 /// *generation* uses the built-in [`DefaultCostModel`] (via
-/// [`default_strategies`], the same way [`SketchFamilyStrategy::default_cost_model`]
+/// [`default_strategies`], the same way [`SketchAlgorithmStrategy::default_cost_model`]
 /// does); call [`PlanSpace::cost_sorted`] on the result for the final
 /// `sorted_by(cost_model)` step. Use [`search_workload_with`] to plug in a
 /// custom strategy set (e.g. built via [`default_strategies_with`] for a
@@ -1801,7 +1809,7 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> PlanSpace<Id> {
 /// section). Deduping candidate plans this way needs no
 /// [`CostModel`] at all — that only enters at two well-defined points: each
 /// [`ReplacementStrategy`] in `strategies` may already carry its own (e.g.
-/// [`SketchFamilyStrategy::new`]'s), and [`PlanSpace::cost_sorted`]'s final
+/// [`SketchAlgorithmStrategy::new`]'s), and [`PlanSpace::cost_sorted`]'s final
 /// ranking step takes one explicitly.
 pub fn search_workload_with<'s, Id>(
     roots: Vec<(Id, Rc<QueryExpr>)>,
@@ -1845,7 +1853,7 @@ pub fn search_workload_with<'s, Id>(
             "search_workload: fixpoint search did not converge within {MAX_SEARCH_ITERATIONS} \
              rounds — a registered ReplacementStrategy's Replacement::Rewrite candidates keep \
              exposing new, never-before-seen descendant structure every round. \
-             SketchFamilyStrategy/SharedSubtreeStrategy never do this (see replacement.rs's \
+             SketchAlgorithmStrategy/SharedSubtreeStrategy never do this (see replacement.rs's \
              module docs' \"Termination\" section); check any custom strategies passed to \
              search_workload_with.",
         );
@@ -2037,7 +2045,7 @@ mod tests {
     /// Shorthand for asserting the realization *category*.
     #[derive(Debug, PartialEq)]
     enum Cat {
-        Sketch(SketchKind),
+        Sketch(SketchAlgorithm),
         Acc(ExactKind),
         Pass,
     }
@@ -2045,7 +2053,7 @@ mod tests {
     fn cat(intent: &AggIntent) -> Cat {
         match preferred(intent) {
             Implementation::ExactAggregate { kind, .. } => Cat::Acc(kind),
-            Implementation::Sketch { kind, .. } => Cat::Sketch(kind),
+            Implementation::Sketch(kind) => Cat::Sketch(kind.algorithm().clone()),
             Implementation::PassThrough => Cat::Pass,
             other => {
                 panic!("this coverage matrix expects only Exact/Sketch/PassThrough, got {other:?}")
@@ -2063,7 +2071,7 @@ mod tests {
         use AggIntent as A;
         use Cat::*;
         use ExactKind as E;
-        use SketchKind as K;
+        use SketchAlgorithm as K;
         let matrix: Vec<(A, Cat)> = vec![
             // approximate-capable, at an ε target → sketch
             (default_quantile(0.99), Sketch(K::Kll)),
@@ -2210,10 +2218,10 @@ mod tests {
         let approx = default_quantile(0.99); // ε = 0.01
         assert_eq!(
             preferred(&approx),
-            Implementation::Sketch {
-                kind: SketchKind::Kll,
-                params: SketchParams::Kll { k: 200 }, // design.md worked example
-            }
+            Implementation::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll { k: 200 }, // design.md worked example
+            ))
         );
 
         let looser = AggIntent::Quantile {
@@ -2223,10 +2231,10 @@ mod tests {
         };
         assert_eq!(
             preferred(&looser),
-            Implementation::Sketch {
-                kind: SketchKind::Kll,
-                params: SketchParams::Kll { k: 40 }, // ⌈2/0.05⌉
-            }
+            Implementation::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll { k: 40 }, // ⌈2/0.05⌉
+            ))
         );
     }
 
@@ -2236,10 +2244,10 @@ mod tests {
         // sizing must invert it back exactly.
         assert_eq!(
             preferred(&default_cardinality()),
-            Implementation::Sketch {
-                kind: SketchKind::Hll,
-                params: SketchParams::Hll { precision: 14 },
-            }
+            Implementation::Sketch(SketchKind::Cardinality(
+                SketchAlgorithm::Hll,
+                SketchParams::Hll { precision: 14 },
+            ))
         );
     }
 
@@ -2253,13 +2261,13 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch {
-                kind: SketchKind::Cms,
-                params: SketchParams::Cms {
+            Implementation::Sketch(SketchKind::Frequency(
+                SketchAlgorithm::Cms,
+                SketchParams::Cms {
                     width: 2719,
                     depth: 7
                 }, // ⌈e/0.001⌉, ⌈ln 1000⌉
-            }
+            ))
         );
         // Epsilon-only falls back to DEFAULT_DELTA → depth 5.
         let intent = AggIntent::Count {
@@ -2267,13 +2275,13 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch {
-                kind: SketchKind::Cms,
-                params: SketchParams::Cms {
+            Implementation::Sketch(SketchKind::Frequency(
+                SketchAlgorithm::Cms,
+                SketchParams::Cms {
                     width: 2719,
                     depth: 5
                 },
-            }
+            ))
         );
     }
 
@@ -2284,15 +2292,14 @@ mod tests {
             accuracy: eps(0.01),
         };
         match preferred(&intent) {
-            Implementation::Sketch {
-                kind: SketchKind::CmsWithHeap,
-                params:
-                    SketchParams::CmsWithHeap {
-                        width,
-                        depth,
-                        heap_size,
-                    },
-            } => {
+            Implementation::Sketch(SketchKind::TopK(
+                SketchAlgorithm::CmsWithHeap,
+                SketchParams::CmsWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                },
+            )) => {
                 assert_eq!(heap_size, 25);
                 assert_eq!(width, 272); // ⌈e/0.01⌉
                 assert_eq!(depth, 5);
@@ -2305,24 +2312,31 @@ mod tests {
     fn candidate_lists_match_the_issue_map() {
         assert_eq!(
             summary_candidates(&default_quantile(0.5)),
-            &[SketchKind::Kll, SketchKind::DDSketch]
+            &[SketchAlgorithm::Kll, SketchAlgorithm::DDSketch]
         );
         assert_eq!(
             summary_candidates(&default_cardinality()),
-            &[SketchKind::Hll, SketchKind::Theta, SketchKind::Kmv]
+            &[
+                SketchAlgorithm::Hll,
+                SketchAlgorithm::Theta,
+                SketchAlgorithm::Kmv
+            ]
         );
         assert_eq!(
             summary_candidates(&AggIntent::TopK {
                 k: 5,
                 accuracy: eps(0.01)
             }),
-            &[SketchKind::CmsWithHeap, SketchKind::CountSketchWithHeap]
+            &[
+                SketchAlgorithm::CmsWithHeap,
+                SketchAlgorithm::CountSketchWithHeap
+            ]
         );
         assert_eq!(
             summary_candidates(&AggIntent::Count {
                 accuracy: eps(0.01)
             }),
-            &[SketchKind::Cms, SketchKind::CountSketch]
+            &[SketchAlgorithm::Cms, SketchAlgorithm::CountSketch]
         );
         assert!(summary_candidates(&AggIntent::Rate).is_empty());
     }
@@ -2332,15 +2346,15 @@ mod tests {
         // Quantile's candidate list is [Kll, DDSketch] — implementations_for_with
         // must return both, ranked with the DefaultCostModel's preferred
         // (Kll) first.
-        let kinds: Vec<SketchKind> =
+        let kinds: Vec<SketchAlgorithm> =
             implementations_for_with(&default_quantile(0.99), &DefaultCostModel)
                 .into_iter()
                 .map(|implementation| match implementation {
-                    Implementation::Sketch { kind, .. } => kind,
+                    Implementation::Sketch(kind) => kind.algorithm().clone(),
                     other => panic!("expected Sketch, got {other:?}"),
                 })
                 .collect();
-        assert_eq!(kinds, vec![SketchKind::Kll, SketchKind::DDSketch]);
+        assert_eq!(kinds, vec![SketchAlgorithm::Kll, SketchAlgorithm::DDSketch]);
     }
 
     #[test]
@@ -2352,10 +2366,10 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch {
-                kind: SketchKind::Kll,
-                params: SketchParams::Kll { k: 65_535 },
-            }
+            Implementation::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll { k: 65_535 },
+            ))
         );
     }
 
@@ -2368,9 +2382,9 @@ mod tests {
     #[test]
     fn posterior_aware_sizing_shrinks_width_under_stated_assumption() {
         let intent = count_intent(0.01);
-        let worst_case = default_size_params(SketchKind::Cms, &intent, 0.01, 0.01);
+        let worst_case = default_size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01);
         let relaxed = posterior_aware_size_params(
-            SketchKind::Cms,
+            SketchAlgorithm::Cms,
             &intent,
             0.01,
             0.01,
@@ -2404,9 +2418,9 @@ mod tests {
         // width_relaxation = 1.0 must reproduce default_size_params exactly
         // — the "no risk taken" boundary.
         let intent = count_intent(0.01);
-        let worst_case = default_size_params(SketchKind::Cms, &intent, 0.01, 0.01);
+        let worst_case = default_size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01);
         let relaxed = posterior_aware_size_params(
-            SketchKind::Cms,
+            SketchAlgorithm::Cms,
             &intent,
             0.01,
             0.01,
@@ -2420,10 +2434,10 @@ mod tests {
     #[test]
     fn posterior_aware_sizing_invalid_relaxation_falls_back_to_worst_case() {
         let intent = count_intent(0.01);
-        let worst_case = default_size_params(SketchKind::Cms, &intent, 0.01, 0.01);
+        let worst_case = default_size_params(SketchAlgorithm::Cms, &intent, 0.01, 0.01);
         for bad in [0.0, -0.5, 1.5, f64::NAN, f64::INFINITY] {
             let relaxed = posterior_aware_size_params(
-                SketchKind::Cms,
+                SketchAlgorithm::Cms,
                 &intent,
                 0.01,
                 0.01,
@@ -2450,7 +2464,7 @@ mod tests {
         // CountSketch
         assert_eq!(
             posterior_aware_size_params(
-                SketchKind::CountSketch,
+                SketchAlgorithm::CountSketch,
                 &count_intent(0.01),
                 0.01,
                 0.01,
@@ -2463,7 +2477,7 @@ mod tests {
         );
         // CmsWithHeap / CountSketchWithHeap carry k through untouched.
         match posterior_aware_size_params(
-            SketchKind::CmsWithHeap,
+            SketchAlgorithm::CmsWithHeap,
             &cms_heap_intent,
             0.01,
             0.01,
@@ -2491,8 +2505,8 @@ mod tests {
             width_relaxation: 0.1,
         };
         assert_eq!(
-            posterior_aware_size_params(SketchKind::Kll, &intent, 0.01, 0.01, assumption),
-            default_size_params(SketchKind::Kll, &intent, 0.01, 0.01),
+            posterior_aware_size_params(SketchAlgorithm::Kll, &intent, 0.01, 0.01, assumption),
+            default_size_params(SketchAlgorithm::Kll, &intent, 0.01, 0.01),
         );
     }
 
@@ -2502,7 +2516,7 @@ mod tests {
         // existing callers must be untouched by adding
         // posterior_aware_size_params alongside it.
         assert_eq!(
-            default_size_params(SketchKind::Cms, &count_intent(0.001), 0.001, 0.001),
+            default_size_params(SketchAlgorithm::Cms, &count_intent(0.001), 0.001, 0.001),
             SketchParams::Cms {
                 width: 2719,
                 depth: 7
@@ -2510,7 +2524,7 @@ mod tests {
         );
     }
 
-    // ── SketchFamilyStrategy / SharedSubtreeStrategy fixtures ───────────
+    // ── SketchAlgorithmStrategy / SharedSubtreeStrategy fixtures ───────────
 
     fn metric_scan(labels: &[&str]) -> QueryExpr {
         let mut columns = vec![
@@ -2535,18 +2549,18 @@ mod tests {
         }
     }
 
-    // ── SketchFamilyStrategy ─────────────────────────────────────────────
+    // ── SketchAlgorithmStrategy ─────────────────────────────────────────────
 
     #[test]
     fn matches_a_bindable_aggregate() {
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        assert!(SketchFamilyStrategy::default_cost_model().matches(&target));
+        assert!(SketchAlgorithmStrategy::default_cost_model().matches(&target));
     }
 
     #[test]
     fn does_not_match_a_multi_intent_or_having_aggregate() {
-        let strategy = SketchFamilyStrategy::default_cost_model();
+        let strategy = SketchAlgorithmStrategy::default_cost_model();
 
         let multi = Rc::new(QueryExpr::Aggregate {
             reduction: ReductionTy::by(vec![2]),
@@ -2575,8 +2589,8 @@ mod tests {
     fn does_not_match_a_non_aggregate_node() {
         let scan = Rc::new(metric_scan(&["job"]));
         let target = TargetSubDAG::new(&scan);
-        assert!(!SketchFamilyStrategy::default_cost_model().matches(&target));
-        assert!(SketchFamilyStrategy::default_cost_model()
+        assert!(!SketchAlgorithmStrategy::default_cost_model().matches(&target));
+        assert!(SketchAlgorithmStrategy::default_cost_model()
             .replacements(&target)
             .is_empty());
     }
@@ -2588,22 +2602,22 @@ mod tests {
         // not just Kll (the CostModel-ranked head implementations_for_with commits to).
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
         assert_eq!(
             replacements.len(),
             2,
             "expected 2 candidates, got {replacements:?}"
         );
 
-        let kinds: Vec<SketchKind> = replacements
+        let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
-                Replacement::Summary(node) => summary_family_kind(node),
+                Replacement::Summary(node) => summary_family_algorithm(node),
                 Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
             })
             .collect();
-        assert!(kinds.contains(&SketchKind::Kll), "{kinds:?}");
-        assert!(kinds.contains(&SketchKind::DDSketch), "{kinds:?}");
+        assert!(kinds.contains(&SketchAlgorithm::Kll), "{kinds:?}");
+        assert!(kinds.contains(&SketchAlgorithm::DDSketch), "{kinds:?}");
         assert!(
             replacements.iter().all(|r| !r.rationale.is_empty()),
             "every candidate must carry a rationale"
@@ -2614,17 +2628,21 @@ mod tests {
     fn cardinality_enumerates_all_three_summary_candidates() {
         let q = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
-        let kinds: Vec<SketchKind> = replacements
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
-                Replacement::Summary(node) => summary_family_kind(node),
+                Replacement::Summary(node) => summary_family_algorithm(node),
                 Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
             })
             .collect();
         assert_eq!(
             kinds,
-            vec![SketchKind::Hll, SketchKind::Theta, SketchKind::Kmv],
+            vec![
+                SketchAlgorithm::Hll,
+                SketchAlgorithm::Theta,
+                SketchAlgorithm::Kmv
+            ],
             "expected every summary_candidates entry for Cardinality"
         );
     }
@@ -2640,7 +2658,7 @@ mod tests {
         };
         let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
         assert!(matches!(
             &replacements[0].replacement,
@@ -2660,7 +2678,7 @@ mod tests {
             metric_scan(&["job"]),
         ));
         let target = TargetSubDAG::new(&q);
-        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
         assert_eq!(replacements.len(), 1, "{replacements:?}");
         assert!(matches!(
             &replacements[0].replacement,
@@ -2680,10 +2698,10 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SketchKind],
-        ) -> Vec<SketchKind> {
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
             let mut v = candidates.to_vec();
-            if let Some(pos) = v.iter().position(|k| *k == SketchKind::DDSketch) {
+            if let Some(pos) = v.iter().position(|k| *k == SketchAlgorithm::DDSketch) {
                 let dd = v.remove(pos);
                 v.insert(0, dd);
             }
@@ -2696,16 +2714,16 @@ mod tests {
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let custom = PreferDDSketch;
-        let replacements = SketchFamilyStrategy::new(&custom).replacements(&target);
-        let kinds: Vec<SketchKind> = replacements
+        let replacements = SketchAlgorithmStrategy::new(&custom).replacements(&target);
+        let kinds: Vec<SketchAlgorithm> = replacements
             .iter()
             .map(|r| match &r.replacement {
-                Replacement::Summary(node) => summary_family_kind(node),
+                Replacement::Summary(node) => summary_family_algorithm(node),
                 Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
             })
             .collect();
-        assert!(kinds.contains(&SketchKind::Kll));
-        assert!(kinds.contains(&SketchKind::DDSketch));
+        assert!(kinds.contains(&SketchAlgorithm::Kll));
+        assert!(kinds.contains(&SketchAlgorithm::DDSketch));
         assert_eq!(kinds.len(), 2);
     }
 
@@ -2723,21 +2741,21 @@ mod tests {
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], default_quantile(0.99), inner));
         let target = TargetSubDAG::new(&outer);
-        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
 
         let ddsketch = replacements
             .iter()
             .find(|r| {
                 matches!(&r.replacement, Replacement::Summary(node)
-                    if summary_family_kind(node) == SketchKind::DDSketch)
+                    if summary_family_algorithm(node) == SketchAlgorithm::DDSketch)
             })
             .expect("the outer target's DDSketch candidate must be present");
         let Replacement::Summary(node) = &ddsketch.replacement else {
             unreachable!("filtered on Replacement::Summary above");
         };
         assert_eq!(
-            summary_family_kind(node),
-            SketchKind::DDSketch,
+            summary_family_algorithm(node),
+            SketchAlgorithm::DDSketch,
             "the outer (target) node must be the DDSketch candidate"
         );
 
@@ -2750,22 +2768,23 @@ mod tests {
             panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
         assert_eq!(
-            summary_family_kind(child),
-            SketchKind::Kll,
+            summary_family_algorithm(child),
+            SketchAlgorithm::Kll,
             "the nested inner aggregate must still get the cost-model-ranked \
              default (Kll), not inherit the outer target's DDSketch candidate"
         );
     }
 
-    /// The `SummaryFamilyType`'s `SketchKind`, from the top `SummaryAgg`
-    /// reachable under a (possibly `SummaryEstimate`-wrapped) bound root.
-    fn summary_family_kind(node: &SummaryNode) -> SketchKind {
+    /// The `SummaryFamilyType`'s committed `SketchAlgorithm`, from the top
+    /// `SummaryAgg` reachable under a (possibly `SummaryEstimate`-wrapped)
+    /// bound root.
+    fn summary_family_algorithm(node: &SummaryNode) -> SketchAlgorithm {
         match &node.expr {
             asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                summary_family_kind(summary_input)
+                summary_family_algorithm(summary_input)
             }
             asap_types::post_asap::SummaryExpr::SummaryAgg { family, .. } => match family {
-                asap_types::post_asap::SummaryFamilyType::Sketch(kind, _) => kind.clone(),
+                asap_types::post_asap::SummaryFamilyType::Sketch(kind) => kind.algorithm().clone(),
                 other => panic!("expected a Sketch family, got {other:?}"),
             },
             other => panic!("expected SummaryAgg/SummaryEstimate, got {other:?}"),
@@ -2994,7 +3013,7 @@ mod tests {
         // Two independently-built, structurally identical Sum aggregates:
         // share_common_subtrees (run inside search_workload) collapses them
         // onto one Rc with consumer_count 2, so this single group should
-        // carry SketchFamilyStrategy's one ExactAggregate candidate *and*
+        // carry SketchAlgorithmStrategy's one ExactAggregate candidate *and*
         // SharedSubtreeStrategy's share-vs-recompute pair.
         let a = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
         let b = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
@@ -3163,7 +3182,7 @@ mod tests {
         // twice for the same target.
         let root = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let mut group = MemoGroup::new(Rc::clone(&root), 1);
-        let strategy = SketchFamilyStrategy::default_cost_model();
+        let strategy = SketchAlgorithmStrategy::default_cost_model();
         let target = TargetSubDAG::new(&root);
         for candidate in strategy.replacements(&target) {
             group.add_candidate(candidate);
@@ -3260,10 +3279,10 @@ mod tests {
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,
-                candidates: &[SketchKind],
-            ) -> Vec<SketchKind> {
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
                 let mut v = candidates.to_vec();
-                if let Some(pos) = v.iter().position(|k| *k == SketchKind::DDSketch) {
+                if let Some(pos) = v.iter().position(|k| *k == SketchAlgorithm::DDSketch) {
                     let dd = v.remove(pos);
                     v.insert(0, dd);
                 }
@@ -3283,7 +3302,7 @@ mod tests {
             Replacement::Summary(node) => sketch_kind_of(node),
             Replacement::Rewrite(_) => None,
         };
-        assert_eq!(first_kind, Some(SketchKind::DDSketch));
+        assert_eq!(first_kind, Some(SketchAlgorithm::DDSketch));
     }
 
     /// [`RankedGroup::costs`] is a per-candidate annotation, aligned
@@ -3457,14 +3476,20 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+            &SummaryFamilyType::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll { k: 200 }
+            ))
         );
         assert_eq!(col, &ColumnRef::SampleValue);
         assert_eq!(reduction, &ReductionTy::by(vec![2]));
         // SummaryAgg edge: the state column carries the committed family.
         assert_eq!(
             field(&summary_input.schema, "quantile_0_99").dtype,
-            SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+            SummaryFamilyType::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::Kll,
+                SketchParams::Kll { k: 200 }
+            ))
         );
         assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(ref e)
             if matches!(**e, QueryExpr::Scan { .. })));
@@ -3480,10 +3505,10 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SketchKind],
-        ) -> Vec<SketchKind> {
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
             let mut v = candidates.to_vec();
-            if let Some(pos) = v.iter().position(|k| *k == SketchKind::DDSketch) {
+            if let Some(pos) = v.iter().position(|k| *k == SketchAlgorithm::DDSketch) {
                 let ddsketch = v.remove(pos);
                 v.insert(0, ddsketch);
             }
@@ -3505,7 +3530,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(SketchKind::Kll, _)
+            SummaryFamilyType::Sketch(SketchKind::Quantile(SketchAlgorithm::Kll, _))
         ));
 
         // With `PreferDDSketchViaCostModel`: DDSketch instead, same query.
@@ -3518,10 +3543,10 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(
-                SketchKind::DDSketch,
+            &SummaryFamilyType::Sketch(SketchKind::Quantile(
+                SketchAlgorithm::DDSketch,
                 SketchParams::DDSketch { alpha: 0.01 }
-            )
+            ))
         );
     }
 
@@ -3536,8 +3561,8 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SketchKind],
-        ) -> Vec<SketchKind> {
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
             candidates.to_vec()
         }
 
@@ -3547,13 +3572,13 @@ mod tests {
             _payload: &serde_json::Value,
         ) -> Implementation {
             if ext_kind == "frequency" {
-                Implementation::Sketch {
-                    kind: SketchKind::CountSketch,
-                    params: SketchParams::CountSketch {
+                Implementation::Sketch(SketchKind::Frequency(
+                    SketchAlgorithm::CountSketch,
+                    SketchParams::CountSketch {
                         width: 256,
                         depth: 4,
                     },
-                }
+                ))
             } else {
                 Implementation::PassThrough
             }
@@ -3615,13 +3640,13 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(
-                SketchKind::CountSketch,
+            &SummaryFamilyType::Sketch(SketchKind::Frequency(
+                SketchAlgorithm::CountSketch,
                 SketchParams::CountSketch {
                     width: 256,
                     depth: 4
                 }
-            )
+            ))
         );
     }
 
@@ -3744,7 +3769,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(SketchKind::Kll, _)
+            SummaryFamilyType::Sketch(SketchKind::Quantile(SketchAlgorithm::Kll, _))
         ));
         let SummaryExpr::SummaryAgg {
             family: inner_family,
@@ -3887,7 +3912,10 @@ mod tests {
         assert!(matches!(
             &summary_input.expr,
             SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(SketchKind::CmsWithHeap, _),
+                family: SummaryFamilyType::Sketch(SketchKind::TopK(
+                    SketchAlgorithm::CmsWithHeap,
+                    _
+                )),
                 ..
             }
         ));

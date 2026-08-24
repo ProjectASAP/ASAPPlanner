@@ -124,16 +124,16 @@ allowed, `Epsilon(e)` / `EpsilonDelta{epsilon, delta}` otherwise.
 
 Feed the `QueryExpr` to `asap-aware-mapping`. This crate depends only on `asap-types`, never on a
 front end, so it's agnostic to which language produced the tree. There is no "bind me one tree"
-entry point: `SketchFamilyStrategy::replacements()` always returns every valid candidate for a
+entry point: `SketchAlgorithmStrategy::replacements()` always returns every valid candidate for a
 target, ranked, and you take the one you want.
 
 ```rust
-use asap_aware_mapping::{Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG};
+use asap_aware_mapping::{Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG};
 use std::rc::Rc;
 
 let root = Rc::new(pre_asap);
 let target = TargetSubDAG::new(&root);
-let candidates = SketchFamilyStrategy::default_cost_model().replacements(&target);
+let candidates = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
 
 // Take the cost-model-preferred candidate — the common case.
 let Some(ReplacementSubDAG { replacement: Replacement::Summary(post_asap), .. }) =
@@ -148,10 +148,10 @@ else {
 ```
 
 `implementations_for_with(&AggIntent, &dyn CostModel) -> Vec<Implementation>` is the lower-level
-enumeration `SketchFamilyStrategy` wraps, if you only need the per-node decision (sketch, exact
+enumeration `SketchAlgorithmStrategy` wraps, if you only need the per-node decision (sketch, exact
 accumulator, or pass-through) without binding it into a `SummaryNode`.
 
-`SketchFamilyStrategy::new(&dyn CostModel)` (vs. `default_cost_model()`) is the extension point for
+`SketchAlgorithmStrategy::new(&dyn CostModel)` (vs. `default_cost_model()`) is the extension point for
 a deployment that wants its own candidate ranking or parameter sizing instead of this crate's
 built-in static preference order (`DefaultCostModel` — what `default_cost_model()` uses).
 See the `CostModel` trait doc in `crates/asap-aware-mapping/src/cost_model.rs` for its overridable

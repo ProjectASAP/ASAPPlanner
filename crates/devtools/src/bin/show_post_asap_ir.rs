@@ -22,7 +22,7 @@
 
 use asap_aware_mapping::replacement::keep_pre_asap;
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchFamilyStrategy, TargetSubDAG,
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
 use asap_types::pre_asap::query_expr::QueryExpr;
@@ -34,7 +34,7 @@ use std::rc::Rc;
 const ACCURACY: AccuracyTarget = AccuracyTarget::Epsilon(0.01);
 
 /// `asap-aware-mapping` has no "bind me one tree" public API any more —
-/// `SketchFamilyStrategy::replacements` always returns every candidate, and
+/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
 /// a caller decides what to keep. This debug tool just wants one
 /// representative binding per query, so it takes the first
 /// (`cost_model`-preferred) candidate the same way a production caller
@@ -42,7 +42,7 @@ const ACCURACY: AccuracyTarget = AccuracyTarget::Epsilon(0.01);
 fn bind(expr: &QueryExpr) -> Result<Rc<asap_types::post_asap::SummaryNode>, String> {
     let root = Rc::new(expr.clone());
     let target = TargetSubDAG::new(&root);
-    match SketchFamilyStrategy::default_cost_model()
+    match SketchAlgorithmStrategy::default_cost_model()
         .replacements(&target)
         .into_iter()
         .next()

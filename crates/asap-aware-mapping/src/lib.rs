@@ -8,7 +8,7 @@
 //! **Common sub-expression elimination (CSE) is not this crate's job.**
 //! Detection is a primary pass over the pre-ASAP `QueryExpr` IR itself
 //! (`asap_types::pre_asap`, design tracked in issue #223), run before a
-//! tree ever reaches [`replacement::SketchFamilyStrategy`] — see issue #222
+//! tree ever reaches [`replacement::SketchAlgorithmStrategy`] — see issue #222
 //! for why (batch query optimization needs to see shared work across a
 //! `QueryWorkload` before summary binding, not after). This crate may
 //! eventually run a second, narrower CSE pass of its own over an
@@ -37,7 +37,7 @@
 //!   exhaustive. The `TargetSubDAG`/`ReplacementSubDAG`/
 //!   `ReplacementStrategy` vocabulary `docs/design_docs/asap_aware_mapping.md` stubs out
 //!   under "Key concepts (not yet implemented)", implemented for real (issue
-//!   #251, part of #33). [`replacement::SketchFamilyStrategy::replacements`]
+//!   #251, part of #33). [`replacement::SketchAlgorithmStrategy::replacements`]
 //!   both *decides* what an `AggIntent` may become
 //!   ([`replacement::implementations_for_with`], exhaustive and ranked via a
 //!   `CostModel`, sized to the `AccuracyTarget`) and *constructs* each
@@ -105,7 +105,7 @@
 //! | **Parse** | parse | text (PromQL/SQL) → AST | `asap-frontend-promql` / `asap-frontend-sql` |
 //! | **Bind #1** | name resolution | `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → **Bind** → Optimize" pipeline sense (e.g. SQL Server's query-processor terminology) | [`asap_types::pre_asap::binder::Binder`](https://docs.rs/asap-types) |
 //! | **Implementation** — `replacement::implementations_for_with` | pre-ASAP → post-ASAP, *one node* | enumerating every concrete physical realization (a sketch family, an exact accumulator, or pass-through) for one [`AggIntent`](asap_types::pre_asap::agg_intent::AggIntent) | [`replacement`] |
-//! | **Replacement** — [`replacement::SketchFamilyStrategy::replacements`] | pre-ASAP → post-ASAP, *one target, every candidate* | wrap each `implementations_for_with` candidate into its own bound [`SummaryNode`](asap_types::post_asap::SummaryNode), ranked — a caller wanting one answer takes the first entry itself | [`replacement`] |
+//! | **Replacement** — [`replacement::SketchAlgorithmStrategy::replacements`] | pre-ASAP → post-ASAP, *one target, every candidate* | wrap each `implementations_for_with` candidate into its own bound [`SummaryNode`](asap_types::post_asap::SummaryNode), ranked — a caller wanting one answer takes the first entry itself | [`replacement`] |
 //! | **Search** — [`replacement::search_workload`]/[`replacement::search_workload_with`] | pre-ASAP → post-ASAP, *whole workload, every candidate* | a Cascades/Volcano-style MEMO search: discover every candidate `TargetSubDAG` across a whole workload (not just one target in isolation), run every registered `ReplacementStrategy` against each to a fixpoint, and dedup into a [`replacement::PlanSpace`] — one [`replacement::MemoGroup`] per distinct `TargetSubDAG` holding every alternative discovered for it, never a flat `2^N`-sized list of whole candidate plans | [`replacement`] |
 //! | **Bind #2** (downstream, not in this crate) | post-ASAP → deployment placement | a *deployment's* own physical binder, deciding **which** candidate to commit to *and* **placement** (edge vs. backend, wire format, …) for a whole workload — a genuinely different, deployment-specific decision this crate doesn't model at all (this is also where a prior workload-wide "keep first/cost-preferred candidate per node" step, `bind::implement_workload`/`implement_workload_with`, would belong if a deployment still wants that exact behavior — it isn't shipped by this crate) | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
 //!
@@ -134,5 +134,5 @@ pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
     summary_candidates, ImplementError, Implementation, Matcher, MemoGroup, PlanSpace, RankedGroup,
     Replacement, ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy,
-    SketchFamilyStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
+    SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
 };

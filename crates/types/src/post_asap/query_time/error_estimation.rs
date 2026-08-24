@@ -46,7 +46,7 @@
 //! plan-time sizing. As of this module landing, **this repository has no
 //! vendored CMS/CountSketch/CU-Sketch runtime and no counter-array data
 //! structure anywhere** — confirmed by inspecting
-//! `crates/types/src/post_asap/sketch.rs` (`SketchKind`, `SketchParams`,
+//! `crates/types/src/post_asap/sketch.rs` (`SketchAlgorithm`, `SketchParams`,
 //! this module's neighbors) and `crates/asap-aware-mapping/src/implementation.rs`
 //! (`default_size_params`, `cms_width`, `cms_depth`): both are purely
 //! planning-time sizing metadata. There is no `A[row][col]` counter matrix
@@ -116,7 +116,7 @@ pub fn cu_sketch_posterior_error_bound(row: &[u64], rows: u32, delta: f64) -> Op
 ///
 /// Count-Sketch counters are signed (each row's hash also picks a random
 /// sign, so a flow's contribution can subtract as well as add — "balanced/
-/// zero-mean-error" per `SketchKind::CountSketch`'s own doc), and a flow's
+/// zero-mean-error" per `SketchAlgorithm::CountSketch`'s own doc), and a flow's
 /// size is estimated as the *median*, not the minimum, of its `r` per-row
 /// counters. That breaks Algorithm 1/2's simple `p = δ^(1/r)` derivation (a
 /// union bound over "any row is bad"): the median needs *more than half* the

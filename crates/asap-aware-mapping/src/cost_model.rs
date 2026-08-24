@@ -13,7 +13,7 @@
 //!
 //! This trait is scoped to the approximate-**sketch** family specifically
 //! ([`CostModel::rank_candidates`]/[`size_params`](CostModel::size_params)
-//! take/return [`SketchKind`]/[`SketchParams`]) — `asap_sketch` also has
+//! take/return [`SketchAlgorithm`]/[`SketchParams`]) — `asap_sketch` also has
 //! sibling families for sampling-based, wavelet-transform, and fitted
 //! statistical-model summaries
 //! ([`asap_types::post_asap::SamplingKind`]/…/[`asap_types::post_asap::StatModelKind`]),
@@ -26,7 +26,7 @@
 //! than overloading these ones across incompatible `Kind`/`Params` types.
 //!
 //! Every entry point that doesn't take an explicit `&dyn CostModel`
-//! ([`SketchFamilyStrategy::default_cost_model`](crate::replacement::SketchFamilyStrategy::default_cost_model),
+//! ([`SketchAlgorithmStrategy::default_cost_model`](crate::replacement::SketchAlgorithmStrategy::default_cost_model),
 //! [`search_workload`](crate::replacement::search_workload)) runs against
 //! [`DefaultCostModel`], so a deployment that never plugs in its own cost
 //! model keeps today's static-preference-order behavior exactly, byte for
@@ -49,7 +49,7 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    SketchKind, SketchParams, SketchQuery, SummaryFamilyType, SummaryNode,
+    SketchAlgorithm, SketchParams, SketchQuery, SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -188,13 +188,17 @@ pub trait CostModel {
     ///
     /// Implementations MAY reorder freely and MAY drop entries that aren't
     /// available in their deployment, but MUST NOT invent a candidate that
-    /// wasn't in the input — an unknown [`SketchKind`] has no
+    /// wasn't in the input — an unknown [`SketchAlgorithm`] has no
     /// [`SketchParams`](asap_types::post_asap::SketchParams) sizing logic in
     /// `replacement::implementations_for_with` and binding it will panic.
     /// Returning an empty `Vec` means "no candidate is acceptable";
     /// `implementations_for_with` treats that the same as `candidates`
     /// having been empty to begin with.
-    fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind>;
+    fn rank_candidates(
+        &self,
+        intent: &AggIntent,
+        candidates: &[SketchAlgorithm],
+    ) -> Vec<SketchAlgorithm>;
 
     /// Size [`SketchParams`] for `kind` (one of the candidates
     /// [`rank_candidates`](Self::rank_candidates) put first) under the
@@ -210,7 +214,7 @@ pub trait CostModel {
     /// not resize them, can leave this method unimplemented.
     fn size_params(
         &self,
-        kind: SketchKind,
+        kind: SketchAlgorithm,
         intent: &AggIntent,
         eps: f64,
         delta: f64,
@@ -311,14 +315,14 @@ pub trait CostModel {
     /// on [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)),
     /// not just order candidates against each other — that ordering job
     /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
-    /// [`SketchFamilyStrategy`](crate::replacement::SketchFamilyStrategy)
+    /// [`SketchAlgorithmStrategy`](crate::replacement::SketchAlgorithmStrategy)
     /// group) and [`cse_share_decision`](Self::cse_share_decision) (for a
     /// [`SharedSubtreeStrategy`](crate::replacement::SharedSubtreeStrategy)
     /// group).
     ///
     /// One method covers both candidate shapes this crate ships:
     /// `candidate.replacement`'s [`Replacement::Summary`] arm (a
-    /// `SketchFamilyStrategy` candidate — the bound `SummaryNode` is right
+    /// `SketchAlgorithmStrategy` candidate — the bound `SummaryNode` is right
     /// there, nothing to reconstruct) and its [`Replacement::Rewrite`] arm
     /// (a `SharedSubtreeStrategy` share-vs-recompute candidate — no bound
     /// `SummaryNode` of its own, since sharing is a decision about a target
@@ -351,7 +355,11 @@ pub trait CostModel {
 pub struct DefaultCostModel;
 
 impl CostModel for DefaultCostModel {
-    fn rank_candidates(&self, _intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind> {
+    fn rank_candidates(
+        &self,
+        _intent: &AggIntent,
+        candidates: &[SketchAlgorithm],
+    ) -> Vec<SketchAlgorithm> {
         candidates.to_vec()
     }
 
@@ -430,8 +438,8 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SketchKind],
-        ) -> Vec<SketchKind> {
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
             let mut v = candidates.to_vec();
             v.reverse();
             v
@@ -453,8 +461,8 @@ mod tests {
     fn size_params_default_body_matches_default_size_params() {
         let intent = default_cardinality();
         assert_eq!(
-            AlwaysPreferLast.size_params(SketchKind::Hll, &intent, 0.01, 0.01),
-            crate::replacement::default_size_params(SketchKind::Hll, &intent, 0.01, 0.01),
+            AlwaysPreferLast.size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
+            crate::replacement::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
         );
     }
 
@@ -468,20 +476,20 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SketchKind],
-        ) -> Vec<SketchKind> {
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
             candidates.to_vec()
         }
 
         fn size_params(
             &self,
-            kind: SketchKind,
+            kind: SketchAlgorithm,
             intent: &AggIntent,
             eps: f64,
             delta: f64,
         ) -> SketchParams {
             match kind {
-                SketchKind::Kll => {
+                SketchAlgorithm::Kll => {
                     let k = if eps >= 0.01 { 200 } else { 2048 };
                     SketchParams::Kll { k }
                 }
@@ -496,19 +504,21 @@ mod tests {
 
         let intent = default_quantile(0.99);
         assert_eq!(
-            DiscreteKllRungs.size_params(SketchKind::Kll, &intent, 0.001, 0.01),
+            DiscreteKllRungs.size_params(SketchAlgorithm::Kll, &intent, 0.001, 0.01),
             SketchParams::Kll { k: 2048 },
         );
         // Untouched kinds still fall through to the default formula.
         assert_eq!(
-            DiscreteKllRungs.size_params(SketchKind::Hll, &intent, 0.01, 0.01),
-            crate::replacement::default_size_params(SketchKind::Hll, &intent, 0.01, 0.01),
+            DiscreteKllRungs.size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
+            crate::replacement::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
         );
     }
 
     // ── CSE sharing (issue #237, #223 stage 4) ──────────────────────────
 
-    use asap_types::post_asap::{ExactKind, ExactParams, SummaryExpr, SummaryField, SummarySchema};
+    use asap_types::post_asap::{
+        ExactKind, ExactParams, SketchKind, SummaryExpr, SummaryField, SummarySchema,
+    };
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
 
@@ -613,8 +623,7 @@ mod tests {
             ExactParams::Sum,
         ));
         let sketch = default_cse_shared_maintenance_cost(&SummaryFamilyType::Sketch(
-            SketchKind::Hll,
-            SketchParams::Hll { precision: 12 },
+            SketchKind::Cardinality(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 }),
         ));
         assert!(
             exact < sketch,
@@ -670,8 +679,8 @@ mod tests {
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,
-                candidates: &[SketchKind],
-            ) -> Vec<SketchKind> {
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
                 candidates.to_vec()
             }
             fn cse_recompute_cost(&self, _candidate: &CseCandidate) -> Cost {
@@ -713,8 +722,8 @@ mod tests {
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,
-                candidates: &[SketchKind],
-            ) -> Vec<SketchKind> {
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
                 candidates.to_vec()
             }
         }

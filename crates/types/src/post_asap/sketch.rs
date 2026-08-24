@@ -34,10 +34,12 @@ pub enum ExactParams {
 
 // ── Approximate sketches ─────────────────────────────────────────────────────
 
-/// An approximate, mergeable sketch family — bounded error, sized by its
-/// [`SketchParams`].
+/// A specific sketch algorithm — bounded error, sized by its
+/// [`SketchParams`]. Each algorithm belongs to exactly one [`SketchKind`]
+/// category (e.g. `Kll` and `DDSketch` both realize `SketchKind::Quantile`);
+/// [`SketchKind::new`] is where that classification is made.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum SketchKind {
+pub enum SketchAlgorithm {
     /// KLL quantile sketch (mergeable, ε-accurate rank queries).
     Kll,
     /// Count-Min Sketch (mergeable, (ε,δ)-accurate frequency queries).
@@ -61,8 +63,8 @@ pub enum SketchKind {
     CountSketchWithHeap,
 }
 
-/// Concrete, catalog-validated parameters for a specific [`SketchKind`]
-/// instance. The variant must correspond to the associated `SketchKind`;
+/// Concrete, catalog-validated parameters for a specific [`SketchAlgorithm`]
+/// instance. The variant must correspond to the associated `SketchAlgorithm`;
 /// mismatches are caught at post-ASAP bind time, before any later,
 /// deployment-specific stage ever sees the plan.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +102,76 @@ pub enum SketchParams {
         depth: u32,
         heap_size: u32,
     },
+}
+
+/// A committed sketch choice: which *category* of query shape it answers —
+/// quantile-style, cardinality-style, frequency-style, or heavy-hitter/
+/// top-k-style estimation — together with the concrete [`SketchAlgorithm`]
+/// and [`SketchParams`] realizing it. Sits between
+/// [`SummaryFamilyType::Sketch`](super::schema::SummaryFamilyType::Sketch)
+/// (the `Sketch` family as a whole, sibling to `Sample`/`Wavelet`/
+/// `StatModel`) and the bare algorithm: `Kll` vs. `DDSketch` is a choice
+/// *within* `Quantile`, not a choice *of* `SketchKind` — every `Quantile`
+/// value already carries which of the two (and its params) was picked.
+///
+/// [`SketchKind::new`] is the one place `(SketchAlgorithm, SketchParams)`
+/// pairs get classified into a category; construct through it rather than
+/// naming a variant directly, so a new algorithm can't drift out of sync
+/// with its category. See `implementation::summary_candidates` for the
+/// `AggIntent -> [SketchAlgorithm]` candidate list this ultimately groups.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SketchKind {
+    /// Approximate rank/percentile queries (e.g. p99 latency).
+    Quantile(SketchAlgorithm, SketchParams),
+    /// Approximate distinct-element counting.
+    Cardinality(SketchAlgorithm, SketchParams),
+    /// Approximate point/frequency counting (e.g. per-key event counts).
+    Frequency(SketchAlgorithm, SketchParams),
+    /// Approximate heavy-hitter / top-k queries.
+    TopK(SketchAlgorithm, SketchParams),
+}
+
+impl SketchKind {
+    /// Classify `(algorithm, params)` into its `SketchKind` category. The
+    /// one place that mapping is made — every other piece of this crate
+    /// that needs to know an algorithm's category goes through this rather
+    /// than re-deriving it.
+    pub fn new(algorithm: SketchAlgorithm, params: SketchParams) -> Self {
+        match algorithm {
+            SketchAlgorithm::Kll | SketchAlgorithm::DDSketch => {
+                SketchKind::Quantile(algorithm, params)
+            }
+            SketchAlgorithm::Hll | SketchAlgorithm::Theta | SketchAlgorithm::Kmv => {
+                SketchKind::Cardinality(algorithm, params)
+            }
+            SketchAlgorithm::Cms | SketchAlgorithm::CountSketch => {
+                SketchKind::Frequency(algorithm, params)
+            }
+            SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap => {
+                SketchKind::TopK(algorithm, params)
+            }
+        }
+    }
+
+    /// The algorithm this kind committed to, regardless of category.
+    pub fn algorithm(&self) -> &SketchAlgorithm {
+        match self {
+            SketchKind::Quantile(a, _)
+            | SketchKind::Cardinality(a, _)
+            | SketchKind::Frequency(a, _)
+            | SketchKind::TopK(a, _) => a,
+        }
+    }
+
+    /// The parameters this kind committed to, regardless of category.
+    pub fn params(&self) -> &SketchParams {
+        match self {
+            SketchKind::Quantile(_, p)
+            | SketchKind::Cardinality(_, p)
+            | SketchKind::Frequency(_, p)
+            | SketchKind::TopK(_, p) => p,
+        }
+    }
 }
 
 // ── Sampling summaries ───────────────────────────────────────────────────────
