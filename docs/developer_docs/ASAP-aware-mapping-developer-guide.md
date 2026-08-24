@@ -53,28 +53,46 @@ flowchart TB
   classDef choose fill:#fcebdc,stroke:#c46a25,color:#572d0c
   classDef report fill:#f2eafe,stroke:#7950b3,color:#34204f
 
-  WL["Workload with one or more roots<br/>Vec&lt;(Id, Rc&lt;QueryExpr&gt;)&gt;"]:::input
-  WL --> SEARCH["search_workload_with<br/>CSE + whole-DAG discovery"]:::generate
-  SEARCH --> TARGET["TargetSubDAG per discovered node<br/>measured consumer_count"]:::generate
+  subgraph DISCOVERY[1. Discover every replaceable site]
+    WL["Input workload<br/>one or more named pre-ASAP QueryExpr roots"]:::input
+    SEARCH["search_workload_with<br/>run CSE once, then visit every node in every root DAG"]:::generate
+    TARGET["TargetSubDAG<br/>one candidate site plus the number of workload locations<br/>that reference the same Rc&lt;QueryExpr&gt;"]:::generate
+    WL -->|"roots"| SEARCH -->|"one target per distinct node"| TARGET
+  end
 
-  TARGET --> SKETCH["SketchAlgorithmStrategy<br/>construct every valid SummaryNode"]:::generate
-  TARGET --> SHARED["SharedSubtreeStrategy<br/>share vs. recompute"]:::generate
-  CM([CostModel]):::choose -. "rank + size" .-> SKETCH
-  SKETCH --> CAND["Vec&lt;ReplacementSubDAG&gt;<br/>Summary or Rewrite; nothing pruned"]:::store
-  SHARED --> CAND
-  CAND --> MEMO["PlanSpace / MemoGroup<br/>all targets, all candidates"]:::store
+  subgraph GENERATION[2. Generate all legal alternatives at each site]
+    SKETCH["SketchAlgorithmStrategy<br/>for a bindable aggregate, enumerate every legal<br/>sketch, exact accumulator, or pass-through realization"]:::generate
+    SHARED["SharedSubtreeStrategy<br/>when consumer_count ≥ 2, emit both<br/>build-once-and-share and recompute-independently"]:::generate
+    CAND["ReplacementSubDAG candidates<br/>each contains a Summary or Rewrite plus its rationale;<br/>no valid alternative is removed"]:::store
+    TARGET -->|"aggregate shape"| SKETCH --> CAND
+    TARGET -->|"shared Rc identity"| SHARED --> CAND
+    CM(["CostModel<br/>orders algorithms and chooses sketch parameters"]):::choose
+    CM -. "rank and size; never filter" .-> SKETCH
+  end
 
-  MEMO --> SORT[PlanSpace::cost_sorted]:::choose
-  SORT --> RANK[rank_candidates]:::choose
-  SORT --> CSE[cse_share_decision]:::choose
-  SORT --> COST[estimate_cost]:::choose
-  RANK --> GROUP["RankedGroup<br/>best-first candidates + aligned costs"]:::choose
-  CSE --> GROUP
-  COST --> GROUP
+  subgraph SEARCHSPACE[3. Store the workload-wide search space]
+    MEMO["PlanSpace<br/>one MemoGroup per target; each group keeps<br/>all independently selectable candidates"]:::store
+    CAND -->|"deduplicate by target and candidate identity"| MEMO
+  end
 
-  MEMO --> EXPLAIN["explain_replacements<br/>kind + location + rationale + node_hash"]:::report
-  EXPLAIN --> EXPORT[dag_export]:::report
-  EXPORT --> VIEWER[dag-viewer]:::report
+  subgraph RANKING[4. Rank without selecting a final plan]
+    SORT["PlanSpace::cost_sorted<br/>dispatch each group according to candidate shape"]:::choose
+    RANK["rank_candidates<br/>order sketch algorithms"]:::choose
+    CSE["cse_share_decision<br/>order share vs. recompute"]:::choose
+    COST["estimate_cost<br/>attach one comparable f64 to every candidate"]:::choose
+    GROUP["RankedGroup<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
+    MEMO --> SORT
+    SORT --> RANK --> GROUP
+    SORT --> CSE --> GROUP
+    SORT --> COST --> GROUP
+  end
+
+  subgraph REPORTING[5. Produce human-facing annotations]
+    EXPLAIN["explain_replacements<br/>select reportable candidates, copy their rationale,<br/>and add kind, location, and node_hash"]:::report
+    EXPORT["dag_export<br/>match node_hash to the exported DAG node"]:::report
+    VIEWER["dag-viewer<br/>show a badge and explanation beside that node"]:::report
+    MEMO -->|"reporting view; no new planner decision"| EXPLAIN --> EXPORT --> VIEWER
+  end
 ```
 
 ---
@@ -103,16 +121,15 @@ flowchart LR
   classDef workload fill:#e7f7ef,stroke:#31835e,color:#173f2d
   classDef common fill:#fff6dd,stroke:#b78922,color:#513d0c
 
-  ROOTS["One or more QueryExpr roots"]:::workload
-  ROOTS --> CSE["Run CSE once"]:::workload
-  CSE --> WALK["Walk every root's whole DAG"]:::workload
-  WALK --> T["TargetSubDAG per node<br/>measured consumer_count"]:::workload
+  ROOTS["Input<br/>one or more named QueryExpr roots"]:::workload
+  ROOTS --> CSE["Canonicalize sharing<br/>merge structurally identical, legally shareable subtrees"]:::workload
+  CSE --> WALK["Discover sites<br/>walk the complete DAG, including nodes below unshared parents"]:::workload
+  WALK --> T["Build TargetSubDAG<br/>retain the subtree's Rc identity and measured consumer_count"]:::workload
   T --> MATCH
-  MATCH[ReplacementStrategy::matches]:::common
-  MATCH --> REPLACE[ReplacementStrategy::replacements]:::common
-  REPLACE --> A[Candidate A]:::common
-  REPLACE --> B[Candidate B]:::common
-  REPLACE --> C[Candidate C]:::common
+  MATCH["matches(target)<br/>cheaply decide whether this strategy has alternatives"]:::common
+  MATCH -->|"true"| REPLACE["replacements(target)<br/>construct every semantically valid alternative;<br/>do not select or prune"]:::common
+  MATCH -->|"false"| NONE["No candidates<br/>continue with the next strategy"]:::common
+  REPLACE --> OUT["Candidate list for this strategy and target<br/>each ReplacementSubDAG carries the replacement and rationale"]:::common
 ```
 
 `TargetSubDAG::new(&root)` remains available for invoking one strategy against one node in isolation; it sets `consumer_count` to `1`. Tests, focused tooling, and the internal `realize_child` helper use this form when workload sharing is irrelevant. It is not a target-discovery or plan-search entry point. Use `search_workload`/`search_workload_with` whenever strategies need workload context or accurate sharing counts.
@@ -689,11 +706,11 @@ At a high level:
 
 ```mermaid
 flowchart LR
-  A[Target Aggregate] --> B[Extract AggIntent]
-  B --> C[implementations_for_with]
-  C --> D[Every ranked Implementation]
-  D --> E[Construct each SummaryNode separately]
-  E --> F["Vec&lt;ReplacementSubDAG&gt;"]
+  A["Input TargetSubDAG<br/>root is a bindable Aggregate"] --> B["bindable_intent<br/>extract the aggregate's operation,<br/>grouping, and accuracy requirement"]
+  B --> C["implementations_for_with<br/>enumerate all legal algorithms or exact/pass-through forms;<br/>CostModel orders and sizes them"]
+  C --> D["For each Implementation<br/>derive schema, summarized column, and readout;<br/>recursively realize the child"]
+  D --> E["Construct one SummaryNode<br/>and attach a human-readable rationale"]
+  E --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>all candidates retained in preferred order"]
 ```
 
 For an approximate quantile, the current candidate list includes both KLL and DDSketch — the strategy returns both, even though the cost model ranks one ahead of the other. For cases where `implementations_for_with` has only one realization, such as an exact accumulator or pass-through, the strategy returns that single realization. There is no separate per-category dispatch inside the strategy: whatever `implementations_for_with` produces, the strategy constructs, one entry at a time.
@@ -932,8 +949,9 @@ The current sketch strategy does exactly this:
 
 ```mermaid
 flowchart LR
-  MODEL[Custom model prefers DDSketch] --> ORDER["Rank: DDSketch, KLL"]
-  ORDER --> RESULT["Strategy returns both<br/>DDSketch + KLL"]
+  INPUT["Legal candidate set<br/>KLL + DDSketch"] --> MODEL["Custom CostModel<br/>prefers DDSketch for this AggIntent"]
+  MODEL --> ORDER["rank_candidates output<br/>DDSketch first, KLL second"]
+  ORDER --> RESULT["Strategy output<br/>both candidates remain; only their order changes"]
 ```
 
 That is the expected separation between enumeration and ranking.
@@ -1050,10 +1068,10 @@ Conceptually:
 
 ```mermaid
 flowchart LR
-  ALG[SketchAlgorithm] --> SIZE[CostModel::size_params]
-  INTENT[AggIntent] --> SIZE
-  ACC[Accuracy target] --> SIZE
-  SIZE --> PARAMS[SketchParams]
+  ALG["Chosen SketchAlgorithm<br/>for example, KLL or HLL"] --> SIZE["CostModel::size_params<br/>translate an accuracy promise into<br/>algorithm-specific storage parameters"]
+  INTENT["AggIntent<br/>what the query is computing"] --> SIZE
+  ACC["Accuracy budget<br/>epsilon and delta"] --> SIZE
+  SIZE --> PARAMS["SketchParams<br/>for example, KLL capacity or HLL precision"]
 ```
 
 ---
@@ -1213,10 +1231,10 @@ Therefore, when adding a new built-in sketch algorithm, the intended flow is:
 
 ```mermaid
 flowchart LR
-  MAP["Add algorithm to summary_candidates<br/>for the relevant AggIntent"]
-  MAP --> MODEL["Define CostModel ranking,<br/>sizing, and numeric cost"]
-  MODEL --> BUILD["Teach construct_summary<br/>to realize the algorithm"]
-  BUILD --> ENUM["SketchAlgorithmStrategy<br/>enumerates it automatically"]
+  MAP["1. Declare legality<br/>add the algorithm to summary_candidates<br/>for each AggIntent it can answer"]
+  MAP --> MODEL["2. Define costing<br/>rank it, derive its SketchParams,<br/>and provide a comparable numeric cost"]
+  MODEL --> BUILD["3. Define construction<br/>teach construct_summary how to build its state<br/>and how the query reads the result"]
+  BUILD --> ENUM["4. Verify integration<br/>SketchAlgorithmStrategy includes it automatically;<br/>tests confirm enumeration, ordering, sizing, and cost"]
 ```
 
 This keeps one source of truth for sketch applicability.
