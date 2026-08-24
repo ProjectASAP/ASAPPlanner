@@ -133,10 +133,10 @@
 //! ```
 //!
 //! Read literally, this enumerates whole *plans* — full copies of the
-//! workload's tree, one per combination of per-site choices. A workload with
-//! `N` independently-choosable sites would produce up to `2^N` flat plans,
-//! each one duplicating every untouched sibling subtree. This module does
-//! not do that:
+//! workload's tree, one per combination of per-target choices. A workload
+//! with `N` independently-choosable targets would produce up to `2^N` flat
+//! plans, each one duplicating every untouched sibling subtree. This module
+//! does not do that:
 //!
 //! 1. **MEMO groups, not flat plans.** [`MemoGroup`] is this engine's
 //!    Cascades-style "group": one distinct [`TargetSubDAG`] (identified by
@@ -144,12 +144,12 @@
 //!    [`asap_types::pre_asap::cse::share_common_subtrees`] already
 //!    established across the workload) holding every
 //!    [`ReplacementSubDAG`] alternative discovered for it. [`PlanSpace`] is
-//!    a collection of these groups, keyed by site — a candidate "plan" is
-//!    never materialized as a distinct top-level `Rc<QueryExpr>` at all;
-//!    two logically-different overall choices at two different sites are
-//!    just two different entries in two different groups, sharing every
-//!    other node in the workload by construction (they *are* the same
-//!    `Rc`s — nothing was copied to make a second "plan").
+//!    a collection of these groups, keyed by `TargetSubDAG` — a candidate
+//!    "plan" is never materialized as a distinct top-level `Rc<QueryExpr>`
+//!    at all; two logically-different overall choices at two different
+//!    targets are just two different entries in two different groups,
+//!    sharing every other node in the workload by construction (they *are*
+//!    the same `Rc`s — nothing was copied to make a second "plan").
 //! 2. **Dedup by structural hash + `PartialEq`, reusing `pre_asap::cse`'s own
 //!    discipline.** [`asap_types::pre_asap::cse::structural_hash`] (made
 //!    `pub` for exactly this reuse) is only ever a candidate-narrowing
@@ -161,28 +161,31 @@
 //!    wrinkle this reuse needs (a `Rc`-identity case pure value equality
 //!    would get wrong).
 //!
-//! ### Where "for site in plan.bindable_sites()" comes from
+//! ### Where `TargetSubDAG` discovery comes from
 //!
-//! [`discover_sites`] is the workload-wide `TargetSubDAG` discovery pass
+//! [`discover_targets`] is the workload-wide `TargetSubDAG` discovery pass
 //! this section used to flag as explicitly *not* implemented ("no
 //! workload-wide `TargetSubDAG` discovery pass is shipped either... wiring
 //! it up automatically belongs to the same future search engine, not this
-//! issue") — this is that future engine, so it's this module's job now. It
-//! walks every workload root's whole DAG (the same **relational-skeleton**
-//! operator-child scope `asap_types::pre_asap::cse::share_common_subtrees`
-//! itself uses — see that module's "Algorithm" section), discovering one
-//! site per distinct `Rc` and a *real* `consumer_count`: how many
-//! operator-child positions anywhere in the workload reference that exact
-//! `Rc`, not just how many of the workload's own top-level roots happen to
-//! be it. This deliberately goes one step further than
+//! issue") — this is that future engine, so it's this module's job now, and
+//! it's what the quoted pseudocode's `for site in plan.bindable_sites()`
+//! line above stands for: every `TargetSubDAG` this pass discovers is one
+//! iteration of that loop. It walks every workload root's whole DAG (the
+//! same **relational-skeleton** operator-child scope
+//! `asap_types::pre_asap::cse::share_common_subtrees` itself uses — see
+//! that module's "Algorithm" section), discovering one `TargetSubDAG` per
+//! distinct `Rc` and a *real* `consumer_count`: how many operator-child
+//! positions anywhere in the workload reference that exact `Rc`, not just
+//! how many of the workload's own top-level roots happen to be it. This
+//! deliberately goes one step further than
 //! [`crate::bind::implement_workload_with`]'s own consumer-count pass,
 //! which only counts whole-root sharing (that function's own doc calls
 //! widening this "future work" for binding) — a `SharedSubtreeStrategy`
 //! candidate three levels under an unshared `Filter` is exactly as real a
-//! search-space site as a shared whole root, so this module's discovery
-//! can't stop at the top level the way binding's does.
+//! target as a shared whole root, so this module's discovery can't stop at
+//! the top level the way binding's does.
 //!
-//! `discover_sites` duplicates (rather than reuses) this module's own
+//! `discover_targets` duplicates (rather than reuses) this module's own
 //! `#[cfg(test)]`-only `count_consumers` traversal (in the test module
 //! below), which mirrors this exact shape for this module's own test
 //! fixtures — that copy is intentionally test-only, so it isn't reachable
@@ -193,22 +196,23 @@
 //!
 //! ### Termination
 //!
-//! Every discovered site is asked *once* per registered strategy, never
+//! Every discovered target is asked *once* per registered strategy, never
 //! re-asked — [`search_workload_with`]'s loop processes each round's
-//! frontier of not-yet-visited sites exactly one time each, so there is no
-//! scenario where the same `(site, strategy)` pair is queried twice (the
-//! `new_plans -= candidate_plans` dedup step the module-level pseudocode
-//! describes is therefore never asked to recognize "the same candidate,
-//! proposed again" as a special case — see [`MemoGroup::add_candidate`]'s
-//! own doc on why that distinction matters for [`Replacement::Summary`]
-//! specifically, where no real equality check exists to make it safely).
+//! frontier of not-yet-visited targets exactly one time each, so there is
+//! no scenario where the same `(target, strategy)` pair is queried twice
+//! (the `new_plans -= candidate_plans` dedup step the module-level
+//! pseudocode describes is therefore never asked to recognize "the same
+//! candidate, proposed again" as a special case — see
+//! [`MemoGroup::add_candidate`]'s own doc on why that distinction matters
+//! for [`Replacement::Summary`] specifically, where no real equality check
+//! exists to make it safely).
 //!
 //! What *can* grow the frontier is a candidate's own reachable structure:
-//! after a site is processed, every [`Replacement::Rewrite`] candidate's
+//! after a target is processed, every [`Replacement::Rewrite`] candidate's
 //! **children** (never the candidate's own top-level node — that value is
-//! an alternative *for* the site just processed, not a new site of its own;
-//! see [`discover_new_descendant_sites`]) are scanned for pointers not
-//! already known, and any found become next round's frontier. Both shipped
+//! an alternative *for* the target just processed, not a new target of its
+//! own; see [`discover_new_descendant_targets`]) are scanned for pointers
+//! not already known, and any found become next round's frontier. Both shipped
 //! strategies are idempotent in exactly this sense: [`SketchFamilyStrategy`]
 //! produces terminal [`Replacement::Summary`] candidates (no `QueryExpr`
 //! children to scan at all), and [`SharedSubtreeStrategy`]'s two
@@ -1372,7 +1376,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
 /// future [`ReplacementStrategy`] (see the module docs' "Termination"
 /// section) — not a bound either shipped strategy could ever approach.
 /// [`SketchFamilyStrategy`] and [`SharedSubtreeStrategy`] both converge in
-/// exactly 2 passes over a fixed site set, regardless of workload size.
+/// exactly 2 passes over a fixed target set, regardless of workload size.
 pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 
 // ── MemoGroup ────────────────────────────────────────────────────────────
@@ -1383,16 +1387,17 @@ pub const MAX_SEARCH_ITERATIONS: usize = 1_000;
 /// [`ReplacementSubDAG`] alternative any registered [`ReplacementStrategy`]
 /// proposed for it.
 ///
-/// `candidates` is deliberately *not* required to be non-empty — a site no
-/// registered strategy has an opinion on still gets a group (with an empty
-/// candidate list), so [`PlanSpace`] always has exactly one group per
-/// discovered site, not "one group per site something matched".
+/// `candidates` is deliberately *not* required to be non-empty — a
+/// `TargetSubDAG` no registered strategy has an opinion on still gets a
+/// group (with an empty candidate list), so [`PlanSpace`] always has
+/// exactly one group per discovered `TargetSubDAG`, not "one group per
+/// `TargetSubDAG` something matched".
 #[derive(Debug, Clone)]
 pub struct MemoGroup {
     /// The target sub-DAG this group is for.
     pub target: Rc<QueryExpr>,
     /// How many operator-child positions across the whole workload
-    /// reference this exact `Rc` — see [`discover_sites`].
+    /// reference this exact `Rc` — see [`discover_targets`].
     pub consumer_count: usize,
     /// Every distinct alternative discovered for `target`, in discovery
     /// order (not ranked — see [`PlanSpace::cost_sorted`] for the ranked
@@ -1508,14 +1513,14 @@ fn is_duplicate_summary(_existing: &Rc<SummaryNode>, _candidate: &Rc<SummaryNode
 // ── PlanSpace ────────────────────────────────────────────────────────────
 
 /// The deduped candidate space [`search_workload`]/[`search_workload_with`]
-/// discover: one [`MemoGroup`] per distinct site in the (already-CSE'd)
-/// workload, plus the workload's own post-CSE roots so a caller can still
-/// map a `Root`'s `Id` back to the `Rc<QueryExpr>` whose group holds its
-/// alternatives.
+/// discover: one [`MemoGroup`] per distinct `TargetSubDAG` in the
+/// (already-CSE'd) workload, plus the workload's own post-CSE roots so a
+/// caller can still map a `Root`'s `Id` back to the `Rc<QueryExpr>` whose
+/// group holds its alternatives.
 pub struct PlanSpace<Id> {
     /// The workload's roots, after the one `share_common_subtrees` pass
     /// [`search_workload_with`] runs up front — the same post-CSE roots
-    /// every site in `groups` was discovered from.
+    /// every `TargetSubDAG` in `groups` was discovered from.
     pub roots: Vec<(Id, Rc<QueryExpr>)>,
     groups: HashMap<*const QueryExpr, MemoGroup>,
     /// Discovery order — stable iteration for [`PlanSpace::groups`]/
@@ -1529,20 +1534,21 @@ impl<Id> PlanSpace<Id> {
         self.order.iter().map(move |ptr| &self.groups[ptr])
     }
 
-    /// How many distinct sites were discovered.
+    /// How many distinct targets were discovered.
     pub fn len(&self) -> usize {
         self.groups.len()
     }
 
-    /// Whether no sites were discovered at all (an empty workload, or one
+    /// Whether no targets were discovered at all (an empty workload, or one
     /// with no `QueryExpr` nodes reachable from any root — never true for a
-    /// non-empty `roots`, since every root is itself a site).
+    /// non-empty `roots`, since every root is itself a target).
     pub fn is_empty(&self) -> bool {
         self.groups.is_empty()
     }
 
-    /// The group for `target`, if `target`'s own `Rc` is a discovered site
-    /// (i.e. `Rc::ptr_eq` to some node reachable from `roots`).
+    /// The group for `target`, if `target`'s own `Rc` is a discovered
+    /// `TargetSubDAG` (i.e. `Rc::ptr_eq` to some node reachable from
+    /// `roots`).
     pub fn group_for(&self, target: &Rc<QueryExpr>) -> Option<&MemoGroup> {
         self.groups.get(&Rc::as_ptr(target))
     }
@@ -1550,7 +1556,7 @@ impl<Id> PlanSpace<Id> {
     /// The `sorted_by(cost_model)` step: every group, each with its own
     /// candidates ranked best-first under `cost_model` where this module
     /// knows how (see the module docs' "Cost-based final selection"
-    /// section) — groups themselves stay in discovery order, since sites
+    /// section) — groups themselves stay in discovery order, since targets
     /// are independent decision points, not alternatives competing with
     /// each other.
     ///
@@ -1708,7 +1714,7 @@ fn bind_one(target: &Rc<QueryExpr>, cost_model: &dyn CostModel) -> Option<Rc<Sum
 /// copy is test-only, so this needs its own for real (non-test) ranking
 /// code — the same "duplicate a small, self-contained traversal rather than
 /// restructure a test helper" call this file's own top doc already makes
-/// for [`discover_sites`].
+/// for [`discover_targets`].
 fn sketch_kind_of(node: &SummaryNode) -> Option<SketchKind> {
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_kind_of(summary_input),
@@ -1768,10 +1774,10 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> PlanSpace<Id> {
 /// Runs [`share_common_subtrees`] once over `roots` first — the same
 /// pattern a hypothetical `applicability::find_applicable_optimizations`
 /// uses, so every strategy sees the same already-deduplicated tree
-/// [`crate::bind::implement_workload`] would — then discovers every site
-/// (see [`discover_sites`]) and runs the fixpoint loop the module docs
-/// describe, capped at [`MAX_SEARCH_ITERATIONS`] passes (see the module
-/// docs' "Termination" section). Deduping candidate plans this way needs no
+/// [`crate::bind::implement_workload`] would — then discovers every
+/// `TargetSubDAG` (see [`discover_targets`]) and runs the fixpoint loop the
+/// module docs describe, capped at [`MAX_SEARCH_ITERATIONS`] passes (see the
+/// module docs' "Termination" section). Deduping candidate plans this way needs no
 /// [`CostModel`] at all — that only enters at two well-defined points: each
 /// [`ReplacementStrategy`] in `strategies` may already carry its own (e.g.
 /// [`SketchFamilyStrategy::new`]'s), and [`PlanSpace::cost_sorted`]'s final
@@ -1796,19 +1802,19 @@ pub fn search_workload_with<'s, Id>(
     let mut order = Vec::new();
     let mut nodes = HashMap::new();
     let mut counts: HashMap<*const QueryExpr, usize> = HashMap::new();
-    discover_sites(&cse_roots, &mut order, &mut nodes, &mut counts);
+    discover_targets(&cse_roots, &mut order, &mut nodes, &mut counts);
 
     let mut groups: HashMap<*const QueryExpr, MemoGroup> = HashMap::new();
     for ptr in &order {
         groups.insert(*ptr, MemoGroup::new(Rc::clone(&nodes[ptr]), counts[ptr]));
     }
 
-    // Round-based frontier: every site is asked exactly once per strategy
+    // Round-based frontier: every target is asked exactly once per strategy
     // (never re-asked — see the module docs' "Termination" section on why
     // that matters for `Replacement::Summary` dedup specifically). A round
     // can grow the *next* round's frontier only by a candidate's own
     // reachable children exposing a genuinely new, not-yet-known `Rc` — see
-    // `discover_new_descendant_sites`.
+    // `discover_new_descendant_targets`.
     let mut frontier = order.clone();
     let mut rounds = 0usize;
     while !frontier.is_empty() {
@@ -1823,45 +1829,45 @@ pub fn search_workload_with<'s, Id>(
              search_workload_with.",
         );
 
-        let sites_before = order.len();
+        let targets_before = order.len();
         for ptr in &frontier {
-            let (target, consumer_count) = {
+            let (root, consumer_count) = {
                 let group = &groups[ptr];
                 (Rc::clone(&group.target), group.consumer_count)
             };
-            let site = TargetSubDAG::with_consumer_count(&target, consumer_count);
+            let target = TargetSubDAG::with_consumer_count(&root, consumer_count);
 
             let mut proposed = Vec::new();
             for strategy in strategies {
-                if strategy.matches(&site) {
-                    proposed.extend(strategy.replacements(&site));
+                if strategy.matches(&target) {
+                    proposed.extend(strategy.replacements(&target));
                 }
             }
 
             for candidate in &proposed {
                 if let Replacement::Rewrite(rc) = &candidate.replacement {
-                    discover_new_descendant_sites(rc, &mut order, &mut nodes, &mut counts);
+                    discover_new_descendant_targets(rc, &mut order, &mut nodes, &mut counts);
                 }
             }
 
             let group = groups
                 .get_mut(ptr)
-                .expect("every discovered site has a group");
+                .expect("every discovered target has a group");
             for candidate in proposed {
                 group.add_candidate(candidate);
             }
         }
 
-        // Any pointer `discover_new_descendant_sites` appended to `order`
-        // this round is a genuinely new site — give it a group and process
-        // it next round. Sites already in `groups` are never revisited.
-        let new_sites = &order[sites_before..];
-        for ptr in new_sites {
+        // Any pointer `discover_new_descendant_targets` appended to `order`
+        // this round is a genuinely new target — give it a group and process
+        // it next round. Targets already in `groups` are never revisited.
+        let new_targets = &order[targets_before..];
+        for ptr in new_targets {
             groups
                 .entry(*ptr)
                 .or_insert_with(|| MemoGroup::new(Rc::clone(&nodes[ptr]), counts[ptr]));
         }
-        frontier = new_sites.to_vec();
+        frontier = new_targets.to_vec();
     }
 
     PlanSpace {
@@ -1871,12 +1877,12 @@ pub fn search_workload_with<'s, Id>(
     }
 }
 
-// ── site discovery ───────────────────────────────────────────────────────
+// ── target discovery ─────────────────────────────────────────────────────
 
-/// Walk every root's whole DAG, discovering one site per distinct `Rc` and
-/// its real `consumer_count` — see the module docs' "Where 'for site in
-/// plan.bindable_sites()' comes from" section for the full rationale.
-fn discover_sites<Id>(
+/// Walk every root's whole DAG, discovering one `TargetSubDAG` per distinct
+/// `Rc` and its real `consumer_count` — see the module docs' "Where
+/// `TargetSubDAG` discovery comes from" section for the full rationale.
+fn discover_targets<Id>(
     roots: &[(Id, Rc<QueryExpr>)],
     order: &mut Vec<*const QueryExpr>,
     nodes: &mut HashMap<*const QueryExpr, Rc<QueryExpr>>,
@@ -1889,13 +1895,13 @@ fn discover_sites<Id>(
 
 /// Scan `candidate`'s **children** (deliberately never `candidate`'s own
 /// top-level pointer — see the module docs' "Termination" section: a
-/// [`Replacement::Rewrite`]'s value is an alternative *for* the site that
-/// proposed it, never a new site of its own) for any `Rc` not already known,
-/// appending each to `order`/`nodes`/`counts` so
+/// [`Replacement::Rewrite`]'s value is an alternative *for* the target that
+/// proposed it, never a new target of its own) for any `Rc` not already
+/// known, appending each to `order`/`nodes`/`counts` so
 /// [`search_workload_with`]'s next round processes it. A no-op when every
 /// child is already known — the case both shipped strategies always produce
 /// (see that section).
-fn discover_new_descendant_sites(
+fn discover_new_descendant_targets(
     candidate: &Rc<QueryExpr>,
     order: &mut Vec<*const QueryExpr>,
     nodes: &mut HashMap<*const QueryExpr, Rc<QueryExpr>>,
@@ -1905,7 +1911,7 @@ fn discover_new_descendant_sites(
 }
 
 /// Visit `node`: count this occurrence, and — the first time this exact
-/// `Rc` is seen — record it as a site and recurse into its children.
+/// `Rc` is seen — record it as a target and recurse into its children.
 fn walk(
     node: &Rc<QueryExpr>,
     order: &mut Vec<*const QueryExpr>,
@@ -2912,7 +2918,7 @@ mod tests {
     // above (identical to `search.rs`'s own copies, which are dropped here
     // to avoid a duplicate-definition collision now that both test modules
     // share one file) and `count_consumers` above (which mirrors
-    // `discover_sites`' own real, non-test traversal for these fixtures).
+    // `discover_targets`' own real, non-test traversal for these fixtures).
 
     // ── discovery + MEMO shape ───────────────────────────────────────────
 
@@ -3016,7 +3022,7 @@ mod tests {
         // unshared Filter parents — real consumer_count must come from
         // walking the whole DAG, not just root-level pointer identity
         // (bind::implement_workload_with's own consumer-count pass would
-        // miss this; this module's discover_sites must not).
+        // miss this; this module's discover_targets must not).
         use asap_types::pre_asap::expr_ir::ScalarValue;
         use asap_types::pre_asap::query_expr::Predicate;
 
@@ -3072,7 +3078,7 @@ mod tests {
         let post_cse_shared = post_cse_shared_a;
         let group = space
             .group_for(post_cse_shared)
-            .expect("shared node must be a discovered site");
+            .expect("shared node must be a discovered target");
         assert_eq!(group.consumer_count, 2);
         assert!(
             SharedSubtreeStrategy.matches(&TargetSubDAG::with_consumer_count(
@@ -3130,10 +3136,10 @@ mod tests {
         // the same `Replacement::Summary` candidates DOES grow the group —
         // this module refuses to guess at an equality check it can't back
         // with a real `PartialEq`. `search_workload_with` never actually
-        // does this in practice (every site is asked exactly once — see the
+        // does this in practice (every target is asked exactly once — see the
         // module docs' "Termination" section), so this test exists to pin
         // the documented behavior, not to endorse calling `replacements`
-        // twice for the same site.
+        // twice for the same target.
         let root = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let mut group = MemoGroup::new(Rc::clone(&root), 1);
         let strategy = SketchFamilyStrategy::default_cost_model();
@@ -3306,11 +3312,11 @@ mod tests {
 
     /// A deliberately ill-behaved [`ReplacementStrategy`]: every call to
     /// `replacements` wraps `target` in two `Filter` layers — the outer one
-    /// (ignored by site discovery — see [`discover_new_descendant_sites`])
+    /// (ignored by target discovery — see [`discover_new_descendant_targets`])
     /// and an inner one carrying a monotonically-increasing counter, so the
     /// inner layer is a **brand-new, never-before-seen `Rc` every call**.
     /// Each round, `search_workload_with` discovers that inner layer as a
-    /// new site, processes it next round (this strategy matches
+    /// new target, processes it next round (this strategy matches
     /// everything), and gets handed *another* fresh inner layer — the
     /// frontier never empties, exactly the failure mode
     /// [`MAX_SEARCH_ITERATIONS`] exists to catch.

@@ -46,11 +46,11 @@
 //!      the build-independently-vs-build-once-and-share choice at a
 //!      CSE-detected shared subtree.
 //!   2. [`replacement::search_workload`]/[`replacement::search_workload_with`]
-//!      *search* — discover every candidate site across a whole workload
-//!      (not just one target in isolation) and run both strategies above
-//!      against each one, to a fixpoint, without ever materializing a flat
-//!      `2^N`-sized candidate-plan list: [`replacement::PlanSpace`] holds
-//!      one Cascades-style [`replacement::MemoGroup`] per distinct site,
+//!      *search* — discover every candidate `TargetSubDAG` across a whole
+//!      workload (not just one target in isolation) and run both strategies
+//!      above against each one, to a fixpoint, without ever materializing a
+//!      flat `2^N`-sized candidate-plan list: [`replacement::PlanSpace`] holds
+//!      one Cascades-style [`replacement::MemoGroup`] per distinct target,
 //!      each carrying every alternative discovered for it.
 //!   3. [`replacement::PlanSpace::cost_sorted`] is the final
 //!      `sorted_by(cost_model)` step, ranking each group's candidates
@@ -108,7 +108,7 @@
 //! | **Bind #1** | name resolution | `ColumnRef` (a name) → `ColumnId` (a concrete schema column) — the classic RDBMS "Parse → **Bind** → Optimize" pipeline sense (e.g. SQL Server's query-processor terminology) | [`asap_types::pre_asap::binder::Binder`](https://docs.rs/asap-types) |
 //! | **Implementation** — `replacement::implementations_for_with` | pre-ASAP → post-ASAP, *one node* | enumerating every concrete physical realization (a sketch family, an exact accumulator, or pass-through) for one [`AggIntent`](asap_types::pre_asap::agg_intent::AggIntent) | [`replacement`] |
 //! | **Replacement** — [`replacement::SketchFamilyStrategy::replacements`] | pre-ASAP → post-ASAP, *one target, every candidate* | wrap each `implementations_for_with` candidate into its own bound [`SummaryNode`](asap_types::post_asap::SummaryNode), ranked — a caller wanting one answer takes the first entry itself | [`replacement`] |
-//! | **Search** — [`replacement::search_workload`]/[`replacement::search_workload_with`] | pre-ASAP → post-ASAP, *whole workload, every candidate* | a Cascades/Volcano-style MEMO search: discover every candidate site across a whole workload (not just one target), run every registered `ReplacementStrategy` against each to a fixpoint, and dedup into a [`replacement::PlanSpace`] — one [`replacement::MemoGroup`] per distinct site holding every alternative discovered for it, never a flat `2^N`-sized list of whole candidate plans | [`replacement`] |
+//! | **Search** — [`replacement::search_workload`]/[`replacement::search_workload_with`] | pre-ASAP → post-ASAP, *whole workload, every candidate* | a Cascades/Volcano-style MEMO search: discover every candidate `TargetSubDAG` across a whole workload (not just one target in isolation), run every registered `ReplacementStrategy` against each to a fixpoint, and dedup into a [`replacement::PlanSpace`] — one [`replacement::MemoGroup`] per distinct `TargetSubDAG` holding every alternative discovered for it, never a flat `2^N`-sized list of whole candidate plans | [`replacement`] |
 //! | **`implement_workload`** — [`bind::implement_workload`] | pre-ASAP → post-ASAP, *whole workload, one answer* | walk every root of a `QueryWorkload`, keeping the first (`cost_model`-preferred) candidate per node, sharing one bound `SummaryNode` across roots CSE already collapsed onto one `Rc<QueryExpr>` — emits the complete post-ASAP `SummaryExpr`/`SummaryNode` DAG | [`bind`] |
 //! | **Bind #2** (downstream, not in this crate) | post-ASAP → deployment placement | a *deployment's* own physical binder, additionally deciding **placement** (edge vs. backend, wire format, …) — a genuinely different, deployment-specific decision this crate doesn't model at all | e.g. `control_plane::sketch_algebra::rules::bind_*` (as of this writing; expected to fold into that deployment's cost-model layer rather than stay a separate "bind" concept) |
 //!

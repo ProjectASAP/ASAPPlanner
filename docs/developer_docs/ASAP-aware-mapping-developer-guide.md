@@ -264,7 +264,7 @@ In the [design document](../design_docs/asap_aware_mapping.md), each `Replacemen
 
 **Tradeoff:** a single-target bind sizes and constructs every valid sketch candidate before the caller keeps the first one. This costs more than constructing only the preferred candidate, but it means there is exactly one place in the crate that decides what an `AggIntent` may become and exactly one place bound output comes from. Child nodes repeat selection independently (via `replacement::select_and_bind`), so a choice at one target does not force choices in nested aggregates.
 
-This crate now also implements the whole-plan Cascades/Volcano-style search the design document describes (issue #252, part of #33): `replacement::search_workload`/`search_workload_with` discover every candidate site across a whole workload and run every registered `ReplacementStrategy` against each to a fixpoint, deduping into a `PlanSpace` — one `MemoGroup` per distinct site, holding every alternative discovered for it. `PlanSpace::cost_sorted` is the final `sorted_by(cost_model)` step. See `replacement.rs`'s own module docs ("Workload-wide search") for the full design: MEMO groups instead of a flat `2^N`-sized plan list, dedup discipline, termination, and cost-based ranking.
+This crate now also implements the whole-plan Cascades/Volcano-style search the design document describes (issue #252, part of #33): `replacement::search_workload`/`search_workload_with` discover every candidate `TargetSubDAG` across a whole workload and run every registered `ReplacementStrategy` against each to a fixpoint, deduping into a `PlanSpace` — one `MemoGroup` per distinct `TargetSubDAG`, holding every alternative discovered for it. `PlanSpace::cost_sorted` is the final `sorted_by(cost_model)` step. See `replacement.rs`'s own module docs ("Workload-wide search") for the full design: MEMO groups instead of a flat `2^N`-sized plan list, dedup discipline, termination, and cost-based ranking.
 
 **One exception:** `bind::implement_workload` and `implement_workload_with` select the first candidate internally. Workload-wide CSE memoizes by `Rc` pointer identity, so roots that share an `Rc<QueryExpr>` must use the same canonical decision. Other callers use `SketchFamilyStrategy::replacements()` (for one target) or `search_workload`/`search_workload_with` (for a whole workload's worth of candidates) directly.
 
@@ -1249,7 +1249,7 @@ Use this table to find the right place for a change.
 | Decide whether an available implementation satisfies a required one | `impl Matcher` |
 | Produce a normal (ranked-first) bound summary for one target | `SketchFamilyStrategy::replacements(...).into_iter().next()` |
 | Bind a whole workload's roots, sharing across CSE-collapsed roots | reuse `bind::implement_workload`/`implement_workload_with` |
-| Search a whole workload for every candidate at every site (never pruning) | `replacement::search_workload`/`search_workload_with` |
+| Search a whole workload for every candidate at every `TargetSubDAG` (never pruning) | `replacement::search_workload`/`search_workload_with` |
 | Get every candidate ranked best-first, across a whole workload | `PlanSpace::cost_sorted` |
 | Get a real numeric cost per candidate, not just a relative rank | `CostModel::estimate_cost` |
 | Enumerate valid sketch kinds | reuse `replacement::summary_candidates` |
