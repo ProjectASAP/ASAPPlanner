@@ -192,7 +192,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::Sketch(SketchKind::Quantile(
+        &SummaryFamilyType::Sketch(SketchKind::new(
             SketchAlgorithm::Kll,
             SketchParams::Kll { k: 200 }
         ))
@@ -212,7 +212,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     );
     assert_eq!(
         summary_input.schema.fields[0].dtype,
-        SummaryFamilyType::Sketch(SketchKind::Quantile(
+        SummaryFamilyType::Sketch(SketchKind::new(
             SketchAlgorithm::Kll,
             SketchParams::Kll { k: 200 }
         ))
@@ -273,7 +273,7 @@ async fn sql_count_distinct_binds_hll_sketch_over_named_column() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::Sketch(SketchKind::Cardinality(
+        &SummaryFamilyType::Sketch(SketchKind::new(
             SketchAlgorithm::Hll,
             SketchParams::Hll { precision: 14 }
         ))

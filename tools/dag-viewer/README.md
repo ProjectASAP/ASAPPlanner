@@ -212,9 +212,11 @@ The one populator today is `dag_export`'s own devtools binary
 (`crates/devtools/src/bin/dag_export.rs`): after exporting each query, it
 calls `asap_aware_mapping::explain_replacements` (issue #257) on the same
 `QueryExpr` and, for every `ReplacementExplanation` returned, finds the
-`DagNode`(s) whose `hash` equals the explanation's `node_hash` — both sides
-compute `structural_hash` over the identical subtree, so this is an exact
-match, not a heuristic — and pushes a `DagNote { kind, reason }` onto it.
+`DagNode` candidates whose `hash` equals the explanation's `node_hash`, then
+confirms structural equality between the node's in-process source expression
+and the explanation target before pushing a `DagNote { kind, reason }`. The
+hash is a narrowing filter, not identity; the equality check makes annotation
+matching collision-safe.
 `kind` is the `Debug` form of `asap_aware_mapping::ExplanationKind`
 (`"SketchApproximation"` or `"CommonSubexpressionReuse"` today,
 `#[non_exhaustive]` — a future variant just shows up as its own tag, no

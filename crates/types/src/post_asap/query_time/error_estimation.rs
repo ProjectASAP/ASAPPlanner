@@ -477,7 +477,7 @@ mod tests {
     #[test]
     fn classic_cms_sizing_matches_implementation_rs_formula() {
         // Same worked example as
-        // `asap-aware-mapping::implementation::tests::epsilon_delta_sizes_cms_depth`
+        // `asap-aware-mapping::replacement::tests::epsilon_delta_sizes_cms_depth`
         // (eps=0.001, delta=0.001 ⇒ width=2719, depth=7), pinned here too so
         // the two independent (layering-forced) reimplementations can't
         // silently drift apart undetected.

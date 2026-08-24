@@ -19,7 +19,6 @@
 //       --epsilon 0.01 --sql "SELECT quantile(0.99, latency) FROM metrics" --name p99
 
 use asap_types::dag_export::{self, DagGraph, DagNote, NamedGraph, WorkloadGraph};
-use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 
@@ -104,34 +103,23 @@ fn parse_args() -> (Vec<(String, Lang, String)>, AccuracyTarget) {
     (entries, accuracy)
 }
 
-/// Explain `qe` (issue #257's `asap_aware_mapping::explain_replacements`,
-/// run as a single-query workload named `name`) and annotate every matching
-/// [`DagGraph`] node — matched by [`asap_types::dag_export::DagNode::hash`]
-/// equalling [`asap_aware_mapping::ReplacementExplanation::node_hash`] — with
-/// a [`DagNote`]. Both sides compute `structural_hash` over the identical
-/// `qe`, so a miss shouldn't happen; this is exploratory tooling, not a
-/// load-bearing path, so a miss is logged and skipped rather than panicking.
-fn annotate_with_explanations(graph: &mut DagGraph, name: &str, qe: &QueryExpr) {
-    let explanations =
-        asap_aware_mapping::explain_replacements(vec![(name.to_string(), qe.clone())]);
-    for explanation in explanations {
-        let mut matched = false;
+/// Attach workload-wide replacement explanations to their exact graph nodes.
+/// `node_hash` is only a narrowing filter; `source_expr == target` is the
+/// collision-safe identity check.
+fn annotate_with_explanations(
+    graph: &mut DagGraph,
+    explanations: &[asap_aware_mapping::ReplacementExplanation],
+    matched: &mut [bool],
+) {
+    for (i, explanation) in explanations.iter().enumerate() {
         for node in graph.nodes.iter_mut() {
-            if node.hash == explanation.node_hash {
+            if node.hash == explanation.node_hash && node.source_expr == *explanation.target {
                 node.notes.push(DagNote {
                     kind: format!("{:?}", explanation.kind),
                     reason: explanation.reason.clone(),
                 });
-                matched = true;
+                matched[i] = true;
             }
-        }
-        if !matched {
-            eprintln!(
-                "dag_export: explanation for {name:?} ({:?}, node_hash={}) matched no \
-                 DagNode by hash — this shouldn't happen, since both sides hash the \
-                 same QueryExpr",
-                explanation.kind, explanation.node_hash
-            );
         }
     }
 }
@@ -144,7 +132,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let mut queries = Vec::new();
+    let mut lowered_queries = Vec::new();
     for (name, lang, query) in entries {
         let lowered = match lang {
             Lang::Sql => lower_sql(&query, &catalog(), accuracy.clone())
@@ -154,18 +142,87 @@ async fn main() {
         };
         match lowered {
             Ok(qe) => {
-                let mut graph = dag_export::export(&qe);
-                annotate_with_explanations(&mut graph, &name, &qe);
-                queries.push(NamedGraph {
-                    name,
-                    source: Some(query),
-                    graph,
-                });
+                lowered_queries.push((name, query, qe));
             }
             Err(e) => eprintln!("skipping {name:?} — lowering failed: {e}"),
         }
     }
 
+    let explanations = asap_aware_mapping::explain_replacements(
+        lowered_queries
+            .iter()
+            .map(|(name, _, qe)| (name.clone(), qe.clone()))
+            .collect(),
+    );
+    let mut matched = vec![false; explanations.len()];
+    let mut queries = Vec::new();
+    for (name, source, qe) in lowered_queries {
+        let mut graph = dag_export::export(&qe);
+        annotate_with_explanations(&mut graph, &explanations, &mut matched);
+        queries.push(NamedGraph {
+            name,
+            source: Some(source),
+            graph,
+        });
+    }
+    for (explanation, matched) in explanations.iter().zip(matched) {
+        if !matched {
+            eprintln!(
+                "dag_export: explanation at {} ({:?}, node_hash={}) matched no DagNode",
+                explanation.location, explanation.kind, explanation.node_hash
+            );
+        }
+    }
+
     let workload = WorkloadGraph { queries };
     println!("{}", serde_json::to_string_pretty(&workload).unwrap());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workload_wide_explanations_annotate_cross_query_reuse() {
+        let query = "sum by (job) (rate(http_requests_total[5m]))";
+        let a = lower_promql(query, AccuracyTarget::Exact).unwrap();
+        let b = lower_promql(query, AccuracyTarget::Exact).unwrap();
+        let explanations =
+            asap_aware_mapping::explain_replacements(vec![("a", a.clone()), ("b", b.clone())]);
+        assert!(explanations
+            .iter()
+            .any(|e| { e.kind == asap_aware_mapping::ExplanationKind::CommonSubexpressionReuse }));
+
+        let mut matched = vec![false; explanations.len()];
+        let mut graph_a = dag_export::export(&a);
+        let mut graph_b = dag_export::export(&b);
+        annotate_with_explanations(&mut graph_a, &explanations, &mut matched);
+        annotate_with_explanations(&mut graph_b, &explanations, &mut matched);
+        assert!(graph_a.nodes.iter().any(|n| !n.notes.is_empty()));
+        assert!(graph_b.nodes.iter().any(|n| !n.notes.is_empty()));
+    }
+
+    #[test]
+    fn hash_collision_without_structural_equality_does_not_attach_a_note() {
+        let target = lower_promql(
+            "quantile(0.99, rate(http_requests_total[5m]))",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap();
+        let explanations = asap_aware_mapping::explain_replacements(vec![("target", target)]);
+        let explanation = explanations
+            .iter()
+            .find(|e| e.kind == asap_aware_mapping::ExplanationKind::SketchApproximation)
+            .unwrap();
+
+        let unrelated =
+            lower_promql("sum(rate(other_metric[5m]))", AccuracyTarget::Epsilon(0.01)).unwrap();
+        let mut graph = dag_export::export(&unrelated);
+        for node in &mut graph.nodes {
+            node.hash = explanation.node_hash;
+        }
+        let mut matched = vec![false; explanations.len()];
+        annotate_with_explanations(&mut graph, &explanations, &mut matched);
+        assert!(graph.nodes.iter().all(|n| n.notes.is_empty()));
+    }
 }

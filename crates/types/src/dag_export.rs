@@ -34,10 +34,10 @@
 //! after the fact without this module needing to know anything about that
 //! layer's concepts. Concretely: `asap-aware-mapping`'s `explanation` module
 //! (issue #257) computes `structural_hash` over the same `QueryExpr`
-//! subtrees this module does (via the identical function), so its
-//! `ReplacementExplanation::node_hash` matches a [`DagNode::hash`] here
-//! one-for-one; `crates/devtools/src/bin/dag_export.rs` is where that
-//! matching actually happens, pushing a [`DagNote`] onto each matched node.
+//! subtrees this module does (via the identical function). The devtools
+//! exporter uses that hash to narrow candidates, then compares
+//! `ReplacementExplanation::target` with [`DagNode::source_expr`] for a
+//! collision-safe match before pushing a [`DagNote`] onto the node.
 //! `asap_types` itself never constructs a `DagNote` — see [`DagNode::notes`]
 //! for the layering rule this keeps.
 
@@ -67,13 +67,19 @@ pub struct DagNode {
     /// See the module doc for what a hash match here does and doesn't
     /// guarantee.
     pub hash: u64,
+    /// Exact source expression for in-process annotation matching. It is not
+    /// part of the JSON format: callers first narrow by `hash`, then compare
+    /// this value structurally to avoid treating a hash collision as node
+    /// identity.
+    #[serde(skip)]
+    pub source_expr: QueryExpr,
     /// Arbitrary reporting-layer annotations for this node — e.g. why a
     /// replacement exists here. `asap_types` never populates this itself
     /// (it has no notion of a "replacement" at all — see the module doc's
     /// layering note); a higher layer that does (`asap-aware-mapping`, via
     /// the `dag_export` devtools binary) fills it in after the fact by
-    /// matching [`DagNode::hash`]. Empty by default, so every existing
-    /// [`export`] caller and test is unaffected.
+    /// matching [`DagNode::hash`] and confirming structural equality. Empty
+    /// by default, so every existing [`export`] caller and test is unaffected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<DagNote>,
 }
@@ -161,6 +167,7 @@ fn push_node(
         detail,
         children,
         hash,
+        source_expr: expr.clone(),
         notes: Vec::new(),
     });
     id

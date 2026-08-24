@@ -182,7 +182,7 @@
 //! [`PlanSpace`]: crate::replacement::PlanSpace
 //! [`MemoGroup`]: crate::replacement::MemoGroup
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::rc::Rc;
 
@@ -229,14 +229,18 @@ pub enum ExplanationKind {
 /// same `Rc<QueryExpr>` shape, that [`asap_types::dag_export::DagNode::hash`]
 /// is computed with. A downstream consumer that independently exported the
 /// same `QueryExpr` (e.g. via `asap_types::dag_export::export`) can match
-/// this explanation to the exact `DagNode` it's about by comparing hashes —
-/// no string-matching or path-guessing against `location` required.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// this explanation to a `DagNode` by first comparing hashes and then
+/// confirming structural equality with [`ReplacementExplanation::target`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReplacementExplanation {
     pub kind: ExplanationKind,
     pub location: String,
     pub reason: String,
     pub node_hash: u64,
+    /// The exact target expression the explanation describes. Reporting
+    /// integrations use this together with `node_hash`: the hash narrows the
+    /// search, and structural equality makes the final match collision-safe.
+    pub target: Rc<QueryExpr>,
 }
 
 /// Explain every replacement [`crate::replacement::search_workload`] finds
@@ -309,6 +313,7 @@ fn findings_from_plan_space(space: &PlanSpace<String>) -> Vec<ReplacementExplana
                 location: location.clone(),
                 reason,
                 node_hash,
+                target: Rc::clone(&group.target),
             });
         }
         if let Some(reason) = shared_subexpr_finding_reason(group) {
@@ -317,6 +322,7 @@ fn findings_from_plan_space(space: &PlanSpace<String>) -> Vec<ReplacementExplana
                 location,
                 reason,
                 node_hash,
+                target: Rc::clone(&group.target),
             });
         }
     }
@@ -384,36 +390,23 @@ fn is_sketch_realization(node: &SummaryNode) -> bool {
 /// root) needs both breadcrumbs in its finding's `location`, not just one.
 fn collect_locations(roots: &[(String, Rc<QueryExpr>)]) -> HashMap<*const QueryExpr, Vec<String>> {
     let mut locations: HashMap<*const QueryExpr, Vec<String>> = HashMap::new();
-    let mut children_walked: HashSet<*const QueryExpr> = HashSet::new();
     for (id, root) in roots {
-        visit(
-            root,
-            format!("root {id:?}"),
-            &mut locations,
-            &mut children_walked,
-        );
+        visit(root, format!("root {id:?}"), &mut locations);
     }
     locations
 }
 
-/// Record `label` as one of `node`'s breadcrumbs, then — only the first time
-/// this exact `Rc` is seen — recurse into its children. Every subsequent
-/// visit still records its own `label` (a genuinely different path reaching
-/// the same shared node), it just doesn't re-walk that node's children a
-/// second time — the same "walk once, but every occurrence still counts"
-/// split `crate::replacement`'s own target-discovery `walk` makes, applied
-/// here to text instead of a consumer count.
+/// Record `label` as one of `node`'s breadcrumbs, then propagate that path
+/// through its children. A shared ancestor is intentionally traversed once
+/// per incoming path so every descendant receives every valid breadcrumb.
 fn visit(
     node: &Rc<QueryExpr>,
     label: String,
     locations: &mut HashMap<*const QueryExpr, Vec<String>>,
-    children_walked: &mut HashSet<*const QueryExpr>,
 ) {
     let ptr = Rc::as_ptr(node);
     locations.entry(ptr).or_default().push(label.clone());
-    if children_walked.insert(ptr) {
-        visit_children(node, &label, locations, children_walked);
-    }
+    visit_children(node, &label, locations);
 }
 
 /// `node`'s own **relational-skeleton** operator children — the same scope
@@ -425,13 +418,12 @@ fn visit_children(
     node: &QueryExpr,
     label: &str,
     locations: &mut HashMap<*const QueryExpr, Vec<String>>,
-    children_walked: &mut HashSet<*const QueryExpr>,
 ) {
     use QueryExpr::*;
     match node {
         Scan { .. } | PromqlScalarBridge(_) | QueryTimestamp => {}
         PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => {
-            visit(c, format!("{label} > child"), locations, children_walked)
+            visit(c, format!("{label} > child"), locations)
         }
         PromqlRelabel { child, .. }
         | PromqlInfoEnrich { child, .. }
@@ -445,34 +437,19 @@ fn visit_children(
         | TimeShift { child, .. }
         | SQLWindowFunc { child, .. }
         | Sort { child, .. }
-        | Limit { child, .. } => visit(
-            child,
-            format!("{label} > child"),
-            locations,
-            children_walked,
-        ),
+        | Limit { child, .. } => visit(child, format!("{label} > child"), locations),
         Concat { children } => {
             for (i, c) in children.iter().enumerate() {
-                visit_children(
-                    c,
-                    &format!("{label} > concat[{i}]"),
-                    locations,
-                    children_walked,
-                );
+                visit_children(c, &format!("{label} > concat[{i}]"), locations);
             }
         }
         Join { left, right, .. } | SetOp { left, right, .. } => {
-            visit(left, format!("{label} > left"), locations, children_walked);
-            visit(
-                right,
-                format!("{label} > right"),
-                locations,
-                children_walked,
-            );
+            visit(left, format!("{label} > left"), locations);
+            visit(right, format!("{label} > right"), locations);
         }
         BinaryOp { lhs, rhs, .. } => {
-            visit(lhs, format!("{label} > lhs"), locations, children_walked);
-            visit(rhs, format!("{label} > rhs"), locations, children_walked);
+            visit(lhs, format!("{label} > lhs"), locations);
+            visit(rhs, format!("{label} > rhs"), locations);
         }
         Column(_)
         | Literal(_)
@@ -663,6 +640,21 @@ mod tests {
         );
         assert!(reuse[0].location.contains("dash_a"));
         assert!(reuse[0].location.contains("dash_b"));
+    }
+
+    #[test]
+    fn descendant_of_a_shared_root_keeps_every_root_breadcrumb() {
+        let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
+        let outer = agg(vec![2], AggIntent::Sum { col: None }, inner);
+        let findings = explain_replacements(vec![("dash_a", outer.clone()), ("dash_b", outer)]);
+        let inner_sketch = findings
+            .iter()
+            .find(|f| {
+                f.kind == ExplanationKind::SketchApproximation && f.location.contains("child")
+            })
+            .expect("expected the nested sketch explanation");
+        assert!(inner_sketch.location.contains("dash_a"));
+        assert!(inner_sketch.location.contains("dash_b"));
     }
 
     #[test]

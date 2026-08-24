@@ -396,7 +396,7 @@ impl CostModel for DefaultCostModel {
     ///   by).
     /// - [`Replacement::Rewrite`]: recovers one representative bound
     ///   `SummaryNode` for `target` via `realize_child` (the same
-    ///   rank-and-take-first helper `replacement::bind_one` reuses for the
+    ///   rank-and-take-first helper `replacement::realize_child` reuses for the
     ///   identical need), then charges
     ///   `cse_shared_maintenance_cost` for the candidate that shares
     ///   `target`'s own `Rc` (`Rc::ptr_eq`), or `cse_recompute_cost *
@@ -684,7 +684,7 @@ mod tests {
             ExactParams::Sum,
         ));
         let sketch = default_cse_shared_maintenance_cost(&SummaryFamilyType::Sketch(
-            SketchKind::Cardinality(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 }),
+            SketchKind::new(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 }),
         ));
         assert!(
             exact < sketch,

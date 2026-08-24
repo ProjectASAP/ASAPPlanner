@@ -88,8 +88,8 @@ flowchart TB
   end
 
   subgraph REPORTING[5. Produce human-facing annotations]
-    EXPLAIN["explain_replacements<br/>select reportable candidates, copy their rationale,<br/>and add kind, location, and node_hash"]:::report
-    EXPORT["dag_export<br/>match node_hash to the exported DAG node"]:::report
+    EXPLAIN["explain_replacements<br/>select reportable candidates, copy their rationale,<br/>and add kind, location, target, and node_hash"]:::report
+    EXPORT["dag_export<br/>narrow by node_hash, then confirm structural equality"]:::report
     VIEWER["dag-viewer<br/>show a badge and explanation beside that node"]:::report
     MEMO -->|"reporting view; no new planner decision"| EXPLAIN --> EXPORT --> VIEWER
   end
@@ -314,7 +314,10 @@ The crate cannot hardcode real deployment costs: `asap-aware-mapping` depends on
   ```rust
   fn realize_extension(&self, ext_kind: &str, _payload: &serde_json::Value) -> Implementation {
       if ext_kind == "frequency" {
-          Implementation::Sketch(SketchKind::Frequency(SketchAlgorithm::CountSketch, /* params */))
+          Implementation::Sketch(SketchKind::new(
+              SketchAlgorithm::CountSketch,
+              SketchParams::CountSketch { width: 1024, depth: 5 },
+          ))
       } else {
           Implementation::PassThrough  // fall back to the default for anything else
       }
@@ -392,32 +395,26 @@ pub struct RankedGroup<'a> {
 
 `search_workload(roots)` runs the shared-subtree pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubtreeStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `MemoGroup`s, sharing every other node in the workload by construction.
 
-`PlanSpace::cost_sorted(cost_model)` is the one ranking step: for each group, it dispatches by candidate shape — a same-shape `Rewrite` pair (a `SharedSubtreeStrategy` share/recompute choice) goes through `CostModel::cse_share_decision`; a same-shape run of `Summary` candidates realizing sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; every candidate also gets a real number from `CostModel::estimate_cost`, aligned index-for-index in `costs`. Groups whose candidates don't fit either shape (a lone candidate, or a mix — e.g. one target where both strategies fired at once) keep discovery order for the un-rankable part. Count in, count out — nothing is ever dropped to produce a ranking.
+`PlanSpace::cost_sorted(cost_model)` is the one ranking step: for each group, it dispatches by candidate shape — a same-shape `Rewrite` pair (a `SharedSubtreeStrategy` share/recompute choice) goes through `CostModel::cse_share_decision`; a same-shape run of `Summary` candidates realizing sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; and a mixed group is ordered by each candidate's `CostModel::estimate_cost`. Every candidate gets a numeric cost aligned index-for-index in `costs`. Count in, count out—nothing is dropped to produce a ranking.
 
 ---
 
-### Family, kind, and algorithm
+### Family, category, algorithm, and parameters
 
-Three levels sit below "summary" in this crate's type vocabulary, and `Sketch` is the only family with all three:
+Sketches separate their query category from the concrete algorithm and its parameters:
 
 | Level | Type | Example |
 | --- | --- | --- |
 | **family** | `SummaryFamilyType` | `Sketch`, `Sample`, `Wavelet`, `StatModel`, `ExactAggregate` |
-| **kind** | `SketchKind` (only inside `Sketch`) | `Quantile`, `Cardinality`, `Frequency`, `TopK` |
-| **algorithm** | `SketchAlgorithm` (nested inside a `SketchKind`) | `Kll` / `DDSketch` (both `Quantile`); `Hll` / `Theta` / `Kmv` (all `Cardinality`) |
+| **category** | `SketchCategory` | `Quantile`, `Cardinality`, `Frequency`, `TopK` |
+| **algorithm** | `SketchAlgorithm` | `Kll` / `DDSketch` (both quantile); `Hll` / `Theta` / `Kmv` (all cardinality) |
+| **committed choice** | `SketchKind` | one validated category + algorithm + parameter combination |
 
-A `SketchKind` isn't just a category tag — every value already carries the committed algorithm and its params:
-
-```rust
-pub enum SketchKind {
-    Quantile(SketchAlgorithm, SketchParams),
-    Cardinality(SketchAlgorithm, SketchParams),
-    Frequency(SketchAlgorithm, SketchParams),
-    TopK(SketchAlgorithm, SketchParams),
-}
-```
-
-`SketchKind::new(algorithm, params)` is the one place an `(algorithm, params)` pair gets classified into its category — construct through it rather than naming a variant directly, so a new algorithm can't drift out of sync with its category. `.algorithm()`/`.params()` pull the committed pair back out regardless of which category variant it's in.
+A `SketchKind` is a validated committed choice. Its public constructor,
+`SketchKind::new(algorithm, params)`, verifies that the parameter variant belongs
+to the selected algorithm and classifies the pair into its category. The public
+`.category()`, `.algorithm()`, and `.params()` accessors expose the committed
+values without permitting an invalid combination.
 
 Where this matters in practice: `CostModel::rank_candidates`, `CostModel::size_params`, and `SketchAlgorithmStrategy::replacements` operate at the **algorithm** level. `summary_candidates(intent)` returns a list of `SketchAlgorithm`s (`[Kll, DDSketch]` for a `Quantile` intent), never a bare `SketchKind` with nothing chosen underneath it. `SketchKind` appears after an algorithm has been selected and sized—on `Implementation::Sketch(SketchKind)` and `SummaryFamilyType::Sketch(SketchKind)`.
 
@@ -458,7 +455,7 @@ Concretely, `explanation.rs` reads two shapes off each `MemoGroup`:
 
 Each `ReplacementExplanation::reason` is copied verbatim from the matching candidate's own `ReplacementSubDAG::rationale`. Nothing in `explanation.rs` re-explains why a candidate is valid; that explanation already exists exactly once, on the candidate itself.
 
-`ReplacementExplanation` also carries `node_hash: u64` — `asap_types::pre_asap::cse::structural_hash` of the `TargetSubDAG`'s own `target` subtree, the identical function (and identical `Rc<QueryExpr>` input shape) `asap_types::dag_export::DagNode::hash` is computed with. A downstream consumer that independently exported the same `QueryExpr` (e.g. `tools/dag-viewer`'s `dag_export` devtools binary) can match an explanation to the exact `DagNode` it's about by comparing hashes, with no string-matching or path-guessing against `location` required — see `crates/devtools/src/bin/dag_export.rs` for the reference consumer.
+`ReplacementExplanation` carries both `node_hash` and `target`. A downstream consumer first compares `node_hash` with an exported `DagNode::hash` to narrow the search, then compares the exact target expression with the node's in-process source expression. This preserves the hash's role as a fast filter while making the final association collision-safe; `location` remains human-readable presentation text rather than a machine identifier.
 
 ### Why there is no `ExplanationRule` trait
 

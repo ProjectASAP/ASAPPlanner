@@ -36,7 +36,7 @@ pub enum ExactParams {
 
 /// A specific sketch algorithm — bounded error, sized by its
 /// [`SketchParams`]. Each algorithm belongs to exactly one [`SketchKind`]
-/// category (e.g. `Kll` and `DDSketch` both realize `SketchKind::Quantile`);
+/// category (e.g. `Kll` and `DDSketch` both realize quantile sketches);
 /// [`SketchKind::new`] is where that classification is made.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SketchAlgorithm {
@@ -104,6 +104,15 @@ pub enum SketchParams {
     },
 }
 
+/// The query category served by a committed sketch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SketchCategory {
+    Quantile,
+    Cardinality,
+    Frequency,
+    TopK,
+}
+
 /// A committed sketch choice: which *category* of query shape it answers —
 /// quantile-style, cardinality-style, frequency-style, or heavy-hitter/
 /// top-k-style estimation — together with the concrete [`SketchAlgorithm`]
@@ -117,60 +126,76 @@ pub enum SketchParams {
 /// [`SketchKind::new`] is the one place `(SketchAlgorithm, SketchParams)`
 /// pairs get classified into a category; construct through it rather than
 /// naming a variant directly, so a new algorithm can't drift out of sync
-/// with its category. See `implementation::summary_candidates` for the
+/// with its category. See `asap_aware_mapping::summary_candidates` for the
 /// `AggIntent -> [SketchAlgorithm]` candidate list this ultimately groups.
 #[derive(Debug, Clone, PartialEq)]
-pub enum SketchKind {
-    /// Approximate rank/percentile queries (e.g. p99 latency).
-    Quantile(SketchAlgorithm, SketchParams),
-    /// Approximate distinct-element counting.
-    Cardinality(SketchAlgorithm, SketchParams),
-    /// Approximate point/frequency counting (e.g. per-key event counts).
-    Frequency(SketchAlgorithm, SketchParams),
-    /// Approximate heavy-hitter / top-k queries.
-    TopK(SketchAlgorithm, SketchParams),
+pub struct SketchKind {
+    category: SketchCategory,
+    algorithm: SketchAlgorithm,
+    params: SketchParams,
 }
 
 impl SketchKind {
     /// Classify `(algorithm, params)` into its `SketchKind` category. The
     /// one place that mapping is made — every other piece of this crate
     /// that needs to know an algorithm's category goes through this rather
-    /// than re-deriving it.
+    /// than re-deriving it. Panics when `params` belongs to a different
+    /// algorithm; invalid committed sketch states cannot be constructed.
     pub fn new(algorithm: SketchAlgorithm, params: SketchParams) -> Self {
-        match algorithm {
-            SketchAlgorithm::Kll | SketchAlgorithm::DDSketch => {
-                SketchKind::Quantile(algorithm, params)
-            }
+        let valid_params = matches!(
+            (&algorithm, &params),
+            (SketchAlgorithm::Kll, SketchParams::Kll { .. })
+                | (SketchAlgorithm::DDSketch, SketchParams::DDSketch { .. })
+                | (SketchAlgorithm::Hll, SketchParams::Hll { .. })
+                | (SketchAlgorithm::Theta, SketchParams::Theta { .. })
+                | (SketchAlgorithm::Kmv, SketchParams::Kmv { .. })
+                | (SketchAlgorithm::Cms, SketchParams::Cms { .. })
+                | (
+                    SketchAlgorithm::CountSketch,
+                    SketchParams::CountSketch { .. }
+                )
+                | (
+                    SketchAlgorithm::CmsWithHeap,
+                    SketchParams::CmsWithHeap { .. }
+                )
+                | (
+                    SketchAlgorithm::CountSketchWithHeap,
+                    SketchParams::CountSketchWithHeap { .. }
+                )
+        );
+        assert!(
+            valid_params,
+            "SketchKind parameter mismatch: algorithm={algorithm:?}, params={params:?}"
+        );
+        let category = match algorithm {
+            SketchAlgorithm::Kll | SketchAlgorithm::DDSketch => SketchCategory::Quantile,
             SketchAlgorithm::Hll | SketchAlgorithm::Theta | SketchAlgorithm::Kmv => {
-                SketchKind::Cardinality(algorithm, params)
+                SketchCategory::Cardinality
             }
-            SketchAlgorithm::Cms | SketchAlgorithm::CountSketch => {
-                SketchKind::Frequency(algorithm, params)
-            }
+            SketchAlgorithm::Cms | SketchAlgorithm::CountSketch => SketchCategory::Frequency,
             SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap => {
-                SketchKind::TopK(algorithm, params)
+                SketchCategory::TopK
             }
+        };
+        Self {
+            category,
+            algorithm,
+            params,
         }
+    }
+
+    pub fn category(&self) -> SketchCategory {
+        self.category
     }
 
     /// The algorithm this kind committed to, regardless of category.
     pub fn algorithm(&self) -> &SketchAlgorithm {
-        match self {
-            SketchKind::Quantile(a, _)
-            | SketchKind::Cardinality(a, _)
-            | SketchKind::Frequency(a, _)
-            | SketchKind::TopK(a, _) => a,
-        }
+        &self.algorithm
     }
 
     /// The parameters this kind committed to, regardless of category.
     pub fn params(&self) -> &SketchParams {
-        match self {
-            SketchKind::Quantile(_, p)
-            | SketchKind::Cardinality(_, p)
-            | SketchKind::Frequency(_, p)
-            | SketchKind::TopK(_, p) => p,
-        }
+        &self.params
     }
 }
 
@@ -265,4 +290,22 @@ pub enum SketchQuery {
     Cardinality,
     /// Top-k most frequent (key, count) pairs.
     TopK { k: usize },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sketch_kind_classifies_a_valid_algorithm_and_params_pair() {
+        let kind = SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 });
+        assert_eq!(kind.category(), SketchCategory::Quantile);
+        assert_eq!(kind.algorithm(), &SketchAlgorithm::Kll);
+    }
+
+    #[test]
+    #[should_panic(expected = "SketchKind parameter mismatch")]
+    fn sketch_kind_rejects_params_from_another_algorithm() {
+        SketchKind::new(SketchAlgorithm::Kll, SketchParams::Hll { precision: 14 });
+    }
 }

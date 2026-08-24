@@ -1695,8 +1695,22 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
                 kind.and_then(|k| order.iter().position(|o| *o == k))
                     .unwrap_or(usize::MAX)
             });
+            return ranked;
         }
     }
+
+    // A target may be handled by more than one strategy (for example, a
+    // shared aggregate has both bound-summary and share/recompute rewrite
+    // candidates). No shape-specific hook spans those different candidate
+    // types, so compare the numeric estimates the CostModel exposes for that
+    // purpose. `total_cmp` gives deterministic placement to a model's NaN
+    // placeholders without dropping any candidate.
+    let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
+    ranked.sort_by(|a, b| {
+        cost_model
+            .estimate_cost(a, &target)
+            .total_cmp(&cost_model.estimate_cost(b, &target))
+    });
     ranked
 }
 
@@ -2226,7 +2240,7 @@ mod tests {
         let approx = default_quantile(0.99); // ε = 0.01
         assert_eq!(
             preferred(&approx),
-            Implementation::Sketch(SketchKind::Quantile(
+            Implementation::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
                 SketchParams::Kll { k: 200 }, // design.md worked example
             ))
@@ -2239,7 +2253,7 @@ mod tests {
         };
         assert_eq!(
             preferred(&looser),
-            Implementation::Sketch(SketchKind::Quantile(
+            Implementation::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
                 SketchParams::Kll { k: 40 }, // ⌈2/0.05⌉
             ))
@@ -2252,7 +2266,7 @@ mod tests {
         // sizing must invert it back exactly.
         assert_eq!(
             preferred(&default_cardinality()),
-            Implementation::Sketch(SketchKind::Cardinality(
+            Implementation::Sketch(SketchKind::new(
                 SketchAlgorithm::Hll,
                 SketchParams::Hll { precision: 14 },
             ))
@@ -2269,7 +2283,7 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch(SketchKind::Frequency(
+            Implementation::Sketch(SketchKind::new(
                 SketchAlgorithm::Cms,
                 SketchParams::Cms {
                     width: 2719,
@@ -2283,7 +2297,7 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch(SketchKind::Frequency(
+            Implementation::Sketch(SketchKind::new(
                 SketchAlgorithm::Cms,
                 SketchParams::Cms {
                     width: 2719,
@@ -2300,17 +2314,18 @@ mod tests {
             accuracy: eps(0.01),
         };
         match preferred(&intent) {
-            Implementation::Sketch(SketchKind::TopK(
-                SketchAlgorithm::CmsWithHeap,
-                SketchParams::CmsWithHeap {
+            Implementation::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::CmsWithHeap => {
+                let SketchParams::CmsWithHeap {
                     width,
                     depth,
                     heap_size,
-                },
-            )) => {
-                assert_eq!(heap_size, 25);
-                assert_eq!(width, 272); // ⌈e/0.01⌉
-                assert_eq!(depth, 5);
+                } = kind.params()
+                else {
+                    unreachable!("SketchKind validates CmsWithHeap params")
+                };
+                assert_eq!(*heap_size, 25);
+                assert_eq!(*width, 272); // ⌈e/0.01⌉
+                assert_eq!(*depth, 5);
             }
             other => panic!("expected CmsWithHeap, got {other:?}"),
         }
@@ -2374,7 +2389,7 @@ mod tests {
         };
         assert_eq!(
             preferred(&intent),
-            Implementation::Sketch(SketchKind::Quantile(
+            Implementation::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
                 SketchParams::Kll { k: 65_535 },
             ))
@@ -3262,6 +3277,10 @@ mod tests {
             .iter()
             .find(|g| Rc::ptr_eq(g.target, &space.roots[0].1))
             .unwrap();
+        assert!(matches!(
+            &ranked_group.candidates[0].replacement,
+            Replacement::Rewrite(rc) if Rc::ptr_eq(rc, &group.target)
+        ));
         let rewrites: Vec<&ReplacementSubDAG> = ranked_group
             .candidates
             .iter()
@@ -3483,7 +3502,7 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::Quantile(
+            &SummaryFamilyType::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
                 SketchParams::Kll { k: 200 }
             ))
@@ -3493,7 +3512,7 @@ mod tests {
         // SummaryAgg edge: the state column carries the committed family.
         assert_eq!(
             field(&summary_input.schema, "quantile_0_99").dtype,
-            SummaryFamilyType::Sketch(SketchKind::Quantile(
+            SummaryFamilyType::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
                 SketchParams::Kll { k: 200 }
             ))
@@ -3537,7 +3556,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(SketchKind::Quantile(SketchAlgorithm::Kll, _))
+            SummaryFamilyType::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::Kll
         ));
 
         // With `PreferDDSketchViaCostModel`: DDSketch instead, same query.
@@ -3550,7 +3569,7 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::Quantile(
+            &SummaryFamilyType::Sketch(SketchKind::new(
                 SketchAlgorithm::DDSketch,
                 SketchParams::DDSketch { alpha: 0.01 }
             ))
@@ -3579,7 +3598,7 @@ mod tests {
             _payload: &serde_json::Value,
         ) -> Implementation {
             if ext_kind == "frequency" {
-                Implementation::Sketch(SketchKind::Frequency(
+                Implementation::Sketch(SketchKind::new(
                     SketchAlgorithm::CountSketch,
                     SketchParams::CountSketch {
                         width: 256,
@@ -3647,7 +3666,7 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::Frequency(
+            &SummaryFamilyType::Sketch(SketchKind::new(
                 SketchAlgorithm::CountSketch,
                 SketchParams::CountSketch {
                     width: 256,
@@ -3776,7 +3795,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(SketchKind::Quantile(SketchAlgorithm::Kll, _))
+            SummaryFamilyType::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::Kll
         ));
         let SummaryExpr::SummaryAgg {
             family: inner_family,
@@ -3919,12 +3938,9 @@ mod tests {
         assert!(matches!(
             &summary_input.expr,
             SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(SketchKind::TopK(
-                    SketchAlgorithm::CmsWithHeap,
-                    _
-                )),
+                family: SummaryFamilyType::Sketch(kind),
                 ..
-            }
+            } if kind.algorithm() == &SketchAlgorithm::CmsWithHeap
         ));
     }
 

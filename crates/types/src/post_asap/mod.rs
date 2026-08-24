@@ -29,6 +29,7 @@ pub use query_time::{
 };
 pub use schema::{SummaryFamilyType, SummaryField, SummarySchema};
 pub use sketch::{
-    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchKind,
-    SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
+    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory,
+    SketchKind, SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind,
+    WaveletParams,
 };
