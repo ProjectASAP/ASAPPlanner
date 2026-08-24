@@ -160,6 +160,24 @@ pub fn implementation_for(intent: &AggIntent) -> Implementation {
     implementation_for_with(intent, &DefaultCostModel)
 }
 
+/// The [`AccuracyTarget`] threaded onto an approximate-capable intent
+/// (`Quantile`/`Cardinality`/`Count`/`TopK`), or `None` for every other
+/// intent (no sketch candidate applies — [`implementation_for_with`]'s own
+/// match routes those elsewhere). Exposed so
+/// [`crate::replacement::SketchFamilyStrategy`] can resolve the same
+/// accuracy target [`implementation_for_with`] would, without re-deriving
+/// [`implementation_for_with`]'s whole dispatch just to read one field back
+/// out.
+pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
+    match intent {
+        AggIntent::Quantile { accuracy, .. }
+        | AggIntent::Cardinality { accuracy, .. }
+        | AggIntent::Count { accuracy }
+        | AggIntent::TopK { accuracy, .. } => Some(accuracy),
+        _ => None,
+    }
+}
+
 /// Like [`implementation_for`], but ranks candidate summaries via `cost_model` (see
 /// [`crate::cost_model`]) instead of the built-in static preference order.
 pub fn implementation_for_with(intent: &AggIntent, cost_model: &dyn CostModel) -> Implementation {
@@ -263,6 +281,24 @@ fn exact_accumulator(intent: &AggIntent, kind: ExactKind, params: ExactParams) -
     Implementation::ExactAggregate { kind, params }
 }
 
+/// Resolve an [`AccuracyTarget`] into the `(eps, delta)` budget
+/// [`CostModel::size_params`] needs. Shared by [`bind_summary_with`] (the
+/// binding path's own choice) and
+/// [`crate::replacement::SketchFamilyStrategy`] (which sizes every
+/// candidate, not just the one the binding path would have picked) — one
+/// place this resolution happens, so the two paths can't drift apart on it.
+///
+/// `Exact` is unreachable via [`implementation_for`] (which routes `Exact`
+/// to [`exact_realization`] instead); degrades to the tightest parameters
+/// for a caller that resolves it directly anyway.
+pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
+    match accuracy {
+        AccuracyTarget::Exact => (f64::MIN_POSITIVE, DEFAULT_DELTA),
+        AccuracyTarget::Epsilon(e) => (*e, DEFAULT_DELTA),
+        AccuracyTarget::EpsilonDelta { epsilon, delta } => (*epsilon, *delta),
+    }
+}
+
 /// Bind the preferred candidate sketch, with parameters sized to the
 /// target, ranking [`summary_candidates`] via `cost_model` (see
 /// [`crate::cost_model`]) instead of taking the static-order head
@@ -272,13 +308,7 @@ fn bind_summary_with(
     accuracy: &AccuracyTarget,
     cost_model: &dyn CostModel,
 ) -> Implementation {
-    let (eps, delta) = match accuracy {
-        // Unreachable via `implementation_for` (Exact routes to `exact_realization`);
-        // degrade to the tightest parameters if called directly.
-        AccuracyTarget::Exact => (f64::MIN_POSITIVE, DEFAULT_DELTA),
-        AccuracyTarget::Epsilon(e) => (*e, DEFAULT_DELTA),
-        AccuracyTarget::EpsilonDelta { epsilon, delta } => (*epsilon, *delta),
-    };
+    let (eps, delta) = accuracy_budget(accuracy);
     let ranked = cost_model.rank_candidates(intent, summary_candidates(intent));
     let kind = ranked
         .into_iter()

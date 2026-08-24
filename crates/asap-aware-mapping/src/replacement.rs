@@ -96,22 +96,29 @@
 //!   This module's own tests build `TargetSubDAG`s directly, the same
 //!   hand-rolled-fixture style `bind.rs`/`implementation.rs`/`cost_model.rs`'s own
 //!   tests already use.
-//! - **[`implementation`]/[`bind`]'s existing single-pick public behavior is
-//!   unchanged.** Nothing here modifies [`implementation::implementation_for`],
-//!   [`bind::implement_tree_with`], or how either is called; this module adds
-//!   the exhaustive-candidate view alongside them, it does not replace or
-//!   rewire either yet (a later issue's job).
+//! - **[`implementation`]/[`bind`]'s existing single-pick *outward-facing*
+//!   behavior is unchanged.** [`implementation::implementation_for`] and
+//!   [`bind::implement_tree_with`] still return exactly the same
+//!   `Implementation`/`SummaryNode` they always did, for the same inputs.
+//!   What changed is internal: [`bind::implement_tree_with`] and this
+//!   module's [`SketchFamilyStrategy`] now both bottom out in the same
+//!   [`bind::bind_with_implementation`] primitive — the binding path
+//!   resolves one ranked `Implementation` and hands it there; this module
+//!   sizes every candidate `Implementation` itself and hands each one there
+//!   in turn — rather than this module working around the binding path via
+//!   a `CostModel`-forcing adapter, as it used to.
 
 use std::rc::Rc;
 
-use asap_types::post_asap::{SketchKind, SketchParams, SketchQuery, SummaryNode};
+use asap_types::post_asap::{SketchKind, SummaryNode};
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
-use crate::bind::implement_tree_with;
-use crate::cost_model::{Cost, CostModel, CseCandidate, DefaultCostModel, ShareDecision};
-use crate::implementation::{implementation_for_with, summary_candidates, Implementation};
+use crate::bind::{bind_with_implementation, bindable_intent};
+use crate::cost_model::{CostModel, DefaultCostModel};
+use crate::implementation::{
+    accuracy_budget, accuracy_target, implementation_for_with, summary_candidates, Implementation,
+};
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
 ///
@@ -213,23 +220,6 @@ pub trait ReplacementStrategy {
 
 // ── SketchFamilyStrategy ─────────────────────────────────────────────────
 
-/// The bindable shape [`bind::implement_tree_with`] itself requires: a single
-/// intent, no `HAVING` (a multi-intent node, or one with a `HAVING`
-/// predicate, stays logical at actual binding time too — see `bind.rs`'s own
-/// module docs on why — so neither is a target this strategy has an opinion
-/// on).
-fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
-    if let QueryExpr::Aggregate {
-        measures, having, ..
-    } = node
-    {
-        if let ([intent], None) = (measures.as_slice(), having) {
-            return Some(intent);
-        }
-    }
-    None
-}
-
 /// A single static instance so [`SketchFamilyStrategy::default_cost_model`]
 /// can hand out a `&'static dyn CostModel` without heap-allocating one —
 /// `DefaultCostModel` is a unit struct with no state, so one instance serves
@@ -286,8 +276,11 @@ impl ReplacementStrategy for SketchFamilyStrategy<'_> {
         // match uses. Only `Sketch` has more than one candidate to enumerate
         // (`summary_candidates`); every other variant is the *only*
         // realization `implementation::implementation_for_with`'s dispatch
-        // produces for this intent, so there's nothing else to offer.
-        match implementation_for_with(intent, self.cost_model) {
+        // produces for this intent, so there's nothing else to offer — bind
+        // the one `implementation` this branch already computed rather than
+        // re-deriving it a second time.
+        let implementation = implementation_for_with(intent, self.cost_model);
+        match &implementation {
             Implementation::Sketch { .. } => summary_candidates(intent)
                 .iter()
                 .filter_map(|kind| {
@@ -296,6 +289,7 @@ impl ReplacementStrategy for SketchFamilyStrategy<'_> {
                 .collect(),
             Implementation::ExactAggregate { kind, .. } => single_candidate(
                 target.root,
+                implementation.clone(),
                 self.cost_model,
                 format!(
                     "{} realizes as an exact {kind:?} accumulator — the only realization \
@@ -306,6 +300,7 @@ impl ReplacementStrategy for SketchFamilyStrategy<'_> {
             ),
             Implementation::PassThrough => single_candidate(
                 target.root,
+                implementation.clone(),
                 self.cost_model,
                 format!(
                     "{} has no summary realization and stays a logical pass-through — the \
@@ -315,6 +310,7 @@ impl ReplacementStrategy for SketchFamilyStrategy<'_> {
             ),
             Implementation::Sample { kind, .. } => single_candidate(
                 target.root,
+                implementation.clone(),
                 self.cost_model,
                 format!(
                     "{} realizes as a {kind:?} sample — the only realization the plugged-in \
@@ -324,6 +320,7 @@ impl ReplacementStrategy for SketchFamilyStrategy<'_> {
             ),
             Implementation::Wavelet { kind, .. } => single_candidate(
                 target.root,
+                implementation.clone(),
                 self.cost_model,
                 format!(
                     "{} realizes as a {kind:?} wavelet transform — the only realization the \
@@ -333,6 +330,7 @@ impl ReplacementStrategy for SketchFamilyStrategy<'_> {
             ),
             Implementation::StatModel { kind, .. } => single_candidate(
                 target.root,
+                implementation.clone(),
                 self.cost_model,
                 format!(
                     "{} realizes as a {kind:?} statistical model — the only realization the \
@@ -344,19 +342,21 @@ impl ReplacementStrategy for SketchFamilyStrategy<'_> {
     }
 }
 
-/// Bind `root` via `cost_model` unchanged (no candidate to steer towards) —
-/// the "only option" path for any [`Implementation`] category besides
-/// `Sketch`. Schema derivation cannot fail for a target that was already a
-/// legitimate part of the workload's tree, but [`implement_tree_with`]'s
-/// signature is fallible (`ImplementError`), so a failure here — never
-/// expected in practice — degrades to "no candidate" rather than a panic,
-/// same conservatism as the rest of this strategy.
+/// Bind `root` to the already-computed `implementation` (no candidate to
+/// steer towards) — the "only option" path for any [`Implementation`]
+/// category besides `Sketch`. Schema derivation cannot fail for a target
+/// that was already a legitimate part of the workload's tree, but
+/// [`bind_with_implementation`]'s signature is fallible (`ImplementError`),
+/// so a failure here — never expected in practice — degrades to "no
+/// candidate" rather than a panic, same conservatism as the rest of this
+/// strategy.
 fn single_candidate(
     root: &QueryExpr,
+    implementation: Implementation,
     cost_model: &dyn CostModel,
     rationale: String,
 ) -> Vec<ReplacementSubDAG> {
-    implement_tree_with(root, cost_model)
+    bind_with_implementation(root, implementation, cost_model)
         .ok()
         .map(|node| ReplacementSubDAG {
             replacement: Replacement::Summary(node),
@@ -366,25 +366,30 @@ fn single_candidate(
         .collect()
 }
 
-/// Bind `root` forcing the sketch-vs-exact boundary towards `kind` — one
-/// entry of [`summary_candidates(intent)`](summary_candidates) — instead of
-/// whichever candidate `cost_model` would otherwise rank first, by steering
-/// [`ForceSketchKind`] through the exact same [`implement_tree_with`] call
-/// [`bind::implement_tree_with`] itself would make. This reuses
-/// `implement_tree_with`'s whole decision procedure (schema derivation,
-/// column resolution, readout construction) unchanged — it does not
-/// reimplement any part of it.
+/// Bind `root` to `kind` — one entry of
+/// [`summary_candidates(intent)`](summary_candidates) — sized the same way
+/// [`implementation::bind_summary_with`] would (via
+/// [`implementation::accuracy_budget`] and `cost_model.size_params`), then
+/// handed to [`bind_with_implementation`] — the same primitive
+/// [`bind::implement_tree_with`] itself bottoms out in for whichever
+/// candidate `cost_model` ranks first. This reuses that whole decision
+/// procedure (schema derivation, column resolution, readout construction)
+/// unchanged; it only supplies a different top-level `Implementation` than
+/// the ranked-first one.
 fn sketch_candidate(
     root: &QueryExpr,
     intent: &AggIntent,
     kind: SketchKind,
     cost_model: &dyn CostModel,
 ) -> Option<ReplacementSubDAG> {
-    let forced = ForceSketchKind {
+    let accuracy = accuracy_target(intent)?;
+    let (eps, delta) = accuracy_budget(accuracy);
+    let params = cost_model.size_params(kind.clone(), intent, eps, delta);
+    let implementation = Implementation::Sketch {
         kind: kind.clone(),
-        inner: cost_model,
+        params,
     };
-    let node = implement_tree_with(root, &forced).ok()?;
+    let node = bind_with_implementation(root, implementation, cost_model).ok()?;
     Some(ReplacementSubDAG {
         replacement: Replacement::Summary(node),
         rationale: format!(
@@ -393,65 +398,6 @@ fn sketch_candidate(
             describe_intent(intent)
         ),
     })
-}
-
-/// A [`CostModel`] adapter that forces
-/// [`rank_candidates`](CostModel::rank_candidates) to put `kind` first,
-/// forwarding every other hook to `inner` unchanged — so binding a specific
-/// candidate still respects whatever deployment-specific sizing/extension
-/// behavior `inner` provides, exactly like binding via `inner` directly
-/// would. Only ever constructed with a `kind` already present in the
-/// `candidates` slice `implementation_for_with` passes to `rank_candidates`
-/// (drawn straight from [`summary_candidates(intent)`](summary_candidates)),
-/// so this never invents a candidate the underlying model didn't already
-/// have available — see [`CostModel::rank_candidates`]'s own contract.
-struct ForceSketchKind<'a> {
-    kind: SketchKind,
-    inner: &'a dyn CostModel,
-}
-
-impl CostModel for ForceSketchKind<'_> {
-    fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind> {
-        let mut ranked = self.inner.rank_candidates(intent, candidates);
-        ranked.retain(|k| *k != self.kind);
-        ranked.insert(0, self.kind.clone());
-        ranked
-    }
-
-    fn size_params(
-        &self,
-        kind: SketchKind,
-        intent: &AggIntent,
-        eps: f64,
-        delta: f64,
-    ) -> SketchParams {
-        self.inner.size_params(kind, intent, eps, delta)
-    }
-
-    fn realize_extension(&self, ext_kind: &str, payload: &serde_json::Value) -> Implementation {
-        self.inner.realize_extension(ext_kind, payload)
-    }
-
-    fn readout_extension(
-        &self,
-        ext_kind: &str,
-        payload: &serde_json::Value,
-        col: &ColumnRef,
-    ) -> SketchQuery {
-        self.inner.readout_extension(ext_kind, payload, col)
-    }
-
-    fn cse_recompute_cost(&self, candidate: &CseCandidate) -> Cost {
-        self.inner.cse_recompute_cost(candidate)
-    }
-
-    fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> Cost {
-        self.inner.cse_shared_maintenance_cost(candidate)
-    }
-
-    fn cse_share_decision(&self, candidate: &CseCandidate) -> ShareDecision {
-        self.inner.cse_share_decision(candidate)
-    }
 }
 
 /// A short human-readable label for an `AggIntent`, for
@@ -734,6 +680,58 @@ mod tests {
         assert!(kinds.contains(&SketchKind::Kll));
         assert!(kinds.contains(&SketchKind::DDSketch));
         assert_eq!(kinds.len(), 2);
+    }
+
+    /// Enumerating a candidate for the *target* node must only steer that
+    /// node's own decision — a nested aggregate underneath it still gets the
+    /// `cost_model`-ranked default, not the target's forced candidate. This
+    /// is the behavior [`sketch_candidate`]'s [`bind_with_implementation`]
+    /// call gets for free (only the top node's `Implementation` is forced;
+    /// `bind_summary_agg`'s recursion into the child re-ranks normally via
+    /// `cost_model`) — the old `ForceSketchKind`-`CostModel`-adapter
+    /// implementation forced *every* `rank_candidates` call for the whole
+    /// recursive bind, which would have silently forced a nested Quantile to
+    /// DDSketch too whenever the outer target's DDSketch candidate was
+    /// enumerated.
+    #[test]
+    fn forcing_the_targets_candidate_does_not_leak_into_a_nested_aggregate() {
+        // outer: quantile(0.99, ...) over inner: quantile(0.5, m) — both
+        // Quantile, so both share the [Kll, DDSketch] candidate list.
+        let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
+        let outer = Rc::new(agg(vec![], default_quantile(0.99), inner));
+        let target = TargetSubDAG::new(&outer);
+        let replacements = SketchFamilyStrategy::default_cost_model().replacements(&target);
+
+        let ddsketch = replacements
+            .iter()
+            .find(|r| {
+                matches!(&r.replacement, Replacement::Summary(node)
+                    if summary_family_kind(node) == SketchKind::DDSketch)
+            })
+            .expect("the outer target's DDSketch candidate must be present");
+        let Replacement::Summary(node) = &ddsketch.replacement else {
+            unreachable!("filtered on Replacement::Summary above");
+        };
+        assert_eq!(
+            summary_family_kind(node),
+            SketchKind::DDSketch,
+            "the outer (target) node must be the forced candidate"
+        );
+
+        let asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr
+        else {
+            panic!("expected SummaryEstimate root, got {:?}", node.expr);
+        };
+        let asap_types::post_asap::SummaryExpr::SummaryAgg { child, .. } = &summary_input.expr
+        else {
+            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
+        };
+        assert_eq!(
+            summary_family_kind(child),
+            SketchKind::Kll,
+            "the nested inner aggregate must still get the cost-model-ranked \
+             default (Kll), not inherit the outer target's forced DDSketch"
+        );
     }
 
     /// The `SummaryFamilyType`'s `SketchKind`, from the top `SummaryAgg`

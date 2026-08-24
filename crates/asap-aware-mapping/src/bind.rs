@@ -55,6 +55,24 @@ pub enum ImplementError {
     Schema(#[from] QueryExprError),
 }
 
+/// The bindable shape this pass (and
+/// [`crate::replacement::SketchFamilyStrategy`], which targets the exact
+/// same shape) requires: a single intent, no `HAVING`. A multi-intent node
+/// (SQL `SELECT SUM(a), AVG(b)`), or one with a `HAVING` predicate (the
+/// filter would need the estimate first), stays logical — see the module
+/// docs' "Conservative fallbacks".
+pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
+    if let QueryExpr::Aggregate {
+        measures, having, ..
+    } = node
+    {
+        if let ([intent], None) = (measures.as_slice(), having) {
+            return Some(intent);
+        }
+    }
+    None
+}
+
 /// Bind a single query to the post-ASAP IR. Ranks candidate summaries via
 /// [`DefaultCostModel`] (`asap-plan`'s built-in static preference order,
 /// unchanged); use [`implement_tree_with`] to plug in a deployment-specific
@@ -65,8 +83,47 @@ pub fn implement_tree(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementErro
 
 /// Like [`implement_tree`], but ranks candidate summaries via `cost_model` (see
 /// [`crate::cost_model`]) instead of the built-in static preference order.
+///
+/// Thin: resolve *which* [`Implementation`] `cost_model` ranks first for
+/// `expr`'s intent, then hand it to [`bind_with_implementation`] — the same
+/// primitive [`crate::replacement::SketchFamilyStrategy`] calls once per
+/// *candidate* `Implementation` instead of just the ranked-first one. This is
+/// the one place the two paths' outputs are actually assembled into a
+/// `SummaryNode`; ranking is the only thing that differs between them.
 pub fn implement_tree_with(
     expr: &QueryExpr,
+    cost_model: &dyn CostModel,
+) -> Result<Rc<SummaryNode>, ImplementError> {
+    match bindable_intent(expr) {
+        Some(intent) => bind_with_implementation(
+            expr,
+            implementation_for_with(intent, cost_model),
+            cost_model,
+        ),
+        None => logical(expr),
+    }
+}
+
+/// Bind `expr` to an already-decided [`Implementation`] for its top intent,
+/// instead of deriving one via [`implementation_for_with`]. The shared
+/// low-level primitive: [`implement_tree_with`] computes the
+/// `cost_model`-ranked `Implementation` and calls this;
+/// [`crate::replacement::SketchFamilyStrategy`] sizes each candidate
+/// `Implementation` itself (see
+/// [`implementation::accuracy_budget`](crate::implementation::accuracy_budget))
+/// and calls this once per candidate — one function turns a chosen
+/// `Implementation` into a `SummaryNode`, used by both the single-answer
+/// production path and the exhaustive-candidate path.
+///
+/// `expr` must still be the [`bindable_intent`] shape for `implementation` to
+/// have any effect; anything else falls back to [`logical`], same as
+/// [`implement_tree_with`]. Only `expr`'s own top-level decision is forced —
+/// recursion into `expr`'s child re-ranks normally via `cost_model`, the same
+/// as an ordinary [`implement_tree_with`] call, so forcing one target's
+/// candidate never leaks into that target's own nested aggregates.
+pub fn bind_with_implementation(
+    expr: &QueryExpr,
+    implementation: Implementation,
     cost_model: &dyn CostModel,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
     if let QueryExpr::Aggregate {
@@ -80,7 +137,6 @@ pub fn implement_tree_with(
         // The bindable shape: exactly one intent, no HAVING. (Multi-intent
         // nodes and HAVING stay logical — see the module docs.)
         if let ([intent], None) = (measures.as_slice(), having) {
-            let implementation = implementation_for_with(intent, cost_model);
             if let Some((family, estimate)) = summary_family(implementation) {
                 return bind_summary_agg(
                     expr, reduction, intent, child, family, estimate, cost_model,
