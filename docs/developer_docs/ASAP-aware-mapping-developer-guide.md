@@ -253,6 +253,35 @@ A custom cost model does not necessarily need to override every hook. The curren
 
 ---
 
+### `PlanSpace` / `MemoGroup` / `RankedGroup` — the whole-workload view
+
+`ReplacementStrategy` answers "what are the candidates for this one target?" `PlanSpace` answers the same question for every target in a whole workload at once, without materializing `2^N` fully-copied plans for `N` independently-choosable sites.
+
+```rust
+// replacement.rs
+
+// One MemoGroup per distinct TargetSubDAG in the whole workload —
+// never a flat list of fully-materialized plans.
+pub struct MemoGroup {
+    pub target: Rc<QueryExpr>,
+    pub consumer_count: usize,
+    pub candidates: Vec<ReplacementSubDAG>,  // every alternative, unranked
+}
+
+pub struct RankedGroup<'a> {
+    pub target: &'a Rc<QueryExpr>,
+    pub consumer_count: usize,
+    pub candidates: Vec<&'a ReplacementSubDAG>,  // same candidates, ranked
+    pub costs: Vec<f64>,                         // costs[i] <-> candidates[i]
+}
+```
+
+`search_workload(roots)` runs the shared-subtree pass once, discovers every target across every root's whole DAG (not just root-level sharing — a `SharedSubtreeStrategy` candidate three levels under an unshared `Filter` is exactly as real a site as a shared whole root), and asks every registered strategy to a fixpoint. Two logically different candidates at two different targets are never copied into two separate plans — they're two entries in two different `MemoGroup`s, sharing every other node in the workload by construction.
+
+`PlanSpace::cost_sorted(cost_model)` is the one ranking step: for each group, it dispatches by candidate shape — a same-shape `Rewrite` pair (a `SharedSubtreeStrategy` share/recompute choice) goes through `CostModel::cse_share_decision`; a same-shape run of `Summary` candidates realizing sketches (a `SketchAlgorithmStrategy` choice) goes through `CostModel::rank_candidates`; every candidate also gets a real number from `CostModel::estimate_cost`, aligned index-for-index in `costs`. Groups whose candidates don't fit either shape (a lone candidate, or a mix — e.g. one target where both strategies fired at once) keep discovery order for the un-rankable part. Count in, count out — nothing is ever dropped to produce a ranking.
+
+---
+
 ### Family, kind, and algorithm
 
 Three levels sit below "summary" in this crate's type vocabulary, and `Sketch` is the only family with all three:
