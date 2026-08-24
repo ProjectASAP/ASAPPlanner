@@ -61,13 +61,11 @@ flowchart TB
   end
 
   subgraph GENERATION[2. Generate all legal alternatives at each site]
-    SKETCH["SketchAlgorithmStrategy<br/>for a bindable aggregate, enumerate every legal<br/>sketch, exact accumulator, or pass-through realization"]:::generate
-    SHARED["SharedSubtreeStrategy<br/>when consumer_count ≥ 2, emit both<br/>build-once-and-share and recompute-independently"]:::generate
+    STRATEGY["ReplacementStrategy<br/>when a target matches, enumerate every legal replacement;<br/>implementations generate but do not choose"]:::generate
     CAND["ReplacementSubDAG candidates<br/>each contains a Summary or Rewrite plus its rationale;<br/>no valid alternative is removed"]:::store
-    TARGET -->|"aggregate shape"| SKETCH --> CAND
-    TARGET -->|"shared Rc identity"| SHARED --> CAND
-    CM(["CostModel<br/>orders algorithms and chooses sketch parameters"]):::choose
-    CM -. "rank and size; never filter" .-> SKETCH
+    TARGET -->|"try every registered strategy"| STRATEGY --> CAND
+    CM(["CostModel<br/>orders candidates and supplies<br/>deployment-specific parameters"]):::choose
+    CM -. "rank and parameterize; never filter" .-> STRATEGY
   end
 
   subgraph SEARCHSPACE[3. Store the workload-wide search space]
@@ -76,15 +74,9 @@ flowchart TB
   end
 
   subgraph RANKING[4. Rank without selecting a final plan]
-    SORT["PlanSpace::cost_sorted<br/>dispatch each group according to candidate shape"]:::choose
-    RANK["rank_candidates<br/>order sketch algorithms"]:::choose
-    CSE["cse_share_decision<br/>order share vs. recompute"]:::choose
-    COST["estimate_cost<br/>attach one comparable f64 to every candidate"]:::choose
+    SORT["PlanSpace::cost_sorted<br/>use the CostModel to order each group<br/>and cost every candidate"]:::choose
     GROUP["RankedGroup<br/>the same candidates in preferred order,<br/>with costs aligned by index"]:::choose
-    MEMO --> SORT
-    SORT --> RANK --> GROUP
-    SORT --> CSE --> GROUP
-    SORT --> COST --> GROUP
+    MEMO --> SORT -->|"reorder only; preserve every candidate"| GROUP
   end
 
   subgraph REPORTING[5. Produce human-facing annotations]
@@ -94,6 +86,14 @@ flowchart TB
     MEMO -->|"reporting view; no new planner decision"| EXPLAIN --> EXPORT --> VIEWER
   end
 ```
+
+The generic `ReplacementStrategy` box is the extension point. The default
+registry currently supplies these concrete implementations separately:
+
+- `SketchAlgorithmStrategy` generates the legal summary realizations for a
+  bindable aggregate.
+- `SharedSubtreeStrategy` generates share-versus-recompute rewrites for a
+  target with multiple consumers.
 
 ---
 
