@@ -315,6 +315,8 @@ Underneath `SketchAlgorithmStrategy::replacements()` sits one more function, `bi
     a caller wanting one answer: replacements(...).into_iter().next()
 ```
 
+(`replacements(...)` returns a `Vec<ReplacementSubDAG>` ranked most-preferred-first; `.into_iter().next()` takes just that first entry and drops the rest — the same "keep candidate[0]" step `implement_tree_with` used to do internally, now written out explicitly on the calling side instead of hidden behind a second entry point.)
+
 ### Replacement-strategy path
 
 ```text
