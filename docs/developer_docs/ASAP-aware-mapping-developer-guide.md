@@ -10,9 +10,9 @@ This guide explains how to extend ASAP-aware mapping in the current codebase. Us
 
 The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and the replacement-plan-searching design this crate now implements, see the separate design document, [`docs/design_docs/asap_aware_mapping.md`](../design_docs/asap_aware_mapping.md).
 
-Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are illustrative; they do not ship with this crate. Samples that use real types—such as `SketchAlgorithmStrategy`, `SharedSubtreeStrategy`, `implementations_for_with`, `PlanSpace`, and `search_workload`—are copied from `replacement.rs`, `bind.rs`, or `cost_model.rs`.
+Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are illustrative; they do not ship with this crate. Samples that use real types—such as `SketchAlgorithmStrategy`, `SharedSubtreeStrategy`, `implementations_for_with`, `PlanSpace`, and `search_workload`—are copied from `replacement.rs`, `explanation.rs`, or `cost_model.rs`.
 
-If you only need to find the right extension point, start with the [extension map](#18-current-extension-map). If you are implementing a strategy, read sections 1–5 first.
+If you only need to find the right extension point, start with the [extension map](#7-current-extension-map) (Part 3 §7). If you are implementing a strategy, read Part 1 §1 (Mental model), Part 2 §1 (Glossary), and Part 3 §1 (Adding a new `ReplacementStrategy`) first.
 
 ---
 
@@ -167,7 +167,7 @@ The diagram in the previous revision of this guide started at `TargetSubDAG`, as
                      candidate A          candidate B              candidate C
 ```
 
-The left path is what a caller with one query in hand uses directly (see `docs/user-guide/user-guide.md`'s "Step 2"), and what `realize_child` uses internally to bind a candidate's own child. The right path is `search_workload`/`search_workload_with` (§3 above) — it's the only place `consumer_count` is ever discovered rather than assumed, which is why `SharedSubtreeStrategy` only meaningfully matches something reached through it.
+The left path is what a caller with one query in hand uses directly (see `docs/user-guide/user-guide.md`'s "Step 2"), and what `realize_child` uses internally to bind a candidate's own child. The right path is `search_workload`/`search_workload_with` — it's the only place `consumer_count` is ever discovered rather than assumed, which is why `SharedSubtreeStrategy` only meaningfully matches something reached through it.
 
 The important rule is:
 
@@ -557,7 +557,7 @@ is enough for the current shared-subtree strategy.
 
 Keep `matches` cheap and unsurprising.
 
-It should answer *whether the strategy applies here* in the plain English sense — not `explanation.rs`'s formal `ReplacementExplanation` concept (issue #257, a separate reporting layer over this trait's own output — see §19). `matches` isn't that machinery and doesn't need to produce anything it consumes; it should also not perform ranking or choose a winner.
+It should answer *whether the strategy applies here* in the plain English sense — not `explanation.rs`'s formal `ReplacementExplanation` concept (issue #257, a separate reporting layer over this trait's own output — see Part 2 §2). `matches` isn't that machinery and doesn't need to produce anything it consumes; it should also not perform ranking or choose a winner.
 
 ---
 
@@ -1141,7 +1141,7 @@ fn readout_extension(
 ) -> SketchQuery;
 ```
 
-This complements `realize_extension`: realization defines what gets maintained; readout defines how it is queried (see the definition in §2's `CostModel` glossary entry if "readout" is unfamiliar).
+This complements `realize_extension`: realization defines what gets maintained; readout defines how it is queried (see the definition in Part 2 §1's `CostModel` glossary entry if "readout" is unfamiliar).
 
 ---
 
@@ -1446,7 +1446,7 @@ Use this table to find the right place for a change.
 | Build a target with no workload context | `TargetSubDAG::new` |
 | Build a target with known sharing context | `TargetSubDAG::with_consumer_count` |
 | Explain why a replacement exists, where, and why | `explanation::explain_replacements`/`explain_replacements_with` |
-| Add a new kind of replacement explanation | new `impl ReplacementStrategy`, wired into `default_strategies`/`default_strategies_with` — not a new explanation-specific trait, see §19 |
+| Add a new kind of replacement explanation | new `impl ReplacementStrategy`, wired into `default_strategies`/`default_strategies_with` — not a new explanation-specific trait, see Part 3 §8 |
 
 ---
 
@@ -1467,8 +1467,8 @@ for explanation in &explanations {
 }
 ```
 
-To plug in a deployment-specific strategy or `CostModel`, use `explain_replacements_with` with a strategy set built the same way `default_strategies_with` builds one — see §8 and §11.
+To plug in a deployment-specific strategy or `CostModel`, use `explain_replacements_with` with a strategy set built the same way `default_strategies_with` builds one — see Part 3 §2 and Part 3 §4.
 
 ### Adding a new kind of replacement explanation
 
-There is no separate checklist here: follow [§4](#4-adding-a-new-replacementstrategy) to add the new `ReplacementStrategy`, wire it into `default_strategies`/`default_strategies_with` (§18), add an `ExplanationKind` variant, and extend `findings_from_plan_space` to recognize the new candidate shape. If the new strategy's `matches`/`replacements` are already correct and tested, the explanation falls out of the existing `PlanSpace` translation with no new discovery logic required.
+There is no separate checklist here: follow [Part 3 §1](#1-adding-a-new-replacementstrategy) to add the new `ReplacementStrategy` and wire it into `default_strategies`/`default_strategies_with`, add an `ExplanationKind` variant, and extend `findings_from_plan_space` to recognize the new candidate shape. If the new strategy's `matches`/`replacements` are already correct and tested, the explanation falls out of the existing `PlanSpace` translation with no new discovery logic required.
