@@ -56,7 +56,17 @@ python3 -m http.server 8420
 
 Tunnel port 8420 to your machine, then open `http://localhost:8420/` locally. `dag.json` loads on page load, same as before.
 
-## 4. Using the page
+## 4. No browser attached at all?
+
+If there's nowhere to even point a tunnel — an agent session, a CI job, anywhere you can only produce a file, not view one live — skip the server and bake a standalone page instead:
+
+```sh
+python3 tools/dag-viewer/render.py tools/dag-viewer/dag.json -o rendered.html
+```
+
+`rendered.html` is fully self-contained (data and every script inlined) — hand it off however you'd hand off any file; whoever opens it gets the same page as steps 1–3, no setup on their end. See "Render a standalone page from Python" in README.md.
+
+## 5. Using the page
 
 Click a node to see its detail in the side panel. That includes its category and whether it's a query's root.
 
