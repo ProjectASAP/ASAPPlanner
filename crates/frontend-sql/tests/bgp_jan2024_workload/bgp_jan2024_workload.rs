@@ -187,8 +187,19 @@ async fn corpus_lowering_matches_the_pinned_aggregate_tally() {
     // failure for all 3 corpus occurrences: every one has both arguments as
     // bare columns of the scanned table, so all 3 lower end to end with no
     // companion gap (unlike `splitByChar`'s array-indexing gap, #230).
-    expect(Category::Lowered, 148);
-    expect(Category::Plan, 37);
+    //
+    // `lagInFrame` support (issue #267 -- a stub `WindowUDF` plus its own
+    // `WindowFuncKind::LagInFrame` variant, not conflated with `Lag`) clears
+    // the "unknown function: laginframe" `Plan` failure for 3 of the 6
+    // corpus occurrences (q024, q025, q171). The other 3 (q056, q114, q170)
+    // still land in `Plan`, but now for an unrelated, pre-existing reason
+    // each: q056/q114 also call `dateDiff`, q170's outer query also calls
+    // `toString` -- neither is a registered `CLICKHOUSE_SCALAR_BUILTINS`
+    // entry, so the query still fails at the first unknown-function name it
+    // hits, just no longer `laginframe`. Out of scope for #267, same as
+    // `splitByChar`'s array-indexing companion gap above.
+    expect(Category::Lowered, 151);
+    expect(Category::Plan, 34);
     expect(Category::Schema, 0);
     expect(Category::Parse, 0);
     // One query that used to fail at `uniqExact` (`Plan`) now clears that

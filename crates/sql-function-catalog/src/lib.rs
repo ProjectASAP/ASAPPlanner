@@ -16,7 +16,7 @@
 //! outright (`reducer_col` in `asap-frontend-sql`) rather than trying to
 //! typecheck it.
 //!
-//! Three tables, matching the three problems this replaces:
+//! Four tables, matching the four problems this replaces:
 //!
 //! - [`NATIVE_FUNCTIONS`] -- aggregate names DataFusion's own planner already
 //!   resolves (`sum`, `avg`, `approx_percentile_cont`, ...). [`lookup_native`]
@@ -45,6 +45,12 @@
 //!   lowers generically (`asap-frontend-sql::sql::expr`'s
 //!   `Expr::ScalarFunction` arm), so a stub `ScalarUDF` registered for the
 //!   name is the whole fix (issue #230).
+//! - [`CLICKHOUSE_WINDOW_BUILTINS`] -- ClickHouse-only *window* names
+//!   DataFusion doesn't know at all (`lagInFrame`, `leadInFrame`). No
+//!   [`RewriteKind`] here either: `asap-frontend-sql::sql::
+//!   lower_window_func_kind` already maps each name directly to its own
+//!   `WindowFuncKind` variant, so a stub `WindowUDF` registered for the name
+//!   is the whole fix (issue #267).
 //!
 //! Generating these tables from a live introspectable source -- ClickHouse's
 //! `system.functions`, DataFusion's own in-process UDF/UDAF registry -- the
@@ -467,6 +473,53 @@ pub fn lookup_clickhouse_scalar_builtin(name: &str) -> Option<&'static ClickHous
     CLICKHOUSE_SCALAR_BUILTINS.iter().find(|b| b.name == name)
 }
 
+/// One [`CLICKHOUSE_WINDOW_BUILTINS`] entry -- just `{ name, arity }`, no
+/// [`RewriteKind`]: unlike an aggregate call, `lower_window_func_kind`
+/// (`asap-frontend-sql::sql`) already maps each of these names directly to
+/// its own `WindowFuncKind` variant, so once DataFusion's planner accepts
+/// the name at all -- via a stub `WindowUDF`, see
+/// `asap-frontend-sql::sql::clickhouse_window_builtin_stub_udwf` -- no
+/// rewrite step is needed either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickHouseWindowBuiltin {
+    /// Lowercase function name, matching the name a stub `WindowUDF` is
+    /// registered under (DataFusion resolves a SQL call to it
+    /// case-insensitively, but reports it back lowercase).
+    pub name: &'static str,
+    pub arity: Arity,
+}
+
+/// ClickHouse-only *window* builtin names DataFusion's planner has no native
+/// equivalent for at all -- each needs a stub `WindowUDF` registered so the
+/// planner accepts the call. `lagInFrame`/`leadInFrame` (issue #267) differ
+/// from ANSI `LAG`/`LEAD` (which DataFusion's native `lag`/`lead` already
+/// model) by respecting the window frame bounds instead of ignoring them --
+/// conflating the two under one `WindowFuncKind` would make the frame clause
+/// silently meaningless depending on which name got you there, so each gets
+/// its own catalog entry and its own `WindowFuncKind` variant
+/// (`LagInFrame`/`LeadInFrame`). `WindowFuncKind` itself still has no frame
+/// representation, so the frame-respecting behavior isn't modeled yet either
+/// -- see issue #231.
+pub const CLICKHOUSE_WINDOW_BUILTINS: &[ClickHouseWindowBuiltin] = &[
+    // lagInFrame(x[, offset[, default]]) -- like LAG, but NULL/default past
+    // the frame boundary instead of reaching arbitrarily far back.
+    ClickHouseWindowBuiltin {
+        name: "laginframe",
+        arity: Arity::Range { min: 1, max: 3 },
+    },
+    // leadInFrame(x[, offset[, default]]) -- the LEAD counterpart.
+    ClickHouseWindowBuiltin {
+        name: "leadinframe",
+        arity: Arity::Range { min: 1, max: 3 },
+    },
+];
+
+/// Look up a ClickHouse-only window builtin by name (case-sensitive, see
+/// [`lookup_native`]).
+pub fn lookup_clickhouse_window_builtin(name: &str) -> Option<&'static ClickHouseWindowBuiltin> {
+    CLICKHOUSE_WINDOW_BUILTINS.iter().find(|b| b.name == name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,6 +638,51 @@ mod tests {
             assert!(
                 lookup_clickhouse_builtin(b.name).is_none(),
                 "{} listed as both a ClickHouse aggregate and scalar builtin",
+                b.name
+            );
+        }
+    }
+
+    #[test]
+    fn clickhouse_window_builtin_lookup_finds_every_listed_name() {
+        for b in CLICKHOUSE_WINDOW_BUILTINS {
+            let found =
+                lookup_clickhouse_window_builtin(b.name).expect("listed name must be found");
+            assert_eq!(found.name, b.name);
+            assert_eq!(found.arity, b.arity);
+        }
+        assert_eq!(
+            lookup_clickhouse_window_builtin("not_a_real_function"),
+            None
+        );
+    }
+
+    #[test]
+    fn clickhouse_window_builtin_names_are_lowercase() {
+        for b in CLICKHOUSE_WINDOW_BUILTINS {
+            assert_eq!(b.name, b.name.to_lowercase(), "not lowercase: {}", b.name);
+        }
+    }
+
+    /// Window builtins live in their own namespace from the aggregate and
+    /// scalar tables (see `clickhouse_scalar_builtins_do_not_shadow_native_or_
+    /// aggregate_names`'s doc for why this documents rather than enforces).
+    #[test]
+    fn clickhouse_window_builtins_do_not_shadow_other_names() {
+        for b in CLICKHOUSE_WINDOW_BUILTINS {
+            assert!(
+                lookup_native(b.name).is_none(),
+                "{} listed as both a native aggregate and a ClickHouse window builtin",
+                b.name
+            );
+            assert!(
+                lookup_clickhouse_builtin(b.name).is_none(),
+                "{} listed as both a ClickHouse aggregate and window builtin",
+                b.name
+            );
+            assert!(
+                lookup_clickhouse_scalar_builtin(b.name).is_none(),
+                "{} listed as both a ClickHouse scalar and window builtin",
                 b.name
             );
         }

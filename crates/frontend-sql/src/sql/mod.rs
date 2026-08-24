@@ -26,7 +26,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::DataType as ArrowDataType;
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datafusion::catalog_common::MemorySchemaProvider;
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
@@ -36,9 +36,11 @@ use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::expr_rewriter::FunctionRewrite;
+use datafusion::logical_expr::function::{PartitionEvaluatorArgs, WindowUDFFieldArgs};
 use datafusion::logical_expr::{
-    self, lit, AggregateUDF, Case, Distinct, Expr, JoinType, LogicalPlan, ScalarUDF, ScalarUDFImpl,
-    Signature, SimpleAggregateUDF, TypeSignature, Volatility, WindowFunctionDefinition,
+    self, lit, AggregateUDF, Case, Distinct, Expr, JoinType, LogicalPlan, PartitionEvaluator,
+    ScalarUDF, ScalarUDFImpl, Signature, SimpleAggregateUDF, TypeSignature, Volatility,
+    WindowFunctionDefinition, WindowUDF, WindowUDFImpl,
 };
 use datafusion::optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion::optimizer::{AnalyzerRule, OptimizerConfig};
@@ -217,6 +219,16 @@ impl<'a> SqlLowerer<'a> {
         // args }`, so registering the stub is the entire fix (issue #230).
         for builtin in asap_sql_function_catalog::CLICKHOUSE_SCALAR_BUILTINS {
             ctx.register_udf(clickhouse_scalar_builtin_stub_udf(
+                builtin.name,
+                builtin.arity,
+            ));
+        }
+        // Register a stub `WindowUDF` for every catalog-listed ClickHouse-only
+        // *window* builtin — same reason as the two loops above, but with no
+        // rewrite step to follow: `lower_window_func_kind` already maps each
+        // name directly to its own `WindowFuncKind` variant (issue #267).
+        for builtin in asap_sql_function_catalog::CLICKHOUSE_WINDOW_BUILTINS {
+            ctx.register_udwf(clickhouse_window_builtin_stub_udwf(
                 builtin.name,
                 builtin.arity,
             ));
@@ -1036,6 +1048,68 @@ impl ScalarUDFImpl for ClickHouseScalarBuiltinStub {
     }
 }
 
+// ── ClickHouse window-builtin compatibility ─────────────────────────────────
+//
+// The window counterpart of the scalar mechanism above: a stub `WindowUDF`
+// registered purely so DataFusion's planner accepts the call name during
+// `SqlToRel` conversion. No rewrite step follows — `lower_window_func_kind`
+// already maps each `asap_sql_function_catalog::CLICKHOUSE_WINDOW_BUILTINS`
+// name directly to its own `WindowFuncKind` variant (issue #267).
+
+/// A stub `WindowUDF` for one `CLICKHOUSE_WINDOW_BUILTINS` entry, registered
+/// purely so DataFusion's planner can resolve the function name inside an
+/// `OVER (...)` clause. This front end only ever uses DataFusion for
+/// planning/type-checking, never physical execution, so
+/// `partition_evaluator` (which physical execution alone would call) is
+/// unreachable in practice.
+fn clickhouse_window_builtin_stub_udwf(name: &'static str, arity: Arity) -> WindowUDF {
+    WindowUDF::from(ClickHouseWindowBuiltinStub {
+        name,
+        signature: arity_to_signature(arity),
+    })
+}
+
+/// A stub `WindowUDFImpl` carrying only what DataFusion's planner needs:
+/// name, arity-only [`Signature`], and a field type derived from the first
+/// argument (matching `lag`/`lead`'s own "output type = input type"
+/// behavior). `partition_evaluator` is left `unimplemented!()` — see
+/// [`clickhouse_window_builtin_stub_udwf`]'s doc for why that is unreachable.
+#[derive(Debug)]
+struct ClickHouseWindowBuiltinStub {
+    name: &'static str,
+    signature: Signature,
+}
+
+impl WindowUDFImpl for ClickHouseWindowBuiltinStub {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn field(&self, field_args: WindowUDFFieldArgs) -> datafusion::common::Result<Field> {
+        let dtype = field_args.get_input_type(0).unwrap_or(ArrowDataType::Null);
+        Ok(Field::new(field_args.name(), dtype, true))
+    }
+
+    fn partition_evaluator(
+        &self,
+        _partition_evaluator_args: PartitionEvaluatorArgs,
+    ) -> datafusion::common::Result<Box<dyn PartitionEvaluator>> {
+        let name = self.name;
+        unimplemented!(
+            "{name} has no partition evaluator: this front end never runs DataFusion's \
+             physical planner, only SqlToRel + the unoptimized LogicalPlan"
+        )
+    }
+}
+
 /// Rewrites every `asap_sql_function_catalog::CLICKHOUSE_BUILTINS` call to
 /// the native DataFusion aggregate shape its entry's `RewriteKind` names —
 /// so a ClickHouse-only builtin DataFusion doesn't know at all becomes an
@@ -1641,6 +1715,9 @@ fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKi
             "dense_rank" => Ok(WindowFuncKind::DenseRank),
             "lag" => Ok(WindowFuncKind::Lag),
             "lead" => Ok(WindowFuncKind::Lead),
+            // ClickHouse: frame-respecting variants, not plain Lag/Lead (#267).
+            "laginframe" => Ok(WindowFuncKind::LagInFrame),
+            "leadinframe" => Ok(WindowFuncKind::LeadInFrame),
             "first_value" => Ok(WindowFuncKind::FirstValue),
             "last_value" => Ok(WindowFuncKind::LastValue),
             "nth_value" => Ok(WindowFuncKind::NthValue(None)),

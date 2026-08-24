@@ -321,6 +321,16 @@ pub enum WindowFuncKind {
     DenseRank,
     Lag,
     Lead,
+    /// ClickHouse `lagInFrame`/`leadInFrame`: unlike [`Lag`](Self::Lag)/[`Lead`](Self::Lead),
+    /// these respect the window frame bounds (NULL/default past the frame edge)
+    /// rather than reaching arbitrarily far back/forward. Kept as distinct
+    /// variants so the frame clause is never silently discarded by conflating
+    /// them with `Lag`/`Lead` (#267). `WindowFuncKind` still has no frame
+    /// representation, so today these lower and behave exactly like
+    /// `Lag`/`Lead` — the tag is correct, the frame-respecting behavior isn't
+    /// implemented yet. See #231 for modeling window frames properly.
+    LagInFrame,
+    LeadInFrame,
     FirstValue,
     LastValue,
     /// `NTH_VALUE(expr, n)` — `n` is resolved from the (literal) 2nd argument.
@@ -1129,6 +1139,8 @@ impl QueryExpr<ColumnId> {
                     // Navigation funcs: arg type, nullable (boundary rows are NULL).
                     WindowFuncKind::Lag
                     | WindowFuncKind::Lead
+                    | WindowFuncKind::LagInFrame
+                    | WindowFuncKind::LeadInFrame
                     | WindowFuncKind::FirstValue
                     | WindowFuncKind::LastValue
                     | WindowFuncKind::NthValue(_) => (arg_dtype(), true),
