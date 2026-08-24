@@ -435,9 +435,11 @@ function renderGraph(query) {
     for (const childId of node.children) {
       elements.push({
         data: {
+          // Arrow points from input to consumer (data-flow direction), the
+          // reverse of the tree's parent->child structure.
           id: `e-${node.id}-${childId}`,
-          source: String(node.id),
-          target: String(childId),
+          source: String(childId),
+          target: String(node.id),
         },
       });
     }
@@ -496,9 +498,11 @@ function renderCompare(chosen) {
       for (const childId of node.children) {
         elements.push({
           data: {
+            // Arrow points from input to consumer (data-flow direction), the
+            // reverse of the tree's parent->child structure.
             id: `e-q${qIdx}-${node.id}-${childId}`,
-            source: `q${qIdx}-${node.id}`,
-            target: `q${qIdx}-${childId}`,
+            source: `q${qIdx}-${childId}`,
+            target: `q${qIdx}-${node.id}`,
           },
         });
       }
@@ -598,14 +602,16 @@ function renderUnion(chosen) {
     const q = queries[qIdx];
     const byId = new Map(q.graph.nodes.map((n) => [n.id, n]));
     for (const node of q.graph.nodes) {
-      const srcKey = keyFor(qIdx, node);
+      const parentKey = keyFor(qIdx, node);
       for (const childId of node.children) {
         const childNode = byId.get(childId);
-        const dstKey = keyFor(qIdx, childNode);
-        const edgeKey = `${srcKey}__${dstKey}`;
+        const childKey = keyFor(qIdx, childNode);
+        const edgeKey = `${parentKey}__${childKey}`;
         if (edgeKeys.has(edgeKey)) continue;
         edgeKeys.add(edgeKey);
-        elements.push({ data: { id: `e-${edgeKey}`, source: srcKey, target: dstKey } });
+        // Arrow points from input to consumer (data-flow direction), the
+        // reverse of the tree's parent->child structure.
+        elements.push({ data: { id: `e-${edgeKey}`, source: childKey, target: parentKey } });
       }
     }
   });
