@@ -49,7 +49,8 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    SketchAlgorithm, SketchParams, SketchQuery, SummaryFamilyType, SummaryNode,
+    GroupingStrategy, HydraParams, SketchAlgorithm, SketchParams, SketchQuery, SummaryExpr,
+    SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -222,6 +223,37 @@ pub trait CostModel {
         crate::replacement::default_size_params(kind, intent, eps, delta)
     }
 
+    /// Estimated number of distinct subpopulations produced by `target`'s
+    /// grouping keys. `None` means the deployment has no cardinality estimate;
+    /// grouping alternatives remain legal but keep their discovery order.
+    fn estimated_subpopulation_count(&self, _target: &QueryExpr) -> Option<usize> {
+        None
+    }
+
+    /// Comparable memory-state cost for a sketch grouping candidate. The
+    /// default compares `N` independent inner sketches against the complete
+    /// shared Hydra grid, using [`Self::estimated_subpopulation_count`].
+    fn grouping_state_cost(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &TargetSubDAG<'_>,
+    ) -> Option<Cost> {
+        let Replacement::Summary(node) = &candidate.replacement else {
+            return None;
+        };
+        let (kind, grouping) = sketch_state(node)?;
+        let inner = sketch_state_units(kind.params());
+        let units = match grouping {
+            GroupingStrategy::PerSubpopulationInstance => {
+                inner * self.estimated_subpopulation_count(target.root)? as f64
+            }
+            GroupingStrategy::SharedMultiSubpopulation { params, .. } => {
+                inner * hydra_grid_cells(params)
+            }
+        };
+        Some(Cost(units))
+    }
+
     /// Realize an `AggIntent::Extension { ext_kind, payload }` — a
     /// deployment-specific intent shape core has no realization opinion
     /// for (issue #131). `replacement::implementations_for_with` consults this
@@ -345,6 +377,47 @@ pub trait CostModel {
     fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
         let _ = (candidate, target);
         f64::NAN
+    }
+}
+
+fn sketch_state(
+    node: &SummaryNode,
+) -> Option<(&asap_types::post_asap::SketchKind, &GroupingStrategy)> {
+    match &node.expr {
+        SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_state(summary_input),
+        SummaryExpr::SummaryAgg {
+            family: SummaryFamilyType::Sketch(kind, grouping),
+            ..
+        } => Some((kind, grouping)),
+        _ => None,
+    }
+}
+
+fn sketch_state_units(params: &SketchParams) -> f64 {
+    match params {
+        SketchParams::Cms { width, depth }
+        | SketchParams::CountSketch { width, depth }
+        | SketchParams::CmsWithHeap { width, depth, .. }
+        | SketchParams::CountSketchWithHeap { width, depth, .. } => {
+            f64::from(*width) * f64::from(*depth)
+        }
+        _ => 1.0,
+    }
+}
+
+fn hydra_grid_cells(params: &HydraParams) -> f64 {
+    match params {
+        HydraParams::HydraKll { shared_buckets, .. } => f64::from(*shared_buckets),
+        HydraParams::HydraCms {
+            shared_rows,
+            shared_columns,
+            ..
+        }
+        | HydraParams::HydraCountSketch {
+            shared_rows,
+            shared_columns,
+            ..
+        } => f64::from(*shared_rows) * f64::from(*shared_columns),
     }
 }
 
@@ -578,7 +651,8 @@ mod tests {
     // ── CSE sharing (issue #237, #223 stage 4) ──────────────────────────
 
     use asap_types::post_asap::{
-        ExactKind, ExactParams, SketchKind, SummaryExpr, SummaryField, SummarySchema,
+        ExactKind, ExactParams, GroupingStrategy, SketchKind, SummaryExpr, SummaryField,
+        SummarySchema,
     };
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -611,6 +685,7 @@ mod tests {
                 family: family.clone(),
                 col: asap_types::pre_asap::expr_ir::ColumnRef::Named("value".into()),
                 reduction: asap_types::pre_asap::query_expr::Reduction::by(vec![]),
+                grouping: GroupingStrategy::default(),
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {
@@ -685,6 +760,7 @@ mod tests {
         ));
         let sketch = default_cse_shared_maintenance_cost(&SummaryFamilyType::Sketch(
             SketchKind::new(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 }),
+            GroupingStrategy::default(),
         ));
         assert!(
             exact < sketch,

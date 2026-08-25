@@ -14,8 +14,8 @@ use asap_aware_mapping::{
 };
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
-    ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryNode, SummarySchema,
+    ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
+    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryNode, SummarySchema,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -98,16 +98,17 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         family,
         col,
         reduction,
+        ..
     } = &summary_input.expr
     else {
         panic!("expected SummaryAgg, got {:?}", summary_input.expr);
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::Sketch(SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll { k: 200 }
-        ))
+        &SummaryFamilyType::Sketch(
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            GroupingStrategy::default()
+        )
     );
     assert_eq!(col, &ColumnRef::SampleValue);
     assert_eq!(
@@ -117,10 +118,10 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
     assert_eq!(
         dtype(&summary_input.schema, "quantile_0_99"),
-        &SummaryFamilyType::Sketch(SketchKind::new(
-            SketchAlgorithm::Kll,
-            SketchParams::Kll { k: 200 }
-        ))
+        &SummaryFamilyType::Sketch(
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            GroupingStrategy::default()
+        )
     );
 
     // The rate: exact counter-reset-aware accumulator, per-series (labels

@@ -264,9 +264,10 @@
 use std::collections::HashMap;
 
 use asap_types::post_asap::{
-    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchKind,
-    SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
-    SummaryFamilyType, SummaryField, SummaryNode, SummarySchema, WaveletKind, WaveletParams,
+    ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm,
+    SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams,
+    SummaryExpr, SummaryFamilyType, SummaryField, SummaryNode, SummarySchema, WaveletKind,
+    WaveletParams,
 };
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
@@ -278,6 +279,7 @@ use std::rc::Rc;
 use thiserror::Error;
 
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
+use crate::grouping::HydraGroupingStrategy;
 use crate::rollup::RollupStrategy;
 
 /// Errors from the pre-ASAP → post-ASAP replacement/construction path
@@ -540,11 +542,15 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
 /// explicit realization is a compile error, and the coverage-matrix test pins
 /// each variant's category.
 ///
-/// Module-private: [`SketchAlgorithmStrategy::replacements`] is the only
-/// caller — a caller outside this module has no use for the bare
-/// `Implementation` list on its own, only for the bound
-/// [`ReplacementSubDAG`]s that strategy produces from it.
-fn implementations_for_with(intent: &AggIntent, cost_model: &dyn CostModel) -> Vec<Implementation> {
+/// `pub(crate)`: [`SketchAlgorithmStrategy::replacements`] is this module's
+/// own caller; `grouping::HydraGroupingStrategy` (issue #256) is the one
+/// caller outside it, needing the exact same already-ranked candidate list
+/// to find the `Implementation::Sketch` matching the Hydra-eligible kind it
+/// is building a candidate for.
+pub(crate) fn implementations_for_with(
+    intent: &AggIntent,
+    cost_model: &dyn CostModel,
+) -> Vec<Implementation> {
     match intent {
         // ── Approximate-capable intents — the AccuracyTarget decides ────────
         AggIntent::Quantile { accuracy, .. }
@@ -1047,7 +1053,10 @@ fn describe_implementation(intent: &AggIntent, implementation: &Implementation) 
 /// counterpart of its own: it reads a candidate's `rationale` — built from
 /// this text — straight off [`ReplacementSubDAG`], rather than re-describing
 /// the same intent a second time.
-fn describe_intent(intent: &AggIntent) -> String {
+///
+/// `pub(crate)`: `grouping::HydraGroupingStrategy` (issue #256) reuses this
+/// for its own rationale strings, for the same reason.
+pub(crate) fn describe_intent(intent: &AggIntent) -> String {
     match intent {
         AggIntent::Quantile { q, .. } => format!("quantile(q={q})"),
         AggIntent::Cardinality { .. } => "cardinality (distinct count)".to_string(),
@@ -1155,7 +1164,15 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
 /// child goes back through [`realize_child`] (fresh candidate
 /// enumeration, not a forced pick), so choosing one candidate for a target
 /// never leaks into that target's own nested aggregates.
-fn construct_summary(
+///
+/// `pub(crate)`: `grouping::HydraGroupingStrategy` (issue #256) is the one
+/// caller outside this module — the same first-class,
+/// one-candidate-at-a-time primitive [`SketchAlgorithmStrategy`] itself
+/// calls once per candidate, reused rather than duplicated so a Hydra
+/// candidate gets exactly the same schema derivation/column
+/// resolution/readout construction as every other candidate, patching only
+/// the `grouping` field this axis owns.
+pub(crate) fn construct_summary(
     expr: &QueryExpr,
     implementation: Implementation,
     cost_model: &dyn CostModel,
@@ -1193,7 +1210,10 @@ fn summary_family(implementation: Implementation) -> Option<(SummaryFamilyType, 
         Implementation::ExactAggregate { kind, params } => {
             (SummaryFamilyType::ExactAggregate(kind, params), false)
         }
-        Implementation::Sketch(kind) => (SummaryFamilyType::Sketch(kind), true),
+        Implementation::Sketch(kind) => (
+            SummaryFamilyType::Sketch(kind, GroupingStrategy::default()),
+            true,
+        ),
         Implementation::Sample { kind, params } => (SummaryFamilyType::Sample(kind, params), true),
         Implementation::Wavelet { kind, params } => {
             (SummaryFamilyType::Wavelet(kind, params), true)
@@ -1248,6 +1268,7 @@ fn construct_summary_agg(
             family,
             col,
             reduction: reduction.clone(),
+            grouping: GroupingStrategy::default(),
         },
         schema: state_schema,
     });
@@ -1597,7 +1618,8 @@ impl<Id> PlanSpace<Id> {
     ///
     /// Ranking itself is decided entirely by [`rank_group`] before
     /// [`RankedGroup::costs`] is ever computed — pairing each candidate with
-    /// [`CostModel::estimate_cost`]'s own number is an additive annotation
+    /// [`CostModel::grouping_state_cost`] for grouping alternatives, or
+    /// [`CostModel::estimate_cost`] otherwise, is an additive annotation
     /// for a caller that wants to *display* a cost (e.g. a
     /// DAG-visualization view), not a second ranking signal, so plugging in
     /// a `CostModel` whose `estimate_cost` disagrees with its own
@@ -1614,7 +1636,11 @@ impl<Id> PlanSpace<Id> {
                 let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
                 let costs = candidates
                     .iter()
-                    .map(|c| cost_model.estimate_cost(c, &target))
+                    .map(|c| {
+                        cost_model
+                            .grouping_state_cost(c, &target)
+                            .map_or_else(|| cost_model.estimate_cost(c, &target), |cost| cost.0)
+                    })
                     .collect();
                 RankedGroup {
                     target: &group.target,
@@ -1634,7 +1660,8 @@ pub struct RankedGroup<'a> {
     pub target: &'a Rc<QueryExpr>,
     pub consumer_count: usize,
     pub candidates: Vec<&'a ReplacementSubDAG>,
-    /// `costs[i]` is `candidates[i]`'s own [`CostModel::estimate_cost`]
+    /// `costs[i]` is `candidates[i]`'s own grouping-state cost when available,
+    /// and its [`CostModel::estimate_cost`] otherwise
     /// estimate — aligned index-for-index with `candidates`, one number per
     /// candidate, for a caller that wants an actual `f64` next to each
     /// candidate (e.g. "candidate A costs ≈ X, candidate B costs ≈ Y") and
@@ -1674,7 +1701,44 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
         return ranked;
     }
 
-    // Shape 2: `SketchAlgorithmStrategy`'s sketch-family candidates (every
+    // Shape 2: independent and Hydra grouping alternatives for the same
+    // sketch algorithms. When deployment statistics provide a subpopulation
+    // estimate, compare N independent states with the shared grid directly.
+    let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
+    let has_hydra = ranked.iter().any(|candidate| {
+        let Replacement::Summary(node) = &candidate.replacement else {
+            return false;
+        };
+        summary_grouping(node).is_some_and(|grouping| {
+            matches!(grouping, GroupingStrategy::SharedMultiSubpopulation { .. })
+        })
+    });
+    let grouping_costs: Option<Vec<f64>> = if has_hydra {
+        ranked
+            .iter()
+            .map(|candidate| {
+                cost_model
+                    .grouping_state_cost(candidate, &target)
+                    .map(|cost| cost.0)
+            })
+            .collect()
+    } else {
+        None
+    };
+    if let Some(costs) = grouping_costs {
+        let by_ptr: HashMap<*const ReplacementSubDAG, f64> = ranked
+            .iter()
+            .zip(costs)
+            .map(|(candidate, cost)| (*candidate as *const ReplacementSubDAG, cost))
+            .collect();
+        ranked.sort_by(|a, b| {
+            by_ptr[&(*a as *const ReplacementSubDAG)]
+                .total_cmp(&by_ptr[&(*b as *const ReplacementSubDAG)])
+        });
+        return ranked;
+    }
+
+    // Shape 3: `SketchAlgorithmStrategy`'s sketch-family candidates (every
     // candidate is a `Summary` that realizes a `SketchAlgorithm`) — rank via
     // `CostModel::rank_candidates`, the same hook `implementations_for_with`
     // itself consults.
@@ -1706,7 +1770,6 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
     // types, so compare the numeric estimates the CostModel exposes for that
     // purpose. `total_cmp` gives deterministic placement to a model's NaN
     // placeholders without dropping any candidate.
-    let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
     ranked.sort_by(|a, b| {
         cost_model
             .estimate_cost(a, &target)
@@ -1768,9 +1831,19 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_kind_of(summary_input),
         SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind),
+            family: SummaryFamilyType::Sketch(kind, _),
             ..
         } => Some(kind.algorithm().clone()),
+        _ => None,
+    }
+}
+
+/// The grouping strategy used by a bound summary candidate, unwrapping its
+/// readout node when necessary.
+fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
+    match &node.expr {
+        SummaryExpr::SummaryEstimate { summary_input, .. } => summary_grouping(summary_input),
+        SummaryExpr::SummaryAgg { grouping, .. } => Some(grouping),
         _ => None,
     }
 }
@@ -1789,6 +1862,7 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
 pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
         Box::new(SketchAlgorithmStrategy::default_cost_model()),
+        Box::new(HydraGroupingStrategy::default_cost_model()),
         Box::new(SharedSubtreeStrategy),
     ]
 }
@@ -1801,6 +1875,7 @@ pub fn default_strategies_with<'a>(
 ) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
     vec![
         Box::new(SketchAlgorithmStrategy::new(cost_model)),
+        Box::new(HydraGroupingStrategy::new(cost_model)),
         Box::new(SharedSubtreeStrategy),
     ]
 }
@@ -2831,7 +2906,9 @@ mod tests {
                 summary_family_algorithm(summary_input)
             }
             asap_types::post_asap::SummaryExpr::SummaryAgg { family, .. } => match family {
-                asap_types::post_asap::SummaryFamilyType::Sketch(kind) => kind.algorithm().clone(),
+                asap_types::post_asap::SummaryFamilyType::Sketch(kind, _) => {
+                    kind.algorithm().clone()
+                }
                 other => panic!("expected a Sketch family, got {other:?}"),
             },
             other => panic!("expected SummaryAgg/SummaryEstimate, got {other:?}"),
@@ -3009,8 +3086,14 @@ mod tests {
     // ── discovery + MEMO shape ───────────────────────────────────────────
 
     #[test]
-    fn single_bindable_aggregate_gets_a_group_with_every_sketch_candidate() {
-        let root = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+    fn single_bindable_aggregate_gets_every_sketch_and_grouping_candidate() {
+        let intent = AggIntent::Count {
+            accuracy: AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        };
+        let root = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let space = search_workload(vec![("q", root)]);
 
         // One group for the Aggregate, one for its Scan child.
@@ -3023,14 +3106,37 @@ mod tests {
         assert_eq!(agg_group.consumer_count, 1);
         assert_eq!(
             agg_group.candidates.len(),
-            2,
-            "quantile has 2 summary_candidates entries: {:?}",
+            4,
+            "grouped approximate count has independent and Hydra CMS/CountSketch candidates: {:?}",
             agg_group.candidates
         );
         assert!(agg_group
             .candidates
             .iter()
             .all(|c| matches!(c.replacement, Replacement::Summary(_))));
+        assert_eq!(
+            agg_group
+                .candidates
+                .iter()
+                .filter(|candidate| {
+                    let Replacement::Summary(node) = &candidate.replacement else {
+                        return false;
+                    };
+                    let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
+                        return false;
+                    };
+                    matches!(
+                        &summary_input.expr,
+                        SummaryExpr::SummaryAgg {
+                            grouping: GroupingStrategy::SharedMultiSubpopulation { .. },
+                            ..
+                        }
+                    )
+                })
+                .count(),
+            2,
+            "the default workload search must register the Hydra grouping strategy"
+        );
 
         let scan_group = space
             .groups()
@@ -3355,6 +3461,62 @@ mod tests {
         assert_eq!(first_kind, Some(SketchAlgorithm::DDSketch));
     }
 
+    #[test]
+    fn grouping_cost_prefers_hydra_only_for_high_subpopulation_cardinality() {
+        struct EstimatedSubpopulations(usize);
+
+        impl CostModel for EstimatedSubpopulations {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+
+            fn estimated_subpopulation_count(&self, _target: &QueryExpr) -> Option<usize> {
+                Some(self.0)
+            }
+        }
+
+        fn first_grouping(estimated_count: usize) -> GroupingStrategy {
+            let model = EstimatedSubpopulations(estimated_count);
+            let intent = AggIntent::Count {
+                accuracy: AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                },
+            };
+            let root = Rc::new(agg(
+                vec![2, 3],
+                intent,
+                metric_scan(&["tenant_id", "endpoint"]),
+            ));
+            let strategies = default_strategies_with(&model);
+            let space = search_workload_with(vec![("tenant_endpoint_count", root)], &strategies);
+            let ranked = space.cost_sorted(&model);
+            let aggregate = ranked
+                .iter()
+                .find(|group| matches!(group.target.as_ref(), QueryExpr::Aggregate { .. }))
+                .expect("aggregate group");
+            let Replacement::Summary(node) = &aggregate.candidates[0].replacement else {
+                panic!("grouping candidate must be a summary")
+            };
+            summary_grouping(node)
+                .expect("bound summary grouping")
+                .clone()
+        }
+
+        assert!(matches!(
+            first_grouping(10_000),
+            GroupingStrategy::SharedMultiSubpopulation { .. }
+        ));
+        assert_eq!(
+            first_grouping(10),
+            GroupingStrategy::PerSubpopulationInstance
+        );
+    }
+
     /// [`RankedGroup::costs`] is a per-candidate annotation, aligned
     /// index-for-index with `candidates` — each entry must equal what
     /// calling [`CostModel::estimate_cost`] directly on that same candidate
@@ -3520,26 +3682,27 @@ mod tests {
             family,
             col,
             reduction,
+            ..
         } = &summary_input.expr
         else {
             panic!("expected SummaryAgg, got {:?}", summary_input.expr);
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 200 }
-            ))
+            &SummaryFamilyType::Sketch(
+                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+                GroupingStrategy::default()
+            )
         );
         assert_eq!(col, &ColumnRef::SampleValue);
         assert_eq!(reduction, &ReductionTy::by(vec![2]));
         // SummaryAgg edge: the state column carries the committed family.
         assert_eq!(
             field(&summary_input.schema, "quantile_0_99").dtype,
-            SummaryFamilyType::Sketch(SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 200 }
-            ))
+            SummaryFamilyType::Sketch(
+                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+                GroupingStrategy::default()
+            )
         );
         assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(ref e)
             if matches!(**e, QueryExpr::Scan { .. })));
@@ -3580,7 +3743,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::Kll
+            SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
         ));
 
         // With `PreferDDSketchViaCostModel`: DDSketch instead, same query.
@@ -3593,10 +3756,13 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::new(
-                SketchAlgorithm::DDSketch,
-                SketchParams::DDSketch { alpha: 0.01 }
-            ))
+            &SummaryFamilyType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::DDSketch,
+                    SketchParams::DDSketch { alpha: 0.01 }
+                ),
+                GroupingStrategy::default()
+            )
         );
     }
 
@@ -3690,13 +3856,16 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::new(
-                SketchAlgorithm::CountSketch,
-                SketchParams::CountSketch {
-                    width: 256,
-                    depth: 4
-                }
-            ))
+            &SummaryFamilyType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::CountSketch,
+                    SketchParams::CountSketch {
+                        width: 256,
+                        depth: 4
+                    }
+                ),
+                GroupingStrategy::default()
+            )
         );
     }
 
@@ -3819,7 +3988,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::Kll
+            SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
         ));
         let SummaryExpr::SummaryAgg {
             family: inner_family,
@@ -3962,7 +4131,7 @@ mod tests {
         assert!(matches!(
             &summary_input.expr,
             SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(kind),
+                family: SummaryFamilyType::Sketch(kind, _),
                 ..
             } if kind.algorithm() == &SketchAlgorithm::CmsWithHeap
         ));

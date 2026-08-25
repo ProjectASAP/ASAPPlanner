@@ -108,6 +108,12 @@
 //!   other axes (e.g. issue #256's `GroupingStrategy`) are expected to
 //!   consult directly, so it and this module's `RollupStrategy` can never
 //!   disagree about which siblings qualify.
+//! - [`grouping`] — [`grouping::HydraGroupingStrategy`] (issue #256, part of
+//!   #33) is an additional `ReplacementStrategy`: the orthogonal
+//!   `GroupingStrategy` axis (one summary instance per `by` subpopulation
+//!   versus one shared Hydra-family structure serving all of them), offered
+//!   alongside the candidates [`replacement::SketchAlgorithmStrategy`]
+//!   enumerates for the same target.
 //! - [`rewrite`] — the "semantic-equivalent rewriting (e.g. `avg` →
 //!   `sum`/`count`) to increase how often the [sharing/sketch] optimizations
 //!   above apply" degree of freedom `docs/design_docs/asap_aware_mapping.md`
@@ -165,6 +171,7 @@
 
 pub mod cost_model;
 pub mod explanation;
+pub mod grouping;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
@@ -173,6 +180,7 @@ pub use cost_model::{CostModel, DefaultCostModel};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
+pub use grouping::{has_subpopulations, HydraGroupingStrategy};
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
     summary_candidates, ImplementError, Implementation, Matcher, MemoGroup, PlanSpace, RankedGroup,

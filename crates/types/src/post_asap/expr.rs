@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use super::schema::{SummaryFamilyType, SummarySchema};
-use super::sketch::SketchQuery;
+use super::sketch::{GroupingStrategy, SketchQuery};
 use crate::pre_asap::{ColumnRef, QueryExpr, Reduction};
 
 // ── Post-ASAP DAG node ───────────────────────────────────────────────────────
@@ -59,6 +59,21 @@ pub enum SummaryExpr {
         /// two collapsed to the same ambiguous `by: []` before this field
         /// existed (issue #163).
         reduction: Reduction,
+        /// How this aggregation's summary state is physically instantiated
+        /// across `reduction`'s subpopulations — one independent instance
+        /// per `by` key (today's only behavior, and this field's default),
+        /// or one shared Hydra-family structure serving all of them (issue
+        /// #256). Lives here, next to `reduction`, for planning, and is also
+        /// encoded in sketch-valued `family`/output-schema state so merges
+        /// can reject incompatible layouts. `reduction` is the field that
+        /// carries the `by` keys this axis's legality depends on (a
+        /// `SharedMultiSubpopulation` choice only makes sense when
+        /// `reduction` actually has a subpopulation concept — see
+        /// `asap_aware_mapping::grouping`'s module docs for the legality
+        /// rules). Every existing producer of a `SummaryAgg` sets this to
+        /// `GroupingStrategy::PerSubpopulationInstance` (its `Default`),
+        /// so no existing behavior changes.
+        grouping: GroupingStrategy,
     },
 
     /// Summary-aware join (KMV / theta for join-cardinality; join-sample for
