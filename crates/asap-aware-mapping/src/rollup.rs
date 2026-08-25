@@ -321,9 +321,12 @@ impl ReplacementStrategy for RollupStrategy<'_> {
         let Some((coarser_by, coarser_intent, _)) = bindable_grouped_aggregate(target.root) else {
             return Vec::new();
         };
+        let QueryExpr::Aggregate { output_names, .. } = target.root.as_ref() else {
+            unreachable!("bindable_grouped_aggregate already confirmed Aggregate");
+        };
         self.finer_sources(target)
             .into_iter()
-            .filter_map(|finer| build_rollup(finer, coarser_by, coarser_intent))
+            .filter_map(|finer| build_rollup(finer, coarser_by, coarser_intent, output_names))
             .collect()
     }
 }
@@ -346,6 +349,7 @@ fn build_rollup(
     finer: &Rc<QueryExpr>,
     coarser_by: &GroupKeys,
     intent: &AggIntent,
+    output_names: &[String],
 ) -> Option<ReplacementSubDAG> {
     let (finer_by, _, _) = bindable_grouped_aggregate(finer)?;
     // `finer`'s own single measure sits right after its `by` columns in its
@@ -362,7 +366,7 @@ fn build_rollup(
     let rewritten = QueryExpr::Aggregate {
         reduction: Reduction::by(remapped_by),
         measures: vec![combinator],
-        output_names: vec![],
+        output_names: output_names.to_vec(),
         having: None,
         child: Rc::clone(finer),
     };
@@ -628,6 +632,33 @@ mod tests {
             &vec![AggIntent::Sum { col: Some(2) }],
             "Count's own output column sits at position 2, right after its two `by` keys"
         );
+    }
+
+    #[test]
+    fn rollup_preserves_the_coarser_output_name() {
+        let scan = Rc::new(metric_scan());
+        let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &scan);
+        let coarse = Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::by(vec![2]),
+            measures: vec![AggIntent::Sum { col: Some(1) }],
+            output_names: vec!["total_requests".into()],
+            having: None,
+            child: Rc::clone(&scan),
+        });
+        let original_schema = coarse.output_schema().unwrap();
+
+        let siblings = vec![Rc::clone(&fine), Rc::clone(&coarse)];
+        let strategy = RollupStrategy::new(&siblings);
+        let replacements = strategy.replacements(&TargetSubDAG::new(&coarse));
+        let Replacement::Rewrite(rewritten) = &replacements[0].replacement else {
+            panic!("expected a Rewrite replacement");
+        };
+
+        assert_eq!(rewritten.output_schema().unwrap(), original_schema);
+        let QueryExpr::Aggregate { output_names, .. } = rewritten.as_ref() else {
+            unreachable!();
+        };
+        assert_eq!(output_names, &vec!["total_requests".to_string()]);
     }
 
     #[test]
