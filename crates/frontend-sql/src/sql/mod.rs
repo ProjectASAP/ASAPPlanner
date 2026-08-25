@@ -1783,18 +1783,24 @@ fn lower_window_frame(
                 days: value.days,
                 nanoseconds: value.nanoseconds,
             },
-            // DataFusion 43 keeps SQL frame interval literals as their
-            // normalized text (for example `"1 HOUR"`) rather than an
-            // interval ScalarValue. Parse that representation before the
-            // ordinary scalar fallback so the canonical IR remains typed.
+            // DataFusion 43 keeps every RANGE offset as text: both numeric
+            // bounds such as `1.5` and normalized interval literals such as
+            // `"1 HOUR"`. Arrow's interval parser accepts bare numbers and
+            // interprets them as months, so classify numeric text first.
             DfScalarValue::Utf8(Some(value)) | DfScalarValue::LargeUtf8(Some(value)) => {
-                match parse_interval_month_day_nano(value) {
-                    Ok(interval) => WindowFrameOffset::Interval {
-                        months: interval.months,
-                        days: interval.days,
-                        nanoseconds: interval.nanoseconds,
-                    },
-                    Err(_) => WindowFrameOffset::Scalar(scalar_value_to_asap(v)?),
+                if let Ok(value) = value.parse::<i64>() {
+                    WindowFrameOffset::Scalar(ScalarValue::Int64(value))
+                } else if let Ok(value) = value.parse::<f64>() {
+                    WindowFrameOffset::Scalar(ScalarValue::Float64(value))
+                } else {
+                    match parse_interval_month_day_nano(value) {
+                        Ok(interval) => WindowFrameOffset::Interval {
+                            months: interval.months,
+                            days: interval.days,
+                            nanoseconds: interval.nanoseconds,
+                        },
+                        Err(_) => WindowFrameOffset::Scalar(scalar_value_to_asap(v)?),
+                    }
                 }
             }
             _ => WindowFrameOffset::Scalar(scalar_value_to_asap(v)?),

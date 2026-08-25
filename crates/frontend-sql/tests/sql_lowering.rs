@@ -803,6 +803,39 @@ async fn range_interval_frame_is_preserved() {
     assert_eq!(frame.end_bound, WindowFrameBound::CurrentRow);
 }
 
+#[tokio::test]
+async fn range_numeric_frames_remain_scalar_offsets() {
+    let integer = lower(
+        "SELECT SUM(bytes) OVER (ORDER BY bytes \
+         RANGE BETWEEN 2 PRECEDING AND CURRENT ROW) FROM metrics",
+    )
+    .await;
+    let fractional = lower(
+        "SELECT SUM(latency) OVER (ORDER BY latency \
+         RANGE BETWEEN 1.5 PRECEDING AND CURRENT ROW) FROM metrics",
+    )
+    .await;
+
+    let start_bound = |qe: &QueryExpr| {
+        let QueryExpr::SQLWindowFunc {
+            frame: Some(frame), ..
+        } = find_windowfunc(qe).unwrap()
+        else {
+            panic!("expected a window function with a concrete frame");
+        };
+        frame.start_bound.clone()
+    };
+
+    assert_eq!(
+        start_bound(&integer),
+        WindowFrameBound::Preceding(WindowFrameOffset::Scalar(ScalarValue::Int64(2)))
+    );
+    assert_eq!(
+        start_bound(&fractional),
+        WindowFrameBound::Preceding(WindowFrameOffset::Scalar(ScalarValue::Float64(1.5)))
+    );
+}
+
 /// `GROUPS` frames aren't in this repo's SQL corpora and nothing downstream
 /// interprets frame semantics yet — rejected explicitly rather than silently
 /// mis-lowered.
