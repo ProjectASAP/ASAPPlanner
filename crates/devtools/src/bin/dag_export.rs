@@ -17,6 +17,14 @@
 // note. Pass it to actually exercise that path, e.g.:
 //   cargo run -p asap-lower --bin dag_export -- \
 //       --epsilon 0.01 --sql "SELECT quantile(0.99, latency) FROM metrics" --name p99
+//
+// `--catalog <name>` is optional (default `metrics`) and applies to every
+// `--sql` query in the run — pick the schema matching whatever domain corpus
+// you're feeding in. One of `metrics` (the built-in `metrics`/`hosts` demo
+// schema this binary has always used), `packets` (matches
+// `frontend-sql/tests/data_quality_check/data/synthetic_packet_trace_queries.sql`),
+// or `netflow` (matches `frontend-sql/tests/netflow/data/netflow.sql`).
+// `--promql` queries ignore `--catalog` entirely (PromQL has no table schema).
 
 use asap_types::dag_export::{self, DagGraph, DagNote, NamedGraph, WorkloadGraph};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -29,17 +37,21 @@ enum Lang {
     PromQl,
 }
 
-fn catalog() -> SqlCatalog {
+fn col(name: &str, dtype: DataType) -> Column {
+    Column::new(name, dtype, false)
+}
+
+fn metrics_catalog() -> SqlCatalog {
     SqlCatalog::new()
         .with_table(
             "metrics",
             Schema::with_time_index(
                 vec![
-                    Column::new("ts", DataType::Timestamp, false),
-                    Column::new("service", DataType::Utf8, false),
-                    Column::new("region", DataType::Utf8, false),
-                    Column::new("latency", DataType::Float64, false),
-                    Column::new("bytes", DataType::Int64, false),
+                    col("ts", DataType::Timestamp),
+                    col("service", DataType::Utf8),
+                    col("region", DataType::Utf8),
+                    col("latency", DataType::Float64),
+                    col("bytes", DataType::Int64),
                 ],
                 0,
                 vec![],
@@ -48,20 +60,66 @@ fn catalog() -> SqlCatalog {
         .with_table(
             "hosts",
             Schema::new(vec![
-                Column::new("service", DataType::Utf8, false),
-                Column::new("region", DataType::Utf8, false),
+                col("service", DataType::Utf8),
+                col("region", DataType::Utf8),
             ]),
         )
+}
+
+/// Matches `synthetic_packet_trace_queries.sql`'s `packets` table.
+fn packets_catalog() -> SqlCatalog {
+    SqlCatalog::new().with_table(
+        "packets",
+        Schema::new(vec![
+            col("srcip", DataType::Utf8),
+            col("dstip", DataType::Utf8),
+            col("srcport", DataType::Int64),
+            col("dstport", DataType::Int64),
+            col("proto", DataType::Utf8),
+            col("time", DataType::Float64),
+            col("pkt_len", DataType::Int64),
+        ]),
+    )
+}
+
+/// Matches `netflow.sql`'s `netflow_table` table.
+fn netflow_catalog() -> SqlCatalog {
+    SqlCatalog::new().with_table(
+        "netflow_table",
+        Schema::with_time_index(
+            vec![
+                col("time", DataType::Timestamp),
+                col("srcip", DataType::Utf8),
+                col("dstip", DataType::Utf8),
+                col("srcport", DataType::Int64),
+                col("dstport", DataType::Int64),
+                col("proto", DataType::Utf8),
+                col("pkt_len", DataType::Int64),
+            ],
+            0,
+            vec![],
+        ),
+    )
+}
+
+fn catalog_by_name(name: &str) -> SqlCatalog {
+    match name {
+        "metrics" => metrics_catalog(),
+        "packets" => packets_catalog(),
+        "netflow" => netflow_catalog(),
+        other => panic!("unknown --catalog {other:?} — expected one of: metrics, packets, netflow"),
+    }
 }
 
 /// Parses `--sql "<query>" --name "<label>"` / `--promql "<query>" --name
 /// "<label>"` pairs off argv, in the order given, plus one optional global
 /// `--epsilon <f64>`. `--name` is optional and applies to the immediately
 /// preceding `--sql`/`--promql`.
-fn parse_args() -> (Vec<(String, Lang, String)>, AccuracyTarget) {
+fn parse_args() -> (Vec<(String, Lang, String)>, AccuracyTarget, SqlCatalog) {
     let mut entries: Vec<(String, Lang, String)> = Vec::new();
     let mut pending: Option<(Lang, String)> = None;
     let mut accuracy = AccuracyTarget::Exact;
+    let mut catalog_name = "metrics".to_string();
     let mut args = std::env::args().skip(1);
 
     fn flush(entries: &mut Vec<(String, Lang, String)>, pending: &mut Option<(Lang, String)>) {
@@ -96,11 +154,14 @@ fn parse_args() -> (Vec<(String, Lang, String)>, AccuracyTarget) {
                     .unwrap_or_else(|_| panic!("--epsilon must be a float, got {raw:?}"));
                 accuracy = AccuracyTarget::Epsilon(epsilon);
             }
+            "--catalog" => {
+                catalog_name = args.next().expect("--catalog requires a value");
+            }
             other => panic!("unrecognized argument: {other}"),
         }
     }
     flush(&mut entries, &mut pending);
-    (entries, accuracy)
+    (entries, accuracy, catalog_by_name(&catalog_name))
 }
 
 /// Attach workload-wide replacement explanations to their exact graph nodes.
@@ -126,16 +187,18 @@ fn annotate_with_explanations(
 
 #[tokio::main]
 async fn main() {
-    let (entries, accuracy) = parse_args();
+    let (entries, accuracy, catalog) = parse_args();
     if entries.is_empty() {
-        eprintln!("usage: dag_export --sql \"<query>\" [--name <label>] [--epsilon <f64>] ...");
+        eprintln!(
+            "usage: dag_export --sql \"<query>\" [--name <label>] [--epsilon <f64>] [--catalog <metrics|packets|netflow>] ..."
+        );
         std::process::exit(1);
     }
 
     let mut lowered_queries = Vec::new();
     for (name, lang, query) in entries {
         let lowered = match lang {
-            Lang::Sql => lower_sql(&query, &catalog(), accuracy.clone())
+            Lang::Sql => lower_sql(&query, &catalog, accuracy.clone())
                 .await
                 .map_err(|e| e.to_string()),
             Lang::PromQl => lower_promql(&query, accuracy.clone()).map_err(|e| e.to_string()),

@@ -20,6 +20,14 @@ multiple files, or run the exporter more than once); their queries are merged.
 Add `--epsilon <f64>` to also populate `notes` with sketch-approximation
 findings — see "Replacement explanations (`notes`)" below.
 
+`--sql` queries lower against a fixed demo schema, selected with `--catalog
+<name>` (default `metrics`, the built-in `metrics`/`hosts` schema this tool
+has always used). Pass `--catalog packets` or `--catalog netflow` to instead
+match the tables in `frontend-sql/tests/data_quality_check/data/synthetic_packet_trace_queries.sql`
+or `frontend-sql/tests/netflow/data/netflow.sql`, so those in-repo corpora can
+be exported query-for-query instead of only against the built-in schema.
+`--promql` queries ignore `--catalog` (PromQL has no table schema).
+
 ## Open the viewer
 
 This is a static page with no server or build step — open `index.html`
