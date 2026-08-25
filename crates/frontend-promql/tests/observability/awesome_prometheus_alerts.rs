@@ -91,7 +91,8 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             // scalar position (issue #205) — nothing to collect there.
             QueryExpr::Scan { .. }
             | QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::QueryTimestamp => {}
+            | QueryExpr::EvalTimestamp
+            | QueryExpr::CurrentTimestamp => {}
             QueryExpr::Column(_)
             | QueryExpr::Literal(_)
             | QueryExpr::Compare { .. }

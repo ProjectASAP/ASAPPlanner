@@ -40,7 +40,7 @@ to one source language.
 
 **[PromQL-specific nodes](#promql-specific-nodes)**
 - [`PromqlScalarBridge`](#promqlscalarbridge) — a scalar sub-expression at an operator-tree position.
-- [`QueryTimestamp`](#querytimestamp) — the query evaluation time as a scalar (PromQL `time()`).
+- [`EvalTimestamp`](#evaltimestamp) — the query evaluation time as a scalar (PromQL `time()`).
 - [`PromqlVectorFromScalar`](#promqlvectorfromscalar) — promotes a scalar to a label-less instant vector.
 - [`PromqlScalarFromVector`](#promqlscalarfromvector) — collapses a single-series vector to a scalar.
 - [`PromqlRelabel`](#promqlrelabel) — per-series label rewrite (PromQL `label_replace`/`label_join`).
@@ -420,10 +420,13 @@ up > 1
 
 **Fields:** a single unnamed child `QueryExpr` — the wrapped scalar sub-expression.
 
-### QueryTimestamp
+### EvalTimestamp
 
-The query **evaluation time** as a scalar — PromQL `time()` — and the implicit input of the
-no-argument calendar functions (`hour()`, `day_of_week()`, ...).
+The query **evaluation timestamp** as Unix seconds — PromQL `time()` — and the implicit
+input of the no-argument calendar functions (`hour()`, `day_of_week()`, ...). It is the
+instant or range-step at which the expression is evaluated, not inherently the current
+wall-clock time. The Prometheus instant-query HTTP API separately defaults an omitted
+`time` request parameter to the server's current time.
 
 ```promql
 time()

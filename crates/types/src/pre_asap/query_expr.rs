@@ -552,10 +552,16 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// in place of the old `PromqlScalar` vs. `Literal` variant tag.
     PromqlScalarBridge(Rc<QueryExpr<C>>),
 
-    /// The query **evaluation time** as a scalar (PromQL `time()`) — a runtime
-    /// value, not a constant. Also the implicit input of the no-argument
-    /// calendar functions (`hour()`, `day_of_week()`, …). Issue #46.
-    QueryTimestamp,
+    /// The query **evaluation timestamp** as Unix seconds, exposed by PromQL
+    /// `time()`. This is not inherently the current wall-clock time: its value
+    /// is the instant or range-step at which the expression is evaluated. It
+    /// is also the implicit input of no-argument calendar functions. Issue #46.
+    EvalTimestamp,
+
+    /// The SQL statement evaluation time (`NOW()` / `CURRENT_TIMESTAMP`) as
+    /// a SQL [`DataType::Timestamp`]. Kept distinct from [`EvalTimestamp`],
+    /// whose PromQL `time()` contract is Unix seconds as `Float64`.
+    CurrentTimestamp,
 
     /// PromQL `vector(s)` — the scalar→instant-vector bridge. Promotes a
     /// scalar-typed child to a single label-less series carrying the scalar's
@@ -892,6 +898,8 @@ impl<C: ColState> QueryExpr<C> {
         match self {
             QueryExpr::Column(c) => vec![c],
             QueryExpr::Literal(_) => vec![],
+            QueryExpr::EvalTimestamp => vec![],
+            QueryExpr::CurrentTimestamp => vec![],
             QueryExpr::Compare { left, right, .. } | QueryExpr::Arithmetic { left, right, .. } => {
                 let mut v = left.columns_referenced();
                 v.extend(right.columns_referenced());
@@ -1160,8 +1168,15 @@ impl QueryExpr<ColumnId> {
             // `PromqlScalarBridge` constructed today wraps a plain
             // `Literal(Float64)` (issue #220), so the schema doesn't need to
             // inspect the inner node.
-            QueryExpr::PromqlScalarBridge(_) | QueryExpr::QueryTimestamp => Ok(Schema {
+            QueryExpr::PromqlScalarBridge(_) | QueryExpr::EvalTimestamp => Ok(Schema {
                 columns: vec![Column::new("value", DataType::Float64, false)],
+                time_index: None,
+                unique_keys: Vec::new(),
+                closed: true,
+            }),
+
+            QueryExpr::CurrentTimestamp => Ok(Schema {
+                columns: vec![Column::new("value", DataType::Timestamp, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
                 closed: true,
@@ -1196,7 +1211,7 @@ impl QueryExpr<ColumnId> {
             QueryExpr::BinaryOp { lhs, rhs, .. } => match (lhs.as_ref(), rhs.as_ref()) {
                 (
                     QueryExpr::PromqlScalarBridge(_)
-                    | QueryExpr::QueryTimestamp
+                    | QueryExpr::EvalTimestamp
                     | QueryExpr::PromqlScalarFromVector(_),
                     r,
                 ) => r.output_schema(),

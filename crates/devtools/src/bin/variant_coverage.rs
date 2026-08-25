@@ -15,7 +15,8 @@ use std::collections::BTreeSet;
 const ALL_VARIANTS: &[&str] = &[
     "Scan",
     "PromqlScalarBridge",
-    "QueryTimestamp",
+    "EvalTimestamp",
+    "CurrentTimestamp",
     "PromqlVectorFromScalar",
     "PromqlScalarFromVector",
     "PromqlRelabel",
@@ -45,8 +46,11 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
         QueryExpr::PromqlScalarBridge(_) => {
             seen.insert("PromqlScalarBridge");
         }
-        QueryExpr::QueryTimestamp => {
-            seen.insert("QueryTimestamp");
+        QueryExpr::EvalTimestamp => {
+            seen.insert("EvalTimestamp");
+        }
+        QueryExpr::CurrentTimestamp => {
+            seen.insert("CurrentTimestamp");
         }
         QueryExpr::PromqlVectorFromScalar(inner) => {
             seen.insert("PromqlVectorFromScalar");

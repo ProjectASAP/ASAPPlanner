@@ -98,7 +98,10 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         }
         // `AggIntent` only ever lives in `Aggregate.measures`, never in a
         // scalar position (issue #205) — nothing to collect there.
-        QueryExpr::Scan { .. } | QueryExpr::PromqlScalarBridge(_) | QueryExpr::QueryTimestamp => {}
+        QueryExpr::Scan { .. }
+        | QueryExpr::PromqlScalarBridge(_)
+        | QueryExpr::EvalTimestamp
+        | QueryExpr::CurrentTimestamp => {}
         QueryExpr::Column(_)
         | QueryExpr::Literal(_)
         | QueryExpr::Compare { .. }
@@ -1743,7 +1746,7 @@ fn absent_keeps_matcher_labels_for_the_synthesized_output() {
 fn time_lowers_to_the_eval_time_scalar() {
     // SEMANTICS: `time()` is the query evaluation timestamp as a scalar — a leaf,
     // not an aggregate over any series.
-    assert!(matches!(ok("time()"), QueryExpr::QueryTimestamp));
+    assert!(matches!(ok("time()"), QueryExpr::EvalTimestamp));
     // …and it is scalar-shaped: a single float `value`, no time index.
     let sch = ok("time()").output_schema().unwrap();
     assert_eq!(sch.columns.len(), 1);
@@ -1760,7 +1763,7 @@ fn time_minus_vector_is_the_uptime_pattern() {
     let QueryExpr::BinaryOp { lhs, op, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
-    assert!(matches!(lhs.as_ref(), QueryExpr::QueryTimestamp));
+    assert!(matches!(lhs.as_ref(), QueryExpr::EvalTimestamp));
     assert!(matches!(
         op,
         BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub)
@@ -1795,7 +1798,7 @@ fn calendar_functions_lower_to_time_fn_intents() {
 #[test]
 fn no_arg_calendar_function_reads_the_eval_time() {
     // `day_of_week()` with no argument computes over the evaluation time itself,
-    // so it is a `TimeFn` aggregate whose child is the `QueryTimestamp` scalar.
+    // so it is a `TimeFn` aggregate whose child is the `EvalTimestamp` scalar.
     let qe = ok("day_of_week()");
     let QueryExpr::Aggregate {
         measures, child, ..
@@ -1807,7 +1810,7 @@ fn no_arg_calendar_function_reads_the_eval_time() {
         measures.as_slice(),
         [AggIntent::TimeFn(TimeFunc::DayOfWeek)]
     ));
-    assert!(matches!(child.as_ref(), QueryExpr::QueryTimestamp));
+    assert!(matches!(child.as_ref(), QueryExpr::EvalTimestamp));
 }
 
 #[test]

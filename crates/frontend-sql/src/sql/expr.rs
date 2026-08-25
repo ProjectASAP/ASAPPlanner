@@ -186,6 +186,19 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             }
         }
 
+        // `NOW()` / `CURRENT_TIMESTAMP` read the SQL statement evaluation
+        // time. Keep this timestamp-typed leaf distinct from PromQL's
+        // Float64 Unix-seconds `EvalTimestamp`. Issue #184.
+        Expr::ScalarFunction(sf)
+            if sf.args.is_empty()
+                && matches!(
+                    sf.func.name().to_ascii_lowercase().as_str(),
+                    "now" | "current_timestamp"
+                ) =>
+        {
+            Ok(Unresolved::CurrentTimestamp)
+        }
+
         Expr::ScalarFunction(sf) => {
             let args: Result<Vec<_>, _> = sf.args.iter().map(df_expr_to_unresolved).collect();
             Ok(Unresolved::FunctionCall {

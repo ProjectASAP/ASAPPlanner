@@ -111,7 +111,8 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
             }
             QueryExpr::Scan { .. }
             | QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::QueryTimestamp => {}
+            | QueryExpr::EvalTimestamp
+            | QueryExpr::CurrentTimestamp => {}
             // Scalar expression variants (issue #205): `AggIntent` only ever
             // lives in `Aggregate.measures`, never nested inside a scalar
             // expression tree, so there's nothing to recurse into here.
