@@ -61,12 +61,20 @@
 //!   with no grouping concept at all) has nothing for a
 //!   shared-multi-subpopulation structure to multiplex across.
 //! - **The family has a Hydra variant**
-//!   ([`asap_types::post_asap::hydra_kind_for`]): only `SketchAlgorithm::Kll`
-//!   has a modeled Hydra wrapper today (`HydraKll`) — see that function's own
-//!   doc for why the others aren't candidates yet.
+//!   ([`asap_types::post_asap::hydra_kind_for`]): `SketchAlgorithm::Kll`,
+//!   `Cms`, and `CountSketch` each have a modeled Hydra wrapper today
+//!   (`HydraKll`/`HydraCms`/`HydraCountSketch`) — see that function's own
+//!   doc for why the others aren't candidates yet, and
+//!   [`asap_types::post_asap::HydraKind`]'s own doc for which of the three
+//!   are the Hydra paper's actual proven construction (`Cms`/`CountSketch`)
+//!   versus an unproven extension of it (`Kll` — the paper explicitly
+//!   excludes quantiles from Hydra-sketch).
 //!
 //! Whether Hydra is *worth it* for a given estimated subpopulation
-//! cardinality is a cost-model question, deliberately out of scope here.
+//! cardinality is a cost-model question, deliberately out of scope here —
+//! and for `HydraKll` specifically, a cost model has no proven error bound
+//! to weigh that trade-off against in the first place (see
+//! [`asap_types::post_asap::HydraKind::HydraKll`]).
 //!
 //! ## No `ForceSketchKind`-style steering — bind one already-known candidate directly
 //!
@@ -93,8 +101,9 @@
 //!
 //! Roll-up and Hydra currently operate on disjoint candidates. Roll-up
 //! rewrites exact `Sum`/`Min`/`Max`/`Count` aggregates in the pre-ASAP DAG;
-//! Hydra is offered only for approximate KLL quantiles and produces a
-//! terminal post-ASAP summary candidate. Consequently neither strategy can
+//! Hydra is offered only for approximate quantile/count intents (KLL, CMS,
+//! Count-Sketch) and produces a terminal post-ASAP summary candidate.
+//! Consequently neither strategy can
 //! presently offer the other's candidate as a source. If roll-up support is
 //! extended to mergeable sketches, that extension must consult
 //! `rollup::is_legal_rollup_source` and add explicit Hydra merge semantics;
@@ -223,8 +232,8 @@ impl<'a> HydraGroupingStrategy<'a> {
                 matches!(candidate, Implementation::Sketch(kind) if *kind.algorithm() == sketch_kind)
             })?;
         let node = construct_summary(root, implementation, self.cost_model).ok()?;
-        let k = per_subpopulation_k(&node)?;
-        let params = default_hydra_params(hydra_kind.clone(), k);
+        let per_subpopulation_params = per_subpopulation_sketch_params(&node)?;
+        let params = default_hydra_params(hydra_kind.clone(), &per_subpopulation_params)?;
         let grouping = GroupingStrategy::SharedMultiSubpopulation {
             kind: hydra_kind.clone(),
             params,
@@ -257,26 +266,33 @@ impl ReplacementStrategy for HydraGroupingStrategy<'_> {
     }
 }
 
-/// The `k` a bound sketch candidate's `SummaryAgg` committed to, if its
-/// family is `Sketch(SketchKind::new(Kll, SketchParams::Kll { k }))` — the only shape
-/// [`default_hydra_params`] currently knows how to build a `HydraParams` for
-/// (mirrors [`hydra_kind_for`]'s own "KLL only, for now" scope). `None` for
-/// any other bound shape (an exact accumulator, a pass-through, or a
-/// different sketch family) — never expected here in practice, since
-/// `hydra_candidates` only calls this for a `sketch_kind` it already
-/// confirmed has a `HydraKind` via `hydra_kind_for`, but degrading to "no
-/// candidate" rather than panicking keeps this as conservative as the rest
-/// of this module.
-fn per_subpopulation_k(node: &SummaryNode) -> Option<u32> {
+/// The [`SketchParams`] a bound sketch candidate's `SummaryAgg` committed
+/// to, if its family is `Sketch(_)` at all — `None` for any other bound
+/// shape (an exact accumulator, a pass-through, or a family with no
+/// `SketchParams`), never expected here in practice since `hydra_candidates`
+/// only calls this for a `sketch_kind` it already confirmed has a
+/// `HydraKind` via `hydra_kind_for`, but degrading to "no candidate" rather
+/// than panicking keeps this as conservative as the rest of this module.
+///
+/// Deliberately returns the *whole* [`SketchParams`], not one scalar field
+/// pulled out of it (an earlier version of this function assumed
+/// `SketchParams::Kll { k }` specifically and returned a bare `k: u32`).
+/// This axis is a "sketch of sketches" framework: the inner sketch a Hydra
+/// structure wraps isn't always KLL, and each [`HydraKind`] variant needs
+/// its own inner sketch's own knobs — `HydraCms`/`HydraCountSketch` need
+/// (`width`, `depth`), not a `k`. [`default_hydra_params`] is what actually
+/// destructures the right variant for `kind`; this function's only job is
+/// to find whatever `SketchParams` the bind decision already committed to
+/// and hand the whole thing over unchanged.
+fn per_subpopulation_sketch_params(node: &SummaryNode) -> Option<SketchParams> {
     match &node.expr {
-        SummaryExpr::SummaryEstimate { summary_input, .. } => per_subpopulation_k(summary_input),
+        SummaryExpr::SummaryEstimate { summary_input, .. } => {
+            per_subpopulation_sketch_params(summary_input)
+        }
         SummaryExpr::SummaryAgg {
             family: SummaryFamilyType::Sketch(kind),
             ..
-        } => match kind.params() {
-            SketchParams::Kll { k } => Some(*k),
-            _ => None,
-        },
+        } => Some(kind.params().clone()),
         _ => None,
     }
 }
@@ -477,6 +493,84 @@ mod tests {
             }
         );
         assert!(!replacements[0].rationale.is_empty());
+    }
+
+    #[test]
+    fn count_offers_hydra_candidates_for_cms_and_count_sketch() {
+        // summary_candidates(Count) = [Cms, CountSketch] — both are now
+        // mapped to a Hydra variant (and, per `HydraKind`'s own doc, both
+        // are the Hydra paper's actual proven construction, unlike KLL's).
+        let intent = AggIntent::Count {
+            accuracy: AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        };
+        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let target = TargetSubDAG::new(&q);
+        let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
+        assert_eq!(replacements.len(), 2, "{replacements:?}");
+
+        for replacement in &replacements {
+            let Replacement::Summary(node) = &replacement.replacement else {
+                panic!("expected a Summary replacement");
+            };
+            let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
+                panic!("expected SummaryEstimate root, got {:?}", node.expr);
+            };
+            let SummaryExpr::SummaryAgg {
+                family, grouping, ..
+            } = &summary_input.expr
+            else {
+                panic!("expected SummaryAgg, got {:?}", summary_input.expr);
+            };
+            let SummaryFamilyType::Sketch(kind) = family else {
+                panic!("expected a Sketch family, got {family:?}");
+            };
+
+            // The Hydra params must carry over exactly the same
+            // (width, depth) the per-subpopulation candidate committed to —
+            // `default_hydra_params` generalizes over *which* inner sketch
+            // it's wrapping rather than assuming a KLL-shaped `k`.
+            match kind.algorithm() {
+                SketchAlgorithm::Cms => {
+                    let SketchParams::Cms { width, depth } = kind.params() else {
+                        panic!("expected Cms params, got {:?}", kind.params());
+                    };
+                    assert_eq!(
+                        grouping,
+                        &GroupingStrategy::SharedMultiSubpopulation {
+                            kind: HydraKind::HydraCms,
+                            params: HydraParams::HydraCms {
+                                width: *width,
+                                depth: *depth,
+                                shared_rows: *depth,
+                                shared_columns: *width,
+                            },
+                        }
+                    );
+                }
+                SketchAlgorithm::CountSketch => {
+                    let SketchParams::CountSketch { width, depth } = kind.params() else {
+                        panic!("expected CountSketch params, got {:?}", kind.params());
+                    };
+                    assert_eq!(
+                        grouping,
+                        &GroupingStrategy::SharedMultiSubpopulation {
+                            kind: HydraKind::HydraCountSketch,
+                            params: HydraParams::HydraCountSketch {
+                                width: *width,
+                                depth: *depth,
+                                shared_rows: *depth,
+                                shared_columns: *width,
+                            },
+                        }
+                    );
+                }
+                other => panic!("unexpected Hydra candidate algorithm: {other:?}"),
+            }
+            assert!(!replacement.rationale.is_empty());
+        }
     }
 
     #[test]
