@@ -183,8 +183,9 @@ pub use explanation::{
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
-    summary_candidates, ImplementError, Implementation, Matcher, MemoGroup, PlanSpace, RankedGroup,
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy,
-    SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
+    summary_candidates, GlobalSelection, ImplementError, Implementation, Matcher, MemoGroup,
+    PlanSpace, RankedGroup, Replacement, ReplacementProvenance, ReplacementStrategy,
+    ReplacementSubDAG, SelectedGroup, SharedSubtreeStrategy, SketchAlgorithmStrategy, TargetSubDAG,
+    MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;

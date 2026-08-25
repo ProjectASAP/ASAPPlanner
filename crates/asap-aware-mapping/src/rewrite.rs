@@ -225,6 +225,7 @@ impl ReplacementStrategy for AvgToSumOverCountStrategy {
         };
         vec![ReplacementSubDAG {
             replacement: Replacement::Rewrite(rewritten),
+            provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
             rationale:
                 "avg has no summary realization at all (replacement::implementations_for_with \
                         dispatches it to PassThrough) and so can never share or sketch; \

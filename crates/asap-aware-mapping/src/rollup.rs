@@ -373,6 +373,7 @@ fn build_rollup(
 
     Some(ReplacementSubDAG {
         replacement: Replacement::Rewrite(Rc::new(rewritten)),
+        provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
         rationale: format!(
             "rolls up from the finer Aggregate grouped by {:?} (a strict superset of this \
              node's own {:?} grouping over the same shared source) instead of an independent \

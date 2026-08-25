@@ -871,6 +871,7 @@ mod tests {
             replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::Plain(
                 asap_types::pre_asap::DataType::Float64,
             )))),
+            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
             rationale: "whatever".into(),
         };
         assert!(RankOnly.estimate_cost(&candidate, &target).is_nan());
@@ -893,6 +894,7 @@ mod tests {
             replacement: Replacement::Summary(Rc::new(summary_node(
                 SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
             ))),
+            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
             rationale: "exact accumulator".into(),
         };
         let pricey = ReplacementSubDAG {
@@ -902,6 +904,7 @@ mod tests {
                     family: "gaussian_mixture".into(),
                 },
             )))),
+            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
             rationale: "fitted statistical model".into(),
         };
 
@@ -934,10 +937,12 @@ mod tests {
 
         let share = ReplacementSubDAG {
             replacement: Replacement::Rewrite(Rc::clone(&target_root)),
+            provenance: crate::replacement::ReplacementProvenance::CseShare,
             rationale: "build once and share".into(),
         };
         let recompute = ReplacementSubDAG {
             replacement: Replacement::Rewrite(Rc::new((*target_root).clone())),
+            provenance: crate::replacement::ReplacementProvenance::CseRecompute,
             rationale: "build independently".into(),
         };
 
