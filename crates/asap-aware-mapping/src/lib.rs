@@ -166,8 +166,8 @@
 pub mod cost_model;
 pub mod explanation;
 pub mod replacement;
-pub mod rollup;
 pub mod rewrite;
+pub mod rollup;
 
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use explanation::{
