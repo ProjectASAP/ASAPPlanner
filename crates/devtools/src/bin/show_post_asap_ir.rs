@@ -5,7 +5,7 @@
 // `asap-aware-mapping` pre-ASAP → post-ASAP binding pass and prints the
 // resulting **post-ASAP IR** (the sketch-bound IR: `SummaryExpr`/`SummaryNode`
 // — the concrete `SummaryKind`/`SummaryParams` committed per aggregate, or
-// `Logical` for whatever the pass left untouched). See `show_pre_asap_ir`
+// `KeepPreAsap` for whatever the pass left untouched). See `show_pre_asap_ir`
 // for the sketch-agnostic IR one layer upstream.
 //
 // File format: one query per line, prefixed with "sql>" or "promql>".
@@ -20,13 +20,40 @@
 // `metrics(ts, service, region, latency, bytes)` catalog — the same table
 // used in cross_language.rs and topk_ir.rs.
 
-use asap_aware_mapping::implement_tree;
+use asap_aware_mapping::replacement::keep_pre_asap;
+use asap_aware_mapping::{
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+};
 use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
+use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 use std::io::Read;
+use std::rc::Rc;
 
 const ACCURACY: AccuracyTarget = AccuracyTarget::Epsilon(0.01);
+
+/// `asap-aware-mapping` has no "bind me one tree" public API any more —
+/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
+/// a caller decides what to keep. This debug tool just wants one
+/// representative binding per query, so it takes the first
+/// (`cost_model`-preferred) candidate the same way a production caller
+/// would.
+fn bind(expr: &QueryExpr) -> Result<Rc<asap_types::post_asap::SummaryNode>, String> {
+    let root = Rc::new(expr.clone());
+    let target = TargetSubDAG::new(&root);
+    match SketchAlgorithmStrategy::default_cost_model()
+        .replacements(&target)
+        .into_iter()
+        .next()
+    {
+        Some(ReplacementSubDAG {
+            replacement: Replacement::Summary(node),
+            ..
+        }) => Ok(node),
+        _ => keep_pre_asap(&root).map_err(|e| e.to_string()),
+    }
+}
 
 fn col(name: &str, dtype: DataType) -> Column {
     Column::new(name, dtype, false)
@@ -82,7 +109,7 @@ async fn main() {
             println!();
             continue;
         };
-        match l3.and_then(|expr| implement_tree(&expr).map_err(|e| e.to_string())) {
+        match l3.and_then(|expr| bind(&expr)) {
             Ok(l4) => println!("{:#?}", l4.expr),
             Err(e) => println!("ERR: {e}"),
         }

@@ -6,14 +6,14 @@
 //! needs knowledge this crate doesn't have and shouldn't acquire: the crate
 //! doc's layering invariant is that `asap-plan` depends only on [`asap_ir`],
 //! never on a runtime or a deployment model. What it *can* own is the
-//! interface every deployment's cost model plugs into, so [`boundary`]'s
+//! interface every deployment's cost model plugs into, so [`replacement`]'s
 //! summary selection has exactly one extension point instead of forcing
 //! each downstream (ASAPCollector + ASAPQuery-backend, ASAPFusion, …) to
-//! fork [`boundary::implementation_for`].
+//! fork `replacement::implementations_for_with`.
 //!
 //! This trait is scoped to the approximate-**sketch** family specifically
 //! ([`CostModel::rank_candidates`]/[`size_params`](CostModel::size_params)
-//! take/return [`SketchKind`]/[`SketchParams`]) — `asap_sketch` also has
+//! take/return [`SketchAlgorithm`]/[`SketchParams`]) — `asap_sketch` also has
 //! sibling families for sampling-based, wavelet-transform, and fitted
 //! statistical-model summaries
 //! ([`asap_types::post_asap::SamplingKind`]/…/[`asap_types::post_asap::StatModelKind`]),
@@ -26,8 +26,8 @@
 //! than overloading these ones across incompatible `Kind`/`Params` types.
 //!
 //! Every entry point that doesn't take an explicit `&dyn CostModel`
-//! ([`implementation_for`](crate::boundary::implementation_for),
-//! [`implement_tree`](crate::bind::implement_tree)) runs against
+//! ([`SketchAlgorithmStrategy::default_cost_model`](crate::replacement::SketchAlgorithmStrategy::default_cost_model),
+//! [`search_workload`](crate::replacement::search_workload)) runs against
 //! [`DefaultCostModel`], so a deployment that never plugs in its own cost
 //! model keeps today's static-preference-order behavior exactly, byte for
 //! byte.
@@ -41,22 +41,29 @@
 //! cost comparison rather than a fixed rule. See
 //! `docs/design_docs/cse-cost-model-decision.md` for the full design discussion (why
 //! cost-based, why not a full plan-search engine, the layering constraint
-//! that forces detection to stay cost-agnostic). [`bind::implement_workload_with`](crate::bind::implement_workload_with)
-//! is the caller.
+//! that forces detection to stay cost-agnostic).
+//! [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)
+//! (via [`crate::replacement`]'s own `cse_preference`) and
+//! [`DefaultCostModel::estimate_cost`] are this crate's own callers.
+
+use std::rc::Rc;
 
 use asap_types::post_asap::{
-    SketchKind, SketchParams, SketchQuery, SummaryFamilyType, SummaryNode,
+    SketchAlgorithm, SketchParams, SketchQuery, SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
-use crate::boundary::Implementation;
+use crate::replacement::{
+    realize_child, Implementation, Replacement, ReplacementSubDAG, TargetSubDAG,
+};
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
-/// [`bind::implement_workload_with`](crate::bind::implement_workload_with)
-/// the first time it binds a subtree that
+/// [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)
+/// (via [`crate::replacement`]'s own `cse_preference`) the first time it
+/// needs a representative bound node for a subtree that
 /// [`asap_types::pre_asap::cse::share_common_subtrees`] already collapsed
 /// onto one `Rc` for two or more workload roots. See
 /// `docs/design_docs/cse-cost-model-decision.md`.
@@ -71,6 +78,42 @@ pub struct CseCandidate<'a> {
     /// once up front over the whole workload (always >= 2 — a candidate is
     /// only ever constructed for an actually-shared subtree).
     pub consumer_count: usize,
+}
+
+/// A cost estimate produced by a [`CostModel`] hook. A newtype around `f64`
+/// rather than a bare `f64` return type, so a future cost dimension (e.g.
+/// separate CPU/memory/network estimates, once a deployment actually needs
+/// to compare along more than one axis) can be added as a field here
+/// without changing every hook's signature a second time. Today it's still
+/// a single unitless scalar — the same magnitude convention
+/// [`default_cse_recompute_cost`]/[`default_cse_shared_maintenance_cost`]
+/// already used as bare `f64`s, just wrapped.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct Cost(pub f64);
+
+impl Cost {
+    /// The cost of an operation that costs nothing at all.
+    pub const ZERO: Cost = Cost(0.0);
+}
+
+impl std::fmt::Display for Cost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::ops::Add for Cost {
+    type Output = Cost;
+    fn add(self, rhs: Cost) -> Cost {
+        Cost(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::Mul<usize> for Cost {
+    type Output = Cost;
+    fn mul(self, rhs: usize) -> Cost {
+        Cost(self.0 * rhs as f64)
+    }
 }
 
 /// The decision [`CostModel::cse_share_decision`] returns for one
@@ -100,8 +143,8 @@ pub enum ShareDecision {
 /// leaf costs little to recompute, a deep multi-join subtree costs a lot.
 /// A deployment with real per-row/per-update cost knowledge should
 /// override [`CostModel::cse_recompute_cost`] instead of relying on this.
-pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> f64 {
-    asap_types::pre_asap::cse::dag_node_count(subtree) as f64
+pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> Cost {
+    Cost(asap_types::pre_asap::cse::dag_node_count(subtree) as f64)
 }
 
 /// Default [`CostModel::cse_shared_maintenance_cost`]: a small
@@ -116,7 +159,7 @@ pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> f64 {
 /// deployment with real memory/update-cost numbers should override
 /// [`CostModel::cse_shared_maintenance_cost`] instead of relying on this
 /// table.
-pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> f64 {
+pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
     const UNIT: f64 = 1.0;
     let weight = match family {
         SummaryFamilyType::Plain(_) => 1.0,
@@ -126,32 +169,36 @@ pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> f64 {
         SummaryFamilyType::Wavelet(..) => 5.0,
         SummaryFamilyType::StatModel(..) => 6.0,
     };
-    weight * UNIT
+    Cost(weight * UNIT)
 }
 
-/// Ranks the candidate summary families for one [`AggIntent`], best choice
+/// Ranks the candidate sketch algorithms for one [`AggIntent`], best choice
 /// first.
 ///
-/// [`boundary::summary_candidates`] returns every family that *can* answer an
+/// [`replacement::summary_candidates`] returns every algorithm that *can* answer an
 /// intent, in an arbitrary static preference order (issue #98's "one home"
 /// for the candidate set). A `CostModel` re-orders that list under real,
 /// deployment-specific cost knowledge this crate has no way to know about —
-/// [`boundary::implementation_for_with`] implements whichever candidate ends
-/// up first after ranking.
+/// `replacement::implementations_for_with` constructs every candidate in the
+/// resulting order.
 pub trait CostModel {
     /// Rank `candidates` (as returned by
-    /// [`summary_candidates`](crate::boundary::summary_candidates)) for
+    /// [`summary_candidates`](crate::replacement::summary_candidates)) for
     /// `intent`, best choice first.
     ///
-    /// Implementations MAY reorder freely and MAY drop entries that aren't
-    /// available in their deployment, but MUST NOT invent a candidate that
-    /// wasn't in the input — an unknown [`SketchKind`] has no
-    /// [`SketchParams`](asap_types::post_asap::SketchParams) sizing logic in
-    /// [`boundary::implementation_for_with`] and binding it will panic.
-    /// Returning an empty `Vec` means "no candidate is acceptable";
-    /// `implementation_for_with` treats that the same as `candidates`
-    /// having been empty to begin with.
-    fn rank_candidates(&self, intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind>;
+    /// Implementations MAY reorder freely, but MUST return exactly the input
+    /// candidates: no additions, removals, or duplicates. Candidate legality
+    /// and availability belong to replacement generation, not costing; letting
+    /// this hook filter would violate [`ReplacementStrategy`]'s exhaustive,
+    /// never-prune contract. This invariant is checked at every production call
+    /// site, and a violation panics with a contract error.
+    ///
+    /// [`ReplacementStrategy`]: crate::replacement::ReplacementStrategy
+    fn rank_candidates(
+        &self,
+        intent: &AggIntent,
+        candidates: &[SketchAlgorithm],
+    ) -> Vec<SketchAlgorithm>;
 
     /// Size [`SketchParams`] for `kind` (one of the candidates
     /// [`rank_candidates`](Self::rank_candidates) put first) under the
@@ -160,24 +207,24 @@ pub trait CostModel {
     /// Splitting sizing out from candidate selection lets a deployment own
     /// its own parameter-sizing math (e.g. an empirically-tuned table, or
     /// discrete rungs required by a downstream catalog) without forking
-    /// [`boundary::implementation_for_with`] — the same "one extension
+    /// `replacement::implementations_for_with` — the same "one extension
     /// point" rationale as `rank_candidates`, one level deeper. Default:
-    /// [`boundary::default_size_params`], `asap-plan`'s built-in formulas
+    /// [`replacement::default_size_params`], `asap-plan`'s built-in formulas
     /// (unchanged) — a deployment that only needs to reorder candidates,
     /// not resize them, can leave this method unimplemented.
     fn size_params(
         &self,
-        kind: SketchKind,
+        kind: SketchAlgorithm,
         intent: &AggIntent,
         eps: f64,
         delta: f64,
     ) -> SketchParams {
-        crate::boundary::default_size_params(kind, intent, eps, delta)
+        crate::replacement::default_size_params(kind, intent, eps, delta)
     }
 
     /// Realize an `AggIntent::Extension { ext_kind, payload }` — a
     /// deployment-specific intent shape core has no realization opinion
-    /// for (issue #131). `boundary::implementation_for_with` consults this
+    /// for (issue #131). `replacement::implementations_for_with` consults this
     /// for every `Extension` node instead of hardcoding `PassThrough`
     /// (issue #150). Default: `PassThrough` — preserves today's behavior
     /// for every deployment that doesn't override this, exactly like
@@ -190,7 +237,7 @@ pub trait CostModel {
     /// same `CostModel` realized as `Implementation::Sketch` via
     /// [`realize_extension`](Self::realize_extension). Only ever called
     /// when `realize_extension` returned `Sketch` for the same
-    /// `(ext_kind, payload)` — `bind::readout` has no other way to build a
+    /// `(ext_kind, payload)` — `replacement::readout` has no other way to build a
     /// `SketchQuery` for a shape core doesn't know. A deployment that
     /// overrides `realize_extension` to return `Sketch` for some
     /// `ext_kind` MUST also override this for that same `ext_kind`, or
@@ -212,7 +259,7 @@ pub trait CostModel {
     /// independently at a single use site. Default:
     /// [`default_cse_recompute_cost`] (a structural-size proxy). See
     /// `docs/design_docs/cse-cost-model-decision.md`.
-    fn cse_recompute_cost(&self, candidate: &CseCandidate) -> f64 {
+    fn cse_recompute_cost(&self, candidate: &CseCandidate) -> Cost {
         default_cse_recompute_cost(candidate.subtree)
     }
 
@@ -222,9 +269,9 @@ pub trait CostModel {
     /// weight table), applied to whichever field of
     /// `candidate.bound_summary`'s output schema actually carries summary
     /// state (falls back to the cheapest, `Plain`, weight if none does —
-    /// e.g. `bound_summary` is a passthrough `Logical` node with nothing
+    /// e.g. `bound_summary` is a passthrough `KeepPreAsap` node with nothing
     /// summary-shaped to maintain). See `docs/design_docs/cse-cost-model-decision.md`.
-    fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> f64 {
+    fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> Cost {
         let family = candidate
             .bound_summary
             .schema
@@ -252,7 +299,7 @@ pub trait CostModel {
     /// (keeping this comparison), or override this method directly for a
     /// wholly different policy.
     fn cse_share_decision(&self, candidate: &CseCandidate) -> ShareDecision {
-        let recompute_total = self.cse_recompute_cost(candidate) * candidate.consumer_count as f64;
+        let recompute_total = self.cse_recompute_cost(candidate) * candidate.consumer_count;
         let shared = self.cse_shared_maintenance_cost(candidate);
         if shared <= recompute_total {
             ShareDecision::Share
@@ -260,24 +307,138 @@ pub trait CostModel {
             ShareDecision::RecomputeIndependently
         }
     }
+
+    /// Estimate a comparable, numeric cost for one already-constructed
+    /// [`ReplacementSubDAG`] candidate at `target` — a real `f64`, not just a
+    /// relative rank, meant for a caller that wants to *display* "candidate A
+    /// costs ≈ X, candidate B costs ≈ Y" (e.g. a DAG-visualization view built
+    /// on [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)),
+    /// not just order candidates against each other — that ordering job
+    /// already belongs to [`rank_candidates`](Self::rank_candidates) (for a
+    /// [`SketchAlgorithmStrategy`](crate::replacement::SketchAlgorithmStrategy)
+    /// group) and [`cse_share_decision`](Self::cse_share_decision) (for a
+    /// [`SharedSubtreeStrategy`](crate::replacement::SharedSubtreeStrategy)
+    /// group).
+    ///
+    /// One method covers both candidate shapes this crate ships:
+    /// `candidate.replacement`'s [`Replacement::Summary`] arm (a
+    /// `SketchAlgorithmStrategy` candidate — the bound `SummaryNode` is right
+    /// there, nothing to reconstruct) and its [`Replacement::Rewrite`] arm
+    /// (a `SharedSubtreeStrategy` share-vs-recompute candidate — no bound
+    /// `SummaryNode` of its own, since sharing is a decision about a target
+    /// already bound some other way; a representative binding is recovered
+    /// from `target` itself). `target` is threaded through explicitly
+    /// (rather than only ever the target embedded in `candidate` — there
+    /// isn't one for a `Rewrite`) so both arms have the `consumer_count`
+    /// context a cost estimate needs to be meaningful.
+    ///
+    /// Default: **not a real cost model** — always returns `f64::NAN`.
+    /// `f64::partial_cmp` against `NAN` is always `None`, so a caller that
+    /// forgot to check whether its `CostModel` actually overrides this can't
+    /// silently treat the placeholder as a real comparison. A deployment
+    /// that wants numeric costs exposed should override this method;
+    /// [`DefaultCostModel`] does, reusing
+    /// [`cse_recompute_cost`](Self::cse_recompute_cost)/
+    /// [`cse_shared_maintenance_cost`](Self::cse_shared_maintenance_cost) —
+    /// the same arithmetic that already backs `cse_share_decision` — rather
+    /// than inventing a second, drifting cost formula.
+    fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
+        let _ = (candidate, target);
+        f64::NAN
+    }
+}
+
+/// Apply [`CostModel::rank_candidates`] and enforce its permutation-only
+/// contract at the boundary where planner code consumes the result.
+pub(crate) fn validated_candidate_ranking(
+    cost_model: &dyn CostModel,
+    intent: &AggIntent,
+    candidates: &[SketchAlgorithm],
+) -> Vec<SketchAlgorithm> {
+    let ranked = cost_model.rank_candidates(intent, candidates);
+    let mut expected = candidates.to_vec();
+    let mut actual = ranked.clone();
+    expected.sort();
+    actual.sort();
+    assert_eq!(
+        actual, expected,
+        "CostModel::rank_candidates must return a permutation of its input; candidate generation is exhaustive and cost models may not add, remove, or duplicate candidates"
+    );
+    ranked
 }
 
 /// The default cost model: preserves [`summary_candidates`]'s built-in static
-/// order and [`boundary::default_size_params`]'s built-in sizing unchanged.
+/// order and [`replacement::default_size_params`]'s built-in sizing unchanged.
 ///
-/// [`summary_candidates`]: crate::boundary::summary_candidates
+/// [`summary_candidates`]: crate::replacement::summary_candidates
 pub struct DefaultCostModel;
 
 impl CostModel for DefaultCostModel {
-    fn rank_candidates(&self, _intent: &AggIntent, candidates: &[SketchKind]) -> Vec<SketchKind> {
+    fn rank_candidates(
+        &self,
+        _intent: &AggIntent,
+        candidates: &[SketchAlgorithm],
+    ) -> Vec<SketchAlgorithm> {
         candidates.to_vec()
+    }
+
+    /// Real numbers, reusing [`CostModel::cse_recompute_cost`]/
+    /// [`CostModel::cse_shared_maintenance_cost`] — the same arithmetic
+    /// `cse_share_decision`'s default body already composes — rather than a
+    /// second formula:
+    ///
+    /// - [`Replacement::Summary`]: `cse_recompute_cost` (the one-time
+    ///   structural cost of building `target` at all) plus
+    ///   `cse_shared_maintenance_cost` of the candidate's own bound family
+    ///   (a pricier family — a sketch over an exact accumulator, say —
+    ///   costs more here, consistent with the per-family weighting
+    ///   [`default_cse_shared_maintenance_cost`] already orders candidates
+    ///   by).
+    /// - [`Replacement::Rewrite`]: recovers one representative bound
+    ///   `SummaryNode` for `target` via `realize_child` (the same
+    ///   rank-and-take-first helper `replacement::realize_child` reuses for the
+    ///   identical need), then charges
+    ///   `cse_shared_maintenance_cost` for the candidate that shares
+    ///   `target`'s own `Rc` (`Rc::ptr_eq`), or `cse_recompute_cost *
+    ///   consumer_count` for the one that doesn't — the same two terms
+    ///   `cse_share_decision` already compares against each other. `NaN`
+    ///   only if `target` itself can't be bound at all (schema derivation
+    ///   failed) — never expected for a target that's already part of a
+    ///   legitimate workload tree.
+    fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
+        let consumer_count = target.consumer_count.max(1);
+        match &candidate.replacement {
+            Replacement::Summary(node) => {
+                let cse = CseCandidate {
+                    subtree: target.root,
+                    bound_summary: node,
+                    consumer_count,
+                };
+                (self.cse_recompute_cost(&cse) + self.cse_shared_maintenance_cost(&cse)).0
+            }
+            Replacement::Rewrite(rc) => {
+                let Ok(bound) = realize_child(target.root, self) else {
+                    return f64::NAN;
+                };
+                let cse = CseCandidate {
+                    subtree: target.root,
+                    bound_summary: &bound,
+                    consumer_count,
+                };
+                if Rc::ptr_eq(rc, target.root) {
+                    self.cse_shared_maintenance_cost(&cse).0
+                } else {
+                    (self.cse_recompute_cost(&cse) * consumer_count).0
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::boundary::summary_candidates;
+    use crate::replacement::summary_candidates;
     use asap_types::pre_asap::agg_intent::default_cardinality;
 
     #[test]
@@ -296,8 +457,8 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SketchKind],
-        ) -> Vec<SketchKind> {
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
             let mut v = candidates.to_vec();
             v.reverse();
             v
@@ -308,8 +469,50 @@ mod tests {
     fn custom_cost_model_can_reorder_candidates() {
         let intent = default_cardinality();
         let candidates = summary_candidates(&intent);
-        let ranked = AlwaysPreferLast.rank_candidates(&intent, candidates);
+        let ranked = validated_candidate_ranking(&AlwaysPreferLast, &intent, candidates);
         assert_eq!(ranked.first(), candidates.last());
+    }
+
+    struct DropsLast;
+
+    impl CostModel for DropsLast {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            candidates[..candidates.len() - 1].to_vec()
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "must return a permutation of its input")]
+    fn candidate_ranking_rejects_filtering() {
+        let intent = default_cardinality();
+        let candidates = summary_candidates(&intent);
+        validated_candidate_ranking(&DropsLast, &intent, candidates);
+    }
+
+    struct DuplicatesFirst;
+
+    impl CostModel for DuplicatesFirst {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            let mut ranked = candidates.to_vec();
+            ranked.push(candidates[0].clone());
+            ranked
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "must return a permutation of its input")]
+    fn candidate_ranking_rejects_additions_and_duplicates() {
+        let intent = default_cardinality();
+        let candidates = summary_candidates(&intent);
+        validated_candidate_ranking(&DuplicatesFirst, &intent, candidates);
     }
 
     /// A deployment that only overrides `rank_candidates` keeps
@@ -319,8 +522,8 @@ mod tests {
     fn size_params_default_body_matches_default_size_params() {
         let intent = default_cardinality();
         assert_eq!(
-            AlwaysPreferLast.size_params(SketchKind::Hll, &intent, 0.01, 0.01),
-            crate::boundary::default_size_params(SketchKind::Hll, &intent, 0.01, 0.01),
+            AlwaysPreferLast.size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
+            crate::replacement::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
         );
     }
 
@@ -334,24 +537,24 @@ mod tests {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
-            candidates: &[SketchKind],
-        ) -> Vec<SketchKind> {
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
             candidates.to_vec()
         }
 
         fn size_params(
             &self,
-            kind: SketchKind,
+            kind: SketchAlgorithm,
             intent: &AggIntent,
             eps: f64,
             delta: f64,
         ) -> SketchParams {
             match kind {
-                SketchKind::Kll => {
+                SketchAlgorithm::Kll => {
                     let k = if eps >= 0.01 { 200 } else { 2048 };
                     SketchParams::Kll { k }
                 }
-                other => crate::boundary::default_size_params(other, intent, eps, delta),
+                other => crate::replacement::default_size_params(other, intent, eps, delta),
             }
         }
     }
@@ -362,19 +565,21 @@ mod tests {
 
         let intent = default_quantile(0.99);
         assert_eq!(
-            DiscreteKllRungs.size_params(SketchKind::Kll, &intent, 0.001, 0.01),
+            DiscreteKllRungs.size_params(SketchAlgorithm::Kll, &intent, 0.001, 0.01),
             SketchParams::Kll { k: 2048 },
         );
         // Untouched kinds still fall through to the default formula.
         assert_eq!(
-            DiscreteKllRungs.size_params(SketchKind::Hll, &intent, 0.01, 0.01),
-            crate::boundary::default_size_params(SketchKind::Hll, &intent, 0.01, 0.01),
+            DiscreteKllRungs.size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
+            crate::replacement::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
         );
     }
 
     // ── CSE sharing (issue #237, #223 stage 4) ──────────────────────────
 
-    use asap_types::post_asap::{ExactKind, ExactParams, SummaryExpr, SummaryField, SummarySchema};
+    use asap_types::post_asap::{
+        ExactKind, ExactParams, SketchKind, SummaryExpr, SummaryField, SummarySchema,
+    };
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
 
@@ -397,7 +602,7 @@ mod tests {
         SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child: std::rc::Rc::new(SummaryNode {
-                    expr: SummaryExpr::Logical(Box::new(scan())),
+                    expr: SummaryExpr::KeepPreAsap(Box::new(scan())),
                     schema: SummarySchema {
                         fields: vec![],
                         time_index: None,
@@ -425,7 +630,7 @@ mod tests {
             cols: vec![0],
             child: std::rc::Rc::new(leaf.clone()),
         };
-        assert!(default_cse_recompute_cost(&leaf) > 0.0);
+        assert!(default_cse_recompute_cost(&leaf) > Cost::ZERO);
         assert!(default_cse_recompute_cost(&nested) > default_cse_recompute_cost(&leaf));
     }
 
@@ -460,12 +665,12 @@ mod tests {
         };
         assert_eq!(
             default_cse_recompute_cost(&no_sharing),
-            3.0,
+            Cost(3.0),
             "no sharing: Join + 2 independent Scans = 3 unique nodes"
         );
         assert_eq!(
             default_cse_recompute_cost(&with_sharing),
-            2.0,
+            Cost(2.0),
             "internal sharing: Join + 1 shared Scan (referenced twice) = \
              2 unique nodes, not 3 — a tree-shaped size measure would \
              wrongly charge for the shared Scan twice"
@@ -479,8 +684,7 @@ mod tests {
             ExactParams::Sum,
         ));
         let sketch = default_cse_shared_maintenance_cost(&SummaryFamilyType::Sketch(
-            SketchKind::Hll,
-            SketchParams::Hll { precision: 12 },
+            SketchKind::new(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 }),
         ));
         assert!(
             exact < sketch,
@@ -536,12 +740,12 @@ mod tests {
             fn rank_candidates(
                 &self,
                 _intent: &AggIntent,
-                candidates: &[SketchKind],
-            ) -> Vec<SketchKind> {
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
                 candidates.to_vec()
             }
-            fn cse_recompute_cost(&self, _candidate: &CseCandidate) -> f64 {
-                1e9
+            fn cse_recompute_cost(&self, _candidate: &CseCandidate) -> Cost {
+                Cost(1e9)
             }
         }
 
@@ -562,6 +766,115 @@ mod tests {
         assert_eq!(
             AlwaysExpensiveToRecompute.cse_share_decision(&candidate),
             ShareDecision::Share
+        );
+    }
+
+    // ── estimate_cost ────────────────────────────────────────────────────
+
+    /// The trait's default `estimate_cost` body is an explicit placeholder,
+    /// not a real cost model — a `CostModel` that only overrides
+    /// `rank_candidates` (the minimum required to implement the trait) must
+    /// still get `f64::NAN` back, never a value that looks like a real
+    /// estimate.
+    #[test]
+    fn estimate_cost_default_body_is_a_nan_placeholder() {
+        struct RankOnly;
+        impl CostModel for RankOnly {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+        }
+
+        let root = Rc::new(scan());
+        let target = TargetSubDAG::new(&root);
+        let candidate = ReplacementSubDAG {
+            replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::Plain(
+                asap_types::pre_asap::DataType::Float64,
+            )))),
+            rationale: "whatever".into(),
+        };
+        assert!(RankOnly.estimate_cost(&candidate, &target).is_nan());
+    }
+
+    /// `DefaultCostModel::estimate_cost` for a [`Replacement::Summary`]
+    /// candidate reuses [`default_cse_shared_maintenance_cost`]'s own
+    /// per-family ordering: a candidate bound to a cheap-to-maintain family
+    /// (an exact accumulator) must cost less than one bound to an
+    /// expensive-to-maintain family (a fitted statistical model), same
+    /// target either way — consistent with
+    /// `default_shared_maintenance_cost_orders_families_cheapest_to_priciest`
+    /// above.
+    #[test]
+    fn estimate_cost_for_summary_orders_candidates_by_family_cheapest_to_priciest() {
+        let root = Rc::new(scan());
+        let target = TargetSubDAG::new(&root);
+
+        let cheap = ReplacementSubDAG {
+            replacement: Replacement::Summary(Rc::new(summary_node(
+                SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            ))),
+            rationale: "exact accumulator".into(),
+        };
+        let pricey = ReplacementSubDAG {
+            replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::StatModel(
+                asap_types::post_asap::StatModelKind::Parametric,
+                asap_types::post_asap::StatModelParams::Parametric {
+                    family: "gaussian_mixture".into(),
+                },
+            )))),
+            rationale: "fitted statistical model".into(),
+        };
+
+        let cheap_cost = DefaultCostModel.estimate_cost(&cheap, &target);
+        let pricey_cost = DefaultCostModel.estimate_cost(&pricey, &target);
+        assert!(
+            cheap_cost.is_finite() && pricey_cost.is_finite(),
+            "cheap={cheap_cost}, pricey={pricey_cost}"
+        );
+        assert!(
+            cheap_cost < pricey_cost,
+            "an ExactAggregate candidate should cost less than a StatModel one: \
+             exact={cheap_cost}, stat_model={pricey_cost}"
+        );
+    }
+
+    /// `DefaultCostModel::estimate_cost` for a [`Replacement::Rewrite`] pair
+    /// (the `SharedSubtreeStrategy` share-vs-recompute shape) agrees with
+    /// what `cse_share_decision` would already pick for the same target: with
+    /// many consumers of a cheap-to-recompute leaf, the "share" candidate
+    /// (the target's own `Rc`) must cost less than the "recompute
+    /// independently" one (a fresh `Rc`) — mirrors
+    /// `cse_share_decision_shares_when_recompute_dominates_maintenance`
+    /// above, through `estimate_cost` instead of `cse_share_decision`
+    /// directly.
+    #[test]
+    fn estimate_cost_for_rewrite_prefers_sharing_when_recompute_dominates_maintenance() {
+        let target_root = Rc::new(scan());
+        let target = TargetSubDAG::with_consumer_count(&target_root, 20);
+
+        let share = ReplacementSubDAG {
+            replacement: Replacement::Rewrite(Rc::clone(&target_root)),
+            rationale: "build once and share".into(),
+        };
+        let recompute = ReplacementSubDAG {
+            replacement: Replacement::Rewrite(Rc::new((*target_root).clone())),
+            rationale: "build independently".into(),
+        };
+
+        let share_cost = DefaultCostModel.estimate_cost(&share, &target);
+        let recompute_cost = DefaultCostModel.estimate_cost(&recompute, &target);
+        assert!(
+            share_cost.is_finite() && recompute_cost.is_finite(),
+            "share={share_cost}, recompute={recompute_cost}"
+        );
+        assert!(
+            share_cost < recompute_cost,
+            "with 20 consumers of a cheap-to-recompute leaf, sharing should cost less: \
+             share={share_cost}, recompute={recompute_cost}"
         );
     }
 }

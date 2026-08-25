@@ -17,6 +17,8 @@ cargo run -p asap-devtools --bin dag_export -- \
 many queries as you want in one file — they all land in one `WorkloadGraph`.
 You can also load several separate JSON files into the viewer at once (drag
 multiple files, or run the exporter more than once); their queries are merged.
+Add `--epsilon <f64>` to also populate `notes` with sketch-approximation
+findings — see "Replacement explanations (`notes`)" below.
 
 ## Open the viewer
 
@@ -32,6 +34,9 @@ picker.
   loaded query get a blue ring — toggle this off with "Highlight shared
   subtrees".
 - Each query's root node (its final output) gets a small red badge.
+- A node whose `notes` array is non-empty gets a small colored badge in the
+  bottom-right corner — click the node to see each note's kind and reason in
+  the side panel. See "Replacement explanations (`notes`)" below.
 - Node color/icon is driven by category — see the legend in the side panel,
   or `node-style.js` for the underlying `kind -> category` table.
 - Once two or more queries are loaded, switch to **Compare** or **Union**
@@ -184,6 +189,61 @@ exporting. That's a reasonable follow-up but a materially bigger change than
 this hash-unification step (new export API, binary changes, and a viewer
 highlighting-logic change) and orthogonal to it, so it's left for a future
 issue rather than folded into #223 stage 3.
+
+## Replacement explanations (`notes`)
+
+Each `DagNode` in the exported JSON carries a `notes` field:
+
+```jsonc
+"notes": [
+  { "kind": "SketchApproximation", "reason": "quantile(q=0.99) realizes as a Kll sketch — …" }
+]
+```
+
+`notes` is `Vec<DagNote>` (`crates/types/src/dag_export.rs`), omitted from the
+JSON entirely when empty — which is the common case, and always true unless
+the export was run with `--epsilon` (see below). `asap_types::dag_export`
+itself never populates this field; it exists purely as a layering seam so a
+*higher* crate can annotate an already-exported graph without `asap_types`
+knowing anything about that crate's concepts (`asap_types` is a lower crate
+`asap-aware-mapping` depends on, never the reverse).
+
+The one populator today is `dag_export`'s own devtools binary
+(`crates/devtools/src/bin/dag_export.rs`): after exporting each query, it
+calls `asap_aware_mapping::explain_replacements` (issue #257) on the same
+`QueryExpr` and, for every `ReplacementExplanation` returned, finds the
+`DagNode` candidates whose `hash` equals the explanation's `node_hash`, then
+confirms structural equality between the node's in-process source expression
+and the explanation target before pushing a `DagNote { kind, reason }`. The
+hash is a narrowing filter, not identity; the equality check makes annotation
+matching collision-safe.
+`kind` is the `Debug` form of `asap_aware_mapping::ExplanationKind`
+(`"SketchApproximation"` or `"CommonSubexpressionReuse"` today,
+`#[non_exhaustive]` — a future variant just shows up as its own tag, no
+viewer change required); `reason` is that explanation's own rationale text,
+verbatim.
+
+`SketchApproximation` notes only appear when the export ran with an
+approximate accuracy target: `dag_export`'s default is
+`AccuracyTarget::Exact` (nothing to approximate, so nothing to report), so
+you need the exporter's own `--epsilon <f64>` flag to see one, e.g.:
+
+```sh
+cargo run -p asap-devtools --bin dag_export -- \
+  --epsilon 0.01 --sql "SELECT quantile(0.99, latency) FROM metrics" --name p99 \
+  > /tmp/dag.json
+```
+
+`CommonSubexpressionReuse` notes don't need `--epsilon`: they come from a
+subtree repeated within one query (e.g. the same branch appearing on both
+sides of a `BinaryOp`), which `share_common_subtrees` can detect regardless
+of accuracy target.
+
+In the viewer, a node with non-empty `notes` gets a small colored badge in
+its bottom-right corner (color keyed to `kind` — see `node-style.js`'s
+`NOTE_KIND_COLOR`); click the node to see each note's kind and full reason
+text in the side panel, the same "click for detail" pattern the rest of the
+side panel already uses for a node's `detail`/root/shared-subtree status.
 
 ## Vendored dependencies
 

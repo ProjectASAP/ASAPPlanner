@@ -1,22 +1,47 @@
 //! End-to-end query-string → post-ASAP IR pin (issue #98).
 //!
 //! Drives the full pipeline — PromQL text → pre-ASAP `QueryExpr`
-//! (`lower_promql`) → post-ASAP `SummaryExpr` DAG
-//! (`asap_aware_mapping::implement_tree`) — and pins the summary-bound shape
-//! node by node, including the family `(Kind, Params)` committed on each
-//! edge's schema. This is the design doc's §"L4 — sketch algebra" worked
-//! example, running for real.
+//! (`lower_promql`) → post-ASAP `SummaryExpr` DAG (via
+//! `SketchAlgorithmStrategy::replacements`, see [`realize`] below) — and pins
+//! the summary-bound shape node by node, including the family `(Kind,
+//! Params)` committed on each edge's schema.
 
-use asap_aware_mapping::implement_tree;
+use std::rc::Rc;
+
+use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
+use asap_aware_mapping::{
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+};
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
-    ExactKind, ExactParams, SketchKind, SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType,
-    SummarySchema,
+    ExactKind, ExactParams, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
+    SummaryFamilyType, SummaryNode, SummarySchema,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
 use asap_types::pre_asap::schema::DataType;
 use asap_types::types::AccuracyTarget;
+
+/// This crate has no "bind me one tree" public API any more —
+/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
+/// a caller decides what to keep. This test-only helper reproduces the
+/// take-the-first-(`cost_model`-preferred)-candidate pattern so the
+/// single-answer pins below don't all repeat it by hand.
+fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+    let root = Rc::new(expr.clone());
+    let target = TargetSubDAG::new(&root);
+    match SketchAlgorithmStrategy::default_cost_model()
+        .replacements(&target)
+        .into_iter()
+        .next()
+    {
+        Some(ReplacementSubDAG {
+            replacement: Replacement::Summary(node),
+            ..
+        }) => Ok(node),
+        _ => keep_pre_asap(&root),
+    }
+}
 
 fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
     &schema
@@ -33,7 +58,7 @@ fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile_0_99: Float64}
 /// └─ SummaryAgg { Kll{k:200}, col: SampleValue }     → {quantile_0_99: Sketch(Kll, {k:200})}
 ///    └─ SummaryAgg { Rate, col: SampleValue }        → {ts, value: ExactAggregate(Rate), …}
-///       └─ Logical(TimeRange{5m} → Scan)             → {ts, value}
+///       └─ KeepPreAsap(TimeRange{5m} → Scan)         → {ts, value}
 /// ```
 ///
 /// The nested tree exercises both realizations: the approximate quantile
@@ -41,12 +66,12 @@ fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
 /// counter-reset-aware accumulator (no estimate — its state is the value).
 #[test]
 fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
-    let l3 = lower_promql(
+    let pre_asap = lower_promql(
         "quantile(0.99, rate(http_requests_total[5m]))",
         AccuracyTarget::Epsilon(0.01),
     )
     .expect("lowering failed");
-    let root = implement_tree(&l3).expect("binding failed");
+    let root = realize(&pre_asap).expect("binding failed");
 
     // Root: the sketch readout, back to a plain row shape.
     let SummaryExpr::SummaryEstimate {
@@ -79,7 +104,10 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     };
     assert_eq!(
         family,
-        &SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+        &SummaryFamilyType::Sketch(SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll { k: 200 }
+        ))
     );
     assert_eq!(col, &ColumnRef::SampleValue);
     assert_eq!(
@@ -89,7 +117,10 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
     assert_eq!(
         dtype(&summary_input.schema, "quantile_0_99"),
-        &SummaryFamilyType::Sketch(SketchKind::Kll, SketchParams::Kll { k: 200 })
+        &SummaryFamilyType::Sketch(SketchKind::new(
+            SketchAlgorithm::Kll,
+            SketchParams::Kll { k: 200 }
+        ))
     );
 
     // The rate: exact counter-reset-aware accumulator, per-series (labels
@@ -120,11 +151,11 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     );
 
     // The leaf: unrewritten pass-through — TimeRange marker over the Scan.
-    let SummaryExpr::Logical(logical_leaf) = &leaf.expr else {
-        panic!("expected Logical leaf, got {:?}", leaf.expr);
+    let SummaryExpr::KeepPreAsap(kept_leaf) = &leaf.expr else {
+        panic!("expected KeepPreAsap leaf, got {:?}", leaf.expr);
     };
-    let QueryExpr::TimeRange { range, child: scan } = logical_leaf.as_ref() else {
-        panic!("expected TimeRange leaf, got {logical_leaf:?}");
+    let QueryExpr::TimeRange { range, child: scan } = kept_leaf.as_ref() else {
+        panic!("expected TimeRange leaf, got {kept_leaf:?}");
     };
     assert_eq!(range.as_secs(), 300);
     assert!(matches!(scan.as_ref(), QueryExpr::Scan { .. }));
@@ -142,9 +173,9 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
 /// `avg(m)` (non-mergeable) passes through as a whole logical subtree.
 #[test]
 fn promql_exact_workload_binds_accumulators_not_sketches() {
-    let l3 = lower_promql("sum by (job) (http_requests_total)", AccuracyTarget::Exact)
+    let pre_asap = lower_promql("sum by (job) (http_requests_total)", AccuracyTarget::Exact)
         .expect("lowering failed");
-    let root = implement_tree(&l3).expect("binding failed");
+    let root = realize(&pre_asap).expect("binding failed");
     let SummaryExpr::SummaryAgg {
         family, reduction, ..
     } = &root.expr
@@ -166,11 +197,11 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
         "group keys pass through verbatim"
     );
 
-    let l3 =
+    let pre_asap =
         lower_promql("avg(http_requests_total)", AccuracyTarget::Exact).expect("lowering failed");
-    let root = implement_tree(&l3).expect("binding failed");
+    let root = realize(&pre_asap).expect("binding failed");
     assert!(
-        matches!(root.expr, SummaryExpr::Logical(_)),
+        matches!(root.expr, SummaryExpr::KeepPreAsap(_)),
         "avg has no mergeable accumulator — stays logical"
     );
 }

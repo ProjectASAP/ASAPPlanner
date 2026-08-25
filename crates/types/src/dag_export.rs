@@ -25,6 +25,21 @@
 //! `Schema::has_unique_key` legality gate, neither of which this export
 //! step evaluates). See `tools/dag-viewer/README.md` for the up-to-date
 //! caveat.
+//!
+//! ## `DagNode::notes` — a layering seam, not a feature this module implements
+//!
+//! [`DagNode`] also carries `notes: Vec<`[`DagNote`]`>`, always empty coming
+//! out of [`export`]. It exists so a *higher* layer — one that depends on
+//! `asap_types`, never the reverse — can annotate an already-exported graph
+//! after the fact without this module needing to know anything about that
+//! layer's concepts. Concretely: `asap-aware-mapping`'s `explanation` module
+//! (issue #257) computes `structural_hash` over the same `QueryExpr`
+//! subtrees this module does (via the identical function). The devtools
+//! exporter uses that hash to narrow candidates, then compares
+//! `ReplacementExplanation::target` with [`DagNode::source_expr`] for a
+//! collision-safe match before pushing a [`DagNote`] onto the node.
+//! `asap_types` itself never constructs a `DagNote` — see [`DagNode::notes`]
+//! for the layering rule this keeps.
 
 use serde::Serialize;
 
@@ -52,6 +67,39 @@ pub struct DagNode {
     /// See the module doc for what a hash match here does and doesn't
     /// guarantee.
     pub hash: u64,
+    /// Exact source expression for in-process annotation matching. It is not
+    /// part of the JSON format: callers first narrow by `hash`, then compare
+    /// this value structurally to avoid treating a hash collision as node
+    /// identity.
+    #[serde(skip)]
+    pub source_expr: QueryExpr,
+    /// Arbitrary reporting-layer annotations for this node — e.g. why a
+    /// replacement exists here. `asap_types` never populates this itself
+    /// (it has no notion of a "replacement" at all — see the module doc's
+    /// layering note); a higher layer that does (`asap-aware-mapping`, via
+    /// the `dag_export` devtools binary) fills it in after the fact by
+    /// matching [`DagNode::hash`] and confirming structural equality. Empty
+    /// by default, so every existing [`export`] caller and test is unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<DagNote>,
+}
+
+/// One reporting-layer annotation attached to a [`DagNode`] by a higher
+/// layer than `asap_types` — see [`DagNode::notes`]. `asap_types` defines
+/// this shape (so the field has a concrete, serializable type) but never
+/// constructs one: `asap_types` is a lower crate that `asap-aware-mapping`
+/// depends on, never the reverse, so this type is deliberately generic and
+/// crate-agnostic rather than naming anything from that higher layer (e.g.
+/// its `ExplanationKind`/`ReplacementExplanation`).
+#[derive(Debug, Clone, Serialize)]
+pub struct DagNote {
+    /// A short tag for the kind of annotation this is (e.g. a
+    /// `Debug`-formatted `asap_aware_mapping::ExplanationKind`) — opaque to
+    /// `asap_types`, meant for a renderer to group or color by.
+    pub kind: String,
+    /// Human-readable explanation text (e.g. an
+    /// `asap_aware_mapping::ReplacementExplanation::reason`).
+    pub reason: String,
 }
 
 /// One query's exported graph. `nodes[root as usize]` is the tree's root.
@@ -119,6 +167,8 @@ fn push_node(
         detail,
         children,
         hash,
+        source_expr: expr.clone(),
+        notes: Vec::new(),
     });
     id
 }
@@ -535,6 +585,22 @@ mod tests {
         assert_eq!(graph.root, 0);
         assert_eq!(graph.nodes[0].kind, "Scan");
         assert!(graph.nodes[0].children.is_empty());
+    }
+
+    /// `export` itself never populates `notes` — that's a higher layer's
+    /// job (see the module doc) — and an empty `notes` must not appear in
+    /// the serialized JSON at all, so every existing consumer of `export`'s
+    /// output (in particular `tools/dag-viewer`, which predates this field)
+    /// keeps parsing the same shape it always has.
+    #[test]
+    fn export_never_populates_notes_and_it_is_omitted_from_json() {
+        let graph = export(&scan("metrics", value_col()));
+        assert!(graph.nodes[0].notes.is_empty());
+        let json = serde_json::to_string(&graph.nodes[0]).unwrap();
+        assert!(
+            !json.contains("notes"),
+            "empty `notes` must be skipped, not serialized as `[]`: {json}"
+        );
     }
 
     #[test]

@@ -55,20 +55,22 @@
               }
             },
             "children": [],
-            "hash": 8728565996306856918
+            "hash": 2606922452740434172
           },
           {
             "id": 1,
             "kind": "Aggregate",
-            "label": "Aggregate(1 aggs)",
+            "label": "Aggregate(1 measures)",
             "detail": {
-              "aggs": [
+              "having": null,
+              "measures": [
                 {
-                  "accuracy": "Exact",
+                  "accuracy": {
+                    "Epsilon": 0.01
+                  },
                   "kind": "count"
                 }
               ],
-              "having": null,
               "output_names": [
                 "count(*)"
               ],
@@ -81,7 +83,13 @@
             "children": [
               0
             ],
-            "hash": 10032018775968531104
+            "hash": 12396162568747900801,
+            "notes": [
+              {
+                "kind": "SketchApproximation",
+                "reason": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with); count realizes as a CountSketch sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)"
+              }
+            ]
           },
           {
             "id": 2,
@@ -107,7 +115,7 @@
             "children": [
               1
             ],
-            "hash": 4964139796740856868
+            "hash": 17063396757587155626
           }
         ],
         "root": 2
@@ -168,20 +176,20 @@
               }
             },
             "children": [],
-            "hash": 8728565996306856918
+            "hash": 2606922452740434172
           },
           {
             "id": 1,
             "kind": "Aggregate",
-            "label": "Aggregate(1 aggs)",
+            "label": "Aggregate(1 measures)",
             "detail": {
-              "aggs": [
+              "having": null,
+              "measures": [
                 {
                   "col": 3,
                   "kind": "avg"
                 }
               ],
-              "having": null,
               "output_names": [
                 "avg(metrics.latency)"
               ],
@@ -194,7 +202,7 @@
             "children": [
               0
             ],
-            "hash": 10890882189167327462
+            "hash": 5109904469838189862
           },
           {
             "id": 2,
@@ -220,7 +228,7 @@
             "children": [
               1
             ],
-            "hash": 7246216437560421843
+            "hash": 5277207484379927121
           }
         ],
         "root": 2
@@ -263,7 +271,7 @@
               }
             },
             "children": [],
-            "hash": 703108412807903437
+            "hash": 16569634401303792668
           },
           {
             "id": 1,
@@ -278,19 +286,19 @@
             "children": [
               0
             ],
-            "hash": 11961238183880065676
+            "hash": 12007712336004404578
           },
           {
             "id": 2,
             "kind": "Aggregate",
-            "label": "Aggregate(1 aggs)",
+            "label": "Aggregate(1 measures)",
             "detail": {
-              "aggs": [
+              "having": null,
+              "measures": [
                 {
                   "kind": "rate"
                 }
               ],
-              "having": null,
               "output_names": [
                 ""
               ],
@@ -299,7 +307,7 @@
             "children": [
               1
             ],
-            "hash": 15197161337493631235
+            "hash": 12607242477503010192
           },
           {
             "id": 3,
@@ -320,7 +328,7 @@
             "children": [
               2
             ],
-            "hash": 3761471737883684370
+            "hash": 3760917937445997010
           },
           {
             "id": 4,
@@ -333,7 +341,7 @@
             "children": [
               3
             ],
-            "hash": 12035961998900520718
+            "hash": 7672123412300577486
           }
         ],
         "root": 4

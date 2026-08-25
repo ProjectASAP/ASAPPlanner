@@ -23,7 +23,7 @@
 //! - [`cse`] — workload-level structural common-subexpression elimination
 //!   over an already-`resolve_root`'d tree (issue #212, #222, #223), run
 //!   *after* `resolve_root` / `canonicalize` and *before* implementation
-//!   (`asap_aware_mapping::implement_workload`).
+//!   (`asap_aware_mapping::replacement`).
 //!
 //! Formerly the separate `asap-l2` crate; folded in here since
 //! `binder`/`column_resolution`/`canonicalize`/`resolve` have no

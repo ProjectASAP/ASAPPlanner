@@ -3,14 +3,19 @@
 //!
 //! Where [`crate::pre_asap`] carries *intent* only ("compute a
 //! quantile to ε accuracy"), this module is the summary-bound IR: the
-//! summary family, kind, and parameters are committed (one `(Kind, Params)`
-//! pair per family — [`sketch::ExactKind`]/[`sketch::ExactParams`],
-//! [`sketch::SketchKind`]/[`sketch::SketchParams`],
+//! summary family, kind/algorithm, and parameters are committed (one
+//! `(Kind, Params)` pair per family — [`sketch::ExactKind`]/[`sketch::ExactParams`],
 //! [`sketch::SamplingKind`]/[`sketch::SamplingParams`],
 //! [`sketch::WaveletKind`]/[`sketch::WaveletParams`],
 //! [`sketch::StatModelKind`]/[`sketch::StatModelParams`]), and
 //! [`expr::SummaryNode`] / [`expr::SummaryExpr`] describe the summary
-//! computation.
+//! computation. The `Sketch` family is the one exception to that
+//! one-pair-per-family shape: it nests a third level, [`sketch::SketchKind`]
+//! (quantile/cardinality/frequency/top-k), which itself carries the
+//! committed [`sketch::SketchAlgorithm`] and [`sketch::SketchParams`] —
+//! `SummaryFamilyType::Sketch(SketchKind)`, not a flat `(kind, params)` pair
+//! — because `Sketch` is the one family with more than one algorithm per
+//! purpose today; no other family needs that extra level yet.
 
 pub mod expr;
 pub mod query_time;
@@ -24,6 +29,7 @@ pub use query_time::{
 };
 pub use schema::{SummaryFamilyType, SummaryField, SummarySchema};
 pub use sketch::{
-    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchKind, SketchParams, SketchQuery,
-    StatModelKind, StatModelParams, WaveletKind, WaveletParams,
+    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory,
+    SketchKind, SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind,
+    WaveletParams,
 };

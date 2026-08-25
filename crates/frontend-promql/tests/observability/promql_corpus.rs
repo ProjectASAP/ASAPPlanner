@@ -13,10 +13,38 @@
 //! that is the guarantee. A coverage floor guards against a change silently
 //! tanking how much of the corpus we can lower.
 
-use asap_aware_mapping::implement_tree;
+use std::rc::Rc;
+
+use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
+use asap_aware_mapping::{
+    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+};
 use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
-use asap_types::post_asap::SummaryExpr;
+use asap_types::post_asap::{SummaryExpr, SummaryNode};
+use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::types::AccuracyTarget;
+
+/// This crate has no "bind me one tree" public API any more —
+/// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
+/// a caller decides what to keep. This test-only helper reproduces the
+/// take-the-first-(`cost_model`-preferred)-candidate pattern so [`bind_tally`]
+/// gets one representative `Result` per query, matching what a totality
+/// check over the whole corpus wants.
+fn bind(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+    let root = Rc::new(expr.clone());
+    let target = TargetSubDAG::new(&root);
+    match SketchAlgorithmStrategy::default_cost_model()
+        .replacements(&target)
+        .into_iter()
+        .next()
+    {
+        Some(ReplacementSubDAG {
+            replacement: Replacement::Summary(node),
+            ..
+        }) => Ok(node),
+        _ => keep_pre_asap(&root),
+    }
+}
 
 const DOCS: &str = include_str!("data/promql_corpus_docs.txt");
 const TESTDATA: &str = include_str!("data/promql_corpus_testdata.txt");
@@ -64,9 +92,9 @@ fn tally(corpus: &str) -> Tally {
 struct BindTally {
     /// Root bound to `SummaryAgg`/`SummaryEstimate` — the pass did something.
     transformed: usize,
-    /// Root stayed `Logical` — the pass left the query untouched.
+    /// Root stayed `KeepPreAsap` — the pass left the query untouched.
     unchanged: usize,
-    /// `implement_tree` returned `Err` (schema derivation failed).
+    /// [`bind`] returned `Err` (schema derivation failed).
     errored: usize,
 }
 
@@ -76,8 +104,8 @@ fn bind_tally(corpus: &str, accuracy: AccuracyTarget) -> BindTally {
         let Ok(tree) = lower_promql(q, accuracy.clone()) else {
             continue;
         };
-        match implement_tree(&tree) {
-            Ok(bound) if matches!(bound.expr, SummaryExpr::Logical(_)) => t.unchanged += 1,
+        match bind(&tree) {
+            Ok(bound) if matches!(bound.expr, SummaryExpr::KeepPreAsap(_)) => t.unchanged += 1,
             Ok(_) => t.transformed += 1,
             Err(_) => t.errored += 1,
         }
@@ -93,7 +121,7 @@ fn binding_is_total_over_the_entire_corpus() {
     eprintln!("docs corpus post-ASAP binding:     {docs:?}");
     eprintln!("testdata corpus post-ASAP binding: {td:?}");
 
-    // Same totality guarantee as lowering: reaching here means `implement_tree`
+    // Same totality guarantee as lowering: reaching here means `bind`
     // never panicked over any lowerable query in the corpus.
     assert_eq!(docs.errored, 0, "post-ASAP binding errored: {docs:?}");
     assert_eq!(td.errored, 0, "post-ASAP binding errored: {td:?}");

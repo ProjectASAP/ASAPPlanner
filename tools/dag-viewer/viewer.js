@@ -362,7 +362,8 @@ function buildCy(elements, layout) {
   return cy;
 }
 
-// Root badges + click/tap wiring — identical across single/compare/union.
+// Root badges + notes badges + click/tap wiring — identical across
+// single/compare/union.
 function finalizeGraphInteractions() {
   // Root nodes get a second, smaller badge icon layered in the corner —
   // QueryExpr has no dedicated terminal "output" kind the way the reference
@@ -375,6 +376,29 @@ function finalizeGraphInteractions() {
       'background-width': ['26%', '22%'],
       'background-height': ['26%', '22%'],
       'background-clip': ['none', 'none'],
+    });
+  });
+
+  // Nodes carrying a non-empty `notes` array (issue #257: asap-aware-mapping
+  // explained a replacement at this node, matched by structural hash — see
+  // README.md) get a third badge in the opposite corner from the root badge,
+  // so a node can be both at once without the two colliding.
+  cy.nodes().forEach((n) => {
+    if (n.data('isLane')) return;
+    const node = n.data('node');
+    if (!node || !node.notes || !node.notes.length) return;
+    const isRoot = n.hasClass('root');
+    n.addClass('hasNotes').style({
+      'background-image': [
+        categoryIconDataUri(n.data('category')),
+        ...(isRoot ? [rootBadgeIconDataUri()] : []),
+        noteBadgeIconDataUri(node.notes),
+      ],
+      'background-position-x': ['46%', ...(isRoot ? ['86%'] : []), '86%'],
+      'background-position-y': ['17%', ...(isRoot ? ['15%'] : []), '83%'],
+      'background-width': ['26%', ...(isRoot ? ['22%'] : []), '22%'],
+      'background-height': ['26%', ...(isRoot ? ['22%'] : []), '22%'],
+      'background-clip': isRoot ? ['none', 'none', 'none'] : ['none', 'none'],
     });
   });
 
@@ -704,8 +728,27 @@ function showDetail(node, query, scopeQueries) {
     <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
     ${rootHtml}
     ${sharedHtml}
+    ${notesHtml(node)}
     <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
   `;
+}
+
+// Renders a DagNode's `notes` (issue #257: asap-aware-mapping's explanation
+// of why a replacement exists here, matched onto this node by structural
+// hash — see README.md), one block per note, color-coded to match its badge.
+// Empty string if there are none, so callers can always splice this in.
+function notesHtml(node) {
+  if (!node.notes || !node.notes.length) return '';
+  const items = node.notes
+    .map((note) => {
+      const c = noteKindColor(note.kind);
+      return `<div class="noteItem" style="border-left-color:${c}">
+        <span class="noteKind" style="color:${c}">${escapeHtml(note.kind)}</span>
+        <div class="noteReason">${escapeHtml(note.reason)}</div>
+      </div>`;
+    })
+    .join('');
+  return `<div class="notesBlock"><h3>Why a replacement exists here</h3>${items}</div>`;
 }
 
 // Union mode's variant of showDetail: `data` is a merged cytoscape node's
@@ -733,6 +776,7 @@ function showUnionDetail(data) {
     <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
     ${rootHtml}
     ${sharedHtml}
+    ${notesHtml(node)}
     <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
   `;
 }
@@ -750,6 +794,11 @@ function renderLegend() {
     <span><span class="swatchLabel">Shared subtree</span><span class="swatchDesc">Structurally identical to a node in another loaded query (hash-based proxy, not real CSE)</span></span></div>`);
   rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${rootColor}"></span>
     <span><span class="swatchLabel">Query root</span><span class="swatchDesc">${escapeHtml(ROOT_BADGE.description)}</span></span></div>`);
+  for (const [kind, label] of Object.entries(NOTE_BADGE_LABEL)) {
+    const c = noteKindColor(kind);
+    rows.push(`<div class="leg"><span class="swatch" style="background:${c}; border-color:${c}"></span>
+      <span><span class="swatchLabel">${escapeHtml(label)}</span><span class="swatchDesc">Bottom-right badge — click the node for why (issue #257)</span></span></div>`);
+  }
   if (mode === 'compare') {
     rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${ringColor}; border-style:dashed"></span>
       <span><span class="swatchLabel">Shared-subtree link</span><span class="swatchDesc">Dashed line connects matching-hash nodes across lanes</span></span></div>`);

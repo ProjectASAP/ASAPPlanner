@@ -1,64 +1,104 @@
 # User guide: getting the pre-ASAP and post-ASAP IR for a query
 
-Two ways to do this: no-code (the `asap-devtools` binaries) or as a library embedded in your own
-codebase.
+The `asap-devtools` package provides command-line tools for inspecting the pre-ASAP and post-ASAP IR generated for SQL and PromQL queries.
 
-## No-code: `asap-devtools` binaries
+## 1. Create a query file
 
-Write a file of `sql>`/`promql>`-prefixed queries (one per line; blank lines and `#` comments
-ignored):
+Create a text file containing one query per line. Prefix each query with `sql>` or `promql>`.
+
+For example, `queries.txt`:
 
 ```text
 promql> quantile(0.99, rate(http_requests_total[5m]))
 sql> SELECT service, COUNT(*) FROM metrics GROUP BY service
 ```
 
-**Pre-ASAP IR** (ASAP-agnostic `QueryExpr`/`AggIntent`):
+Blank lines and lines beginning with `#` are ignored.
+
+## 2. Show the pre-ASAP IR
+
+Run:
 
 ```sh
 cargo run -p asap-devtools --bin show_pre_asap_ir -- queries.txt
 ```
 
-**Post-ASAP IR** (ASAP-aware IR with `SummaryExpr`/`L4Node`, one layer downstream, with
-concrete `SummaryKind`/`SummaryParams` committed per aggregate):
+You can also provide the queries through stdin:
+
+```sh
+cargo run -p asap-devtools --bin show_pre_asap_ir < queries.txt
+```
+
+## 3. Show the post-ASAP IR
+
+Run:
 
 ```sh
 cargo run -p asap-devtools --bin show_post_asap_ir -- queries.txt
 ```
 
-Both accept stdin instead of a file (`... < queries.txt`). `show_post_asap_ir` lowers at
-ε = 0.01 rather than `Exact` — an exact target only ever exercises the mergeable-accumulator
-arm of the binding decision, never a real sketch, so it wouldn't show the interesting case.
+Or through stdin:
 
-### Other dev tools
+```sh
+cargo run -p asap-devtools --bin show_post_asap_ir < queries.txt
+```
 
-`crates/devtools` ships more debugging binaries and examples for poking at the lowering pipeline. Binaries (`cargo run -p asap-devtools --bin <name>`):
+`show_post_asap_ir` uses an approximation target of ε = 0.01 so that the output can exercise sketch-based implementations rather than only exact aggregation.
 
-- **`show_pre_asap_ir`** — see above
-- **`show_post_asap_ir`** — see above
-- **`dag_export`** — dumps pre-ASAP IRs for given `--sql`/`--promql` queries for
-  [`tools/dag-viewer`](../tools/dag-viewer/index.html), an interactive DAG viewer
-  (see [`tools/dag-viewer/RUNNING.md`](../tools/dag-viewer/RUNNING.md) for
-  end-to-end setup, including running it over a remote tunnel).
-- **`variant_coverage`** — parses and canonicalizes every query corpus in the repo to pre-ASAP IR and reports which `QueryExpr` variants get exercised.
+## Other useful commands
 
-Examples (`cargo run -p asap-devtools --example <name>`):
+### Export a query DAG
 
-- **`topk_ir`** — prints pre-ASAP IR for a hardcoded set of topk-shaped SQL/PromQL queries
-- **`canonical_examples`** — prints pre-ASAP IR for one canonical query per `QueryExpr` variant, and custom join/set-op/distinct/CTE probes, to eyeball their shape.
+Export pre-ASAP IR for SQL or PromQL queries for use with the interactive DAG viewer:
+
+```sh
+cargo run -p asap-devtools --bin dag_export -- --sql "<SQL query>"
+```
+
+or:
+
+```sh
+cargo run -p asap-devtools --bin dag_export -- --promql "<PromQL query>"
+```
+
+See [`tools/dag-viewer/RUNNING.md`](../../tools/dag-viewer/RUNNING.md) for instructions on running the DAG viewer.
+
+### Check IR variant coverage
+
+Parse the query corpora in the repository and report which pre-ASAP IR variants are exercised:
+
+```sh
+cargo run -p asap-devtools --bin variant_coverage
+```
+
+## Additional examples
+
+Print pre-ASAP IR for several top-k queries:
+
+```sh
+cargo run -p asap-devtools --example topk_ir
+```
+
+Print representative queries covering the pre-ASAP IR variants:
+
+```sh
+cargo run -p asap-devtools --example canonical_examples
+```
 
 ## As a library
 
-Neither crate is published to crates.io — depend on them by path (inside this workspace) or by git:
+These crates are not published to crates.io—depend on them by path (inside this workspace) or by Git:
 
 ```toml
 # from another crate in this workspace
 asap-frontend-promql = { path = "../frontend-promql" }   # or asap-frontend-sql
 asap-aware-mapping = { path = "../asap-aware-mapping" }
+asap-types = { path = "../types" }
 
 # from an external codebase
 asap-frontend-promql = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-frontend-promql" }
 asap-aware-mapping = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-aware-mapping" }
+asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", package = "asap-types" }
 ```
 
 ### Step 1 — get the pre-ASAP IR
@@ -85,32 +125,49 @@ allowed, `Epsilon(e)` / `EpsilonDelta{epsilon, delta}` otherwise.
 ### Step 2 — get the post-ASAP IR
 
 Feed the `QueryExpr` to `asap-aware-mapping`. This crate depends only on `asap-types`, never on a
-front end, so it's agnostic to which language produced the tree.
+front end, so it's agnostic to which language produced the tree. There is no "bind me one tree"
+entry point: `SketchAlgorithmStrategy::replacements()` always returns every valid candidate for a
+target, ranked, and you take the one you want.
 
 ```rust
-use asap_aware_mapping::implement_tree;
+use asap_aware_mapping::{Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG};
+use std::rc::Rc;
 
-let post_asap = implement_tree(&pre_asap)?; // Rc<L4Node> — the SummaryExpr DAG
+let root = Rc::new(pre_asap);
+let target = TargetSubDAG::new(&root);
+let candidates = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+
+// Take the cost-model-preferred candidate — the common case.
+let Some(ReplacementSubDAG { replacement: Replacement::Summary(post_asap), .. }) =
+    candidates.into_iter().next()
+else {
+    // No candidate (e.g. the node isn't a bindable Aggregate) — fall back to
+    // `asap_aware_mapping::replacement::keep_pre_asap(&root)`, the same conservative
+    // pass-through this crate's own dispatch uses.
+    panic!("no candidate for this target");
+};
+// post_asap: Rc<SummaryNode> — the SummaryExpr DAG
 ```
 
-Two entry points, both re-exported from the crate root:
+`SketchAlgorithmStrategy::new(&dyn CostModel)` (vs. `default_cost_model()`) is the extension point for
+a deployment that wants its own candidate ranking or parameter sizing instead of this crate's
+built-in static preference order (`DefaultCostModel` — what `default_cost_model()` uses).
+See the `CostModel` trait doc in `crates/asap-aware-mapping/src/cost_model.rs` for its overridable
+hooks (`rank_candidates`, `size_params`, `realize_extension`, …).
 
-- `implementation_for(&AggIntent) -> Implementation` — the single-node decision (sketch, exact
-  accumulator, or pass-through) for one aggregation.
-- `implement_tree(&QueryExpr) -> Result<Rc<L4Node>, ImplementError>` — walks a whole tree, calling
-  the per-node decision at every `Aggregate` and emitting the full post-ASAP DAG.
-
-Each has a `_with(..., &dyn CostModel)` variant. A `CostModel` is the extension point for a
-deployment that wants its own candidate ranking or parameter sizing instead of this crate's
-built-in static preference order (`DefaultCostModel` — what the plain, non-`_with` functions use).
-See the `CostModel` trait doc in `crates/asap-aware-mapping/src/cost_model.rs` for its three
-overridable hooks (`rank_candidates`, `size_params`, `realize_extension`).
+To see every root of a whole workload at once — including the candidates CSE-shared subtrees get
+(a shared subtree's `MemoGroup` carries both the "share" and "recompute independently" options,
+ranked by `CostModel::cse_share_decision`) — use `asap_aware_mapping::search_workload`/
+`search_workload_with` instead; unlike the single-target path above, these return every discovered
+site's full candidate list (a `PlanSpace`), not one picked winner. Committing to one final,
+physically-materialized `SummaryNode` per shared subtree is out of this crate's scope — that's a
+downstream deployment's call, once it also knows where each candidate would be placed.
 
 ### Reading the result
 
 Match on `post_asap.expr` (a `SummaryExpr`):
 
-- `Logical(Box<QueryExpr>)` — this subtree wasn't rewritten; execute it exactly.
+- `KeepPreAsap(Box<QueryExpr>)` — this subtree wasn't rewritten; execute it exactly.
 - `SummaryAgg { summary, params, .. }` — an exact accumulator (`summary.is_exact()`) or an
   approximate sketch, sized to the query's `AccuracyTarget`.
 - `SummaryEstimate { summary_input, query }` — wraps a sketch `SummaryAgg`; `query` is what to
