@@ -130,6 +130,7 @@ pub fn resolve_expr(
     Ok(match expr {
         QueryExpr::Column(c) => QueryExpr::Column(resolve_column_ref(c, schema)?),
         QueryExpr::Literal(s) => QueryExpr::Literal(s.clone()),
+        QueryExpr::QueryTimestamp => QueryExpr::QueryTimestamp,
         QueryExpr::Compare { left, op, right } => QueryExpr::Compare {
             left: rc(left)?,
             op: op.clone(),

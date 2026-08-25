@@ -892,6 +892,7 @@ impl<C: ColState> QueryExpr<C> {
         match self {
             QueryExpr::Column(c) => vec![c],
             QueryExpr::Literal(_) => vec![],
+            QueryExpr::QueryTimestamp => vec![],
             QueryExpr::Compare { left, right, .. } | QueryExpr::Arithmetic { left, right, .. } => {
                 let mut v = left.columns_referenced();
                 v.extend(right.columns_referenced());

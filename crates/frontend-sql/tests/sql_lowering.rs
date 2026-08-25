@@ -1590,3 +1590,39 @@ async fn lead_in_frame_lowers_to_its_own_kind_not_lead() {
     };
     assert_eq!(*func, WindowFuncKind::LeadInFrame);
 }
+
+/// Issue #184: `NOW()` in a predicate must lower to the `QueryTimestamp`
+/// leaf (the same evaluation-time node PromQL's `time()` uses), not the
+/// semantically-opaque `FunctionCall { name: "now", .. }` catch-all.
+#[tokio::test]
+async fn now_in_predicate_lowers_to_query_timestamp() {
+    // SELECT * folds WHERE onto Scan.predicates (no explicit Filter node).
+    let qe = lower("SELECT * FROM metrics WHERE ts < NOW()").await;
+    let QueryExpr::Scan { predicates, .. } = &qe else {
+        panic!("expected Scan at root, got {qe:?}");
+    };
+    assert_eq!(predicates.len(), 1);
+    assert!(
+        matches!(predicates[0].0.as_ref(), QueryExpr::Compare { right, .. }
+            if matches!(right.as_ref(), QueryExpr::QueryTimestamp)),
+        "NOW() must lower to QueryTimestamp, got {:?}",
+        predicates[0].0
+    );
+}
+
+/// Same for ClickHouse's `now()`, since #184 was raised specifically against
+/// the ClickHouse dialect.
+#[tokio::test]
+async fn clickhouse_now_in_predicate_lowers_to_query_timestamp() {
+    let qe = lower_clickhouse("SELECT * FROM metrics WHERE ts < now()").await;
+    let QueryExpr::Scan { predicates, .. } = &qe else {
+        panic!("expected Scan at root, got {qe:?}");
+    };
+    assert_eq!(predicates.len(), 1);
+    assert!(
+        matches!(predicates[0].0.as_ref(), QueryExpr::Compare { right, .. }
+            if matches!(right.as_ref(), QueryExpr::QueryTimestamp)),
+        "now() must lower to QueryTimestamp, got {:?}",
+        predicates[0].0
+    );
+}

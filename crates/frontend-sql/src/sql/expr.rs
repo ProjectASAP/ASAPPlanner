@@ -186,6 +186,19 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             }
         }
 
+        // `NOW()` / `CURRENT_TIMESTAMP` read the query evaluation time — same
+        // runtime-dependent value as PromQL's `time()`, which lowers to this
+        // same `QueryTimestamp` leaf (frontend-promql/src/promql.rs). Issue #184.
+        Expr::ScalarFunction(sf)
+            if sf.args.is_empty()
+                && matches!(
+                    sf.func.name().to_ascii_lowercase().as_str(),
+                    "now" | "current_timestamp"
+                ) =>
+        {
+            Ok(Unresolved::QueryTimestamp)
+        }
+
         Expr::ScalarFunction(sf) => {
             let args: Result<Vec<_>, _> = sf.args.iter().map(df_expr_to_unresolved).collect();
             Ok(Unresolved::FunctionCall {
