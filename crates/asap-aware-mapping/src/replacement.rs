@@ -1618,7 +1618,8 @@ impl<Id> PlanSpace<Id> {
     ///
     /// Ranking itself is decided entirely by [`rank_group`] before
     /// [`RankedGroup::costs`] is ever computed — pairing each candidate with
-    /// [`CostModel::estimate_cost`]'s own number is an additive annotation
+    /// [`CostModel::grouping_state_cost`] for grouping alternatives, or
+    /// [`CostModel::estimate_cost`] otherwise, is an additive annotation
     /// for a caller that wants to *display* a cost (e.g. a
     /// DAG-visualization view), not a second ranking signal, so plugging in
     /// a `CostModel` whose `estimate_cost` disagrees with its own
@@ -1635,7 +1636,11 @@ impl<Id> PlanSpace<Id> {
                 let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
                 let costs = candidates
                     .iter()
-                    .map(|c| cost_model.estimate_cost(c, &target))
+                    .map(|c| {
+                        cost_model
+                            .grouping_state_cost(c, &target)
+                            .map_or_else(|| cost_model.estimate_cost(c, &target), |cost| cost.0)
+                    })
                     .collect();
                 RankedGroup {
                     target: &group.target,
@@ -1655,7 +1660,8 @@ pub struct RankedGroup<'a> {
     pub target: &'a Rc<QueryExpr>,
     pub consumer_count: usize,
     pub candidates: Vec<&'a ReplacementSubDAG>,
-    /// `costs[i]` is `candidates[i]`'s own [`CostModel::estimate_cost`]
+    /// `costs[i]` is `candidates[i]`'s own grouping-state cost when available,
+    /// and its [`CostModel::estimate_cost`] otherwise
     /// estimate — aligned index-for-index with `candidates`, one number per
     /// candidate, for a caller that wants an actual `f64` next to each
     /// candidate (e.g. "candidate A costs ≈ X, candidate B costs ≈ Y") and
@@ -1695,7 +1701,44 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
         return ranked;
     }
 
-    // Shape 2: `SketchAlgorithmStrategy`'s sketch-family candidates (every
+    // Shape 2: independent and Hydra grouping alternatives for the same
+    // sketch algorithms. When deployment statistics provide a subpopulation
+    // estimate, compare N independent states with the shared grid directly.
+    let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
+    let has_hydra = ranked.iter().any(|candidate| {
+        let Replacement::Summary(node) = &candidate.replacement else {
+            return false;
+        };
+        summary_grouping(node).is_some_and(|grouping| {
+            matches!(grouping, GroupingStrategy::SharedMultiSubpopulation { .. })
+        })
+    });
+    let grouping_costs: Option<Vec<f64>> = if has_hydra {
+        ranked
+            .iter()
+            .map(|candidate| {
+                cost_model
+                    .grouping_state_cost(candidate, &target)
+                    .map(|cost| cost.0)
+            })
+            .collect()
+    } else {
+        None
+    };
+    if let Some(costs) = grouping_costs {
+        let by_ptr: HashMap<*const ReplacementSubDAG, f64> = ranked
+            .iter()
+            .zip(costs)
+            .map(|(candidate, cost)| (*candidate as *const ReplacementSubDAG, cost))
+            .collect();
+        ranked.sort_by(|a, b| {
+            by_ptr[&(*a as *const ReplacementSubDAG)]
+                .total_cmp(&by_ptr[&(*b as *const ReplacementSubDAG)])
+        });
+        return ranked;
+    }
+
+    // Shape 3: `SketchAlgorithmStrategy`'s sketch-family candidates (every
     // candidate is a `Summary` that realizes a `SketchAlgorithm`) — rank via
     // `CostModel::rank_candidates`, the same hook `implementations_for_with`
     // itself consults.
@@ -1727,7 +1770,6 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
     // types, so compare the numeric estimates the CostModel exposes for that
     // purpose. `total_cmp` gives deterministic placement to a model's NaN
     // placeholders without dropping any candidate.
-    let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
     ranked.sort_by(|a, b| {
         cost_model
             .estimate_cost(a, &target)
@@ -1792,6 +1834,16 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
             family: SummaryFamilyType::Sketch(kind, _),
             ..
         } => Some(kind.algorithm().clone()),
+        _ => None,
+    }
+}
+
+/// The grouping strategy used by a bound summary candidate, unwrapping its
+/// readout node when necessary.
+fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
+    match &node.expr {
+        SummaryExpr::SummaryEstimate { summary_input, .. } => summary_grouping(summary_input),
+        SummaryExpr::SummaryAgg { grouping, .. } => Some(grouping),
         _ => None,
     }
 }
@@ -3407,6 +3459,62 @@ mod tests {
             Replacement::Rewrite(_) => None,
         };
         assert_eq!(first_kind, Some(SketchAlgorithm::DDSketch));
+    }
+
+    #[test]
+    fn grouping_cost_prefers_hydra_only_for_high_subpopulation_cardinality() {
+        struct EstimatedSubpopulations(usize);
+
+        impl CostModel for EstimatedSubpopulations {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+
+            fn estimated_subpopulation_count(&self, _target: &QueryExpr) -> Option<usize> {
+                Some(self.0)
+            }
+        }
+
+        fn first_grouping(estimated_count: usize) -> GroupingStrategy {
+            let model = EstimatedSubpopulations(estimated_count);
+            let intent = AggIntent::Count {
+                accuracy: AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                },
+            };
+            let root = Rc::new(agg(
+                vec![2, 3],
+                intent,
+                metric_scan(&["tenant_id", "endpoint"]),
+            ));
+            let strategies = default_strategies_with(&model);
+            let space = search_workload_with(vec![("tenant_endpoint_count", root)], &strategies);
+            let ranked = space.cost_sorted(&model);
+            let aggregate = ranked
+                .iter()
+                .find(|group| matches!(group.target.as_ref(), QueryExpr::Aggregate { .. }))
+                .expect("aggregate group");
+            let Replacement::Summary(node) = &aggregate.candidates[0].replacement else {
+                panic!("grouping candidate must be a summary")
+            };
+            summary_grouping(node)
+                .expect("bound summary grouping")
+                .clone()
+        }
+
+        assert!(matches!(
+            first_grouping(10_000),
+            GroupingStrategy::SharedMultiSubpopulation { .. }
+        ));
+        assert_eq!(
+            first_grouping(10),
+            GroupingStrategy::PerSubpopulationInstance
+        );
     }
 
     /// [`RankedGroup::costs`] is a per-candidate annotation, aligned
