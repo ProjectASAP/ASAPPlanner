@@ -279,6 +279,7 @@ use std::rc::Rc;
 use thiserror::Error;
 
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
+use crate::grouping::HydraGroupingStrategy;
 use crate::rollup::RollupStrategy;
 
 /// Errors from the pre-ASAP → post-ASAP replacement/construction path
@@ -1806,6 +1807,7 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
 pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
         Box::new(SketchAlgorithmStrategy::default_cost_model()),
+        Box::new(HydraGroupingStrategy::default_cost_model()),
         Box::new(SharedSubtreeStrategy),
     ]
 }
@@ -1818,6 +1820,7 @@ pub fn default_strategies_with<'a>(
 ) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
     vec![
         Box::new(SketchAlgorithmStrategy::new(cost_model)),
+        Box::new(HydraGroupingStrategy::new(cost_model)),
         Box::new(SharedSubtreeStrategy),
     ]
 }
@@ -3026,7 +3029,7 @@ mod tests {
     // ── discovery + MEMO shape ───────────────────────────────────────────
 
     #[test]
-    fn single_bindable_aggregate_gets_a_group_with_every_sketch_candidate() {
+    fn single_bindable_aggregate_gets_every_sketch_and_grouping_candidate() {
         let root = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let space = search_workload(vec![("q", root)]);
 
@@ -3040,14 +3043,37 @@ mod tests {
         assert_eq!(agg_group.consumer_count, 1);
         assert_eq!(
             agg_group.candidates.len(),
-            2,
-            "quantile has 2 summary_candidates entries: {:?}",
+            3,
+            "grouped quantile has KLL, DDSketch, and HydraKLL candidates: {:?}",
             agg_group.candidates
         );
         assert!(agg_group
             .candidates
             .iter()
             .all(|c| matches!(c.replacement, Replacement::Summary(_))));
+        assert_eq!(
+            agg_group
+                .candidates
+                .iter()
+                .filter(|candidate| {
+                    let Replacement::Summary(node) = &candidate.replacement else {
+                        return false;
+                    };
+                    let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
+                        return false;
+                    };
+                    matches!(
+                        &summary_input.expr,
+                        SummaryExpr::SummaryAgg {
+                            grouping: GroupingStrategy::SharedMultiSubpopulation { .. },
+                            ..
+                        }
+                    )
+                })
+                .count(),
+            1,
+            "the default workload search must register the Hydra grouping strategy"
+        );
 
         let scan_group = space
             .groups()
@@ -3364,7 +3390,7 @@ mod tests {
             .iter()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .unwrap();
-        assert_eq!(agg_group.candidates.len(), 2);
+        assert_eq!(agg_group.candidates.len(), 3);
         let first_kind = match &agg_group.candidates[0].replacement {
             Replacement::Summary(node) => sketch_kind_of(node),
             Replacement::Rewrite(_) => None,

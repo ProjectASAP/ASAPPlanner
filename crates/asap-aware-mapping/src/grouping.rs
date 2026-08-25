@@ -91,14 +91,14 @@
 //!
 //! ## Cross-axis legality with roll-up (issue #254)
 //!
-//! See the `TODO(#254)` comment inside [`HydraGroupingStrategy::replacements`]
-//! below (via [`HydraGroupingStrategy::hydra_candidates`]): whether a
-//! Hydra-backed `SummaryAgg` can serve as either side of a roll-up
-//! substitution is a fact about that summary family that issue #254's own
-//! roll-up `ReplacementStrategy` is responsible for deciding, via a
-//! standalone legality predicate its issue description commits to landing.
-//! At the time this module was rebuilt, that predicate was not yet callable
-//! from here; this comment marks exactly where the call belongs once it is.
+//! Roll-up and Hydra currently operate on disjoint candidates. Roll-up
+//! rewrites exact `Sum`/`Min`/`Max`/`Count` aggregates in the pre-ASAP DAG;
+//! Hydra is offered only for approximate KLL quantiles and produces a
+//! terminal post-ASAP summary candidate. Consequently neither strategy can
+//! presently offer the other's candidate as a source. If roll-up support is
+//! extended to mergeable sketches, that extension must consult
+//! `rollup::is_legal_rollup_source` and add explicit Hydra merge semantics;
+//! grouping alone must not imply that a sketch can be rolled up.
 
 use std::rc::Rc;
 
@@ -146,9 +146,10 @@ static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 /// `GroupingStrategy::SharedMultiSubpopulation` candidate wherever the
 /// legality conditions in the module docs above hold — alongside, not
 /// instead of, the per-subpopulation candidates `SketchAlgorithmStrategy`
-/// itself enumerates. A future search engine composing both strategies over
-/// the same target sees every summary-family alternative *and* the Hydra
-/// alternative; this strategy's own `replacements()` reports only the
+/// itself enumerates. The workload search composes both strategies over the
+/// same target, so it sees every summary-family alternative *and* the Hydra
+/// alternative; the built-in workload search registers both strategies, and
+/// this strategy's own `replacements()` reports only the
 /// latter, matching every other strategy in this crate's "one strategy, one
 /// concern" shape.
 pub struct HydraGroupingStrategy<'a> {
@@ -229,13 +230,6 @@ impl<'a> HydraGroupingStrategy<'a> {
             params,
         };
 
-        // TODO(#254): before offering this candidate as either side of a
-        // roll-up substitution, call issue #254's standalone roll-up
-        // merge-legality predicate here — whether a Hydra-backed structure
-        // can be merged down to (or built up from) a coarser grouping is a
-        // fact about that summary family that this axis cannot assume. Not
-        // yet callable from here as of this module's rebuild; this comment
-        // marks exactly where the call belongs once it is.
         let patched = with_grouping(node, grouping);
         Some(ReplacementSubDAG {
             replacement: Replacement::Summary(patched),
