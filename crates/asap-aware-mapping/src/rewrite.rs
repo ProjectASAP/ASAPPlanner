@@ -84,6 +84,7 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
         reduction,
         measures,
         having: None,
+        child,
         ..
     } = node
     else {
@@ -98,6 +99,17 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     let [AggIntent::Avg { col }] = measures.as_slice() else {
         return None;
     };
+    // `AggIntent::Count` represents COUNT(*), not COUNT(col).  AVG(col) can
+    // therefore be decomposed through it only when the averaged input is
+    // provably non-null; otherwise NULL rows would incorrectly contribute to
+    // the denominator.
+    let input_schema = child.output_schema().ok()?;
+    let value_col = col
+        .or_else(|| input_schema.column_id("value"))
+        .or_else(|| (0..input_schema.columns.len()).find(|i| !by.contains(i)))?;
+    if input_schema.columns.get(value_col)?.nullable {
+        return None;
+    }
     Some((by.keys().len(), *col))
 }
 
@@ -109,16 +121,17 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
 /// original `Avg` aggregate's own leading columns, since both aggregates
 /// share the same `reduction`/`child` and only differ in `measures`
 /// (`aggregate_output_schema`'s grouping-column derivation never looks at
-/// `measures` at all). The final item recomputes `sum / count`, `Cast` to
-/// `Float64` and aliased to the original `avg` column's own name — matching
+/// `measures` at all). The final item recomputes `sum / count`, casting the
+/// numerator to `Float64` before division, and aliases it to the original
+/// `avg` column's own name — matching
 /// [`AggIntent::Avg::output_column`]'s `(name, Float64, nullable: false)`
 /// exactly regardless of the summed column's own type (integer division
 /// would otherwise silently reappear whenever the input column is itself
 /// integer-typed: `Sum`'s output type tracks its input, `Count`'s is always
 /// `Int64`, and `QueryExpr::output_schema`'s own `Arithmetic` type inference
-/// types a `Div` of two `Int64` operands as `Int64` — the explicit `Cast` is
-/// what keeps the rewritten `avg` column's type `Float64` the way the
-/// original always was, not an incidental extra step).
+/// types a `Div` of two `Int64` operands as `Int64` — the explicit operand
+/// `Cast` is what keeps both the division and rewritten `avg` column
+/// `Float64` the way the original always was, not an incidental extra step).
 fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
     let (group_count, col) = avg_rewrite_target(root)?;
     let QueryExpr::Aggregate {
@@ -168,14 +181,14 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         .collect();
     cols.push(ProjectItem {
         alias: Some(avg_name),
-        expr: QueryExpr::Cast {
-            expr: Rc::new(QueryExpr::Arithmetic {
-                op: ArithmeticOpKind::Div,
-                left: Rc::new(QueryExpr::Column(sum_idx)),
-                right: Rc::new(QueryExpr::Column(count_idx)),
+        expr: QueryExpr::Arithmetic {
+            op: ArithmeticOpKind::Div,
+            left: Rc::new(QueryExpr::Cast {
+                expr: Rc::new(QueryExpr::Column(sum_idx)),
+                to: DataType::Float64,
+                try_cast: false,
             }),
-            to: DataType::Float64,
-            try_cast: false,
+            right: Rc::new(QueryExpr::Column(count_idx)),
         },
     });
 
@@ -504,5 +517,39 @@ mod tests {
             rewritten_schema.columns.last().unwrap().dtype,
             DataType::Float64
         );
+
+        let QueryExpr::Project { cols, .. } = rewritten.as_ref() else {
+            unreachable!();
+        };
+        assert!(matches!(
+            &cols.last().unwrap().expr,
+            QueryExpr::Arithmetic {
+                op: ArithmeticOpKind::Div,
+                left,
+                ..
+            } if matches!(left.as_ref(), QueryExpr::Cast { to: DataType::Float64, .. })
+        ));
+    }
+
+    #[test]
+    fn does_not_rewrite_avg_of_a_nullable_column_via_count_star() {
+        let child = QueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Column::new("ts", DataType::Timestamp, false),
+                    Column::new("value", DataType::Float64, false),
+                    Column::new("latency", DataType::Float64, true),
+                ],
+                0,
+                vec![],
+            ),
+        };
+        let q = Rc::new(avg_agg(vec![], Some(2), child));
+        let target = TargetSubDAG::new(&q);
+
+        assert!(!AvgToSumOverCountStrategy.matches(&target));
+        assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
     }
 }
