@@ -358,6 +358,20 @@ pub struct WindowFrame {
     pub end_bound: WindowFrameBound,
 }
 
+/// A finite window-frame displacement. Intervals are normalized to Arrow's
+/// month/day/nanosecond representation so SQL `RANGE INTERVAL ...` bounds
+/// survive lowering without leaking DataFusion types into the canonical IR.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFrameOffset {
+    Scalar(ScalarValue),
+    Interval {
+        months: i32,
+        days: i32,
+        nanoseconds: i64,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WindowFrameUnits {
@@ -371,11 +385,13 @@ pub enum WindowFrameUnits {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WindowFrameBound {
-    /// `UNBOUNDED PRECEDING` is `Preceding(ScalarValue::Null)`.
-    Preceding(ScalarValue),
+    /// `UNBOUNDED PRECEDING` is
+    /// `Preceding(WindowFrameOffset::Scalar(ScalarValue::Null))`.
+    Preceding(WindowFrameOffset),
     CurrentRow,
-    /// `UNBOUNDED FOLLOWING` is `Following(ScalarValue::Null)`.
-    Following(ScalarValue),
+    /// `UNBOUNDED FOLLOWING` is
+    /// `Following(WindowFrameOffset::Scalar(ScalarValue::Null))`.
+    Following(WindowFrameOffset),
 }
 
 /// A symbolic label matcher on the **info metric** side of an
@@ -785,7 +801,12 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         args: Vec<QueryExpr<C>>,
         partition_by: GroupKeys<C>,
         order_by: Vec<SortKey<C>>,
-        frame: WindowFrame,
+        /// `None` is accepted only for backward compatibility with serialized
+        /// pre-#268 IR, where the engine's implicit frame was not retained.
+        /// Newly lowered SQL always carries `Some` with DataFusion's resolved
+        /// concrete default or explicit frame.
+        #[serde(default)]
+        frame: Option<WindowFrame>,
         /// The output column's name — DataFusion's window-expr field name, so a
         /// `Project` above resolves it (cf. `Aggregate.output_names`).
         output_name: String,
@@ -1548,6 +1569,36 @@ mod tests {
                 closed: true,
             },
         }
+    }
+
+    #[test]
+    fn legacy_window_json_without_frame_deserializes_as_unspecified() {
+        let window = QueryExpr::SQLWindowFunc {
+            func: WindowFuncKind::RowNumber,
+            args: vec![],
+            partition_by: GroupKeys::by(vec![]),
+            order_by: vec![],
+            frame: Some(WindowFrame {
+                units: WindowFrameUnits::Range,
+                start_bound: WindowFrameBound::Preceding(WindowFrameOffset::Scalar(
+                    ScalarValue::Null,
+                )),
+                end_bound: WindowFrameBound::CurrentRow,
+            }),
+            output_name: "row_number".into(),
+            child: Rc::new(scan(vec![col("v", DataType::Int64, false)], None, vec![])),
+        };
+        let mut json = serde_json::to_value(window).unwrap();
+        json.get_mut("SQLWindowFunc")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("frame");
+
+        let decoded: QueryExpr = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            decoded,
+            QueryExpr::SQLWindowFunc { frame: None, .. }
+        ));
     }
 
     /// A row can appear in more than one branch, so no branch's unique key is a

@@ -26,6 +26,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+use datafusion::arrow::compute::kernels::cast_utils::parse_interval_month_day_nano;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datafusion::catalog_common::MemorySchemaProvider;
 use datafusion::common::config::ConfigOptions;
@@ -51,7 +52,8 @@ use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{
     GroupKeys, Predicate, ProjectItem, Reduction, SortKey, Source,
-    UnresolvedQueryExpr as Unresolved, WindowFrame, WindowFrameBound, WindowFrameUnits,
+    UnresolvedQueryExpr as Unresolved, WindowFrame, WindowFrameBound, WindowFrameOffset,
+    WindowFrameUnits,
 };
 use asap_types::pre_asap::schema::{DataType, Schema};
 use asap_types::pre_asap::{
@@ -628,7 +630,7 @@ impl<'a> SqlLowerer<'a> {
             args,
             partition_by: partition_by.into(),
             order_by,
-            frame,
+            frame: Some(frame),
             output_name,
             child,
         })
@@ -1764,15 +1766,45 @@ fn lower_window_frame(
             ))
         }
     };
+    let offset = |v: &DfScalarValue| -> Result<WindowFrameOffset, LoweringError> {
+        Ok(match v {
+            DfScalarValue::IntervalYearMonth(Some(months)) => WindowFrameOffset::Interval {
+                months: *months,
+                days: 0,
+                nanoseconds: 0,
+            },
+            DfScalarValue::IntervalDayTime(Some(value)) => WindowFrameOffset::Interval {
+                months: 0,
+                days: value.days,
+                nanoseconds: i64::from(value.milliseconds) * 1_000_000,
+            },
+            DfScalarValue::IntervalMonthDayNano(Some(value)) => WindowFrameOffset::Interval {
+                months: value.months,
+                days: value.days,
+                nanoseconds: value.nanoseconds,
+            },
+            // DataFusion 43 keeps SQL frame interval literals as their
+            // normalized text (for example `"1 HOUR"`) rather than an
+            // interval ScalarValue. Parse that representation before the
+            // ordinary scalar fallback so the canonical IR remains typed.
+            DfScalarValue::Utf8(Some(value)) | DfScalarValue::LargeUtf8(Some(value)) => {
+                match parse_interval_month_day_nano(value) {
+                    Ok(interval) => WindowFrameOffset::Interval {
+                        months: interval.months,
+                        days: interval.days,
+                        nanoseconds: interval.nanoseconds,
+                    },
+                    Err(_) => WindowFrameOffset::Scalar(scalar_value_to_asap(v)?),
+                }
+            }
+            _ => WindowFrameOffset::Scalar(scalar_value_to_asap(v)?),
+        })
+    };
     let bound = |b: &DfWindowFrameBound| -> Result<WindowFrameBound, LoweringError> {
         Ok(match b {
-            DfWindowFrameBound::Preceding(v) => {
-                WindowFrameBound::Preceding(scalar_value_to_asap(v)?)
-            }
+            DfWindowFrameBound::Preceding(v) => WindowFrameBound::Preceding(offset(v)?),
             DfWindowFrameBound::CurrentRow => WindowFrameBound::CurrentRow,
-            DfWindowFrameBound::Following(v) => {
-                WindowFrameBound::Following(scalar_value_to_asap(v)?)
-            }
+            DfWindowFrameBound::Following(v) => WindowFrameBound::Following(offset(v)?),
         })
     };
     Ok(WindowFrame {

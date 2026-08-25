@@ -9,7 +9,7 @@ use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::pre_asap::{
     AggIntent, CompareOpKind, GroupKeys, JoinKind, QueryExpr, Reduction, ScalarValue, Source,
-    WindowFrameBound, WindowFrameUnits, WindowFuncKind,
+    WindowFrameBound, WindowFrameOffset, WindowFrameUnits, WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
@@ -747,7 +747,9 @@ async fn window_frame_is_captured_not_dropped() {
         let QueryExpr::SQLWindowFunc { frame, .. } = find_windowfunc(qe).unwrap() else {
             unreachable!();
         };
-        frame.clone()
+        frame
+            .clone()
+            .expect("newly lowered SQL always records a frame")
     };
     let (a, b, c) = (
         frame_of(&default_frame),
@@ -764,12 +766,41 @@ async fn window_frame_is_captured_not_dropped() {
     assert_eq!(b.units, WindowFrameUnits::Rows);
     assert_eq!(
         b.start_bound,
-        WindowFrameBound::Preceding(ScalarValue::Int64(2))
+        WindowFrameBound::Preceding(WindowFrameOffset::Scalar(ScalarValue::Int64(2)))
     );
     assert_eq!(b.end_bound, WindowFrameBound::CurrentRow);
 
     assert_eq!(c.start_bound, WindowFrameBound::CurrentRow);
-    assert_eq!(c.end_bound, WindowFrameBound::Following(ScalarValue::Null));
+    assert_eq!(
+        c.end_bound,
+        WindowFrameBound::Following(WindowFrameOffset::Scalar(ScalarValue::Null))
+    );
+}
+
+#[tokio::test]
+async fn range_interval_frame_is_preserved() {
+    let qe = lower(
+        "SELECT service, SUM(latency) OVER (PARTITION BY service ORDER BY ts \
+         RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW) FROM metrics",
+    )
+    .await;
+    let QueryExpr::SQLWindowFunc {
+        frame: Some(frame), ..
+    } = find_windowfunc(&qe).unwrap()
+    else {
+        panic!("expected a window function with a concrete frame");
+    };
+
+    assert_eq!(frame.units, WindowFrameUnits::Range);
+    assert_eq!(
+        frame.start_bound,
+        WindowFrameBound::Preceding(WindowFrameOffset::Interval {
+            months: 0,
+            days: 0,
+            nanoseconds: 3_600_000_000_000,
+        })
+    );
+    assert_eq!(frame.end_bound, WindowFrameBound::CurrentRow);
 }
 
 /// `GROUPS` frames aren't in this repo's SQL corpora and nothing downstream

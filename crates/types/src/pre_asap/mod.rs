@@ -56,8 +56,8 @@ pub use query_expr::{
     aggregate_output_schema, AtModifier, BinaryOpKind, ColState, DataModel, GroupKeys, GroupSide,
     InfoMatcher, JoinKind, Predicate, ProjectItem, QueryExpr, QueryExprError, Reduction,
     ResolvedQueryExpr, SampleKind, SetOpKind, SortKey, Source, TimeShift, UnresolvedQueryExpr,
-    VectorGrouping, VectorMatch, VectorMatchKind, WindowFrame, WindowFrameBound, WindowFrameUnits,
-    WindowFuncKind,
+    VectorGrouping, VectorMatch, VectorMatchKind, WindowFrame, WindowFrameBound, WindowFrameOffset,
+    WindowFrameUnits, WindowFuncKind,
 };
 pub use resolve::{resolve_root, ResolveTreeError};
 pub use schema::{Column, ColumnId, DataType, Schema};

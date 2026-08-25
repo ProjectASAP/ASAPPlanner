@@ -295,7 +295,8 @@ fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
 mod tests {
     use super::*;
     use crate::pre_asap::query_expr::{
-        GroupKeys, ProjectItem, Source, WindowFrame, WindowFrameBound, WindowFrameUnits,
+        GroupKeys, ProjectItem, Source, WindowFrame, WindowFrameBound, WindowFrameOffset,
+        WindowFrameUnits,
     };
     use crate::pre_asap::schema::{Column, DataType, Schema};
     use crate::types::AccuracyTarget;
@@ -480,8 +481,8 @@ mod tests {
     fn rownumber_frame() -> WindowFrame {
         WindowFrame {
             units: WindowFrameUnits::Rows,
-            start_bound: WindowFrameBound::Preceding(ScalarValue::Null),
-            end_bound: WindowFrameBound::Following(ScalarValue::Null),
+            start_bound: WindowFrameBound::Preceding(WindowFrameOffset::Scalar(ScalarValue::Null)),
+            end_bound: WindowFrameBound::Following(WindowFrameOffset::Scalar(ScalarValue::Null)),
         }
     }
 
@@ -497,7 +498,7 @@ mod tests {
                 ascending: false,
                 nulls_first: true,
             }],
-            frame: rownumber_frame(),
+            frame: Some(rownumber_frame()),
             output_name: "rn".into(),
             child: Rc::new(agg),
         };
@@ -580,7 +581,7 @@ mod tests {
                 ascending: false,
                 nulls_first: true,
             }],
-            frame: rownumber_frame(),
+            frame: Some(rownumber_frame()),
             output_name: "rn".into(),
             child: Rc::new(grouped(AggIntent::Count {
                 accuracy: AccuracyTarget::Exact,
