@@ -97,6 +97,20 @@
 //!   #247's own rule-based traversal, which re-walked the tree once per
 //!   optimization before [`replacement::search_workload`] existed to read
 //!   from instead — see that module's docs for the full reframing.
+//! - [`rewrite`] — the "semantic-equivalent rewriting (e.g. `avg` →
+//!   `sum`/`count`) to increase how often the [sharing/sketch] optimizations
+//!   above apply" degree of freedom `docs/design_docs/asap_aware_mapping.md`
+//!   names (issue #253, part of #33): [`rewrite::AvgToSumOverCountStrategy`]
+//!   is a [`replacement::ReplacementStrategy`] that reshapes a bare `avg`
+//!   node — which [`replacement::implementations_for_with`] can only
+//!   dispatch to `Implementation::PassThrough`, so it can never be a
+//!   [`replacement::SharedSubtreeStrategy`] target — into a `sum`/`count`
+//!   pair under the same grouping, re-divided back by a wrapping `Project`,
+//!   so those *are* ordinary mergeable accumulators sharing/sketching can
+//!   reach. It only reshapes; [`replacement::search_workload`]'s cost-based
+//!   ranking (or a downstream consumer reading [`replacement::PlanSpace`])
+//!   is what decides whether the reshaped form is actually worth picking,
+//!   the same propose-don't-decide split every other strategy here keeps.
 //!
 //! ## Terminology — "bind" already means three different things nearby;
 //! this crate's own logical→physical step is named "implementation" instead
@@ -141,6 +155,7 @@
 pub mod cost_model;
 pub mod explanation;
 pub mod replacement;
+pub mod rewrite;
 
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use explanation::{
@@ -152,3 +167,4 @@ pub use replacement::{
     Replacement, ReplacementStrategy, ReplacementSubDAG, SharedSubtreeStrategy,
     SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
 };
+pub use rewrite::AvgToSumOverCountStrategy;
