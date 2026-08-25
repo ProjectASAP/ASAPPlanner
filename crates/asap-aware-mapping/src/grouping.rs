@@ -201,6 +201,7 @@ impl<'a> HydraGroupingStrategy<'a> {
         let patched = with_grouping(node, grouping);
         Some(ReplacementSubDAG {
             replacement: Replacement::Summary(patched),
+            provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
             rationale: format!(
                 "{} realizes as a shared {hydra_kind:?} structure over {sketch_kind:?} \
                  serving every subpopulation of this grouped aggregate, instead of one \

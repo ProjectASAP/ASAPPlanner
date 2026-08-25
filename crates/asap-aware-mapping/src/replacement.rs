@@ -229,7 +229,7 @@
 //! invent brand-new descendant structure every time they're computed (e.g.
 //! internal state that fabricates a fresh child node on every call) could
 //! in principle keep the frontier non-empty forever. Since this crate has
-//! no cardinality/statistics estimation to bound anything by,
+//! no principled bound on strategy-generated descendant sites,
 //! [`search_workload_with`] enforces a generous, documented round cap
 //! ([`MAX_SEARCH_ITERATIONS`]) instead: exceeding it panics with a clear
 //! message naming the actual cause, rather than hanging silently — a test
@@ -260,8 +260,88 @@
 //!   a defined comparison for) keeps discovery order — there is nothing to
 //!   rank, or no [`CostModel`] hook this module knows how to apply; it never
 //!   invents a comparison `CostModel` doesn't already define.
+//!
+//! ## Whole-plan (cross-group) selection — issue #271
+//!
+//! [`PlanSpace::cost_sorted`] above ranks every group's candidates
+//! independently: it never lets one group's choice influence how another
+//! group is costed. That's the right behavior when groups genuinely don't
+//! interact — which both shipped strategies' one-round convergence (see
+//! "Termination" above) makes the common case — but it's the wrong answer
+//! whenever they do. Concretely: [`CostModel::cse_share_decision`] costs a
+//! [`SharedSubtreeStrategy`] group by comparing a `consumer_count`-scaled
+//! recompute cost against a fixed maintenance cost — but a **nested**
+//! `SharedSubtreeStrategy` group's *true* recompute burden isn't its own
+//! raw [`MemoGroup::consumer_count`] (how many operator-child positions
+//! directly reference it) whenever an ancestor on the path to it is
+//! *itself* being recomputed independently rather than shared: recomputing
+//! that ancestor independently at each of *its own* uses recomputes
+//! everything underneath it that many times too, even though nothing
+//! underneath gained a single new direct reference. `cost_sorted`'s
+//! per-group ranking has no way to see this — it only ever looks at one
+//! group's own `candidates`, in isolation.
+//!
+//! [`PlanSpace::global_selection`] is that missing step: a single
+//! **top-down dynamic-programming pass** over the discovered sites,
+//! processed in the topological order [`topological_order`] computes over a
+//! small [`ReferenceGraph`] built for exactly this purpose (parent before
+//! every child, so a site's `effective_consumer_count` is always computed
+//! from *already-decided* ancestors). For every site it computes the
+//! **effective consumer count** — how many times that site actually runs
+//! once every ancestor's own selected candidate is accounted for — and, for
+//! every [`SharedSubtreeStrategy`]-shaped group, re-decides
+//! [`CostModel::cse_share_decision`] against *that* corrected count instead
+//! of the group's raw structural one (see [`multiplier`]'s doc for the
+//! exact recurrence): a group that chooses `Share` collapses its own
+//! multiplicity to exactly `1` for everything beneath it (one shared
+//! execution backs every use of it); a group that chooses
+//! `RecomputeIndependently` — or has no Share/Recompute decision of its own
+//! at all, i.e. isn't itself a `SharedSubtreeStrategy` shape — passes its
+//! *own* effective count straight through to whatever it references,
+//! transitively composing contributions from every ancestor on the path,
+//! not just the immediate parent.
+//!
+//! This is genuine dynamic programming in the classical sense: overlapping
+//! subproblems (a site reachable through more than one parent path is
+//! solved once, memoized in `effective_uses`, and reused for every path
+//! into it) combined via a real recurrence — not just the MEMO-group
+//! sharing [`PlanSpace`] itself already does for *storing* candidates. That
+//! distinction is exactly what issue #271 raised: this module already looks
+//! like a Cascades/Volcano MEMO, but [`PlanSpace::cost_sorted`] alone never
+//! actually performed this composition step; `global_selection` is that
+//! step, added alongside `cost_sorted` rather than replacing it (both stay
+//! available — see [`RankedGroup`] vs. [`SelectedGroup`]'s own docs for when
+//! to reach for which).
+//!
+//! Two things this deliberately does **not** attempt, both left as
+//! documented follow-up rather than silently overclaimed:
+//!
+//! - [`CostModel::rank_candidates`]/[`CostModel::size_params`] — the hooks
+//!   [`SketchAlgorithmStrategy`] groups rank by — take no `consumer_count`
+//!   parameter at all today, so a `SketchAlgorithmStrategy` group's selection
+//!   here still falls back to [`rank_group`]'s ordinary (consumer-count-
+//!   blind) local ranking, even though its own
+//!   [`SelectedGroup::effective_consumer_count`] is computed and exposed
+//!   correctly regardless. Wiring sketch sizing/ranking to actually consume
+//!   it needs a `CostModel` interface change — out of scope here per this
+//!   issue's own "reuse `CostModel`, don't invent a new interface" ask; a
+//!   correct `effective_consumer_count` is the input such a future hook
+//!   would need, and this module now computes it for every group, sketch
+//!   groups included.
+//! - This is not an exhaustive search over combinations of choices for a
+//!   provably-global optimum in every case. [`CostModel::cse_share_decision`]
+//!   is still a *local*, pairwise comparison at each `SharedSubtreeStrategy`
+//!   site (recompute-total vs. one fixed maintenance cost) — this module
+//!   just now feeds it a *correct* input instead of an *incorrect* one. Two
+//!   sibling `SharedSubtreeStrategy` groups that could trade off against
+//!   each other under some shared resource budget (memory, say) still
+//!   aren't jointly optimized here — this crate has no
+//!   cardinality/statistics estimation to bound a combinatorial search like
+//!   that with (the same constraint #237/#263 already navigated), so real
+//!   multi-group joint optimization beyond this per-site recurrence is left
+//!   for whenever that changes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::post_asap::{
     ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm,
@@ -362,7 +442,19 @@ pub enum Replacement {
 #[derive(Debug, Clone)]
 pub struct ReplacementSubDAG {
     pub replacement: Replacement,
+    /// Machine-readable origin/role of this alternative. Selection uses this
+    /// instead of inferring strategy semantics from replacement shape or
+    /// pointer identity when several strategies contribute to one memo group.
+    pub provenance: ReplacementProvenance,
     pub rationale: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementProvenance {
+    SummaryImplementation,
+    CseShare,
+    CseRecompute,
+    LogicalRewrite,
 }
 
 /// A replacement strategy: given a [`TargetSubDAG`], does this strategy have
@@ -998,6 +1090,7 @@ impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
                 let node = construct_summary(target.root, implementation, self.cost_model).ok()?;
                 Some(ReplacementSubDAG {
                     replacement: Replacement::Summary(node),
+                    provenance: ReplacementProvenance::SummaryImplementation,
                     rationale,
                 })
             })
@@ -1399,6 +1492,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
                 // The already-interned `Rc` itself: reusing it verbatim *is*
                 // "build once and share" — no new node to construct.
                 replacement: Replacement::Rewrite(Rc::clone(target.root)),
+                provenance: ReplacementProvenance::CseShare,
                 rationale: format!(
                     "build once and share: share_common_subtrees already interned this \
                      subtree once and reused it across {count} consumers — one build can \
@@ -1410,6 +1504,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
                 // value (`PartialEq`), deliberately *not* the same pointer,
                 // representing "undo the sharing and recompute independently".
                 replacement: Replacement::Rewrite(Rc::new((**target.root).clone())),
+                provenance: ReplacementProvenance::CseRecompute,
                 rationale: format!(
                     "build independently: undo the sharing share_common_subtrees found and \
                      recompute this subtree separately at each of its {count} consumers — \
@@ -1682,20 +1777,16 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
         return ranked;
     }
 
-    // Shape 1: a `SharedSubtreeStrategy` share-vs-recompute pair (every
-    // candidate is a `Rewrite`) — rank via `CostModel::cse_share_decision`
-    // (see `cse_preference` below).
-    if ranked
-        .iter()
-        .all(|c| matches!(c.replacement, Replacement::Rewrite(_)))
-    {
+    // Shape 1: the exact `SharedSubtreeStrategy` share-vs-recompute pair —
+    // rank via `CostModel::cse_share_decision`, the same comparison
+    // the local CSE ranking path already uses.
+    if cse_candidate_pair(group).is_some() {
         if let Some(prefer_target) = cse_preference(group, cost_model) {
-            ranked.sort_by_key(|c| {
-                let is_target = matches!(
-                    &c.replacement,
-                    Replacement::Rewrite(rc) if Rc::ptr_eq(rc, &group.target)
-                );
-                u8::from(is_target != prefer_target)
+            ranked.sort_by_key(|c| match c.provenance {
+                ReplacementProvenance::CseShare if prefer_target => 0,
+                ReplacementProvenance::CseRecompute if !prefer_target => 0,
+                ReplacementProvenance::CseShare | ReplacementProvenance::CseRecompute => 2,
+                _ => 1,
             });
         }
         return ranked;
@@ -1846,6 +1937,449 @@ fn summary_grouping(node: &SummaryNode) -> Option<&GroupingStrategy> {
         SummaryExpr::SummaryAgg { grouping, .. } => Some(grouping),
         _ => None,
     }
+}
+
+// ── global_selection ─────────────────────────────────────────────────────
+
+/// One group's globally-selected candidate — the answer
+/// [`PlanSpace::global_selection`] commits to for one site, after folding in
+/// every ancestor [`SharedSubtreeStrategy`] decision on the path from a
+/// workload root to this site. See the module docs' "Whole-plan
+/// (cross-group) selection" section for the full recurrence.
+///
+/// Contrast with [`RankedGroup`] ([`PlanSpace::cost_sorted`]'s output):
+/// that ranks every candidate for one group in isolation and never commits
+/// to just one; this commits to exactly one (or none), and the count it
+/// ranks against — [`Self::effective_consumer_count`] — can differ from the
+/// group's own raw structural [`MemoGroup::consumer_count`] whenever an
+/// ancestor's choice changes how many times this site truly runs. Use
+/// `cost_sorted` to inspect every alternative for a site; use
+/// `global_selection` when you need this module's best single answer,
+/// accounting for cross-group interaction where it knows how to.
+#[derive(Debug)]
+pub struct SelectedGroup<'a> {
+    /// The target sub-DAG this selection is for.
+    pub target: &'a Rc<QueryExpr>,
+    /// [`MemoGroup::consumer_count`] — how many operator-child positions
+    /// directly reference `target`, ignoring every ancestor's own choice.
+    pub consumer_count: usize,
+    /// How many times `target`'s computation actually runs once every
+    /// ancestor's own selected candidate is accounted for — see
+    /// [`multiplier`]'s doc for the exact recurrence. Equal to
+    /// `consumer_count` unless some ancestor on a path from a root to this
+    /// site is itself a [`SharedSubtreeStrategy`] group that chose
+    /// [`ShareDecision::RecomputeIndependently`].
+    pub effective_consumer_count: usize,
+    /// The candidate this selection committed to, or `None` for a group no
+    /// registered strategy proposed anything for (mirrors
+    /// [`MemoGroup::candidates`] being possibly empty).
+    pub chosen: Option<&'a ReplacementSubDAG>,
+}
+
+/// [`PlanSpace::global_selection`]'s result: one [`SelectedGroup`] per
+/// discovered site, in the same discovery order [`PlanSpace::groups`]/
+/// [`PlanSpace::cost_sorted`] use.
+#[derive(Debug)]
+pub struct GlobalSelection<'a> {
+    order: Vec<*const QueryExpr>,
+    groups: HashMap<*const QueryExpr, SelectedGroup<'a>>,
+}
+
+impl<'a> GlobalSelection<'a> {
+    /// Every selected group, in discovery order.
+    pub fn groups(&self) -> impl Iterator<Item = &SelectedGroup<'a>> {
+        self.order.iter().map(move |ptr| &self.groups[ptr])
+    }
+
+    /// The selection for `target`, if `target`'s own `Rc` is a discovered
+    /// site (i.e. `Rc::ptr_eq` to some node reachable from the workload's
+    /// roots).
+    pub fn for_target(&self, target: &Rc<QueryExpr>) -> Option<&SelectedGroup<'a>> {
+        self.groups.get(&Rc::as_ptr(target))
+    }
+}
+
+impl<Id> PlanSpace<Id> {
+    /// The whole-plan (cross-group) selection step the module docs'
+    /// "Whole-plan (cross-group) selection" section describes: one
+    /// [`SelectedGroup`] per discovered site, each ranked against an
+    /// `effective_consumer_count` that accounts for every ancestor
+    /// [`SharedSubtreeStrategy`] decision on the path to it — unlike
+    /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
+    /// group's own raw [`MemoGroup::consumer_count`].
+    pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
+        let graph = reference_graph(self);
+        let topo = topological_order(&self.order, &graph);
+
+        let mut effective_uses = graph.external_root_uses.clone();
+        let mut chosen_share: HashMap<*const QueryExpr, ShareDecision> = HashMap::new();
+        let mut groups: HashMap<*const QueryExpr, SelectedGroup<'_>> = HashMap::new();
+
+        for ptr in &topo {
+            let group = &self.groups[ptr];
+
+            let effective = effective_uses.get(ptr).copied().unwrap_or(0);
+            effective_uses.insert(*ptr, effective);
+
+            let chosen = if effective >= 2 && cse_candidate_pair(group).is_some() {
+                match decide_with_effective_count(group, effective, cost_model) {
+                    Some(decision) => {
+                        chosen_share.insert(*ptr, decision);
+                        pick_shared_subtree_candidate(group, decision)
+                    }
+                    // `realize_child` couldn't produce even a logical fallback —
+                    // not expected in practice for a target that's already
+                    // part of a legitimate workload tree (mirrors
+                    // `cse_preference`'s own doc on this same degrade).
+                    // Falling back to ordinary local ranking is still a
+                    // valid answer, just not a cross-group-aware one; this
+                    // group also contributes no Share collapse to its own
+                    // children (see `multiplier`'s `_ => effective` arm).
+                    None => rank_group(group, cost_model).into_iter().next(),
+                }
+            } else {
+                rank_group(group, cost_model)
+                    .into_iter()
+                    .find(|candidate| !is_cse_candidate(candidate))
+                    .or_else(|| cse_candidate_pair(group).map(|(share, _)| share))
+            };
+
+            let outgoing_multiplier = multiplier(*ptr, &effective_uses, &chosen_share);
+            let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
+                Some(Replacement::Rewrite(rewrite)) => rewrite,
+                Some(Replacement::Summary(_)) | None => &group.target,
+            };
+            for (child, edge_count) in direct_child_counts(selected_rewrite) {
+                *effective_uses.entry(child).or_insert(0) += edge_count * outgoing_multiplier;
+            }
+
+            groups.insert(
+                *ptr,
+                SelectedGroup {
+                    target: &group.target,
+                    consumer_count: group.consumer_count,
+                    effective_consumer_count: effective,
+                    chosen,
+                },
+            );
+        }
+
+        GlobalSelection {
+            order: self.order.clone(),
+            groups,
+        }
+    }
+}
+
+fn is_cse_candidate(candidate: &ReplacementSubDAG) -> bool {
+    matches!(
+        candidate.provenance,
+        ReplacementProvenance::CseShare | ReplacementProvenance::CseRecompute
+    )
+}
+
+/// How much one direct reference to `parent_ptr` actually costs, once
+/// `parent_ptr`'s own chosen candidate (if it has a Share/Recompute pair at
+/// all) is taken into account:
+///
+/// - `1`, if `parent_ptr` chose [`ShareDecision::Share`] — one shared
+///   execution backs every reference to it, so referencing it costs no more
+///   than referencing it once.
+/// - `parent_ptr`'s own `effective_consumer_count` otherwise — either it
+///   chose [`ShareDecision::RecomputeIndependently`] (each of its own uses
+///   gets its own independent execution, so referencing it costs as much as
+///   its *own* full multiplicity), or it has no Share/Recompute decision at
+///   all (not a [`SharedSubtreeStrategy`] shape — nothing here collapses
+///   its multiplicity to one, so whatever multiplicity *its* ancestors
+///   established simply passes through).
+///
+/// Composing this recurrence transitively up the whole ancestor chain (not
+/// just the immediate parent) is exactly what makes
+/// [`PlanSpace::global_selection`]'s `effective_consumer_count` differ from
+/// [`MemoGroup::consumer_count`] whenever a `RecomputeIndependently`
+/// ancestor sits anywhere on the path from a root to a site — see the
+/// module docs' "Whole-plan (cross-group) selection" section.
+fn multiplier(
+    parent_ptr: *const QueryExpr,
+    effective_uses: &HashMap<*const QueryExpr, usize>,
+    chosen_share: &HashMap<*const QueryExpr, ShareDecision>,
+) -> usize {
+    let effective = *effective_uses.get(&parent_ptr).expect(
+        "topological_order guarantees a parent is processed (and its effective_consumer_count \
+         recorded) before any of its children",
+    );
+    match chosen_share.get(&parent_ptr) {
+        Some(ShareDecision::Share) => 1,
+        _ => effective,
+    }
+}
+
+/// Find the explicitly-tagged CSE share/recompute pair inside `group`, even
+/// when other strategies contributed additional alternatives to the same
+/// memo group. Provenance makes these two orthogonal choices identifiable
+/// without inferring semantics from pointer or expression shape.
+fn cse_candidate_pair(group: &MemoGroup) -> Option<(&ReplacementSubDAG, &ReplacementSubDAG)> {
+    let mut share = None;
+    let mut recompute = None;
+    for candidate in &group.candidates {
+        match candidate.provenance {
+            ReplacementProvenance::CseShare => {
+                let Replacement::Rewrite(rc) = &candidate.replacement else {
+                    return None;
+                };
+                if !Rc::ptr_eq(rc, &group.target) || share.replace(candidate).is_some() {
+                    return None;
+                }
+            }
+            ReplacementProvenance::CseRecompute => {
+                let Replacement::Rewrite(rc) = &candidate.replacement else {
+                    return None;
+                };
+                if Rc::ptr_eq(rc, &group.target)
+                    || rc.as_ref() != group.target.as_ref()
+                    || recompute.replace(candidate).is_some()
+                {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    Some((share?, recompute?))
+}
+
+/// [`CostModel::cse_share_decision`] for `group`, against an explicit
+/// `effective_consumer_count` instead of `group.consumer_count` — the
+/// cross-group-aware counterpart to [`cse_preference`], which uses the raw
+/// structural count. `None` only when [`realize_child`] can't produce even a
+/// logical fallback for `group.target` (see that function's own doc).
+fn decide_with_effective_count(
+    group: &MemoGroup,
+    effective_consumer_count: usize,
+    cost_model: &dyn CostModel,
+) -> Option<ShareDecision> {
+    let bound = realize_child(&group.target, cost_model).ok()?;
+    let candidate = CseCandidate {
+        subtree: &group.target,
+        bound_summary: &bound,
+        consumer_count: effective_consumer_count,
+    };
+    Some(cost_model.cse_share_decision(&candidate))
+}
+
+/// The [`SharedSubtreeStrategy`] candidate matching `decision`: the one
+/// that shares `group.target`'s own `Rc` for [`ShareDecision::Share`], the
+/// freshly-allocated one for [`ShareDecision::RecomputeIndependently`] —
+/// the same `Rc`-identity distinction [`is_duplicate_rewrite`]'s own doc
+/// explains is the *only* signal this IR carries for that choice.
+fn pick_shared_subtree_candidate(
+    group: &MemoGroup,
+    decision: ShareDecision,
+) -> Option<&ReplacementSubDAG> {
+    let (share, recompute) = cse_candidate_pair(group)?;
+    Some(match decision {
+        ShareDecision::Share => share,
+        ShareDecision::RecomputeIndependently => recompute,
+    })
+}
+
+// ── reference graph + topological order ─────────────────────────────────
+
+/// The parent/child structure [`PlanSpace::global_selection`]'s DP walks —
+/// built separately from [`discover_targets`]'s own `order`/`nodes`/`counts`
+/// maps (which only track *aggregate* reference counts, not per-parent
+/// breakdown or direction) rather than extending that already-reviewed,
+/// already-tested pass. Same "small duplicated traversal over reshaping
+/// proven code" call as [`is_shared_subtree_group`].
+struct ReferenceGraph {
+    /// child ptr -> `(parent ptr, edge count from that one parent)`, for
+    /// every direct operator-child edge in the relational-skeleton scope
+    /// [`walk_children`] itself uses (an edge count above 1 happens when
+    /// one parent references the same child from two different fields,
+    /// e.g. a `Join`'s `left`/`right` both being the same `Rc`).
+    parents_of: HashMap<*const QueryExpr, Vec<(*const QueryExpr, usize)>>,
+    /// parent ptr -> every distinct child ptr it directly references — the
+    /// reverse of `parents_of`, for [`topological_order`]'s Kahn's-algorithm
+    /// traversal.
+    children_of: HashMap<*const QueryExpr, Vec<*const QueryExpr>>,
+    /// How many of the workload's own `roots` point directly at each node —
+    /// a node's "external" use. Nothing inside the tree decides this (it
+    /// isn't a reference from another discovered site), so it's never
+    /// subject to any ancestor's Share/Recompute choice — it's the base
+    /// case [`PlanSpace::global_selection`]'s recurrence starts from.
+    external_root_uses: HashMap<*const QueryExpr, usize>,
+}
+
+/// Build an ordering graph containing every edge that could be selected:
+/// the original target's edges plus every rewrite candidate's edges. The
+/// graph is deliberately only used for topological ordering; effective-use
+/// counts are propagated through the one candidate actually selected.
+fn reference_graph<Id>(space: &PlanSpace<Id>) -> ReferenceGraph {
+    let mut graph = ReferenceGraph {
+        parents_of: HashMap::new(),
+        children_of: HashMap::new(),
+        external_root_uses: HashMap::new(),
+    };
+    for (_, root) in &space.roots {
+        *graph
+            .external_root_uses
+            .entry(Rc::as_ptr(root))
+            .or_insert(0) += 1;
+    }
+    for ptr in &space.order {
+        let group = &space.groups[ptr];
+        record_possible_edges(*ptr, &group.target, &mut graph);
+        for candidate in &group.candidates {
+            if let Replacement::Rewrite(rewrite) = &candidate.replacement {
+                record_possible_edges(*ptr, rewrite, &mut graph);
+            }
+        }
+    }
+    graph
+}
+
+/// Record one `parent_ptr -> child` edge (both directions — see
+/// [`ReferenceGraph`]'s fields), retaining the greatest multiplicity seen
+/// when the target and alternative rewrites expose the same edge.
+fn add_edge(
+    parent_ptr: *const QueryExpr,
+    child_ptr: *const QueryExpr,
+    edge_count: usize,
+    graph: &mut ReferenceGraph,
+) {
+    let siblings = graph.parents_of.entry(child_ptr).or_default();
+    match siblings.iter_mut().find(|(p, _)| *p == parent_ptr) {
+        Some((_, count)) => *count = (*count).max(edge_count),
+        None => siblings.push((parent_ptr, edge_count)),
+    }
+    let kids = graph.children_of.entry(parent_ptr).or_default();
+    if !kids.contains(&child_ptr) {
+        kids.push(child_ptr);
+    }
+}
+
+fn record_possible_edges(
+    parent_ptr: *const QueryExpr,
+    node: &QueryExpr,
+    graph: &mut ReferenceGraph,
+) {
+    for (child_ptr, edge_count) in direct_child_counts(node) {
+        add_edge(parent_ptr, child_ptr, edge_count, graph);
+    }
+}
+
+/// Direct relational-skeleton children and their edge multiplicities.
+/// `Concat` is transparent, matching [`walk_children`]'s site scope.
+fn direct_child_counts(node: &QueryExpr) -> Vec<(*const QueryExpr, usize)> {
+    fn push(children: &mut Vec<(*const QueryExpr, usize)>, child: &Rc<QueryExpr>) {
+        let ptr = Rc::as_ptr(child);
+        match children.iter_mut().find(|(existing, _)| *existing == ptr) {
+            Some((_, count)) => *count += 1,
+            None => children.push((ptr, 1)),
+        }
+    }
+
+    fn collect(node: &QueryExpr, children: &mut Vec<(*const QueryExpr, usize)>) {
+        use QueryExpr::*;
+        match node {
+            Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
+            PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => {
+                push(children, c);
+            }
+            PromqlRelabel { child, .. }
+            | PromqlInfoEnrich { child, .. }
+            | PromqlSeriesSample { child, .. }
+            | Filter { child, .. }
+            | Project { child, .. }
+            | Aggregate { child, .. }
+            | Dedup { child, .. }
+            | PromqlSubquery { child, .. }
+            | TimeRange { child, .. }
+            | TimeShift { child, .. }
+            | SQLWindowFunc { child, .. }
+            | Sort { child, .. }
+            | Limit { child, .. } => {
+                push(children, child);
+            }
+            Concat {
+                children: concat_children,
+            } => {
+                for c in concat_children {
+                    collect(c, children);
+                }
+            }
+            Join { left, right, .. } | SetOp { left, right, .. } => {
+                push(children, left);
+                push(children, right);
+            }
+            BinaryOp { lhs, rhs, .. } => {
+                push(children, lhs);
+                push(children, rhs);
+            }
+            Column(_)
+            | Literal(_)
+            | Compare { .. }
+            | BoolAnd(_)
+            | BoolOr(_)
+            | Not(_)
+            | IsNull(_)
+            | IsNotNull(_)
+            | Cast { .. }
+            | InList { .. }
+            | FunctionCall { .. }
+            | Arithmetic { .. }
+            | Case { .. } => {}
+        }
+    }
+
+    let mut children = Vec::new();
+    collect(node, &mut children);
+    children
+}
+
+/// A topological order over `order` (parent before every child) via Kahn's
+/// algorithm on `graph`'s reverse adjacency — needed because
+/// [`discover_targets`]'s own `order` is only a valid *discovery* order
+/// (first-seen-first), not a valid topological one: a node reached via two
+/// different root paths can have a parent that's discovered *after* it (see
+/// this function's own test for a worked diamond example), which is exactly
+/// backwards for [`PlanSpace::global_selection`]'s recurrence.
+fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<*const QueryExpr> {
+    let mut in_degree: HashMap<*const QueryExpr, usize> = HashMap::new();
+    for ptr in order {
+        let degree = graph.parents_of.get(ptr).map(Vec::len).unwrap_or(0);
+        in_degree.insert(*ptr, degree);
+    }
+
+    let mut queue: VecDeque<*const QueryExpr> = order
+        .iter()
+        .copied()
+        .filter(|ptr| in_degree[ptr] == 0)
+        .collect();
+
+    let mut topo = Vec::with_capacity(order.len());
+    while let Some(ptr) = queue.pop_front() {
+        topo.push(ptr);
+        if let Some(children) = graph.children_of.get(&ptr) {
+            for child in children {
+                if let Some(degree) = in_degree.get_mut(child) {
+                    *degree -= 1;
+                    if *degree == 0 {
+                        queue.push_back(*child);
+                    }
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        topo.len(),
+        order.len(),
+        "topological_order: the discovered-site reference graph has a cycle — every QueryExpr \
+         node is built from Rc children, which can't form one, so this indicates a bug in \
+         reference_graph rather than a real cyclic workload",
+    );
+    topo
 }
 
 // ── default_strategies ──────────────────────────────────────────────────
@@ -2020,10 +2554,82 @@ fn search_cse_workload_with<'s, Id>(
         frontier = new_targets.to_vec();
     }
 
+    add_effective_count_cse_candidates(&order, &mut groups);
+
     PlanSpace {
         roots: cse_roots,
         groups,
         order,
+    }
+}
+
+/// Materialize share/recompute alternatives for descendants whose raw edge
+/// count is one but whose effective count can exceed one when a repeated
+/// ancestor is recomputed. We only do this when an ordinary repeated group
+/// proves that `SharedSubtreeStrategy` is part of this search's strategy set.
+fn add_effective_count_cse_candidates(
+    order: &[*const QueryExpr],
+    groups: &mut HashMap<*const QueryExpr, MemoGroup>,
+) {
+    let mut possible_children: HashMap<*const QueryExpr, Vec<*const QueryExpr>> = HashMap::new();
+    for ptr in order {
+        let group = &groups[ptr];
+        let children = possible_children.entry(*ptr).or_default();
+        for (child, _) in direct_child_counts(&group.target) {
+            if !children.contains(&child) {
+                children.push(child);
+            }
+        }
+        for candidate in &group.candidates {
+            if let Replacement::Rewrite(rewrite) = &candidate.replacement {
+                for (child, _) in direct_child_counts(rewrite) {
+                    if !children.contains(&child) {
+                        children.push(child);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut potentially_repeated = HashSet::new();
+    let mut queue = VecDeque::new();
+    for ptr in order {
+        let group = &groups[ptr];
+        if group.consumer_count >= 2 && cse_candidate_pair(group).is_some() {
+            potentially_repeated.insert(*ptr);
+            queue.push_back(*ptr);
+        }
+    }
+    while let Some(parent) = queue.pop_front() {
+        if let Some(children) = possible_children.get(&parent) {
+            for child in children {
+                if groups.contains_key(child) && potentially_repeated.insert(*child) {
+                    queue.push_back(*child);
+                }
+            }
+        }
+    }
+
+    for ptr in order {
+        let group = groups
+            .get_mut(ptr)
+            .expect("every discovered site has a group");
+        if potentially_repeated.contains(ptr) && cse_candidate_pair(group).is_none() {
+            let target = Rc::clone(&group.target);
+            let site = TargetSubDAG::with_consumer_count(&target, 2);
+            for mut candidate in SharedSubtreeStrategy.replacements(&site) {
+                candidate.rationale = format!(
+                    "{}: this subtree can become repeated when a repeated ancestor is recomputed; \
+                     global_selection decides using its effective consumer count",
+                    match candidate.provenance {
+                        ReplacementProvenance::CseShare => "build once and share",
+                        ReplacementProvenance::CseRecompute => "recompute independently",
+                        _ => unreachable!("SharedSubtreeStrategy only emits CSE candidates"),
+                    }
+                );
+                group.add_candidate(candidate);
+            }
+        }
     }
 }
 
@@ -2139,6 +2745,7 @@ fn walk_children(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cost_model::Cost;
     use asap_types::pre_asap::agg_intent::{
         agg_is_exact, default_cardinality, default_quantile, MathFunc, TimeFunc,
     };
@@ -3548,6 +4155,511 @@ mod tests {
         }
     }
 
+    // ── global_selection (issue #271) ───────────────────────────────────
+
+    /// A `CostModel` with a constant, `subtree`-independent recompute cost
+    /// and shared-maintenance cost, chosen (40 recompute-per-use, 100
+    /// maintenance) so that a `SharedSubtreeStrategy` group's
+    /// `cse_share_decision` flips exactly between a consumer count of 2
+    /// (recompute total 80, below maintenance: `RecomputeIndependently`)
+    /// and a consumer count of 3 (recompute total 120, above
+    /// maintenance: `Share`) — the precise threshold
+    /// `effective_consumer_count_corrects_a_nested_groups_share_decision`
+    /// needs to cross.
+    struct ConstantCseCost;
+    impl CostModel for ConstantCseCost {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            candidates.to_vec()
+        }
+        fn cse_recompute_cost(&self, _candidate: &CseCandidate) -> Cost {
+            Cost(40.0)
+        }
+        fn cse_shared_maintenance_cost(&self, _candidate: &CseCandidate) -> Cost {
+            Cost(100.0)
+        }
+    }
+
+    #[test]
+    fn global_selection_matches_cost_sorted_for_a_non_interacting_workload() {
+        // No nested sharing at all — global_selection's effective_consumer_count
+        // must equal the group's own raw consumer_count, and its `chosen`
+        // candidate must be cost_sorted's top pick, for both the sketch
+        // group and its child Scan.
+        let root = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let space = search_workload(vec![("q", root)]);
+
+        let ranked = space.cost_sorted(&DefaultCostModel);
+        let selected = space.global_selection(&DefaultCostModel);
+        assert_eq!(ranked.len(), selected.groups().count());
+
+        for ranked_group in &ranked {
+            let selected_group = selected.for_target(ranked_group.target).unwrap();
+            assert_eq!(
+                selected_group.effective_consumer_count, ranked_group.consumer_count,
+                "no ancestor is ever RecomputeIndependently here, so effective must equal raw"
+            );
+            assert_eq!(
+                selected_group.chosen.map(|c| &c.rationale),
+                ranked_group.candidates.first().map(|c| &c.rationale),
+                "with no cross-group interaction, global_selection's pick must match \
+                 cost_sorted's top-ranked candidate"
+            );
+        }
+    }
+
+    #[test]
+    fn global_selection_leaves_an_unmatched_group_as_none() {
+        // A bare Scan: no registered strategy has an opinion on it, so it
+        // gets a group with an empty candidate list (see MemoGroup's own
+        // doc) — global_selection must not invent a candidate for it.
+        let root = Rc::new(metric_scan(&["job"]));
+        let space = search_workload(vec![("q", root)]);
+        let selected = space.global_selection(&DefaultCostModel);
+        let scan_group = selected
+            .groups()
+            .find(|g| matches!(g.target.as_ref(), QueryExpr::Scan { .. }))
+            .unwrap();
+        assert!(scan_group.chosen.is_none());
+        assert_eq!(scan_group.effective_consumer_count, 1);
+    }
+
+    #[test]
+    fn global_selection_falls_back_to_local_ranking_for_sketch_family_groups() {
+        // SketchAlgorithmStrategy groups have no cross-group-aware cost hook
+        // (rank_candidates takes no consumer_count) — global_selection must
+        // still return cost_sorted's own top pick for them (documented in
+        // the module docs' "Whole-plan (cross-group) selection" section),
+        // not silently drop the candidate or fall back to discovery order.
+        struct PreferDDSketch;
+        impl CostModel for PreferDDSketch {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                let mut v = candidates.to_vec();
+                if let Some(pos) = v.iter().position(|k| *k == SketchAlgorithm::DDSketch) {
+                    let dd = v.remove(pos);
+                    v.insert(0, dd);
+                }
+                v
+            }
+        }
+
+        let root = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let space = search_workload(vec![("q", root)]);
+        let selected = space.global_selection(&PreferDDSketch);
+        let agg_group = selected
+            .groups()
+            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .unwrap();
+        let kind = match &agg_group.chosen.unwrap().replacement {
+            Replacement::Summary(node) => sketch_kind_of(node),
+            Replacement::Rewrite(_) => None,
+        };
+        assert_eq!(kind, Some(SketchAlgorithm::DDSketch));
+    }
+
+    #[test]
+    fn mixed_rewrite_group_keeps_and_selects_its_explicit_cse_pair() {
+        let target = Rc::new(metric_scan(&["job"]));
+        let mut group = MemoGroup::new(Rc::clone(&target), 2);
+        group.candidates = vec![
+            ReplacementSubDAG {
+                replacement: Replacement::Rewrite(Rc::clone(&target)),
+                provenance: ReplacementProvenance::CseShare,
+                rationale: "share".into(),
+            },
+            ReplacementSubDAG {
+                replacement: Replacement::Rewrite(Rc::new(target.as_ref().clone())),
+                provenance: ReplacementProvenance::CseRecompute,
+                rationale: "recompute".into(),
+            },
+            ReplacementSubDAG {
+                replacement: Replacement::Rewrite(Rc::new(QueryExpr::CurrentTimestamp)),
+                provenance: ReplacementProvenance::LogicalRewrite,
+                rationale: "different rewrite strategy".into(),
+            },
+        ];
+
+        assert!(cse_candidate_pair(&group).is_some());
+        let ranked = rank_group(&group, &ConstantCseCost);
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|c| c.rationale.as_str())
+                .collect::<Vec<_>>(),
+            vec!["recompute", "different rewrite strategy", "share"],
+            "the preferred CSE choice must be ranked without losing the unrelated rewrite"
+        );
+        let chosen = pick_shared_subtree_candidate(
+            &group,
+            decide_with_effective_count(&group, 2, &ConstantCseCost).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(chosen.provenance, ReplacementProvenance::CseRecompute);
+    }
+
+    #[test]
+    fn effective_consumer_count_corrects_a_nested_groups_share_decision() {
+        // The interaction issue #271 describes: an outer shared subtree `a`
+        // (referenced by 2 roots, so consumer_count == 2) wraps an inner
+        // shared subtree `c` (referenced once through `a`'s own child edge,
+        // plus once more directly by a third, separate root — so `c`'s own
+        // *raw* structural consumer_count is also 2, independent of `a`).
+        //
+        //   root1 ─┐
+        //          ├─▶ a = Filter(child = c) ─▶ c = Dedup(job)
+        //   root2 ─┘
+        //   root3 ───────────────────────────▶ c  (same shared Rc)
+        //
+        // `a` and `c` are both non-`Aggregate` nodes (`Filter`/`Dedup`) so
+        // neither is bindable — each group is a *clean* two-candidate
+        // SharedSubtreeStrategy share-vs-recompute pair, with no
+        // SketchAlgorithmStrategy `Summary` candidate mixed in to complicate
+        // ranking (see `shared_aggregate_across_two_roots_gets_both_strategies_candidates`
+        // for what a *mixed*-shape group looks like — deliberately avoided
+        // here to isolate the SharedSubtreeStrategy-only interaction).
+        //
+        // Under ConstantCseCost, consumer_count == 2 loses to maintenance
+        // (2 * 40 = 80 < 100 ⇒ RecomputeIndependently); consumer_count == 3 wins
+        // (3 * 40 = 120 > 100 ⇒ Share). `cost_sorted` only ever sees `c`'s raw
+        // count (2) and picks RecomputeIndependently for it — the WRONG
+        // answer once `a` itself is accounted for: `a`'s own decision is
+        // also RecomputeIndependently (same 80-vs-100 threshold), so `a`
+        // actually runs twice, and each run recomputes `c` once more —
+        // `c`'s *true* effective count is 2 (via `a`) + 1 (via root3) = 3,
+        // which flips its own decision to Share. Only global_selection,
+        // which folds `a`'s decision into `c`'s effective_consumer_count
+        // before deciding `c`, gets this right.
+        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::pre_asap::query_expr::Predicate;
+
+        let c = || QueryExpr::Dedup {
+            cols: vec![0],
+            child: Rc::new(metric_scan(&["job"])),
+        };
+        let a = || QueryExpr::Filter {
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            child: Rc::new(c()),
+        };
+
+        let space = search_workload(vec![
+            ("root1", Rc::new(a())),
+            ("root2", Rc::new(a())),
+            ("root3", Rc::new(c())),
+        ]);
+
+        // Fixture sanity: root1/root2 merged onto one shared `a`, and `c`
+        // (root1/root2's shared child, and root3 itself) merged onto one
+        // shared `c` with raw consumer_count 2, and both groups are clean
+        // (non-mixed) two-candidate SharedSubtreeStrategy pairs.
+        assert!(Rc::ptr_eq(&space.roots[0].1, &space.roots[1].1));
+        let a_rc = &space.roots[0].1;
+        let QueryExpr::Filter { child: c_via_a, .. } = a_rc.as_ref() else {
+            panic!("expected root1/root2 to still be a Filter");
+        };
+        assert!(Rc::ptr_eq(c_via_a, &space.roots[2].1));
+        let a_group = space.group_for(a_rc).unwrap();
+        let c_group = space.group_for(c_via_a).unwrap();
+        assert_eq!(
+            a_group.consumer_count, 2,
+            "fixture sanity: a has 2 consumers"
+        );
+        assert_eq!(
+            c_group.consumer_count, 2,
+            "fixture sanity: c has 2 raw consumers (via a's child edge, and via root3)"
+        );
+        assert_eq!(
+            a_group.candidates.len(),
+            2,
+            "fixture sanity: a is a clean Rewrite pair"
+        );
+        assert_eq!(
+            c_group.candidates.len(),
+            2,
+            "fixture sanity: c is a clean Rewrite pair"
+        );
+
+        // The naive/local answer: cost_sorted ranks c using its raw count
+        // (2) alone and prefers RecomputeIndependently.
+        let ranked = space.cost_sorted(&ConstantCseCost);
+        let c_ranked = ranked
+            .iter()
+            .find(|g| Rc::ptr_eq(g.target, c_via_a))
+            .unwrap();
+        let c_top_shares = matches!(
+            &c_ranked.candidates[0].replacement,
+            Replacement::Rewrite(rc) if Rc::ptr_eq(rc, c_via_a)
+        );
+        assert!(
+            !c_top_shares,
+            "cost_sorted, blind to a's own decision, must (wrongly) prefer \
+             RecomputeIndependently for c using its raw consumer_count of 2"
+        );
+
+        // The corrected, cross-group-aware answer: global_selection folds
+        // a's own RecomputeIndependently choice into c's effective count
+        // (2 from a + 1 from root3 = 3) and flips to Share.
+        let selected = space.global_selection(&ConstantCseCost);
+        let a_selected = selected.for_target(a_rc).unwrap();
+        let c_selected = selected.for_target(c_via_a).unwrap();
+
+        assert_eq!(
+            a_selected.effective_consumer_count, 2,
+            "a has no interacting ancestor"
+        );
+        let a_shares = matches!(
+            &a_selected.chosen.unwrap().replacement,
+            Replacement::Rewrite(rc) if Rc::ptr_eq(rc, a_rc)
+        );
+        assert!(
+            !a_shares,
+            "fixture sanity: a itself must also choose RecomputeIndependently"
+        );
+
+        assert_eq!(
+            c_selected.effective_consumer_count, 3,
+            "c's effective count must be 2 (a, itself recomputed twice) + 1 (root3)"
+        );
+        let c_shares = matches!(
+            &c_selected.chosen.unwrap().replacement,
+            Replacement::Rewrite(rc) if Rc::ptr_eq(rc, c_via_a)
+        );
+        assert!(
+            c_shares,
+            "global_selection must flip c to Share once a's own recomputation is accounted for"
+        );
+    }
+
+    #[test]
+    fn effective_repetition_materializes_a_cse_choice_for_a_single_edge_child() {
+        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::pre_asap::query_expr::Predicate;
+
+        let c = || QueryExpr::Dedup {
+            cols: vec![0],
+            child: Rc::new(metric_scan(&["job"])),
+        };
+        let a = || QueryExpr::Filter {
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            child: Rc::new(c()),
+        };
+        let space = search_workload(vec![("root1", Rc::new(a())), ("root2", Rc::new(a()))]);
+        let a_rc = &space.roots[0].1;
+        let QueryExpr::Filter { child: c_rc, .. } = a_rc.as_ref() else {
+            panic!("expected Filter root");
+        };
+
+        assert_eq!(space.group_for(c_rc).unwrap().consumer_count, 1);
+        assert!(cse_candidate_pair(space.group_for(c_rc).unwrap()).is_some());
+
+        let selected = space.global_selection(&ConstantCseCost);
+        let child = selected.for_target(c_rc).unwrap();
+        assert_eq!(child.effective_consumer_count, 2);
+        assert!(child.chosen.is_some());
+    }
+
+    #[test]
+    fn shared_ancestor_keeps_a_single_use_cse_descendant_selected() {
+        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::pre_asap::query_expr::Predicate;
+
+        struct AlwaysShare;
+        impl CostModel for AlwaysShare {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+
+            fn cse_share_decision(&self, _candidate: &CseCandidate) -> ShareDecision {
+                ShareDecision::Share
+            }
+        }
+
+        let child = || QueryExpr::Dedup {
+            cols: vec![0],
+            child: Rc::new(metric_scan(&["job"])),
+        };
+        let parent = || QueryExpr::Filter {
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            child: Rc::new(child()),
+        };
+        let space = search_workload(vec![
+            ("root1", Rc::new(parent())),
+            ("root2", Rc::new(parent())),
+        ]);
+        let parent_rc = &space.roots[0].1;
+        let QueryExpr::Filter {
+            child: child_rc, ..
+        } = parent_rc.as_ref()
+        else {
+            panic!("expected Filter root");
+        };
+
+        let selected = space.global_selection(&AlwaysShare);
+        assert_eq!(
+            selected
+                .for_target(parent_rc)
+                .unwrap()
+                .effective_consumer_count,
+            2
+        );
+        let child_selection = selected.for_target(child_rc).unwrap();
+        assert_eq!(child_selection.effective_consumer_count, 1);
+        assert_eq!(
+            child_selection.chosen.map(|candidate| candidate.provenance),
+            Some(ReplacementProvenance::CseShare),
+            "a descendant collapsed to one execution still needs a selected plan"
+        );
+    }
+
+    #[test]
+    fn global_selection_propagates_uses_through_the_selected_rewrite() {
+        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::pre_asap::query_expr::Predicate;
+
+        struct ReplaceFilterChild;
+        impl ReplacementStrategy for ReplaceFilterChild {
+            fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
+                matches!(target.root.as_ref(), QueryExpr::Filter { .. })
+            }
+
+            fn replacements(&self, _target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
+                vec![ReplacementSubDAG {
+                    replacement: Replacement::Rewrite(Rc::new(QueryExpr::Dedup {
+                        cols: vec![0],
+                        child: Rc::new(metric_scan(&["replacement"])),
+                    })),
+                    provenance: ReplacementProvenance::LogicalRewrite,
+                    rationale: "replace the Filter and its input".into(),
+                }]
+            }
+        }
+
+        let original_child = Rc::new(metric_scan(&["original"]));
+        let root = Rc::new(QueryExpr::Filter {
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            child: Rc::clone(&original_child),
+        });
+        let strategies: Vec<Box<dyn ReplacementStrategy>> = vec![Box::new(ReplaceFilterChild)];
+        let space = search_workload_with(vec![("q", root)], &strategies);
+        let root = &space.roots[0].1;
+        let selected = space.global_selection(&DefaultCostModel);
+        let Replacement::Rewrite(rewrite) = &selected
+            .for_target(root)
+            .unwrap()
+            .chosen
+            .unwrap()
+            .replacement
+        else {
+            panic!("expected logical rewrite");
+        };
+        let QueryExpr::Dedup {
+            child: replacement_child,
+            ..
+        } = rewrite.as_ref()
+        else {
+            panic!("expected Dedup rewrite");
+        };
+        let QueryExpr::Filter {
+            child: original_child,
+            ..
+        } = root.as_ref()
+        else {
+            panic!("expected Filter root");
+        };
+
+        assert_eq!(
+            selected
+                .for_target(original_child)
+                .unwrap()
+                .effective_consumer_count,
+            0
+        );
+        assert_eq!(
+            selected
+                .for_target(replacement_child)
+                .unwrap()
+                .effective_consumer_count,
+            1
+        );
+    }
+
+    #[test]
+    fn topological_order_puts_a_later_discovered_parent_before_its_child() {
+        // Mirrors nested_shared_subtree_below_an_unshared_parent_is_still_discovered's
+        // diamond fixture: discover_targets's own `order` visits root_b (a
+        // parent of `shared`) *after* `shared` itself, because `shared` was
+        // already fully walked via root_a first. A naive "process
+        // discover_targets's own order" DP would see root_b's child edge
+        // after already processing `shared` — topological_order must not
+        // make that mistake.
+        use asap_types::pre_asap::expr_ir::ScalarValue;
+        use asap_types::pre_asap::query_expr::Predicate;
+
+        let shared = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
+        let root_a = QueryExpr::Filter {
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(1)))),
+            child: Rc::new(shared.clone()),
+        };
+        let root_b = QueryExpr::Filter {
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Int64(2)))),
+            child: Rc::new(shared),
+        };
+        let roots = vec![("a", Rc::new(root_a)), ("b", Rc::new(root_b))];
+
+        let mut order = Vec::new();
+        let mut nodes = HashMap::new();
+        let mut counts = HashMap::new();
+        discover_targets(&roots, &mut order, &mut nodes, &mut counts);
+        let groups = order
+            .iter()
+            .map(|ptr| (*ptr, MemoGroup::new(Rc::clone(&nodes[ptr]), counts[ptr])))
+            .collect();
+        let space = PlanSpace {
+            roots,
+            groups,
+            order: order.clone(),
+        };
+        let graph = reference_graph(&space);
+
+        // Discovery-order sanity: root_b comes after the shared child in
+        // discover_targets's own order (the exact non-topological case this
+        // test exists to cover).
+        let QueryExpr::Filter {
+            child: shared_via_a,
+            ..
+        } = space.roots[0].1.as_ref()
+        else {
+            panic!("expected a Filter root");
+        };
+        let shared_ptr = Rc::as_ptr(shared_via_a);
+        let root_b_ptr = Rc::as_ptr(&space.roots[1].1);
+        let shared_discovery_pos = order.iter().position(|p| *p == shared_ptr).unwrap();
+        let root_b_discovery_pos = order.iter().position(|p| *p == root_b_ptr).unwrap();
+        assert!(
+            root_b_discovery_pos > shared_discovery_pos,
+            "fixture sanity: discover_targets's own order must NOT already be topological here"
+        );
+
+        let topo = topological_order(&order, &graph);
+        let shared_topo_pos = topo.iter().position(|p| *p == shared_ptr).unwrap();
+        let root_b_topo_pos = topo.iter().position(|p| *p == root_b_ptr).unwrap();
+        assert!(
+            root_b_topo_pos < shared_topo_pos,
+            "topological_order must place root_b (a parent of the shared node) before it, \
+             unlike discover_targets's own discovery order"
+        );
+    }
+
     // ── termination ──────────────────────────────────────────────────────
 
     #[test]
@@ -3596,6 +4708,7 @@ mod tests {
             };
             vec![ReplacementSubDAG {
                 replacement: Replacement::Rewrite(Rc::new(outer_wrapper)),
+                provenance: ReplacementProvenance::LogicalRewrite,
                 rationale: format!("pathological candidate #{n}"),
             }]
         }
