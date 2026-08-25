@@ -36,14 +36,17 @@
 //! - `Sum`/`Min`/`Max` are **self-combining**: a sum of sums is a sum, a min
 //!   of mins is a min. Reapplying the identical `AggIntent` over the finer
 //!   side's own output column is correct.
-//! - `Count` is **not** self-combining: re-`Count`ing the finer side's own
+//! - Exact `Count` is **not** self-combining: re-`Count`ing the finer side's own
 //!   output rows counts the number of *finer groups* per coarser group (how
 //!   many distinct `region`s a `job` has), not the original row count. The
 //!   correct combinator is `Sum` — `count(A ∪ B) = count(A) + count(B)`, the
 //!   same "`COUNT(*)` over a pre-aggregated summary table becomes
 //!   `SUM(count)`" rule every OLAP rollup/cube/materialized-view-matching
-//!   implementation applies. `Increase` mirrors it (a counter's total
-//!   increase across sub-windows is additive), so it combines via `Sum` too.
+//!   implementation applies. Approximate `Count` is excluded because summing
+//!   finalized per-finer-group estimates does not preserve the coarser error
+//!   target. `Increase` mirrors exact count's additive combination (a
+//!   counter's total increase across sub-windows is additive), so it combines
+//!   via `Sum` too.
 //! - `Rate` (`increase / duration`) has **no** valid self- or sum-combinator
 //!   here, so it is deliberately left unhandled (see [`rollup_combinator`]).
 //!   In practice this never matters: `Rate`/`Increase` are constructed with
@@ -61,37 +64,27 @@
 //! asks for) consults it, and so does this module's `replacements`, so the
 //! two can never disagree about which intents are eligible.
 //!
-//! ## `ColumnId` comparability — only sound because the child `Rc` is shared
+//! ## `ColumnId` comparability — only sound for identical child IR
 //!
 //! A `ColumnId` is a *position* into a specific `Schema` (`crates/types/src/pre_asap/schema.rs`'s
 //! own doc: "the same edge, the same schema, the same positional numbering").
 //! Comparing the coarser aggregate's `by` positions against the finer
-//! aggregate's `by` positions is only meaningful because **both aggregates
-//! share the identical child `Rc`** (post-CSE, per
-//! `pre_asap::cse::share_common_subtrees`'s doc on why hash-consing is a
-//! precondition, not a coincidence) — so both `by` lists are positional
-//! offsets into the exact same schema. Two *structurally different but
-//! equivalent* sources (e.g. two independently-built scans of the same
-//! underlying table with columns in a different order) are explicitly out
-//! of scope: this module never attempts to reconcile `ColumnId`s across two
-//! distinct schemas.
+//! aggregate's `by` positions is only meaningful when both aggregates have
+//! pointer-identical or `PartialEq`-equal children, including equal schemas.
+//! Thus both `by` lists index the same shape. The equality fallback matters
+//! for scans that CSE conservatively declines to alias because they have no
+//! declared unique key. Structurally different sources remain out of scope:
+//! this module never reconciles `ColumnId`s across distinct schemas.
 //!
 //! ## Non-goals (tracked separately, not attempted here — same split
 //! `replacement.rs`'s own module docs draw for `SharedSubtreeStrategy`'s
 //! `consumer_count`)
 //!
-//! - **No workload-wide sibling discovery.** Finding "every `Aggregate` node
-//!   across a whole workload that shares a given `Rc` child" is a traversal
-//!   over the *whole* workload, not a fact available from one
-//!   [`TargetSubDAG`] in isolation — [`ReplacementStrategy::matches`]/
-//!   `replacements` only ever see one target at a time. [`RollupStrategy`]
-//!   takes the already-discovered sibling set as constructor state instead
-//!   of rediscovering it: a future caller (the search engine, issue #252,
-//!   built in parallel and possibly not yet landed on this branch) is
-//!   expected to construct this strategy with the real sibling set it
-//!   already found — the same "this module wraps a decision, it does not
-//!   own the traversal that feeds it" split `replacement.rs` draws for
-//!   `SharedSubtreeStrategy::matches`'s `consumer_count`.
+//! - **No sibling discovery inside this strategy.** Finding every aggregate
+//!   across a workload is not a per-target operation. The workload search
+//!   performs that traversal after CSE, then constructs [`RollupStrategy`]
+//!   with the discovered aggregate set. Direct/custom callers supply their
+//!   own set through [`RollupStrategy::new`].
 //! - **No materialized roll-up operator.** Actually building a pre-aggregated
 //!   summary/scan leaf at execution time is separate, larger work outside
 //!   `asap-aware-mapping`'s scope (see issue #254's own "Non-goal" section)
@@ -110,6 +103,7 @@ use std::rc::Rc;
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{GroupKeys, QueryExpr, Reduction};
 use asap_types::pre_asap::schema::{ColumnId, Schema};
+use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{Replacement, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG};
 
@@ -170,7 +164,10 @@ fn rollup_combinator(intent: &AggIntent, finer_measure_col: ColumnId) -> Option<
         }),
         // Not self-combining — see the module docs. Both merge by addition
         // over the finer side's own output column instead.
-        AggIntent::Count { .. } | AggIntent::Increase => Some(AggIntent::Sum {
+        AggIntent::Count {
+            accuracy: AccuracyTarget::Exact,
+        }
+        | AggIntent::Increase => Some(AggIntent::Sum {
             col: Some(finer_measure_col),
         }),
         _ => None,
@@ -243,40 +240,43 @@ pub fn is_legal_rollup_source(
 /// superset, so the length check alone rules out equality without a set
 /// comparison).
 fn is_strict_column_superset(finer: &[ColumnId], coarser: &[ColumnId]) -> bool {
-    if finer.len() <= coarser.len() {
+    let finer_set: HashSet<&ColumnId> = finer.iter().collect();
+    let coarser_set: HashSet<&ColumnId> = coarser.iter().collect();
+    if finer_set.len() <= coarser_set.len() {
         return false;
     }
-    let finer_set: HashSet<&ColumnId> = finer.iter().collect();
-    coarser.iter().all(|id| finer_set.contains(id))
+    coarser_set.is_subset(&finer_set)
 }
 
 /// Wraps the group-by-lattice roll-up reuse (issue #254, part of #33) as a
 /// [`ReplacementStrategy`]: given a coarser `Aggregate` [`TargetSubDAG`],
-/// finds every already-known sibling `Aggregate` that shares the same child
-/// `Rc` and is a legal, strictly finer roll-up source for it (per
+/// finds every already-known sibling `Aggregate` that has an identical child
+/// IR and is a legal, strictly finer roll-up source for it (per
 /// [`is_legal_rollup_source`]), and proposes replacing the target with a
 /// re-aggregation over that sibling instead of the shared raw source.
 ///
 /// `siblings` is **caller-supplied, not discovered here** — see the module
 /// docs' "Non-goals" on why finding the full sibling set across a workload
 /// is a workload-wide traversal this strategy does not own.
-pub struct RollupStrategy<'a> {
-    siblings: &'a [Rc<QueryExpr>],
+pub struct RollupStrategy {
+    siblings: Vec<Rc<QueryExpr>>,
 }
 
-impl<'a> RollupStrategy<'a> {
-    /// A strategy that considers every node in `siblings` as a candidate
-    /// roll-up source (or target) — typically the full set of `Aggregate`
+impl RollupStrategy {
+    /// A strategy that owns clones of every node in `siblings` and considers
+    /// each as a candidate roll-up source (or target) — typically the full set of `Aggregate`
     /// nodes a workload-wide discovery pass (issue #252) already found
     /// sharing at least one child `Rc` with something else.
-    pub fn new(siblings: &'a [Rc<QueryExpr>]) -> Self {
-        Self { siblings }
+    pub fn new(siblings: &[Rc<QueryExpr>]) -> Self {
+        Self {
+            siblings: siblings.to_vec(),
+        }
     }
 
     /// Every sibling that is a legal, strictly finer roll-up source for
     /// `target` — shared between `matches` and `replacements` so the two
     /// can never disagree about which siblings qualify.
-    fn finer_sources(&self, target: &TargetSubDAG<'_>) -> Vec<&'a Rc<QueryExpr>> {
+    fn finer_sources(&self, target: &TargetSubDAG<'_>) -> Vec<&Rc<QueryExpr>> {
         let Some((coarser_by, coarser_intent, coarser_child)) =
             bindable_grouped_aggregate(target.root)
         else {
@@ -294,7 +294,7 @@ impl<'a> RollupStrategy<'a> {
                 else {
                     return false;
                 };
-                if !Rc::ptr_eq(finer_child, coarser_child) {
+                if !Rc::ptr_eq(finer_child, coarser_child) && finer_child != coarser_child {
                     return false;
                 }
                 let Ok(finer_schema) = candidate.output_schema() else {
@@ -312,7 +312,7 @@ impl<'a> RollupStrategy<'a> {
     }
 }
 
-impl ReplacementStrategy for RollupStrategy<'_> {
+impl ReplacementStrategy for RollupStrategy {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
         !self.finer_sources(target).is_empty()
     }
@@ -514,6 +514,18 @@ mod tests {
     }
 
     #[test]
+    fn predicate_does_not_treat_duplicate_keys_as_a_strict_superset() {
+        let finer_schema = Schema::with_time_index(vec![], 0, vec![vec![0, 1]]);
+        assert!(!is_legal_rollup_source(
+            &GroupKeys::by(vec![2, 3, 3]),
+            &finer_schema,
+            &AggIntent::Sum { col: None },
+            &GroupKeys::by(vec![2, 3]),
+            &AggIntent::Sum { col: None },
+        ));
+    }
+
+    #[test]
     fn predicate_rejects_unrelated_by_sets() {
         let finer_schema = Schema::with_time_index(vec![], 0, vec![vec![0, 1]]);
         assert!(!is_legal_rollup_source(
@@ -635,6 +647,90 @@ mod tests {
     }
 
     #[test]
+    fn approximate_count_does_not_roll_up_via_sum() {
+        let scan = Rc::new(metric_scan());
+        let intent = AggIntent::Count {
+            accuracy: AccuracyTarget::Epsilon(0.01),
+        };
+        let fine = agg(vec![2, 3], intent.clone(), &scan);
+        let coarse = agg(vec![2], intent, &scan);
+        let siblings = vec![Rc::clone(&fine), Rc::clone(&coarse)];
+        let strategy = RollupStrategy::new(&siblings);
+        let target = TargetSubDAG::new(&coarse);
+
+        assert!(!strategy.matches(&target));
+        assert!(strategy.replacements(&target).is_empty());
+    }
+
+    #[test]
+    fn default_workload_search_adds_rollup_for_two_query_workload() {
+        let fine_scan = Rc::new(metric_scan());
+        let coarse_scan = Rc::new(metric_scan());
+        let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &fine_scan);
+        let coarse = agg(vec![2], AggIntent::Sum { col: Some(1) }, &coarse_scan);
+
+        let space = crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
+        let coarse_group = space
+            .groups()
+            .find(|group| {
+                matches!(
+                    group.target.as_ref(),
+                    QueryExpr::Aggregate {
+                        reduction: Reduction::Reduce(by),
+                        ..
+                    } if by.keys() == [2]
+                )
+            })
+            .expect("coarser aggregate group");
+
+        let rewrite = coarse_group
+            .candidates
+            .iter()
+            .find_map(|candidate| match &candidate.replacement {
+                Replacement::Rewrite(rewrite) => Some(rewrite),
+                Replacement::Summary(_) => None,
+            })
+            .expect("default search must include the roll-up rewrite");
+        let QueryExpr::Aggregate { child, .. } = rewrite.as_ref() else {
+            panic!("expected aggregate rewrite, got {rewrite:?}");
+        };
+        assert!(matches!(
+            child.as_ref(),
+            QueryExpr::Aggregate {
+                reduction: Reduction::Reduce(by),
+                ..
+            } if by.keys() == [2, 3]
+        ));
+    }
+
+    #[test]
+    fn workload_search_does_not_roll_up_approximate_count() {
+        let intent = AggIntent::Count {
+            accuracy: AccuracyTarget::Epsilon(0.01),
+        };
+        let fine = agg(vec![2, 3], intent.clone(), &Rc::new(metric_scan()));
+        let coarse = agg(vec![2], intent, &Rc::new(metric_scan()));
+        let space = crate::replacement::search_workload(vec![("fine", fine), ("coarse", coarse)]);
+        let coarse_group = space
+            .groups()
+            .find(|group| {
+                matches!(
+                    group.target.as_ref(),
+                    QueryExpr::Aggregate {
+                        reduction: Reduction::Reduce(by),
+                        ..
+                    } if by.keys() == [2]
+                )
+            })
+            .expect("coarser aggregate group");
+
+        assert!(coarse_group
+            .candidates
+            .iter()
+            .all(|candidate| !matches!(candidate.replacement, Replacement::Rewrite(_))));
+    }
+
+    #[test]
     fn rollup_preserves_the_coarser_output_name() {
         let scan = Rc::new(metric_scan());
         let fine = agg(vec![2, 3], AggIntent::Sum { col: Some(1) }, &scan);
@@ -735,10 +831,10 @@ mod tests {
     }
 
     #[test]
-    fn different_child_does_not_roll_up_even_with_identical_shape() {
-        // Two separately-allocated (not CSE-shared) scans: same shape, but
-        // not the same `Rc`, so their `ColumnId`s are not comparable per
-        // this module's own scope (see the module docs).
+    fn structurally_identical_children_roll_up_without_cse_aliasing() {
+        // Scans without unique keys are deliberately not pointer-aliased by
+        // CSE. Structural equality still proves identical schemas and makes
+        // the two aggregates' positional ColumnIds comparable.
         let fine = agg(
             vec![2, 3],
             AggIntent::Sum { col: Some(1) },
@@ -753,7 +849,8 @@ mod tests {
         let siblings = vec![Rc::clone(&fine), Rc::clone(&coarse)];
         let strategy = RollupStrategy::new(&siblings);
         let target = TargetSubDAG::new(&coarse);
-        assert!(!strategy.matches(&target));
+        assert!(strategy.matches(&target));
+        assert_eq!(strategy.replacements(&target).len(), 1);
     }
 
     #[test]
