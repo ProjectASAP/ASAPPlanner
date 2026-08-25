@@ -278,6 +278,7 @@ use std::rc::Rc;
 use thiserror::Error;
 
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
+use crate::rollup::RollupStrategy;
 
 /// Errors from the pre-ASAP → post-ASAP replacement/construction path
 /// ([`realize_child`] and [`keep_pre_asap`]). Moved here from the former
@@ -1776,9 +1777,10 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
 
 // ── default_strategies ──────────────────────────────────────────────────
 
-/// The strategies [`search_workload`] runs, in the built-in
-/// [`DefaultCostModel`] configuration — mirrors this module's own two
-/// shipped [`ReplacementStrategy`] impls.
+/// The context-free strategies [`search_workload`] runs in the built-in
+/// [`DefaultCostModel`] configuration. Workload-dependent strategies such as
+/// [`RollupStrategy`] are added by [`search_workload`] after CSE and target
+/// discovery, when their sibling context exists.
 /// [`crate::explanation::explain_replacements`] (issue #257) uses
 /// this same set (via [`search_workload`]) rather than keeping a second,
 /// explanation-specific list to stay in sync with. Use
@@ -1817,9 +1819,11 @@ pub fn search_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> PlanSpace<Id> {
     search_workload_with(roots, &default_strategies())
 }
 
-/// Like [`search_workload`], but with an explicit `strategies` set (see
-/// [`default_strategies_with`] to plug in a deployment-specific
-/// [`CostModel`] for candidate generation).
+/// Like [`search_workload`], but with an explicit set of context-free
+/// `strategies` (see [`default_strategies_with`] to plug in a
+/// deployment-specific [`CostModel`]). The workload-dependent
+/// [`RollupStrategy`] is derived and added automatically after CSE for both
+/// entry points, because only this function owns the post-CSE sibling set.
 ///
 /// Runs [`share_common_subtrees`] once over `roots` first — so every
 /// strategy (and, transitively, every
@@ -1837,6 +1841,10 @@ pub fn search_workload_with<'s, Id>(
     roots: Vec<(Id, Rc<QueryExpr>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
 ) -> PlanSpace<Id> {
+    search_cse_workload_with(cse_workload(roots), strategies)
+}
+
+fn cse_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> Vec<(Id, Rc<QueryExpr>)> {
     // `share_common_subtrees` wants owned `QueryExpr`s, not already-`Rc`
     // roots — the same `Rc::try_unwrap`-with-clone-fallback pattern
     // `asap_types::pre_asap::cse::intern_child` itself uses to recover an
@@ -1848,12 +1856,25 @@ pub fn search_workload_with<'s, Id>(
             (id, expr)
         })
         .collect();
-    let cse_roots = share_common_subtrees(owned_roots);
+    share_common_subtrees(owned_roots)
+}
 
+fn search_cse_workload_with<'s, Id>(
+    cse_roots: Vec<(Id, Rc<QueryExpr>)>,
+    strategies: &[Box<dyn ReplacementStrategy + 's>],
+) -> PlanSpace<Id> {
     let mut order = Vec::new();
     let mut nodes = HashMap::new();
     let mut counts: HashMap<*const QueryExpr, usize> = HashMap::new();
     discover_targets(&cse_roots, &mut order, &mut nodes, &mut counts);
+    let siblings: Vec<Rc<QueryExpr>> = order
+        .iter()
+        .filter_map(|ptr| {
+            let node = &nodes[ptr];
+            matches!(node.as_ref(), QueryExpr::Aggregate { .. }).then(|| Rc::clone(node))
+        })
+        .collect();
+    let rollup_strategy = RollupStrategy::new(&siblings);
 
     let mut groups: HashMap<*const QueryExpr, MemoGroup> = HashMap::new();
     for ptr in &order {
@@ -1893,6 +1914,9 @@ pub fn search_workload_with<'s, Id>(
                 if strategy.matches(&target) {
                     proposed.extend(strategy.replacements(&target));
                 }
+            }
+            if rollup_strategy.matches(&target) {
+                proposed.extend(rollup_strategy.replacements(&target));
             }
 
             for candidate in &proposed {
