@@ -13,7 +13,8 @@
 //! one-pair-per-family shape: it nests a third level, [`sketch::SketchKind`]
 //! (quantile/cardinality/frequency/top-k), which itself carries the
 //! committed [`sketch::SketchAlgorithm`] and [`sketch::SketchParams`] —
-//! `SummaryFamilyType::Sketch(SketchKind)`, not a flat `(kind, params)` pair
+//! `SummaryFamilyType::Sketch(SketchKind, GroupingStrategy)`, not a flat
+//! `(kind, params)` pair
 //! — because `Sketch` is the one family with more than one algorithm per
 //! purpose today; no other family needs that extra level yet.
 //!
@@ -23,7 +24,7 @@
 //! (`PerSubpopulationInstance`, today's only behavior, vs.
 //! `SharedMultiSubpopulation`/Hydra — see [`sketch::HydraKind`]/
 //! [`sketch::HydraParams`]), carried on [`expr::SummaryExpr::SummaryAgg`]
-//! alongside `reduction` rather than on `SummaryFamilyType`/`Implementation`
+//! alongside `reduction` and on sketch-valued edge types
 //! — see `asap_aware_mapping::grouping`'s module docs for why.
 
 pub mod expr;

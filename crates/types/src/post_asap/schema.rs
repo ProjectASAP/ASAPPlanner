@@ -1,6 +1,6 @@
 use super::sketch::{
-    ExactKind, ExactParams, SamplingKind, SamplingParams, SketchKind, StatModelKind,
-    StatModelParams, WaveletKind, WaveletParams,
+    ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams, SketchKind,
+    StatModelKind, StatModelParams, WaveletKind, WaveletParams,
 };
 use crate::pre_asap::DataType;
 
@@ -11,8 +11,9 @@ use crate::pre_asap::DataType;
 /// edges that carry partial summary state between a `SummaryAgg` and a
 /// downstream `SummaryEstimate` or `SummaryMerge`.
 ///
-/// Every non-`Plain` variant carries `(kind, params)` from that family's own
-/// pair of types, so the type system can reject merges of incompatible
+/// Every non-`Plain` variant carries the physical state identity required by
+/// that family (`Sketch` additionally carries its grouping layout), so the
+/// type system can reject merges of incompatible
 /// summaries at plan construction time — a `SummaryMerge` over
 /// `Sketch(Kll, …)` and `Sketch(Cms, …)` inputs is a plan-time error, and a
 /// `Sketch(…)` can never be confused for a `Sample(…)` even though both are
@@ -28,10 +29,10 @@ pub enum SummaryFamilyType {
     ExactAggregate(ExactKind, ExactParams),
     /// Approximate sketch state (KLL/CMS/HLL/…), read out via a
     /// `SummaryEstimate`. A [`SketchKind`] already carries the concrete
-    /// algorithm and params committed to, not just its category — a bound
-    /// node needs to know it's specifically KLL, not merely "some quantile
-    /// sketch".
-    Sketch(SketchKind),
+    /// algorithm, params, and grouping layout committed to, not just its
+    /// category — a bound node needs to know it's specifically independent
+    /// KLL or shared Hydra-backed CMS, not merely "some sketch".
+    Sketch(SketchKind, GroupingStrategy),
     /// Sampling-based summary state (a retained row subset).
     Sample(SamplingKind, SamplingParams),
     /// Wavelet-transform summary state (a coefficient vector).

@@ -5,50 +5,15 @@
 //! *which* summary family/kind answers the intent, the same way
 //! [`asap_types::post_asap::GroupingStrategy`]'s own doc explains.
 //!
-//! ## Placement: `SummaryExpr::SummaryAgg`, not `Implementation`/`SummaryFamilyType`
+//! ## Placement: planning metadata and edge-state type
 //!
-//! Issue #256 as filed sketched this as a new field on
-//! `Implementation::Sketch`/`Sample`/`Wavelet` ([`crate::replacement`])
-//! and, correspondingly, on `SummaryFamilyType::Sketch`/`Sample`/`Wavelet`
-//! ([`asap_types::post_asap`]) — a breaking change to those variants that
-//! would ripple through every construction and match arm of `Implementation`
-//! across `replacement.rs` and `cost_model.rs` (and every test in each),
-//! because those two enums'
-//! variants appear everywhere a summary family is discussed, whether or not
-//! grouping is even in scope for the decision being made.
-//!
-//! This module places it on [`asap_types::post_asap::SummaryExpr::SummaryAgg`]
-//! instead, for a reason visible directly in the code this axis has to gate
-//! against: [`crate::replacement::implementations_for_with`] — the
-//! function that actually produces an `Implementation` — takes only an
-//! `&AggIntent`. It never sees a `Reduction`/`by` at all, because the
-//! sketch-vs-exact boundary decision is genuinely independent of grouping.
-//! Bolting a `GroupingStrategy` field onto `Implementation` would force every
-//! caller of `implementations_for_with` to invent a `Reduction` it doesn't
-//! have merely to populate a field the function's own logic never consults —
-//! the false-orthogonality problem this axis is supposed to solve,
-//! reintroduced one layer up.
-//!
-//! `SummaryAgg` already carries the one field this axis's legality actually
-//! depends on: `reduction` (the `by` keys), right alongside `family` (the
-//! `SummaryFamilyType` the "which kind" axis lives on). Placing
-//! `GroupingStrategy` there means:
-//!
-//! - it touches exactly one producer — `replacement::construct_summary_agg`
-//!   (module-private; reached through [`crate::replacement::construct_summary`])
-//!   — instead of every match arm of `Implementation`/`SummaryFamilyType`
-//!   across four modules;
-//! - the legality check (non-empty `by`) is a local read of a field already
-//!   in scope at the point the decision is made, not a value threaded in
-//!   from a caller three layers up;
-//! - existing `Implementation`/`SummaryFamilyType` match sites — including
-//!   every deployment's own downstream code matching on either enum —
-//!   observe zero change, because neither enum's shape changed at all.
-//!
-//! (Issue #256 has been updated via `gh issue comment` to record this
-//! placement delta — see that issue for the note, mirroring how issue #251's
-//! actual `Replacement` enum shape ended up slightly different from its own
-//! original sketch.)
+//! `SummaryExpr::SummaryAgg` carries the grouping choice next to the
+//! `Reduction` whose `by` keys determine legality. The same choice is also
+//! committed to `SummaryFamilyType::Sketch` on the aggregate's output edge.
+//! That duplication is intentional: the node field makes the choice easy to
+//! inspect during planning, while the edge type ensures an independent KLL/
+//! CMS state and a Hydra-backed state cannot be accepted as compatible inputs
+//! to a downstream `SummaryMerge`. [`with_grouping`] updates both atomically.
 //!
 //! ## Legality vs. cost (same split [`crate::replacement::implementations_for_with`]
 //! already draws)
@@ -61,20 +26,14 @@
 //!   with no grouping concept at all) has nothing for a
 //!   shared-multi-subpopulation structure to multiplex across.
 //! - **The family has a Hydra variant**
-//!   ([`asap_types::post_asap::hydra_kind_for`]): `SketchAlgorithm::Kll`,
-//!   `Cms`, and `CountSketch` each have a modeled Hydra wrapper today
-//!   (`HydraKll`/`HydraCms`/`HydraCountSketch`) — see that function's own
-//!   doc for why the others aren't candidates yet, and
-//!   [`asap_types::post_asap::HydraKind`]'s own doc for which of the three
-//!   are the Hydra paper's actual proven construction (`Cms`/`CountSketch`)
-//!   versus an unproven extension of it (`Kll` — the paper explicitly
-//!   excludes quantiles from Hydra-sketch).
+//!   ([`asap_types::post_asap::hydra_kind_for`]): only `Cms` and
+//!   `CountSketch` are selectable today because their error guarantees are
+//!   modeled. `HydraKll` remains an explicit experimental IR value, but the
+//!   paper excludes quantiles and search therefore never emits it.
 //!
 //! Whether Hydra is *worth it* for a given estimated subpopulation
 //! cardinality is a cost-model question, deliberately out of scope here —
-//! and for `HydraKll` specifically, a cost model has no proven error bound
-//! to weigh that trade-off against in the first place (see
-//! [`asap_types::post_asap::HydraKind::HydraKll`]).
+//! candidates with no modeled error bound are excluded before costing.
 //!
 //! ## No `ForceSketchKind`-style steering — bind one already-known candidate directly
 //!
@@ -290,7 +249,7 @@ fn per_subpopulation_sketch_params(node: &SummaryNode) -> Option<SketchParams> {
             per_subpopulation_sketch_params(summary_input)
         }
         SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind),
+            family: SummaryFamilyType::Sketch(kind, _),
             ..
         } => Some(kind.params().clone()),
         _ => None,
@@ -321,16 +280,30 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
             col,
             reduction,
             ..
-        } => Rc::new(SummaryNode {
-            expr: SummaryExpr::SummaryAgg {
-                child: Rc::clone(child),
-                family: family.clone(),
-                col: col.clone(),
-                reduction: reduction.clone(),
-                grouping,
-            },
-            schema: node.schema.clone(),
-        }),
+        } => {
+            let grouped_family = match family {
+                SummaryFamilyType::Sketch(kind, _) => {
+                    SummaryFamilyType::Sketch(kind.clone(), grouping.clone())
+                }
+                _ => family.clone(),
+            };
+            let mut grouped_schema = node.schema.clone();
+            for field in &mut grouped_schema.fields {
+                if let SummaryFamilyType::Sketch(kind, _) = &field.dtype {
+                    field.dtype = SummaryFamilyType::Sketch(kind.clone(), grouping.clone());
+                }
+            }
+            Rc::new(SummaryNode {
+                expr: SummaryExpr::SummaryAgg {
+                    child: Rc::clone(child),
+                    family: grouped_family,
+                    col: col.clone(),
+                    reduction: reduction.clone(),
+                    grouping,
+                },
+                schema: grouped_schema,
+            })
+        }
         // Never reached by this module's own callers (they only ever pass a
         // node `construct_summary` just bound for a `Sketch`
         // candidate, which is always `SummaryAgg` or
@@ -344,7 +317,7 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::post_asap::{HydraParams, SketchKind};
+    use asap_types::post_asap::HydraParams;
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -413,8 +386,14 @@ mod tests {
     // ── HydraGroupingStrategy ─────────────────────────────────────────────
 
     #[test]
-    fn matches_a_grouped_quantile_aggregate() {
-        let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+    fn matches_a_grouped_count_aggregate() {
+        let intent = AggIntent::Count {
+            accuracy: AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        };
+        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         assert!(HydraGroupingStrategy::default_cost_model().matches(&target));
     }
@@ -449,50 +428,11 @@ mod tests {
     }
 
     #[test]
-    fn quantile_offers_exactly_one_hydra_candidate_for_kll_only() {
-        // summary_candidates(Quantile) = [Kll, DDSketch]; only Kll has a
-        // modeled Hydra variant today, so exactly one candidate, not two.
+    fn quantile_has_no_hydra_candidate_without_a_modeled_error_bound() {
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
-        assert_eq!(replacements.len(), 1, "{replacements:?}");
-
-        let Replacement::Summary(node) = &replacements[0].replacement else {
-            panic!("expected a Summary replacement");
-        };
-        let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
-            panic!("expected SummaryEstimate root, got {:?}", node.expr);
-        };
-        let SummaryExpr::SummaryAgg {
-            family,
-            grouping,
-            reduction,
-            ..
-        } = &summary_input.expr
-        else {
-            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
-        };
-        assert_eq!(
-            family,
-            &SummaryFamilyType::Sketch(SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 200 }
-            )),
-            "the family/kind/params must be identical to the per-subpopulation candidate — \
-             only `grouping` differs"
-        );
-        assert_eq!(reduction, &Reduction::by(vec![2]));
-        assert_eq!(
-            grouping,
-            &GroupingStrategy::SharedMultiSubpopulation {
-                kind: HydraKind::HydraKll,
-                params: HydraParams::HydraKll {
-                    k: 200,
-                    shared_buckets: 200,
-                },
-            }
-        );
-        assert!(!replacements[0].rationale.is_empty());
+        assert!(replacements.is_empty(), "{replacements:?}");
     }
 
     #[test]
@@ -524,9 +464,15 @@ mod tests {
             else {
                 panic!("expected SummaryAgg, got {:?}", summary_input.expr);
             };
-            let SummaryFamilyType::Sketch(kind) = family else {
+            let SummaryFamilyType::Sketch(kind, state_grouping) = family else {
                 panic!("expected a Sketch family, got {family:?}");
             };
+            assert_eq!(state_grouping, grouping);
+            assert!(summary_input
+                .schema
+                .fields
+                .iter()
+                .any(|field| &field.dtype == family));
 
             // The Hydra params must carry over exactly the same
             // (width, depth) the per-subpopulation candidate committed to —
@@ -653,15 +599,11 @@ mod tests {
     }
 
     #[test]
-    fn custom_cost_model_still_only_offers_the_kll_hydra_candidate() {
+    fn custom_cost_model_cannot_enable_unproven_hydra_kll() {
         let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let custom = PreferDDSketch;
         let replacements = HydraGroupingStrategy::new(&custom).replacements(&target);
-        // DDSketch has no Hydra variant, so re-ranking DDSketch first at the
-        // boundary doesn't add a second Hydra candidate or remove the Kll
-        // one — `summary_candidates` (not `implementations_for_with`'s own
-        // ranking) is what this strategy iterates.
-        assert_eq!(replacements.len(), 1, "{replacements:?}");
+        assert!(replacements.is_empty(), "{replacements:?}");
     }
 }

@@ -63,9 +63,9 @@ pub enum SummaryExpr {
         /// across `reduction`'s subpopulations — one independent instance
         /// per `by` key (today's only behavior, and this field's default),
         /// or one shared Hydra-family structure serving all of them (issue
-        /// #256). Lives here, next to `reduction`, rather than on `family`
-        /// itself: this axis is orthogonal to *which* family/kind answers
-        /// the intent, and `reduction` is exactly the field that already
+        /// #256). Lives here, next to `reduction`, for planning, and is also
+        /// encoded in sketch-valued `family`/output-schema state so merges
+        /// can reject incompatible layouts. `reduction` is the field that
         /// carries the `by` keys this axis's legality depends on (a
         /// `SharedMultiSubpopulation` choice only makes sense when
         /// `reduction` actually has a subpopulation concept — see

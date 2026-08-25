@@ -1210,7 +1210,10 @@ fn summary_family(implementation: Implementation) -> Option<(SummaryFamilyType, 
         Implementation::ExactAggregate { kind, params } => {
             (SummaryFamilyType::ExactAggregate(kind, params), false)
         }
-        Implementation::Sketch(kind) => (SummaryFamilyType::Sketch(kind), true),
+        Implementation::Sketch(kind) => (
+            SummaryFamilyType::Sketch(kind, GroupingStrategy::default()),
+            true,
+        ),
         Implementation::Sample { kind, params } => (SummaryFamilyType::Sample(kind, params), true),
         Implementation::Wavelet { kind, params } => {
             (SummaryFamilyType::Wavelet(kind, params), true)
@@ -1786,7 +1789,7 @@ fn sketch_kind_of(node: &SummaryNode) -> Option<SketchAlgorithm> {
     match &node.expr {
         SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_kind_of(summary_input),
         SummaryExpr::SummaryAgg {
-            family: SummaryFamilyType::Sketch(kind),
+            family: SummaryFamilyType::Sketch(kind, _),
             ..
         } => Some(kind.algorithm().clone()),
         _ => None,
@@ -2851,7 +2854,9 @@ mod tests {
                 summary_family_algorithm(summary_input)
             }
             asap_types::post_asap::SummaryExpr::SummaryAgg { family, .. } => match family {
-                asap_types::post_asap::SummaryFamilyType::Sketch(kind) => kind.algorithm().clone(),
+                asap_types::post_asap::SummaryFamilyType::Sketch(kind, _) => {
+                    kind.algorithm().clone()
+                }
                 other => panic!("expected a Sketch family, got {other:?}"),
             },
             other => panic!("expected SummaryAgg/SummaryEstimate, got {other:?}"),
@@ -3030,7 +3035,13 @@ mod tests {
 
     #[test]
     fn single_bindable_aggregate_gets_every_sketch_and_grouping_candidate() {
-        let root = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
+        let intent = AggIntent::Count {
+            accuracy: AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        };
+        let root = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let space = search_workload(vec![("q", root)]);
 
         // One group for the Aggregate, one for its Scan child.
@@ -3043,8 +3054,8 @@ mod tests {
         assert_eq!(agg_group.consumer_count, 1);
         assert_eq!(
             agg_group.candidates.len(),
-            3,
-            "grouped quantile has KLL, DDSketch, and HydraKLL candidates: {:?}",
+            4,
+            "grouped approximate count has independent and Hydra CMS/CountSketch candidates: {:?}",
             agg_group.candidates
         );
         assert!(agg_group
@@ -3071,7 +3082,7 @@ mod tests {
                     )
                 })
                 .count(),
-            1,
+            2,
             "the default workload search must register the Hydra grouping strategy"
         );
 
@@ -3390,7 +3401,7 @@ mod tests {
             .iter()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .unwrap();
-        assert_eq!(agg_group.candidates.len(), 3);
+        assert_eq!(agg_group.candidates.len(), 2);
         let first_kind = match &agg_group.candidates[0].replacement {
             Replacement::Summary(node) => sketch_kind_of(node),
             Replacement::Rewrite(_) => None,
@@ -3570,20 +3581,20 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 200 }
-            ))
+            &SummaryFamilyType::Sketch(
+                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+                GroupingStrategy::default()
+            )
         );
         assert_eq!(col, &ColumnRef::SampleValue);
         assert_eq!(reduction, &ReductionTy::by(vec![2]));
         // SummaryAgg edge: the state column carries the committed family.
         assert_eq!(
             field(&summary_input.schema, "quantile_0_99").dtype,
-            SummaryFamilyType::Sketch(SketchKind::new(
-                SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 200 }
-            ))
+            SummaryFamilyType::Sketch(
+                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+                GroupingStrategy::default()
+            )
         );
         assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(ref e)
             if matches!(**e, QueryExpr::Scan { .. })));
@@ -3624,7 +3635,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::Kll
+            SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
         ));
 
         // With `PreferDDSketchViaCostModel`: DDSketch instead, same query.
@@ -3637,10 +3648,13 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::new(
-                SketchAlgorithm::DDSketch,
-                SketchParams::DDSketch { alpha: 0.01 }
-            ))
+            &SummaryFamilyType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::DDSketch,
+                    SketchParams::DDSketch { alpha: 0.01 }
+                ),
+                GroupingStrategy::default()
+            )
         );
     }
 
@@ -3734,13 +3748,16 @@ mod tests {
         };
         assert_eq!(
             family,
-            &SummaryFamilyType::Sketch(SketchKind::new(
-                SketchAlgorithm::CountSketch,
-                SketchParams::CountSketch {
-                    width: 256,
-                    depth: 4
-                }
-            ))
+            &SummaryFamilyType::Sketch(
+                SketchKind::new(
+                    SketchAlgorithm::CountSketch,
+                    SketchParams::CountSketch {
+                        width: 256,
+                        depth: 4
+                    }
+                ),
+                GroupingStrategy::default()
+            )
         );
     }
 
@@ -3863,7 +3880,7 @@ mod tests {
         };
         assert!(matches!(
             family,
-            SummaryFamilyType::Sketch(kind) if kind.algorithm() == &SketchAlgorithm::Kll
+            SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::Kll
         ));
         let SummaryExpr::SummaryAgg {
             family: inner_family,
@@ -4006,7 +4023,7 @@ mod tests {
         assert!(matches!(
             &summary_input.expr,
             SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(kind),
+                family: SummaryFamilyType::Sketch(kind, _),
                 ..
             } if kind.algorithm() == &SketchAlgorithm::CmsWithHeap
         ));

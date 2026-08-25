@@ -687,6 +687,7 @@ mod tests {
         ));
         let sketch = default_cse_shared_maintenance_cost(&SummaryFamilyType::Sketch(
             SketchKind::new(SketchAlgorithm::Hll, SketchParams::Hll { precision: 12 }),
+            GroupingStrategy::default(),
         ));
         assert!(
             exact < sketch,

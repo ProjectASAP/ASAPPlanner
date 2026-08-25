@@ -316,13 +316,11 @@ pub enum StatModelParams {
 /// vector, and has no analogous "sum the colliding contributions, bound the
 /// noise" algebra. The paper is explicit that its own construction cannot
 /// serve quantiles at all (§4.3: "A statistic that cannot directly be
-/// estimated by Hydra-sketch is quantiles."). `HydraKll` is kept as a real,
-/// discoverable candidate — sharing one KLL-family structure across
-/// subpopulations is a reasonable systems idea on its own — but it is an
-/// **unproven extension beyond the paper**: no error bound is modeled for
-/// it (see [`HydraParams::HydraKll`]'s own doc), and nothing in this crate
-/// should treat its accuracy as equivalent to the independent-instance
-/// baseline it replaces. Extend that stance only alongside an actual proof.
+/// estimated by Hydra-sketch is quantiles."). `HydraKll` remains available
+/// as an explicit experimental IR value, but [`hydra_kind_for`] does not
+/// expose it to semantics-preserving replacement search: no error bound is
+/// modeled for it (see [`HydraParams::HydraKll`]'s own doc). Enable automatic
+/// selection only alongside an actual proof and error model.
 ///
 /// Not yet modeled: `HydraUnivMon`. The paper's own named "Hydra-sketch" is
 /// really the universal-sketch composition (L layers of Count-Sketch plus a
@@ -335,9 +333,9 @@ pub enum StatModelParams {
 pub enum HydraKind {
     /// Hydra over a KLL-family quantile sketch. See this type's own doc:
     /// **not** an instance of the paper's proven construction — the paper
-    /// excludes quantiles from Hydra-sketch entirely. Kept for
-    /// legality/discoverability; treat its error as unmodeled, not merely
-    /// "the same as independent instances."
+    /// excludes quantiles from Hydra-sketch entirely. Kept only as an
+    /// explicit experimental representation; automatic replacement search
+    /// must not treat it as equivalent to independent instances.
     HydraKll,
     /// Hydra over Count-Min Sketch: a direct instance of the paper's proven
     /// w×r shared-grid construction (§4.2/§4.5) — CMS is exactly the
@@ -415,11 +413,11 @@ pub enum HydraParams {
 /// this axis's scope stops at legality: not every `SketchAlgorithm` has a
 /// Hydra wrapper modeled yet — extend alongside `HydraKind` as more are
 /// added. See [`HydraKind`]'s own doc for which of the mapped kinds are the
-/// paper's own proven construction (`Cms`/`CountSketch`) versus an unproven
-/// extension of it (`Kll`).
+/// paper's own proven construction. Unproven extensions such as `HydraKll`
+/// deliberately return `None`: replacement search may only expose variants
+/// with a modeled error guarantee.
 pub fn hydra_kind_for(algorithm: &SketchAlgorithm) -> Option<HydraKind> {
     match algorithm {
-        SketchAlgorithm::Kll => Some(HydraKind::HydraKll),
         SketchAlgorithm::Cms => Some(HydraKind::HydraCms),
         SketchAlgorithm::CountSketch => Some(HydraKind::HydraCountSketch),
         _ => None,
@@ -478,15 +476,15 @@ pub fn default_hydra_params(
 /// How a grouped aggregate's summary state is physically instantiated
 /// across its `by` subpopulations — orthogonal to *which*
 /// `SketchKind`/`SamplingKind`/`WaveletKind`/`StatModelKind` answers the
-/// intent (that choice lives on `SummaryFamilyType`, unchanged). Lives here,
+/// intent (that choice lives alongside it on `SummaryFamilyType`). Lives here,
 /// alongside `SketchKind`/`SketchParams` etc., rather than on any of those
 /// enums themselves, for exactly the reason explained in this section's
 /// module docs above.
 ///
-/// Carried on `SummaryExpr::SummaryAgg` (not on `SummaryFamilyType` /
-/// `Implementation`) — see `asap_aware_mapping::grouping`'s module docs for
-/// why, and for the legality rules gating when `SharedMultiSubpopulation` is
-/// even offered as a candidate.
+/// Carried both on `SummaryExpr::SummaryAgg` (where planning consults it)
+/// and on sketch-valued `SummaryFamilyType` edges (where it prevents
+/// incompatible shared and independent physical states from type-checking
+/// as merge-compatible).
 #[derive(Debug, Clone, PartialEq)]
 pub enum GroupingStrategy {
     /// One independent summary instance per distinct `by` key — today's
@@ -569,11 +567,8 @@ mod tests {
     }
 
     #[test]
-    fn hydra_kind_for_maps_kll_cms_and_count_sketch() {
-        assert_eq!(
-            hydra_kind_for(&SketchAlgorithm::Kll),
-            Some(HydraKind::HydraKll)
-        );
+    fn hydra_kind_for_only_maps_algorithms_with_modeled_error_bounds() {
+        assert_eq!(hydra_kind_for(&SketchAlgorithm::Kll), None);
         assert_eq!(
             hydra_kind_for(&SketchAlgorithm::Cms),
             Some(HydraKind::HydraCms)
