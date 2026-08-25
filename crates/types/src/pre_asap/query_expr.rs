@@ -552,10 +552,10 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// in place of the old `PromqlScalar` vs. `Literal` variant tag.
     PromqlScalarBridge(Rc<QueryExpr<C>>),
 
-    /// The query **evaluation time** as a scalar Unix timestamp in seconds.
-    /// PromQL supplies it from the request evaluation time (or the current
-    /// time when none is supplied); it is also the implicit input of the
-    /// no-argument calendar functions. Issue #46.
+    /// The query **evaluation timestamp** as Unix seconds, exposed by PromQL
+    /// `time()`. This is not inherently the current wall-clock time: its value
+    /// is the instant or range-step at which the expression is evaluated. It
+    /// is also the implicit input of no-argument calendar functions. Issue #46.
     EvalTimestamp,
 
     /// The SQL statement evaluation time (`NOW()` / `CURRENT_TIMESTAMP`) as
