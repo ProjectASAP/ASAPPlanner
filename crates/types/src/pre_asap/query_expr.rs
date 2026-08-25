@@ -342,6 +342,58 @@ pub enum WindowFuncKind {
     Max,
 }
 
+/// A window's frame-spec (`ROWS`/`RANGE BETWEEN … AND …`) — which rows around
+/// the current one an analytic window function reads. `GROUPS` is rejected at
+/// lowering time (issue #268): every SQL corpus in this repo uses only `ROWS`,
+/// and nothing downstream interprets frame semantics yet, so it isn't worth
+/// modelling untested.
+///
+/// Meaningless (but harmless) on the rank-only and navigation functions
+/// (`ROW_NUMBER`/`RANK`/`DENSE_RANK`/`LAG`/`LEAD`), which ignore the frame per
+/// SQL semantics — DataFusion still attaches one, stored here verbatim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowFrame {
+    pub units: WindowFrameUnits,
+    pub start_bound: WindowFrameBound,
+    pub end_bound: WindowFrameBound,
+}
+
+/// A finite window-frame displacement. Intervals are normalized to Arrow's
+/// month/day/nanosecond representation so SQL `RANGE INTERVAL ...` bounds
+/// survive lowering without leaking DataFusion types into the canonical IR.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFrameOffset {
+    Scalar(ScalarValue),
+    Interval {
+        months: i32,
+        days: i32,
+        nanoseconds: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFrameUnits {
+    /// Boundaries count physical rows: `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW`.
+    Rows,
+    /// Boundaries count by value-distance on the (single) `ORDER BY` column:
+    /// `RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW`.
+    Range,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFrameBound {
+    /// `UNBOUNDED PRECEDING` is
+    /// `Preceding(WindowFrameOffset::Scalar(ScalarValue::Null))`.
+    Preceding(WindowFrameOffset),
+    CurrentRow,
+    /// `UNBOUNDED FOLLOWING` is
+    /// `Following(WindowFrameOffset::Scalar(ScalarValue::Null))`.
+    Following(WindowFrameOffset),
+}
+
 /// A symbolic label matcher on the **info metric** side of an
 /// [`QueryExpr::PromqlInfoEnrich`] (issue #84). Unlike a `Scan` predicate it is not
 /// resolved positionally — it references the info metric's labels (`__name__`
@@ -745,9 +797,9 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         child: Rc<QueryExpr<C>>,
     },
 
-    /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …)`.
-    /// Output schema = child schema + one column named `output_name` (the name
-    /// the enclosing `Project` references). Window frames are not modelled yet.
+    /// SQL analytic window function: `func(args) OVER (PARTITION BY … ORDER BY …
+    /// ROWS/RANGE BETWEEN …)`. Output schema = child schema + one column named
+    /// `output_name` (the name the enclosing `Project` references).
     SQLWindowFunc {
         func: WindowFuncKind,
         /// Operand expressions (`LAG(value)` → `[Column(value_id)]`); empty for
@@ -755,6 +807,12 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         args: Vec<QueryExpr<C>>,
         partition_by: GroupKeys<C>,
         order_by: Vec<SortKey<C>>,
+        /// `None` is accepted only for backward compatibility with serialized
+        /// pre-#268 IR, where the engine's implicit frame was not retained.
+        /// Newly lowered SQL always carries `Some` with DataFusion's resolved
+        /// concrete default or explicit frame.
+        #[serde(default)]
+        frame: Option<WindowFrame>,
         /// The output column's name — DataFusion's window-expr field name, so a
         /// `Project` above resolves it (cf. `Aggregate.output_names`).
         output_name: String,
@@ -1526,6 +1584,36 @@ mod tests {
                 closed: true,
             },
         }
+    }
+
+    #[test]
+    fn legacy_window_json_without_frame_deserializes_as_unspecified() {
+        let window = QueryExpr::SQLWindowFunc {
+            func: WindowFuncKind::RowNumber,
+            args: vec![],
+            partition_by: GroupKeys::by(vec![]),
+            order_by: vec![],
+            frame: Some(WindowFrame {
+                units: WindowFrameUnits::Range,
+                start_bound: WindowFrameBound::Preceding(WindowFrameOffset::Scalar(
+                    ScalarValue::Null,
+                )),
+                end_bound: WindowFrameBound::CurrentRow,
+            }),
+            output_name: "row_number".into(),
+            child: Rc::new(scan(vec![col("v", DataType::Int64, false)], None, vec![])),
+        };
+        let mut json = serde_json::to_value(window).unwrap();
+        json.get_mut("SQLWindowFunc")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("frame");
+
+        let decoded: QueryExpr = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            decoded,
+            QueryExpr::SQLWindowFunc { frame: None, .. }
+        ));
     }
 
     /// A row can appear in more than one branch, so no branch's unique key is a

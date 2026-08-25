@@ -26,6 +26,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
+use datafusion::arrow::compute::kernels::cast_utils::parse_interval_month_day_nano;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datafusion::catalog_common::MemorySchemaProvider;
 use datafusion::common::config::ConfigOptions;
@@ -40,6 +41,7 @@ use datafusion::logical_expr::function::{PartitionEvaluatorArgs, WindowUDFFieldA
 use datafusion::logical_expr::{
     self, lit, AggregateUDF, Case, Distinct, Expr, JoinType, LogicalPlan, PartitionEvaluator,
     ScalarUDF, ScalarUDFImpl, Signature, SimpleAggregateUDF, TypeSignature, Volatility,
+    WindowFrameBound as DfWindowFrameBound, WindowFrameUnits as DfWindowFrameUnits,
     WindowFunctionDefinition, WindowUDF, WindowUDFImpl,
 };
 use datafusion::optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
@@ -50,7 +52,8 @@ use asap_sql_function_catalog::{AggSemantic, Arity, RewriteKind};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{
     GroupKeys, Predicate, ProjectItem, Reduction, SortKey, Source,
-    UnresolvedQueryExpr as Unresolved,
+    UnresolvedQueryExpr as Unresolved, WindowFrame, WindowFrameBound, WindowFrameOffset,
+    WindowFrameUnits,
 };
 use asap_types::pre_asap::schema::{DataType, Schema};
 use asap_types::pre_asap::{
@@ -67,7 +70,7 @@ mod types;
 pub use types::SqlCatalog;
 
 use self::expr::df_expr_to_unresolved;
-use self::types::{arrow_to_dtype, schema_to_arrow};
+use self::types::{arrow_to_dtype, scalar_value_to_asap, schema_to_arrow};
 
 std::thread_local! {
     static ACCURACY: std::cell::RefCell<AccuracyTarget> =
@@ -557,8 +560,8 @@ impl<'a> SqlLowerer<'a> {
         })
     }
 
-    /// `func(args) OVER (PARTITION BY … ORDER BY …)`. One window function per
-    /// plan node; window frames are not modelled yet (default frame assumed).
+    /// `func(args) OVER (PARTITION BY … ORDER BY … ROWS/RANGE BETWEEN …)`. One
+    /// window function per plan node.
     fn lower_window(&self, window: &logical_expr::Window) -> Result<Unresolved, LoweringError> {
         if window.window_expr.len() > 1 {
             return Err(LoweringError::UnsupportedFeature(format!(
@@ -613,6 +616,7 @@ impl<'a> SqlLowerer<'a> {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let frame = lower_window_frame(&wf.window_frame)?;
         // The window plan's schema is `[input fields …, window output]`; the last
         // field is the window column's name (what an enclosing Project references).
         let output_name = window
@@ -626,6 +630,7 @@ impl<'a> SqlLowerer<'a> {
             args,
             partition_by: partition_by.into(),
             order_by,
+            frame: Some(frame),
             output_name,
             child,
         })
@@ -1740,6 +1745,79 @@ fn lower_window_func_kind(fun: &WindowFunctionDefinition) -> Result<WindowFuncKi
             }
         }
     }
+}
+
+/// Map DataFusion's resolved `WindowFrame` (issue #268) to the canonical
+/// [`WindowFrame`]. DataFusion's planner always fills in the SQL-standard
+/// default frame before the logical plan is built, so this never sees an
+/// "absent" frame — only `ROWS`/`RANGE`/`GROUPS` with concrete bounds.
+/// `GROUPS` is rejected: no query in this repo's SQL corpora uses it, and
+/// nothing downstream interprets frame semantics yet, so it isn't worth
+/// modelling untested.
+fn lower_window_frame(
+    frame: &datafusion::logical_expr::WindowFrame,
+) -> Result<WindowFrame, LoweringError> {
+    let units = match frame.units {
+        DfWindowFrameUnits::Rows => WindowFrameUnits::Rows,
+        DfWindowFrameUnits::Range => WindowFrameUnits::Range,
+        DfWindowFrameUnits::Groups => {
+            return Err(LoweringError::UnsupportedFeature(
+                "window frame unit: GROUPS".into(),
+            ))
+        }
+    };
+    let offset = |v: &DfScalarValue| -> Result<WindowFrameOffset, LoweringError> {
+        Ok(match v {
+            DfScalarValue::IntervalYearMonth(Some(months)) => WindowFrameOffset::Interval {
+                months: *months,
+                days: 0,
+                nanoseconds: 0,
+            },
+            DfScalarValue::IntervalDayTime(Some(value)) => WindowFrameOffset::Interval {
+                months: 0,
+                days: value.days,
+                nanoseconds: i64::from(value.milliseconds) * 1_000_000,
+            },
+            DfScalarValue::IntervalMonthDayNano(Some(value)) => WindowFrameOffset::Interval {
+                months: value.months,
+                days: value.days,
+                nanoseconds: value.nanoseconds,
+            },
+            // DataFusion 43 keeps every RANGE offset as text: both numeric
+            // bounds such as `1.5` and normalized interval literals such as
+            // `"1 HOUR"`. Arrow's interval parser accepts bare numbers and
+            // interprets them as months, so classify numeric text first.
+            DfScalarValue::Utf8(Some(value)) | DfScalarValue::LargeUtf8(Some(value)) => {
+                if let Ok(value) = value.parse::<i64>() {
+                    WindowFrameOffset::Scalar(ScalarValue::Int64(value))
+                } else if let Ok(value) = value.parse::<f64>() {
+                    WindowFrameOffset::Scalar(ScalarValue::Float64(value))
+                } else {
+                    match parse_interval_month_day_nano(value) {
+                        Ok(interval) => WindowFrameOffset::Interval {
+                            months: interval.months,
+                            days: interval.days,
+                            nanoseconds: interval.nanoseconds,
+                        },
+                        Err(_) => WindowFrameOffset::Scalar(scalar_value_to_asap(v)?),
+                    }
+                }
+            }
+            _ => WindowFrameOffset::Scalar(scalar_value_to_asap(v)?),
+        })
+    };
+    let bound = |b: &DfWindowFrameBound| -> Result<WindowFrameBound, LoweringError> {
+        Ok(match b {
+            DfWindowFrameBound::Preceding(v) => WindowFrameBound::Preceding(offset(v)?),
+            DfWindowFrameBound::CurrentRow => WindowFrameBound::CurrentRow,
+            DfWindowFrameBound::Following(v) => WindowFrameBound::Following(offset(v)?),
+        })
+    };
+    Ok(WindowFrame {
+        units,
+        start_bound: bound(&frame.start_bound)?,
+        end_bound: bound(&frame.end_bound)?,
+    })
 }
 
 // ── Issue #225, item 3: DataFusion registry drift detection ────────────────
