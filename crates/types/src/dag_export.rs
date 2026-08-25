@@ -231,6 +231,15 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             serde_json::json!({}),
             vec![],
         ),
+        QueryExpr::CurrentTimestamp => push_node(
+            nodes,
+            expr,
+            cache,
+            "CurrentTimestamp",
+            "CurrentTimestamp".into(),
+            serde_json::json!({}),
+            vec![],
+        ),
         QueryExpr::PromqlVectorFromScalar(child) => {
             let c = build(child, nodes, cache);
             push_node(

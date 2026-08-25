@@ -557,6 +557,11 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// calendar functions (`hour()`, `day_of_week()`, …). Issue #46.
     QueryTimestamp,
 
+    /// The SQL statement evaluation time (`NOW()` / `CURRENT_TIMESTAMP`) as
+    /// a SQL [`DataType::Timestamp`]. Kept distinct from [`QueryTimestamp`],
+    /// whose PromQL `time()` contract is Unix seconds as `Float64`.
+    CurrentTimestamp,
+
     /// PromQL `vector(s)` — the scalar→instant-vector bridge. Promotes a
     /// scalar-typed child to a single label-less series carrying the scalar's
     /// value at every step. Lets a scalar participate where a vector is required
@@ -893,6 +898,7 @@ impl<C: ColState> QueryExpr<C> {
             QueryExpr::Column(c) => vec![c],
             QueryExpr::Literal(_) => vec![],
             QueryExpr::QueryTimestamp => vec![],
+            QueryExpr::CurrentTimestamp => vec![],
             QueryExpr::Compare { left, right, .. } | QueryExpr::Arithmetic { left, right, .. } => {
                 let mut v = left.columns_referenced();
                 v.extend(right.columns_referenced());
@@ -1163,6 +1169,13 @@ impl QueryExpr<ColumnId> {
             // inspect the inner node.
             QueryExpr::PromqlScalarBridge(_) | QueryExpr::QueryTimestamp => Ok(Schema {
                 columns: vec![Column::new("value", DataType::Float64, false)],
+                time_index: None,
+                unique_keys: Vec::new(),
+                closed: true,
+            }),
+
+            QueryExpr::CurrentTimestamp => Ok(Schema {
+                columns: vec![Column::new("value", DataType::Timestamp, false)],
                 time_index: None,
                 unique_keys: Vec::new(),
                 closed: true,

@@ -401,6 +401,7 @@ pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
         // `rebuild_children`'s and `dag_node_count`'s identical scope
         // decision for these variants ("never descended into").
         QueryTimestamp
+        | CurrentTimestamp
         | PromqlScalarBridge(_)
         | Column(_)
         | Literal(_)
@@ -482,7 +483,7 @@ fn count_unique(node: &QueryExpr, seen: &mut std::collections::HashSet<*const Qu
         // `PromqlScalarBridge`'s child is a scalar-sub-language node (issue
         // #220), never descended into — same treatment `rebuild_children`
         // gives it (see that function's comment on this same variant).
-        Scan { .. } | PromqlScalarBridge(_) | QueryTimestamp => 0,
+        Scan { .. } | PromqlScalarBridge(_) | QueryTimestamp | CurrentTimestamp => 0,
         PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => visit(c, seen),
         PromqlRelabel { child, .. }
         | PromqlInfoEnrich { child, .. }
@@ -570,7 +571,7 @@ fn intern_bottom_up(table: &mut InternTable, expr: QueryExpr) -> Rc<QueryExpr> {
 fn rebuild_children(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
     use QueryExpr::*;
     match expr {
-        Scan { .. } | QueryTimestamp => expr,
+        Scan { .. } | QueryTimestamp | CurrentTimestamp => expr,
         PromqlVectorFromScalar(c) => PromqlVectorFromScalar(intern_child(table, c)),
         PromqlScalarFromVector(c) => PromqlScalarFromVector(intern_child(table, c)),
         PromqlRelabel { dst, value, child } => PromqlRelabel {

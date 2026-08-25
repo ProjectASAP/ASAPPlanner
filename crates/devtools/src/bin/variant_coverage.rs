@@ -16,6 +16,7 @@ const ALL_VARIANTS: &[&str] = &[
     "Scan",
     "PromqlScalarBridge",
     "QueryTimestamp",
+    "CurrentTimestamp",
     "PromqlVectorFromScalar",
     "PromqlScalarFromVector",
     "PromqlRelabel",
@@ -47,6 +48,9 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
         }
         QueryExpr::QueryTimestamp => {
             seen.insert("QueryTimestamp");
+        }
+        QueryExpr::CurrentTimestamp => {
+            seen.insert("CurrentTimestamp");
         }
         QueryExpr::PromqlVectorFromScalar(inner) => {
             seen.insert("PromqlVectorFromScalar");

@@ -1591,11 +1591,11 @@ async fn lead_in_frame_lowers_to_its_own_kind_not_lead() {
     assert_eq!(*func, WindowFuncKind::LeadInFrame);
 }
 
-/// Issue #184: `NOW()` in a predicate must lower to the `QueryTimestamp`
-/// leaf (the same evaluation-time node PromQL's `time()` uses), not the
-/// semantically-opaque `FunctionCall { name: "now", .. }` catch-all.
+/// Issue #184: `NOW()` in a predicate must lower to the timestamp-typed
+/// `CurrentTimestamp` leaf, not the semantically-opaque function catch-all or
+/// PromQL's Float64 Unix-seconds `QueryTimestamp`.
 #[tokio::test]
-async fn now_in_predicate_lowers_to_query_timestamp() {
+async fn now_in_predicate_lowers_to_current_timestamp() {
     // SELECT * folds WHERE onto Scan.predicates (no explicit Filter node).
     let qe = lower("SELECT * FROM metrics WHERE ts < NOW()").await;
     let QueryExpr::Scan { predicates, .. } = &qe else {
@@ -1604,8 +1604,8 @@ async fn now_in_predicate_lowers_to_query_timestamp() {
     assert_eq!(predicates.len(), 1);
     assert!(
         matches!(predicates[0].0.as_ref(), QueryExpr::Compare { right, .. }
-            if matches!(right.as_ref(), QueryExpr::QueryTimestamp)),
-        "NOW() must lower to QueryTimestamp, got {:?}",
+            if matches!(right.as_ref(), QueryExpr::CurrentTimestamp)),
+        "NOW() must lower to CurrentTimestamp, got {:?}",
         predicates[0].0
     );
 }
@@ -1613,7 +1613,7 @@ async fn now_in_predicate_lowers_to_query_timestamp() {
 /// Same for ClickHouse's `now()`, since #184 was raised specifically against
 /// the ClickHouse dialect.
 #[tokio::test]
-async fn clickhouse_now_in_predicate_lowers_to_query_timestamp() {
+async fn clickhouse_now_in_predicate_lowers_to_current_timestamp() {
     let qe = lower_clickhouse("SELECT * FROM metrics WHERE ts < now()").await;
     let QueryExpr::Scan { predicates, .. } = &qe else {
         panic!("expected Scan at root, got {qe:?}");
@@ -1621,8 +1621,24 @@ async fn clickhouse_now_in_predicate_lowers_to_query_timestamp() {
     assert_eq!(predicates.len(), 1);
     assert!(
         matches!(predicates[0].0.as_ref(), QueryExpr::Compare { right, .. }
-            if matches!(right.as_ref(), QueryExpr::QueryTimestamp)),
-        "now() must lower to QueryTimestamp, got {:?}",
+            if matches!(right.as_ref(), QueryExpr::CurrentTimestamp)),
+        "now() must lower to CurrentTimestamp, got {:?}",
         predicates[0].0
     );
+}
+
+#[tokio::test]
+async fn current_timestamp_lowers_to_typed_current_timestamp_leaf() {
+    let qe = lower("SELECT CURRENT_TIMESTAMP FROM metrics").await;
+    let QueryExpr::Project { cols, .. } = &qe else {
+        panic!("expected Project at root, got {qe:?}");
+    };
+    assert!(matches!(&cols[0].expr, QueryExpr::CurrentTimestamp));
+    let schema = cols[0].expr.output_schema().expect("timestamp schema");
+    assert_eq!(schema.columns[0].dtype, DataType::Timestamp);
+
+    let promql_schema = QueryExpr::QueryTimestamp
+        .output_schema()
+        .expect("PromQL timestamp schema");
+    assert_eq!(promql_schema.columns[0].dtype, DataType::Float64);
 }

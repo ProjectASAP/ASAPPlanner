@@ -186,9 +186,9 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             }
         }
 
-        // `NOW()` / `CURRENT_TIMESTAMP` read the query evaluation time — same
-        // runtime-dependent value as PromQL's `time()`, which lowers to this
-        // same `QueryTimestamp` leaf (frontend-promql/src/promql.rs). Issue #184.
+        // `NOW()` / `CURRENT_TIMESTAMP` read the SQL statement evaluation
+        // time. Keep this timestamp-typed leaf distinct from PromQL's
+        // Float64 Unix-seconds `QueryTimestamp`. Issue #184.
         Expr::ScalarFunction(sf)
             if sf.args.is_empty()
                 && matches!(
@@ -196,7 +196,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
                     "now" | "current_timestamp"
                 ) =>
         {
-            Ok(Unresolved::QueryTimestamp)
+            Ok(Unresolved::CurrentTimestamp)
         }
 
         Expr::ScalarFunction(sf) => {

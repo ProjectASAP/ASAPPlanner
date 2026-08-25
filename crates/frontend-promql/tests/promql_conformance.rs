@@ -98,7 +98,10 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
         }
         // `AggIntent` only ever lives in `Aggregate.measures`, never in a
         // scalar position (issue #205) — nothing to collect there.
-        QueryExpr::Scan { .. } | QueryExpr::PromqlScalarBridge(_) | QueryExpr::QueryTimestamp => {}
+        QueryExpr::Scan { .. }
+        | QueryExpr::PromqlScalarBridge(_)
+        | QueryExpr::QueryTimestamp
+        | QueryExpr::CurrentTimestamp => {}
         QueryExpr::Column(_)
         | QueryExpr::Literal(_)
         | QueryExpr::Compare { .. }
