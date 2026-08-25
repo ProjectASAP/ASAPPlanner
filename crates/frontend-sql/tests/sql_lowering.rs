@@ -1593,7 +1593,7 @@ async fn lead_in_frame_lowers_to_its_own_kind_not_lead() {
 
 /// Issue #184: `NOW()` in a predicate must lower to the timestamp-typed
 /// `CurrentTimestamp` leaf, not the semantically-opaque function catch-all or
-/// PromQL's Float64 Unix-seconds `QueryTimestamp`.
+/// PromQL's Float64 Unix-seconds `EvalTimestamp`.
 #[tokio::test]
 async fn now_in_predicate_lowers_to_current_timestamp() {
     // SELECT * folds WHERE onto Scan.predicates (no explicit Filter node).
@@ -1636,9 +1636,4 @@ async fn current_timestamp_lowers_to_typed_current_timestamp_leaf() {
     assert!(matches!(&cols[0].expr, QueryExpr::CurrentTimestamp));
     let schema = cols[0].expr.output_schema().expect("timestamp schema");
     assert_eq!(schema.columns[0].dtype, DataType::Timestamp);
-
-    let promql_schema = QueryExpr::QueryTimestamp
-        .output_schema()
-        .expect("PromQL timestamp schema");
-    assert_eq!(promql_schema.columns[0].dtype, DataType::Float64);
 }

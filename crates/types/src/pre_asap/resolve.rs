@@ -131,7 +131,7 @@ fn resolve(
         QE::PromqlScalarBridge(inner) => {
             QE::PromqlScalarBridge(Rc::new(resolve_expr(inner, fallback)?))
         }
-        QE::QueryTimestamp => QE::QueryTimestamp,
+        QE::EvalTimestamp => QE::EvalTimestamp,
         QE::CurrentTimestamp => QE::CurrentTimestamp,
 
         QE::PromqlVectorFromScalar(child) => {

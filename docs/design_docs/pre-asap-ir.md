@@ -40,7 +40,7 @@ to one source language.
 
 **[PromQL-specific nodes](#promql-specific-nodes)**
 - [`PromqlScalarBridge`](#promqlscalarbridge) — a scalar sub-expression at an operator-tree position.
-- [`QueryTimestamp`](#querytimestamp) — the query evaluation time as a scalar (PromQL `time()`).
+- [`EvalTimestamp`](#evaltimestamp) — the query evaluation time as a scalar (PromQL `time()`).
 - [`PromqlVectorFromScalar`](#promqlvectorfromscalar) — promotes a scalar to a label-less instant vector.
 - [`PromqlScalarFromVector`](#promqlscalarfromvector) — collapses a single-series vector to a scalar.
 - [`PromqlRelabel`](#promqlrelabel) — per-series label rewrite (PromQL `label_replace`/`label_join`).
@@ -420,7 +420,7 @@ up > 1
 
 **Fields:** a single unnamed child `QueryExpr` — the wrapped scalar sub-expression.
 
-### QueryTimestamp
+### EvalTimestamp
 
 The query **evaluation time** as a scalar — PromQL `time()` — and the implicit input of the
 no-argument calendar functions (`hour()`, `day_of_week()`, ...).

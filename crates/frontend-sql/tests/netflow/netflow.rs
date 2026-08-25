@@ -300,7 +300,7 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
         }
         QueryExpr::Scan { .. }
         | QueryExpr::PromqlScalarBridge(_)
-        | QueryExpr::QueryTimestamp
+        | QueryExpr::EvalTimestamp
         | QueryExpr::CurrentTimestamp => {}
         // Scalar expression variants (issue #205) aren't relational nodes;
         // this visitor only walks the relational tree, so stop here.

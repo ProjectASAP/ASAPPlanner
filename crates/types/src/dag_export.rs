@@ -222,12 +222,12 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
                 vec![],
             )
         }
-        QueryExpr::QueryTimestamp => push_node(
+        QueryExpr::EvalTimestamp => push_node(
             nodes,
             expr,
             cache,
-            "QueryTimestamp",
-            "QueryTimestamp".into(),
+            "EvalTimestamp",
+            "EvalTimestamp".into(),
             serde_json::json!({}),
             vec![],
         ),

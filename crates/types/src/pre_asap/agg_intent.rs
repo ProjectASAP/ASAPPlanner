@@ -192,7 +192,7 @@ pub enum AggIntent<C = ColumnId> {
     /// A time / calendar accessor (issue #46) — `timestamp`, `minute`, `hour`,
     /// `day_of_week`, … over each sample's timestamp (or, for the no-arg forms,
     /// over the evaluation time). Label-preserving per-series value transform.
-    /// (`time()` is the evaluation time itself — a `QueryExpr::QueryTimestamp` leaf,
+    /// (`time()` is the evaluation time itself — a `QueryExpr::EvalTimestamp` leaf,
     /// not this.)
     TimeFn(TimeFunc),
 

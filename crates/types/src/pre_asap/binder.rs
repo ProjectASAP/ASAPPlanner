@@ -145,8 +145,8 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
         }),
         // A scalar bridge's child is a scalar-sub-language leaf (in practice
         // always a `Literal`, issue #220) — never a `Scan`, same as
-        // `QueryTimestamp`.
-        QE::PromqlScalarBridge(_) | QE::QueryTimestamp | QE::CurrentTimestamp => None,
+        // `EvalTimestamp`.
+        QE::PromqlScalarBridge(_) | QE::EvalTimestamp | QE::CurrentTimestamp => None,
         QE::PromqlVectorFromScalar(child) | QE::PromqlScalarFromVector(child) => {
             leftmost_scan_name(child)
         }
@@ -295,7 +295,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
                 walk(left, out);
                 walk(right, out);
             }
-            QE::QueryTimestamp | QE::CurrentTimestamp => {}
+            QE::EvalTimestamp | QE::CurrentTimestamp => {}
             // The bridged child is a genuine scalar-sub-language position now
             // (issue #220) — peel its column refs off with `named`, same as
             // every other scalar-typed field (`Scan.predicates`,

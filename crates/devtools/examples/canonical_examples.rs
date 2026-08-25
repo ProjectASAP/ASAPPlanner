@@ -49,7 +49,7 @@ async fn main() {
     let promql_examples: &[(&str, &str)] = &[
         ("Scan", "up"),
         ("BinaryOp + PromqlScalarBridge", "up > 1"),
-        ("QueryTimestamp", "time()"),
+        ("EvalTimestamp", "time()"),
         ("Aggregate", "sum(up)"),
         (
             "PromqlRelabel",

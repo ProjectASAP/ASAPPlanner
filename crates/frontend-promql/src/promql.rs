@@ -39,7 +39,7 @@
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], TimeRange{w}}` — per-series counter-derivative intents (issue #44) |
 //! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is a post-ASAP concern (issue #47) |
 //! | `abs`/`ceil`/`sqrt`/`ln`/`clamp*`/`round`/trig(`v`), `pi()` | `Aggregate{[Math(f)]}` element-wise transform (issue #45); `pi()` → a `PromqlScalarBridge` leaf |
-//! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `QueryTimestamp` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
+//! | `time()` / `timestamp`/`hour`/`day_of_week`/… (`v`) | `EvalTimestamp` leaf / `Aggregate{[TimeFn(f)]}` (issue #46) |
 //! | `vector(s)` / `scalar(v)` | `PromqlVectorFromScalar` / `PromqlScalarFromVector` — the scalar⇄vector bridges (issue #48) |
 //! | `label_replace(v,…)` / `label_join(v,…)` | `PromqlRelabel{dst, value}` — per-series label rewrite; value unchanged (issue #50) |
 //! | `info(v, [selector])` | `PromqlInfoEnrich{selector}` — label-enrichment join against the info metric(s); join keys resolved during post-ASAP binding (issue #84) |
@@ -802,12 +802,12 @@ fn is_time_fn(name: &str) -> bool {
     )
 }
 
-/// `time()` → the `QueryTimestamp` leaf. `timestamp(v)` and the calendar accessors →
-/// `Aggregate{[TimeFn(f)]}` over the argument vector, or over `QueryTimestamp` for the
+/// `time()` → the `EvalTimestamp` leaf. `timestamp(v)` and the calendar accessors →
+/// `Aggregate{[TimeFn(f)]}` over the argument vector, or over `EvalTimestamp` for the
 /// no-argument calendar forms (`hour()`, `day_of_week()`, …). Issue #46.
 fn walk_time(call: &Call) -> Result<Unresolved> {
     if call.func.name == "time" {
-        return Ok(Unresolved::QueryTimestamp);
+        return Ok(Unresolved::EvalTimestamp);
     }
     let func = match call.func.name {
         "timestamp" => TimeFunc::Timestamp,
@@ -824,7 +824,7 @@ fn walk_time(call: &Call) -> Result<Unresolved> {
     // A calendar function with no argument reads the evaluation time; otherwise
     // it maps over each sample's timestamp in the argument vector.
     let inner = if call.args.args.is_empty() {
-        Unresolved::QueryTimestamp
+        Unresolved::EvalTimestamp
     } else {
         walk(arg(call, 0)?)?
     };

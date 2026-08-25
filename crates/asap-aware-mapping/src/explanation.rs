@@ -421,7 +421,7 @@ fn visit_children(
 ) {
     use QueryExpr::*;
     match node {
-        Scan { .. } | PromqlScalarBridge(_) | QueryTimestamp | CurrentTimestamp => {}
+        Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
         PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => {
             visit(c, format!("{label} > child"), locations)
         }

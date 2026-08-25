@@ -188,7 +188,7 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
 
         // `NOW()` / `CURRENT_TIMESTAMP` read the SQL statement evaluation
         // time. Keep this timestamp-typed leaf distinct from PromQL's
-        // Float64 Unix-seconds `QueryTimestamp`. Issue #184.
+        // Float64 Unix-seconds `EvalTimestamp`. Issue #184.
         Expr::ScalarFunction(sf)
             if sf.args.is_empty()
                 && matches!(

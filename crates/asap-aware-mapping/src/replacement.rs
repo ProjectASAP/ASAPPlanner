@@ -1993,7 +1993,7 @@ fn walk_children(
 ) {
     use QueryExpr::*;
     match node {
-        Scan { .. } | PromqlScalarBridge(_) | QueryTimestamp | CurrentTimestamp => {}
+        Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
         PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => walk(c, order, nodes, counts),
         PromqlRelabel { child, .. }
         | PromqlInfoEnrich { child, .. }
@@ -2900,7 +2900,7 @@ mod tests {
         fn walk_children(node: &QueryExpr, counts: &mut HashMap<*const QueryExpr, usize>) {
             use QueryExpr::*;
             match node {
-                Scan { .. } | PromqlScalarBridge(_) | QueryTimestamp | CurrentTimestamp => {}
+                Scan { .. } | PromqlScalarBridge(_) | EvalTimestamp | CurrentTimestamp => {}
                 PromqlVectorFromScalar(c) | PromqlScalarFromVector(c) => walk(c, counts),
                 PromqlRelabel { child, .. }
                 | PromqlInfoEnrich { child, .. }
