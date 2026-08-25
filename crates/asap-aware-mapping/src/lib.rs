@@ -101,7 +101,7 @@
 //!   reuse (issue #254, part of #33) as a [`ReplacementStrategy`]: given a
 //!   coarser `Aggregate` target and a caller-supplied sibling set, proposes
 //!   re-deriving it from an already-computed, strictly finer sibling
-//!   `Aggregate` over the same shared child instead of an independent pass
+//!   `Aggregate` over identical child IR instead of an independent pass
 //!   over the raw source — the cross-aggregate sibling of
 //!   `pre_asap::cse::share_common_subtrees`'s identical-subtree sharing.
 //!   [`rollup::is_legal_rollup_source`] is the standalone legality predicate

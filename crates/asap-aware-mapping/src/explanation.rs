@@ -162,7 +162,7 @@
 //! | Catalog entry | Status | Where a future `ExplanationKind` would come from |
 //! |---|---|---|
 //! | Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) | No `ReplacementStrategy` implementation in this codebase yet (tracked separately, issue #253) | Once wired into `default_strategies()`: any `Replacement::Rewrite` candidate that strategy proposes |
-//! | Roll-ups (fine-to-coarse group-by reuse) | No `ReplacementStrategy` implementation in this codebase yet (tracked separately, issue #254) | Once wired into `default_strategies()`: any `Replacement::Rewrite` candidate that strategy proposes |
+//! | Roll-ups (fine-to-coarse group-by reuse) | [`RollupStrategy`](crate::rollup::RollupStrategy), derived from workload siblings after CSE/target discovery (issue #254) | Any `Replacement::Rewrite` candidate that rolls a coarse aggregate up from a compatible finer aggregate |
 //! | Wavelets/OMP | Params type exists (`WaveletKind`/`WaveletParams`), reachable only via a deployment `CostModel::realize_extension` (no core `AggIntent` dispatch picks it) | A `ReplacementStrategy` that inspects a deployment's own `CostModel`, once some intent shape actually maps to `Implementation::Wavelet` |
 //! | Sampling | Same story as Wavelets: `SamplingKind`/`SamplingParams` exist, unreachable from core dispatch | Same hook as Wavelets, for `Implementation::Sample` |
 //! | Deep generative compression | No representation at all — no `Implementation`/`SummaryFamilyType` variant | Needs a new summary family added to `asap_types::post_asap` first |
