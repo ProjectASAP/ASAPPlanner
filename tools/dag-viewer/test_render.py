@@ -98,12 +98,12 @@ class RenderTests(unittest.TestCase):
         # usage in prose) once that file is inlined verbatim -- so match the
         # real tag shape instead of a bare substring.
         workload = {"queries": [named_graph("q1"), named_graph("q2")]}
-        html = render(workload, mode="single")
+        html = render(workload)
         self.assertNotRegex(html, r'<script src="[^"]+"></script>')
 
     def test_embedded_workload_round_trips(self):
         workload = {"queries": [named_graph("q1"), named_graph("q2")]}
-        html = render(workload, mode="single")
+        html = render(workload)
 
         m = re.search(
             r'<script type="application/json" id="embedded-workload">(.*?)</script>',
@@ -116,44 +116,35 @@ class RenderTests(unittest.TestCase):
     def test_render_does_not_mutate_callers_workload(self):
         workload = {"queries": [named_graph("q1")]}
         original = json.loads(json.dumps(workload))
-        render(workload, mode="single")
+        render(workload)
         self.assertEqual(workload, original)
 
-    def test_single_mode_adds_no_render_config(self):
+    def test_render_adds_no_legacy_mode_config(self):
         # Bare "__DAG_RENDER__" also matches viewer.js's own header comment
         # (which documents the window.__DAG_RENDER__ config object in prose)
         # once that file is inlined verbatim -- match the actual assignment
         # statement instead.
         workload = {"queries": [named_graph("q1"), named_graph("q2")]}
-        html = render(workload, mode="single")
+        html = render(workload)
         self.assertNotRegex(html, r"window\.__DAG_RENDER__ =")
-
-    def test_non_single_mode_sets_render_config(self):
-        workload = {"queries": [named_graph("q1"), named_graph("q2")]}
-        html = render(workload, mode="union")
-        m = re.search(r"window\.__DAG_RENDER__ = (\{.*?\});", html)
-        self.assertIsNotNone(m, "__DAG_RENDER__ assignment not found")
-        self.assertEqual(json.loads(m.group(1)), {"mode": "union"})
 
     def test_embedded_data_placed_before_viewer_js_body(self):
         # viewer.js's top-level startup code reads #embedded-workload and
-        # window.__DAG_RENDER__ synchronously as soon as it runs, so both
-        # must appear earlier in the document than viewer.js's own inlined
+        # synchronously as soon as it runs, so it must appear earlier in the
+        # document than viewer.js's own inlined
         # <script> block.
         workload = {"queries": [named_graph("q1"), named_graph("q2")]}
-        html = render(workload, mode="union")
+        html = render(workload)
         embedded_pos = html.index('id="embedded-workload"')
-        config_pos = html.index("__DAG_RENDER__ =")
         viewer_pos = html.index("cytoscape.use(window.cytoscapeDagre)")  # viewer.js's first line
         self.assertLess(embedded_pos, viewer_pos)
-        self.assertLess(config_pos, viewer_pos)
 
     def test_angle_bracket_in_query_source_does_not_break_out_of_script_tag(self):
         # A pathological (but legal JSON) query source containing a literal
         # "</script>" substring must not prematurely close the embedded
         # <script type="application/json"> tag when the browser parses it.
         workload = {"queries": [named_graph("q1", source="SELECT '</script><script>evil()</script>'")]}
-        html = render(workload, mode="single")
+        html = render(workload)
 
         m = re.search(
             r'<script type="application/json" id="embedded-workload">(.*?)</script>',

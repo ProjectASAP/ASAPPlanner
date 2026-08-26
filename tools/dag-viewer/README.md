@@ -1,315 +1,91 @@
-# ASAP query DAG viewer
+# ASAP Pre/Post-ASAP DAG viewer
 
-Interactive viewer for the pre-ASAP query IR (`QueryExpr`), for manual IR
-review/debugging, eyeballing common shapes across a corpus, and spotting shared sub-DAGs across queries.
+The viewer has one visualization mode: **Pre/Post-ASAP**.
 
-## Generate a graph
+- Select one query to see that query's complete pre-ASAP and post-ASAP DAGs.
+- Select multiple queries to see two workload-union DAGs: one pre-ASAP union
+  and one post-ASAP union. Structurally identical nodes and edges are
+  collapsed while query roots and ownership are retained.
+- Pre-ASAP nodes show only their original IR content.
+- Post-ASAP nodes show their translated IR content and the explicit planner
+  decision carried by that node.
 
-```sh
-cargo run -p asap-devtools --bin dag_export -- \
-  --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
-  --sql "SELECT service, AVG(latency) FROM metrics GROUP BY service" --name q2 \
-  --promql "topk(5, rate(http_requests_total[5m]))" --name q3 \
-  > /tmp/dag.json
-```
+There are no separate Single, Compare, or Union modes.
 
-`--name` is optional (defaults to `q<n>`). Repeat `--sql`/`--promql` for as
-many queries as you want in one file — they all land in one `WorkloadGraph`.
-You can also load several separate JSON files into the viewer at once (drag
-multiple files, or run the exporter more than once); their queries are merged.
-Add `--epsilon <f64>` to also populate `notes` with sketch-approximation
-findings — see "Replacement explanations (`notes`)" below.
+## Interactive query editor
 
-## Run the interactive planner viewer
+From the repository root:
 
 ```sh
 python3 tools/dag-viewer/server.py
-# open http://127.0.0.1:8000
 ```
 
-The server builds `dag_export` once, serves the UI, and exposes a local
-`POST /api/plan`. Open **Query editor**, add SQL/PromQL entries, choose which
-ones belong to the workload, and click **Plan selected workload**. The backend
-passes the whole batch to the real `dag_export --post-asap` binary as an argv
-array (never a shell command), running pre-ASAP lowering, ASAP-aware workload
-mapping, and post-ASAP export before returning the `WorkloadGraph` to the UI.
-It listens on `127.0.0.1` by default.
+Open <http://127.0.0.1:8000>, expand **Query editor**, add SQL or PromQL
+queries, choose an epsilon, and click **Plan selected workload**. The backend
+runs the real pipeline:
 
-## Open a static export
+1. SQL/PromQL parsing and lowering
+2. pre-ASAP DAG generation
+3. ASAP-aware mapping
+4. post-ASAP DAG generation
 
-This is a static page with no server or build step — open `index.html`
-directly in a browser (`file://tools/dag-viewer/index.html`), or serve the
-directory (`python3 -m http.server` from here) if your browser blocks local
-JS module loads. Drop the generated JSON onto the page, or use the file
-picker.
+The Python terminal streams those stages while they run. The server binds to
+localhost by default and invokes `dag_export` with an argv array, not a
+shell command.
 
-- Click a node to inspect its full field detail in the side panel.
-- Multiple loaded queries show up as tabs across the top ("Single" mode,
-  the default). Nodes that are structurally identical to a node in *another*
-  loaded query get a blue ring — toggle this off with "Highlight shared
-  subtrees".
-- Each query's root node (its final output) gets a heavier border.
-- A node whose `notes` array is non-empty gets a double border; click it to
-  see each note's kind and reason in the side panel.
-- Node color is driven by category — see the legend in the side panel,
-  or `node-style.js` for the underlying `kind -> category` table.
-- Once two or more queries are loaded, switch to **Compare** or **Union**
-  mode (buttons next to the drop zone) to see them together instead of one
-  at a time — see below.
-- If a query's export carries `replacements` (`dag_export --post-asap`),
-  switch to **Before/After** mode for complete pre-/post-ASAP DAGs — see below.
-
-## Render a standalone page from Python
-
-`index.html` needs a browser attached — dropping a file onto it, or a
-sibling `dag.json` it can `fetch()`. Neither works if you're generating a
-graph from an environment with no browser to look at it in (piped over SSH,
-a CI job, an agent session): `render.py` bakes a `dag_export` JSON straight
-into a single portable HTML file instead, with the query data and every
-vendored script inlined — open the output directly, nothing else to fetch:
-
-```sh
-cargo run -p asap-devtools --bin dag_export -- --sql "..." --name q1 \
-  | python3 tools/dag-viewer/render.py -o rendered.html
-
-# or from files already on disk, opening straight into Union mode:
-python3 tools/dag-viewer/render.py dag1.json dag2.json -o rendered.html --mode union
-```
-
-It's the exact same UI as `index.html` — `--mode` just pre-selects every
-loaded query and switches the page's *initial* view; Single/Compare/Union,
-click-to-inspect, and the highlight toggle all still work after it opens.
-`index.html` and `render.py`'s output share one copy of the interaction
-logic (`viewer.js`) and the category table (`node-style.js`), so anything
-below in this doc — the mode descriptions, the shared-hash caveats — applies
-to both equally.
-
-Node/edge transitions (mode switches, the shared-subtree ring, layout on
-load) are animated in both — see `viewer.js`'s `LAYOUT_ANIMATION` and the
-`transition-property` entries in `buildCyStyle()` if you want to retune or
-disable that.
-
-Pre-ASAP nodes have no per-node execution cost. Post-ASAP replacement nodes
-do carry the chosen candidate's estimated cost as part of `decision` and the
-side panel renders it alongside strategy/rationale.
-
-## Visual style and node categories
-
-Node colors and shapes are adapted from
-[`ProjectASAP/bgp-query-dag-explorer`](https://github.com/ProjectASAP/bgp-query-dag-explorer)'s
-visual language, applied to the real `QueryExpr` IR instead of that repo's
-hardcoded BGP query set. `tools/dag-viewer/node-style.js` is the single
-source of truth for which of `QueryExpr`'s ~24 node kinds belongs to which of
-the 9 categories (data / filter / derive / aggregate / window / join / set /
-sort / bind) — edit that file to reclassify a kind or retune the palette;
-nothing else in `index.html` needs to change.
-
-## Compare and Union mode
-
-Once two or more queries are loaded, the mode toggle next to the drop zone
-switches between three views:
-
-- **Single** (default) — one query's DAG at a time, selected via the tabs.
-  Unchanged from before.
-- **Compare** — every checked query gets its own lane (a dashed box titled
-  with the query's name), laid out side by side. A dashed line connects
-  nodes across lanes whenever their structural hash matches, so "what's
-  shared vs. query-specific" is a line you can trace instead of a ring you
-  have to hunt for one node at a time.
-- **Union** — the checked queries are merged into a single graph. Any node
-  whose hash is shared by two or more of them is drawn once, and edges from
-  every query that reaches that node converge onto it, instead of each
-  query drawing its own disconnected copy of the shared subtree. A merged
-  node gets a double border; the side panel lists which queries it's
-  present in (and, if it's more than one query's root, all of them).
-
-Switching into Compare or Union the first time selects every currently
-loaded query by default; use the checkboxes in the tab bar to narrow it
-down (each mode needs at least two selected, or it shows a hint instead of
-an empty graph). The selection is remembered when you switch back to
-Single and later back to Compare/Union.
-
-Branching is the normal case here, not an edge case: `QueryExpr` graphs have
-real branching at arbitrary depth (`Merge`/`Concat` with N children,
-`Join`/`SetOp`/`BinaryOp` with two, `LetBinding` with two structurally
-different children), and Union mode's merge can give a single node several
-parents at once — e.g. two queries whose `Aggregate` differs but whose
-underlying `Scan` is identical converge two different parents onto that one
-`Scan` node. `dagre` lays out multi-parent DAGs natively, so no special
-casing was needed for that beyond building the merged node/edge set
-correctly. Compare mode's lanes use `cytoscape.js`'s compound-node support
-(each lane is a parent node containing that query's nodes); the dashed
-cross-lane links are added to the graph *after* the per-lane layout runs,
-so they're purely visual and never distort which lane a node lands in.
-
-This is the same lane-based interaction model as the reference repo
-mentioned in [issue #186](https://github.com/ProjectASAP/ASAPPlanner/issues/186)
-(`ProjectASAP/bgp-query-dag-explorer`), adapted for real DAGs: that repo's
-layout assumes each query is a flat, linear list of `steps`, which doesn't
-carry over as-is once a query can branch.
-
-### "Shared" here means matching hash, not real CSE
-
-Compare and Union mode build on the exact same signal as the single-view
-highlighting described below: a node is "shared"/"merged" if its structural
-hash matches a node in another selected query. It is **not** real `Rc`
-identity and **not** the output of a real common-subexpression-elimination
-pass — see the next section for why, and don't read the UI's "shared" /
-"merged" language as claiming otherwise.
-
-## Shared-subtree highlighting is a real-hash proxy, not real CSE (yet)
-
-The highlight (and Compare/Union mode's notion of "shared") is computed by
-matching each node's `hash` across queries (a node is "shared" once its
-hash shows up under ≥ 2 distinct query names).
-That `hash` is no longer a viewer-only reimplementation: as of issue #223
-stage 3, `dag_export`'s per-node `hash` is computed by calling
-`asap_types::pre_asap::cse::structural_hash` directly — the exact same
-function, on the exact same input, that
-`asap_types::pre_asap::cse::share_common_subtrees`'s `InternTable` uses to
-bucket its own merge candidates (`crates/types/src/dag_export.rs`,
-`crates/types/src/pre_asap/cse.rs`). Two nodes with equal `hash` here really
-are exactly the pair `InternTable::intern` would go on to run its
-`PartialEq` check against.
-
-It's still a **proxy**, though, for two independent reasons — a hash match
-here does not by itself mean `share_common_subtrees` ran and actually merged
-those nodes onto one `Rc`:
-
-1. **The `PartialEq` + legality gate isn't re-run.** `structural_hash` is
-   deliberately only a coarse bucketing filter (hash collisions are
-   possible, and never disambiguated here); the viewer trusts a hash match
-   as "structurally identical" without also re-checking `PartialEq` or
-   `Schema::has_unique_key()` the way `InternTable::intern` does before
-   actually sharing an `Rc`. A node with no provable unique key (e.g. an
-   ungrouped `Aggregate`) can still show up highlighted here even though
-   real CSE would never hoist it.
-2. **No real `Rc` identity crosses this tool's process boundaries.** Each
-   `--sql`/`--promql` query given to the `dag_export` binary is lowered and
-   exported independently — `share_common_subtrees` is never actually
-   invoked in this path — and the viewer's own multi-file-load feature
-   merges JSON produced by entirely separate `dag_export` invocations (or
-   even separate machines/times). There is no `Rc<QueryExpr>` for the
-   viewer to compare pointer identity on; hash equality is the only signal
-   available to it, by construction, regardless of how the hash is
-   computed.
-
-Closing this fully — real `Rc::ptr_eq`-based highlighting reflecting an
-actual `share_common_subtrees` run — would mean threading `Rc` pointer
-identity from a single in-process `share_common_subtrees` call through
-`dag_export`'s node-flattening and into the exported JSON (a new field
-alongside `hash`), and having the `dag_export` binary actually call
-`share_common_subtrees` across all queries given in one invocation before
-exporting. That's a reasonable follow-up but a materially bigger change than
-this hash-unification step (new export API, binary changes, and a viewer
-highlighting-logic change) and orthogonal to it, so it's left for a future
-issue rather than folded into #223 stage 3.
-
-## Replacement explanations (`notes`)
-
-Each `DagNode` in the exported JSON carries a `notes` field:
-
-```jsonc
-"notes": [
-  { "kind": "SketchApproximation", "reason": "quantile(q=0.99) realizes as a Kll sketch — …" }
-]
-```
-
-`notes` is `Vec<DagNote>` (`crates/types/src/dag_export.rs`), omitted from the
-JSON entirely when empty — which is the common case, and always true unless
-the export was run with `--epsilon` (see below). `asap_types::dag_export`
-itself never populates this field; it exists purely as a layering seam so a
-*higher* crate can annotate an already-exported graph without `asap_types`
-knowing anything about that crate's concepts (`asap_types` is a lower crate
-`asap-aware-mapping` depends on, never the reverse).
-
-The one populator today is `dag_export`'s own devtools binary
-(`crates/devtools/src/bin/dag_export.rs`): after exporting each query, it
-calls `asap_aware_mapping::explain_replacements` (issue #257) on the same
-`QueryExpr` and, for every `ReplacementExplanation` returned, finds the
-`DagNode` candidates whose `hash` equals the explanation's `node_hash`, then
-confirms structural equality between the node's in-process source expression
-and the explanation target before pushing a `DagNote { kind, reason }`. The
-hash is a narrowing filter, not identity; the equality check makes annotation
-matching collision-safe.
-`kind` is the `Debug` form of `asap_aware_mapping::ExplanationKind`
-(`"SketchApproximation"` or `"CommonSubexpressionReuse"` today,
-`#[non_exhaustive]` — a future variant just shows up as its own tag, no
-viewer change required); `reason` is that explanation's own rationale text,
-verbatim.
-
-`SketchApproximation` notes only appear when the export ran with an
-approximate accuracy target: `dag_export`'s default is
-`AccuracyTarget::Exact` (nothing to approximate, so nothing to report), so
-you need the exporter's own `--epsilon <f64>` flag to see one, e.g.:
+## Export JSON directly
 
 ```sh
 cargo run -p asap-devtools --bin dag_export -- \
-  --epsilon 0.01 --sql "SELECT quantile(0.99, latency) FROM metrics" --name p99 \
+  --post-asap --epsilon 0.01 \
+  --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
   > /tmp/dag.json
 ```
 
-`CommonSubexpressionReuse` notes don't need `--epsilon`: they come from a
-subtree repeated within one query (e.g. the same branch appearing on both
-sides of a `BinaryOp`), which `share_common_subtrees` can detect regardless
-of accuracy target.
+Load the JSON with the page's file picker. A post-ASAP visualization requires
+`--post-asap`; ordinary exports intentionally omit `post_graph`.
 
-In the viewer, a node with non-empty `notes` gets a double border; click the
-node to see each note's kind and full reason text in the side panel, the same
-"click for detail" pattern used for IR content and translation decisions.
+## Standalone HTML
 
-## Before/After mode
+```sh
+python3 tools/dag-viewer/render.py /tmp/dag.json -o /tmp/dag.html
+```
 
-`dag_export --post-asap` attaches a `replacements` array to each
-query — one entry per place in the query where `asap-aware-mapping` actually
-*chose* a real optimization (cost-ranked, not just "could apply"): a sketch
-mapping, a CSE share/recompute, a workload-aware rollup, Hydra
-frequency-sketch grouping, or an `avg`→`sum`/`count` rewrite. Each entry
-carries its own small `before` subtree (the pre-ASAP nodes it replaced) and
-`after` subtree — either a rewritten pre-ASAP graph (`after.kind ===
-"Rewrite"`, e.g. the `avg` rewrite) or a post-ASAP "Summary" graph
-(`after.kind === "Summary"`, e.g. a sketch realization), plus `strategy`,
-`provenance`, a human `rationale`, and this candidate's `rank`/`cost` among
-whatever else was considered for the same target (`rank: 0` is the winner).
+The renderer embeds the workload and vendored JavaScript into one file. It
+always opens in Pre/Post-ASAP mode; there is no `--mode` option.
 
-**Before/After** uses checkbox tabs as a workload selector. Select one query
-to see its complete `graph` (pre-ASAP) and complete `post_graph` side by side.
-Select several queries to see every selected query's complete pre-ASAP DAG
-and post-ASAP DAG in one batch view. Per-target mini-subtrees are not the main
-view; their replacement records instead explain clicked nodes.
+## JSON contract
 
-Every `post_graph.nodes[]` entry produced or carried by a winning replacement
-contains a self-contained `decision` object with `id`, `strategy`,
-`rationale`, `rank`, `cost`, and `role` (`replacement_root` or
-`replacement_region`). This is a hard export contract: the viewer reads that
-field directly and never guesses provenance from a label, structural hash, or
-similarity to a replacement subtree. Clicking a post-ASAP node shows exactly
-why it was translated (or carried inside a translated region), while clicking
-the corresponding pre-ASAP target shows the selected replacement entry.
+`NamedGraph.graph` is the original pre-ASAP DAG. `NamedGraph.post_graph`
+is the complete translated DAG. Every post-ASAP node produced or carried by
+a selected replacement directly contains:
 
-A Summary graph's nodes (`SummaryDagNode`, from `after.kind === "Summary"` or
-from `post_graph`) are a different shape than the pre-ASAP `DagNode`s
-everywhere else in this viewer: `kind` is one of `KeepPreAsap`, `SummaryAgg`,
-`SummaryJoin`, `SummarySubtract`, `SummaryDelete`, `SummaryEstimate`,
-`SummaryMerge`, and there's no `hash` (no corresponding `QueryExpr` to hash)
-and no `notes`. `node-style.js` maps all seven to a new `summary` category —
-neutral gray rather than another saturated hue, both because a 10th vivid
-color starts crowding the other 9 and because "materialized post-ASAP
-structure" reads better as its own muted family than as one more member of
-the pre-ASAP rainbow. `KeepPreAsap` — literally an unchanged pre-ASAP subtree
-carried through as-is — gets an even more washed-out, dashed treatment on
-top of that (see `buildCyStyle`'s `node[kind = "KeepPreAsap"]` override in
-`viewer.js`), so a glance at an After lane separates "the planner did
-something here" from "left alone." Side-panel node inspection is otherwise
-identical to every other mode: click a node, get its `detail` dumped
-verbatim; a `SummaryDagNode`'s missing `hash`/`notes` just means the
-cross-query "shared with" note and notes block don't render, not a crash.
+```json
+{
+  "decision": {
+    "id": 7,
+    "strategy": "SketchAlgorithmStrategy",
+    "rationale": "count realizes as a Cms sketch",
+    "rank": 0,
+    "cost": 3.0,
+    "role": "replacement_root"
+  }
+}
+```
 
-## Vendored dependencies
+The viewer reads this explicit metadata. It never guesses a strategy from a
+node label, hash, or client-side signature. Union signatures are used only to
+collapse structurally identical visualization nodes; they do not infer
+planner decisions.
 
-`cytoscape.min.js`, `dagre.min.js`, and `cytoscape-dagre.js` are vendored here
-(not CDN-fetched) so the page works fully offline and doesn't drift with
-upstream releases. All three are MIT-licensed:
-- <https://github.com/cytoscape/cytoscape.js>
-- <https://github.com/dagrejs/dagre>
-- <https://github.com/cytoscape/cytoscape.js-dagre>
+Node boxes use concrete IR fields: aggregate measures/grouping, sort keys,
+filter predicates, projections, sources, summary families, and readout
+queries. Category icons are deliberately omitted so they cannot be confused
+with IR text.
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tools/dag-viewer -p test_render.py
+cargo test -p asap-devtools --bin dag_export
+```

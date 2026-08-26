@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Bake one or more dag_export WorkloadGraph JSON files into a single,
-portable HTML page — the same tools/dag-viewer UI (Single/Compare/Union,
-click-to-inspect, shared-subtree/CSE highlighting) as index.html, but with
+"""Bake WorkloadGraph JSON into a single, portable Pre/Post-ASAP HTML page,
+with the same query selection, workload-union, and node details as index.html,
+but with
 the vendored JS libraries and the query data all inlined into one file.
 
 Why this exists alongside index.html:
@@ -30,7 +30,7 @@ Usage:
   cargo run -p asap-devtools --bin dag_export -- --sql "..." --name q1 \\
     | python3 tools/dag-viewer/render.py -o rendered.html
 
-  python3 tools/dag-viewer/render.py dag1.json dag2.json -o rendered.html --mode union
+  python3 tools/dag-viewer/render.py dag1.json dag2.json -o rendered.html
 
 Multiple input files are merged exactly like index.html's multi-file drop: a
 query name colliding with an earlier one is disambiguated by suffixing the
@@ -272,7 +272,7 @@ def _json_script(obj: object) -> str:
     return json.dumps(obj).replace("<", "\\u003c")
 
 
-def render(workload: dict, mode: str) -> str:
+def render(workload: dict) -> str:
     workload = prepare_workload(workload)
     html = (HERE / "index.html").read_text()
 
@@ -283,13 +283,12 @@ def render(workload: dict, mode: str) -> str:
         html = html.replace(tag, f"<script>\n{(HERE / name).read_text()}\n</script>", 1)
 
     embedded = f'<script type="application/json" id="embedded-workload">{_json_script(workload)}</script>'
-    config = f"<script>window.__DAG_RENDER__ = {_json_script({'mode': mode})};</script>\n" if mode != "single" else ""
     viewer_tag = '<script src="viewer.js"></script>'
     if viewer_tag not in html:
         raise RuntimeError(f"render.py: expected to find {viewer_tag!r} in index.html — did it move or get renamed?")
     html = html.replace(
         viewer_tag,
-        f"{embedded}\n{config}<script>\n{(HERE / 'viewer.js').read_text()}\n</script>",
+        f"{embedded}\n<script>\n{(HERE / 'viewer.js').read_text()}\n</script>",
         1,
     )
     return html
@@ -307,12 +306,6 @@ def main() -> None:
         help="dag_export WorkloadGraph JSON file(s); reads stdin if none are given",
     )
     parser.add_argument("-o", "--output", type=Path, required=True, help="output HTML file path")
-    parser.add_argument(
-        "--mode",
-        choices=["single", "compare", "union", "beforeafter"],
-        default="single",
-        help="initial view mode; Before/After starts with the first query selected (default: single)",
-    )
     args = parser.parse_args()
 
     try:
@@ -327,14 +320,7 @@ def main() -> None:
     if not workload.get("queries"):
         print("render.py: no queries in input — nothing to render", file=sys.stderr)
         sys.exit(1)
-    if args.mode != "single" and len(workload["queries"]) < 2:
-        print(
-            f"render.py: --mode {args.mode} needs 2+ queries to do anything "
-            f"(got {len(workload['queries'])}) — the page will just show its 'select more' hint",
-            file=sys.stderr,
-        )
-
-    args.output.write_text(render(workload, args.mode))
+    args.output.write_text(render(workload))
     n = len(workload["queries"])
     print(f"wrote {args.output} ({n} quer{'y' if n == 1 else 'ies'})")
 

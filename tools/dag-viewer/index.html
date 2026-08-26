@@ -370,12 +370,8 @@
   <div id="dropzone">Drop WorkloadGraph JSON here, or click to choose file(s)</div>
   <input id="fileInput" type="file" accept="application/json" multiple />
   <div class="modeToggle" id="modeToggle">
-    <button class="btn active" id="modeSingleBtn" data-mode="single">Single</button>
-    <button class="btn" id="modeCompareBtn" data-mode="compare">Compare</button>
-    <button class="btn" id="modeUnionBtn" data-mode="union">Union</button>
-    <button class="btn" id="modeBeforeAfterBtn" data-mode="beforeafter">Before/After</button>
+    <button class="btn active" type="button" disabled>Pre/Post-ASAP</button>
   </div>
-  <span class="proxyNote" id="proxyNote" style="display:none">"Shared" = same structural hash across independent exports, not live Rc identity — see README.</span>
   <button class="btn" id="plannerToggle">Query editor</button>
   <button class="btn" id="clearBtn">Clear all</button>
   <label class="toggle">

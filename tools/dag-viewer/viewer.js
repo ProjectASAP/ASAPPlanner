@@ -26,18 +26,8 @@ let activeIndex = -1;
 let cy = null;
 let highlightOn = true;
 let zoom = 1;
-// mode: 'single' (default) shows one query's DAG via the tabs above, exactly
-// as before. 'compare' lays every selected query out in its own lane, side
-// by side, with dashed links between nodes that share a structural hash.
-// 'union' merges selected queries into one graph, collapsing every node
-// whose hash is shared by >= 2 of them into a single node with converging
-// edges. See the "Compare and Union mode" section of README.md. 'beforeafter'
-// draws the complete pre-ASAP and post-ASAP DAG for every checked query.
-// One checked query is the single-query view; 2+ checked queries are a
-// workload/batch view. Replacement entries are explanations attached to
-// clicked nodes, not separate tiny-subtree views.
-let mode = 'single';
-// Indices into `queries` currently selected to participate in compare/union.
+// The viewer has one Pre/Post-ASAP mode. One selected query renders its own
+// two DAGs; multiple selected queries union each stage into one workload DAG.
 let participants = new Set();
 
 const dropzone = document.getElementById('dropzone');
@@ -55,7 +45,6 @@ const detailSection = document.getElementById('detailSection');
 const viewTitleEl = document.getElementById('viewTitle');
 const zoomSlider = document.getElementById('zoomSlider');
 const zoomLabel = document.getElementById('zoomLabel');
-const proxyNote = document.getElementById('proxyNote');
 
 dropzone.addEventListener('click', () => fileInput.click());
 dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
@@ -69,39 +58,13 @@ fileInput.addEventListener('change', (e) => loadFiles(e.target.files));
 clearBtn.addEventListener('click', () => {
   queries = [];
   activeIndex = -1;
-  mode = 'single';
   participants = new Set();
-  setModeButtons();
   render();
 });
 highlightToggle.addEventListener('change', () => {
   highlightOn = highlightToggle.checked;
   applyHighlighting();
 });
-
-document.querySelectorAll('#modeToggle .btn').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    mode = btn.dataset.mode;
-    setModeButtons();
-    // First switch into compare/union with nothing chosen yet: default to
-    // every currently-loaded query rather than an empty set of lanes.
-    if ((mode === 'compare' || mode === 'union') && participants.size === 0) {
-      queries.forEach((_, i) => participants.add(i));
-    }
-    // First switch into Before/After: start with the currently active query.
-    // The checkbox tabs can then expand that into a batch workload.
-    if (mode === 'beforeafter') {
-      if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
-      if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
-    }
-    render();
-  });
-});
-
-function setModeButtons() {
-  document.querySelectorAll('#modeToggle .btn').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
-  proxyNote.style.display = mode === 'compare' || mode === 'union' ? 'inline' : 'none';
-}
 
 function loadFiles(fileList) {
   const files = Array.from(fileList || []);
@@ -126,6 +89,7 @@ function loadFiles(fileList) {
       pending -= 1;
       if (pending === 0) {
         if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
+        if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
         render();
       }
     };
@@ -185,38 +149,13 @@ function render() {
 
   renderTabs();
 
-  if (mode === 'single') {
-    baPickerEl.classList.remove('visible');
-    if (activeIndex === -1) activeIndex = 0;
-    renderGraph(queries[activeIndex]);
-  } else if (mode === 'compare') {
-    baPickerEl.classList.remove('visible');
-    renderCompare(getParticipants());
-  } else if (mode === 'union') {
-    baPickerEl.classList.remove('visible');
-    renderUnion(getParticipants());
-  } else {
-    renderBeforeAfter();
-  }
+  renderPrePostAsap();
   renderLegend();
 }
 
 function renderTabs() {
   tabsEl.innerHTML = '';
-  if (mode === 'single') {
-    queries.forEach((q, i) => {
-      const tab = document.createElement('div');
-      tab.className = 'tab' + (i === activeIndex ? ' active' : '');
-      tab.textContent = q.name;
-      tab.addEventListener('click', () => {
-        activeIndex = i;
-        render();
-      });
-      tabsEl.appendChild(tab);
-    });
-    return;
-  }
-  // Compare/Union/Before-After: checkboxes choose the workload.
+  // Checkboxes choose the single query or workload to union.
   queries.forEach((q, i) => {
     const chip = document.createElement('label');
     chip.className = 'tab checkTab' + (participants.has(i) ? ' active' : '');
@@ -448,7 +387,7 @@ function finalizeGraphInteractions() {
       return;
     }
     const query = queries.find((q) => q.name === n.data('queryName'));
-    showDetail(n.data('node'), query, mode === 'compare' ? getParticipants().map((i) => queries[i]) : undefined);
+    showDetail(n.data('node'), query);
   });
   cy.on('tap', (evt) => { if (evt.target === cy) clearDetail(); });
 }
@@ -702,24 +641,21 @@ function renderUnion(chosen) {
   fitAndSyncZoom();
 }
 
-// ── Before/After mode: complete query/workload pre/post DAGs ─────────────
-// Checkbox tabs select one query or a batch. Every selected query contributes
-// a complete pre-ASAP lane and complete post-ASAP lane. Replacement records
-// power node-click explanations instead of being rendered as tiny subtrees.
-function renderBeforeAfter() {
+// ── Pre/Post-ASAP: one query or two workload-union DAGs ──────────────────
+function renderPrePostAsap() {
   const chosen = getParticipants();
   const selected = chosen.map((i) => queries[i]);
   renderBaScopeSummary(selected);
   renderSourcePanel(selected);
 
   if (selected.length === 0) {
-    viewTitleEl.textContent = 'Before/After';
+    viewTitleEl.textContent = 'Pre/Post-ASAP';
     showModeHint('Select one query for a complete pre/post DAG, or several queries for a batch workload view.');
     return;
   }
   const missing = selected.filter((q) => !q.post_graph);
   if (missing.length > 0) {
-    viewTitleEl.textContent = selected.length === 1 ? `Before/After: ${selected[0].name}` : `Batch Before/After: ${selected.length} queries`;
+    viewTitleEl.textContent = selected.length === 1 ? `Pre/Post-ASAP: ${selected[0].name}` : `Pre/Post-ASAP workload: ${selected.length} queries`;
     const action = document.getElementById('plannerRun')
       ? 'Open Query planner and click “Plan selected workload”, or re-export with dag_export --post-asap.'
       : 'Re-export with dag_export --post-asap.';
@@ -728,24 +664,106 @@ function renderBeforeAfter() {
   }
   hideModeHint();
   viewTitleEl.textContent = selected.length === 1
-    ? `Before/After: ${selected[0].name} — complete IR DAG`
-    : `Batch Before/After: ${selected.length} queries`;
+    ? `Pre/Post-ASAP: ${selected[0].name}`
+    : `Pre/Post-ASAP workload union: ${selected.length} queries`;
 
-  const elements = [];
-  chosen.forEach((qIdx) => {
-    const query = queries[qIdx];
-    elements.push(...laneElements(`ba-pre-${qIdx}`, `${query.name} · pre-ASAP`, query.graph, query, 'pre'));
-  });
-  chosen.forEach((qIdx) => {
-    const query = queries[qIdx];
-    elements.push(...laneElements(`ba-post-${qIdx}`, `${query.name} · post-ASAP`, query.post_graph, query, 'post'));
-  });
+  const elements = selected.length === 1
+    ? [
+        ...laneElements('pre-asap', `${selected[0].name} · pre-ASAP`, selected[0].graph, selected[0], 'pre'),
+        ...laneElements('post-asap', `${selected[0].name} · post-ASAP`, selected[0].post_graph, selected[0], 'post'),
+      ]
+    : [
+        ...unionStageLaneElements('pre', chosen),
+        ...unionStageLaneElements('post', chosen),
+      ];
 
   buildCy(elements);
   finalizeGraphInteractions();
   applyHighlighting();
   clearDetail();
   fitAndSyncZoom();
+}
+
+function unionStageLaneElements(stage, chosen) {
+  const laneId = `${stage}-asap-union`;
+  const graphFor = (query) => (stage === 'pre' ? query.graph : query.post_graph);
+  const signatures = new Map();
+  const owners = new Map();
+
+  chosen.forEach((qIdx) => {
+    const query = queries[qIdx];
+    const graph = graphFor(query);
+    const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+    const perQuery = new Map();
+    const signatureFor = (node) => {
+      if (perQuery.has(node.id)) return perQuery.get(node.id);
+      const childSignatures = node.children.map((id) => signatureFor(byId.get(id)));
+      const signature = JSON.stringify([node.kind, node.detail, childSignatures]);
+      perQuery.set(node.id, signature);
+      if (!owners.has(signature)) owners.set(signature, new Set());
+      owners.get(signature).add(query.name);
+      return signature;
+    };
+    graph.nodes.forEach(signatureFor);
+    signatures.set(qIdx, perQuery);
+  });
+
+  const sharedIds = new Map();
+  let nextSharedId = 0;
+  owners.forEach((queryNames, signature) => {
+    if (queryNames.size > 1) sharedIds.set(signature, `${laneId}-shared-${nextSharedId++}`);
+  });
+  const keyFor = (qIdx, node) => sharedIds.get(signatures.get(qIdx).get(node.id)) || `${laneId}-q${qIdx}-${node.id}`;
+  const entries = new Map();
+  const edges = new Set();
+  const elements = [
+    { data: { id: laneId, label: `${stage === 'pre' ? 'pre-ASAP' : 'post-ASAP'} · workload union`, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
+  ];
+
+  chosen.forEach((qIdx) => {
+    const query = queries[qIdx];
+    const graph = graphFor(query);
+    const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+    graph.nodes.forEach((node) => {
+      const key = keyFor(qIdx, node);
+      let entry = entries.get(key);
+      if (!entry) {
+        entry = { node, query, sourceQueries: new Set(), rootFor: new Set() };
+        entries.set(key, entry);
+      }
+      entry.sourceQueries.add(query.name);
+      if (node.id === graph.root) entry.rootFor.add(query.name);
+      node.children.forEach((childId) => {
+        const childKey = keyFor(qIdx, byId.get(childId));
+        edges.add(`${childKey}\u0000${key}`);
+      });
+    });
+  });
+
+  entries.forEach((entry, key) => elements.push({
+    data: {
+      id: key,
+      parent: laneId,
+      label: entry.node.label,
+      node: entry.node,
+      kind: entry.node.kind,
+      category: categoryOf(entry.node.kind),
+      root: entry.rootFor.size > 0,
+      rootFor: Array.from(entry.rootFor),
+      sourceQueries: Array.from(entry.sourceQueries),
+      isBeforeAfter: true,
+      stage,
+      queryName: entry.query.name,
+      translations: translationsForNode(entry.query, entry.node, stage),
+    },
+    classes: entry.sourceQueries.size > 1 ? 'unionShared' : '',
+  }));
+  let edgeIndex = 0;
+  edges.forEach((edge) => {
+    const [source, target] = edge.split('\u0000');
+    elements.push({ data: { id: `${laneId}-edge-${edgeIndex++}`, source, target } });
+  });
+  return elements;
 }
 
 // Builds one Compare-mode-style lane (a dashed compound parent plus its
@@ -829,8 +847,9 @@ function showBeforeAfterDetail(data) {
   const stageName = data.stage === 'pre' ? 'pre-ASAP' : 'post-ASAP';
   const chipLabel = catLabel === node.kind ? node.kind : `${catLabel} · ${node.kind}`;
 
+  const rootNames = data.rootFor && data.rootFor.length ? data.rootFor : [data.queryName];
   const rootHtml = data.root
-    ? `<div class="rootNote">This is the root of ${escapeHtml(data.queryName)}'s complete ${stageName} DAG.</div>`
+    ? `<div class="rootNote">Root of the complete ${stageName} DAG for: ${rootNames.map(escapeHtml).join(', ')}.</div>`
     : '';
 
   const decisions = data.translations || [];
@@ -887,8 +906,7 @@ function renderSourcePanel(qs) {
 
 function applyHighlighting() {
   if (!cy) return;
-  if (mode === 'beforeafter') {
-    const selected = getParticipants().map((i) => queries[i]);
+  const selected = getParticipants().map((i) => queries[i]);
     const ownersFor = (graphOf) => {
       const owners = new Map();
       selected.forEach((q) => {
@@ -912,17 +930,6 @@ function applyHighlighting() {
       const sharedWith = node && owners.get(node.hash);
       n.toggleClass('shared', !!(highlightOn && sharedWith && sharedWith.size > 1));
     });
-    return;
-  }
-  const owners = mode === 'single' ? computeHashOwners() : computeHashOwners(getParticipants().map((i) => queries[i]));
-  cy.nodes().forEach((n) => {
-    if (n.data('isLane') || n.data('isUnion')) return;
-    const node = n.data('node');
-    if (!node) return;
-    const sharedWith = owners.get(node.hash);
-    const isShared = highlightOn && sharedWith && sharedWith.size > 1;
-    n.toggleClass('shared', isShared);
-  });
 }
 
 function clearDetail() {
@@ -1022,20 +1029,10 @@ function renderLegend() {
     rows.push(`<div class="leg"><span class="swatch" style="background:${c}; border-color:${c}"></span>
       <span><span class="swatchLabel">${escapeHtml(label)}</span><span class="swatchDesc">Bottom-right badge — click the node for why (issue #257)</span></span></div>`);
   }
-  if (mode === 'compare') {
-    rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${ringColor}; border-style:dashed"></span>
-      <span><span class="swatchLabel">Shared-subtree link</span><span class="swatchDesc">Dashed line connects matching-hash nodes across lanes</span></span></div>`);
-  }
-  if (mode === 'union') {
-    rows.push(`<div class="leg"><span class="swatch" style="background:transparent; border:3px double ${ringColor}"></span>
-      <span><span class="swatchLabel">Merged node</span><span class="swatchDesc">Collapsed: this hash appears in 2+ selected queries</span></span></div>`);
-  }
-  if (mode === 'beforeafter') {
-    const panelBg = getComputedStyle(document.documentElement).getPropertyValue('--panel2').trim() || '#f0f2f5';
-    const mutedColor = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#6b7280';
-    rows.push(`<div class="leg"><span class="swatch" style="background:${panelBg}; border-color:${mutedColor}; border-style:dashed"></span>
-      <span><span class="swatchLabel">Pass-through (KeepPreAsap)</span><span class="swatchDesc">Unchanged pre-ASAP subtree carried into the Summary graph as-is</span></span></div>`);
-  }
+  const panelBg = getComputedStyle(document.documentElement).getPropertyValue('--panel2').trim() || '#f0f2f5';
+  const mutedColor = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#6b7280';
+  rows.push(`<div class="leg"><span class="swatch" style="background:${panelBg}; border-color:${mutedColor}; border-style:dashed"></span>
+    <span><span class="swatchLabel">Pass-through (KeepPreAsap)</span><span class="swatchDesc">Unchanged pre-ASAP subtree carried into the Summary graph as-is</span></span></div>`);
   legendList.innerHTML = rows.join('');
 }
 
@@ -1064,6 +1061,7 @@ function loadWorkload(parsed) {
   const incoming = (parsed && parsed.queries) || [];
   incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph }));
   if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
+  if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
 }
 
 // Entry point used by planner-ui.js after the local HTTP backend returns a
@@ -1075,8 +1073,6 @@ window.renderPlannerWorkload = function renderPlannerWorkload(parsed) {
   activeIndex = -1;
   loadWorkload(parsed);
   queries.forEach((_, index) => participants.add(index));
-  mode = 'beforeafter';
-  setModeButtons();
   render();
 };
 
@@ -1086,8 +1082,7 @@ window.renderPlannerWorkload = function renderPlannerWorkload(parsed) {
 // browsers (blocked as cross-origin), which is exactly the "no browser
 // dev-server available" case that tool exists for. `window.__DAG_RENDER__`
 // is an optional config object the same generated page may also set, e.g.
-// `{ mode: 'union' }`, to open straight into Compare/Union instead of
-// Single — see render.py's --mode flag.
+// The generated page always opens in Pre/Post-ASAP mode.
 const embeddedEl = document.getElementById('embedded-workload');
 if (embeddedEl) {
   try {
@@ -1095,16 +1090,7 @@ if (embeddedEl) {
   } catch (err) {
     console.error('tools/dag-viewer: failed to parse embedded workload data', err);
   }
-  const requestedMode = window.__DAG_RENDER__ && window.__DAG_RENDER__.mode;
-  if (requestedMode && requestedMode !== 'single') {
-    mode = requestedMode;
-    if (mode === 'beforeafter') {
-      if (queries.length > 0) participants.add(0);
-    } else {
-      queries.forEach((_, i) => participants.add(i));
-    }
-    setModeButtons();
-  }
+  if (queries.length > 0 && participants.size === 0) participants.add(0);
   render();
 } else {
   // Plain index.html starts with the committed, post-ASAP-generated example.
