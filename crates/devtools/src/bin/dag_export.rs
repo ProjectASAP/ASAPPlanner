@@ -189,6 +189,43 @@ struct Winner<'a> {
     cost: f64,
 }
 
+/// Short explanation intended for a selected winner in node-level UI. The
+/// candidate's full rationale remains available in pre-ASAP applicability
+/// notes; repeating that exhaustive prose on every post-ASAP region node
+/// obscures the actual decision.
+fn decision_rationale(winner: &Winner<'_>) -> String {
+    match winner.candidate.strategy {
+        "AvgToSumOverCountStrategy" => {
+            "Rewrites AVG into SUM and COUNT under the same grouping, then divides SUM by COUNT."
+                .to_string()
+        }
+        "SharedSubtreeStrategy" => match winner.candidate.provenance {
+            asap_aware_mapping::replacement::ReplacementProvenance::CseShare => {
+                "Builds the repeated subtree once and shares it across consumers.".to_string()
+            }
+            asap_aware_mapping::replacement::ReplacementProvenance::CseRecompute => {
+                "Recomputes the subtree per consumer because that has the lower estimated cost."
+                    .to_string()
+            }
+            _ => "Chooses the lowest-cost handling of the repeated subtree.".to_string(),
+        },
+        "RollupStrategy" => {
+            "Answers this aggregate from a compatible finer-grained aggregate.".to_string()
+        }
+        _ => {
+            let summary = winner
+                .candidate
+                .rationale
+                .split_once(" — ")
+                .map_or(winner.candidate.rationale.as_str(), |(summary, _)| summary);
+            summary
+                .split_once(" (asap_")
+                .map_or(summary, |(plain, _)| plain)
+                .to_string()
+        }
+    }
+}
+
 /// Find the index into `winners` (if any) whose `target` is structurally
 /// identical to `expr` — `by_hash` is only a narrowing filter (keyed by
 /// [`structural_hash`]); `expr == target` is the collision-safe identity
@@ -232,7 +269,7 @@ fn target_replacement(
         decision_id,
         target_pre_id,
         strategy,
-        rationale: winner.candidate.rationale.clone(),
+        rationale: decision_rationale(winner),
         rank: 0,
         cost: winner.cost,
         before,
@@ -351,7 +388,7 @@ fn run_post_asap_with_progress(
         let decision = DagDecision {
             id: i as u32,
             strategy: winner.candidate.strategy.to_string(),
-            rationale: winner.candidate.rationale.clone(),
+            rationale: decision_rationale(winner),
             rank: 0,
             cost: winner.cost,
             role: "replacement_region",

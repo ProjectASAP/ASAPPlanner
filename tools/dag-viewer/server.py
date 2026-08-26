@@ -12,6 +12,8 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from render import prepare_workload
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 BINARY = REPO / "target" / "debug" / "dag_export"
@@ -80,7 +82,7 @@ def plan_workload(payload: dict) -> dict:
     stderr = "\n".join(stderr_lines)
     if returncode != 0:
         raise RuntimeError(stderr.strip() or "dag_export failed")
-    workload = json.loads(stdout)
+    workload = prepare_workload(json.loads(stdout))
     workload["planner_stderr"] = stderr
     print(f"[planner] Complete: generated {len(workload.get('queries', []))} pre/post DAG pairs", flush=True)
     return workload

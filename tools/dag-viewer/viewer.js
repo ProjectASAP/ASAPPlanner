@@ -823,6 +823,7 @@ function showBeforeAfterDetail(data) {
   const catColors = categoryColors(category);
   const catLabel = (CATEGORIES[category] || {}).label || category;
   const stageName = data.stage === 'pre' ? 'pre-ASAP' : 'post-ASAP';
+  const chipLabel = catLabel === node.kind ? node.kind : `${catLabel} · ${node.kind}`;
 
   const rootHtml = data.root
     ? `<div class="rootNote">This is the root of ${escapeHtml(data.queryName)}'s complete ${stageName} DAG.</div>`
@@ -847,11 +848,11 @@ function showBeforeAfterDetail(data) {
 
   detailSection.innerHTML = `
     <h2>Selected node</h2>
-    <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(catLabel)} · ${escapeHtml(node.kind)}</span>
+    <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(chipLabel)}</span>
     <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
     ${rootHtml}
     ${translationHtml}
-    ${notesHtml(node)}
+    ${data.stage === 'pre' ? notesHtml(node) : ''}
     <h3 class="detailSubhead">IR node content</h3>
     <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
   `;
