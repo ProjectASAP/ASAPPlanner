@@ -41,8 +41,11 @@
 //! `asap_types` itself never constructs a `DagNote` — see [`DagNode::notes`]
 //! for the layering rule this keeps.
 
+use std::rc::Rc;
+
 use serde::Serialize;
 
+use crate::post_asap::{SummaryExpr, SummaryNode};
 use crate::pre_asap::cse::{structural_hash, HashCache};
 use crate::pre_asap::query_expr::{QueryExpr, Source};
 
@@ -71,8 +74,14 @@ pub struct DagNode {
     /// part of the JSON format: callers first narrow by `hash`, then compare
     /// this value structurally to avoid treating a hash collision as node
     /// identity.
+    ///
+    /// `None` for a node with no corresponding pre-ASAP `QueryExpr` at all —
+    /// only possible for a post-ASAP-originated node inside a merged
+    /// [`export_post_asap`] graph (a `SummaryAgg`/`SummaryJoin`/… node has no
+    /// single `QueryExpr` it corresponds to). Every node [`export`] itself
+    /// produces is pre-ASAP by construction and always carries `Some`.
     #[serde(skip)]
-    pub source_expr: QueryExpr,
+    pub source_expr: Option<QueryExpr>,
     /// Arbitrary reporting-layer annotations for this node — e.g. why a
     /// replacement exists here. `asap_types` never populates this itself
     /// (it has no notion of a "replacement" at all — see the module doc's
@@ -120,6 +129,33 @@ pub struct NamedGraph {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     pub graph: DagGraph,
+    /// Concrete post-ASAP replacement sites discovered for this query — see
+    /// [`TargetReplacement`]. Always empty coming out of anything in this
+    /// module (same layering rule as [`DagNode::notes`]: `asap_types` never
+    /// runs `asap-aware-mapping`'s search itself); a higher layer populates
+    /// this after the fact, e.g. the `dag_export` devtools binary's
+    /// `--post-asap` flag. Omitted from the JSON entirely when empty, so
+    /// every existing producer/consumer of `NamedGraph` (in particular every
+    /// invocation of `dag_export` without `--post-asap`) keeps emitting and
+    /// parsing exactly the same shape it always has.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replacements: Vec<TargetReplacement>,
+    /// One merged "whole query, but post-ASAP" graph — see
+    /// [`export_post_asap`] for how a higher layer builds this. Unlike
+    /// [`TargetReplacement::before`]/`::after` (small, self-contained
+    /// before/after pairs, one per independently-discovered replacement
+    /// site), this is a single flattened [`DagGraph`] spanning the whole
+    /// query: every node that has no winning replacement renders as an
+    /// ordinary pre-ASAP [`DagNode`] (same shape [`export`] itself
+    /// produces), and every node that does splices in its winning
+    /// candidate's shape instead — a rewritten [`QueryExpr`] subtree, or a
+    /// bound `SummaryNode` subtree, rendered inline in the very same node
+    /// list. `None` unless a higher layer explicitly built one (e.g. the
+    /// `dag_export` devtools binary's `--post-asap` flag); omitted from the
+    /// JSON entirely when absent, so every existing producer/consumer of
+    /// `NamedGraph` is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_graph: Option<DagGraph>,
 }
 
 /// A batch of named queries — the shape the viewer's multi-query / compare
@@ -131,6 +167,298 @@ pub struct WorkloadGraph {
     pub queries: Vec<NamedGraph>,
 }
 
+// ── Post-ASAP replacement export — a second, layering-seam-shaped feature ──
+//
+// Everything below this point is the post-ASAP counterpart of the pre-ASAP
+// flattening above: [`export_summary`] flattens a `SummaryNode` the same way
+// [`export`] flattens a `QueryExpr`, and [`TargetReplacement`] is the
+// generic, crate-agnostic "one replacement site, before and after" shape a
+// higher layer (`asap-aware-mapping`, via the `dag_export` devtools binary's
+// `--post-asap` flag) populates after running its own search — the exact
+// same layering rule [`DagNode::notes`]'s doc above already states: this
+// module never runs `asap_aware_mapping::replacement::search_workload_with`
+// itself, never picks a "winning" candidate, and has no opinion on what a
+// `ReplacementProvenance` or a cost model even is. It only defines shapes
+// concrete and serializable enough for a higher layer to fill in, and for
+// `tools/dag-viewer` to render without needing to know anything about
+// `asap-aware-mapping`'s own vocabulary.
+//
+// A single whole-query "post-ASAP tree" isn't attempted here, and isn't
+// representable in the current type system either: `SummaryExpr` has no
+// variant letting a `SummaryNode` be embedded back inside a plain
+// `QueryExpr`'s child slot (`QueryExpr`'s own children are always
+// `Rc<QueryExpr>`, never `Rc<SummaryNode>`), so there is no way to splice a
+// post-ASAP binding back into its original pre-ASAP tree in place. Inventing
+// a bridge type for that is a real `asap_types`/`asap-aware-mapping` IR
+// design decision, well beyond what a devtools visualization export should
+// decide unilaterally. Instead, each independently-discovered replacement
+// target gets its own small, self-contained `before`/`after` pair — the
+// target's own pre-ASAP subtree, and either the winning `SummaryNode` or the
+// winning rewritten `QueryExpr`, both of which *are* fully representable
+// today via [`export`]/[`export_summary`] as-is.
+
+/// One flattened post-ASAP node — the [`SummaryExpr`] analogue of
+/// [`DagNode`]. `detail` holds this node's own scalar fields (the summarized
+/// column, the summary family, grouping strategy, sketch-query kind, …) —
+/// everything except its `SummaryNode` children, which live in `children`
+/// instead.
+///
+/// Unlike [`DagNode`], this carries no `hash`/`source_expr` pair: nothing in
+/// this module ever needs to re-identify a particular `SummaryDagNode` the
+/// way `DagNode::hash` lets a higher layer re-identify a pre-ASAP node (a
+/// `SummaryNode` is always freshly exported for exactly one
+/// [`TargetReplacementAfter::Summary`] site, never matched back against a
+/// separately-exported graph the way pre-ASAP notes are).
+///
+/// Several of `SummaryExpr`'s own fields (`SummaryFamilyType`,
+/// `GroupingStrategy`, `SketchQuery`) derive neither `Serialize` nor
+/// `Deserialize` in `asap_types::post_asap` — they carry no reporting
+/// obligation there, since nothing before this module ever needed to
+/// serialize a post-ASAP node. Rather than adding `Serialize` impls to
+/// `post_asap`'s own core types purely for this devtools-facing export (a
+/// change to that module's own public API contract, out of scope for a
+/// reporting concern), this module renders those particular fields into
+/// `detail` via their `Debug` formatting instead — human-readable, and
+/// sufficient for the display purpose `detail` exists for on every other
+/// node in this file (see [`DagNode::detail`]'s own doc), at the cost of
+/// those particular fields being opaque strings rather than structured JSON
+/// on the `SummaryDagNode` side of the export.
+#[derive(Debug, Clone, Serialize)]
+pub struct SummaryDagNode {
+    pub id: u32,
+    /// The `SummaryExpr` variant name (e.g. `"SummaryAgg"`).
+    pub kind: &'static str,
+    /// Short human-readable summary for a node's collapsed on-graph label.
+    pub label: String,
+    pub detail: serde_json::Value,
+    /// Child node ids, in the variant's field order (e.g. `SummaryJoin` is
+    /// `[outer, inner]`).
+    pub children: Vec<u32>,
+}
+
+/// One post-ASAP `SummaryNode` tree, flattened the same way [`DagGraph`]
+/// flattens a pre-ASAP `QueryExpr` tree.
+#[derive(Debug, Clone, Serialize)]
+pub struct SummaryDagGraph {
+    pub nodes: Vec<SummaryDagNode>,
+    pub root: u32,
+}
+
+/// Flatten a [`SummaryNode`] the same way [`export`] flattens a `QueryExpr`
+/// — post-order, one [`SummaryDagNode`] per [`SummaryExpr`] variant, no
+/// memoization of repeated `Rc<SummaryNode>` references (a shared
+/// sub-expression reachable through two parents is flattened twice, into two
+/// separate node entries — the same "this is a flattened tree view, not a
+/// pointer-identity-preserving graph" behavior [`build`] already has for
+/// `QueryExpr`).
+///
+/// A `KeepPreAsap(inner)` leaf embeds the *whole* pre-ASAP subtree beneath it
+/// as a nested [`DagGraph`] (via [`export(inner)`](export)) inside its own
+/// `detail` field (`{"pre_asap_subgraph": <DagGraph>}`) rather than trying to
+/// flatten it into this same node list — [`DagNode`] and [`SummaryDagNode`]
+/// are different types with different id spaces, so mixing them into one
+/// `Vec` isn't type-safe; nesting is. `label` for a `KeepPreAsap` node is
+/// `format!("KeepPreAsap({kind})")`, where `kind` is the inner subtree's own
+/// top-level `DagNode::kind`.
+pub fn export_summary(node: &SummaryNode) -> SummaryDagGraph {
+    let mut nodes = Vec::new();
+    let root = build_summary(node, &mut nodes);
+    SummaryDagGraph { nodes, root }
+}
+
+fn push_summary_node(
+    nodes: &mut Vec<SummaryDagNode>,
+    kind: &'static str,
+    label: String,
+    detail: serde_json::Value,
+    children: Vec<u32>,
+) -> u32 {
+    let id = nodes.len() as u32;
+    nodes.push(SummaryDagNode {
+        id,
+        kind,
+        label,
+        detail,
+        children,
+    });
+    id
+}
+
+/// A short, human-readable label for a [`crate::post_asap::SummaryFamilyType`]
+/// (e.g. `"Sketch(Kll)"`, `"ExactAggregate(Sum)"`) — for
+/// [`SummaryDagNode::label`] text on a `SummaryAgg`/`SummaryJoin` node. Not
+/// exhaustive prose (mirrors `asap_aware_mapping::replacement::describe_intent`'s
+/// own "this is a label, not a decision" stance) — every variant is covered,
+/// but via `Debug` for the inner kind rather than hand-written prose per
+/// algorithm.
+fn family_label(family: &crate::post_asap::SummaryFamilyType) -> String {
+    use crate::post_asap::SummaryFamilyType;
+    match family {
+        SummaryFamilyType::Plain(dtype) => format!("Plain({dtype:?})"),
+        SummaryFamilyType::ExactAggregate(kind, _) => format!("ExactAggregate({kind:?})"),
+        SummaryFamilyType::Sketch(kind, _grouping) => format!("Sketch({:?})", kind.algorithm()),
+        SummaryFamilyType::Sample(kind, _) => format!("Sample({kind:?})"),
+        SummaryFamilyType::Wavelet(kind, _) => format!("Wavelet({kind:?})"),
+        SummaryFamilyType::StatModel(kind, _) => format!("StatModel({kind:?})"),
+    }
+}
+
+/// `(kind, label, detail)` for every [`SummaryExpr`] variant *except*
+/// [`SummaryExpr::KeepPreAsap`] — that variant has no `SummaryDagNode`/
+/// `DagNode` of its own (see [`build_summary`]/[`build_summary_hybrid`], its
+/// only two callers, both of which special-case it before ever reaching
+/// this function). Factored out so [`build_summary`] (nests a `KeepPreAsap`
+/// leaf's pre-ASAP subtree as its own [`SummaryDagGraph`]) and
+/// [`build_summary_hybrid`] (splices that same subtree directly into a
+/// shared [`DagGraph`] node list — see [`export_post_asap`]) can't drift
+/// apart on how every *other* variant's own shape is described, since
+/// nothing about that description differs between the two.
+fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value) {
+    match expr {
+        SummaryExpr::KeepPreAsap(_) => {
+            unreachable!("summary_shape's callers special-case KeepPreAsap before calling it")
+        }
+        SummaryExpr::SummaryAgg {
+            family,
+            col,
+            reduction,
+            grouping,
+            ..
+        } => {
+            let label = format!("SummaryAgg({})", family_label(family));
+            let detail = serde_json::json!({
+                "family": format!("{family:?}"),
+                "col": col,
+                "reduction": reduction,
+                "grouping": format!("{grouping:?}"),
+            });
+            ("SummaryAgg", label, detail)
+        }
+        SummaryExpr::SummaryJoin { key, family, .. } => {
+            let label = format!("SummaryJoin({})", family_label(family));
+            let detail = serde_json::json!({
+                "key": key,
+                "family": format!("{family:?}"),
+            });
+            ("SummaryJoin", label, detail)
+        }
+        SummaryExpr::SummarySubtract { .. } => (
+            "SummarySubtract",
+            "SummarySubtract".into(),
+            serde_json::json!({}),
+        ),
+        SummaryExpr::SummaryDelete { key, .. } => {
+            let detail = serde_json::json!({ "key": key });
+            ("SummaryDelete", "SummaryDelete".into(), detail)
+        }
+        SummaryExpr::SummaryEstimate { query, .. } => {
+            let label = format!("SummaryEstimate({query:?})");
+            let detail = serde_json::json!({ "query": format!("{query:?}") });
+            ("SummaryEstimate", label, detail)
+        }
+        SummaryExpr::SummaryMerge { children } => {
+            let label = format!("SummaryMerge({} children)", children.len());
+            ("SummaryMerge", label, serde_json::json!({}))
+        }
+    }
+}
+
+/// `expr`'s own `Rc<SummaryNode>` children, in the variant's field order
+/// (e.g. `SummaryJoin` is `[outer, inner]`) — empty for
+/// [`SummaryExpr::KeepPreAsap`], which has no `SummaryNode` children at all
+/// (only a boxed pre-ASAP `QueryExpr`). Shared by [`build_summary`] and
+/// [`build_summary_hybrid`] for the same reason [`summary_shape`] is.
+fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
+    match expr {
+        SummaryExpr::KeepPreAsap(_) => vec![],
+        SummaryExpr::SummaryAgg { child, .. } => vec![child],
+        SummaryExpr::SummaryJoin { outer, inner, .. } => vec![outer, inner],
+        SummaryExpr::SummarySubtract { left, right } => vec![left, right],
+        SummaryExpr::SummaryDelete { summary_input, .. } => vec![summary_input],
+        SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
+        SummaryExpr::SummaryMerge { children } => children.iter().collect(),
+    }
+}
+
+/// Recursively flatten `node`, appending [`SummaryDagNode`]s to `nodes` in
+/// post-order (children pushed before their parent), and return the pushed
+/// root's id. Exhaustive over every [`SummaryExpr`] variant, matching this
+/// file's own exhaustive style for `QueryExpr` in [`build`].
+fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
+    if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
+        let pre_asap_subgraph = export(inner);
+        let inner_kind = pre_asap_subgraph.nodes[pre_asap_subgraph.root as usize].kind;
+        let label = format!("KeepPreAsap({inner_kind})");
+        let detail = serde_json::json!({ "pre_asap_subgraph": pre_asap_subgraph });
+        return push_summary_node(nodes, "KeepPreAsap", label, detail, vec![]);
+    }
+    let children: Vec<u32> = summary_children(&node.expr)
+        .into_iter()
+        .map(|child| build_summary(child, nodes))
+        .collect();
+    let (kind, label, detail) = summary_shape(&node.expr);
+    push_summary_node(nodes, kind, label, detail, children)
+}
+
+/// One replacement site a higher layer (the `dag_export` binary) found by
+/// running `asap_aware_mapping::replacement::search_workload_with` +
+/// `PlanSpace::cost_sorted` and picking the best-ranked candidate for one
+/// `MemoGroup` — `asap_types` never runs that search itself (same layering
+/// rule as [`DagNote`]: this crate defines the shape, a higher crate
+/// populates it).
+#[derive(Debug, Clone, Serialize)]
+pub struct TargetReplacement {
+    /// Id of the [`DagNode`] (in this query's own `graph.nodes`, i.e. the
+    /// [`NamedGraph`] this `TargetReplacement` is attached to) this
+    /// replacement's `before` subtree is rooted at.
+    pub target_pre_id: u32,
+    /// Human label for which strategy proposed the winning candidate —
+    /// e.g. `"Sketch"` / `"HydraGrouping"` / `"SharedSubtree"` /
+    /// `"AvgToSumRewrite"` / `"Rollup"`. The higher layer derives this from
+    /// `ReplacementProvenance` plus which strategy's shape actually
+    /// produced the winning candidate; `asap_types` has no opinion on the
+    /// string values here at all — purely a display label.
+    pub strategy: String,
+    /// The winning candidate's own human-readable rationale (reused
+    /// verbatim from `ReplacementSubDAG::rationale` by the higher layer,
+    /// not re-derived here).
+    pub rationale: String,
+    /// This candidate's rank among its `MemoGroup`'s alternatives after
+    /// `PlanSpace::cost_sorted` (`0` = best). Exposed so a renderer can show
+    /// "this was the best of N candidates" without re-deriving the ranking.
+    pub rank: usize,
+    /// This candidate's own estimated cost, straight off
+    /// `RankedGroup::costs` — `f64::NAN` whenever the plugged-in cost model
+    /// doesn't estimate a numeric cost for this candidate shape (see that
+    /// field's own doc upstream).
+    pub cost: f64,
+    /// The target's own pre-ASAP subtree, before replacement — literally
+    /// `export(target)` for the `MemoGroup`'s own `target`, reused as-is.
+    pub before: DagGraph,
+    pub after: TargetReplacementAfter,
+}
+
+/// What a [`TargetReplacement`] became — either a genuine post-ASAP binding
+/// or a still-pre-ASAP-shaped structural rewrite, mirroring
+/// `asap_aware_mapping::replacement::Replacement`'s own two variants.
+///
+/// Serializes as `{"kind": "Summary"|"Rewrite", "graph": {...}}` (serde's
+/// adjacently-tagged representation for a `#[serde(tag = "kind", content =
+/// "graph")]` enum) — this exact shape is a cross-team contract with
+/// `tools/dag-viewer`'s fixture data, so it isn't incidental: changing it
+/// needs coordinating with that side, not just a local refactor here.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", content = "graph")]
+pub enum TargetReplacementAfter {
+    /// A `Replacement::Summary` candidate — a genuine post-ASAP binding.
+    Summary(SummaryDagGraph),
+    /// A `Replacement::Rewrite` candidate — still pre-ASAP shaped (CSE
+    /// share/recompute, `AvgToSumOverCountStrategy`, and `RollupStrategy`
+    /// all produce this kind), so this reuses [`DagGraph`]/[`export`] too,
+    /// not a new type.
+    Rewrite(DagGraph),
+}
+
 /// Flatten `expr` into a [`DagGraph`].
 pub fn export(expr: &QueryExpr) -> DagGraph {
     let mut nodes = Vec::new();
@@ -139,8 +467,81 @@ pub fn export(expr: &QueryExpr) -> DagGraph {
     // real work across this pass instead of re-walking an already-hashed
     // shared descendant once per node that references it.
     let mut cache = HashCache::new();
-    let root = build(expr, &mut nodes, &mut cache);
+    // No substitution: an ordinary pre-ASAP export never splices anything
+    // in — see `build`'s own doc for why it always takes a `find_winner`
+    // callback regardless (so `export_post_asap` can share this exact
+    // per-variant traversal instead of duplicating it).
+    let root = build(expr, &mut nodes, &mut cache, &mut |_| None);
     DagGraph { nodes, root }
+}
+
+/// What a higher layer found for one specific pre-ASAP node when building a
+/// merged post-ASAP graph via [`export_post_asap`] — see that function's own
+/// doc for the full design. `asap_types` has no opinion on *how* this is
+/// decided (that's `asap_aware_mapping::replacement::search_workload_with` +
+/// `PlanSpace::cost_sorted`'s job, a higher layer, exactly the layering rule
+/// [`DagNode::notes`] already states); it only defines the shape a decision
+/// comes back in.
+#[derive(Debug, Clone)]
+pub enum PostAsapSubstitution {
+    /// This exact node has a winning `Replacement::Rewrite` — keep building
+    /// from `.0` instead of the original node. Still pre-ASAP shaped, so
+    /// [`build`] renders it via the same ordinary `DagNode` path — see
+    /// [`build`]'s own doc for why `.0`'s own top level is rendered without
+    /// re-querying `find_winner` on it (its descendants still are).
+    Rewrite(Rc<QueryExpr>),
+    /// This exact node has a winning `Replacement::Summary` — switch to
+    /// rendering `.0`'s bound `SummaryNode` shape from here down, via
+    /// [`build_summary_hybrid`].
+    Summary(Rc<SummaryNode>),
+}
+
+/// Build one merged "whole query, but post-ASAP" [`DagGraph`] by walking
+/// `root`'s ordinary pre-ASAP shape and, at every node, asking `find_winner`
+/// whether *that exact node* has a winning replacement — if so, splicing
+/// the replacement's own shape in at that position instead, in the very
+/// same flattened node list (not a nested sub-graph the way
+/// [`TargetReplacement::before`]/`::after` — small, independent, per-site
+/// before/after pairs — already do; see this file's "Post-ASAP replacement
+/// export" section doc for why *that* design doesn't attempt a single
+/// whole-query composite, and why this one can: this is a synthetic
+/// id/edge list, the same kind of thing [`DagGraph`] already is for the
+/// pre-ASAP side, not a real `QueryExpr`/`SummaryNode` value with a type
+/// system to satisfy).
+///
+/// `find_winner` is the whole layering seam: `asap_types` never runs
+/// `asap_aware_mapping::replacement::search_workload_with` or
+/// `PlanSpace::cost_sorted` itself, and has no idea what a `MemoGroup` or a
+/// `ReplacementProvenance` is — it only asks, for one node at a time, "did a
+/// higher layer already decide something for you?" A caller (e.g. the
+/// `dag_export` devtools binary) builds this closure once per workload
+/// search, over whatever hash/structural-equality lookup it already needs
+/// for [`TargetReplacement`] discovery, and passes it in here unchanged.
+///
+/// `find_winner` is deliberately consulted only once per node, at the
+/// moment [`build`] first reaches it — **not** re-consulted on a
+/// substitution's own immediate top level (only on that substitution's
+/// *descendants*, which get an ordinary fresh call same as any other node).
+/// This matters for correctness, not just efficiency:
+/// `SharedSubtreeStrategy`'s own "build once and share" candidate is
+/// `Replacement::Rewrite(Rc::clone(target))` — literally the *same* value
+/// as the target it's a candidate for. Re-querying `find_winner` on that
+/// candidate's own top level would find the identical group and its
+/// identical winning candidate again, recursing forever. Skipping the
+/// re-query at exactly that one level is what makes this termination-safe
+/// for every registered strategy, not just the ones that happen not to
+/// return the target itself as a candidate.
+pub fn export_post_asap(
+    root: &QueryExpr,
+    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
+) -> DagGraph {
+    let mut nodes = Vec::new();
+    let mut cache = HashCache::new();
+    let root_id = build(root, &mut nodes, &mut cache, find_winner);
+    DagGraph {
+        nodes,
+        root: root_id,
+    }
 }
 
 /// Push one flattened node for `expr`. `expr` is the *whole* subtree this
@@ -167,10 +568,69 @@ fn push_node(
         detail,
         children,
         hash,
-        source_expr: expr.clone(),
+        source_expr: Some(expr.clone()),
         notes: Vec::new(),
     });
     id
+}
+
+/// Push one flattened node with no corresponding pre-ASAP `QueryExpr` at
+/// all — a post-ASAP-originated node inside [`export_post_asap`]'s merged
+/// graph (a `SummaryAgg`/`SummaryJoin`/… node, via [`build_summary_hybrid`]).
+/// `hash`/`source_expr`-based re-identification (see [`DagNode::hash`]'s own
+/// doc) has no meaning for a node with no `QueryExpr` behind it, so this
+/// pushes a fixed placeholder hash (`0`) and `source_expr: None` rather than
+/// inventing a hash over `SummaryExpr` (which, unlike `QueryExpr`, has no
+/// [`structural_hash`]-equivalent function at all — see [`SummaryDagNode`]'s
+/// own doc on why `SummaryExpr`'s fields don't even derive `Hash`/`PartialEq`
+/// consistently enough to build one).
+fn push_summary_originated_node(
+    nodes: &mut Vec<DagNode>,
+    kind: &'static str,
+    label: String,
+    detail: serde_json::Value,
+    children: Vec<u32>,
+) -> u32 {
+    let id = nodes.len() as u32;
+    nodes.push(DagNode {
+        id,
+        kind,
+        label,
+        detail,
+        children,
+        hash: 0,
+        source_expr: None,
+        notes: Vec::new(),
+    });
+    id
+}
+
+/// The [`build_summary`]/[`build_summary_hybrid`] counterpart of [`build`]
+/// for a bound [`SummaryNode`] reached while building
+/// [`export_post_asap`]'s merged graph: appends into the *same* `nodes:
+/// Vec<DagNode>` list `build` itself is filling, instead of a separate
+/// [`SummaryDagGraph`]. A `KeepPreAsap(inner)` leaf recurses back into
+/// [`build`] on `inner` (the general pre-ASAP entry, `find_winner` included)
+/// rather than nesting a `{"pre_asap_subgraph": ...}` blob the way
+/// [`build_summary`] does — so the merged graph reads as one seamless graph
+/// with no dead ends, and so a target reachable underneath a `KeepPreAsap`
+/// wrapper (a nested aggregate a strategy independently found a
+/// replacement for, say) still gets spliced in correctly.
+fn build_summary_hybrid(
+    node: &SummaryNode,
+    nodes: &mut Vec<DagNode>,
+    cache: &mut HashCache,
+    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
+) -> u32 {
+    if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
+        return build(inner, nodes, cache, find_winner);
+    }
+    let children: Vec<u32> = summary_children(&node.expr)
+        .into_iter()
+        .map(|child| build_summary_hybrid(child, nodes, cache, find_winner))
+        .collect();
+    let (kind, label, detail) = summary_shape(&node.expr);
+    push_summary_originated_node(nodes, kind, label, detail, children)
 }
 
 fn source_label(source: &Source) -> String {
@@ -190,7 +650,47 @@ fn source_label(source: &Source) -> String {
 /// serializes it as opaque `detail` JSON via `Predicate`/`ProjectItem`/
 /// `AggIntent`'s own `Serialize` impl, same as before the merge — a scalar
 /// subtree was never a separate DAG node, so this doesn't change that.
-fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u32 {
+///
+/// `find_winner` is [`export_post_asap`]'s substitution seam, threaded
+/// through every recursive call (including [`export`]'s own, which always
+/// passes a closure that returns `None`) so both entry points share this
+/// exact traversal instead of maintaining two copies of it. `build` itself
+/// only ever calls `find_winner` once, right here at the top, before
+/// dispatching into the ordinary per-variant match below — see
+/// [`export_post_asap`]'s own doc for why a substitution's own immediate
+/// result is rendered via that match directly (recursing into its children
+/// through `build` again, so *they* still get a fresh `find_winner` call)
+/// rather than by looping back through this check a second time.
+fn build(
+    expr: &QueryExpr,
+    nodes: &mut Vec<DagNode>,
+    cache: &mut HashCache,
+    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
+) -> u32 {
+    match find_winner(expr) {
+        Some(PostAsapSubstitution::Rewrite(replacement)) => {
+            return build_no_recheck(&replacement, nodes, cache, find_winner);
+        }
+        Some(PostAsapSubstitution::Summary(node)) => {
+            return build_summary_hybrid(&node, nodes, cache, find_winner);
+        }
+        None => {}
+    }
+    build_no_recheck(expr, nodes, cache, find_winner)
+}
+
+/// The actual per-variant match [`build`] dispatches to once it has decided
+/// (by consulting `find_winner` exactly once) which `QueryExpr` value to
+/// render at this position — either `expr` itself (unchanged), or a winning
+/// `Replacement::Rewrite`'s own target. Every recursive call here goes back
+/// through [`build`] (not this function), so every child gets its own fresh
+/// `find_winner` query.
+fn build_no_recheck(
+    expr: &QueryExpr,
+    nodes: &mut Vec<DagNode>,
+    cache: &mut HashCache,
+    find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
+) -> u32 {
     match expr {
         QueryExpr::Scan {
             source,
@@ -241,7 +741,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             vec![],
         ),
         QueryExpr::PromqlVectorFromScalar(child) => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             push_node(
                 nodes,
                 expr,
@@ -253,7 +753,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             )
         }
         QueryExpr::PromqlScalarFromVector(child) => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             push_node(
                 nodes,
                 expr,
@@ -265,7 +765,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             )
         }
         QueryExpr::PromqlRelabel { dst, value, child } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "dst": dst, "value": value });
             push_node(
                 nodes,
@@ -278,7 +778,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             )
         }
         QueryExpr::PromqlInfoEnrich { selector, child } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "selector": selector });
             push_node(
                 nodes,
@@ -291,7 +791,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             )
         }
         QueryExpr::PromqlSeriesSample { by, kind, child } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "by": by, "kind": kind });
             push_node(
                 nodes,
@@ -304,7 +804,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             )
         }
         QueryExpr::Filter { pred, child } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "pred": pred });
             push_node(
                 nodes,
@@ -321,7 +821,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             qualifier,
             child,
         } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "cols": cols, "qualifier": qualifier });
             push_node(
                 nodes,
@@ -340,7 +840,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             having,
             child,
         } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({
                 "reduction": reduction,
                 "measures": measures,
@@ -358,7 +858,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             )
         }
         QueryExpr::Dedup { cols, child } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "cols": cols });
             push_node(
                 nodes,
@@ -371,7 +871,10 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             )
         }
         QueryExpr::Concat { children } => {
-            let ids: Vec<u32> = children.iter().map(|c| build(c, nodes, cache)).collect();
+            let ids: Vec<u32> = children
+                .iter()
+                .map(|c| build(c, nodes, cache, find_winner))
+                .collect();
             let label = format!("Concat({} branches)", ids.len());
             push_node(
                 nodes,
@@ -389,8 +892,8 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             left,
             right,
         } => {
-            let l = build(left, nodes, cache);
-            let r = build(right, nodes, cache);
+            let l = build(left, nodes, cache, find_winner);
+            let r = build(right, nodes, cache, find_winner);
             let detail = serde_json::json!({ "kind": kind, "pred": pred });
             push_node(
                 nodes,
@@ -408,8 +911,8 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             left,
             right,
         } => {
-            let l = build(left, nodes, cache);
-            let r = build(right, nodes, cache);
+            let l = build(left, nodes, cache, find_winner);
+            let r = build(right, nodes, cache, find_winner);
             let detail = serde_json::json!({ "kind": kind, "all": all });
             push_node(
                 nodes,
@@ -426,7 +929,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             partition_by,
             child,
         } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "keys": keys, "partition_by": partition_by });
             push_node(
                 nodes,
@@ -439,7 +942,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             )
         }
         QueryExpr::Limit { n, offset, child } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "n": n, "offset": offset });
             push_node(
                 nodes,
@@ -456,7 +959,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             resolution,
             child,
         } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "range": range, "resolution": resolution });
             push_node(
                 nodes,
@@ -469,7 +972,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             )
         }
         QueryExpr::TimeRange { range, child } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "range": range });
             push_node(
                 nodes,
@@ -482,7 +985,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             )
         }
         QueryExpr::TimeShift { shift, child } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "shift": shift });
             push_node(
                 nodes,
@@ -503,7 +1006,7 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             output_name,
             child,
         } => {
-            let c = build(child, nodes, cache);
+            let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({
                 "func": func,
                 "args": args,
@@ -528,8 +1031,8 @@ fn build(expr: &QueryExpr, nodes: &mut Vec<DagNode>, cache: &mut HashCache) -> u
             rhs,
             vector_match,
         } => {
-            let l = build(lhs, nodes, cache);
-            let r = build(rhs, nodes, cache);
+            let l = build(lhs, nodes, cache, find_winner);
+            let r = build(rhs, nodes, cache, find_winner);
             let detail = serde_json::json!({ "op": op.to_string(), "vector_match": vector_match });
             push_node(
                 nodes,
