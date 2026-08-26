@@ -28,7 +28,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from render import _json_script, load_workload, render
+from render import _json_script, _semantic_label, load_workload, prepare_workload, render
 
 HERE = Path(__file__).resolve().parent
 
@@ -111,7 +111,13 @@ class RenderTests(unittest.TestCase):
             re.S,
         )
         self.assertIsNotNone(m, "embedded-workload <script> tag not found")
-        self.assertEqual(json.loads(m.group(1)), workload)
+        self.assertEqual(json.loads(m.group(1)), prepare_workload(workload))
+
+    def test_render_does_not_mutate_callers_workload(self):
+        workload = {"queries": [named_graph("q1")]}
+        original = json.loads(json.dumps(workload))
+        render(workload, mode="single")
+        self.assertEqual(workload, original)
 
     def test_single_mode_adds_no_render_config(self):
         # Bare "__DAG_RENDER__" also matches viewer.js's own header comment
@@ -164,6 +170,16 @@ class JsonScriptTests(unittest.TestCase):
         encoded = _json_script({"x": "</script>"})
         self.assertNotIn("</script>", encoded)
         self.assertEqual(json.loads(encoded), {"x": "</script>"})
+
+
+class SemanticLabelTests(unittest.TestCase):
+    def test_aggregate_names_measure_input_and_grouping(self):
+        node = {"kind": "Aggregate", "detail": {"measures": [{"kind": "quantile", "col": 6, "q": 0.95}], "reduction": {"Reduce": [1]}}}
+        self.assertEqual(_semantic_label(node), "Aggregate\ncompute: quantile(col[6], q=0.95)\ngroup by col[1]")
+
+    def test_sort_names_expression_direction_and_null_order(self):
+        node = {"kind": "Sort", "detail": {"keys": [{"expr": {"Column": 2}, "ascending": False, "nulls_first": True}]}}
+        self.assertEqual(_semantic_label(node), "Sort\nsort: col[2] descending, nulls first")
 
 
 class MainCliTests(unittest.TestCase):

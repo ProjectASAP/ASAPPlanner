@@ -71,6 +71,16 @@ Parse the query corpora in the repository and report which pre-ASAP IR variants 
 cargo run -p asap-devtools --bin variant_coverage
 ```
 
+### Check sketch-replacement coverage
+
+Parse the same query corpora, lower them with an approximate `AccuracyTarget`, and report what fraction of each corpus's successfully-lowered queries got a genuine sketch alternative (`SketchApproximation`, e.g. KLL vs. DDSketch) and/or a cross-query common-subexpression-reuse candidate (`CommonSubexpressionReuse`):
+
+```sh
+cargo run -p asap-devtools --bin sketch_coverage -- --epsilon 0.01
+```
+
+`--epsilon` is optional (defaults to `0.01`). See the binary's own doc comment for exactly how "coverage" is defined and attributed back to each query.
+
 ## Additional examples
 
 Print pre-ASAP IR for several top-k queries:

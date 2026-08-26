@@ -226,18 +226,11 @@ function buildCyStyle() {
         'text-wrap': 'wrap',
         'text-valign': 'center',
         'text-halign': 'center',
-        'text-margin-y': 9,
         'font-size': 10,
         'width': 'label',
         'height': 'label',
-        'padding': '16px',
+        'padding': '12px',
         'border-width': 1.5,
-        'background-fit': 'contain',
-        'background-position-x': '50%',
-        'background-position-y': '17%',
-        'background-width': '30%',
-        'background-height': '30%',
-        'background-clip': 'none',
         // Lets class/style changes below (the '.shared' ring, '.unionShared'
         // double border, ':selected' outline, and buildCy's fade-in) animate
         // instead of snapping — cytoscape treats these like CSS transitions,
@@ -252,7 +245,18 @@ function buildCyStyle() {
       selector: 'node[category = "data"]',
       style: { 'corner-radius': 999, 'border-style': 'dashed' },
     },
-    ...categoryStyles,
+    ...categoryStyles.map((entry) => ({
+      ...entry,
+      style: { ...entry.style, 'background-image': 'none' },
+    })),
+    {
+      selector: 'node.root',
+      style: { 'border-width': 2.5 },
+    },
+    {
+      selector: 'node.hasNotes',
+      style: { 'border-style': 'double', 'border-width': 3 },
+    },
     {
       selector: 'node.shared',
       style: {
@@ -365,41 +369,16 @@ function buildCy(elements, layout) {
 // Root badges + notes badges + click/tap wiring — identical across
 // single/compare/union.
 function finalizeGraphInteractions() {
-  // Root nodes get a second, smaller badge icon layered in the corner —
-  // QueryExpr has no dedicated terminal "output" kind the way the reference
-  // repo's BGP `out_*` steps do, so the root is marked structurally instead.
-  cy.nodes('[?root]').forEach((n) => {
-    n.addClass('root').style({
-      'background-image': [categoryIconDataUri(n.data('category')), rootBadgeIconDataUri()],
-      'background-position-x': ['46%', '86%'],
-      'background-position-y': ['17%', '15%'],
-      'background-width': ['26%', '22%'],
-      'background-height': ['26%', '22%'],
-      'background-clip': ['none', 'none'],
-    });
-  });
+  // Use borders rather than pictograms so IR text owns the whole node box.
+  cy.nodes('[?root]').addClass('root');
 
-  // Nodes carrying a non-empty `notes` array (issue #257: asap-aware-mapping
-  // explained a replacement at this node, matched by structural hash — see
-  // README.md) get a third badge in the opposite corner from the root badge,
-  // so a node can be both at once without the two colliding.
+  // A double border marks nodes carrying planner notes without taking space
+  // away from the IR text.
   cy.nodes().forEach((n) => {
     if (n.data('isLane')) return;
     const node = n.data('node');
     if (!node || !node.notes || !node.notes.length) return;
-    const isRoot = n.hasClass('root');
-    n.addClass('hasNotes').style({
-      'background-image': [
-        categoryIconDataUri(n.data('category')),
-        ...(isRoot ? [rootBadgeIconDataUri()] : []),
-        noteBadgeIconDataUri(node.notes),
-      ],
-      'background-position-x': ['46%', ...(isRoot ? ['86%'] : []), '86%'],
-      'background-position-y': ['17%', ...(isRoot ? ['15%'] : []), '83%'],
-      'background-width': ['26%', ...(isRoot ? ['22%'] : []), '22%'],
-      'background-height': ['26%', ...(isRoot ? ['22%'] : []), '22%'],
-      'background-clip': isRoot ? ['none', 'none', 'none'] : ['none', 'none'],
-    });
+    n.addClass('hasNotes');
   });
 
   cy.on('tap', 'node', (evt) => {
@@ -447,7 +426,7 @@ function renderGraph(query) {
     elements.push({
       data: {
         id: String(node.id),
-        label: `${node.kind}\n${node.label}`,
+        label: node.label,
         node,
         category: categoryOf(node.kind),
         root: node.id === query.graph.root,
@@ -510,7 +489,7 @@ function renderCompare(chosen) {
         data: {
           id: `q${qIdx}-${node.id}`,
           parent: laneId,
-          label: `${node.kind}\n${node.label}`,
+          label: node.label,
           node,
           category: categoryOf(node.kind),
           root: node.id === q.graph.root,
@@ -644,7 +623,7 @@ function renderUnion(chosen) {
     elements.push({
       data: {
         id: key,
-        label: `${entry.node.kind}\n${entry.node.label}`,
+        label: entry.node.label,
         node: entry.node,
         category: entry.category,
         isUnion: true,

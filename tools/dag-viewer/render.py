@@ -40,6 +40,7 @@ source filename.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
@@ -52,6 +53,167 @@ HERE = Path(__file__).resolve().parent
 # document order (its startup code reads both synchronously as soon as it
 # runs) — see viewer.js's header comment.
 _INLINE_LIBS = ("dagre.min.js", "cytoscape.min.js", "cytoscape-dagre.js", "node-style.js")
+
+
+def _compact(value: object) -> str:
+    """Render one IR value compactly enough to fit inside a DAG node."""
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return ", ".join(_compact(item) for item in value) or "none"
+    if not isinstance(value, dict):
+        return str(value)
+    if set(value) == {"Column"}:
+        return f"col[{_compact(value['Column'])}]"
+    if set(value) == {"Table"} and isinstance(value["Table"], dict):
+        return value["Table"].get("table_ref", _compact(value["Table"]))
+    if set(value) == {"TimeSeries"} and isinstance(value["TimeSeries"], dict):
+        return value["TimeSeries"].get("metric", _compact(value["TimeSeries"]))
+    if len(value) == 1:
+        tag, payload = next(iter(value.items()))
+        if payload is None:
+            return tag
+        return f"{tag}({_compact(payload)})"
+    return ", ".join(f"{key}={_compact(item)}" for key, item in value.items())
+
+
+def _column(value: object) -> str:
+    if isinstance(value, int):
+        return f"col[{value}]"
+    return _compact(value)
+
+
+def _measure(value: object) -> str:
+    if not isinstance(value, dict):
+        return _compact(value)
+    kind = str(value.get("kind", "aggregate"))
+    args = []
+    if value.get("col") is not None:
+        args.append(_column(value["col"]))
+    for key in ("q", "k", "population", "label", "lower", "upper"):
+        if key in value:
+            args.append(f"{key}={_compact(value[key])}")
+    accuracy = value.get("accuracy")
+    if isinstance(accuracy, dict) and len(accuracy) == 1:
+        name, amount = next(iter(accuracy.items()))
+        args.append(f"{name.lower()}={_compact(amount)}")
+    return f"{kind}({', '.join(args)})" if args else f"{kind}()"
+
+
+def _grouping(reduction: object) -> str | None:
+    if reduction == "PerEntity":
+        return "per entity"
+    if not isinstance(reduction, dict) or "Reduce" not in reduction:
+        return None
+    keys = reduction["Reduce"]
+    if isinstance(keys, dict) and "without" in keys:
+        return "group without " + ", ".join(_column(key) for key in keys["without"])
+    if isinstance(keys, list):
+        return "group by " + (", ".join(_column(key) for key in keys) or "all rows")
+    return "group by " + _compact(keys)
+
+
+def _sort_key(value: object) -> str:
+    if not isinstance(value, dict):
+        return _compact(value)
+    expr = _compact(value.get("expr"))
+    direction = "ascending" if value.get("ascending", True) else "descending"
+    nulls = "nulls first" if value.get("nulls_first", False) else "nulls last"
+    return f"{expr} {direction}, {nulls}"
+
+
+def _semantic_label(node: dict) -> str:
+    """Build a box label from a node's concrete IR fields, not its summary."""
+    kind = str(node.get("kind", "Node"))
+    detail = node.get("detail") or {}
+    if not isinstance(detail, dict):
+        return f"{kind}\n{_compact(detail)}"
+    lines = [kind]
+    if kind == "Scan":
+        lines.append(f"source: {_compact(detail.get('source', 'unknown'))}")
+        if detail.get("predicates"):
+            lines.append(f"where: {_compact(detail['predicates'])}")
+    elif kind == "Aggregate":
+        lines.extend(f"compute: {_measure(measure)}" for measure in detail.get("measures") or [])
+        grouping = _grouping(detail.get("reduction"))
+        if grouping:
+            lines.append(grouping)
+        if detail.get("having"):
+            lines.append(f"having: {_compact(detail['having'])}")
+    elif kind == "Sort":
+        lines.extend(f"sort: {_sort_key(key)}" for key in detail.get("keys") or [])
+        if detail.get("partition_by"):
+            lines.append(f"within: {_compact(detail['partition_by'])}")
+    elif kind == "Project":
+        for item in detail.get("cols") or []:
+            if isinstance(item, dict):
+                expr = _compact(item.get("expr"))
+                alias = item.get("alias")
+                lines.append(f"output: {expr}" + (f" as {alias}" if alias else ""))
+            else:
+                lines.append(f"output: {_compact(item)}")
+    elif kind == "Filter":
+        lines.append(f"where: {_compact(detail.get('pred'))}")
+    elif kind == "Join":
+        lines.append(f"type: {_compact(detail.get('kind'))}")
+        if detail.get("pred"):
+            lines.append(f"on: {_compact(detail['pred'])}")
+    elif kind == "Limit":
+        lines.append(f"rows: {_compact(detail.get('n'))}")
+        if detail.get("offset"):
+            lines.append(f"offset: {_compact(detail['offset'])}")
+    elif kind == "BinaryOp":
+        lines.append(f"operation: {_compact(detail.get('op'))}")
+        if detail.get("vector_match"):
+            lines.append(f"match: {_compact(detail['vector_match'])}")
+    elif kind in {"SummaryAgg", "SummaryJoin"}:
+        lines.append(f"family: {_compact(detail.get('family'))}")
+        for key in ("col", "key", "reduction", "grouping"):
+            if key in detail:
+                lines.append(f"{key}: {_compact(detail[key])}")
+    elif kind == "SummaryEstimate":
+        lines.append(f"query: {_compact(detail.get('query'))}")
+    elif kind == "SummaryDelete":
+        lines.append(f"key: {_compact(detail.get('key'))}")
+    elif kind == "KeepPreAsap":
+        nested = detail.get("pre_asap_subgraph")
+        nested_nodes = nested.get("nodes", []) if isinstance(nested, dict) else []
+        nested_root = nested.get("root") if isinstance(nested, dict) else None
+        root = next((item for item in nested_nodes if item.get("id") == nested_root), None)
+        lines.append(f"unchanged: {root.get('kind', 'pre-ASAP subtree') if root else 'pre-ASAP subtree'}")
+    else:
+        for key, value in detail.items():
+            if key not in {"schema", "pre_asap_subgraph"} and value not in (None, [], {}):
+                lines.append(f"{key}: {_compact(value)}")
+    return "\n".join(lines)
+
+
+def prepare_workload(workload: dict) -> dict:
+    """Copy a workload and replace every graph label with readable IR text."""
+    prepared = copy.deepcopy(workload)
+
+    def prepare_graph(graph: object) -> None:
+        if not isinstance(graph, dict):
+            return
+        for node in graph.get("nodes", []):
+            node["label"] = _semantic_label(node)
+            nested = (node.get("detail") or {}).get("pre_asap_subgraph")
+            prepare_graph(nested)
+
+    for query in prepared.get("queries", []):
+        prepare_graph(query.get("graph"))
+        prepare_graph(query.get("post_graph"))
+        for replacement in query.get("replacements", []):
+            prepare_graph(replacement.get("before"))
+            after = replacement.get("after") or {}
+            prepare_graph(after.get("graph"))
+    return prepared
 
 
 def load_workload(paths: list[Path]) -> dict:
@@ -81,6 +243,7 @@ def _json_script(obj: object) -> str:
 
 
 def render(workload: dict, mode: str) -> str:
+    workload = prepare_workload(workload)
     html = (HERE / "index.html").read_text()
 
     for name in _INLINE_LIBS:
