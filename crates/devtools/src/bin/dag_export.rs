@@ -72,7 +72,7 @@ enum Lang {
     PromQl,
 }
 
-fn catalog() -> SqlCatalog {
+fn default_catalog() -> SqlCatalog {
     SqlCatalog::new()
         .with_table(
             "metrics",
@@ -97,16 +97,70 @@ fn catalog() -> SqlCatalog {
         )
 }
 
+fn catalog(custom: &[String]) -> SqlCatalog {
+    let mut catalog = default_catalog();
+    for raw in custom {
+        let value: serde_json::Value = serde_json::from_str(raw)
+            .unwrap_or_else(|error| panic!("--table-schema must be valid JSON: {error}"));
+        let name = value["name"]
+            .as_str()
+            .expect("--table-schema.name must be a string");
+        let columns = value["columns"]
+            .as_array()
+            .expect("--table-schema.columns must be an array");
+        let columns: Vec<Column> = columns
+            .iter()
+            .map(|column| {
+                let column_name = column["name"]
+                    .as_str()
+                    .expect("column.name must be a string");
+                let data_type = match column["type"]
+                    .as_str()
+                    .expect("column.type must be a string")
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
+                    "timestamp" => DataType::Timestamp,
+                    "utf8" | "string" => DataType::Utf8,
+                    "float64" | "double" => DataType::Float64,
+                    "int64" | "bigint" => DataType::Int64,
+                    other => panic!("unsupported column type {other:?}"),
+                };
+                Column::new(
+                    column_name,
+                    data_type,
+                    column["nullable"].as_bool().unwrap_or(true),
+                )
+            })
+            .collect();
+        let schema = match value.get("time_index").and_then(|index| index.as_u64()) {
+            Some(index) => Schema::with_time_index(columns, index as usize, vec![]),
+            None => Schema::new(columns),
+        };
+        catalog = catalog.with_table(name, schema);
+    }
+    catalog
+}
+
 /// Parses `--sql "<query>" --name "<label>"` / `--promql "<query>" --name
 /// "<label>"` pairs off argv, in the order given, plus one optional global
 /// `--epsilon <f64>` and one optional global `--post-asap` flag. `--name` is
 /// optional and applies to the immediately preceding `--sql`/`--promql`.
-fn parse_args() -> (Vec<(String, Lang, String)>, AccuracyTarget, bool, bool) {
+struct ParsedArgs {
+    entries: Vec<(String, Lang, String)>,
+    accuracy: AccuracyTarget,
+    post_asap: bool,
+    progress: bool,
+    table_schemas: Vec<String>,
+}
+
+fn parse_args() -> ParsedArgs {
     let mut entries: Vec<(String, Lang, String)> = Vec::new();
     let mut pending: Option<(Lang, String)> = None;
     let mut accuracy = AccuracyTarget::Exact;
     let mut post_asap = false;
     let mut progress = false;
+    let mut table_schemas = Vec::new();
     let mut args = std::env::args().skip(1);
 
     fn flush(entries: &mut Vec<(String, Lang, String)>, pending: &mut Option<(Lang, String)>) {
@@ -147,11 +201,20 @@ fn parse_args() -> (Vec<(String, Lang, String)>, AccuracyTarget, bool, bool) {
             "--progress" => {
                 progress = true;
             }
+            "--table-schema" => {
+                table_schemas.push(args.next().expect("--table-schema requires JSON"));
+            }
             other => panic!("unrecognized argument: {other}"),
         }
     }
     flush(&mut entries, &mut pending);
-    (entries, accuracy, post_asap, progress)
+    ParsedArgs {
+        entries,
+        accuracy,
+        post_asap,
+        progress,
+        table_schemas,
+    }
 }
 
 /// Attach workload-wide replacement explanations to their exact graph nodes.
@@ -549,7 +612,14 @@ fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapRes
 
 #[tokio::main]
 async fn main() {
-    let (entries, accuracy, post_asap, progress) = parse_args();
+    let ParsedArgs {
+        entries,
+        accuracy,
+        post_asap,
+        progress,
+        table_schemas,
+    } = parse_args();
+    let sql_catalog = catalog(&table_schemas);
     let planner_started = Instant::now();
     if entries.is_empty() {
         eprintln!(
@@ -565,7 +635,7 @@ async fn main() {
     }
     for (name, lang, query) in entries {
         let lowered = match lang {
-            Lang::Sql => lower_sql(&query, &catalog(), accuracy.clone())
+            Lang::Sql => lower_sql(&query, &sql_catalog, accuracy.clone())
                 .await
                 .map_err(|e| e.to_string()),
             Lang::PromQl => lower_promql(&query, accuracy.clone()).map_err(|e| e.to_string()),
@@ -716,7 +786,7 @@ mod tests {
     /// other `--post-asap` output `main` wires up.
     #[tokio::test]
     async fn post_asap_run_produces_both_summary_and_rewrite_replacements() {
-        let cat = catalog();
+        let cat = default_catalog();
         let sketch_query = lower_sql(
             "SELECT approx_percentile_cont(latency, 0.95) FROM metrics",
             &cat,
@@ -874,6 +944,40 @@ mod tests {
         assert_eq!(q3_large.workload_node_id, q4_large.workload_node_id);
     }
 
+    #[tokio::test]
+    async fn join_demo_explicitly_shares_metrics_scan_with_grouped_query() {
+        let cat = default_catalog();
+        let q1 = lower_sql(
+            "SELECT service, COUNT(*) FROM metrics GROUP BY service",
+            &cat,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        let q6 = lower_sql(
+            "SELECT metrics.service, COUNT(*) FROM metrics JOIN hosts ON metrics.service = hosts.service GROUP BY metrics.service",
+            &cat,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        let mut q1_graph = dag_export::export(&q1);
+        let mut q6_graph = dag_export::export(&q6);
+        assign_workload_node_ids(&mut [&mut q1_graph, &mut q6_graph]);
+        let q1_scan = q1_graph
+            .nodes
+            .iter()
+            .find(|node| node.label == "Scan(metrics)")
+            .unwrap();
+        let q6_scan = q6_graph
+            .nodes
+            .iter()
+            .find(|node| node.label == "Scan(metrics)")
+            .unwrap();
+        assert_eq!(q1_scan.workload_node_id, q6_scan.workload_node_id);
+        assert!(q6_graph.nodes.iter().any(|node| node.kind == "Join"));
+    }
+
     /// Regression test for a real stack overflow found via manual testing
     /// against real corpus queries (a `STDDEV_POP` aggregate, which — like
     /// `AVG` — dispatches to `Implementation::PassThrough` with no
@@ -893,7 +997,7 @@ mod tests {
     /// stack.
     #[tokio::test]
     async fn post_asap_does_not_recurse_forever_on_a_trivial_keep_pre_asap_winner() {
-        let cat = catalog();
+        let cat = default_catalog();
         let stddev_query = lower_sql(
             "SELECT STDDEV_POP(latency) FROM metrics",
             &cat,

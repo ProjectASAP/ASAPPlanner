@@ -994,16 +994,16 @@ function renderSourcePanel(qs) {
 
 function renderTableSchemas(qs) {
   const box = document.getElementById('tableSchemaBox');
-  const seen = new Set();
-  const blocks = [];
+  const schemas = new Map();
   qs.forEach((query) => {
     (query.graph?.nodes || []).filter((node) => node.kind === 'Scan').forEach((node) => {
       const key = JSON.stringify([node.detail, node.schema]);
-      if (seen.has(key)) return;
-      seen.add(key);
-      blocks.push(`${query.name} · ${node.label}\n${formatSchema(node.schema) || '(schema unavailable)'}`);
+      if (!schemas.has(key)) schemas.set(key, { node, owners: [] });
+      schemas.get(key).owners.push(query.name);
     });
   });
+  const blocks = Array.from(schemas.values()).map(({ node, owners }) =>
+    `${node.label}\nUsed by: ${owners.join(', ')}\n${formatSchema(node.schema) || '(schema unavailable)'}`);
   box.textContent = blocks.join('\n\n') || 'No bound Scan schema in the selected queries.';
   box.classList.toggle('placeholder', blocks.length === 0);
 }

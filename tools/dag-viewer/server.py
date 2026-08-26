@@ -35,7 +35,25 @@ def plan_workload(payload: dict) -> dict:
     if not 0 < epsilon < 1:
         raise ValueError("epsilon must be between 0 and 1")
 
+    schemas = payload.get("schemas", [])
+    if not isinstance(schemas, list) or len(schemas) > 50:
+        raise ValueError("schemas must be an array with at most 50 tables")
+
     args = [str(BINARY), "--post-asap", "--progress", "--epsilon", str(epsilon)]
+    schema_names: set[str] = set()
+    for index, schema in enumerate(schemas, 1):
+        if not isinstance(schema, dict):
+            raise ValueError(f"schema #{index} must be an object")
+        name = schema.get("name")
+        columns = schema.get("columns")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"schema #{index}: name is required")
+        if name in schema_names:
+            raise ValueError(f"schema #{index}: duplicate table name {name}")
+        schema_names.add(name)
+        if not isinstance(columns, list) or not columns or len(columns) > 500:
+            raise ValueError(f"schema #{index}: columns must contain 1–500 entries")
+        args.extend(["--table-schema", json.dumps(schema, separators=(",", ":"))])
     for index, query in enumerate(queries, 1):
         if not isinstance(query, dict):
             raise ValueError(f"query #{index} must be an object")
@@ -46,6 +64,12 @@ def plan_workload(payload: dict) -> dict:
             raise ValueError(f"query #{index}: language must be sql or promql")
         if not isinstance(text, str) or not text.strip() or len(text) > 100_000:
             raise ValueError(f"query #{index}: text must contain 1–100000 characters")
+        selected_schemas = query.get("schemas", [])
+        if language == "sql" and (
+            not isinstance(selected_schemas, list)
+            or any(schema not in schema_names for schema in selected_schemas)
+        ):
+            raise ValueError(f"query #{index}: selected schemas must all be enabled")
         args.extend([f"--{language}", text, "--name", str(name)])
 
     print(f"\n[planner] Received workload with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}", flush=True)

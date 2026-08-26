@@ -33,6 +33,15 @@ runs the real pipeline:
 3. ASAP-aware mapping
 4. post-ASAP DAG generation
 
+The editor includes built-in `metrics` and `hosts` table schemas. Enable the
+schemas each SQL query uses with its checkboxes, or add a table with custom
+columns using `name:type` (`!` means NOT NULL) and an optional time-index
+column. These definitions are passed to `dag_export` and used by the SQL
+binder; they are not display-only metadata. PromQL keeps its open metric
+model and shows an inferred schema based on the labels and values used by the
+query. The sidebar groups identical input schemas and lists every selected
+query that uses each one.
+
 The Python terminal streams those stages while they run. The server binds to
 localhost by default and invokes `dag_export` with an argv array, not a
 shell command.

@@ -16,6 +16,7 @@ cargo run -p asap-devtools --bin dag_export -- \
   --sql "SELECT service, AVG(latency) FROM metrics GROUP BY service" --name q2 \
   --promql "topk(5, rate(http_requests_total[5m]))" --name q3 \
   --promql "topk(10, rate(http_requests_total[5m]))" --name q4 \
+  --sql "SELECT metrics.service, COUNT(*) FROM metrics JOIN hosts ON metrics.service = hosts.service GROUP BY metrics.service" --name q6 \
   > tools/dag-viewer/dag.example.json
 
 echo "wrote tools/dag-viewer/dag.example.json"

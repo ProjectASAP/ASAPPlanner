@@ -1546,7 +1546,7 @@
             "workload_node_id": 0,
             "hash": 2606922452740434172,
             "decision": {
-              "id": 5,
+              "id": 6,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator",
               "rank": 0,
@@ -1593,7 +1593,7 @@
             ],
             "workload_node_id": 4,
             "decision": {
-              "id": 5,
+              "id": 6,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator",
               "rank": 0,
@@ -1699,7 +1699,7 @@
             ],
             "workload_node_id": 6,
             "decision": {
-              "id": 6,
+              "id": 7,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "count realizes as an exact Count accumulator",
               "rank": 0,
@@ -3711,6 +3711,1261 @@
           }
         ],
         "root": 4
+      }
+    },
+    {
+      "name": "q6",
+      "source": "SELECT metrics.service, COUNT(*) FROM metrics JOIN hosts ON metrics.service = hosts.service GROUP BY metrics.service",
+      "graph": {
+        "nodes": [
+          {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(metrics)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": true,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "service",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "region",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "int64",
+                    "name": "bytes",
+                    "nullable": false,
+                    "table": "metrics"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "Table": {
+                  "table_ref": "metrics"
+                }
+              }
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "float64",
+                  "name": "latency",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "int64",
+                  "name": "bytes",
+                  "nullable": false,
+                  "table": "metrics"
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [],
+            "workload_node_id": 0,
+            "hash": 2606922452740434172
+          },
+          {
+            "id": 1,
+            "kind": "Scan",
+            "label": "Scan(hosts)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": true,
+                "columns": [
+                  {
+                    "dtype": "utf8",
+                    "name": "service",
+                    "nullable": false,
+                    "table": "hosts"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "region",
+                    "nullable": false,
+                    "table": "hosts"
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "source": {
+                "Table": {
+                  "table_ref": "hosts"
+                }
+              }
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "hosts"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "hosts"
+                }
+              ],
+              "time_index": null,
+              "unique_keys": []
+            },
+            "children": [],
+            "workload_node_id": 11,
+            "hash": 7077183977966848076
+          },
+          {
+            "id": 2,
+            "kind": "Join",
+            "label": "Join(Inner)",
+            "detail": {
+              "kind": "Inner",
+              "pred": {
+                "Compare": {
+                  "left": {
+                    "Column": 1
+                  },
+                  "op": "Eq",
+                  "right": {
+                    "Column": 5
+                  }
+                }
+              }
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "float64",
+                  "name": "latency",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "int64",
+                  "name": "bytes",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "hosts"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "hosts"
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [
+              0,
+              1
+            ],
+            "workload_node_id": 12,
+            "hash": 1121596767830819524
+          },
+          {
+            "id": 3,
+            "kind": "Aggregate",
+            "label": "Aggregate(1 measures)",
+            "detail": {
+              "having": null,
+              "measures": [
+                {
+                  "accuracy": {
+                    "Epsilon": 0.01
+                  },
+                  "kind": "count"
+                }
+              ],
+              "output_names": [
+                "count(*)"
+              ],
+              "reduction": {
+                "Reduce": [
+                  1
+                ]
+              }
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "int64",
+                  "name": "count(*)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
+            },
+            "children": [
+              2
+            ],
+            "workload_node_id": 13,
+            "hash": 4243737280010465780,
+            "notes": [
+              {
+                "kind": "SketchApproximation",
+                "reason": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with); count realizes as a CountSketch sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with); count realizes as a shared HydraCms structure over Cms serving every subpopulation of this grouped aggregate, instead of one Cms instance per distinct `by` key — legal because this aggregate has a non-empty subpopulation concept and Cms has a modeled Hydra variant (asap_types::post_asap::hydra_kind_for); whether it's *worth* the shared/independent trade-off for the actual subpopulation cardinality is a CostModel's call, not this strategy's; count realizes as a shared HydraCountSketch structure over CountSketch serving every subpopulation of this grouped aggregate, instead of one CountSketch instance per distinct `by` key — legal because this aggregate has a non-empty subpopulation concept and CountSketch has a modeled Hydra variant (asap_types::post_asap::hydra_kind_for); whether it's *worth* the shared/independent trade-off for the actual subpopulation cardinality is a CostModel's call, not this strategy's"
+              }
+            ]
+          },
+          {
+            "id": 4,
+            "kind": "Project",
+            "label": "Project(2 cols)",
+            "detail": {
+              "cols": [
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 0
+                  }
+                },
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 1
+                  }
+                }
+              ],
+              "qualifier": null
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "int64",
+                  "name": "count(*)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
+            },
+            "children": [
+              3
+            ],
+            "workload_node_id": 14,
+            "hash": 16310199685311002920
+          }
+        ],
+        "root": 4
+      },
+      "replacements": [
+        {
+          "decision_id": 5,
+          "target_pre_id": 3,
+          "strategy": "SketchAlgorithmStrategy",
+          "rationale": "count realizes as a Cms sketch",
+          "rank": 0,
+          "cost": 5.0,
+          "before": {
+            "nodes": [
+              {
+                "id": 0,
+                "kind": "Scan",
+                "label": "Scan(metrics)",
+                "detail": {
+                  "predicates": [],
+                  "schema": {
+                    "closed": true,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "service",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "region",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "latency",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "int64",
+                        "name": "bytes",
+                        "nullable": false,
+                        "table": "metrics"
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "source": {
+                    "Table": {
+                      "table_ref": "metrics"
+                    }
+                  }
+                },
+                "schema": {
+                  "closed": true,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "service",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "region",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "latency",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "int64",
+                      "name": "bytes",
+                      "nullable": false,
+                      "table": "metrics"
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "children": [],
+                "hash": 2606922452740434172
+              },
+              {
+                "id": 1,
+                "kind": "Scan",
+                "label": "Scan(hosts)",
+                "detail": {
+                  "predicates": [],
+                  "schema": {
+                    "closed": true,
+                    "columns": [
+                      {
+                        "dtype": "utf8",
+                        "name": "service",
+                        "nullable": false,
+                        "table": "hosts"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "region",
+                        "nullable": false,
+                        "table": "hosts"
+                      }
+                    ],
+                    "time_index": null,
+                    "unique_keys": []
+                  },
+                  "source": {
+                    "Table": {
+                      "table_ref": "hosts"
+                    }
+                  }
+                },
+                "schema": {
+                  "closed": true,
+                  "columns": [
+                    {
+                      "dtype": "utf8",
+                      "name": "service",
+                      "nullable": false,
+                      "table": "hosts"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "region",
+                      "nullable": false,
+                      "table": "hosts"
+                    }
+                  ],
+                  "time_index": null,
+                  "unique_keys": []
+                },
+                "children": [],
+                "hash": 7077183977966848076
+              },
+              {
+                "id": 2,
+                "kind": "Join",
+                "label": "Join(Inner)",
+                "detail": {
+                  "kind": "Inner",
+                  "pred": {
+                    "Compare": {
+                      "left": {
+                        "Column": 1
+                      },
+                      "op": "Eq",
+                      "right": {
+                        "Column": 5
+                      }
+                    }
+                  }
+                },
+                "schema": {
+                  "closed": true,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "service",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "region",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "latency",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "int64",
+                      "name": "bytes",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "service",
+                      "nullable": false,
+                      "table": "hosts"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "region",
+                      "nullable": false,
+                      "table": "hosts"
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "children": [
+                  0,
+                  1
+                ],
+                "hash": 1121596767830819524
+              },
+              {
+                "id": 3,
+                "kind": "Aggregate",
+                "label": "Aggregate(1 measures)",
+                "detail": {
+                  "having": null,
+                  "measures": [
+                    {
+                      "accuracy": {
+                        "Epsilon": 0.01
+                      },
+                      "kind": "count"
+                    }
+                  ],
+                  "output_names": [
+                    "count(*)"
+                  ],
+                  "reduction": {
+                    "Reduce": [
+                      1
+                    ]
+                  }
+                },
+                "schema": {
+                  "closed": true,
+                  "columns": [
+                    {
+                      "dtype": "utf8",
+                      "name": "service",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "int64",
+                      "name": "count(*)",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": null,
+                  "unique_keys": [
+                    [
+                      0
+                    ]
+                  ]
+                },
+                "children": [
+                  2
+                ],
+                "hash": 4243737280010465780
+              }
+            ],
+            "root": 3
+          },
+          "after": {
+            "kind": "Summary",
+            "graph": {
+              "nodes": [
+                {
+                  "id": 0,
+                  "kind": "KeepPreAsap",
+                  "label": "KeepPreAsap(Join)",
+                  "detail": {
+                    "pre_asap_subgraph": {
+                      "nodes": [
+                        {
+                          "children": [],
+                          "detail": {
+                            "predicates": [],
+                            "schema": {
+                              "closed": true,
+                              "columns": [
+                                {
+                                  "dtype": "timestamp",
+                                  "name": "ts",
+                                  "nullable": false,
+                                  "table": "metrics"
+                                },
+                                {
+                                  "dtype": "utf8",
+                                  "name": "service",
+                                  "nullable": false,
+                                  "table": "metrics"
+                                },
+                                {
+                                  "dtype": "utf8",
+                                  "name": "region",
+                                  "nullable": false,
+                                  "table": "metrics"
+                                },
+                                {
+                                  "dtype": "float64",
+                                  "name": "latency",
+                                  "nullable": false,
+                                  "table": "metrics"
+                                },
+                                {
+                                  "dtype": "int64",
+                                  "name": "bytes",
+                                  "nullable": false,
+                                  "table": "metrics"
+                                }
+                              ],
+                              "time_index": 0,
+                              "unique_keys": []
+                            },
+                            "source": {
+                              "Table": {
+                                "table_ref": "metrics"
+                              }
+                            }
+                          },
+                          "hash": 2606922452740434172,
+                          "id": 0,
+                          "kind": "Scan",
+                          "label": "Scan(metrics)",
+                          "schema": {
+                            "closed": true,
+                            "columns": [
+                              {
+                                "dtype": "timestamp",
+                                "name": "ts",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "utf8",
+                                "name": "service",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "utf8",
+                                "name": "region",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "float64",
+                                "name": "latency",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "int64",
+                                "name": "bytes",
+                                "nullable": false,
+                                "table": "metrics"
+                              }
+                            ],
+                            "time_index": 0,
+                            "unique_keys": []
+                          }
+                        },
+                        {
+                          "children": [],
+                          "detail": {
+                            "predicates": [],
+                            "schema": {
+                              "closed": true,
+                              "columns": [
+                                {
+                                  "dtype": "utf8",
+                                  "name": "service",
+                                  "nullable": false,
+                                  "table": "hosts"
+                                },
+                                {
+                                  "dtype": "utf8",
+                                  "name": "region",
+                                  "nullable": false,
+                                  "table": "hosts"
+                                }
+                              ],
+                              "time_index": null,
+                              "unique_keys": []
+                            },
+                            "source": {
+                              "Table": {
+                                "table_ref": "hosts"
+                              }
+                            }
+                          },
+                          "hash": 7077183977966848076,
+                          "id": 1,
+                          "kind": "Scan",
+                          "label": "Scan(hosts)",
+                          "schema": {
+                            "closed": true,
+                            "columns": [
+                              {
+                                "dtype": "utf8",
+                                "name": "service",
+                                "nullable": false,
+                                "table": "hosts"
+                              },
+                              {
+                                "dtype": "utf8",
+                                "name": "region",
+                                "nullable": false,
+                                "table": "hosts"
+                              }
+                            ],
+                            "time_index": null,
+                            "unique_keys": []
+                          }
+                        },
+                        {
+                          "children": [
+                            0,
+                            1
+                          ],
+                          "detail": {
+                            "kind": "Inner",
+                            "pred": {
+                              "Compare": {
+                                "left": {
+                                  "Column": 1
+                                },
+                                "op": "Eq",
+                                "right": {
+                                  "Column": 5
+                                }
+                              }
+                            }
+                          },
+                          "hash": 1121596767830819524,
+                          "id": 2,
+                          "kind": "Join",
+                          "label": "Join(Inner)",
+                          "schema": {
+                            "closed": true,
+                            "columns": [
+                              {
+                                "dtype": "timestamp",
+                                "name": "ts",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "utf8",
+                                "name": "service",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "utf8",
+                                "name": "region",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "float64",
+                                "name": "latency",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "int64",
+                                "name": "bytes",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "utf8",
+                                "name": "service",
+                                "nullable": false,
+                                "table": "hosts"
+                              },
+                              {
+                                "dtype": "utf8",
+                                "name": "region",
+                                "nullable": false,
+                                "table": "hosts"
+                              }
+                            ],
+                            "time_index": 0,
+                            "unique_keys": []
+                          }
+                        }
+                      ],
+                      "root": 2
+                    }
+                  },
+                  "children": []
+                },
+                {
+                  "id": 1,
+                  "kind": "SummaryAgg",
+                  "label": "SummaryAgg(Sketch(Cms))",
+                  "detail": {
+                    "col": "SampleValue",
+                    "family": "Sketch(SketchKind { category: Frequency, algorithm: Cms, params: Cms { width: 272, depth: 5 } }, PerSubpopulationInstance)",
+                    "grouping": "PerSubpopulationInstance",
+                    "reduction": {
+                      "Reduce": [
+                        1
+                      ]
+                    }
+                  },
+                  "children": [
+                    0
+                  ]
+                },
+                {
+                  "id": 2,
+                  "kind": "SummaryEstimate",
+                  "label": "SummaryEstimate(PointCount { key: SampleValue, value: None })",
+                  "detail": {
+                    "query": "PointCount { key: SampleValue, value: None }"
+                  },
+                  "children": [
+                    1
+                  ]
+                }
+              ],
+              "root": 2
+            }
+          }
+        }
+      ],
+      "post_graph": {
+        "nodes": [
+          {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(metrics)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": true,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "service",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "region",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "int64",
+                    "name": "bytes",
+                    "nullable": false,
+                    "table": "metrics"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "Table": {
+                  "table_ref": "metrics"
+                }
+              }
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "float64",
+                  "name": "latency",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "int64",
+                  "name": "bytes",
+                  "nullable": false,
+                  "table": "metrics"
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [],
+            "workload_node_id": 0,
+            "hash": 2606922452740434172,
+            "decision": {
+              "id": 5,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "count realizes as a Cms sketch",
+              "rank": 0,
+              "cost": 5.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 1,
+            "kind": "Scan",
+            "label": "Scan(hosts)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": true,
+                "columns": [
+                  {
+                    "dtype": "utf8",
+                    "name": "service",
+                    "nullable": false,
+                    "table": "hosts"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "region",
+                    "nullable": false,
+                    "table": "hosts"
+                  }
+                ],
+                "time_index": null,
+                "unique_keys": []
+              },
+              "source": {
+                "Table": {
+                  "table_ref": "hosts"
+                }
+              }
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "hosts"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "hosts"
+                }
+              ],
+              "time_index": null,
+              "unique_keys": []
+            },
+            "children": [],
+            "workload_node_id": 15,
+            "hash": 7077183977966848076,
+            "decision": {
+              "id": 5,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "count realizes as a Cms sketch",
+              "rank": 0,
+              "cost": 5.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 2,
+            "kind": "Join",
+            "label": "Join(Inner)",
+            "detail": {
+              "kind": "Inner",
+              "pred": {
+                "Compare": {
+                  "left": {
+                    "Column": 1
+                  },
+                  "op": "Eq",
+                  "right": {
+                    "Column": 5
+                  }
+                }
+              }
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "float64",
+                  "name": "latency",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "int64",
+                  "name": "bytes",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "hosts"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "hosts"
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [
+              0,
+              1
+            ],
+            "workload_node_id": 16,
+            "hash": 1121596767830819524,
+            "decision": {
+              "id": 5,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "count realizes as a Cms sketch",
+              "rank": 0,
+              "cost": 5.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 3,
+            "kind": "SummaryAgg",
+            "label": "SummaryAgg(Sketch(Cms))",
+            "detail": {
+              "col": "SampleValue",
+              "family": "Sketch(SketchKind { category: Frequency, algorithm: Cms, params: Cms { width: 272, depth: 5 } }, PerSubpopulationInstance)",
+              "grouping": "PerSubpopulationInstance",
+              "reduction": {
+                "Reduce": [
+                  1
+                ]
+              }
+            },
+            "schema": {
+              "fields": [
+                {
+                  "dtype": "Plain(Utf8)",
+                  "name": "service",
+                  "nullable": false
+                },
+                {
+                  "dtype": "Sketch(SketchKind { category: Frequency, algorithm: Cms, params: Cms { width: 272, depth: 5 } }, PerSubpopulationInstance)",
+                  "name": "count(*)",
+                  "nullable": false
+                }
+              ],
+              "time_index": null
+            },
+            "children": [
+              2
+            ],
+            "workload_node_id": 17,
+            "decision": {
+              "id": 5,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "count realizes as a Cms sketch",
+              "rank": 0,
+              "cost": 5.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 4,
+            "kind": "SummaryEstimate",
+            "label": "SummaryEstimate(PointCount { key: SampleValue, value: None })",
+            "detail": {
+              "query": "PointCount { key: SampleValue, value: None }"
+            },
+            "schema": {
+              "fields": [
+                {
+                  "dtype": "Plain(Utf8)",
+                  "name": "service",
+                  "nullable": false
+                },
+                {
+                  "dtype": "Plain(Int64)",
+                  "name": "count(*)",
+                  "nullable": false
+                }
+              ],
+              "time_index": null
+            },
+            "children": [
+              3
+            ],
+            "workload_node_id": 18,
+            "decision": {
+              "id": 5,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "count realizes as a Cms sketch",
+              "rank": 0,
+              "cost": 5.0,
+              "role": "replacement_root"
+            }
+          },
+          {
+            "id": 5,
+            "kind": "Project",
+            "label": "Project(2 cols)",
+            "detail": {
+              "cols": [
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 0
+                  }
+                },
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 1
+                  }
+                }
+              ],
+              "qualifier": null
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "int64",
+                  "name": "count(*)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
+            },
+            "children": [
+              4
+            ],
+            "workload_node_id": 19,
+            "hash": 16310199685311002920
+          }
+        ],
+        "root": 5
       }
     }
   ]

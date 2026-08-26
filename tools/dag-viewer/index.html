@@ -118,8 +118,9 @@
   }
   #plannerPanel.visible { display: block; }
   #plannerRows { display: flex; flex-direction: column; gap: 0.45rem; }
-  .plannerRow { display: grid; grid-template-columns: auto 140px 90px minmax(280px, 1fr) auto; gap: 0.45rem; align-items: center; }
-  .plannerRow input, .plannerRow select, .plannerRow textarea, #plannerEpsilon {
+  .plannerRow { display: grid; grid-template-columns: auto 130px 80px 150px minmax(280px, 1fr) auto; gap: 0.45rem; align-items: center; }
+  .plannerRow input, .plannerRow select, .plannerRow textarea, #plannerEpsilon,
+  .schemaRow input, .schemaRow textarea {
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--bg);
@@ -128,6 +129,15 @@
     font: inherit;
   }
   .plannerRow textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.75rem; }
+  .plannerSchemas { display:flex; flex-wrap:wrap; gap:.2rem .45rem; font-size:.68rem; color:var(--muted); }
+  .plannerSchemas label { display:flex; align-items:center; gap:.15rem; }
+  .schemaEditor { margin-bottom: 0.75rem; padding-bottom: 0.7rem; border-bottom: 1px solid var(--border); }
+  .schemaEditorHead { display:flex; align-items:center; gap:.6rem; margin-bottom:.45rem; }
+  .schemaEditorHead h2 { margin:0; font-size:.8rem; }
+  #schemaRows { display:flex; flex-direction:column; gap:.4rem; }
+  .schemaRow { display:grid; grid-template-columns:auto 150px minmax(360px,1fr) 105px auto; gap:.45rem; align-items:center; }
+  .schemaRow textarea { resize:vertical; font: .72rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .schemaHint { color:var(--muted); font-size:.7rem; }
   .plannerActions { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.55rem; }
   #plannerStatus { color: var(--muted); font-size: 0.75rem; }
   #baPicker {
@@ -396,6 +406,14 @@
 </header>
 
 <div id="plannerPanel">
+  <div class="schemaEditor">
+    <div class="schemaEditorHead">
+      <h2>Input table schemas</h2>
+      <button class="btn" id="schemaAdd" type="button">Add schema</button>
+      <span class="schemaHint">Columns: name:type! where ! means NOT NULL. PromQL schemas are inferred from metric usage.</span>
+    </div>
+    <div id="schemaRows"></div>
+  </div>
   <div id="plannerRows"></div>
   <div class="plannerActions">
     <button class="btn" id="plannerAdd" type="button">Add query</button>
