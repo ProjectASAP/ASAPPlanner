@@ -229,6 +229,7 @@ impl ReplacementStrategy for AvgToSumOverCountStrategy {
             return Vec::new();
         };
         vec![ReplacementSubDAG {
+            strategy: "AvgToSumOverCountStrategy",
             replacement: Replacement::Rewrite(rewritten),
             provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
             rationale:

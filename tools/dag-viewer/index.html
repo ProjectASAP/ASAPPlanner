@@ -110,6 +110,71 @@
   .tab.checkTab { display: flex; align-items: center; gap: 0.35rem; cursor: default; }
   .tab.checkTab input { cursor: pointer; }
   .modeToggle { display: flex; gap: 0.3rem; }
+  #plannerPanel {
+    display: none;
+    padding: 0.65rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #plannerPanel.visible { display: block; }
+  #plannerRows { display: flex; flex-direction: column; gap: 0.45rem; }
+  .plannerRow { display: grid; grid-template-columns: auto 130px 80px 150px minmax(280px, 1fr) auto; gap: 0.45rem; align-items: center; }
+  .plannerRow input, .plannerRow select, .plannerRow textarea, #plannerEpsilon,
+  .schemaRow input, .schemaRow textarea {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 0.35rem 0.45rem;
+    font: inherit;
+  }
+  .plannerRow textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.75rem; }
+  .plannerSchemas { display:flex; flex-wrap:wrap; gap:.2rem .45rem; font-size:.68rem; color:var(--muted); }
+  .plannerSchemas label { display:flex; align-items:center; gap:.15rem; }
+  .schemaEditor { margin-bottom: 0.75rem; padding-bottom: 0.7rem; border-bottom: 1px solid var(--border); }
+  .schemaEditorHead { display:flex; align-items:center; gap:.6rem; margin-bottom:.45rem; }
+  .schemaEditorHead h2 { margin:0; font-size:.8rem; }
+  #schemaRows { display:flex; flex-direction:column; gap:.4rem; }
+  .schemaRow { display:grid; grid-template-columns:auto 150px minmax(360px,1fr) 105px auto; gap:.45rem; align-items:center; }
+  .schemaRow textarea { resize:vertical; font: .72rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .schemaHint { color:var(--muted); font-size:.7rem; }
+  .plannerActions { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.55rem; }
+  #plannerStatus { color: var(--muted); font-size: 0.75rem; }
+  #scopePicker {
+    display: none;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.2rem;
+    padding: 0.55rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #scopePicker.visible { display: flex; }
+  .scopeGroup { display: flex; flex-direction: column; gap: 0.3rem; min-width: 220px; }
+  .scopeGroupLabel {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--muted);
+  }
+  .scopeRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel2);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.78rem;
+    text-align: left;
+  }
+  .scopeRow.active {
+    border-color: var(--accent);
+    background: var(--bg);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .scopeRow .scopeMeta { color: var(--muted); font-size: 0.72rem; margin-left: auto; white-space: nowrap; }
   .proxyNote {
     font-size: 0.72rem;
     color: var(--muted);
@@ -188,11 +253,25 @@
   }
   #sidepanel {
     width: 340px;
+    min-width: 260px;
+    max-width: 70vw;
     flex-shrink: 0;
     border-left: 1px solid var(--border);
     background: var(--panel);
     overflow-y: auto;
     font-size: 0.8rem;
+  }
+  #sideResizeHandle {
+    width: 6px;
+    flex: 0 0 6px;
+    cursor: col-resize;
+    background: transparent;
+    border-left: 1px solid var(--border);
+    touch-action: none;
+  }
+  #sideResizeHandle:hover, #sideResizeHandle.dragging {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-left-color: var(--accent);
   }
   #sidepanel .section {
     padding: 0.8rem;
@@ -235,6 +314,26 @@
   }
   .noteKind { font-size: 0.72rem; font-weight: 700; }
   .noteReason { font-size: 0.75rem; color: var(--fg); margin-top: 0.15rem; }
+  .translationBlock {
+    margin: 0.65rem 0;
+    padding: 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+    border-radius: 8px;
+    background: var(--bg);
+  }
+  .translationBlock h3, .detailSubhead {
+    margin: 0 0 0.4rem;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--muted);
+  }
+  .translationCard + .translationCard { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.5rem; }
+  .translationStrategy { color: var(--accent); font-weight: 750; }
+  .translationMeta, .translationTarget { color: var(--muted); font-size: 0.7rem; margin-top: 0.2rem; }
+  .translationReason { margin-top: 0.35rem; line-height: 1.35; }
+  .translationBlock.unchanged { border-style: dashed; color: var(--muted); }
+  .detailSubhead { margin-top: 0.65rem; }
   #detailSection pre {
     white-space: pre-wrap;
     word-break: break-word;
@@ -282,19 +381,37 @@
   <div id="dropzone">Drop WorkloadGraph JSON here, or click to choose file(s)</div>
   <input id="fileInput" type="file" accept="application/json" multiple />
   <div class="modeToggle" id="modeToggle">
-    <button class="btn active" id="modeSingleBtn" data-mode="single">Single</button>
-    <button class="btn" id="modeCompareBtn" data-mode="compare">Compare</button>
-    <button class="btn" id="modeUnionBtn" data-mode="union">Union</button>
+    <button class="btn active" type="button" disabled>Pre/Post-ASAP</button>
   </div>
-  <span class="proxyNote" id="proxyNote" style="display:none">"Shared" = same structural hash across independent exports, not live Rc identity — see README.</span>
+  <button class="btn" id="plannerToggle">Query editor</button>
   <button class="btn" id="clearBtn">Clear all</button>
   <label class="toggle">
     <input id="highlightToggle" type="checkbox" checked />
     Highlight shared subtrees
   </label>
+  <span class="proxyNote">Click an edge to inspect its schema</span>
 </header>
 
+<div id="plannerPanel">
+  <div class="schemaEditor">
+    <div class="schemaEditorHead">
+      <h2>Input table schemas</h2>
+      <button class="btn" id="schemaAdd" type="button">Add table schema</button>
+      <span class="schemaHint">One column per line: name TYPE [NOT NULL]. PromQL schemas are inferred from metric usage.</span>
+    </div>
+    <div id="schemaRows"></div>
+  </div>
+  <div id="plannerRows"></div>
+  <div class="plannerActions">
+    <button class="btn" id="plannerAdd" type="button">Add query</button>
+    <label class="toggle">epsilon <input id="plannerEpsilon" type="number" min="0.000001" max="0.999999" step="0.001" value="0.01" /></label>
+    <button class="btn" id="plannerRun" type="button">Plan selected workload</button>
+    <span id="plannerStatus">Requires the local interactive server.</span>
+  </div>
+</div>
+
 <div id="tabs"></div>
+<div id="scopePicker"></div>
 
 <div id="main">
   <div id="empty">
@@ -317,6 +434,7 @@
     <div id="cy"></div>
     <div id="modeHint" class="modeHint"></div>
   </div>
+  <div id="sideResizeHandle" style="display:none" title="Drag to resize details panel"></div>
   <div id="sidepanel" style="display:none">
     <div class="section" id="detailSection">
       <h2>Selected node</h2>
@@ -327,6 +445,10 @@
       <pre class="code" id="sourceBox"></pre>
     </div>
     <div class="section">
+      <h2>Input table / metric schemas</h2>
+      <pre class="code" id="tableSchemaBox"></pre>
+    </div>
+    <div class="section">
       <h2>Legend</h2>
       <div class="legend" id="legendList"></div>
     </div>
@@ -334,5 +456,6 @@
 </div>
 
 <script src="viewer.js"></script>
+<script src="planner-ui.js"></script>
 </body>
 </html>

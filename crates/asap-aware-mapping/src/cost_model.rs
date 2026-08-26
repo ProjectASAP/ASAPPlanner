@@ -676,7 +676,7 @@ mod tests {
         SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child: std::rc::Rc::new(SummaryNode {
-                    expr: SummaryExpr::KeepPreAsap(Box::new(scan())),
+                    expr: SummaryExpr::KeepPreAsap(Rc::new(scan())),
                     schema: SummarySchema {
                         fields: vec![],
                         time_index: None,
@@ -868,6 +868,7 @@ mod tests {
         let root = Rc::new(scan());
         let target = TargetSubDAG::new(&root);
         let candidate = ReplacementSubDAG {
+            strategy: "TestStrategy",
             replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::Plain(
                 asap_types::pre_asap::DataType::Float64,
             )))),
@@ -891,6 +892,7 @@ mod tests {
         let target = TargetSubDAG::new(&root);
 
         let cheap = ReplacementSubDAG {
+            strategy: "TestStrategy",
             replacement: Replacement::Summary(Rc::new(summary_node(
                 SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
             ))),
@@ -898,6 +900,7 @@ mod tests {
             rationale: "exact accumulator".into(),
         };
         let pricey = ReplacementSubDAG {
+            strategy: "TestStrategy",
             replacement: Replacement::Summary(Rc::new(summary_node(SummaryFamilyType::StatModel(
                 asap_types::post_asap::StatModelKind::Parametric,
                 asap_types::post_asap::StatModelParams::Parametric {
@@ -936,11 +939,13 @@ mod tests {
         let target = TargetSubDAG::with_consumer_count(&target_root, 20);
 
         let share = ReplacementSubDAG {
+            strategy: "TestStrategy",
             replacement: Replacement::Rewrite(Rc::clone(&target_root)),
             provenance: crate::replacement::ReplacementProvenance::CseShare,
             rationale: "build once and share".into(),
         };
         let recompute = ReplacementSubDAG {
+            strategy: "TestStrategy",
             replacement: Replacement::Rewrite(Rc::new((*target_root).clone())),
             provenance: crate::replacement::ReplacementProvenance::CseRecompute,
             rationale: "build independently".into(),

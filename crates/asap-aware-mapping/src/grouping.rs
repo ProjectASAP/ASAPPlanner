@@ -200,6 +200,7 @@ impl<'a> HydraGroupingStrategy<'a> {
 
         let patched = with_grouping(node, grouping);
         Some(ReplacementSubDAG {
+            strategy: "HydraGroupingStrategy",
             replacement: Replacement::Summary(patched),
             provenance: crate::replacement::ReplacementProvenance::SummaryImplementation,
             rationale: format!(

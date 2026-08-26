@@ -98,12 +98,12 @@ class RenderTests(unittest.TestCase):
         # usage in prose) once that file is inlined verbatim -- so match the
         # real tag shape instead of a bare substring.
         workload = {"queries": [named_graph("q1"), named_graph("q2")]}
-        html = render(workload, mode="single")
+        html = render(workload)
         self.assertNotRegex(html, r'<script src="[^"]+"></script>')
 
     def test_embedded_workload_round_trips(self):
         workload = {"queries": [named_graph("q1"), named_graph("q2")]}
-        html = render(workload, mode="single")
+        html = render(workload)
 
         m = re.search(
             r'<script type="application/json" id="embedded-workload">(.*?)</script>',
@@ -116,44 +116,35 @@ class RenderTests(unittest.TestCase):
     def test_render_does_not_mutate_callers_workload(self):
         workload = {"queries": [named_graph("q1")]}
         original = json.loads(json.dumps(workload))
-        render(workload, mode="single")
+        render(workload)
         self.assertEqual(workload, original)
 
-    def test_single_mode_adds_no_render_config(self):
+    def test_render_adds_no_legacy_mode_config(self):
         # Bare "__DAG_RENDER__" also matches viewer.js's own header comment
         # (which documents the window.__DAG_RENDER__ config object in prose)
         # once that file is inlined verbatim -- match the actual assignment
         # statement instead.
         workload = {"queries": [named_graph("q1"), named_graph("q2")]}
-        html = render(workload, mode="single")
+        html = render(workload)
         self.assertNotRegex(html, r"window\.__DAG_RENDER__ =")
-
-    def test_non_single_mode_sets_render_config(self):
-        workload = {"queries": [named_graph("q1"), named_graph("q2")]}
-        html = render(workload, mode="union")
-        m = re.search(r"window\.__DAG_RENDER__ = (\{.*?\});", html)
-        self.assertIsNotNone(m, "__DAG_RENDER__ assignment not found")
-        self.assertEqual(json.loads(m.group(1)), {"mode": "union"})
 
     def test_embedded_data_placed_before_viewer_js_body(self):
         # viewer.js's top-level startup code reads #embedded-workload and
-        # window.__DAG_RENDER__ synchronously as soon as it runs, so both
-        # must appear earlier in the document than viewer.js's own inlined
+        # synchronously as soon as it runs, so it must appear earlier in the
+        # document than viewer.js's own inlined
         # <script> block.
         workload = {"queries": [named_graph("q1"), named_graph("q2")]}
-        html = render(workload, mode="union")
+        html = render(workload)
         embedded_pos = html.index('id="embedded-workload"')
-        config_pos = html.index("__DAG_RENDER__ =")
         viewer_pos = html.index("cytoscape.use(window.cytoscapeDagre)")  # viewer.js's first line
         self.assertLess(embedded_pos, viewer_pos)
-        self.assertLess(config_pos, viewer_pos)
 
     def test_angle_bracket_in_query_source_does_not_break_out_of_script_tag(self):
         # A pathological (but legal JSON) query source containing a literal
         # "</script>" substring must not prematurely close the embedded
         # <script type="application/json"> tag when the browser parses it.
         workload = {"queries": [named_graph("q1", source="SELECT '</script><script>evil()</script>'")]}
-        html = render(workload, mode="single")
+        html = render(workload)
 
         m = re.search(
             r'<script type="application/json" id="embedded-workload">(.*?)</script>',
@@ -173,13 +164,85 @@ class JsonScriptTests(unittest.TestCase):
 
 
 class SemanticLabelTests(unittest.TestCase):
+    def test_scan_recovers_source_from_legacy_label(self):
+        node = {"kind": "Scan", "label": "Scan(metrics)", "detail": {}}
+        self.assertEqual(_semantic_label(node), "Scan\nsource: metrics")
+
     def test_aggregate_names_measure_input_and_grouping(self):
-        node = {"kind": "Aggregate", "detail": {"measures": [{"kind": "quantile", "col": 6, "q": 0.95}], "reduction": {"Reduce": [1]}}}
-        self.assertEqual(_semantic_label(node), "Aggregate\ncompute: quantile(col[6], q=0.95)\ngroup by col[1]")
+        node = {
+            "kind": "Aggregate",
+            "detail": {
+                "measures": [{"kind": "quantile", "col": 6, "q": 0.95}],
+                "reduction": {"Reduce": [1]},
+            },
+        }
+        self.assertEqual(
+            _semantic_label(node),
+            "Aggregate\nmeasure: quantile(col[6], q=0.95)\ngroup by col[1]",
+        )
+
+    def test_summary_aggregate_names_reduction_as_group_by(self):
+        node = {
+            "kind": "SummaryAgg",
+            "detail": {
+                "family": "Sketch(Cms)",
+                "col": "SampleValue",
+                "reduction": {"Reduce": [1]},
+                "grouping": "PerSubpopulationInstance",
+            },
+        }
+        self.assertEqual(
+            _semantic_label(node),
+            "SummaryAgg\nfamily: Sketch(Cms)\ninput: SampleValue\n… +2 more",
+        )
 
     def test_sort_names_expression_direction_and_null_order(self):
-        node = {"kind": "Sort", "detail": {"keys": [{"expr": {"Column": 2}, "ascending": False, "nulls_first": True}]}}
+        node = {
+            "kind": "Sort",
+            "detail": {
+                "keys": [{"expr": {"Column": 2}, "ascending": False, "nulls_first": True}]
+            },
+        }
         self.assertEqual(_semantic_label(node), "Sort\nsort: col[2] descending, nulls first")
+
+    def test_prepares_before_after_and_whole_post_asap_graphs(self):
+        node = {
+            "id": 0,
+            "kind": "Aggregate",
+            "label": "Aggregate(1 measures)",
+            "detail": {"measures": [{"kind": "avg", "col": 3}]},
+            "children": [],
+        }
+        def graph():
+            return {"nodes": [dict(node)], "root": 0}
+        workload = {
+            "queries": [
+                {
+                    "graph": graph(),
+                    "post_graph": graph(),
+                    "replacements": [{"before": graph(), "after": {"graph": graph()}}],
+                }
+            ]
+        }
+        prepared = prepare_workload(workload)
+        query = prepared["queries"][0]
+        labels = [
+            query["graph"]["nodes"][0]["label"],
+            query["post_graph"]["nodes"][0]["label"],
+        ]
+        self.assertEqual(labels, ["Aggregate\nmeasure: avg(col[3])"] * 2)
+        self.assertEqual(
+            query["replacements"][0]["before"]["nodes"][0]["label"],
+            "Aggregate(1 measures)",
+        )
+
+    def test_replacement_subgraphs_are_not_prepared_for_the_current_viewer(self):
+        def graph():
+            return {"nodes": [{"id": 0, "kind": "Scan", "label": "legacy", "detail": {}, "children": []}], "root": 0}
+        workload = {"queries": [{"graph": graph(), "replacements": [{"before": graph(), "after": {"graph": graph()}}]}]}
+        replacement = prepare_workload(workload)["queries"][0]["replacements"][0]
+        self.assertEqual(replacement["before"]["nodes"][0]["label"], "legacy")
+        self.assertEqual(replacement["after"]["graph"]["nodes"][0]["label"], "legacy")
 
 
 class MainCliTests(unittest.TestCase):

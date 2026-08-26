@@ -175,6 +175,7 @@ pub mod grouping;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
+pub mod topk_reuse;
 
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use explanation::{
@@ -189,3 +190,4 @@ pub use replacement::{
     MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;
+pub use topk_reuse::TopKLimitReuseStrategy;

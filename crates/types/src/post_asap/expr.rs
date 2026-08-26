@@ -23,7 +23,7 @@ pub struct SummaryNode {
 /// Sketch-bound IR produced by post-ASAP binding rules. Those rules
 /// selectively replace logical aggregates and joins in the pre-ASAP
 /// `QueryExpr` with their summary-bound counterparts; everything not
-/// rewritten passes through as `KeepPreAsap(Box<QueryExpr>)`.
+/// rewritten passes through as `KeepPreAsap(Rc<QueryExpr>)`.
 ///
 /// Traversing from the root node yields a DAG; shared sub-expressions appear
 /// as multiple `Rc` references to the same `SummaryNode`.
@@ -33,7 +33,7 @@ pub enum SummaryExpr {
     /// post-ASAP form (e.g. `Filter`, `Project`, `Sort`). Output schema is
     /// the inner node's schema, lifted to `SummarySchema` with all fields as
     /// `SummaryFamilyType::Plain`.
-    KeepPreAsap(Box<QueryExpr>),
+    KeepPreAsap(Rc<QueryExpr>),
 
     /// Summary aggregation. Post-ASAP binding chose `family` — which
     /// summary family (exact accumulator, sketch, sample, wavelet, or

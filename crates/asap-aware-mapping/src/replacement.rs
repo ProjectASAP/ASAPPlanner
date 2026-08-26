@@ -365,6 +365,7 @@ use thiserror::Error;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
 use crate::rollup::RollupStrategy;
+use crate::topk_reuse::TopKLimitReuseStrategy;
 
 /// Errors from the pre-ASAP → post-ASAP replacement/construction path
 /// ([`realize_child`] and [`keep_pre_asap`]). Moved here from the former
@@ -446,6 +447,10 @@ pub enum Replacement {
 #[derive(Debug, Clone)]
 pub struct ReplacementSubDAG {
     pub replacement: Replacement,
+    /// Name of the [`ReplacementStrategy`] that proposed this candidate.
+    /// Search fills this from `ReplacementStrategy::name`; consumers must not
+    /// infer it from the replacement's shape or provenance.
+    pub strategy: &'static str,
     /// Machine-readable origin/role of this alternative. Selection uses this
     /// instead of inferring strategy semantics from replacement shape or
     /// pointer identity when several strategies contribute to one memo group.
@@ -476,6 +481,16 @@ pub enum ReplacementProvenance {
 /// don't match, so a caller that skips the `matches` check first still gets a
 /// safe (merely uninformative) answer instead of a crash.
 pub trait ReplacementStrategy {
+    /// Stable, human-readable strategy name carried into every proposed
+    /// candidate and ultimately into planner diagnostics/visualizations.
+    fn name(&self) -> &'static str {
+        let short = std::any::type_name::<Self>()
+            .rsplit("::")
+            .next()
+            .expect("a Rust type name always has a final segment");
+        short.split_once('<').map_or(short, |(base, _)| base)
+    }
+
     /// Does this strategy have any replacement to offer for `target`?
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool;
 
@@ -1093,6 +1108,7 @@ impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
                 let rationale = describe_implementation(intent, &implementation);
                 let node = construct_summary(target.root, implementation, self.cost_model).ok()?;
                 Some(ReplacementSubDAG {
+                    strategy: "SketchAlgorithmStrategy",
                     replacement: Replacement::Summary(node),
                     provenance: ReplacementProvenance::SummaryImplementation,
                     rationale,
@@ -1219,10 +1235,14 @@ pub(crate) fn realize_child(
 /// candidate for a target, or a deployment wants to force a node its own
 /// runtime can't actually implement — through the same fallback this
 /// crate's own dispatch uses, without duplicating the schema-lift logic.
-pub fn keep_pre_asap(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+pub fn keep_pre_asap(expr: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementError> {
+    keep_pre_asap_rc(Rc::clone(expr))
+}
+
+fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementError> {
     let schema = expr.output_schema()?;
     Ok(Rc::new(SummaryNode {
-        expr: SummaryExpr::KeepPreAsap(Box::new(expr.clone())),
+        expr: SummaryExpr::KeepPreAsap(expr),
         schema: lift(&schema),
     }))
 }
@@ -1292,7 +1312,7 @@ pub(crate) fn construct_summary(
             }
         }
     }
-    keep_pre_asap(expr)
+    keep_pre_asap_rc(Rc::new(expr.clone()))
 }
 
 /// Translate an [`Implementation`] into the `(family, needs a
@@ -1493,6 +1513,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
         let count = target.consumer_count;
         vec![
             ReplacementSubDAG {
+                strategy: "SharedSubtreeStrategy",
                 // The already-interned `Rc` itself: reusing it verbatim *is*
                 // "build once and share" — no new node to construct.
                 replacement: Replacement::Rewrite(Rc::clone(target.root)),
@@ -1504,6 +1525,7 @@ impl ReplacementStrategy for SharedSubtreeStrategy {
                 ),
             },
             ReplacementSubDAG {
+                strategy: "SharedSubtreeStrategy",
                 // A structurally-identical but freshly-allocated `Rc`: same
                 // value (`PartialEq`), deliberately *not* the same pointer,
                 // representing "undo the sharing and recompute independently".
@@ -2528,6 +2550,14 @@ fn search_cse_workload_with<'s, Id>(
         })
         .collect();
     let rollup_strategy = RollupStrategy::new(&siblings);
+    let limits: Vec<Rc<QueryExpr>> = order
+        .iter()
+        .filter_map(|ptr| {
+            let node = &nodes[ptr];
+            matches!(node.as_ref(), QueryExpr::Limit { .. }).then(|| Rc::clone(node))
+        })
+        .collect();
+    let topk_reuse_strategy = TopKLimitReuseStrategy::new(&limits);
 
     let mut groups: HashMap<*const QueryExpr, MemoGroup> = HashMap::new();
     for ptr in &order {
@@ -2565,11 +2595,32 @@ fn search_cse_workload_with<'s, Id>(
             let mut proposed = Vec::new();
             for strategy in strategies {
                 if strategy.matches(&target) {
-                    proposed.extend(strategy.replacements(&target));
+                    let name = strategy.name();
+                    proposed.extend(strategy.replacements(&target).into_iter().map(
+                        |mut candidate| {
+                            candidate.strategy = name;
+                            candidate
+                        },
+                    ));
                 }
             }
             if rollup_strategy.matches(&target) {
-                proposed.extend(rollup_strategy.replacements(&target));
+                let name = rollup_strategy.name();
+                proposed.extend(rollup_strategy.replacements(&target).into_iter().map(
+                    |mut candidate| {
+                        candidate.strategy = name;
+                        candidate
+                    },
+                ));
+            }
+            if topk_reuse_strategy.matches(&target) {
+                let name = topk_reuse_strategy.name();
+                proposed.extend(topk_reuse_strategy.replacements(&target).into_iter().map(
+                    |mut candidate| {
+                        candidate.strategy = name;
+                        candidate
+                    },
+                ));
             }
 
             for candidate in &proposed {
@@ -4314,16 +4365,19 @@ mod tests {
         let mut group = MemoGroup::new(Rc::clone(&target), 2);
         group.candidates = vec![
             ReplacementSubDAG {
+                strategy: "TestStrategy",
                 replacement: Replacement::Rewrite(Rc::clone(&target)),
                 provenance: ReplacementProvenance::CseShare,
                 rationale: "share".into(),
             },
             ReplacementSubDAG {
+                strategy: "TestStrategy",
                 replacement: Replacement::Rewrite(Rc::new(target.as_ref().clone())),
                 provenance: ReplacementProvenance::CseRecompute,
                 rationale: "recompute".into(),
             },
             ReplacementSubDAG {
+                strategy: "TestStrategy",
                 replacement: Replacement::Rewrite(Rc::new(QueryExpr::CurrentTimestamp)),
                 provenance: ReplacementProvenance::LogicalRewrite,
                 rationale: "different rewrite strategy".into(),
@@ -4578,6 +4632,7 @@ mod tests {
 
             fn replacements(&self, _target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
                 vec![ReplacementSubDAG {
+                    strategy: "ReplaceFilterChild",
                     replacement: Replacement::Rewrite(Rc::new(QueryExpr::Dedup {
                         cols: vec![0],
                         child: Rc::new(metric_scan(&["replacement"])),
@@ -4799,6 +4854,7 @@ mod tests {
                 child: Rc::new(fresh_inner_layer),
             };
             vec![ReplacementSubDAG {
+                strategy: "AlwaysGrowingStrategy",
                 replacement: Replacement::Rewrite(Rc::new(outer_wrapper)),
                 provenance: ReplacementProvenance::LogicalRewrite,
                 rationale: format!("pathological candidate #{n}"),

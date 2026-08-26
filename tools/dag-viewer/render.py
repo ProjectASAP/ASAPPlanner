@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Bake one or more dag_export WorkloadGraph JSON files into a single,
-portable HTML page — the same tools/dag-viewer UI (Single/Compare/Union,
-click-to-inspect, shared-subtree/CSE highlighting) as index.html, but with
+"""Bake WorkloadGraph JSON into a single, portable Pre/Post-ASAP HTML page,
+with the same query selection, workload-union, and node details as index.html,
+but with
 the vendored JS libraries and the query data all inlined into one file.
 
 Why this exists alongside index.html:
@@ -30,7 +30,7 @@ Usage:
   cargo run -p asap-devtools --bin dag_export -- --sql "..." --name q1 \\
     | python3 tools/dag-viewer/render.py -o rendered.html
 
-  python3 tools/dag-viewer/render.py dag1.json dag2.json -o rendered.html --mode union
+  python3 tools/dag-viewer/render.py dag1.json dag2.json -o rendered.html
 
 Multiple input files are merged exactly like index.html's multi-file drop: a
 query name colliding with an earlier one is disambiguated by suffixing the
@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -52,7 +53,7 @@ HERE = Path(__file__).resolve().parent
 # embedded data and mode override must land immediately before it in
 # document order (its startup code reads both synchronously as soon as it
 # runs) — see viewer.js's header comment.
-_INLINE_LIBS = ("dagre.min.js", "cytoscape.min.js", "cytoscape-dagre.js", "node-style.js")
+_INLINE_LIBS = ("dagre.min.js", "cytoscape.min.js", "cytoscape-dagre.js", "node-style.js", "planner-ui.js")
 
 
 def _compact(value: object) -> str:
@@ -69,6 +70,8 @@ def _compact(value: object) -> str:
         return ", ".join(_compact(item) for item in value) or "none"
     if not isinstance(value, dict):
         return str(value)
+
+    # Common serde enum/newtype shapes in QueryExpr detail.
     if set(value) == {"Column"}:
         return f"col[{_compact(value['Column'])}]"
     if set(value) == {"Table"} and isinstance(value["Table"], dict):
@@ -83,39 +86,49 @@ def _compact(value: object) -> str:
     return ", ".join(f"{key}={_compact(item)}" for key, item in value.items())
 
 
-def _column(value: object) -> str:
+def _column(value: object, input_schema: object = None) -> str:
     if isinstance(value, int):
+        if isinstance(input_schema, dict):
+            columns = input_schema.get("columns")
+            if isinstance(columns, list) and value < len(columns):
+                column = columns[value]
+                if isinstance(column, dict) and column.get("name"):
+                    return str(column["name"])
         return f"col[{value}]"
     return _compact(value)
 
 
-def _measure(value: object) -> str:
+def _measure(value: object, input_schema: object = None) -> str:
     if not isinstance(value, dict):
         return _compact(value)
     kind = str(value.get("kind", "aggregate"))
     args = []
     if value.get("col") is not None:
-        args.append(_column(value["col"]))
+        args.append(_column(value["col"], input_schema))
     for key in ("q", "k", "population", "label", "lower", "upper"):
         if key in value:
             args.append(f"{key}={_compact(value[key])}")
-    accuracy = value.get("accuracy")
-    if isinstance(accuracy, dict) and len(accuracy) == 1:
-        name, amount = next(iter(accuracy.items()))
-        args.append(f"{name.lower()}={_compact(amount)}")
     return f"{kind}({', '.join(args)})" if args else f"{kind}()"
 
 
-def _grouping(reduction: object) -> str | None:
+def _bounded_lines(lines: list[str], maximum: int = 4, width: int = 64) -> str:
+    """Keep graph boxes scannable; the sidebar owns the lossless detail."""
+    shortened = [line if len(line) <= width else line[: width - 1] + "…" for line in lines]
+    if len(shortened) > maximum:
+        shortened = shortened[: maximum - 1] + [f"… +{len(shortened) - maximum + 1} more"]
+    return "\n".join(shortened)
+
+
+def _grouping(reduction: object, input_schema: object = None) -> str | None:
     if reduction == "PerEntity":
         return "per entity"
     if not isinstance(reduction, dict) or "Reduce" not in reduction:
         return None
     keys = reduction["Reduce"]
     if isinstance(keys, dict) and "without" in keys:
-        return "group without " + ", ".join(_column(key) for key in keys["without"])
+        return "group without " + ", ".join(_column(key, input_schema) for key in keys["without"])
     if isinstance(keys, list):
-        return "group by " + (", ".join(_column(key) for key in keys) or "all rows")
+        return "group by " + (", ".join(_column(key, input_schema) for key in keys) or "all rows")
     return "group by " + _compact(keys)
 
 
@@ -128,20 +141,28 @@ def _sort_key(value: object) -> str:
     return f"{expr} {direction}, {nulls}"
 
 
-def _semantic_label(node: dict) -> str:
+def _semantic_label(node: dict, input_schema: object = None) -> str:
     """Build a box label from a node's concrete IR fields, not its summary."""
     kind = str(node.get("kind", "Node"))
     detail = node.get("detail") or {}
     if not isinstance(detail, dict):
         return f"{kind}\n{_compact(detail)}"
+
     lines = [kind]
     if kind == "Scan":
-        lines.append(f"source: {_compact(detail.get('source', 'unknown'))}")
+        source = detail.get("source")
+        if source is None:
+            # Older/demo fixtures sometimes kept the source only in the
+            # exporter label ("Scan(metrics)") and left detail empty.
+            match = re.fullmatch(r"Scan\(([^)]+)\)(?:\s+.*)?", str(node.get("label", "")))
+            source = match.group(1) if match else "unknown"
+        lines.append(f"source: {_compact(source)}")
         if detail.get("predicates"):
             lines.append(f"where: {_compact(detail['predicates'])}")
     elif kind == "Aggregate":
-        lines.extend(f"compute: {_measure(measure)}" for measure in detail.get("measures") or [])
-        grouping = _grouping(detail.get("reduction"))
+        measures = detail.get("measures") or []
+        lines.extend(f"measure: {_measure(measure, input_schema)}" for measure in measures)
+        grouping = _grouping(detail.get("reduction"), input_schema)
         if grouping:
             lines.append(grouping)
         if detail.get("having"):
@@ -151,13 +172,13 @@ def _semantic_label(node: dict) -> str:
         if detail.get("partition_by"):
             lines.append(f"within: {_compact(detail['partition_by'])}")
     elif kind == "Project":
-        for item in detail.get("cols") or []:
-            if isinstance(item, dict):
-                expr = _compact(item.get("expr"))
-                alias = item.get("alias")
-                lines.append(f"output: {expr}" + (f" as {alias}" if alias else ""))
-            else:
-                lines.append(f"output: {_compact(item)}")
+        output_schema = node.get("schema")
+        output_columns = output_schema.get("columns") if isinstance(output_schema, dict) else None
+        if isinstance(output_columns, list) and output_columns:
+            names = [str(column.get("name", "?")) for column in output_columns if isinstance(column, dict)]
+            lines.append("columns: " + ", ".join(names))
+        else:
+            lines.append(f"columns: {len(detail.get('cols') or [])}")
     elif kind == "Filter":
         lines.append(f"where: {_compact(detail.get('pred'))}")
     elif kind == "Join":
@@ -172,9 +193,18 @@ def _semantic_label(node: dict) -> str:
         lines.append(f"operation: {_compact(detail.get('op'))}")
         if detail.get("vector_match"):
             lines.append(f"match: {_compact(detail['vector_match'])}")
-    elif kind in {"SummaryAgg", "SummaryJoin"}:
+    elif kind == "SummaryAgg":
         lines.append(f"family: {_compact(detail.get('family'))}")
-        for key in ("col", "key", "reduction", "grouping"):
+        if "col" in detail:
+            lines.append(f"input: {_column(detail['col'])}")
+        reduction = _grouping(detail.get("reduction"), input_schema)
+        if reduction:
+            lines.append(reduction)
+        if "grouping" in detail:
+            lines.append(f"summary layout: {_compact(detail['grouping'])}")
+    elif kind == "SummaryJoin":
+        lines.append(f"family: {_compact(detail.get('family'))}")
+        for key in ("key", "grouping"):
             if key in detail:
                 lines.append(f"{key}: {_compact(detail[key])}")
     elif kind == "SummaryEstimate":
@@ -188,10 +218,13 @@ def _semantic_label(node: dict) -> str:
         root = next((item for item in nested_nodes if item.get("id") == nested_root), None)
         lines.append(f"unchanged: {root.get('kind', 'pre-ASAP subtree') if root else 'pre-ASAP subtree'}")
     else:
+        # Less common variants still show their own scalar IR fields. Avoid
+        # schema/subgraph blobs, which belong in the click-to-inspect panel.
         for key, value in detail.items():
             if key not in {"schema", "pre_asap_subgraph"} and value not in (None, [], {}):
                 lines.append(f"{key}: {_compact(value)}")
-    return "\n".join(lines)
+
+    return _bounded_lines(lines)
 
 
 def prepare_workload(workload: dict) -> dict:
@@ -201,18 +234,21 @@ def prepare_workload(workload: dict) -> dict:
     def prepare_graph(graph: object) -> None:
         if not isinstance(graph, dict):
             return
+        by_id = {node.get("id"): node for node in graph.get("nodes", [])}
         for node in graph.get("nodes", []):
-            node["label"] = _semantic_label(node)
+            child = by_id.get((node.get("children") or [None])[0])
+            input_schema = (
+                child.get("schema") or (child.get("detail") or {}).get("schema")
+                if isinstance(child, dict)
+                else None
+            )
+            node["label"] = _semantic_label(node, input_schema)
             nested = (node.get("detail") or {}).get("pre_asap_subgraph")
             prepare_graph(nested)
 
     for query in prepared.get("queries", []):
         prepare_graph(query.get("graph"))
         prepare_graph(query.get("post_graph"))
-        for replacement in query.get("replacements", []):
-            prepare_graph(replacement.get("before"))
-            after = replacement.get("after") or {}
-            prepare_graph(after.get("graph"))
     return prepared
 
 
@@ -242,7 +278,7 @@ def _json_script(obj: object) -> str:
     return json.dumps(obj).replace("<", "\\u003c")
 
 
-def render(workload: dict, mode: str) -> str:
+def render(workload: dict) -> str:
     workload = prepare_workload(workload)
     html = (HERE / "index.html").read_text()
 
@@ -253,13 +289,12 @@ def render(workload: dict, mode: str) -> str:
         html = html.replace(tag, f"<script>\n{(HERE / name).read_text()}\n</script>", 1)
 
     embedded = f'<script type="application/json" id="embedded-workload">{_json_script(workload)}</script>'
-    config = f"<script>window.__DAG_RENDER__ = {_json_script({'mode': mode})};</script>\n" if mode != "single" else ""
     viewer_tag = '<script src="viewer.js"></script>'
     if viewer_tag not in html:
         raise RuntimeError(f"render.py: expected to find {viewer_tag!r} in index.html — did it move or get renamed?")
     html = html.replace(
         viewer_tag,
-        f"{embedded}\n{config}<script>\n{(HERE / 'viewer.js').read_text()}\n</script>",
+        f"{embedded}\n<script>\n{(HERE / 'viewer.js').read_text()}\n</script>",
         1,
     )
     return html
@@ -277,12 +312,6 @@ def main() -> None:
         help="dag_export WorkloadGraph JSON file(s); reads stdin if none are given",
     )
     parser.add_argument("-o", "--output", type=Path, required=True, help="output HTML file path")
-    parser.add_argument(
-        "--mode",
-        choices=["single", "compare", "union"],
-        default="single",
-        help="view mode the page opens into; compare/union pre-select every loaded query (default: single)",
-    )
     args = parser.parse_args()
 
     try:
@@ -297,14 +326,7 @@ def main() -> None:
     if not workload.get("queries"):
         print("render.py: no queries in input — nothing to render", file=sys.stderr)
         sys.exit(1)
-    if args.mode != "single" and len(workload["queries"]) < 2:
-        print(
-            f"render.py: --mode {args.mode} needs 2+ queries to do anything "
-            f"(got {len(workload['queries'])}) — the page will just show its 'select more' hint",
-            file=sys.stderr,
-        )
-
-    args.output.write_text(render(workload, args.mode))
+    args.output.write_text(render(workload))
     n = len(workload["queries"])
     print(f"wrote {args.output} ({n} quer{'y' if n == 1 else 'ies'})")
 
