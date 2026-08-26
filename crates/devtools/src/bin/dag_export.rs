@@ -166,7 +166,7 @@ fn annotate_with_explanations(
 ) {
     for (i, explanation) in explanations.iter().enumerate() {
         for node in graph.nodes.iter_mut() {
-            if node.hash == explanation.node_hash
+            if node.hash == Some(explanation.node_hash)
                 && node.source_expr.as_ref() == Some(explanation.target.as_ref())
             {
                 node.notes.push(DagNote {
@@ -523,7 +523,7 @@ mod tests {
             lower_promql("sum(rate(other_metric[5m]))", AccuracyTarget::Epsilon(0.01)).unwrap();
         let mut graph = dag_export::export(&unrelated);
         for node in &mut graph.nodes {
-            node.hash = explanation.node_hash;
+            node.hash = Some(explanation.node_hash);
         }
         let mut matched = vec![false; explanations.len()];
         annotate_with_explanations(&mut graph, &explanations, &mut matched);

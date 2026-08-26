@@ -69,7 +69,16 @@ pub struct DagNode {
     /// equally here iff they would land in the same `InternTable` bucket.
     /// See the module doc for what a hash match here does and doesn't
     /// guarantee.
-    pub hash: u64,
+    ///
+    /// `None` for the same reason `source_expr` is `None` — a post-ASAP-
+    /// originated node in an [`export_post_asap`] merged graph has no
+    /// `QueryExpr` to hash. Omitted from JSON entirely (rather than, say,
+    /// serialized as `0`) so a consumer's shared-subtree-by-hash pass can
+    /// tell "no hash" apart from a real hash that happens to collide with a
+    /// placeholder — `0` is a legal `structural_hash` output, not a safe
+    /// sentinel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<u64>,
     /// Exact source expression for in-process annotation matching. It is not
     /// part of the JSON format: callers first narrow by `hash`, then compare
     /// this value structurally to avoid treating a hash collision as node
@@ -560,7 +569,7 @@ fn push_node(
     children: Vec<u32>,
 ) -> u32 {
     let id = nodes.len() as u32;
-    let hash = structural_hash(expr, cache);
+    let hash = Some(structural_hash(expr, cache));
     nodes.push(DagNode {
         id,
         kind,
@@ -598,7 +607,7 @@ fn push_summary_originated_node(
         label,
         detail,
         children,
-        hash: 0,
+        hash: None,
         source_expr: None,
         notes: Vec::new(),
     });
@@ -1229,7 +1238,7 @@ mod tests {
         let graph = export(&leaf);
         assert_eq!(
             graph.nodes[graph.root as usize].hash,
-            structural_hash(&leaf, &mut HashCache::new()),
+            Some(structural_hash(&leaf, &mut HashCache::new())),
             "dag_export's root hash must equal cse::structural_hash(&leaf, &mut HashCache::new()) directly"
         );
     }
@@ -1257,7 +1266,7 @@ mod tests {
         let graph = export(&root);
         assert_eq!(
             graph.nodes[graph.root as usize].hash,
-            structural_hash(&root, &mut HashCache::new()),
+            Some(structural_hash(&root, &mut HashCache::new())),
             "Filter root hash must match cse::structural_hash(&root, &mut HashCache::new())"
         );
 
@@ -1265,7 +1274,7 @@ mod tests {
         let agg_node = &graph.nodes[filter.children[0] as usize];
         assert_eq!(
             agg_node.hash,
-            structural_hash(&agg, &mut HashCache::new()),
+            Some(structural_hash(&agg, &mut HashCache::new())),
             "the exported Aggregate node's hash must match cse::structural_hash \
              on the Aggregate subtree it represents, not just the root"
         );

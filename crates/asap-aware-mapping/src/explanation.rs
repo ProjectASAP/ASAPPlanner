@@ -534,7 +534,8 @@ mod tests {
             .find(|f| f.kind == ExplanationKind::SketchApproximation)
             .expect("expected a sketch finding");
         assert_eq!(
-            sketch.node_hash, expected_hash,
+            Some(sketch.node_hash),
+            expected_hash,
             "ReplacementExplanation::node_hash must match dag_export's DagNode::hash \
              for the same QueryExpr subtree"
         );
