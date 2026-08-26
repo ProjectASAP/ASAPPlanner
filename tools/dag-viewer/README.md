@@ -4,8 +4,8 @@ The viewer has one visualization mode: **Pre/Post-ASAP**.
 
 - Select one query to see that query's complete pre-ASAP and post-ASAP DAGs.
 - Select multiple queries to see two workload-union DAGs: one pre-ASAP union
-  and one post-ASAP union. Structurally identical nodes and edges are
-  collapsed while query roots and ownership are retained.
+  and one post-ASAP union. Nodes with the same exporter-assigned workload
+  identity are collapsed while query roots and ownership are retained.
 - Pre-ASAP nodes show only their original IR content.
 - Post-ASAP nodes show their translated IR content and the explicit planner
   decision carried by that node.
