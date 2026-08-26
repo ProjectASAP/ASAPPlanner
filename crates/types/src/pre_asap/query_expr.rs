@@ -1073,9 +1073,11 @@ impl QueryExpr<ColumnId> {
 
             // π — one output column per projection item. Each item's type is
             // inferred from its expression against the child schema; the name
-            // is the explicit alias or a derived default. Projection may drop
-            // the grouping/time columns, so unique_keys reset and time_index
-            // is re-found by name.
+            // is the explicit alias or a derived default. A child unique key
+            // survives exactly when every one of its columns is passed through
+            // as a bare `Column` item (possibly reordered or aliased). Derived
+            // expressions cannot carry key identity. `time_index` is re-found
+            // by name.
             QueryExpr::Project { cols, qualifier, child } => {
                 let in_schema = child.output_schema()?;
                 let columns: Vec<Column> = cols
@@ -1098,10 +1100,23 @@ impl QueryExpr<ColumnId> {
                     })
                     .collect();
                 let time_index = columns.iter().position(|c| c.name == "ts");
+                let unique_keys = in_schema
+                    .unique_keys
+                    .iter()
+                    .filter_map(|key| {
+                        key.iter()
+                            .map(|input_col| {
+                                cols.iter().position(|item| {
+                                    matches!(&item.expr, QueryExpr::Column(col) if col == input_col)
+                                })
+                            })
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .collect();
                 Ok(Schema {
                     columns,
                     time_index,
-                    unique_keys: Vec::new(),
+                    unique_keys,
                     // Projection enumerates exactly its items → closed.
                     closed: true,
                 })
@@ -1584,6 +1599,68 @@ mod tests {
                 closed: true,
             },
         }
+    }
+
+    #[test]
+    fn project_preserves_unique_keys_that_are_passed_through() {
+        let input = Rc::new(scan(
+            vec![
+                col("tenant", DataType::Utf8, false),
+                col("region", DataType::Utf8, false),
+                col("value", DataType::Int64, false),
+            ],
+            None,
+            vec![vec![0, 1]],
+        ));
+        let projected = QueryExpr::Project {
+            cols: vec![
+                ProjectItem {
+                    alias: Some("r".into()),
+                    expr: QueryExpr::Column(1),
+                },
+                ProjectItem {
+                    alias: Some("t".into()),
+                    expr: QueryExpr::Column(0),
+                },
+                ProjectItem {
+                    alias: None,
+                    expr: QueryExpr::Arithmetic {
+                        op: ArithmeticOpKind::Add,
+                        left: Rc::new(QueryExpr::Column(2)),
+                        right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(1))),
+                    },
+                },
+            ],
+            qualifier: None,
+            child: input,
+        };
+
+        assert_eq!(
+            projected.output_schema().unwrap().unique_keys,
+            vec![vec![1, 0]]
+        );
+    }
+
+    #[test]
+    fn project_drops_a_unique_key_when_a_key_column_is_omitted() {
+        let input = Rc::new(scan(
+            vec![
+                col("tenant", DataType::Utf8, false),
+                col("region", DataType::Utf8, false),
+            ],
+            None,
+            vec![vec![0, 1]],
+        ));
+        let projected = QueryExpr::Project {
+            cols: vec![ProjectItem {
+                alias: None,
+                expr: QueryExpr::Column(0),
+            }],
+            qualifier: None,
+            child: input,
+        };
+
+        assert!(projected.output_schema().unwrap().unique_keys.is_empty());
     }
 
     #[test]
