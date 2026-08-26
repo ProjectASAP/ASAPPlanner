@@ -12,25 +12,19 @@ Important properties include:
 - Composability
 - Accuracy trends
 
-## Mergeability
+### Mergeability
 
 Can two independently maintained summaries be combined to produce a summary of their union?
 
-Mergeability enables:
+This enables distributed aggregation, time-bucket merging, group-by roll-up, hierarchical summaries, and some forms of shared computation.
 
-- distributed aggregation,
-- time-bucket merging,
-- group-by roll-up,
-- hierarchical summaries,
-- and some forms of shared computation.
-
-## Subpopulation Awareness
+### Subpopulation Awareness
 
 Can one summary represent multiple subpopulations and answer queries for individual subsets?
 
 This determines whether shared multi-subpopulation designs are possible.
 
-## Subtractability
+### Subtractability
 
 Can one summary be removed from another?
 
@@ -43,7 +37,7 @@ Summary(A ∪ B) - Summary(B) → Summary(A)
 Subtractability is useful for sliding windows, dynamic partitions, and incremental maintenance.
 
 
-## Deletion Support
+### Deletion Support
 
 Can individual items be removed from a summary?
 
@@ -56,19 +50,19 @@ Deletion support may be necessary for:
 
 This is distinct from subtracting one complete summary from another.
 
-## Time Awareness
+### Time Awareness
 
 Does the summary natively model time or window semantics?
 
 A time-aware summary may support operations that are difficult or expensive using a time-agnostic sketch.
 
-## Linearity
+### Linearity
 
 Can the summary participate in linear combinations or related algebraic operations?
 
 Linearity may enable composition, subtraction, hierarchical aggregation, or recovery of related statistics.
 
-## Composability
+### Composability
 
 Can a summary serve as the input to another logical or summary operator?
 
@@ -94,7 +88,7 @@ coarser summary
 
 Composability determines which multi-stage candidate plans are legal.
 
-## Accuracy Under Continued Insertion
+### Accuracy Under Continued Insertion
 
 Does the summary's error behavior change as more items are inserted?
 

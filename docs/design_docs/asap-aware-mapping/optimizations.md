@@ -11,7 +11,7 @@ ASAP-aware mapping should support several largely orthogonal dimensions of optim
 - (subpopulation) Hierarchy of summaries (AHA) vs treating hierarchical subpopulations independently
 - (sketch) Combining computation between part from the sketch, and part from the raw data to meet an accuracy target
 
-Some of these are described below with examples
+Some of these are described below with examples.
 
 ## Using a subpopulation sketch
 

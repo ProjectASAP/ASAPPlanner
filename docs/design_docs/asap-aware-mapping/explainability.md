@@ -24,8 +24,4 @@ Additional opportunities:
     - reuse finer-grained aggregation through roll-up
 ```
 
-Implemented as `asap-aware-mapping`'s `explanation` module (`explain_replacements`/`explain_replacements_with`, issue #257): a **view of the candidate search space**, not a second optimization engine — each explanation's reason is the matching candidate's own rationale, not new prose invented by the reporting layer.
-
-This keeps explanations consistent with the plans the optimizer can actually produce.
-
----
+Implemented as `asap-aware-mapping`'s `explanation` module (`explain_replacements`/`explain_replacements_with`, issue #257)
