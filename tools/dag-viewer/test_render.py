@@ -213,14 +213,13 @@ class SemanticLabelTests(unittest.TestCase):
             "detail": {"measures": [{"kind": "avg", "col": 3}]},
             "children": [],
         }
-        def graph():
-            return {"nodes": [dict(node)], "root": 0}
+        graph = {"nodes": [node], "root": 0}
         workload = {
             "queries": [
                 {
-                    "graph": graph(),
-                    "post_graph": graph(),
-                    "replacements": [{"before": graph(), "after": {"graph": graph()}}],
+                    "graph": graph,
+                    "post_graph": graph,
+                    "replacements": [{"before": graph, "after": {"graph": graph}}],
                 }
             ]
         }
@@ -229,20 +228,47 @@ class SemanticLabelTests(unittest.TestCase):
         labels = [
             query["graph"]["nodes"][0]["label"],
             query["post_graph"]["nodes"][0]["label"],
-        ]
-        self.assertEqual(labels, ["Aggregate\nmeasure: avg(col[3])"] * 2)
-        self.assertEqual(
             query["replacements"][0]["before"]["nodes"][0]["label"],
-            "Aggregate(1 measures)",
-        )
+            query["replacements"][0]["after"]["graph"]["nodes"][0]["label"],
+        ]
+        self.assertEqual(labels, ["Aggregate\nmeasure: avg(col[3])"] * 4)
 
-    def test_replacement_subgraphs_are_not_prepared_for_the_current_viewer(self):
+    def test_cse_before_after_makes_reuse_decision_visible(self):
+        node = {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(metrics)",
+            "detail": {},
+            "children": [],
+        }
         def graph():
-            return {"nodes": [{"id": 0, "kind": "Scan", "label": "legacy", "detail": {}, "children": []}], "root": 0}
-        workload = {"queries": [{"graph": graph(), "replacements": [{"before": graph(), "after": {"graph": graph()}}]}]}
+            return {"nodes": [dict(node)], "root": 0}
+
+        workload = {
+            "queries": [
+                {
+                    "graph": graph(),
+                    "replacements": [
+                        {
+                            "strategy": "SharedSubtree",
+                            "provenance": "CseShare",
+                            "rationale": "Scan(metrics) has 2 consumers across this workload",
+                            "before": graph(),
+                            "after": {"graph": graph()},
+                        }
+                    ],
+                }
+            ]
+        }
         replacement = prepare_workload(workload)["queries"][0]["replacements"][0]
-        self.assertEqual(replacement["before"]["nodes"][0]["label"], "legacy")
-        self.assertEqual(replacement["after"]["graph"]["nodes"][0]["label"], "legacy")
+        self.assertEqual(
+            replacement["before"]["nodes"][0]["label"],
+            "Scan\nsource: metrics\nreuse: recomputed per consumer",
+        )
+        self.assertEqual(
+            replacement["after"]["graph"]["nodes"][0]["label"],
+            "Scan\nsource: metrics\nreuse: shared across workload (2 consumers)",
+        )
 
 
 class MainCliTests(unittest.TestCase):

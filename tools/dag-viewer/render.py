@@ -246,9 +246,29 @@ def prepare_workload(workload: dict) -> dict:
             nested = (node.get("detail") or {}).get("pre_asap_subgraph")
             prepare_graph(nested)
 
+    def append_root_line(graph: object, line: str) -> None:
+        if not isinstance(graph, dict):
+            return
+        root_id = graph.get("root")
+        root = next((node for node in graph.get("nodes", []) if node.get("id") == root_id), None)
+        if root is not None:
+            root["label"] += f"\n{line}"
+
     for query in prepared.get("queries", []):
         prepare_graph(query.get("graph"))
         prepare_graph(query.get("post_graph"))
+        for replacement in query.get("replacements", []):
+            before = replacement.get("before")
+            after = replacement.get("after") or {}
+            after_graph = after.get("graph")
+            prepare_graph(before)
+            prepare_graph(after_graph)
+            if replacement.get("strategy") == "SharedSubtree" or replacement.get("provenance") == "CseShare":
+                rationale = str(replacement.get("rationale", ""))
+                count = re.search(r"(\d+)\s+consumers?", rationale)
+                suffix = f" ({count.group(1)} consumers)" if count else ""
+                append_root_line(before, "reuse: recomputed per consumer")
+                append_root_line(after_graph, f"reuse: shared across workload{suffix}")
     return prepared
 
 

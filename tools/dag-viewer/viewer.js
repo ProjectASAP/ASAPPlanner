@@ -35,7 +35,7 @@ const fileInput = document.getElementById('fileInput');
 const clearBtn = document.getElementById('clearBtn');
 const highlightToggle = document.getElementById('highlightToggle');
 const tabsEl = document.getElementById('tabs');
-const scopePickerEl = document.getElementById('scopePicker');
+const baPickerEl = document.getElementById('baPicker');
 const cyOuterEl = document.getElementById('cyOuter');
 const cyEl = document.getElementById('cy');
 const modeHintEl = document.getElementById('modeHint');
@@ -116,6 +116,35 @@ function loadFiles(fileList) {
   fileInput.value = '';
 }
 
+// ── Shared-subtree hashes across a set of queries ───────────────────────
+// Map<hash, Set<queryName>> — a node's hash is "shared" once it shows up
+// under >= 2 distinct query names (this is a client-side structural-equality
+// proxy for real CSE output; see crates/types/src/dag_export.rs and the
+// "Shared-subtree highlighting is a proxy" section of README.md). Defaults
+// to every loaded query (single-view highlighting); Compare/Union instead
+// pass just their selected participants, so a node never shows as "shared"
+// against a query that isn't even part of that view.
+function computeHashOwners(subsetQueries) {
+  const list = subsetQueries || queries;
+  const owners = new Map();
+  for (const q of list) {
+    const seenInThisQuery = new Set();
+    for (const node of q.graph.nodes) {
+      // A post-ASAP-only node (e.g. mixed into a whole-query post_graph) has
+      // no corresponding QueryExpr to hash — skip rather than bucketing
+      // every such node together under the key `undefined`. `graph.nodes`
+      // (as opposed to `post_graph.nodes`) never actually contains one of
+      // these today, but this stays correct if that ever changes.
+      if (node.hash === undefined) continue;
+      if (seenInThisQuery.has(node.hash)) continue;
+      seenInThisQuery.add(node.hash);
+      if (!owners.has(node.hash)) owners.set(node.hash, new Set());
+      owners.get(node.hash).add(q.name);
+    }
+  }
+  return owners;
+}
+
 function getParticipants() {
   return Array.from(participants)
     .filter((i) => i >= 0 && i < queries.length)
@@ -125,7 +154,7 @@ function getParticipants() {
 function render() {
   if (queries.length === 0) {
     tabsEl.innerHTML = '';
-    scopePickerEl.classList.remove('visible');
+    baPickerEl.classList.remove('visible');
     emptyEl.style.display = 'flex';
     cyOuterEl.style.display = 'none';
     sidepanel.style.display = 'none';
@@ -177,6 +206,7 @@ function buildCyStyle() {
     style: {
       'border-color': categoryColors(name).border,
       'background-color': categoryColors(name).bg,
+      'background-image': categoryIconDataUri(name),
     },
   }));
 
@@ -210,9 +240,12 @@ function buildCyStyle() {
       selector: 'node[category = "data"]',
       style: { 'corner-radius': 999, 'border-style': 'dashed' },
     },
-    ...categoryStyles,
+    ...categoryStyles.map((entry) => ({
+      ...entry,
+      style: { ...entry.style, 'background-image': 'none' },
+    })),
     {
-      // KeepPreAsap (post-ASAP lane only) is post-ASAP-only
+      // KeepPreAsap (Before/After mode's After lane only) is post-ASAP-only
       // as a *kind*, but represents literally unchanged pre-ASAP content —
       // override the 'summary' category's color/icon with the same neutral
       // panel/muted/dashed treatment the rest of the chrome uses for "nothing
@@ -225,11 +258,16 @@ function buildCyStyle() {
         'background-color': panelColor,
         'border-color': borderColor,
         'border-style': 'dashed',
+        'background-image': 'none',
       },
     },
     {
       selector: 'node.root',
       style: { 'border-width': 2.5 },
+    },
+    {
+      selector: 'node.hasNotes',
+      style: { 'border-style': 'double', 'border-width': 3 },
     },
     {
       selector: 'node.shared',
@@ -241,7 +279,7 @@ function buildCyStyle() {
       },
     },
     {
-      // Workload-union collapsed nodes: a persistent double border marks the
+      // Union mode's collapsed nodes: a persistent double border marks the
       // merge itself (unlike '.shared', this isn't gated by the highlight
       // toggle — collapsing *is* how union mode represents sharing).
       selector: 'node.unionShared',
@@ -258,7 +296,7 @@ function buildCyStyle() {
       },
     },
     {
-      // Pre/Post-ASAP lane container (a compound parent node).
+      // Compare mode's per-query lane container (a compound parent node).
       selector: 'node.laneParent',
       style: {
         'shape': 'round-rectangle',
@@ -300,6 +338,29 @@ function buildCyStyle() {
         'transition-timing-function': 'ease-in-out',
       },
     },
+    {
+      selector: 'edge.showSchema',
+      style: {
+        'label': 'data(schemaLabel)',
+      },
+    },
+    {
+      // Compare mode's cross-lane "same hash" connector: dashed, no
+      // arrowhead (it isn't a data-flow edge), added after layout so it
+      // never influences dagre's ranking.
+      selector: 'edge.sharedLink',
+      style: {
+        'line-style': 'dashed',
+        'line-color': ringColor,
+        'target-arrow-shape': 'none',
+        'source-arrow-shape': 'none',
+        'curve-style': 'unbundled-bezier',
+        'control-point-distances': [24],
+        'control-point-weights': [0.5],
+        'opacity': 0.55,
+        'width': 1.5,
+      },
+    },
   ];
 
   return style;
@@ -332,15 +393,36 @@ function buildCy(elements, layout) {
   return cy;
 }
 
-// Root borders and click/tap wiring for the Pre/Post-ASAP lanes.
+// Root badges + notes badges + click/tap wiring — identical across
+// single/compare/union.
 function finalizeGraphInteractions() {
   // Use borders rather than pictograms so IR text owns the whole node box.
   cy.nodes('[?root]').addClass('root');
 
+  // A double border marks nodes carrying planner notes without taking space
+  // away from the IR text.
+  cy.nodes().forEach((n) => {
+    // Before/After has a strict stage split: pre-ASAP is the unannotated IR,
+    // while post-ASAP carries explicit decision explanations.
+    if (n.data('isLane') || n.data('isBeforeAfter')) return;
+    const node = n.data('node');
+    if (!node || !node.notes || !node.notes.length) return;
+    n.addClass('hasNotes');
+  });
+
   cy.on('tap', 'node', (evt) => {
     const n = evt.target;
     if (n.data('isLane')) return;
-    showPrePostDetail(n.data());
+    if (n.data('isUnion')) {
+      showUnionDetail(n.data());
+      return;
+    }
+    if (n.data('isBeforeAfter')) {
+      showBeforeAfterDetail(n.data());
+      return;
+    }
+    const query = queries.find((q) => q.name === n.data('queryName'));
+    showDetail(n.data('node'), query);
   });
   cy.on('tap', 'edge', (evt) => showEdgeDetail(evt.target));
   cy.on('tap', (evt) => { if (evt.target === cy) clearDetail(); });
@@ -366,11 +448,240 @@ function hideModeHint() {
   cyEl.style.display = 'block';
 }
 
+// ── Single-query view (default, unchanged behavior) ──────────────────────
+
+function renderGraph(query) {
+  hideModeHint();
+  viewTitleEl.textContent = query.name;
+  renderSourcePanel([query]);
+
+  const elements = [];
+  for (const node of query.graph.nodes) {
+    elements.push({
+      data: {
+        id: String(node.id),
+        label: node.label,
+        node,
+        category: categoryOf(node.kind),
+        root: node.id === query.graph.root,
+        queryName: query.name,
+      },
+    });
+  }
+  for (const node of query.graph.nodes) {
+    for (const childId of node.children) {
+      elements.push({
+        data: {
+          // Arrow points from input to consumer (data-flow direction), the
+          // reverse of the tree's parent->child structure.
+          id: `e-${node.id}-${childId}`,
+          source: String(childId),
+          target: String(node.id),
+        },
+      });
+    }
+  }
+
+  buildCy(elements);
+  finalizeGraphInteractions();
+  applyHighlighting();
+  clearDetail();
+  zoom = 1;
+  applyZoom();
+}
+
+// ── Compare mode: selected queries side by side in lanes ─────────────────
+// Each selected query gets its own compound "lane" node (a dashed box
+// titled with the query name). Lanes share no structural edges with each
+// other, so dagre lays them out left to right on their own. Nodes whose
+// hash is shared by >= 2 selected queries get a dashed link edge added
+// *after* the layout call returns (dagre layout is synchronous here), so
+// those cross-lane links are purely visual and never pull dagre's ranking
+// out of per-query lanes.
+function renderCompare(chosen) {
+  viewTitleEl.textContent = chosen.length ? `Compare: ${chosen.map((i) => queries[i].name).join(', ')}` : 'Compare';
+  renderSourcePanel(chosen.map((i) => queries[i]));
+
+  if (chosen.length < 2) {
+    showModeHint('Select two or more loaded queries above to compare them side by side.');
+    return;
+  }
+  hideModeHint();
+
+  const elements = [];
+  chosen.forEach((qIdx) => {
+    const q = queries[qIdx];
+    const laneId = `lane-${qIdx}`;
+    elements.push({
+      data: { id: laneId, label: q.name, isLane: true },
+      classes: 'laneParent',
+      selectable: false,
+      grabbable: false,
+    });
+    for (const node of q.graph.nodes) {
+      elements.push({
+        data: {
+          id: `q${qIdx}-${node.id}`,
+          parent: laneId,
+          label: node.label,
+          node,
+          category: categoryOf(node.kind),
+          root: node.id === q.graph.root,
+          queryName: q.name,
+        },
+      });
+    }
+    for (const node of q.graph.nodes) {
+      for (const childId of node.children) {
+        elements.push({
+          data: {
+            // Arrow points from input to consumer (data-flow direction), the
+            // reverse of the tree's parent->child structure.
+            id: `e-q${qIdx}-${node.id}-${childId}`,
+            source: `q${qIdx}-${childId}`,
+            target: `q${qIdx}-${node.id}`,
+          },
+        });
+      }
+    }
+  });
+
+  buildCy(elements);
+  cy.add(buildSharedLinkEdges(chosen));
+  finalizeGraphInteractions();
+  applyHighlighting();
+  clearDetail();
+  fitAndSyncZoom();
+}
+
+// Dashed, non-directional link edges connecting one representative node per
+// lane for every hash shared by >= 2 of the chosen queries. Chains each
+// occurrence to the nearest earlier lane that also has it (not a full
+// mesh), which is enough to make "this shape recurs" visually obvious
+// without drawing an edge for every pair.
+function buildSharedLinkEdges(chosen) {
+  const owners = computeHashOwners(chosen.map((i) => queries[i]));
+  const links = [];
+  for (const [hash, ownerNames] of owners) {
+    if (ownerNames.size < 2) continue;
+    let prevKey = null;
+    chosen.forEach((qIdx) => {
+      const q = queries[qIdx];
+      if (!ownerNames.has(q.name)) return;
+      const representative = q.graph.nodes.find((n) => n.hash === hash);
+      if (!representative) return;
+      const key = `q${qIdx}-${representative.id}`;
+      if (prevKey) {
+        links.push({
+          data: { id: `link-${hash}-${prevKey}-${key}`, source: prevKey, target: key },
+          classes: 'sharedLink',
+          selectable: false,
+        });
+      }
+      prevKey = key;
+    });
+  }
+  return links;
+}
+
+// ── Union mode: merge selected queries into one graph ─────────────────────
+// A node whose hash is shared by >= 2 selected queries collapses into a
+// single graph node (id `h-<hash>`); every other node keeps a per-query id
+// (`q<i>-<nodeId>`). Edges are deduped after the merge, so multiple parents
+// — from different queries, or repeats within one query — that point at the
+// same shared node converge onto it instead of each drawing a separate
+// copy. That's the "real branching DAG" case this mode has to handle:
+// a merged node can end up with several parents at once, and plain dagre
+// already lays out multi-parent DAGs natively, so no special-cased layout
+// is needed beyond building this merged element set.
+function renderUnion(chosen) {
+  viewTitleEl.textContent = chosen.length ? `Union: ${chosen.map((i) => queries[i].name).join(', ')}` : 'Union';
+  renderSourcePanel(chosen.map((i) => queries[i]));
+
+  if (chosen.length < 2) {
+    showModeHint('Select two or more loaded queries above to merge them into one union graph.');
+    return;
+  }
+  hideModeHint();
+
+  const owners = computeHashOwners(chosen.map((i) => queries[i]));
+  const isSharedHash = (hash) => {
+    const ownerNames = owners.get(hash);
+    return !!ownerNames && ownerNames.size > 1;
+  };
+  const keyFor = (qIdx, node) => (isSharedHash(node.hash) ? `h-${node.hash}` : `q${qIdx}-${node.id}`);
+
+  const nodeEntries = new Map(); // key -> accumulator
+  const edgeKeys = new Set();
+  const elements = [];
+
+  chosen.forEach((qIdx) => {
+    const q = queries[qIdx];
+    for (const node of q.graph.nodes) {
+      const key = keyFor(qIdx, node);
+      let entry = nodeEntries.get(key);
+      if (!entry) {
+        entry = {
+          node,
+          category: categoryOf(node.kind),
+          isMerged: isSharedHash(node.hash),
+          sourceQueries: new Set(),
+          rootFor: new Set(),
+        };
+        nodeEntries.set(key, entry);
+      }
+      entry.sourceQueries.add(q.name);
+      if (node.id === q.graph.root) entry.rootFor.add(q.name);
+    }
+  });
+
+  chosen.forEach((qIdx) => {
+    const q = queries[qIdx];
+    const byId = new Map(q.graph.nodes.map((n) => [n.id, n]));
+    for (const node of q.graph.nodes) {
+      const parentKey = keyFor(qIdx, node);
+      for (const childId of node.children) {
+        const childNode = byId.get(childId);
+        const childKey = keyFor(qIdx, childNode);
+        const edgeKey = `${parentKey}__${childKey}`;
+        if (edgeKeys.has(edgeKey)) continue;
+        edgeKeys.add(edgeKey);
+        // Arrow points from input to consumer (data-flow direction), the
+        // reverse of the tree's parent->child structure.
+        elements.push({ data: { id: `e-${edgeKey}`, source: childKey, target: parentKey } });
+      }
+    }
+  });
+
+  for (const [key, entry] of nodeEntries) {
+    elements.push({
+      data: {
+        id: key,
+        label: entry.node.label,
+        node: entry.node,
+        category: entry.category,
+        isUnion: true,
+        isMerged: entry.isMerged,
+        sourceQueries: Array.from(entry.sourceQueries),
+        rootFor: Array.from(entry.rootFor),
+        root: entry.rootFor.size > 0,
+      },
+      classes: entry.isMerged ? 'unionShared' : '',
+    });
+  }
+
+  buildCy(elements);
+  finalizeGraphInteractions();
+  applyHighlighting();
+  clearDetail();
+  fitAndSyncZoom();
+}
+
 // ── Pre/Post-ASAP: one query or two workload-union DAGs ──────────────────
 function renderPrePostAsap() {
   const chosen = getParticipants();
   const selected = chosen.map((i) => queries[i]);
-  renderScopeSummary(selected);
+  renderBaScopeSummary(selected);
   renderSourcePanel(selected);
 
   if (selected.length === 0) {
@@ -410,7 +721,7 @@ function renderPrePostAsap() {
   ).first();
   if (initial && initial.length) {
     initial.select();
-    showPrePostDetail(initial.data());
+    showBeforeAfterDetail(initial.data());
   } else {
     clearDetail();
   }
@@ -454,13 +765,10 @@ function unionStageLaneElements(stage, chosen) {
       const key = keyFor(qIdx, node);
       let entry = entries.get(key);
       if (!entry) {
-        entry = { node, sourceQueries: new Set(), rootFor: new Set(), decisions: new Map() };
+        entry = { node, query, sourceQueries: new Set(), rootFor: new Set() };
         entries.set(key, entry);
       }
       entry.sourceQueries.add(query.name);
-      for (const decision of translationsForNode(query, node, stage)) {
-        entry.decisions.set(decision.id, decision);
-      }
       if (node.id === graph.root) entry.rootFor.add(query.name);
       node.children.forEach((childId) => {
         const childKey = keyFor(qIdx, byId.get(childId));
@@ -481,10 +789,10 @@ function unionStageLaneElements(stage, chosen) {
       root: entry.rootFor.size > 0,
       rootFor: Array.from(entry.rootFor),
       sourceQueries: Array.from(entry.sourceQueries),
-      isPrePost: true,
+      isBeforeAfter: true,
       stage,
-      queryName: Array.from(entry.sourceQueries)[0],
-      translations: Array.from(entry.decisions.values()),
+      queryName: entry.query.name,
+      translations: translationsForNode(entry.query, entry.node, stage),
     },
     classes: entry.sourceQueries.size > 1 ? 'unionShared' : '',
   }));
@@ -496,13 +804,13 @@ function unionStageLaneElements(stage, chosen) {
   return elements;
 }
 
-// Builds one Pre/Post-ASAP lane (a dashed compound parent plus its
-// nodes/edges). `nodes` is either a plain pre-ASAP
+// Builds one Compare-mode-style lane (a dashed compound parent plus its
+// nodes/edges) for Before/After mode. `nodes` is either a plain pre-ASAP
 // DagNode list (the `before` subtree, or an `after.kind === "Rewrite"`
 // graph) or a SummaryDagNode list (an `after.kind === "Summary"` graph) —
 // both shapes carry id/kind/label/detail/children, which is all a lane
 // needs; SummaryDagNode's missing `hash`/`notes` fields are simply never
-// read by this function or by showPrePostDetail below.
+// read by this function or by showBeforeAfterDetail below.
 function laneElements(laneId, laneLabel, graph, query, stage) {
   const nodes = graph.nodes;
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -523,7 +831,7 @@ function laneElements(laneId, laneLabel, graph, query, stage) {
         kind: node.kind,
         category: categoryOf(node.kind),
         root: node.id === graph.root,
-        isPrePost: true,
+        isBeforeAfter: true,
         laneId,
         stage,
         queryName: query.name,
@@ -613,32 +921,30 @@ function showEdgeDetail(edge) {
   `;
 }
 
-function renderScopeSummary(selected) {
-  scopePickerEl.classList.add('visible');
+function renderBaScopeSummary(selected) {
+  baPickerEl.classList.add('visible');
   const strategies = new Set();
-  selected.forEach((query) => (query.post_graph?.nodes || []).forEach((node) => {
-    if (node.decision && node.decision.rank === 0) strategies.add(node.decision.strategy);
-  }));
+  selected.forEach((q) => (q.replacements || []).filter((r) => r.rank === 0).forEach((r) => strategies.add(r.strategy)));
   const scope = selected.length === 1 ? 'Single query' : `Batch workload · ${selected.length} queries`;
   const strategyText = strategies.size ? `Winning strategies: ${Array.from(strategies).join(', ')}` : 'No selected replacements';
-  scopePickerEl.innerHTML = `<div class="scopeGroup"><div class="scopeGroupLabel">View scope</div><div class="scopeRow active"><span>${escapeHtml(scope)}</span><span class="scopeMeta">${escapeHtml(strategyText)}</span></div></div>`;
+  baPickerEl.innerHTML = `<div class="baGroup"><div class="baGroupLabel">View scope</div><div class="baRow active"><span>${escapeHtml(scope)}</span><span class="baMeta">${escapeHtml(strategyText)}</span></div></div>`;
 }
 
 function translationsForNode(query, node, stage) {
   // The pre lane is deliberately the original pre-ASAP IR only. Strategy
   // metadata belongs to nodes in the post lane.
   if (stage === 'pre') return [];
-  const replacements = (query.replacements || []).filter((replacement) => replacement.rank === 0);
+  const replacements = (query.replacements || []).filter((r) => r.rank === 0);
   if (!node.decision) return [];
-  const replacement = replacements.find((entry) => entry.decision_id === node.decision.id);
+  const replacement = replacements.find((r) => r.decision_id === node.decision.id);
   return [{
     ...node.decision,
     target_pre_id: replacement ? replacement.target_pre_id : undefined,
-    output_kind: replacement ? replacement.after?.kind : undefined,
+    after: replacement ? replacement.after : undefined,
   }];
 }
 
-function showPrePostDetail(data) {
+function showBeforeAfterDetail(data) {
   const node = data.node;
   const category = categoryOf(node.kind);
   const catColors = categoryColors(category);
@@ -660,7 +966,7 @@ function showPrePostDetail(data) {
         <div class="translationMeta">rank ${entry.rank} · estimated cost ${escapeHtml(entry.cost)}</div>
         <div class="translationMeta">${entry.role === 'replacement_root' ? 'This node replaces the pre-ASAP target.' : 'This node is generated or carried inside the replacement region.'}</div>
         <div class="translationReason">${escapeHtml(entry.rationale || 'No rationale recorded.')}</div>
-        <div class="translationTarget">${entry.target_pre_id === undefined ? `decision #${entry.id}` : `pre-ASAP target node #${entry.target_pre_id}`} · output ${escapeHtml(entry.output_kind || node.kind)}</div>
+        <div class="translationTarget">${entry.target_pre_id === undefined ? `decision #${entry.id}` : `pre-ASAP target node #${entry.target_pre_id}`} · output ${escapeHtml((entry.after || {}).kind || node.kind)}</div>
       </div>`).join('');
     translationHtml = `<div class="translationBlock"><h3>Why this post-ASAP translation</h3>${cards}</div>`;
   } else if (data.stage === 'post') {
@@ -723,34 +1029,108 @@ function renderTableSchemas(qs) {
 function applyHighlighting() {
   if (!cy) return;
   const selected = getParticipants().map((i) => queries[i]);
-  const ownersFor = (graphOf) => {
-    const owners = new Map();
-    selected.forEach((query) => {
-      const seen = new Set();
-      const graph = graphOf(query);
-      (graph ? graph.nodes : []).forEach((node) => {
-        const id = node.workload_node_id;
-        if (id === undefined || seen.has(id)) return;
-        seen.add(id);
-        if (!owners.has(id)) owners.set(id, new Set());
-        owners.get(id).add(query.name);
+    const ownersFor = (graphOf) => {
+      const owners = new Map();
+      selected.forEach((q) => {
+        const seen = new Set();
+        const graph = graphOf(q);
+        (graph ? graph.nodes : []).forEach((node) => {
+          if (node.hash === undefined || seen.has(node.hash)) return;
+          seen.add(node.hash);
+          if (!owners.has(node.hash)) owners.set(node.hash, new Set());
+          owners.get(node.hash).add(q.name);
+        });
       });
+      return owners;
+    };
+    const preOwners = ownersFor((q) => q.graph);
+    const postOwners = ownersFor((q) => q.post_graph);
+    cy.nodes().forEach((n) => {
+      if (n.data('isLane')) return;
+      const node = n.data('node');
+      const owners = n.data('stage') === 'post' ? postOwners : preOwners;
+      const sharedWith = node && owners.get(node.hash);
+      n.toggleClass('shared', !!(highlightOn && sharedWith && sharedWith.size > 1));
     });
-    return owners;
-  };
-  const preOwners = ownersFor((query) => query.graph);
-  const postOwners = ownersFor((query) => query.post_graph);
-  cy.nodes().forEach((element) => {
-    if (element.data('isLane')) return;
-    const node = element.data('node');
-    const owners = element.data('stage') === 'post' ? postOwners : preOwners;
-    const sharedWith = node && owners.get(node.workload_node_id);
-    element.toggleClass('shared', !!(highlightOn && sharedWith && sharedWith.size > 1));
-  });
 }
 
 function clearDetail() {
   detailSection.innerHTML = '<h2>Selected node</h2><div class="placeholder">Click a node to inspect it.</div>';
+}
+
+function showDetail(node, query, scopeQueries) {
+  const owners = computeHashOwners(scopeQueries);
+  const sharedWith = Array.from(owners.get(node.hash) || []).filter((n) => n !== query.name);
+  const category = categoryOf(node.kind);
+  const catColors = categoryColors(category);
+  const catLabel = (CATEGORIES[category] || {}).label || category;
+
+  const rootHtml = node.id === query.graph.root
+    ? `<div class="rootNote">This is the query's root (final output).</div>`
+    : '';
+  const sharedHtml = sharedWith.length
+    ? `<div class="shared-note">Structurally identical to a node also present in: ${sharedWith
+        .map(escapeHtml)
+        .join(', ')}</div>`
+    : '';
+
+  detailSection.innerHTML = `
+    <h2>Selected node</h2>
+    <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(catLabel)} · ${escapeHtml(node.kind)}</span>
+    <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
+    ${rootHtml}
+    ${sharedHtml}
+    ${notesHtml(node)}
+    <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
+  `;
+}
+
+// Renders a DagNode's `notes` (issue #257: asap-aware-mapping's explanation
+// of why a replacement exists here, matched onto this node by structural
+// hash — see README.md), one block per note, color-coded to match its badge.
+// Empty string if there are none, so callers can always splice this in.
+function notesHtml(node) {
+  if (!node.notes || !node.notes.length) return '';
+  const items = node.notes
+    .map((note) => {
+      const c = noteKindColor(note.kind);
+      return `<div class="noteItem" style="border-left-color:${c}">
+        <span class="noteKind" style="color:${c}">${escapeHtml(note.kind)}</span>
+        <div class="noteReason">${escapeHtml(note.reason)}</div>
+      </div>`;
+    })
+    .join('');
+  return `<div class="notesBlock"><h3>Why a replacement exists here</h3>${items}</div>`;
+}
+
+// Union mode's variant of showDetail: `data` is a merged cytoscape node's
+// data object (see renderUnion), not a raw DagNode + query pair, since a
+// merged node can be "present in" several queries and "root of" several
+// (or zero) of them at once.
+function showUnionDetail(data) {
+  const node = data.node;
+  const category = categoryOf(node.kind);
+  const catColors = categoryColors(category);
+  const catLabel = (CATEGORIES[category] || {}).label || category;
+
+  const rootHtml = data.rootFor && data.rootFor.length
+    ? `<div class="rootNote">Root (final output) of: ${data.rootFor.map(escapeHtml).join(', ')}</div>`
+    : '';
+  const sharedHtml = data.isMerged
+    ? `<div class="shared-note">Merged: same structural hash in ${data.sourceQueries.length} selected queries — ${data.sourceQueries
+        .map(escapeHtml)
+        .join(', ')}</div>`
+    : `<div class="shared-note" style="color:var(--muted)">Query-specific to ${escapeHtml(data.sourceQueries[0])}</div>`;
+
+  detailSection.innerHTML = `
+    <h2>Selected node</h2>
+    <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(catLabel)} · ${escapeHtml(node.kind)}</span>
+    <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
+    ${rootHtml}
+    ${sharedHtml}
+    ${notesHtml(node)}
+    <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
+  `;
 }
 
 function renderLegend() {
@@ -763,9 +1143,14 @@ function renderLegend() {
   const ringColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#2563eb';
   const rootColor = getComputedStyle(document.documentElement).getPropertyValue('--cat-output-border').trim() || '#b42318';
   rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${ringColor}"></span>
-    <span><span class="swatchLabel">Shared workload node</span><span class="swatchDesc">Explicitly identified by the exporter as shared across selected queries</span></span></div>`);
+    <span><span class="swatchLabel">Shared subtree</span><span class="swatchDesc">Structurally identical to a node in another loaded query (hash-based proxy, not real CSE)</span></span></div>`);
   rows.push(`<div class="leg"><span class="swatch ring" style="border-color:${rootColor}"></span>
     <span><span class="swatchLabel">Query root</span><span class="swatchDesc">${escapeHtml(ROOT_BADGE.description)}</span></span></div>`);
+  for (const [kind, label] of Object.entries(NOTE_BADGE_LABEL)) {
+    const c = noteKindColor(kind);
+    rows.push(`<div class="leg"><span class="swatch" style="background:${c}; border-color:${c}"></span>
+      <span><span class="swatchLabel">${escapeHtml(label)}</span><span class="swatchDesc">Bottom-right badge — click the node for why (issue #257)</span></span></div>`);
+  }
   const panelBg = getComputedStyle(document.documentElement).getPropertyValue('--panel2').trim() || '#f0f2f5';
   const mutedColor = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#6b7280';
   rows.push(`<div class="leg"><span class="swatch" style="background:${panelBg}; border-color:${mutedColor}; border-style:dashed"></span>
@@ -832,7 +1217,7 @@ if (embeddedEl) {
 } else {
   // Plain index.html starts with the committed, post-ASAP-generated example.
   // Do not silently prefer a leftover scratch dag.json: it may predate
-  // post_graph and make Pre/Post-ASAP appear broken. Users can load scratch
+  // post_graph and make Before/After appear broken. Users can load scratch
   // exports explicitly with the picker or run them through Query planner.
   fetch('/api/example', { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : fetch('dag.example.json', { cache: 'no-store' }).then((fallback) => fallback.json())))
