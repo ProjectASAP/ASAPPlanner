@@ -497,6 +497,43 @@
               ],
               "root": 2
             }
+          },
+          "baseline_cost": {
+            "value": 2.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "model_version": "dag_export-structural-cost-v1",
+            "inputs": [
+              {
+                "name": "per_consumer_recompute_cost",
+                "value": 2.0
+              },
+              {
+                "name": "consumer_count",
+                "value": 1.0
+              }
+            ]
+          },
+          "selected_cost": {
+            "value": 3.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "delta": -1.0,
+            "benefit_ratio": -0.5,
+            "model_version": "dag_export-structural-cost-v1"
+          },
+          "benefit": {
+            "value": -1.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "benefit_ratio": -0.5,
+            "model_version": "dag_export-structural-cost-v1"
           }
         }
       ],
@@ -597,7 +634,44 @@
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 3.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 2.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 2.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -639,7 +713,44 @@
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 3.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 2.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 2.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -674,7 +785,44 @@
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 3.0,
-              "role": "replacement_root"
+              "role": "replacement_root",
+              "baseline_cost": {
+                "value": 2.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 2.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -729,6 +877,30 @@
           }
         ],
         "root": 3
+      },
+      "workload_cost": {
+        "baseline_cost": {
+          "value": 2.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "model_version": "dag_export-structural-cost-v1"
+        },
+        "selected_cost": {
+          "value": 3.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "model_version": "dag_export-structural-cost-v1"
+        },
+        "benefit": {
+          "value": -1.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "baseline": {
+            "kind": "PreAsapRecomputation"
+          },
+          "benefit_ratio": -0.5,
+          "model_version": "dag_export-workload-cost-v1"
+        }
       }
     },
     {
@@ -1451,6 +1623,43 @@
               ],
               "root": 5
             }
+          },
+          "baseline_cost": {
+            "value": 2.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "model_version": "dag_export-structural-cost-v1",
+            "inputs": [
+              {
+                "name": "per_consumer_recompute_cost",
+                "value": 2.0
+              },
+              {
+                "name": "consumer_count",
+                "value": 1.0
+              }
+            ]
+          },
+          "selected_cost": {
+            "value": 2.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "delta": 0.0,
+            "benefit_ratio": 0.0,
+            "model_version": "dag_export-structural-cost-v1"
+          },
+          "benefit": {
+            "value": 0.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "benefit_ratio": 0.0,
+            "model_version": "dag_export-structural-cost-v1"
           }
         }
       ],
@@ -1551,7 +1760,44 @@
               "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator",
               "rank": 0,
               "cost": 3.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 2.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 2.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -1598,7 +1844,44 @@
               "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator",
               "rank": 0,
               "cost": 3.0,
-              "role": "replacement_root"
+              "role": "replacement_root",
+              "baseline_cost": {
+                "value": 2.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 2.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -1662,7 +1945,44 @@
               "rationale": "Rewrites AVG into SUM and COUNT under the same grouping, then divides SUM by COUNT.",
               "rank": 0,
               "cost": 2.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 2.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 2.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 2.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": 0.0,
+                "benefit_ratio": 0.0,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": 0.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": 0.0,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -1704,7 +2024,44 @@
               "rationale": "count realizes as an exact Count accumulator",
               "rank": 0,
               "cost": 3.0,
-              "role": "replacement_root"
+              "role": "replacement_root",
+              "baseline_cost": {
+                "value": 2.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 2.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.5,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -1750,7 +2107,44 @@
               "rationale": "Rewrites AVG into SUM and COUNT under the same grouping, then divides SUM by COUNT.",
               "rank": 0,
               "cost": 2.0,
-              "role": "replacement_root"
+              "role": "replacement_root",
+              "baseline_cost": {
+                "value": 2.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 2.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 2.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": 0.0,
+                "benefit_ratio": 0.0,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": 0.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": 0.0,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -1804,7 +2198,73 @@
             "hash": 5277207484379927121
           }
         ],
-        "root": 5
+        "root": 5,
+        "edge_annotations": [
+          {
+            "from": 0,
+            "to": 1,
+            "cost": {
+              "value": 0.5,
+              "unit": "RelativeStructuralUnits",
+              "source": "Modeled",
+              "model_version": "dag_export-shared-edge-v1",
+              "inputs": [
+                {
+                  "name": "materialized_subtree_size",
+                  "value": 1.0
+                },
+                {
+                  "name": "consumer_count",
+                  "value": 2.0
+                }
+              ]
+            }
+          },
+          {
+            "from": 0,
+            "to": 3,
+            "cost": {
+              "value": 0.5,
+              "unit": "RelativeStructuralUnits",
+              "source": "Modeled",
+              "model_version": "dag_export-shared-edge-v1",
+              "inputs": [
+                {
+                  "name": "materialized_subtree_size",
+                  "value": 1.0
+                },
+                {
+                  "name": "consumer_count",
+                  "value": 2.0
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "workload_cost": {
+        "baseline_cost": {
+          "value": 6.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "model_version": "dag_export-structural-cost-v1"
+        },
+        "selected_cost": {
+          "value": 8.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "model_version": "dag_export-structural-cost-v1"
+        },
+        "benefit": {
+          "value": -2.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "baseline": {
+            "kind": "PreAsapRecomputation"
+          },
+          "benefit_ratio": -0.3333333333333333,
+          "model_version": "dag_export-workload-cost-v1"
+        }
       }
     },
     {
@@ -2280,6 +2740,43 @@
               ],
               "root": 1
             }
+          },
+          "baseline_cost": {
+            "value": 3.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "model_version": "dag_export-structural-cost-v1",
+            "inputs": [
+              {
+                "name": "per_consumer_recompute_cost",
+                "value": 3.0
+              },
+              {
+                "name": "consumer_count",
+                "value": 1.0
+              }
+            ]
+          },
+          "selected_cost": {
+            "value": 4.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "delta": -1.0,
+            "benefit_ratio": -0.3333333333333333,
+            "model_version": "dag_export-structural-cost-v1"
+          },
+          "benefit": {
+            "value": -1.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "benefit_ratio": -0.3333333333333333,
+            "model_version": "dag_export-structural-cost-v1"
           }
         },
         {
@@ -2731,6 +3228,43 @@
               ],
               "root": 5
             }
+          },
+          "baseline_cost": {
+            "value": 5.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "model_version": "dag_export-structural-cost-v1",
+            "inputs": [
+              {
+                "name": "per_consumer_recompute_cost",
+                "value": 5.0
+              },
+              {
+                "name": "consumer_count",
+                "value": 1.0
+              }
+            ]
+          },
+          "selected_cost": {
+            "value": 5.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "delta": 0.0,
+            "benefit_ratio": 0.0,
+            "model_version": "dag_export-structural-cost-v1"
+          },
+          "benefit": {
+            "value": 0.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "benefit_ratio": 0.0,
+            "model_version": "dag_export-structural-cost-v1"
           }
         }
       ],
@@ -2795,7 +3329,44 @@
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
               "cost": 4.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 3.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -2838,7 +3409,44 @@
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
               "cost": 4.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 3.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -2876,7 +3484,44 @@
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
               "cost": 4.0,
-              "role": "replacement_root"
+              "role": "replacement_root",
+              "baseline_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 3.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -2925,7 +3570,44 @@
               "rationale": "Derives this smaller top-k from a compatible larger top-k result shared by the workload.",
               "rank": 0,
               "cost": 5.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 5.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": 0.0,
+                "benefit_ratio": 0.0,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": 0.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": 0.0,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -2966,7 +3648,44 @@
               "rationale": "Derives this smaller top-k from a compatible larger top-k result shared by the workload.",
               "rank": 0,
               "cost": 5.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 5.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": 0.0,
+                "benefit_ratio": 0.0,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": 0.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": 0.0,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -3007,11 +3726,72 @@
               "rationale": "Derives this smaller top-k from a compatible larger top-k result shared by the workload.",
               "rank": 0,
               "cost": 5.0,
-              "role": "replacement_root"
+              "role": "replacement_root",
+              "baseline_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 5.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": 0.0,
+                "benefit_ratio": 0.0,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": 0.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": 0.0,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           }
         ],
         "root": 5
+      },
+      "workload_cost": {
+        "baseline_cost": {
+          "value": 8.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "model_version": "dag_export-structural-cost-v1"
+        },
+        "selected_cost": {
+          "value": 9.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "model_version": "dag_export-structural-cost-v1"
+        },
+        "benefit": {
+          "value": -1.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "baseline": {
+            "kind": "PreAsapRecomputation"
+          },
+          "benefit_ratio": -0.125,
+          "model_version": "dag_export-workload-cost-v1"
+        }
       }
     },
     {
@@ -3487,6 +4267,43 @@
               ],
               "root": 1
             }
+          },
+          "baseline_cost": {
+            "value": 3.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "model_version": "dag_export-structural-cost-v1",
+            "inputs": [
+              {
+                "name": "per_consumer_recompute_cost",
+                "value": 3.0
+              },
+              {
+                "name": "consumer_count",
+                "value": 1.0
+              }
+            ]
+          },
+          "selected_cost": {
+            "value": 4.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "delta": -1.0,
+            "benefit_ratio": -0.3333333333333333,
+            "model_version": "dag_export-structural-cost-v1"
+          },
+          "benefit": {
+            "value": -1.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "benefit_ratio": -0.3333333333333333,
+            "model_version": "dag_export-structural-cost-v1"
           }
         }
       ],
@@ -3551,7 +4368,44 @@
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
               "cost": 4.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 3.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -3594,7 +4448,44 @@
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
               "cost": 4.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 3.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -3632,7 +4523,44 @@
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
               "cost": 4.0,
-              "role": "replacement_root"
+              "role": "replacement_root",
+              "baseline_cost": {
+                "value": 3.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 3.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.3333333333333333,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -3711,6 +4639,30 @@
           }
         ],
         "root": 4
+      },
+      "workload_cost": {
+        "baseline_cost": {
+          "value": 3.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "model_version": "dag_export-structural-cost-v1"
+        },
+        "selected_cost": {
+          "value": 4.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "model_version": "dag_export-structural-cost-v1"
+        },
+        "benefit": {
+          "value": -1.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "baseline": {
+            "kind": "PreAsapRecomputation"
+          },
+          "benefit_ratio": -0.3333333333333333,
+          "model_version": "dag_export-workload-cost-v1"
+        }
       }
     },
     {
@@ -4590,6 +5542,43 @@
               ],
               "root": 2
             }
+          },
+          "baseline_cost": {
+            "value": 4.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "model_version": "dag_export-structural-cost-v1",
+            "inputs": [
+              {
+                "name": "per_consumer_recompute_cost",
+                "value": 4.0
+              },
+              {
+                "name": "consumer_count",
+                "value": 1.0
+              }
+            ]
+          },
+          "selected_cost": {
+            "value": 5.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "delta": -1.0,
+            "benefit_ratio": -0.25,
+            "model_version": "dag_export-structural-cost-v1"
+          },
+          "benefit": {
+            "value": -1.0,
+            "unit": "RelativeStructuralUnits",
+            "source": "Modeled",
+            "baseline": {
+              "kind": "PreAsapRecomputation"
+            },
+            "benefit_ratio": -0.25,
+            "model_version": "dag_export-structural-cost-v1"
           }
         }
       ],
@@ -4690,7 +5679,44 @@
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 5.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 4.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.25,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.25,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -4752,7 +5778,44 @@
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 5.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 4.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.25,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.25,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -4834,7 +5897,44 @@
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 5.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 4.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.25,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.25,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -4876,7 +5976,44 @@
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 5.0,
-              "role": "replacement_region"
+              "role": "replacement_region",
+              "baseline_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 4.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.25,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.25,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -4911,7 +6048,44 @@
               "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 5.0,
-              "role": "replacement_root"
+              "role": "replacement_root",
+              "baseline_cost": {
+                "value": 4.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "model_version": "dag_export-structural-cost-v1",
+                "inputs": [
+                  {
+                    "name": "per_consumer_recompute_cost",
+                    "value": 4.0
+                  },
+                  {
+                    "name": "consumer_count",
+                    "value": 1.0
+                  }
+                ]
+              },
+              "selected_cost": {
+                "value": 5.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "delta": -1.0,
+                "benefit_ratio": -0.25,
+                "model_version": "dag_export-structural-cost-v1"
+              },
+              "benefit": {
+                "value": -1.0,
+                "unit": "RelativeStructuralUnits",
+                "source": "Modeled",
+                "baseline": {
+                  "kind": "PreAsapRecomputation"
+                },
+                "benefit_ratio": -0.25,
+                "model_version": "dag_export-structural-cost-v1"
+              }
             }
           },
           {
@@ -4966,7 +6140,55 @@
           }
         ],
         "root": 5
+      },
+      "workload_cost": {
+        "baseline_cost": {
+          "value": 4.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "model_version": "dag_export-structural-cost-v1"
+        },
+        "selected_cost": {
+          "value": 5.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "model_version": "dag_export-structural-cost-v1"
+        },
+        "benefit": {
+          "value": -1.0,
+          "unit": "RelativeStructuralUnits",
+          "source": "Modeled",
+          "baseline": {
+            "kind": "PreAsapRecomputation"
+          },
+          "benefit_ratio": -0.25,
+          "model_version": "dag_export-workload-cost-v1"
+        }
       }
     }
-  ]
+  ],
+  "workload_cost": {
+    "baseline_cost": {
+      "value": 20.0,
+      "unit": "RelativeStructuralUnits",
+      "source": "Modeled",
+      "model_version": "dag_export-structural-cost-v1"
+    },
+    "selected_cost": {
+      "value": 25.0,
+      "unit": "RelativeStructuralUnits",
+      "source": "Modeled",
+      "model_version": "dag_export-structural-cost-v1"
+    },
+    "benefit": {
+      "value": -5.0,
+      "unit": "RelativeStructuralUnits",
+      "source": "Modeled",
+      "baseline": {
+        "kind": "PreAsapRecomputation"
+      },
+      "benefit_ratio": -0.25,
+      "model_version": "dag_export-workload-cost-v1"
+    }
+  }
 }

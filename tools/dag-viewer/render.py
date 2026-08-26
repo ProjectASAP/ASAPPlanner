@@ -20,11 +20,12 @@ comment) and only differs in packaging: one query's worth of exported
 `QueryExpr` detail *is* its plan (see the side panel on node click), and
 shared-hash highlighting *is* what this repo has for CSE today — both a
 hash-based proxy, not real CSE output; see README.md's "Shared-subtree
-highlighting is a proxy" section. Per-node cost isn't in dag_export's output
-yet (no cost estimator is wired into pre-ASAP IR), so there's nothing here
-to render for it; if `detail` ever grows a `cost` field, the side panel
-shows it automatically since it dumps `detail` verbatim, no viewer change
-needed.
+highlighting is a proxy" section. Structured cost/benefit annotations
+(issue #286, `CostAnnotation` in crates/types/src/cost.rs) pass through
+this deep-copy untouched, same as everything else `prepare_workload` below
+doesn't explicitly rewrite — viewer.js reads `decision.baseline_cost` /
+`.selected_cost` / `.benefit`, `NamedGraph.workload_cost`, and
+`DagGraph.edge_annotations` directly, with no help needed from this file.
 
 Usage:
   cargo run -p asap-devtools --bin dag_export -- --sql "..." --name q1 \\
