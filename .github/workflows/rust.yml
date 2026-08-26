@@ -64,6 +64,16 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Free disk space
+      # cargo test --workspace links dozens of arrow/datafusion-heavy test
+      # binaries; the runner's ~14GB of free disk (the rest is preinstalled
+      # SDKs we don't need) isn't enough headroom and linking dies with
+      # "ld terminated with signal 7 [Bus error]" once it fills up.
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        df -h /
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
