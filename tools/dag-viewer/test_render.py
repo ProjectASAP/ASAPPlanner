@@ -181,6 +181,22 @@ class SemanticLabelTests(unittest.TestCase):
             "Aggregate\ncompute: quantile(col[6], q=0.95)\ngroup by col[1]",
         )
 
+    def test_summary_aggregate_names_reduction_as_group_by(self):
+        node = {
+            "kind": "SummaryAgg",
+            "detail": {
+                "family": "Sketch(Cms)",
+                "col": "SampleValue",
+                "reduction": {"Reduce": [1]},
+                "grouping": "PerSubpopulationInstance",
+            },
+        }
+        self.assertEqual(
+            _semantic_label(node),
+            "SummaryAgg\nfamily: Sketch(Cms)\ninput: SampleValue\n"
+            "group by col[1]\nsummary layout: PerSubpopulationInstance",
+        )
+
     def test_sort_names_expression_direction_and_null_order(self):
         node = {
             "kind": "Sort",

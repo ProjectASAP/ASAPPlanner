@@ -86,8 +86,14 @@ def _compact(value: object) -> str:
     return ", ".join(f"{key}={_compact(item)}" for key, item in value.items())
 
 
-def _column(value: object) -> str:
+def _column(value: object, input_schema: object = None) -> str:
     if isinstance(value, int):
+        if isinstance(input_schema, dict):
+            columns = input_schema.get("columns")
+            if isinstance(columns, list) and value < len(columns):
+                column = columns[value]
+                if isinstance(column, dict) and column.get("name"):
+                    return str(column["name"])
         return f"col[{value}]"
     return _compact(value)
 
@@ -109,16 +115,16 @@ def _measure(value: object) -> str:
     return f"{kind}({', '.join(args)})" if args else f"{kind}()"
 
 
-def _grouping(reduction: object) -> str | None:
+def _grouping(reduction: object, input_schema: object = None) -> str | None:
     if reduction == "PerEntity":
         return "per entity"
     if not isinstance(reduction, dict) or "Reduce" not in reduction:
         return None
     keys = reduction["Reduce"]
     if isinstance(keys, dict) and "without" in keys:
-        return "group without " + ", ".join(_column(key) for key in keys["without"])
+        return "group without " + ", ".join(_column(key, input_schema) for key in keys["without"])
     if isinstance(keys, list):
-        return "group by " + (", ".join(_column(key) for key in keys) or "all rows")
+        return "group by " + (", ".join(_column(key, input_schema) for key in keys) or "all rows")
     return "group by " + _compact(keys)
 
 
@@ -131,7 +137,7 @@ def _sort_key(value: object) -> str:
     return f"{expr} {direction}, {nulls}"
 
 
-def _semantic_label(node: dict) -> str:
+def _semantic_label(node: dict, input_schema: object = None) -> str:
     """Build a box label from a node's concrete IR fields, not its summary."""
     kind = str(node.get("kind", "Node"))
     detail = node.get("detail") or {}
@@ -152,7 +158,7 @@ def _semantic_label(node: dict) -> str:
     elif kind == "Aggregate":
         measures = detail.get("measures") or []
         lines.extend(f"compute: {_measure(measure)}" for measure in measures)
-        grouping = _grouping(detail.get("reduction"))
+        grouping = _grouping(detail.get("reduction"), input_schema)
         if grouping:
             lines.append(grouping)
         if detail.get("having"):
@@ -183,9 +189,18 @@ def _semantic_label(node: dict) -> str:
         lines.append(f"operation: {_compact(detail.get('op'))}")
         if detail.get("vector_match"):
             lines.append(f"match: {_compact(detail['vector_match'])}")
-    elif kind in {"SummaryAgg", "SummaryJoin"}:
+    elif kind == "SummaryAgg":
         lines.append(f"family: {_compact(detail.get('family'))}")
-        for key in ("col", "key", "reduction", "grouping"):
+        if "col" in detail:
+            lines.append(f"input: {_column(detail['col'])}")
+        reduction = _grouping(detail.get("reduction"), input_schema)
+        if reduction:
+            lines.append(reduction)
+        if "grouping" in detail:
+            lines.append(f"summary layout: {_compact(detail['grouping'])}")
+    elif kind == "SummaryJoin":
+        lines.append(f"family: {_compact(detail.get('family'))}")
+        for key in ("key", "grouping"):
             if key in detail:
                 lines.append(f"{key}: {_compact(detail[key])}")
     elif kind == "SummaryEstimate":
@@ -215,8 +230,11 @@ def prepare_workload(workload: dict) -> dict:
     def prepare_graph(graph: object) -> None:
         if not isinstance(graph, dict):
             return
+        by_id = {node.get("id"): node for node in graph.get("nodes", [])}
         for node in graph.get("nodes", []):
-            node["label"] = _semantic_label(node)
+            child = by_id.get((node.get("children") or [None])[0])
+            input_schema = (child.get("detail") or {}).get("schema") if isinstance(child, dict) else None
+            node["label"] = _semantic_label(node, input_schema)
             nested = (node.get("detail") or {}).get("pre_asap_subgraph")
             prepare_graph(nested)
 
