@@ -428,7 +428,9 @@ function finalizeGraphInteractions() {
   // A double border marks nodes carrying planner notes without taking space
   // away from the IR text.
   cy.nodes().forEach((n) => {
-    if (n.data('isLane')) return;
+    // Before/After has a strict stage split: pre-ASAP is the unannotated IR,
+    // while post-ASAP carries explicit decision explanations.
+    if (n.data('isLane') || n.data('isBeforeAfter')) return;
     const node = n.data('node');
     if (!node || !node.notes || !node.notes.length) return;
     n.addClass('hasNotes');
@@ -806,8 +808,10 @@ function renderBaScopeSummary(selected) {
 }
 
 function translationsForNode(query, node, stage) {
+  // The pre lane is deliberately the original pre-ASAP IR only. Strategy
+  // metadata belongs to nodes in the post lane.
+  if (stage === 'pre') return [];
   const replacements = (query.replacements || []).filter((r) => r.rank === 0);
-  if (stage === 'pre') return replacements.filter((r) => r.target_pre_id === node.id);
   if (!node.decision) return [];
   const replacement = replacements.find((r) => r.decision_id === node.decision.id);
   return [{
@@ -840,8 +844,7 @@ function showBeforeAfterDetail(data) {
         <div class="translationReason">${escapeHtml(entry.rationale || 'No rationale recorded.')}</div>
         <div class="translationTarget">${entry.target_pre_id === undefined ? `decision #${entry.id}` : `pre-ASAP target node #${entry.target_pre_id}`} · output ${escapeHtml((entry.after || {}).kind || node.kind)}</div>
       </div>`).join('');
-    const heading = data.stage === 'post' ? 'Why this post-ASAP translation' : 'Selected post-ASAP strategy for this node';
-    translationHtml = `<div class="translationBlock"><h3>${heading}</h3>${cards}</div>`;
+    translationHtml = `<div class="translationBlock"><h3>Why this post-ASAP translation</h3>${cards}</div>`;
   } else if (data.stage === 'post') {
     translationHtml = `<div class="translationBlock unchanged"><h3>Translation</h3><div>No replacement targets this node; it is unchanged support structure in the post-ASAP DAG.</div></div>`;
   }
@@ -852,7 +855,6 @@ function showBeforeAfterDetail(data) {
     <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
     ${rootHtml}
     ${translationHtml}
-    ${data.stage === 'pre' ? notesHtml(node) : ''}
     <h3 class="detailSubhead">IR node content</h3>
     <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
   `;
