@@ -108,6 +108,12 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as error:  # surface planner failures to this local UI
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
+    def end_headers(self) -> None:
+        # This is a local development viewer: stale HTML/JS/example JSON is
+        # more harmful than the tiny files are expensive to reload.
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        super().end_headers()
+
     def _send_json(self, status: HTTPStatus, value: object) -> None:
         body = json.dumps(value).encode()
         self.send_response(status)

@@ -1104,16 +1104,11 @@ if (embeddedEl) {
   }
   render();
 } else {
-  // Plain index.html: no embedded data. If a dag.json sits next to this page
-  // (e.g. so a remote/tunnelled session has something to look at without a
-  // local file to drag in), load it automatically. Silently does nothing if
-  // there's no such file — drag/drop and the file picker still work either
-  // way. Prefer a real, freshly-generated dag.json (gitignored scratch
-  // output of generate-sample.sh or a manual dag_export run), falling back
-  // to the committed dag.example.json so the page still shows something
-  // with zero setup.
-  fetch('dag.json')
-    .then((r) => (r.ok ? r : fetch('dag.example.json')))
+  // Plain index.html starts with the committed, post-ASAP-generated example.
+  // Do not silently prefer a leftover scratch dag.json: it may predate
+  // post_graph and make Before/After appear broken. Users can load scratch
+  // exports explicitly with the picker or run them through Query planner.
+  fetch('dag.example.json', { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : null))
     .then(loadWorkload)
     .catch(() => {})
