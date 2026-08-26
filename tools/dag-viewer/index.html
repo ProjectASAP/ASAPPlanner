@@ -256,11 +256,25 @@
   }
   #sidepanel {
     width: 340px;
+    min-width: 260px;
+    max-width: 70vw;
     flex-shrink: 0;
     border-left: 1px solid var(--border);
     background: var(--panel);
     overflow-y: auto;
     font-size: 0.8rem;
+  }
+  #sideResizeHandle {
+    width: 6px;
+    flex: 0 0 6px;
+    cursor: col-resize;
+    background: transparent;
+    border-left: 1px solid var(--border);
+    touch-action: none;
+  }
+  #sideResizeHandle:hover, #sideResizeHandle.dragging {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-left-color: var(--accent);
   }
   #sidepanel .section {
     padding: 0.8rem;
@@ -378,10 +392,7 @@
     <input id="highlightToggle" type="checkbox" checked />
     Highlight shared subtrees
   </label>
-  <label class="toggle">
-    <input id="schemaToggle" type="checkbox" />
-    Show edge schemas
-  </label>
+  <span class="proxyNote">Click an edge to inspect its schema</span>
 </header>
 
 <div id="plannerPanel">
@@ -418,6 +429,7 @@
     <div id="cy"></div>
     <div id="modeHint" class="modeHint"></div>
   </div>
+  <div id="sideResizeHandle" style="display:none" title="Drag to resize details panel"></div>
   <div id="sidepanel" style="display:none">
     <div class="section" id="detailSection">
       <h2>Selected node</h2>
@@ -426,6 +438,10 @@
     <div class="section">
       <h2>Query source</h2>
       <pre class="code" id="sourceBox"></pre>
+    </div>
+    <div class="section">
+      <h2>Input table / metric schemas</h2>
+      <pre class="code" id="tableSchemaBox"></pre>
     </div>
     <div class="section">
       <h2>Legend</h2>

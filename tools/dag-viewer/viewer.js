@@ -25,7 +25,6 @@ let queries = [];
 let activeIndex = -1;
 let cy = null;
 let highlightOn = true;
-let showEdgeSchemas = false;
 let zoom = 1;
 // The viewer has one Pre/Post-ASAP mode. One selected query renders its own
 // two DAGs; multiple selected queries union each stage into one workload DAG.
@@ -35,7 +34,6 @@ const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const clearBtn = document.getElementById('clearBtn');
 const highlightToggle = document.getElementById('highlightToggle');
-const schemaToggle = document.getElementById('schemaToggle');
 const tabsEl = document.getElementById('tabs');
 const baPickerEl = document.getElementById('baPicker');
 const cyOuterEl = document.getElementById('cyOuter');
@@ -43,6 +41,7 @@ const cyEl = document.getElementById('cy');
 const modeHintEl = document.getElementById('modeHint');
 const emptyEl = document.getElementById('empty');
 const sidepanel = document.getElementById('sidepanel');
+const sideResizeHandle = document.getElementById('sideResizeHandle');
 const detailSection = document.getElementById('detailSection');
 const viewTitleEl = document.getElementById('viewTitle');
 const zoomSlider = document.getElementById('zoomSlider');
@@ -67,9 +66,22 @@ highlightToggle.addEventListener('change', () => {
   highlightOn = highlightToggle.checked;
   applyHighlighting();
 });
-schemaToggle.addEventListener('change', () => {
-  showEdgeSchemas = schemaToggle.checked;
-  applyEdgeSchemaVisibility();
+let resizingSidepanel = false;
+sideResizeHandle.addEventListener('pointerdown', (event) => {
+  resizingSidepanel = true;
+  sideResizeHandle.classList.add('dragging');
+  sideResizeHandle.setPointerCapture(event.pointerId);
+});
+sideResizeHandle.addEventListener('pointermove', (event) => {
+  if (!resizingSidepanel) return;
+  const width = Math.max(260, Math.min(window.innerWidth * 0.7, window.innerWidth - event.clientX));
+  sidepanel.style.width = `${width}px`;
+  if (cy) cy.resize();
+});
+sideResizeHandle.addEventListener('pointerup', (event) => {
+  resizingSidepanel = false;
+  sideResizeHandle.classList.remove('dragging');
+  sideResizeHandle.releasePointerCapture(event.pointerId);
 });
 
 function loadFiles(fileList) {
@@ -146,12 +158,14 @@ function render() {
     emptyEl.style.display = 'flex';
     cyOuterEl.style.display = 'none';
     sidepanel.style.display = 'none';
+    sideResizeHandle.style.display = 'none';
     if (cy) { cy.destroy(); cy = null; }
     return;
   }
   emptyEl.style.display = 'none';
   cyOuterEl.style.display = 'block';
   sidepanel.style.display = 'block';
+  sideResizeHandle.style.display = 'block';
 
   renderTabs();
 
@@ -410,6 +424,7 @@ function finalizeGraphInteractions() {
     const query = queries.find((q) => q.name === n.data('queryName'));
     showDetail(n.data('node'), query);
   });
+  cy.on('tap', 'edge', (evt) => showEdgeDetail(evt.target));
   cy.on('tap', (evt) => { if (evt.target === cy) clearDetail(); });
 }
 
@@ -470,7 +485,6 @@ function renderGraph(query) {
   buildCy(elements);
   finalizeGraphInteractions();
   applyHighlighting();
-  applyEdgeSchemaVisibility();
   clearDetail();
   zoom = 1;
   applyZoom();
@@ -659,7 +673,6 @@ function renderUnion(chosen) {
   buildCy(elements);
   finalizeGraphInteractions();
   applyHighlighting();
-  applyEdgeSchemaVisibility();
   clearDetail();
   fitAndSyncZoom();
 }
@@ -703,41 +716,33 @@ function renderPrePostAsap() {
   buildCy(elements);
   finalizeGraphInteractions();
   applyHighlighting();
-  applyEdgeSchemaVisibility();
   clearDetail();
   fitAndSyncZoom();
 }
 
 function unionStageLaneElements(stage, chosen) {
+  // Workload merging is an exporter decision. `workload_node_id` is the
+  // explicit JSON mapping; do not reconstruct identity from node content.
   const laneId = `${stage}-asap-union`;
   const graphFor = (query) => (stage === 'pre' ? query.graph : query.post_graph);
-  const signatures = new Map();
   const owners = new Map();
 
   chosen.forEach((qIdx) => {
     const query = queries[qIdx];
     const graph = graphFor(query);
-    const byId = new Map(graph.nodes.map((node) => [node.id, node]));
-    const perQuery = new Map();
-    const signatureFor = (node) => {
-      if (perQuery.has(node.id)) return perQuery.get(node.id);
-      const childSignatures = node.children.map((id) => signatureFor(byId.get(id)));
-      const signature = JSON.stringify([node.kind, node.detail, childSignatures]);
-      perQuery.set(node.id, signature);
-      if (!owners.has(signature)) owners.set(signature, new Set());
-      owners.get(signature).add(query.name);
-      return signature;
-    };
-    graph.nodes.forEach(signatureFor);
-    signatures.set(qIdx, perQuery);
+    graph.nodes.forEach((node) => {
+      if (node.workload_node_id === undefined) return;
+      if (!owners.has(node.workload_node_id)) owners.set(node.workload_node_id, new Set());
+      owners.get(node.workload_node_id).add(query.name);
+    });
   });
 
   const sharedIds = new Map();
   let nextSharedId = 0;
-  owners.forEach((queryNames, signature) => {
-    if (queryNames.size > 1) sharedIds.set(signature, `${laneId}-shared-${nextSharedId++}`);
+  owners.forEach((queryNames, workloadNodeId) => {
+    if (queryNames.size > 1) sharedIds.set(workloadNodeId, `${laneId}-shared-${nextSharedId++}`);
   });
-  const keyFor = (qIdx, node) => sharedIds.get(signatures.get(qIdx).get(node.id)) || `${laneId}-q${qIdx}-${node.id}`;
+  const keyFor = (qIdx, node) => sharedIds.get(node.workload_node_id) || `${laneId}-q${qIdx}-${node.id}`;
   const entries = new Map();
   const edges = new Map();
   const elements = [
@@ -856,9 +861,46 @@ function formatSchema(schema) {
   }).join(' · ');
 }
 
-function applyEdgeSchemaVisibility() {
-  if (!cy) return;
-  cy.edges().toggleClass('showSchema', showEdgeSchemas);
+function schemaDerivation(target) {
+  const node = target.data('node');
+  if (!node) return 'The target operation metadata is unavailable.';
+  const detail = node.detail || {};
+  switch (node.kind) {
+    case 'Filter': return 'Filter evaluates its predicate and preserves the input columns and types.';
+    case 'Sort': return 'Sort changes row order using its sort keys and preserves the input schema.';
+    case 'Limit': return `Limit keeps ${detail.n ?? 'the requested number of'} ordered rows and preserves the input schema.`;
+    case 'Project': return 'Project evaluates its selected expressions; aliases and expression result types form the output schema.';
+    case 'Aggregate': return 'Aggregate emits its reduction/group-by keys followed by the result column for each aggregate measure.';
+    case 'SummaryAgg': return 'SummaryAgg replaces the aggregate state with the selected exact or approximate summary representation.';
+    case 'SummaryEstimate': return 'SummaryEstimate reads the selected summary state and emits the requested estimate schema.';
+    case 'TimeRange': return 'TimeRange restricts the temporal input window and preserves the row schema.';
+    case 'Scan': return 'Scan obtains this schema from the bound table or metric source.';
+    default: return `${node.kind} applies the IR operation shown below; its declared output schema is exported by the planner.`;
+  }
+}
+
+function showEdgeDetail(edge) {
+  const source = edge.source();
+  const target = edge.target();
+  const sourceNode = source.data('node') || {};
+  const targetNode = target.data('node') || {};
+  const edgeSchema = edge.data('schemaLabel') || formatSchema(sourceNode.schema);
+  detailSection.innerHTML = `
+    <h2>Selected edge</h2>
+    <div class="translationBlock">
+      <h3>Connection</h3>
+      <div><strong>From:</strong> ${escapeHtml(sourceNode.label || source.id())}</div>
+      <div><strong>To:</strong> ${escapeHtml(targetNode.label || target.id())}</div>
+    </div>
+    <h3 class="detailSubhead">Schema carried by this edge</h3>
+    <pre>${escapeHtml(edgeSchema || '(schema unavailable)')}</pre>
+    <h3 class="detailSubhead">How the schema is produced</h3>
+    <div class="translationBlock">${escapeHtml(schemaDerivation(target))}</div>
+    <h3 class="detailSubhead">Target operation</h3>
+    <pre>${escapeHtml(JSON.stringify(targetNode.detail || {}, null, 2))}</pre>
+    <h3 class="detailSubhead">Target output schema</h3>
+    <pre>${escapeHtml(formatSchema(targetNode.schema) || '(schema unavailable)')}</pre>
+  `;
 }
 
 function renderBaScopeSummary(selected) {
@@ -928,6 +970,7 @@ function showBeforeAfterDetail(data) {
 
 function renderSourcePanel(qs) {
   const sourceBox = document.getElementById('sourceBox');
+  renderTableSchemas(qs);
   if (qs.length === 0) {
     sourceBox.textContent = 'Select queries above.';
     sourceBox.classList.add('placeholder');
@@ -947,6 +990,22 @@ function renderSourcePanel(qs) {
   const blocks = qs.map((q) => `— ${q.name} —\n${q.source || '(no source text in this export)'}`);
   sourceBox.textContent = blocks.join('\n\n');
   sourceBox.classList.remove('placeholder');
+}
+
+function renderTableSchemas(qs) {
+  const box = document.getElementById('tableSchemaBox');
+  const seen = new Set();
+  const blocks = [];
+  qs.forEach((query) => {
+    (query.graph?.nodes || []).filter((node) => node.kind === 'Scan').forEach((node) => {
+      const key = JSON.stringify([node.detail, node.schema]);
+      if (seen.has(key)) return;
+      seen.add(key);
+      blocks.push(`${query.name} · ${node.label}\n${formatSchema(node.schema) || '(schema unavailable)'}`);
+    });
+  });
+  box.textContent = blocks.join('\n\n') || 'No bound Scan schema in the selected queries.';
+  box.classList.toggle('placeholder', blocks.length === 0);
 }
 
 function applyHighlighting() {

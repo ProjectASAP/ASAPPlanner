@@ -213,6 +213,10 @@ fn decision_rationale(winner: &Winner<'_>) -> String {
         "RollupStrategy" => {
             "Answers this aggregate from a compatible finer-grained aggregate.".to_string()
         }
+        "TopKLimitReuseStrategy" => {
+            "Derives this smaller top-k from a compatible larger top-k result shared by the workload."
+                .to_string()
+        }
         _ => {
             let summary = winner
                 .candidate
@@ -291,6 +295,48 @@ struct PostAsapResults {
     /// [`dag_export::export_post_asap`] — every winning candidate spliced
     /// directly into that query's own pre-ASAP shape in place.
     post_graphs: Vec<(String, DagGraph)>,
+}
+
+/// Assign collision-free, explicit identities to structurally equal nodes
+/// across a set of exported query graphs. The full canonical subtree string
+/// is the equality key; the compact integer is what JSON consumers receive.
+/// Consequently the viewer never needs to guess identity from labels,
+/// hashes, or a client-side node signature.
+fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
+    fn key_for(id: u32, graph: &DagGraph, memo: &mut HashMap<u32, String>) -> String {
+        if let Some(key) = memo.get(&id) {
+            return key.clone();
+        }
+        let node = &graph.nodes[id as usize];
+        let child_keys: Vec<_> = node
+            .children
+            .iter()
+            .map(|child| key_for(*child, graph, memo))
+            .collect();
+        let key = serde_json::to_string(&(node.kind, &node.detail, &node.schema, child_keys))
+            .expect("exported DAG node content is serializable");
+        memo.insert(id, key.clone());
+        key
+    }
+
+    let mut ids = HashMap::<String, u32>::new();
+    let mut next_id = 0_u32;
+    for graph in graphs.iter_mut() {
+        let mut memo = HashMap::new();
+        let keys: Vec<_> = graph
+            .nodes
+            .iter()
+            .map(|node| key_for(node.id, graph, &mut memo))
+            .collect();
+        for (node, key) in graph.nodes.iter_mut().zip(keys) {
+            let id = *ids.entry(key).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+            node.workload_node_id = Some(id);
+        }
+    }
 }
 
 /// Run `asap_aware_mapping::replacement::search_workload` (its own
@@ -590,6 +636,18 @@ async fn main() {
         }
     }
 
+    {
+        let mut pre_graphs: Vec<_> = queries.iter_mut().map(|query| &mut query.graph).collect();
+        assign_workload_node_ids(&mut pre_graphs);
+    }
+    {
+        let mut post_graphs: Vec<_> = queries
+            .iter_mut()
+            .filter_map(|query| query.post_graph.as_mut())
+            .collect();
+        assign_workload_node_ids(&mut post_graphs);
+    }
+
     let workload = WorkloadGraph { queries };
     if progress {
         eprintln!(
@@ -755,6 +813,65 @@ mod tests {
             assert!(!decision.strategy.is_empty());
             assert!(!decision.rationale.is_empty());
         }
+    }
+
+    #[test]
+    fn workload_node_ids_make_smaller_topk_reuse_explicit() {
+        let small = lower_promql(
+            "topk(5, rate(http_requests_total[5m]))",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap();
+        let large = lower_promql(
+            "topk(10, rate(http_requests_total[5m]))",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .unwrap();
+        let lowered = vec![
+            (
+                "q3".into(),
+                "topk(5, rate(http_requests_total[5m]))".into(),
+                small,
+            ),
+            (
+                "q4".into(),
+                "topk(10, rate(http_requests_total[5m]))".into(),
+                large,
+            ),
+        ];
+        let mut results = run_post_asap(&lowered);
+        let mut graph_refs: Vec<_> = results
+            .post_graphs
+            .iter_mut()
+            .map(|(_, graph)| graph)
+            .collect();
+        assign_workload_node_ids(&mut graph_refs);
+
+        let q3 = &results
+            .post_graphs
+            .iter()
+            .find(|(name, _)| name == "q3")
+            .unwrap()
+            .1;
+        let q4 = &results
+            .post_graphs
+            .iter()
+            .find(|(name, _)| name == "q4")
+            .unwrap()
+            .1;
+        let q3_root = &q3.nodes[q3.root as usize];
+        assert_eq!(q3_root.label, "Limit(5)");
+        assert_eq!(
+            q3_root
+                .decision
+                .as_ref()
+                .map(|decision| decision.strategy.as_str()),
+            Some("TopKLimitReuseStrategy")
+        );
+        let q3_large = &q3.nodes[q3_root.children[0] as usize];
+        let q4_large = &q4.nodes[q4.root as usize];
+        assert_eq!(q3_large.label, "Limit(10)");
+        assert_eq!(q3_large.workload_node_id, q4_large.workload_node_id);
     }
 
     /// Regression test for a real stack overflow found via manual testing

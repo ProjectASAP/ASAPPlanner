@@ -68,6 +68,11 @@ pub struct DagNode {
     /// Child node ids, in the variant's field order (e.g. `Join` is
     /// `[left, right]`).
     pub children: Vec<u32>,
+    /// Explicit workload-wide identity assigned by a higher-level exporter.
+    /// Viewers use this field to union nodes and must not reconstruct a
+    /// structural signature client-side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload_node_id: Option<u32>,
     /// [`structural_hash`](crate::pre_asap::cse::structural_hash) of the
     /// subtree rooted at this node — the exact same function `cse`'s
     /// `InternTable` uses to bucket CSE candidates, so two nodes hash
@@ -651,6 +656,7 @@ fn push_node(
             .ok()
             .and_then(|schema| serde_json::to_value(schema).ok()),
         children,
+        workload_node_id: None,
         hash,
         source_expr: Some(expr.clone()),
         source_ptr: Some(expr as *const QueryExpr as usize),
@@ -685,6 +691,7 @@ fn push_summary_originated_node(
         detail,
         schema: None,
         children,
+        workload_node_id: None,
         hash: None,
         source_expr: None,
         source_ptr: None,

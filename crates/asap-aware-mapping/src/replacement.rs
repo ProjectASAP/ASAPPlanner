@@ -365,6 +365,7 @@ use thiserror::Error;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
 use crate::rollup::RollupStrategy;
+use crate::topk_reuse::TopKLimitReuseStrategy;
 
 /// Errors from the pre-ASAP → post-ASAP replacement/construction path
 /// ([`realize_child`] and [`keep_pre_asap`]). Moved here from the former
@@ -2549,6 +2550,14 @@ fn search_cse_workload_with<'s, Id>(
         })
         .collect();
     let rollup_strategy = RollupStrategy::new(&siblings);
+    let limits: Vec<Rc<QueryExpr>> = order
+        .iter()
+        .filter_map(|ptr| {
+            let node = &nodes[ptr];
+            matches!(node.as_ref(), QueryExpr::Limit { .. }).then(|| Rc::clone(node))
+        })
+        .collect();
+    let topk_reuse_strategy = TopKLimitReuseStrategy::new(&limits);
 
     let mut groups: HashMap<*const QueryExpr, MemoGroup> = HashMap::new();
     for ptr in &order {
@@ -2598,6 +2607,15 @@ fn search_cse_workload_with<'s, Id>(
             if rollup_strategy.matches(&target) {
                 let name = rollup_strategy.name();
                 proposed.extend(rollup_strategy.replacements(&target).into_iter().map(
+                    |mut candidate| {
+                        candidate.strategy = name;
+                        candidate
+                    },
+                ));
+            }
+            if topk_reuse_strategy.matches(&target) {
+                let name = topk_reuse_strategy.name();
+                proposed.extend(topk_reuse_strategy.replacements(&target).into_iter().map(
                     |mut candidate| {
                         candidate.strategy = name;
                         candidate

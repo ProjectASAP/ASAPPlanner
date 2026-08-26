@@ -92,6 +92,7 @@
               "unique_keys": []
             },
             "children": [],
+            "workload_node_id": 0,
             "hash": 2606922452740434172
           },
           {
@@ -143,6 +144,7 @@
             "children": [
               0
             ],
+            "workload_node_id": 1,
             "hash": 12396162568747900801,
             "notes": [
               {
@@ -198,6 +200,7 @@
             "children": [
               1
             ],
+            "workload_node_id": 2,
             "hash": 17063396757587155626
           }
         ],
@@ -586,6 +589,7 @@
               "unique_keys": []
             },
             "children": [],
+            "workload_node_id": 0,
             "hash": 2606922452740434172,
             "decision": {
               "id": 0,
@@ -628,6 +632,7 @@
             "children": [
               0
             ],
+            "workload_node_id": 1,
             "decision": {
               "id": 0,
               "strategy": "SketchAlgorithmStrategy",
@@ -662,6 +667,7 @@
             "children": [
               1
             ],
+            "workload_node_id": 2,
             "decision": {
               "id": 0,
               "strategy": "SketchAlgorithmStrategy",
@@ -718,6 +724,7 @@
             "children": [
               2
             ],
+            "workload_node_id": 3,
             "hash": 17063396757587155626
           }
         ],
@@ -816,6 +823,7 @@
               "unique_keys": []
             },
             "children": [],
+            "workload_node_id": 0,
             "hash": 2606922452740434172
           },
           {
@@ -865,6 +873,7 @@
             "children": [
               0
             ],
+            "workload_node_id": 3,
             "hash": 5109904469838189862
           },
           {
@@ -914,6 +923,7 @@
             "children": [
               1
             ],
+            "workload_node_id": 4,
             "hash": 5277207484379927121
           }
         ],
@@ -1533,9 +1543,10 @@
               "unique_keys": []
             },
             "children": [],
+            "workload_node_id": 0,
             "hash": 2606922452740434172,
             "decision": {
-              "id": 4,
+              "id": 5,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator",
               "rank": 0,
@@ -1580,8 +1591,9 @@
             "children": [
               0
             ],
+            "workload_node_id": 4,
             "decision": {
-              "id": 4,
+              "id": 5,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator",
               "rank": 0,
@@ -1642,6 +1654,7 @@
             "children": [
               1
             ],
+            "workload_node_id": 5,
             "hash": 11401885529025699918,
             "decision": {
               "id": 1,
@@ -1684,8 +1697,9 @@
             "children": [
               0
             ],
+            "workload_node_id": 6,
             "decision": {
-              "id": 5,
+              "id": 6,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "count realizes as an exact Count accumulator",
               "rank": 0,
@@ -1728,6 +1742,7 @@
               2,
               3
             ],
+            "workload_node_id": 7,
             "hash": 16391872732257280252,
             "decision": {
               "id": 1,
@@ -1785,6 +1800,7 @@
             "children": [
               4
             ],
+            "workload_node_id": 8,
             "hash": 5277207484379927121
           }
         ],
@@ -1847,6 +1863,7 @@
               "unique_keys": []
             },
             "children": [],
+            "workload_node_id": 5,
             "hash": 16569634401303792668
           },
           {
@@ -1881,6 +1898,7 @@
             "children": [
               0
             ],
+            "workload_node_id": 6,
             "hash": 12007712336004404578
           },
           {
@@ -1921,6 +1939,7 @@
             "children": [
               1
             ],
+            "workload_node_id": 7,
             "hash": 12607242477503010192
           },
           {
@@ -1961,6 +1980,7 @@
             "children": [
               2
             ],
+            "workload_node_id": 8,
             "hash": 3760917937445997010
           },
           {
@@ -1993,6 +2013,7 @@
             "children": [
               3
             ],
+            "workload_node_id": 9,
             "hash": 7672123412300577486
           }
         ],
@@ -2000,7 +2021,7 @@
       },
       "replacements": [
         {
-          "decision_id": 2,
+          "decision_id": 3,
           "target_pre_id": 2,
           "strategy": "SketchAlgorithmStrategy",
           "rationale": "Rate realizes as an exact Rate accumulator",
@@ -2260,6 +2281,457 @@
               "root": 1
             }
           }
+        },
+        {
+          "decision_id": 2,
+          "target_pre_id": 4,
+          "strategy": "TopKLimitReuseStrategy",
+          "rationale": "Derives this smaller top-k from a compatible larger top-k result shared by the workload.",
+          "rank": 0,
+          "cost": 5.0,
+          "before": {
+            "nodes": [
+              {
+                "id": 0,
+                "kind": "Scan",
+                "label": "Scan(http_requests_total)",
+                "detail": {
+                  "predicates": [],
+                  "schema": {
+                    "closed": false,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "value",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  }
+                },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "children": [],
+                "hash": 16569634401303792668
+              },
+              {
+                "id": 1,
+                "kind": "TimeRange",
+                "label": "TimeRange(300s)",
+                "detail": {
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
+                },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "children": [
+                  0
+                ],
+                "hash": 12007712336004404578
+              },
+              {
+                "id": 2,
+                "kind": "Aggregate",
+                "label": "Aggregate(1 measures)",
+                "detail": {
+                  "having": null,
+                  "measures": [
+                    {
+                      "kind": "rate"
+                    }
+                  ],
+                  "output_names": [
+                    ""
+                  ],
+                  "reduction": "PerEntity"
+                },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "children": [
+                  1
+                ],
+                "hash": 12607242477503010192
+              },
+              {
+                "id": 3,
+                "kind": "Sort",
+                "label": "Sort(1 keys)",
+                "detail": {
+                  "keys": [
+                    {
+                      "ascending": false,
+                      "expr": {
+                        "Column": 1
+                      },
+                      "nulls_first": false
+                    }
+                  ],
+                  "partition_by": []
+                },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "children": [
+                  2
+                ],
+                "hash": 3760917937445997010
+              },
+              {
+                "id": 4,
+                "kind": "Limit",
+                "label": "Limit(5)",
+                "detail": {
+                  "n": 5,
+                  "offset": 0
+                },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "children": [
+                  3
+                ],
+                "hash": 7672123412300577486
+              }
+            ],
+            "root": 4
+          },
+          "after": {
+            "kind": "Rewrite",
+            "graph": {
+              "nodes": [
+                {
+                  "id": 0,
+                  "kind": "Scan",
+                  "label": "Scan(http_requests_total)",
+                  "detail": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": false,
+                      "columns": [
+                        {
+                          "dtype": "timestamp",
+                          "name": "ts",
+                          "nullable": false,
+                          "table": null
+                        },
+                        {
+                          "dtype": "float64",
+                          "name": "value",
+                          "nullable": false,
+                          "table": null
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "TimeSeries": {
+                        "metric": "http_requests_total"
+                      }
+                    }
+                  },
+                  "schema": {
+                    "closed": false,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "value",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "children": [],
+                  "hash": 16569634401303792668
+                },
+                {
+                  "id": 1,
+                  "kind": "TimeRange",
+                  "label": "TimeRange(300s)",
+                  "detail": {
+                    "range": {
+                      "nanos": 0,
+                      "secs": 300
+                    }
+                  },
+                  "schema": {
+                    "closed": false,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "value",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "children": [
+                    0
+                  ],
+                  "hash": 12007712336004404578
+                },
+                {
+                  "id": 2,
+                  "kind": "Aggregate",
+                  "label": "Aggregate(1 measures)",
+                  "detail": {
+                    "having": null,
+                    "measures": [
+                      {
+                        "kind": "rate"
+                      }
+                    ],
+                    "output_names": [
+                      ""
+                    ],
+                    "reduction": "PerEntity"
+                  },
+                  "schema": {
+                    "closed": false,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "value",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "children": [
+                    1
+                  ],
+                  "hash": 12607242477503010192
+                },
+                {
+                  "id": 3,
+                  "kind": "Sort",
+                  "label": "Sort(1 keys)",
+                  "detail": {
+                    "keys": [
+                      {
+                        "ascending": false,
+                        "expr": {
+                          "Column": 1
+                        },
+                        "nulls_first": false
+                      }
+                    ],
+                    "partition_by": []
+                  },
+                  "schema": {
+                    "closed": false,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "value",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "children": [
+                    2
+                  ],
+                  "hash": 3760917937445997010
+                },
+                {
+                  "id": 4,
+                  "kind": "Limit",
+                  "label": "Limit(10)",
+                  "detail": {
+                    "n": 10,
+                    "offset": 0
+                  },
+                  "schema": {
+                    "closed": false,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "value",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "children": [
+                    3
+                  ],
+                  "hash": 10822644126224715622
+                },
+                {
+                  "id": 5,
+                  "kind": "Limit",
+                  "label": "Limit(5)",
+                  "detail": {
+                    "n": 5,
+                    "offset": 0
+                  },
+                  "schema": {
+                    "closed": false,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "value",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "children": [
+                    4
+                  ],
+                  "hash": 5925942169603452483
+                }
+              ],
+              "root": 5
+            }
+          }
         }
       ],
       "post_graph": {
@@ -2315,9 +2787,10 @@
               "unique_keys": []
             },
             "children": [],
+            "workload_node_id": 9,
             "hash": 16569634401303792668,
             "decision": {
-              "id": 2,
+              "id": 3,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
@@ -2357,9 +2830,10 @@
             "children": [
               0
             ],
+            "workload_node_id": 10,
             "hash": 12007712336004404578,
             "decision": {
-              "id": 2,
+              "id": 3,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
@@ -2395,8 +2869,9 @@
             "children": [
               1
             ],
+            "workload_node_id": 11,
             "decision": {
-              "id": 2,
+              "id": 3,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
@@ -2442,10 +2917,60 @@
             "children": [
               2
             ],
-            "hash": 3760917937445997010
+            "workload_node_id": 12,
+            "hash": 3760917937445997010,
+            "decision": {
+              "id": 2,
+              "strategy": "TopKLimitReuseStrategy",
+              "rationale": "Derives this smaller top-k from a compatible larger top-k result shared by the workload.",
+              "rank": 0,
+              "cost": 5.0,
+              "role": "replacement_region"
+            }
           },
           {
             "id": 4,
+            "kind": "Limit",
+            "label": "Limit(10)",
+            "detail": {
+              "n": 10,
+              "offset": 0
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [
+              3
+            ],
+            "workload_node_id": 13,
+            "hash": 10822644126224715622,
+            "decision": {
+              "id": 2,
+              "strategy": "TopKLimitReuseStrategy",
+              "rationale": "Derives this smaller top-k from a compatible larger top-k result shared by the workload.",
+              "rank": 0,
+              "cost": 5.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 5,
             "kind": "Limit",
             "label": "Limit(5)",
             "detail": {
@@ -2472,12 +2997,21 @@
               "unique_keys": []
             },
             "children": [
-              3
+              4
             ],
-            "hash": 7672123412300577486
+            "workload_node_id": 14,
+            "hash": 5925942169603452483,
+            "decision": {
+              "id": 2,
+              "strategy": "TopKLimitReuseStrategy",
+              "rationale": "Derives this smaller top-k from a compatible larger top-k result shared by the workload.",
+              "rank": 0,
+              "cost": 5.0,
+              "role": "replacement_root"
+            }
           }
         ],
-        "root": 4
+        "root": 5
       }
     },
     {
@@ -2536,6 +3070,7 @@
               "unique_keys": []
             },
             "children": [],
+            "workload_node_id": 5,
             "hash": 16569634401303792668
           },
           {
@@ -2570,6 +3105,7 @@
             "children": [
               0
             ],
+            "workload_node_id": 6,
             "hash": 12007712336004404578
           },
           {
@@ -2610,6 +3146,7 @@
             "children": [
               1
             ],
+            "workload_node_id": 7,
             "hash": 12607242477503010192
           },
           {
@@ -2650,6 +3187,7 @@
             "children": [
               2
             ],
+            "workload_node_id": 8,
             "hash": 3760917937445997010
           },
           {
@@ -2682,6 +3220,7 @@
             "children": [
               3
             ],
+            "workload_node_id": 10,
             "hash": 10822644126224715622
           }
         ],
@@ -2689,7 +3228,7 @@
       },
       "replacements": [
         {
-          "decision_id": 2,
+          "decision_id": 3,
           "target_pre_id": 2,
           "strategy": "SketchAlgorithmStrategy",
           "rationale": "Rate realizes as an exact Rate accumulator",
@@ -3004,9 +3543,10 @@
               "unique_keys": []
             },
             "children": [],
+            "workload_node_id": 9,
             "hash": 16569634401303792668,
             "decision": {
-              "id": 2,
+              "id": 3,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
@@ -3046,9 +3586,10 @@
             "children": [
               0
             ],
+            "workload_node_id": 10,
             "hash": 12007712336004404578,
             "decision": {
-              "id": 2,
+              "id": 3,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
@@ -3084,8 +3625,9 @@
             "children": [
               1
             ],
+            "workload_node_id": 11,
             "decision": {
-              "id": 2,
+              "id": 3,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
@@ -3131,6 +3673,7 @@
             "children": [
               2
             ],
+            "workload_node_id": 12,
             "hash": 3760917937445997010
           },
           {
@@ -3163,6 +3706,7 @@
             "children": [
               3
             ],
+            "workload_node_id": 13,
             "hash": 10822644126224715622
           }
         ],

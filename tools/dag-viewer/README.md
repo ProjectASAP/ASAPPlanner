@@ -9,9 +9,10 @@ The viewer has one visualization mode: **Pre/Post-ASAP**.
 - Pre-ASAP nodes show only their original IR content.
 - Post-ASAP nodes show their translated IR content and the explicit planner
   decision carried by that node.
-- **Show edge schemas** optionally labels each data-flow edge with the source
-  node's output columns and types. It is off by default to keep large DAGs
-  readable.
+- Click any edge to inspect its schema, source and target nodes, and how the
+  target operation derives its output schema in the details panel.
+- The details panel shows the selected workload's bound table/metric schemas
+  and can be resized by dragging its left edge.
 
 There are no separate Single, Compare, or Union modes.
 
@@ -76,10 +77,10 @@ a selected replacement directly contains:
 }
 ```
 
-The viewer reads this explicit metadata. It never guesses a strategy from a
-node label, hash, or client-side signature. Union signatures are used only to
-collapse structurally identical visualization nodes; they do not infer
-planner decisions.
+The viewer reads this explicit metadata. It never guesses a strategy or
+workload-sharing identity from a node label, hash, or client-side signature.
+The exporter assigns `workload_node_id`; union rendering reads that mapping
+directly.
 
 Node boxes use concrete IR fields: aggregate measures/grouping, sort keys,
 filter predicates, projections, sources, summary families, and readout
