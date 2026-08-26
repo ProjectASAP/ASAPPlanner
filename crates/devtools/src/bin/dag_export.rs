@@ -19,10 +19,11 @@
 //       --epsilon 0.01 --sql "SELECT quantile(0.99, latency) FROM metrics" --name p99
 //
 // `--post-asap` is optional and off by default. When passed, this binary
-// additionally runs `asap_aware_mapping::replacement::search_workload_with`
-// (with `default_strategies()` plus `AvgToSumOverCountStrategy`, which isn't
-// one of that crate's own defaults) over every lowered query and ranks each
-// discovered `MemoGroup` via `PlanSpace::cost_sorted`. The best-ranked
+// additionally runs `asap_aware_mapping::replacement::search_workload` (this
+// binary took no strategies of its own — `default_strategies()` already
+// includes `AvgToSumOverCountStrategy` as of #282) over every lowered query
+// and ranks each discovered `MemoGroup` via `PlanSpace::cost_sorted`. The
+// best-ranked
 // candidate per group feeds two additive outputs:
 //
 //   - one `asap_types::dag_export::TargetReplacement` per group on whichever
@@ -53,10 +54,8 @@ use std::rc::Rc;
 
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{
-    default_strategies, search_workload_with, Replacement, ReplacementProvenance,
-    ReplacementStrategy, ReplacementSubDAG,
+    search_workload, Replacement, ReplacementProvenance, ReplacementSubDAG,
 };
-use asap_aware_mapping::rewrite::AvgToSumOverCountStrategy;
 use asap_types::dag_export::{
     self, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetReplacement,
     TargetReplacementAfter, WorkloadGraph,
@@ -309,23 +308,20 @@ struct PostAsapResults {
     post_graphs: Vec<(String, DagGraph)>,
 }
 
-/// Run `asap_aware_mapping::replacement::search_workload_with` (this
-/// binary's own strategy set — `default_strategies()` plus
-/// `AvgToSumOverCountStrategy`, since that strategy isn't one of that
-/// crate's own defaults) over every lowered query, rank each discovered
-/// `MemoGroup` via `PlanSpace::cost_sorted`, and build both `--post-asap`
-/// outputs from the exact same set of winning candidates (see [`Winner`]),
-/// so the flat `replacements` list and the merged `post_graph` can never
-/// disagree about which candidate won for a given target.
+/// Run `asap_aware_mapping::replacement::search_workload` (its own
+/// `default_strategies()` — which includes `AvgToSumOverCountStrategy` as of
+/// #282 — is exactly the strategy set this binary wants; no custom list
+/// needed) over every lowered query, rank each discovered `MemoGroup` via
+/// `PlanSpace::cost_sorted`, and build both `--post-asap` outputs from the
+/// exact same set of winning candidates (see [`Winner`]), so the flat
+/// `replacements` list and the merged `post_graph` can never disagree about
+/// which candidate won for a given target.
 fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapResults {
-    let mut strategies: Vec<Box<dyn ReplacementStrategy>> = default_strategies();
-    strategies.push(Box::new(AvgToSumOverCountStrategy));
-
     let roots: Vec<(String, Rc<QueryExpr>)> = lowered_queries
         .iter()
         .map(|(name, _, qe)| (name.clone(), Rc::new(qe.clone())))
         .collect();
-    let space = search_workload_with(roots, &strategies);
+    let space = search_workload(roots);
     let ranked_groups = space.cost_sorted(&DefaultCostModel);
 
     let winners: Vec<Winner<'_>> = ranked_groups
@@ -349,43 +345,21 @@ fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapRes
         by_hash.entry(hash).or_default().push(i);
     }
 
-    // ---- Flat per-target `replacements`, one list per query -----------
-    //
-    // Independently re-export every query's own graph for matching — a
-    // fresh `export` per query, not reused from `main`'s own already-built
-    // `NamedGraph`s, so this function stays self-contained and callable on
-    // its own (see this file's `#[cfg(test)]` module).
-    let mut lookup_cache = HashCache::new();
-    let mut replacements = Vec::new();
-    let mut matched = vec![false; winners.len()];
-    for (name, _, qe) in lowered_queries {
-        let graph = dag_export::export(qe);
-        for node in &graph.nodes {
-            let Some(source_expr) = node.source_expr.as_ref() else {
-                continue; // never true for a plain `export` — defensive only.
-            };
-            if let Some(i) = lookup_winner(&by_hash, &winners, &mut lookup_cache, source_expr) {
-                replacements.push((name.clone(), target_replacement(node.id, &winners[i])));
-                matched[i] = true;
-            }
-        }
-    }
-    for (winner, matched) in winners.iter().zip(&matched) {
-        if !matched {
-            let strategy = classify_strategy(winner.target, winner.candidate);
-            eprintln!(
-                "dag_export: post-asap replacement ({strategy}) matched no DagNode in any query graph"
-            );
-        }
-    }
-
     // ---- Merged, whole-query `post_graph`, one per query ---------------
     //
-    // A fresh `HashCache` here (rather than reusing `lookup_cache` above):
-    // `export_post_asap` calls `find_winner` at every node of every query's
-    // own tree, not just at nodes a plain `export` already flattened, so
-    // this is a genuinely separate hashing pass, not a re-walk of the same
-    // nodes the loop above already visited.
+    // Built *before* the flat `replacements` pass below, not after: a
+    // winner whose target only exists inside another winner's own
+    // `Replacement::Rewrite` output (e.g. the `sum`/`count` aggregates
+    // `AvgToSumOverCountStrategy`'s rewrite exposes, which
+    // `default_strategies()` — #282 — now discovers and independently
+    // sketch-ranks in the same search pass) can never appear in any query's
+    // *original*, pre-rewrite `graph` — there's nothing wrong with that
+    // winner, it's just nested. `post_graph` is where it's expected to
+    // surface instead (`export_post_asap`'s recursive `find_winner`
+    // threading walks straight through a rewritten subtree and re-checks
+    // every node inside it too), so the flat-`replacements` pass below
+    // checks there before deciding a miss is a real anomaly worth a
+    // warning.
     let mut post_graph_cache = HashCache::new();
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
@@ -403,6 +377,64 @@ fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapRes
             )
         })
         .collect();
+
+    // ---- Flat per-target `replacements`, one list per query -----------
+    //
+    // Independently re-export every query's own graph for matching — a
+    // fresh `export` per query, not reused from `main`'s own already-built
+    // `NamedGraph`s, so this function stays self-contained and callable on
+    // its own (see this file's `#[cfg(test)]` module). Deliberately anchored
+    // to the *original* `graph` only (never `post_graph`) — `target_pre_id`
+    // is documented as an id into `NamedGraph.graph.nodes`, so a nested
+    // secondary target (see above) never gets a flat entry of its own here:
+    // it's already visible, in place, inside its parent's own `after`
+    // subtree and inside `post_graph` as a whole.
+    let mut lookup_cache = HashCache::new();
+    let mut replacements = Vec::new();
+    let mut matched = vec![false; winners.len()];
+    for (name, _, qe) in lowered_queries {
+        let graph = dag_export::export(qe);
+        for node in &graph.nodes {
+            let Some(source_expr) = node.source_expr.as_ref() else {
+                continue; // never true for a plain `export` — defensive only.
+            };
+            if let Some(i) = lookup_winner(&by_hash, &winners, &mut lookup_cache, source_expr) {
+                replacements.push((name.clone(), target_replacement(node.id, &winners[i])));
+                matched[i] = true;
+            }
+        }
+    }
+
+    // A winner can legitimately stay unmatched here: `default_strategies()`
+    // (#282) means `AvgToSumOverCountStrategy`'s rewrite output (and
+    // similarly `RollupStrategy`'s) can expose a brand-new `sum`/`count`
+    // descendant that the *same* search pass then independently discovers
+    // and ranks — a real winner, but one with no node anywhere in any
+    // query's original, pre-rewrite `graph` to attach a flat entry to
+    // (`target_pre_id` is documented as an id into `graph.nodes`
+    // specifically). This isn't a data loss: `export_post_asap` still
+    // splices that winner in, in place, inside `post_graph` — see this
+    // function's own construction of `post_graphs` above, which walks
+    // straight through a rewritten subtree and resolves every nested
+    // winner too, recursively. So an unmatched winner here is expected,
+    // not necessarily a bug, whenever it's downstream of some other
+    // winner's own `Replacement::Rewrite` — logged as an FYI rather than a
+    // warning, since telling the two cases apart precisely would mean
+    // reimplementing `search`'s own private descendant-discovery walk
+    // (`discover_new_descendant_targets` in `asap_aware_mapping::replacement`,
+    // not exposed) a second time here just to double-check something
+    // `post_graph`'s own construction already handled correctly.
+    for (winner, matched) in winners.iter().zip(&matched) {
+        if !matched {
+            let strategy = classify_strategy(winner.target, winner.candidate);
+            eprintln!(
+                "dag_export: post-asap replacement ({strategy}) has no node in any query's \
+                 original graph — expected for a winner exposed only inside another winner's \
+                 own rewrite output (e.g. a sum/count descendant of an avg rewrite); still \
+                 present in that query's post_graph"
+            );
+        }
+    }
 
     PostAsapResults {
         replacements,
