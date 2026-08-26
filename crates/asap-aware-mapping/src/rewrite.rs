@@ -18,12 +18,12 @@
 //! `Sum` and `Count` are both ordinary mergeable accumulators
 //! (`agg_is_mergeable`) — exactly the shape [`SharedSubtreeStrategy`] and a
 //! future sketch-family search already know how to reuse across a
-//! workload. Rewriting `Aggregate{ measures: [Avg{col}], .. }` into
-//! `Aggregate{ measures: [Sum{col}, Count], .. }` re-divided back into the
-//! original `avg` column by a wrapping `Project` computes exactly the same
-//! result, but *reshapes* it into pieces other strategies can now share or
-//! sketch. This module only performs that reshaping — see "Non-goals" below
-//! for why it does not also decide whether the reshaping is worth it.
+//! workload. Rewriting `Aggregate{ measures: [Avg{col}], .. }` into two
+//! independent single-measure `Sum` and `Count` aggregates, divided with a
+//! `BinaryOp`, computes the same result but *reshapes* it into targets other
+//! strategies can bind and share independently. This module only performs
+//! that reshaping — see "Non-goals" below for why it does not also decide
+//! whether the reshaping is worth it.
 //!
 //! ## Scope: `by(...)` grouping only (issue #253's own scope note)
 //!
@@ -68,7 +68,7 @@ use std::rc::Rc;
 
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ArithmeticOpKind;
-use asap_types::pre_asap::query_expr::{ProjectItem, QueryExpr, Reduction};
+use asap_types::pre_asap::query_expr::{BinaryOpKind, ProjectItem, QueryExpr, Reduction};
 use asap_types::pre_asap::schema::{ColumnId, DataType};
 use asap_types::types::AccuracyTarget;
 
@@ -113,8 +113,10 @@ fn avg_rewrite_target(node: &QueryExpr) -> Option<(usize, Option<ColumnId>)> {
     Some((by.keys().len(), *col))
 }
 
-/// Build the rewritten `Aggregate{ [Sum, Count] } |> Project{ sum/count }`
-/// tree for `root`, or `None` if `root` isn't [`avg_rewrite_target`]'s shape.
+/// Build the rewritten `Project{ cast(sum) } / Aggregate{ Count }` tree for
+/// `root`, or `None` if `root` isn't [`avg_rewrite_target`]'s shape. `Sum` and
+/// `Count` deliberately live in separate, single-measure aggregates so the
+/// replacement fixpoint discovers each as an independently bindable target.
 ///
 /// The `Project`'s leading `by.len()` items are bare `Column(i)`
 /// pass-throughs of the grouping keys — identical in name/type to the
@@ -158,21 +160,24 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         .cloned()
         .unwrap_or_else(|| "avg".to_string());
 
-    let sum_count_agg = QueryExpr::Aggregate {
+    let sum_agg = Rc::new(QueryExpr::Aggregate {
         reduction: reduction.clone(),
-        measures: vec![
-            AggIntent::Sum { col },
-            AggIntent::Count {
-                accuracy: AccuracyTarget::Exact,
-            },
-        ],
+        measures: vec![AggIntent::Sum { col }],
         output_names: Vec::new(),
         having: None,
         child: Rc::clone(child),
-    };
+    });
+    let count_agg = Rc::new(QueryExpr::Aggregate {
+        reduction: reduction.clone(),
+        measures: vec![AggIntent::Count {
+            accuracy: AccuracyTarget::Exact,
+        }],
+        output_names: Vec::new(),
+        having: None,
+        child: Rc::clone(child),
+    });
 
     let sum_idx = group_count;
-    let count_idx = group_count + 1;
     let mut cols: Vec<ProjectItem> = (0..group_count)
         .map(|i| ProjectItem {
             alias: None,
@@ -181,30 +186,30 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
         .collect();
     cols.push(ProjectItem {
         alias: Some(avg_name),
-        expr: QueryExpr::Arithmetic {
-            op: ArithmeticOpKind::Div,
-            left: Rc::new(QueryExpr::Cast {
-                expr: Rc::new(QueryExpr::Column(sum_idx)),
-                to: DataType::Float64,
-                try_cast: false,
-            }),
-            right: Rc::new(QueryExpr::Column(count_idx)),
+        expr: QueryExpr::Cast {
+            expr: Rc::new(QueryExpr::Column(sum_idx)),
+            to: DataType::Float64,
+            try_cast: false,
         },
     });
 
-    Some(Rc::new(QueryExpr::Project {
+    let float_sum = Rc::new(QueryExpr::Project {
         cols,
         qualifier: None,
-        child: Rc::new(sum_count_agg),
+        child: sum_agg,
+    });
+    Some(Rc::new(QueryExpr::BinaryOp {
+        op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+        lhs: float_sum,
+        rhs: count_agg,
+        vector_match: None,
     }))
 }
 
 /// Rewrites `Aggregate{ measures: [Avg{col}], .. }` into the semantically
-/// equivalent `Aggregate{ measures: [Sum{col}, Count], .. } |> Project{
-/// sum/count re-divided under the original `avg` column name }` — see the
-/// module docs for why this reshaping lets `SharedSubtreeStrategy` (and a
-/// future sketch-family search) reach further than a bare `avg` node ever
-/// could.
+/// equivalent pair of single-measure `Sum` and `Count` aggregates divided by
+/// a `BinaryOp` — see the module docs for why keeping the accumulators in
+/// separate relational nodes lets later strategies reach them independently.
 ///
 /// A unit struct: unlike [`SketchAlgorithmStrategy`], this strategy doesn't
 /// bind anything (its one [`Replacement`] is always [`Replacement::Rewrite`],
@@ -377,18 +382,8 @@ mod tests {
 
     // ── replacements / schema round-trip ─────────────────────────────────
 
-    /// The rewritten tree must be a `Project` over an `Aggregate{[Sum,
-    /// Count]}`, and — the correctness bug this test exists to catch — its
-    /// `output_schema()` must equal the original `Avg` aggregate's, exactly.
-    /// An ungrouped (`by: []`) aggregate is the shape used here specifically
-    /// because it's the one shape where a `Project`-wrapped rewrite's
-    /// `unique_keys`/`closed` bookkeeping (always reset by `Project`, see
-    /// `QueryExpr::output_schema`'s `Project` arm) coincides exactly with
-    /// what an ungrouped `Aggregate` already reports for those same fields
-    /// (`unique_keys: []` whenever `by` is empty, `closed: true` either way)
-    /// — see `does_not_match_a_without_grouped_avg_aggregate`'s sibling test
-    /// below for the (column-level, not whole-`Schema`) invariant a
-    /// non-trivial `by(...)` grouping still gets.
+    /// The rewritten tree must keep `Sum` and `Count` in separate aggregates,
+    /// and its `output_schema()` must equal the original `Avg` aggregate's.
     #[test]
     fn avg_rewrites_and_schema_matches_exactly_when_ungrouped() {
         let original = avg_agg(vec![], None, metric_scan(&[]));
@@ -403,20 +398,22 @@ mod tests {
             Replacement::Rewrite(rc) => rc,
             other => panic!("expected a Rewrite replacement, got {other:?}"),
         };
-        assert!(
-            matches!(rewritten.as_ref(), QueryExpr::Project { .. }),
-            "expected a Project wrapping the rewritten Aggregate, got {rewritten:?}"
-        );
-        if let QueryExpr::Project { child, .. } = rewritten.as_ref() {
-            assert!(matches!(
-                child.as_ref(),
-                QueryExpr::Aggregate { measures, .. }
-                    if matches!(
-                        measures.as_slice(),
-                        [AggIntent::Sum { col: None }, AggIntent::Count { accuracy: AccuracyTarget::Exact }]
-                    )
-            ));
-        }
+        let QueryExpr::BinaryOp { lhs, rhs, .. } = rewritten.as_ref() else {
+            panic!("expected sum/count BinaryOp, got {rewritten:?}");
+        };
+        let QueryExpr::Project { child: sum, .. } = lhs.as_ref() else {
+            panic!("expected cast Project above Sum, got {lhs:?}");
+        };
+        assert!(matches!(
+            sum.as_ref(),
+            QueryExpr::Aggregate { measures, .. }
+                if matches!(measures.as_slice(), [AggIntent::Sum { col: None }])
+        ));
+        assert!(matches!(
+            rhs.as_ref(),
+            QueryExpr::Aggregate { measures, .. }
+                if matches!(measures.as_slice(), [AggIntent::Count { accuracy: AccuracyTarget::Exact }])
+        ));
 
         let original_schema = original.output_schema().unwrap();
         let rewritten_schema = rewritten.output_schema().unwrap();
@@ -449,16 +446,10 @@ mod tests {
         assert_eq!(rewritten_schema.columns[0].name, "avg_latency");
     }
 
-    /// For a non-trivial `by(...)` grouping, `Project`'s own schema
-    /// derivation always resets `unique_keys` to `[]` (see
-    /// `QueryExpr::output_schema`'s `Project` arm) — a pre-existing
-    /// property of every `Project`-wrapped rewrite in this IR, not specific
-    /// to this strategy — so a grouped `Avg` aggregate's `unique_keys =
-    /// [[0]]` doesn't survive verbatim. What must still hold, and does, is
-    /// the column-level shape (names, types, nullability, and grouping
-    /// column count) downstream schema derivation actually reads.
+    /// A grouped rewrite must preserve the aggregate's grouping-key metadata;
+    /// CSE and roll-up legality both depend on it.
     #[test]
-    fn grouped_avg_rewrite_matches_columns_though_not_the_whole_schema_struct() {
+    fn grouped_avg_rewrite_preserves_the_whole_schema() {
         let original = avg_agg(vec![2], None, metric_scan(&["job"]));
         let original_schema = original.output_schema().unwrap();
         let original_rc = Rc::new(original);
@@ -471,14 +462,51 @@ mod tests {
         };
         let rewritten_schema = rewritten.output_schema().unwrap();
 
-        assert_eq!(rewritten_schema.columns, original_schema.columns);
-        assert_eq!(rewritten_schema.closed, original_schema.closed);
-        assert!(
-            original_schema.unique_keys == vec![vec![0]] && rewritten_schema.unique_keys.is_empty(),
-            "documents the known Project-reset gap this test exists to pin down; if this \
-             assertion starts failing, the gap has closed and this test (and its comment) \
-             should be simplified to a plain schema equality assertion instead"
-        );
+        assert_eq!(rewritten_schema, original_schema);
+    }
+
+    #[test]
+    fn default_search_discovers_bindable_sum_and_count_targets() {
+        let root = Rc::new(avg_agg(vec![2], None, metric_scan(&["job"])));
+        let space = crate::replacement::search_workload(vec![("avg", Rc::clone(&root))]);
+
+        let avg_group = space.group_for(&space.roots[0].1).expect("avg group");
+        assert!(avg_group.candidates.iter().any(|candidate| {
+            candidate.provenance == crate::replacement::ReplacementProvenance::LogicalRewrite
+        }));
+
+        let mut found_sum = false;
+        let mut found_count = false;
+        for group in space.groups() {
+            let QueryExpr::Aggregate { measures, .. } = group.target.as_ref() else {
+                continue;
+            };
+            let expected = matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+                || matches!(
+                    measures.as_slice(),
+                    [AggIntent::Count {
+                        accuracy: AccuracyTarget::Exact
+                    }]
+                );
+            if !expected {
+                continue;
+            }
+            assert!(
+                group
+                    .candidates
+                    .iter()
+                    .any(|candidate| matches!(candidate.replacement, Replacement::Summary(_))),
+                "rewritten accumulator must be independently bindable: {measures:?}"
+            );
+            found_sum |= matches!(measures.as_slice(), [AggIntent::Sum { .. }]);
+            found_count |= matches!(
+                measures.as_slice(),
+                [AggIntent::Count {
+                    accuracy: AccuracyTarget::Exact
+                }]
+            );
+        }
+        assert!(found_sum && found_count);
     }
 
     #[test]
@@ -519,16 +547,18 @@ mod tests {
             DataType::Float64
         );
 
-        let QueryExpr::Project { cols, .. } = rewritten.as_ref() else {
-            unreachable!();
+        let QueryExpr::BinaryOp { lhs, .. } = rewritten.as_ref() else {
+            panic!("expected sum/count BinaryOp");
+        };
+        let QueryExpr::Project { cols, .. } = lhs.as_ref() else {
+            panic!("expected cast Project above Sum");
         };
         assert!(matches!(
             &cols.last().unwrap().expr,
-            QueryExpr::Arithmetic {
-                op: ArithmeticOpKind::Div,
-                left,
+            QueryExpr::Cast {
+                to: DataType::Float64,
                 ..
-            } if matches!(left.as_ref(), QueryExpr::Cast { to: DataType::Float64, .. })
+            }
         ));
     }
 

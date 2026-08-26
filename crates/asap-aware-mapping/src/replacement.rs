@@ -291,8 +291,12 @@
 //! once every ancestor's own selected candidate is accounted for — and, for
 //! every [`SharedSubtreeStrategy`]-shaped group, re-decides
 //! [`CostModel::cse_share_decision`] against *that* corrected count instead
-//! of the group's raw structural one (see [`multiplier`]'s doc for the
-//! exact recurrence): a group that chooses `Share` collapses its own
+//! of the group's raw structural one. When that group also contains a
+//! non-CSE alternative such as a semantic rewrite, the chosen CSE candidate
+//! and the cheapest non-CSE candidate additionally compete through
+//! [`CostModel::estimate_cost`]; the CSE pair is no longer allowed to hide an
+//! otherwise valid logical alternative. See [`multiplier`]'s doc for the
+//! exact recurrence: a group that chooses `Share` collapses its own
 //! multiplicity to exactly `1` for everything beneath it (one shared
 //! execution backs every use of it); a group that chooses
 //! `RecomputeIndependently` — or has no Share/Recompute decision of its own
@@ -2024,8 +2028,34 @@ impl<Id> PlanSpace<Id> {
             let chosen = if effective >= 2 && cse_candidate_pair(group).is_some() {
                 match decide_with_effective_count(group, effective, cost_model) {
                     Some(decision) => {
-                        chosen_share.insert(*ptr, decision);
-                        pick_shared_subtree_candidate(group, decision)
+                        let cse = pick_shared_subtree_candidate(group, decision);
+                        let effective_target =
+                            TargetSubDAG::with_consumer_count(&group.target, effective);
+                        let logical = group
+                            .candidates
+                            .iter()
+                            .filter(|candidate| !is_cse_candidate(candidate))
+                            .min_by(|a, b| {
+                                cost_model
+                                    .estimate_cost(a, &effective_target)
+                                    .total_cmp(&cost_model.estimate_cost(b, &effective_target))
+                            });
+                        match (cse, logical) {
+                            (Some(cse), Some(logical))
+                                if cost_model
+                                    .estimate_cost(logical, &effective_target)
+                                    .total_cmp(&cost_model.estimate_cost(cse, &effective_target))
+                                    .is_lt() =>
+                            {
+                                Some(logical)
+                            }
+                            (cse, _) => {
+                                if cse.is_some() {
+                                    chosen_share.insert(*ptr, decision);
+                                }
+                                cse
+                            }
+                        }
                     }
                     // `realize_child` couldn't produce even a logical fallback —
                     // not expected in practice for a target that's already
@@ -2393,11 +2423,24 @@ fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<
 /// explanation-specific list to stay in sync with. Use
 /// [`default_strategies_with`] to plug in a deployment-specific
 /// [`CostModel`] instead.
+///
+/// [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) is
+/// included here (issue #253) even though it's a
+/// [`Replacement::Rewrite`]-only strategy with no [`CostModel`] of its own to
+/// plug in — it's context-free (`matches`/`replacements` need nothing beyond
+/// the target itself) exactly like [`SharedSubtreeStrategy`], so it belongs
+/// in this list rather than being derived per-workload the way
+/// [`RollupStrategy`] is. Rewriting `avg` into `sum`/`count` upfront is what
+/// lets [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`] see a
+/// mergeable accumulator to sketch or share at all — see that module's own
+/// doc comment for why a bare `avg` node otherwise never becomes a
+/// [`ReplacementStrategy`] target for anything.
 pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
         Box::new(SketchAlgorithmStrategy::default_cost_model()),
         Box::new(HydraGroupingStrategy::default_cost_model()),
         Box::new(SharedSubtreeStrategy),
+        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
     ]
 }
 
@@ -2411,6 +2454,7 @@ pub fn default_strategies_with<'a>(
         Box::new(SketchAlgorithmStrategy::new(cost_model)),
         Box::new(HydraGroupingStrategy::new(cost_model)),
         Box::new(SharedSubtreeStrategy),
+        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
     ]
 }
 
@@ -4590,6 +4634,54 @@ mod tests {
                 .unwrap()
                 .effective_consumer_count,
             1
+        );
+    }
+
+    #[test]
+    fn global_selection_compares_a_logical_rewrite_with_the_cse_choice() {
+        struct PreferLogicalRewrite;
+
+        impl CostModel for PreferLogicalRewrite {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+
+            fn estimate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _target: &TargetSubDAG<'_>,
+            ) -> f64 {
+                match candidate.provenance {
+                    ReplacementProvenance::LogicalRewrite => 0.0,
+                    _ => 100.0,
+                }
+            }
+        }
+
+        let a = Rc::new(agg(
+            vec![2],
+            AggIntent::Avg { col: None },
+            metric_scan(&["job"]),
+        ));
+        let b = Rc::new(agg(
+            vec![2],
+            AggIntent::Avg { col: None },
+            metric_scan(&["job"]),
+        ));
+        let space = search_workload(vec![("a", a), ("b", b)]);
+        let root = &space.roots[0].1;
+        let selected = space.global_selection(&PreferLogicalRewrite);
+
+        assert_eq!(
+            selected
+                .for_target(root)
+                .and_then(|group| group.chosen)
+                .map(|candidate| candidate.provenance),
+            Some(ReplacementProvenance::LogicalRewrite)
         );
     }
 
