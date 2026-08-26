@@ -169,6 +169,7 @@
 //! `sketch_algebra::capability::Capability`/`is_satisfied_by` is the
 //! reference downstream implementation.
 
+pub mod accuracy_reconciliation;
 pub mod cost_model;
 pub mod explanation;
 pub mod grouping;
@@ -177,6 +178,7 @@ pub mod rewrite;
 pub mod rollup;
 pub mod topk_reuse;
 
+pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,

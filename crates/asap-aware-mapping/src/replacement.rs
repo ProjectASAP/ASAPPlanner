@@ -362,6 +362,7 @@ use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 use thiserror::Error;
 
+use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
 use crate::rollup::RollupStrategy;
@@ -2438,7 +2439,9 @@ fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<
 
 /// The context-free strategies [`search_workload`] runs in the built-in
 /// [`DefaultCostModel`] configuration. Workload-dependent strategies such as
-/// [`RollupStrategy`] are added by [`search_workload`] after CSE and target
+/// [`RollupStrategy`] and [`AccuracyReconciliationStrategy`] (issue #273,
+/// cross-consumer accuracy reconciliation for CSE sharing — see that
+/// module's own docs) are added by [`search_workload`] after CSE and target
 /// discovery, when their sibling context exists.
 /// [`crate::explanation::explain_replacements`] (issue #257) uses
 /// this same set (via [`search_workload`]) rather than keeping a second,
@@ -2550,6 +2553,7 @@ fn search_cse_workload_with<'s, Id>(
         })
         .collect();
     let rollup_strategy = RollupStrategy::new(&siblings);
+    let accuracy_reconciliation_strategy = AccuracyReconciliationStrategy::new(&siblings);
     let limits: Vec<Rc<QueryExpr>> = order
         .iter()
         .filter_map(|ptr| {
@@ -2612,6 +2616,18 @@ fn search_cse_workload_with<'s, Id>(
                         candidate
                     },
                 ));
+            }
+            if accuracy_reconciliation_strategy.matches(&target) {
+                let name = accuracy_reconciliation_strategy.name();
+                proposed.extend(
+                    accuracy_reconciliation_strategy
+                        .replacements(&target)
+                        .into_iter()
+                        .map(|mut candidate| {
+                            candidate.strategy = name;
+                            candidate
+                        }),
+                );
             }
             if topk_reuse_strategy.matches(&target) {
                 let name = topk_reuse_strategy.name();
