@@ -852,13 +852,23 @@ function formatSchema(schema) {
   if (!schema || typeof schema !== 'object') return 'schema unavailable';
   const fields = Array.isArray(schema.columns) ? schema.columns : schema.fields;
   if (!Array.isArray(fields) || fields.length === 0) return 'empty schema';
-  return fields.map((field) => {
+  const rows = fields.map((field, index) => {
     const name = field && field.name !== undefined ? field.name : '?';
     const dtype = field && field.dtype !== undefined
       ? (typeof field.dtype === 'string' ? field.dtype : JSON.stringify(field.dtype))
       : '?';
-    return `${name}: ${dtype}${field && field.nullable ? '?' : ''}`;
-  }).join(' · ');
+    return {
+      name: String(name),
+      dtype: String(dtype).toUpperCase(),
+      nullable: field && field.nullable ? 'NULL' : 'NOT NULL',
+      timeIndex: schema.time_index === index,
+    };
+  });
+  const nameWidth = Math.max(...rows.map((row) => row.name.length));
+  const typeWidth = Math.max(...rows.map((row) => row.dtype.length));
+  return rows.map((row) =>
+    `${row.name.padEnd(nameWidth)}  ${row.dtype.padEnd(typeWidth)}  ${row.nullable}${row.timeIndex ? '  · TIME INDEX' : ''}`
+  ).join('\n');
 }
 
 function schemaDerivation(target) {

@@ -9,7 +9,7 @@ function addSchemaRow(schema = {}) {
   row.innerHTML = `
     <input class="schemaInclude" type="checkbox" checked title="Include this table in the SQL catalog" />
     <input class="schemaName" value="${escapeHtml(schema.name || `table_${schemaRows.children.length + 1}`)}" aria-label="Table name" />
-    <textarea class="schemaColumns" rows="2" aria-label="Columns">${escapeHtml(schema.columns || 'id:int64!, value:float64')}</textarea>
+    <textarea class="schemaColumns" rows="5" aria-label="Columns">${escapeHtml(schema.columns || 'id       INT64       NOT NULL\nvalue    FLOAT64')}</textarea>
     <input class="schemaTimeIndex" value="${escapeHtml(schema.timeIndex ?? '')}" placeholder="time column" aria-label="Time-index column" />
     <button class="btn schemaRemove" type="button">Remove</button>`;
   row.querySelector('.schemaRemove').addEventListener('click', () => {
@@ -41,10 +41,16 @@ function refreshSchemaSelectors() {
 }
 
 function parseSchemaRow(row) {
-  const columns = row.querySelector('.schemaColumns').value.split(',').map((raw) => raw.trim()).filter(Boolean).map((raw) => {
-    const match = raw.match(/^([^:]+):([a-zA-Z0-9]+)(!)?$/);
-    if (!match) throw new Error(`Invalid column ${raw}; use name:type or name:type!`);
-    return { name: match[1].trim(), type: match[2], nullable: !match[3] };
+  const columns = row.querySelector('.schemaColumns').value.split(/[\n,]+/).map((raw) => raw.trim()).filter(Boolean).map((raw) => {
+    const compact = raw.match(/^([^:\s]+):([a-zA-Z0-9]+)(!)?$/);
+    if (compact) return { name: compact[1], type: compact[2], nullable: !compact[3] };
+    const readable = raw.match(/^(\S+)\s+(\S+?)(?:\s+(NOT\s+NULL|NULL))?$/i);
+    if (!readable) throw new Error(`Invalid column ${raw}; use "name TYPE [NOT NULL]"`);
+    return {
+      name: readable[1],
+      type: readable[2],
+      nullable: !readable[3] || readable[3].toUpperCase() === 'NULL',
+    };
   });
   const timeName = row.querySelector('.schemaTimeIndex').value.trim();
   const timeIndex = timeName ? columns.findIndex((column) => column.name === timeName) : -1;
@@ -113,8 +119,15 @@ document.getElementById('plannerRun').addEventListener('click', async () => {
   }
 });
 
-addSchemaRow({ name: 'metrics', columns: 'ts:timestamp!, service:utf8!, region:utf8!, latency:float64!, bytes:int64!', timeIndex: 'ts' });
-addSchemaRow({ name: 'hosts', columns: 'service:utf8!, region:utf8!' });
+addSchemaRow({
+  name: 'metrics',
+  columns: 'ts         TIMESTAMP   NOT NULL\nservice    UTF8        NOT NULL\nregion     UTF8        NOT NULL\nlatency    FLOAT64     NOT NULL\nbytes      INT64       NOT NULL',
+  timeIndex: 'ts',
+});
+addSchemaRow({
+  name: 'hosts',
+  columns: 'service    UTF8        NOT NULL\nregion     UTF8        NOT NULL',
+});
 addPlannerRow({ name: 'count_by_service', schemas: ['metrics'] });
 addPlannerRow({ name: 'avg_latency', schemas: ['metrics'], text: 'SELECT service, AVG(latency) FROM metrics GROUP BY service' });
 addPlannerRow({
