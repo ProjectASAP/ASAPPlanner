@@ -2393,11 +2393,24 @@ fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<
 /// explanation-specific list to stay in sync with. Use
 /// [`default_strategies_with`] to plug in a deployment-specific
 /// [`CostModel`] instead.
+///
+/// [`AvgToSumOverCountStrategy`](crate::rewrite::AvgToSumOverCountStrategy) is
+/// included here (issue #253) even though it's a
+/// [`Replacement::Rewrite`]-only strategy with no [`CostModel`] of its own to
+/// plug in — it's context-free (`matches`/`replacements` need nothing beyond
+/// the target itself) exactly like [`SharedSubtreeStrategy`], so it belongs
+/// in this list rather than being derived per-workload the way
+/// [`RollupStrategy`] is. Rewriting `avg` into `sum`/`count` upfront is what
+/// lets [`SketchAlgorithmStrategy`] and [`SharedSubtreeStrategy`] see a
+/// mergeable accumulator to sketch or share at all — see that module's own
+/// doc comment for why a bare `avg` node otherwise never becomes a
+/// [`ReplacementStrategy`] target for anything.
 pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
     vec![
         Box::new(SketchAlgorithmStrategy::default_cost_model()),
         Box::new(HydraGroupingStrategy::default_cost_model()),
         Box::new(SharedSubtreeStrategy),
+        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
     ]
 }
 
@@ -2411,6 +2424,7 @@ pub fn default_strategies_with<'a>(
         Box::new(SketchAlgorithmStrategy::new(cost_model)),
         Box::new(HydraGroupingStrategy::new(cost_model)),
         Box::new(SharedSubtreeStrategy),
+        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
     ]
 }
 
