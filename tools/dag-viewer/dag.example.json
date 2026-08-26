@@ -1535,7 +1535,7 @@
             "children": [],
             "hash": 2606922452740434172,
             "decision": {
-              "id": 3,
+              "id": 4,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator",
               "rank": 0,
@@ -1581,7 +1581,7 @@
               0
             ],
             "decision": {
-              "id": 3,
+              "id": 4,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator",
               "rank": 0,
@@ -1685,7 +1685,7 @@
               0
             ],
             "decision": {
-              "id": 4,
+              "id": 5,
               "strategy": "SketchAlgorithmStrategy",
               "rationale": "count realizes as an exact Count accumulator",
               "rank": 0,
@@ -2475,6 +2475,695 @@
               3
             ],
             "hash": 7672123412300577486
+          }
+        ],
+        "root": 4
+      }
+    },
+    {
+      "name": "q4",
+      "source": "topk(10, rate(http_requests_total[5m]))",
+      "graph": {
+        "nodes": [
+          {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(http_requests_total)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": false,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "TimeSeries": {
+                  "metric": "http_requests_total"
+                }
+              }
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [],
+            "hash": 16569634401303792668
+          },
+          {
+            "id": 1,
+            "kind": "TimeRange",
+            "label": "TimeRange(300s)",
+            "detail": {
+              "range": {
+                "nanos": 0,
+                "secs": 300
+              }
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [
+              0
+            ],
+            "hash": 12007712336004404578
+          },
+          {
+            "id": 2,
+            "kind": "Aggregate",
+            "label": "Aggregate(1 measures)",
+            "detail": {
+              "having": null,
+              "measures": [
+                {
+                  "kind": "rate"
+                }
+              ],
+              "output_names": [
+                ""
+              ],
+              "reduction": "PerEntity"
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [
+              1
+            ],
+            "hash": 12607242477503010192
+          },
+          {
+            "id": 3,
+            "kind": "Sort",
+            "label": "Sort(1 keys)",
+            "detail": {
+              "keys": [
+                {
+                  "ascending": false,
+                  "expr": {
+                    "Column": 1
+                  },
+                  "nulls_first": false
+                }
+              ],
+              "partition_by": []
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [
+              2
+            ],
+            "hash": 3760917937445997010
+          },
+          {
+            "id": 4,
+            "kind": "Limit",
+            "label": "Limit(10)",
+            "detail": {
+              "n": 10,
+              "offset": 0
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [
+              3
+            ],
+            "hash": 10822644126224715622
+          }
+        ],
+        "root": 4
+      },
+      "replacements": [
+        {
+          "decision_id": 2,
+          "target_pre_id": 2,
+          "strategy": "SketchAlgorithmStrategy",
+          "rationale": "Rate realizes as an exact Rate accumulator",
+          "rank": 0,
+          "cost": 4.0,
+          "before": {
+            "nodes": [
+              {
+                "id": 0,
+                "kind": "Scan",
+                "label": "Scan(http_requests_total)",
+                "detail": {
+                  "predicates": [],
+                  "schema": {
+                    "closed": false,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "value",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  }
+                },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "children": [],
+                "hash": 16569634401303792668
+              },
+              {
+                "id": 1,
+                "kind": "TimeRange",
+                "label": "TimeRange(300s)",
+                "detail": {
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
+                },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "children": [
+                  0
+                ],
+                "hash": 12007712336004404578
+              },
+              {
+                "id": 2,
+                "kind": "Aggregate",
+                "label": "Aggregate(1 measures)",
+                "detail": {
+                  "having": null,
+                  "measures": [
+                    {
+                      "kind": "rate"
+                    }
+                  ],
+                  "output_names": [
+                    ""
+                  ],
+                  "reduction": "PerEntity"
+                },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
+                "children": [
+                  1
+                ],
+                "hash": 12607242477503010192
+              }
+            ],
+            "root": 2
+          },
+          "after": {
+            "kind": "Summary",
+            "graph": {
+              "nodes": [
+                {
+                  "id": 0,
+                  "kind": "KeepPreAsap",
+                  "label": "KeepPreAsap(TimeRange)",
+                  "detail": {
+                    "pre_asap_subgraph": {
+                      "nodes": [
+                        {
+                          "children": [],
+                          "detail": {
+                            "predicates": [],
+                            "schema": {
+                              "closed": false,
+                              "columns": [
+                                {
+                                  "dtype": "timestamp",
+                                  "name": "ts",
+                                  "nullable": false,
+                                  "table": null
+                                },
+                                {
+                                  "dtype": "float64",
+                                  "name": "value",
+                                  "nullable": false,
+                                  "table": null
+                                }
+                              ],
+                              "time_index": 0,
+                              "unique_keys": []
+                            },
+                            "source": {
+                              "TimeSeries": {
+                                "metric": "http_requests_total"
+                              }
+                            }
+                          },
+                          "hash": 16569634401303792668,
+                          "id": 0,
+                          "kind": "Scan",
+                          "label": "Scan(http_requests_total)",
+                          "schema": {
+                            "closed": false,
+                            "columns": [
+                              {
+                                "dtype": "timestamp",
+                                "name": "ts",
+                                "nullable": false,
+                                "table": null
+                              },
+                              {
+                                "dtype": "float64",
+                                "name": "value",
+                                "nullable": false,
+                                "table": null
+                              }
+                            ],
+                            "time_index": 0,
+                            "unique_keys": []
+                          }
+                        },
+                        {
+                          "children": [
+                            0
+                          ],
+                          "detail": {
+                            "range": {
+                              "nanos": 0,
+                              "secs": 300
+                            }
+                          },
+                          "hash": 12007712336004404578,
+                          "id": 1,
+                          "kind": "TimeRange",
+                          "label": "TimeRange(300s)",
+                          "schema": {
+                            "closed": false,
+                            "columns": [
+                              {
+                                "dtype": "timestamp",
+                                "name": "ts",
+                                "nullable": false,
+                                "table": null
+                              },
+                              {
+                                "dtype": "float64",
+                                "name": "value",
+                                "nullable": false,
+                                "table": null
+                              }
+                            ],
+                            "time_index": 0,
+                            "unique_keys": []
+                          }
+                        }
+                      ],
+                      "root": 1
+                    }
+                  },
+                  "children": []
+                },
+                {
+                  "id": 1,
+                  "kind": "SummaryAgg",
+                  "label": "SummaryAgg(ExactAggregate(Rate))",
+                  "detail": {
+                    "col": "SampleValue",
+                    "family": "ExactAggregate(Rate, Rate)",
+                    "grouping": "PerSubpopulationInstance",
+                    "reduction": "PerEntity"
+                  },
+                  "children": [
+                    0
+                  ]
+                }
+              ],
+              "root": 1
+            }
+          }
+        }
+      ],
+      "post_graph": {
+        "nodes": [
+          {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(http_requests_total)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": false,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "TimeSeries": {
+                  "metric": "http_requests_total"
+                }
+              }
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [],
+            "hash": 16569634401303792668,
+            "decision": {
+              "id": 2,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "Rate realizes as an exact Rate accumulator",
+              "rank": 0,
+              "cost": 4.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 1,
+            "kind": "TimeRange",
+            "label": "TimeRange(300s)",
+            "detail": {
+              "range": {
+                "nanos": 0,
+                "secs": 300
+              }
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [
+              0
+            ],
+            "hash": 12007712336004404578,
+            "decision": {
+              "id": 2,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "Rate realizes as an exact Rate accumulator",
+              "rank": 0,
+              "cost": 4.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 2,
+            "kind": "SummaryAgg",
+            "label": "SummaryAgg(ExactAggregate(Rate))",
+            "detail": {
+              "col": "SampleValue",
+              "family": "ExactAggregate(Rate, Rate)",
+              "grouping": "PerSubpopulationInstance",
+              "reduction": "PerEntity"
+            },
+            "schema": {
+              "fields": [
+                {
+                  "dtype": "Plain(Timestamp)",
+                  "name": "ts",
+                  "nullable": false
+                },
+                {
+                  "dtype": "ExactAggregate(Rate, Rate)",
+                  "name": "value",
+                  "nullable": false
+                }
+              ],
+              "time_index": 0
+            },
+            "children": [
+              1
+            ],
+            "decision": {
+              "id": 2,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "Rate realizes as an exact Rate accumulator",
+              "rank": 0,
+              "cost": 4.0,
+              "role": "replacement_root"
+            }
+          },
+          {
+            "id": 3,
+            "kind": "Sort",
+            "label": "Sort(1 keys)",
+            "detail": {
+              "keys": [
+                {
+                  "ascending": false,
+                  "expr": {
+                    "Column": 1
+                  },
+                  "nulls_first": false
+                }
+              ],
+              "partition_by": []
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [
+              2
+            ],
+            "hash": 3760917937445997010
+          },
+          {
+            "id": 4,
+            "kind": "Limit",
+            "label": "Limit(10)",
+            "detail": {
+              "n": 10,
+              "offset": 0
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
+            "children": [
+              3
+            ],
+            "hash": 10822644126224715622
           }
         ],
         "root": 4

@@ -51,6 +51,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{search_workload, Replacement, ReplacementSubDAG};
@@ -304,6 +305,7 @@ fn run_post_asap_with_progress(
     lowered_queries: &[(String, String, QueryExpr)],
     progress: bool,
 ) -> PostAsapResults {
+    let mapping_started = Instant::now();
     if progress {
         eprintln!("[3/4] ASAP-aware mapping is running…");
     }
@@ -362,6 +364,12 @@ fn run_post_asap_with_progress(
         let hash = structural_hash(winner.target, &mut by_hash_cache);
         by_hash.entry(hash).or_default().push(i);
     }
+    if progress {
+        eprintln!(
+            "[3/4] ASAP-aware mapping done in {:.2} ms",
+            mapping_started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 
     // ---- Merged, whole-query `post_graph`, one per query ---------------
     //
@@ -381,6 +389,7 @@ fn run_post_asap_with_progress(
     if progress {
         eprintln!("[4/4] Post-ASAP DAG generation is running…");
     }
+    let post_started = Instant::now();
     let mut post_graph_cache = HashCache::new();
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
@@ -474,6 +483,12 @@ fn run_post_asap_with_progress(
             );
         }
     }
+    if progress {
+        eprintln!(
+            "[4/4] Post-ASAP DAG generation done in {:.2} ms",
+            post_started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 
     PostAsapResults {
         replacements,
@@ -489,6 +504,7 @@ fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapRes
 #[tokio::main]
 async fn main() {
     let (entries, accuracy, post_asap, progress) = parse_args();
+    let planner_started = Instant::now();
     if entries.is_empty() {
         eprintln!(
             "usage: dag_export --sql \"<query>\" [--name <label>] [--epsilon <f64>] [--post-asap] ..."
@@ -497,6 +513,7 @@ async fn main() {
     }
 
     let mut lowered_queries = Vec::new();
+    let lowering_started = Instant::now();
     if progress {
         eprintln!("[1/4] Parsing and lowering SQL/PromQL queries…");
     }
@@ -514,7 +531,14 @@ async fn main() {
             Err(e) => eprintln!("skipping {name:?} — lowering failed: {e}"),
         }
     }
+    if progress {
+        eprintln!(
+            "[1/4] Parsing and lowering done in {:.2} ms",
+            lowering_started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 
+    let pre_started = Instant::now();
     if progress {
         eprintln!("[2/4] Pre-ASAP DAG generation is running…");
     }
@@ -545,6 +569,12 @@ async fn main() {
             );
         }
     }
+    if progress {
+        eprintln!(
+            "[2/4] Pre-ASAP DAG generation done in {:.2} ms",
+            pre_started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 
     if post_asap {
         let results = run_post_asap_with_progress(&lowered_queries, progress);
@@ -561,6 +591,12 @@ async fn main() {
     }
 
     let workload = WorkloadGraph { queries };
+    if progress {
+        eprintln!(
+            "Total planner time: {:.2} ms",
+            planner_started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     println!("{}", serde_json::to_string_pretty(&workload).unwrap());
 }
 

@@ -46,3 +46,13 @@ document.getElementById('plannerRun').addEventListener('click', async () => {
 
 addPlannerRow({ name: 'count_by_service' });
 addPlannerRow({ name: 'avg_latency', text: 'SELECT service, AVG(latency) FROM metrics GROUP BY service' });
+addPlannerRow({
+  name: 'q3',
+  language: 'promql',
+  text: 'topk(5, rate(http_requests_total[5m]))',
+});
+addPlannerRow({
+  name: 'q4',
+  language: 'promql',
+  text: 'topk(10, rate(http_requests_total[5m]))',
+});
