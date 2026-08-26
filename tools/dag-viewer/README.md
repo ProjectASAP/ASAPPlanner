@@ -42,6 +42,9 @@ picker.
 - Once two or more queries are loaded, switch to **Compare** or **Union**
   mode (buttons next to the drop zone) to see them together instead of one
   at a time — see below.
+- If a query's export carries `replacements` (`dag_export --post-asap`),
+  switch to **Before/After** mode to see one claimed replacement's before
+  and after subtrees side by side — see "Before/After mode" below.
 
 ## Render a standalone page from Python
 
@@ -244,6 +247,57 @@ its bottom-right corner (color keyed to `kind` — see `node-style.js`'s
 `NOTE_KIND_COLOR`); click the node to see each note's kind and full reason
 text in the side panel, the same "click for detail" pattern the rest of the
 side panel already uses for a node's `detail`/root/shared-subtree status.
+
+## Before/After mode
+
+`dag_export --post-asap` additionally attaches a `replacements` array to each
+query — one entry per place in the query where `asap-aware-mapping` actually
+*chose* a real optimization (cost-ranked, not just "could apply"): a sketch
+mapping, a CSE share/recompute, a workload-aware rollup, Hydra
+frequency-sketch grouping, or an `avg`→`sum`/`count` rewrite. Each entry
+carries its own small `before` subtree (the pre-ASAP nodes it replaced) and
+`after` subtree — either a rewritten pre-ASAP graph (`after.kind ===
+"Rewrite"`, e.g. the `avg` rewrite) or a post-ASAP "Summary" graph
+(`after.kind === "Summary"`, e.g. a sketch realization), plus `strategy`,
+`provenance`, a human `rationale`, and this candidate's `rank`/`cost` among
+whatever else was considered for the same target (`rank: 0` is the winner).
+
+**Before/After** mode (only shown once a query with `replacements` is
+loaded) reuses the Single-mode tab bar to pick a query, then shows a
+secondary picker below the tabs listing every entry, grouped by which
+pre-ASAP node it targets (so a node with several ranked candidates — e.g.
+one query's Kll sketch vs. a Hydra-grouped alternative for the same
+aggregate — reads as one section instead of unrelated rows) and sorted by
+rank within a group so the winner is always first and marked. Pick a row and
+the main view draws that entry's `before` and `after` as two fixed lanes —
+**Before** / **After** — using the same compound-lane layout Compare mode
+uses for its per-query lanes, just with exactly two lanes fed from one
+entry's two subtrees instead of N lanes fed from N queries.
+
+The picker also always offers a **Whole query** option: `query.graph`
+(Before) against the query's whole-query merged post-ASAP graph,
+`query.post_graph` (After) — the `NamedGraph`-level counterpart to picking
+one target's tiny subtrees. It's disabled rather than hidden when a query's
+export has no `post_graph` (no `--post-asap`, or the query had zero
+replacements) — the option always exists, it just isn't always populated.
+
+A Summary graph's nodes (`SummaryDagNode`, from `after.kind === "Summary"` or
+from `post_graph`) are a different shape than the pre-ASAP `DagNode`s
+everywhere else in this viewer: `kind` is one of `KeepPreAsap`, `SummaryAgg`,
+`SummaryJoin`, `SummarySubtract`, `SummaryDelete`, `SummaryEstimate`,
+`SummaryMerge`, and there's no `hash` (no corresponding `QueryExpr` to hash)
+and no `notes`. `node-style.js` maps all seven to a new `summary` category —
+neutral gray rather than another saturated hue, both because a 10th vivid
+color starts crowding the other 9 and because "materialized post-ASAP
+structure" reads better as its own muted family than as one more member of
+the pre-ASAP rainbow. `KeepPreAsap` — literally an unchanged pre-ASAP subtree
+carried through as-is — gets an even more washed-out, dashed treatment on
+top of that (see `buildCyStyle`'s `node[kind = "KeepPreAsap"]` override in
+`viewer.js`), so a glance at an After lane separates "the planner did
+something here" from "left alone." Side-panel node inspection is otherwise
+identical to every other mode: click a node, get its `detail` dumped
+verbatim; a `SummaryDagNode`'s missing `hash`/`notes` just means the
+cross-query "shared with" note and notes block don't render, not a crash.
 
 ## Vendored dependencies
 

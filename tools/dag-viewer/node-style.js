@@ -3,6 +3,11 @@
 // reclassify a kind or retune a palette; nothing else in index.html needs to
 // change. Icon SVGs are adapted from ProjectASAP/bgp-query-dag-explorer's
 // hand-drawn icon set (see tools/dag-viewer/README.md).
+//
+// Also covers the 7 post-ASAP-only SummaryDagNode kinds (KeepPreAsap,
+// SummaryAgg, SummaryJoin, SummarySubtract, SummaryDelete, SummaryEstimate,
+// SummaryMerge) that only ever appear in Before/After mode's After lane when
+// an entry's `after.kind === "Summary"` — see the `summary` category below.
 
 // kind (DagNode.kind from crates/ir/src/dag_export.rs) -> category name.
 const KIND_CATEGORY = {
@@ -31,6 +36,14 @@ const KIND_CATEGORY = {
   Sort: 'sort',
   Limit: 'sort',
   LetBinding: 'bind',
+  // Post-ASAP SummaryDagNode kinds (Before/After mode's After lane only).
+  KeepPreAsap: 'summary',
+  SummaryAgg: 'summary',
+  SummaryJoin: 'summary',
+  SummarySubtract: 'summary',
+  SummaryDelete: 'summary',
+  SummaryEstimate: 'summary',
+  SummaryMerge: 'summary',
 };
 
 const ICON_STROKE = '2.2';
@@ -52,7 +65,22 @@ const ICONS = {
   sort: (c) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><path d="M12 12h20M12 22h15M12 32h10" stroke="${c}" stroke-width="${ICON_STROKE}" stroke-linecap="round"/><path d="M35 12v24m0 0l-6-6m6 6l6-6" stroke="${c}" stroke-width="${ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   // New: a name tag, for LetBinding naming a sub-expression for reuse.
   bind: (c) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><path d="M8 22V12a4 4 0 0 1 4-4h10l18 18-14 14L8 22z" fill="${ICON_FILL}" stroke="${c}" stroke-width="${ICON_STROKE}" stroke-linejoin="round"/><circle cx="17" cy="17" r="2.4" fill="${c}"/></svg>`,
+  // New: stacked layers, for the post-ASAP `summary` category — a materialized
+  // structure (a sketch, a rollup, a merged/estimated join) rather than a
+  // pre-ASAP relational operator.
+  summary: (c) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect x="9" y="7" width="30" height="10" rx="3" fill="${ICON_FILL}" stroke="${c}" stroke-width="${ICON_STROKE}"/><rect x="9" y="19" width="30" height="10" rx="3" fill="${ICON_FILL}" stroke="${c}" stroke-width="${ICON_STROKE}"/><rect x="9" y="31" width="30" height="10" rx="3" fill="${ICON_FILL}" stroke="${c}" stroke-width="${ICON_STROKE}"/></svg>`,
 };
+
+// KeepPreAsap-only: a dashed box with a through-arrow, standing in for
+// "unchanged pre-ASAP content carried through as-is" — see the `summary`
+// CATEGORIES entry and buildCyStyle's `node[kind = "KeepPreAsap"]` override
+// in viewer.js for why this doesn't just reuse ICONS.summary's stroke color.
+const KEEP_PRE_ASAP_ICON = (c) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48"><rect x="7" y="14" width="34" height="20" rx="4" fill="${ICON_FILL}" stroke="${c}" stroke-width="${ICON_STROKE}" stroke-dasharray="4 3"/><path d="M13 24h22m0 0l-6-6m6 6l-6 6" fill="none" stroke="${c}" stroke-width="${ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+function keepPreAsapIconDataUri() {
+  const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim() || '#6b7280';
+  return svgDataUri(KEEP_PRE_ASAP_ICON(muted));
+}
 
 // New: a small flag/marker badge layered onto whichever node is a query's
 // root, since QueryExpr has no dedicated terminal "output" node kind the way
@@ -114,6 +142,24 @@ const CATEGORIES = {
     description: 'LetBinding — names a sub-expression for reuse via Ref',
     light: { bg: '#fff5ea', border: '#b45309' },
     dark: { bg: '#3a2408', border: '#fb923c' },
+  },
+  // Post-ASAP only (Before/After mode's After lane): every other category
+  // above is a saturated, hand-picked hue for a pre-ASAP QueryExpr operator.
+  // `summary` is deliberately plain neutral gray instead of another hue —
+  // partly because a 10th saturated color starts getting hard to
+  // distinguish at a glance from its 9 neighbors (data's blue and sort's
+  // blue are already close), and partly because "materialized post-ASAP
+  // structure" reads better as a visually distinct *family* (muted,
+  // grayscale) than as one more member of the pre-ASAP rainbow. KeepPreAsap
+  // (unchanged pre-ASAP content passed through) gets its own even-more-muted
+  // override in viewer.js's buildCyStyle rather than its own category, since
+  // it's a variant *within* "post-ASAP" (something bothered to carry it
+  // through) rather than a different concept.
+  summary: {
+    label: 'Summary',
+    description: 'KeepPreAsap, SummaryAgg, SummaryJoin, SummarySubtract, SummaryDelete, SummaryEstimate, SummaryMerge — post-ASAP materialized structures (Before/After mode only)',
+    light: { bg: '#f1f2f4', border: '#4b5563' },
+    dark: { bg: '#20242b', border: '#9ca3af' },
   },
 };
 

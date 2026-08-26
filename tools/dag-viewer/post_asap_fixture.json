@@ -1,0 +1,149 @@
+{
+  "queries": [
+    {
+      "name": "p95_pktlen",
+      "source": "SELECT srcip, approx_percentile_cont(pkt_len, 0.95) AS p95_pkt_len FROM netflow_table GROUP BY srcip",
+      "graph": {
+        "nodes": [
+          { "id": 0, "kind": "Scan", "label": "Scan(netflow_table)", "detail": {"source": {"Table": {"table_ref": "netflow_table"}}}, "children": [], "hash": 111 },
+          { "id": 1, "kind": "Aggregate", "label": "Aggregate(1 measures)", "detail": {"measures": [{"kind": "quantile", "q": 0.95, "col": 6, "accuracy": {"Epsilon": 0.01}}], "output_names": ["approx_percentile_cont(netflow_table.pkt_len,Float64(0.95))"], "reduction": {"Reduce": [1]}}, "children": [0], "hash": 222,
+            "notes": [{"kind": "SketchApproximation", "reason": "quantile(q=0.95) realizes as a Kll sketch — one of summary_candidates' alternatives for this intent"}] },
+          { "id": 2, "kind": "Project", "label": "Project(2 cols)", "detail": {"cols": [{"expr": {"Column": 0}}, {"alias": "p95_pkt_len", "expr": {"Column": 1}}]}, "children": [1], "hash": 333 }
+        ],
+        "root": 2
+      },
+      "post_graph": {
+        "nodes": [
+          { "id": 0, "kind": "KeepPreAsap", "label": "KeepPreAsap(Scan)", "detail": {"pre_asap_subgraph": {"nodes": [{"id": 0, "kind": "Scan", "label": "Scan(netflow_table)", "detail": {}, "children": []}], "root": 0}}, "children": [] },
+          { "id": 1, "kind": "SummaryAgg", "label": "SummaryAgg(Kll)", "detail": {"family": {"Sketch": ["Kll", {"k": 200}]}, "col": {"Column": 6}, "reduction": {"Reduce": [1]}, "grouping": "PerSubpopulationInstance"}, "children": [0], "origin_pre_id": 1 },
+          { "id": 2, "kind": "KeepPreAsap", "label": "KeepPreAsap(Project)", "detail": {"pre_asap_subgraph": {"nodes": [{"id": 0, "kind": "Project", "label": "Project(2 cols)", "detail": {}, "children": []}], "root": 0}}, "children": [1] }
+        ],
+        "root": 2
+      },
+      "replacements": [
+        {
+          "target_pre_id": 1,
+          "strategy": "Sketch",
+          "provenance": "SummaryImplementation",
+          "rationale": "quantile(q=0.95) realizes as a Kll sketch (rank 1 of 2 candidates, est. cost 1024 bytes/group) — DDSketch was the runner-up.",
+          "rank": 0,
+          "cost": 1024.0,
+          "before": {
+            "nodes": [
+              { "id": 0, "kind": "Scan", "label": "Scan(netflow_table)", "detail": {"source": {"Table": {"table_ref": "netflow_table"}}}, "children": [], "hash": 111 },
+              { "id": 1, "kind": "Aggregate", "label": "Aggregate(1 measures)", "detail": {"measures": [{"kind": "quantile", "q": 0.95, "col": 6}]}, "children": [0], "hash": 222 }
+            ],
+            "root": 1
+          },
+          "after": {
+            "kind": "Summary",
+            "graph": {
+              "nodes": [
+                { "id": 0, "kind": "KeepPreAsap", "label": "KeepPreAsap(Scan)", "detail": {"pre_asap_subgraph": {"nodes": [{"id": 0, "kind": "Scan", "label": "Scan(netflow_table)", "detail": {}, "children": [], "hash": 111}], "root": 0}}, "children": [] },
+                { "id": 1, "kind": "SummaryAgg", "label": "SummaryAgg(Kll)", "detail": {"family": {"Sketch": ["Kll", {"k": 200}]}, "col": {"Column": 6}, "reduction": {"Reduce": [1]}, "grouping": "PerSubpopulationInstance"}, "children": [0], "origin_pre_id": 1 }
+              ],
+              "root": 1
+            }
+          }
+        },
+        {
+          "target_pre_id": 1,
+          "strategy": "HydraGrouping",
+          "provenance": "SummaryImplementation",
+          "rationale": "This grouped aggregate's Kll sketch can instead be realized as one shared Hydra-Kll structure over every srcip subpopulation, instead of one instance per distinct srcip — legal here, but ranked below the per-subpopulation instance because the estimated per-key cardinality is too low for the shared layout to pay off.",
+          "rank": 1,
+          "cost": 4096.0,
+          "before": {
+            "nodes": [
+              { "id": 0, "kind": "Scan", "label": "Scan(netflow_table)", "detail": {}, "children": [], "hash": 111 },
+              { "id": 1, "kind": "Aggregate", "label": "Aggregate(1 measures)", "detail": {"measures": [{"kind": "quantile", "q": 0.95, "col": 6}]}, "children": [0], "hash": 222 }
+            ],
+            "root": 1
+          },
+          "after": {
+            "kind": "Summary",
+            "graph": {
+              "nodes": [
+                { "id": 0, "kind": "KeepPreAsap", "label": "KeepPreAsap(Scan)", "detail": {}, "children": [] },
+                { "id": 1, "kind": "SummaryAgg", "label": "SummaryAgg(HydraKll)", "detail": {"family": {"Sketch": ["Kll", {"k": 200}]}, "grouping": {"SharedMultiSubpopulation": {"params": {}}}}, "children": [0], "origin_pre_id": 1 }
+              ],
+              "root": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "avg_latency",
+      "source": "SELECT service, AVG(latency) FROM metrics GROUP BY service",
+      "graph": {
+        "nodes": [
+          { "id": 0, "kind": "Scan", "label": "Scan(metrics)", "detail": {"source": {"Table": {"table_ref": "metrics"}}}, "children": [], "hash": 444 },
+          { "id": 1, "kind": "Aggregate", "label": "Aggregate(1 measures)", "detail": {"measures": [{"kind": "avg", "col": 3}], "output_names": ["avg(metrics.latency)"]}, "children": [0], "hash": 555 },
+          { "id": 2, "kind": "Project", "label": "Project(2 cols)", "detail": {"cols": [{"expr": {"Column": 0}}, {"expr": {"Column": 1}}]}, "children": [1], "hash": 666 }
+        ],
+        "root": 2
+      },
+      "replacements": [
+        {
+          "target_pre_id": 1,
+          "strategy": "AvgToSumRewrite",
+          "provenance": "LogicalRewrite",
+          "rationale": "avg(latency) has no summary realization of its own (PassThrough) — rewritten into sum(latency)/count(*) so the sketch/CSE strategies below now have a mergeable accumulator to work with.",
+          "rank": 0,
+          "cost": 0.0,
+          "before": {
+            "nodes": [
+              { "id": 0, "kind": "Scan", "label": "Scan(metrics)", "detail": {}, "children": [], "hash": 444 },
+              { "id": 1, "kind": "Aggregate", "label": "Aggregate(1 measures)", "detail": {"measures": [{"kind": "avg", "col": 3}]}, "children": [0], "hash": 555 }
+            ],
+            "root": 1
+          },
+          "after": {
+            "kind": "Rewrite",
+            "graph": {
+              "nodes": [
+                { "id": 0, "kind": "Scan", "label": "Scan(metrics)", "detail": {}, "children": [], "hash": 444 },
+                { "id": 1, "kind": "Aggregate", "label": "Aggregate(2 measures)", "detail": {"measures": [{"kind": "sum", "col": 3}, {"kind": "count"}], "output_names": ["sum(metrics.latency)", "count(*)"]}, "children": [0], "hash": 777 },
+                { "id": 2, "kind": "Project", "label": "Project(1 cols)", "detail": {"cols": [{"alias": "avg(metrics.latency)", "expr": {"BinaryOp": {"op": "Div", "left": {"Column": 0}, "right": {"Column": 1}}}}]}, "children": [1], "hash": 888 }
+              ],
+              "root": 2
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "cse_share_demo",
+      "source": "-- q_a -- SELECT service, COUNT(*) FROM metrics GROUP BY service ;\n-- q_b -- SELECT service, COUNT(*) FROM metrics WHERE region='us' GROUP BY service",
+      "graph": {
+        "nodes": [
+          { "id": 0, "kind": "Scan", "label": "Scan(metrics)", "detail": {}, "children": [], "hash": 111 },
+          { "id": 1, "kind": "Aggregate", "label": "Aggregate(1 measures)", "detail": {"measures": [{"kind": "count"}]}, "children": [0], "hash": 999 }
+        ],
+        "root": 1
+      },
+      "replacements": [
+        {
+          "target_pre_id": 0,
+          "strategy": "SharedSubtree",
+          "provenance": "CseShare",
+          "rationale": "Scan(metrics) has 2 consumers across this workload — building it once and sharing the Rc beats recomputing it independently per consumer at this estimated row count.",
+          "rank": 0,
+          "cost": 12.0,
+          "before": {
+            "nodes": [ { "id": 0, "kind": "Scan", "label": "Scan(metrics)", "detail": {}, "children": [], "hash": 111 } ],
+            "root": 0
+          },
+          "after": {
+            "kind": "Rewrite",
+            "graph": {
+              "nodes": [ { "id": 0, "kind": "Scan", "label": "Scan(metrics)  [shared, 2 consumers]", "detail": {}, "children": [], "hash": 111 } ],
+              "root": 0
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -110,6 +110,54 @@
   .tab.checkTab { display: flex; align-items: center; gap: 0.35rem; cursor: default; }
   .tab.checkTab input { cursor: pointer; }
   .modeToggle { display: flex; gap: 0.3rem; }
+  #baPicker {
+    display: none;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.2rem;
+    padding: 0.55rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #baPicker.visible { display: flex; }
+  .baGroup { display: flex; flex-direction: column; gap: 0.3rem; min-width: 220px; }
+  .baGroupLabel {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--muted);
+  }
+  .baRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel2);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.78rem;
+    text-align: left;
+  }
+  .baRow:hover { border-color: var(--accent); }
+  .baRow:disabled { opacity: 0.55; cursor: not-allowed; }
+  .baRow:disabled:hover { border-color: var(--border); }
+  .baRow.active {
+    border-color: var(--accent);
+    background: var(--bg);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .baRow .baWinner {
+    font-size: 0.66rem;
+    font-weight: 700;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
+    flex-shrink: 0;
+  }
+  .baRow .baMeta { color: var(--muted); font-size: 0.72rem; margin-left: auto; white-space: nowrap; }
   .proxyNote {
     font-size: 0.72rem;
     color: var(--muted);
@@ -285,6 +333,7 @@
     <button class="btn active" id="modeSingleBtn" data-mode="single">Single</button>
     <button class="btn" id="modeCompareBtn" data-mode="compare">Compare</button>
     <button class="btn" id="modeUnionBtn" data-mode="union">Union</button>
+    <button class="btn" id="modeBeforeAfterBtn" data-mode="beforeafter">Before/After</button>
   </div>
   <span class="proxyNote" id="proxyNote" style="display:none">"Shared" = same structural hash across independent exports, not live Rc identity — see README.</span>
   <button class="btn" id="clearBtn">Clear all</button>
@@ -295,6 +344,7 @@
 </header>
 
 <div id="tabs"></div>
+<div id="baPicker"></div>
 
 <div id="main">
   <div id="empty">
