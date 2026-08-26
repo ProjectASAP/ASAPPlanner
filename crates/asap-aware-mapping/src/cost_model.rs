@@ -56,6 +56,9 @@ use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
+use crate::recurrence::{
+    self, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
+};
 use crate::replacement::{
     realize_child, Implementation, Replacement, ReplacementSubDAG, TargetSubDAG,
 };
@@ -338,6 +341,79 @@ pub trait CostModel {
         } else {
             ShareDecision::RecomputeIndependently
         }
+    }
+
+    // ── Recurrence-aware costing (issue #287) ───────────────────────────
+    //
+    // See `crate::recurrence`'s module docs for the full cost model
+    // (`maintained_cost_rate`/`recompute_cost_rate` formulas, units,
+    // provenance of every new input). The three hooks below are the
+    // per-update-event/per-read/per-recomputation cost primitives that
+    // formula is built from; `cse_share_decision_with_recurrence` is the
+    // composed decision, mirroring how `cse_share_decision` above composes
+    // `cse_recompute_cost`/`cse_shared_maintenance_cost`.
+
+    /// Cost of maintaining `candidate`'s bound summary for a single ingest
+    /// update event. Units: cost units per update — the
+    /// `maintenance_cost_per_update` term of `maintained_cost_rate`
+    /// (`crate::recurrence`). Default: delegates to
+    /// [`cse_shared_maintenance_cost`](Self::cse_shared_maintenance_cost)'s
+    /// per-family weight table, reinterpreted as a per-update charge — a
+    /// deployment with a real measured per-update cost (e.g. observed
+    /// sketch-insert latency) should override this instead.
+    fn maintenance_cost_per_update(&self, candidate: &CseCandidate) -> Cost {
+        self.cse_shared_maintenance_cost(candidate)
+    }
+
+    /// Cost of one read against `candidate`'s already-maintained summary.
+    /// Units: cost units per read — the `summary_read_cost` term of
+    /// `maintained_cost_rate`. Default: `Cost(1.0)`, a nominal unit read —
+    /// illustrative, like every other numeric default in this trait; a
+    /// deployment with a real read-path cost should override this.
+    fn summary_read_cost(&self, _candidate: &CseCandidate) -> Cost {
+        Cost(1.0)
+    }
+
+    /// Cost of recomputing `candidate.subtree` once, from the pre-ASAP/raw
+    /// path. Units: cost units per recomputation — the `raw_recompute_cost`
+    /// term of `recompute_cost_rate`. Default: delegates to
+    /// [`cse_recompute_cost`](Self::cse_recompute_cost) (the same
+    /// structural-size proxy `cse_share_decision` already uses).
+    fn raw_recompute_cost(&self, candidate: &CseCandidate) -> Cost {
+        self.cse_recompute_cost(candidate)
+    }
+
+    /// The recurrence-aware counterpart to
+    /// [`cse_share_decision`](Self::cse_share_decision): the same
+    /// `Share`/`RecomputeIndependently` choice, weighted by how *often*
+    /// `candidate`'s consumers actually run (`recurrence`) instead of only
+    /// how many structurally exist (`candidate.consumer_count`). See
+    /// `crate::recurrence`'s module docs for the full design.
+    ///
+    /// - `recurrence.is_empty()` (no [`RepeatingEntry`]/[`DataCharacteristics`]-derived
+    ///   metadata available): delegates to
+    ///   [`cse_share_decision`](Self::cse_share_decision), preserving
+    ///   today's structural-consumer-count behavior exactly — issue #287's
+    ///   "preserve existing behavior when recurrence metadata is
+    ///   unavailable" requirement.
+    /// - Otherwise: compares `maintained_cost_rate` against
+    ///   `recompute_cost_rate` (both cost units/second). If
+    ///   `recurrence.one_shot_consumers > 0` alongside any recurring rate
+    ///   (mixed one-shot + repeating work), `horizon` MUST be `Some` —
+    ///   `Err(RecurrenceError::MissingHorizon)` otherwise, per "the cost
+    ///   model must not silently combine rate-valued and one-shot costs".
+    ///   With no one-shot consumers, `horizon` is optional (comparing bare
+    ///   rates is equivalent to comparing `rate * H` for any fixed `H > 0`).
+    ///
+    /// [`RepeatingEntry`]: asap_types::workload::RepeatingEntry
+    /// [`DataCharacteristics`]: asap_types::workload::DataCharacteristics
+    fn cse_share_decision_with_recurrence(
+        &self,
+        candidate: &CseCandidate,
+        recurrence: &RecurrenceProfile,
+        horizon: Option<Horizon>,
+    ) -> Result<RecurrenceCostExplanation, RecurrenceError> {
+        recurrence::decide(self, candidate, recurrence, horizon)
     }
 
     /// Estimate a comparable, numeric cost for one already-constructed

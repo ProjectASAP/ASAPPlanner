@@ -359,11 +359,13 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
 use asap_types::pre_asap::schema::Schema;
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::RepetitionInterval;
 use std::rc::Rc;
 use thiserror::Error;
 
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
+use crate::recurrence::{evaluation_rate_of, RecurrenceProfile, RootRecurrence, UpdateRate};
 use crate::rollup::RollupStrategy;
 use crate::topk_reuse::TopKLimitReuseStrategy;
 
@@ -1771,6 +1773,136 @@ impl<Id> PlanSpace<Id> {
                 }
             })
             .collect()
+    }
+}
+
+// ── Recurrence-aware cost context (issue #287) ──────────────────────────
+
+/// One [`RecurrenceProfile`] per discovered [`MemoGroup`] target, built by
+/// [`PlanSpace::recurrence_profiles`] — the "carry `RepeatingEntry.interval`
+/// and relevant `DataCharacteristics` into ASAP-aware search/cost context"
+/// half of issue #287. Looked up by `Rc` pointer identity, the same
+/// currency [`PlanSpace::group_for`]/[`GlobalSelection::for_target`] already
+/// use.
+#[derive(Debug, Clone)]
+pub struct RecurrenceProfileMap {
+    profiles: HashMap<*const QueryExpr, RecurrenceProfile>,
+}
+
+impl RecurrenceProfileMap {
+    /// The [`RecurrenceProfile`] for `target`, or
+    /// [`RecurrenceProfile::EMPTY`] when `target` wasn't a discovered site
+    /// in the [`PlanSpace`] this map was built from (or carried no
+    /// recurring/one-shot/update-rate metadata at all) — always a valid,
+    /// "no metadata" answer, never a panic.
+    pub fn for_target(&self, target: &Rc<QueryExpr>) -> RecurrenceProfile {
+        self.profiles
+            .get(&Rc::as_ptr(target))
+            .copied()
+            .unwrap_or(RecurrenceProfile::EMPTY)
+    }
+}
+
+impl<Id> PlanSpace<Id> {
+    /// Build one [`RecurrenceProfile`] per discovered site, by walking every
+    /// root's whole reachable sub-DAG (the same relational-skeleton
+    /// traversal [`discover_targets`] itself used to discover those sites)
+    /// and folding each root's own recurrence tag
+    /// ([`RootRecurrence::Repeating`]'s interval, or
+    /// [`RootRecurrence::OneShot`]) into every site reachable from it.
+    ///
+    /// `root_recurrence` is positional: `root_recurrence[i]` describes
+    /// `self.roots[i]` — the same order [`search_workload`]/
+    /// [`search_workload_with`] were originally called with (post-CSE
+    /// dedup preserves both root count and order — see
+    /// `asap_types::pre_asap::cse::share_common_subtrees`'s own
+    /// `.map(...).collect()` body). This keeps `Id` fully opaque (no `Eq`/
+    /// `Hash`/`Clone` bound needed on it at all — issue #287's "keep
+    /// caller/query identifiers opaque" requirement) at the cost of the
+    /// caller keeping the two slices in step; `root_recurrence.len()` must
+    /// equal `self.roots.len()`.
+    ///
+    /// A shared sub-DAG reachable from more than one root aggregates every
+    /// reaching root's contribution — repeating roots' intervals combine via
+    /// [`evaluation_rate_of`]'s `sum(1 / interval_i)`, one-shot roots
+    /// increment [`RecurrenceProfile::one_shot_consumers`] — so a summary
+    /// consumed by queries with different intervals gets one profile
+    /// reflecting all of them, per issue #287's "support a shared sub-DAG
+    /// consumed by queries with different intervals".
+    ///
+    /// `update_rate` is applied uniformly to every discovered site: today's
+    /// [`asap_types::workload::DataCharacteristics`] is a single
+    /// workload-level value (applies to every query in a `QueryWorkload`),
+    /// not per-target, so there is no finer-grained source to attach
+    /// instead. `None` when no `DataCharacteristics` were available —
+    /// preserves "missing metadata" behavior for the update-rate term alone
+    /// even when repeating/one-shot consumer information is present.
+    ///
+    /// Returns [`RecurrenceError::InvalidInterval`] if any
+    /// `RootRecurrence::Repeating` interval is zero.
+    pub fn recurrence_profiles(
+        &self,
+        root_recurrence: &[RootRecurrence],
+        update_rate: Option<UpdateRate>,
+    ) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
+        assert_eq!(
+            root_recurrence.len(),
+            self.roots.len(),
+            "recurrence_profiles: root_recurrence must have one entry per root, in the same \
+             order self.roots is in (got {} entries for {} roots)",
+            root_recurrence.len(),
+            self.roots.len()
+        );
+
+        let mut intervals: HashMap<*const QueryExpr, Vec<RepetitionInterval>> = HashMap::new();
+        let mut one_shot_counts: HashMap<*const QueryExpr, usize> = HashMap::new();
+
+        for ((_, root), recurrence) in self.roots.iter().zip(root_recurrence) {
+            let mut seen: HashSet<*const QueryExpr> = HashSet::new();
+            let mut queue: VecDeque<*const QueryExpr> = VecDeque::new();
+            let root_ptr = Rc::as_ptr(root);
+            seen.insert(root_ptr);
+            queue.push_back(root_ptr);
+
+            while let Some(ptr) = queue.pop_front() {
+                match recurrence {
+                    RootRecurrence::Repeating(interval) => {
+                        intervals.entry(ptr).or_default().push(*interval);
+                    }
+                    RootRecurrence::OneShot => {
+                        *one_shot_counts.entry(ptr).or_insert(0) += 1;
+                    }
+                }
+                // Every reachable node was itself discovered as its own
+                // `MemoGroup` (`discover_targets` walks the identical
+                // relational-skeleton scope) — its own `target` is the
+                // canonical `Rc` to read children off.
+                if let Some(group) = self.groups.get(&ptr) {
+                    for (child, _) in direct_child_counts(&group.target) {
+                        if seen.insert(child) {
+                            queue.push_back(child);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut profiles = HashMap::with_capacity(self.order.len());
+        for ptr in &self.order {
+            let evaluation_rate =
+                evaluation_rate_of(intervals.get(ptr).cloned().unwrap_or_default())?;
+            let one_shot_consumers = one_shot_counts.get(ptr).copied().unwrap_or(0);
+            profiles.insert(
+                *ptr,
+                RecurrenceProfile {
+                    evaluation_rate,
+                    one_shot_consumers,
+                    update_rate,
+                },
+            );
+        }
+
+        Ok(RecurrenceProfileMap { profiles })
     }
 }
 
