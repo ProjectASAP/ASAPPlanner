@@ -547,6 +547,7 @@ function unionStageLaneElements(stage, chosen) {
 function laneElements(laneId, laneLabel, graph, query, stage) {
   const nodes = graph.nodes;
   const byId = new Map(nodes.map((node) => [node.id, node]));
+  const edgeCostByPair = new Map((graph.edge_annotations || []).map((edge) => [`${edge.from} ${edge.to}`, edge.cost]));
   const elements = [
     { data: { id: laneId, label: laneLabel, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
   ];
@@ -555,7 +556,11 @@ function laneElements(laneId, laneLabel, graph, query, stage) {
       data: {
         id: `${laneId}-${node.id}`,
         parent: laneId,
-        label: node.label,
+        // On-graph label carries a concise cost/benefit badge (issue #286)
+        // when this node's decision has one; `node.label` itself (nested,
+        // used everywhere else — the sidebar, schema derivation, …) stays
+        // exactly the plain IR label.
+        label: node.label + nodeCostBadgeSuffix(node),
         node,
         // Flat (not nested under `node`) so buildCyStyle's
         // `node[kind = "KeepPreAsap"]` selector can actually match it —
@@ -583,11 +588,162 @@ function laneElements(laneId, laneLabel, graph, query, stage) {
           source: `${laneId}-${childId}`,
           target: `${laneId}-${node.id}`,
           schemaLabel: formatSchema(byId.get(childId).schema),
+          // Issue #286 edge cost — only ever present when the exporter
+          // found this exact (child -> node) edge genuinely attributable
+          // (a real DAG merge point); `undefined` otherwise, read by
+          // showEdgeDetail.
+          edgeCost: edgeCostByPair.get(`${childId} ${node.id}`),
         },
       });
     }
   }
   return elements;
+}
+
+// ── Issue #286: structured cost/benefit annotations ───────────────────────
+// Renders only what a `dag_export` JSON export explicitly carries
+// (`CostAnnotation`/`WorkloadCostSummary`/`EdgeCostAnnotation` from
+// crates/types/src/cost.rs) — no client-side cost estimation. A value with
+// no `source: "Modeled"|"Measured"` (i.e. `Unavailable`, or the field
+// simply absent from an older export) always reads "Not estimated", never
+// a fabricated number.
+
+function formatCostUnit(unit) {
+  switch (unit) {
+    case 'CostUnitsPerSecond': return 'cost units/s';
+    case 'CostUnits': return 'cost units';
+    case 'RelativeStructuralUnits': return 'relative structural units';
+    default: return unit || 'unknown unit';
+  }
+}
+
+function formatBaselineRef(baseline) {
+  if (!baseline) return '';
+  switch (baseline.kind) {
+    case 'PreAsapRecomputation': return 'pre-ASAP recomputation';
+    case 'HighestRankedNonSelectedCandidate':
+      return `best non-selected candidate (rank ${baseline.detail && baseline.detail.rank})`;
+    case 'Named': return String(baseline.detail || '');
+    default: return baseline.kind || '';
+  }
+}
+
+function formatCostNumber(value) {
+  // Trim to at most 3 decimals without trailing zeros — these are
+  // structural-proxy magnitudes today (see cost.rs's module doc), not
+  // precision-sensitive measurements.
+  return Number(value.toFixed(3)).toString();
+}
+
+// One `<title, CostAnnotation>` block for the sidebar: value + unit +
+// Modeled/Measured/Unavailable badge, baseline/delta/ratio when present,
+// model/benchmark provenance, and the raw `inputs` the value was built
+// from. `annotation` may be `undefined` (an older export with no
+// annotation at all) or `null`/missing `value` (an explicit `Unavailable`)
+// — both render as "Not estimated", never a number.
+function renderCostAnnotation(title, annotation) {
+  if (!annotation) return '';
+  const source = annotation.source || 'Unavailable';
+  const badgeClass = source === 'Modeled' ? 'costBadge--modeled' : source === 'Measured' ? 'costBadge--measured' : 'costBadge--unavailable';
+  if (annotation.value === null || annotation.value === undefined) {
+    return `<div class="costRow"><span class="costLabel">${escapeHtml(title)}</span><span class="costValue">Not estimated</span><span class="costBadge ${badgeClass}">${escapeHtml(source)}</span></div>`;
+  }
+  const unit = formatCostUnit(annotation.unit);
+  const valueText = `${formatCostNumber(annotation.value)} ${unit}`;
+  const metaParts = [];
+  if (annotation.baseline) metaParts.push(`vs ${formatBaselineRef(annotation.baseline)}`);
+  if (typeof annotation.delta === 'number') metaParts.push(`Δ ${formatCostNumber(annotation.delta)} ${unit}`);
+  if (typeof annotation.benefit_ratio === 'number') metaParts.push(`ratio ${(annotation.benefit_ratio * 100).toFixed(1)}%`);
+  const provenanceParts = [];
+  if (annotation.model_version) provenanceParts.push(`model ${annotation.model_version}`);
+  if (annotation.benchmark_id) provenanceParts.push(`benchmark ${annotation.benchmark_id}`);
+  const inputsHtml = (annotation.inputs || []).length
+    ? `<ul class="costInputs">${annotation.inputs.map((input) => `<li><span>${escapeHtml(input.name)}</span><span>${escapeHtml(String(input.value))}${input.unit ? ' ' + escapeHtml(input.unit) : ''}</span></li>`).join('')}</ul>`
+    : '';
+  return `
+    <div class="costRow">
+      <span class="costLabel">${escapeHtml(title)}</span>
+      <span class="costValue">${escapeHtml(valueText)}</span>
+      <span class="costBadge ${badgeClass}">${escapeHtml(source)}</span>
+    </div>
+    ${metaParts.length ? `<div class="costMeta">${escapeHtml(metaParts.join(' · '))}</div>` : ''}
+    ${provenanceParts.length ? `<div class="costMeta">${escapeHtml(provenanceParts.join(' · '))}</div>` : ''}
+    ${inputsHtml}
+  `;
+}
+
+// Baseline/selected/benefit trio for one replacement decision, matching
+// `DagDecision.baseline_cost/selected_cost/benefit` (crates/types/src/dag_export.rs).
+function renderDecisionCostBlock(entry) {
+  if (!entry.baseline_cost && !entry.selected_cost && !entry.benefit) return '';
+  return `<div class="costBlock">
+    <h4>Cost / benefit</h4>
+    ${renderCostAnnotation('Baseline', entry.baseline_cost)}
+    ${renderCostAnnotation('Selected', entry.selected_cost)}
+    ${renderCostAnnotation('Benefit', entry.benefit)}
+  </div>`;
+}
+
+// Short, on-graph badge text for a post-ASAP node's own winning decision —
+// "concise on-graph benefit/cost badges" per issue #286; the full
+// breakdown only ever appears in the sidebar (`renderDecisionCostBlock`).
+// Empty string whenever there's nothing to show (no decision, or its
+// benefit is `Unavailable`) so an un-costed node's label is untouched.
+function nodeCostBadgeSuffix(node) {
+  const benefit = node.decision && node.decision.benefit;
+  if (!benefit || benefit.value === null || benefit.value === undefined) return '';
+  if (typeof benefit.benefit_ratio === 'number') {
+    const pct = Math.abs(benefit.benefit_ratio * 100);
+    return `\n${benefit.benefit_ratio >= 0 ? '▼' : '▲'}${pct >= 10 ? Math.round(pct) : pct.toFixed(1)}%`;
+  }
+  return `\n${benefit.value >= 0 ? '▼' : '▲'}${formatCostNumber(Math.abs(benefit.value))}`;
+}
+
+// Workload-wide baseline/selected/benefit for the currently selected
+// queries, deduplicated by `decision.id` — the same collision-free key
+// `crates/devtools/src/bin/dag_export.rs`'s own `decision_cost_entries`
+// dedupes by (a decision spans every node in its replacement region, and a
+// CSE-shared target can appear in more than one selected query). This
+// aggregates explicit per-node `CostAnnotation`s already in the export; it
+// never estimates a cost itself. Returns `null` when nothing in the
+// selection carries a cost annotation, or when selected annotations
+// disagree on unit (unit-incompatible aggregation is refused, not mixed).
+function computeSelectionWorkloadCost(selected) {
+  const seenDecisions = new Set();
+  let unit = null;
+  let baselineSum = 0;
+  let selectedSum = 0;
+  let any = false;
+  for (const query of selected) {
+    const nodes = (query.post_graph && query.post_graph.nodes) || [];
+    for (const node of nodes) {
+      const decision = node.decision;
+      if (!decision || seenDecisions.has(decision.id)) continue;
+      seenDecisions.add(decision.id);
+      const baseline = decision.baseline_cost;
+      const selectedCost = decision.selected_cost;
+      if (!baseline || !selectedCost) continue;
+      if (baseline.value === null || baseline.value === undefined || selectedCost.value === null || selectedCost.value === undefined) continue;
+      if (unit === null) unit = baseline.unit;
+      if (baseline.unit !== unit || selectedCost.unit !== unit) return null; // unit-incompatible aggregation is rejected
+      baselineSum += baseline.value;
+      selectedSum += selectedCost.value;
+      any = true;
+    }
+  }
+  if (!any) return null;
+  const delta = baselineSum - selectedSum;
+  return {
+    baseline_cost: { value: baselineSum, unit, source: 'Modeled' },
+    selected_cost: { value: selectedSum, unit, source: 'Modeled' },
+    benefit: {
+      value: delta,
+      unit,
+      source: 'Modeled',
+      baseline: { kind: 'PreAsapRecomputation' },
+      benefit_ratio: baselineSum > 0 ? delta / baselineSum : null,
+    },
+  };
 }
 
 function formatSchema(schema) {
@@ -637,6 +793,10 @@ function showEdgeDetail(edge) {
   const sourceNode = source.data('node') || {};
   const targetNode = target.data('node') || {};
   const edgeSchema = edge.data('schemaLabel') || formatSchema(sourceNode.schema);
+  const edgeCost = edge.data('edgeCost');
+  const edgeCostHtml = edgeCost
+    ? `<div class="costBlock"><h4>Edge cost</h4>${renderCostAnnotation('Materialization', edgeCost)}</div>`
+    : '';
   detailSection.innerHTML = `
     <h2>Selected edge</h2>
     <div class="translationBlock">
@@ -644,6 +804,7 @@ function showEdgeDetail(edge) {
       <div><strong>From:</strong> ${escapeHtml(sourceNode.label || source.id())}</div>
       <div><strong>To:</strong> ${escapeHtml(targetNode.label || target.id())}</div>
     </div>
+    ${edgeCostHtml}
     <h3 class="detailSubhead">Schema carried by this edge</h3>
     <pre>${escapeHtml(edgeSchema || '(schema unavailable)')}</pre>
     <h3 class="detailSubhead">How the schema is produced</h3>
@@ -663,7 +824,17 @@ function renderScopeSummary(selected) {
   }));
   const scope = selected.length === 1 ? 'Single query' : `Batch workload · ${selected.length} queries`;
   const strategyText = strategies.size ? `Winning strategies: ${Array.from(strategies).join(', ')}` : 'No selected replacements';
-  scopePickerEl.innerHTML = `<div class="scopeGroup"><div class="scopeGroupLabel">View scope</div><div class="scopeRow active"><span>${escapeHtml(scope)}</span><span class="scopeMeta">${escapeHtml(strategyText)}</span></div></div>`;
+  // Single query: use the exporter's own precomputed `NamedGraph.workload_cost`
+  // directly. Multiple queries: no single precomputed field covers exactly
+  // this subset, so aggregate the explicit per-decision annotations already
+  // in the export (dedup by `decision.id`) — see
+  // computeSelectionWorkloadCost's own doc for why this is aggregation, not
+  // client-side cost estimation.
+  const costSummary = selected.length === 1 ? selected[0].workload_cost : computeSelectionWorkloadCost(selected);
+  const costHtml = costSummary
+    ? `<div class="scopeGroup"><div class="scopeGroupLabel">Workload cost</div><div class="costBlock">${renderCostAnnotation('Baseline', costSummary.baseline_cost)}${renderCostAnnotation('Selected', costSummary.selected_cost)}${renderCostAnnotation('Benefit', costSummary.benefit)}</div></div>`
+    : '';
+  scopePickerEl.innerHTML = `<div class="scopeGroup"><div class="scopeGroupLabel">View scope</div><div class="scopeRow active"><span>${escapeHtml(scope)}</span><span class="scopeMeta">${escapeHtml(strategyText)}</span></div></div>${costHtml}`;
 }
 
 function translationsForNode(query, node, stage) {
@@ -730,6 +901,7 @@ function showPrePostDetail(data) {
         <div class="translationMeta">${entry.role === 'replacement_root' ? 'This node replaces the pre-ASAP target.' : 'This node is generated or carried inside the replacement region.'}</div>
         <div class="translationReason">${escapeHtml(entry.rationale || 'No rationale recorded.')}</div>
         <div class="translationTarget">${entry.target_pre_id === undefined ? `decision #${entry.id}` : `pre-ASAP target node #${entry.target_pre_id}`} · output ${escapeHtml(entry.output_kind || node.kind)}</div>
+        ${renderDecisionCostBlock(entry)}
       </div>`).join('');
     translationHtml = `<div class="translationBlock"><h3>Why this post-ASAP translation</h3>${cards}</div>`;
   } else if (data.stage === 'post') {

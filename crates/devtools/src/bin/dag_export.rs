@@ -53,8 +53,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-use asap_aware_mapping::cost_model::DefaultCostModel;
+use asap_aware_mapping::cost_model::{default_cse_recompute_cost, DefaultCostModel};
 use asap_aware_mapping::replacement::{search_workload, Replacement, ReplacementSubDAG};
+use asap_types::cost::{BaselineRef, CostAnnotation, CostInput, CostSource, CostUnit};
 use asap_types::dag_export::{
     self, DagDecision, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetRejection,
     TargetReplacement, TargetReplacementAfter, WorkloadGraph,
@@ -64,6 +65,83 @@ use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
+
+/// `model_version` tag for every [`CostAnnotation`] this binary computes —
+/// see [`winner_cost_annotations`]'s own doc for what it's a structural
+/// proxy for and why (issue #286, issue #287 is the real rate-modeling
+/// follow-up).
+const STRUCTURAL_COST_MODEL_VERSION: &str = "dag_export-structural-cost-v1";
+
+/// Baseline/selected/benefit [`CostAnnotation`]s for one [`Winner`] — issue
+/// #286's "replacement-region baseline cost, selected cost, and benefit"
+/// granularity item, reused verbatim for [`TargetReplacement`] and for the
+/// [`DagDecision`] carried by every node the winning candidate produced or
+/// carried.
+///
+/// The baseline is always [`BaselineRef::PreAsapRecomputation`]: the cost of
+/// recomputing `target` independently at every one of its `consumer_count`
+/// use sites, via
+/// [`default_cse_recompute_cost`] — the exact structural-size proxy
+/// `asap_aware_mapping::cost_model`'s own `DefaultCostModel` already uses,
+/// not a second formula. This baseline is always computable (never
+/// `Unavailable`) since it only needs `target` itself, unlike `selected`,
+/// which is `Unavailable` whenever `selected_cost` is `NaN` (the plugged-in
+/// cost model has no numeric estimate for that particular candidate shape —
+/// see [`RankedGroup::costs`](asap_aware_mapping::replacement::RankedGroup::costs)'s
+/// own doc).
+///
+/// Every value here is unit-tagged [`CostUnit::RelativeStructuralUnits`],
+/// not [`CostUnit::CostUnitsPerSecond`]: today's cost model has no
+/// `update_rate`/`evaluation_rate`/`query_interval` recurrence inputs at all
+/// (issue #287's job) — see `asap_types::cost`'s module doc for why this
+/// crate refuses to mislabel a structural proxy as a real rate.
+fn winner_cost_annotations(
+    target: &QueryExpr,
+    consumer_count: usize,
+    selected_cost: f64,
+) -> (CostAnnotation, CostAnnotation, CostAnnotation) {
+    let per_consumer_recompute = default_cse_recompute_cost(target).0;
+    let baseline_value = per_consumer_recompute * consumer_count.max(1) as f64;
+    let baseline = CostAnnotation::modeled(
+        baseline_value,
+        CostUnit::RelativeStructuralUnits,
+        STRUCTURAL_COST_MODEL_VERSION,
+        vec![
+            CostInput::new("per_consumer_recompute_cost", per_consumer_recompute),
+            CostInput::new("consumer_count", consumer_count.max(1) as f64),
+        ],
+    );
+
+    if !selected_cost.is_finite() {
+        return (
+            baseline,
+            CostAnnotation::unavailable(CostUnit::RelativeStructuralUnits),
+            CostAnnotation::unavailable(CostUnit::RelativeStructuralUnits),
+        );
+    }
+
+    let selected = CostAnnotation::modeled(
+        selected_cost,
+        CostUnit::RelativeStructuralUnits,
+        STRUCTURAL_COST_MODEL_VERSION,
+        vec![],
+    )
+    .with_baseline(BaselineRef::PreAsapRecomputation, baseline_value);
+
+    let benefit = CostAnnotation {
+        value: selected.delta,
+        unit: CostUnit::RelativeStructuralUnits,
+        source: CostSource::Modeled,
+        baseline: Some(BaselineRef::PreAsapRecomputation),
+        delta: None,
+        benefit_ratio: selected.benefit_ratio,
+        model_version: Some(STRUCTURAL_COST_MODEL_VERSION.to_string()),
+        benchmark_id: None,
+        inputs: Vec::new(),
+    };
+
+    (baseline, selected, benefit)
+}
 
 use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
 
@@ -251,6 +329,10 @@ struct Winner<'a> {
     target: &'a Rc<QueryExpr>,
     candidate: &'a ReplacementSubDAG,
     cost: f64,
+    /// The target's own `MemoGroup::consumer_count` — threaded through so
+    /// [`winner_cost_annotations`] can compute a baseline without a second
+    /// lookup back into `PlanSpace`.
+    consumer_count: usize,
 }
 
 /// Short explanation intended for a selected winner in node-level UI. The
@@ -316,6 +398,30 @@ fn lookup_winner(
         .find(|&i| expr == winners[i].target.as_ref())
 }
 
+/// One `(decision.id, baseline_cost, selected_cost)` triple per *distinct*
+/// [`DagDecision`] carried anywhere in `graph` — collapsing every node that
+/// shares one `decision.id` (a replacement region can span many nodes, all
+/// carrying an identical clone of the same decision) down to a single
+/// entry, so a caller summing these never counts one decision's cost once
+/// per node it happens to touch.
+fn decision_cost_entries(graph: &DagGraph) -> Vec<(u32, CostAnnotation, CostAnnotation)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    for node in &graph.nodes {
+        let Some(decision) = &node.decision else {
+            continue;
+        };
+        if !seen.insert(decision.id) {
+            continue;
+        }
+        let (Some(baseline), Some(selected)) = (&decision.baseline_cost, &decision.selected_cost) else {
+            continue;
+        };
+        entries.push((decision.id, baseline.clone(), selected.clone()));
+    }
+    entries
+}
+
 /// Build a [`TargetReplacement`] for `winner`, matching this file's own
 /// per-target `before`/`after` construction.
 fn target_replacement(
@@ -333,6 +439,8 @@ fn target_replacement(
             TargetReplacementAfter::Rewrite(dag_export::export(rewritten))
         }
     };
+    let (baseline_cost, selected_cost, benefit) =
+        winner_cost_annotations(winner.target, winner.consumer_count, winner.cost);
     TargetReplacement {
         decision_id,
         target_pre_id,
@@ -342,6 +450,9 @@ fn target_replacement(
         cost: winner.cost,
         before,
         after,
+        baseline_cost: Some(baseline_cost),
+        selected_cost: Some(selected_cost),
+        benefit: Some(benefit),
     }
 }
 
@@ -465,6 +576,7 @@ fn run_post_asap_with_progress(
                 target: group.target,
                 candidate,
                 cost: group.costs[0],
+                consumer_count: group.consumer_count,
             })
         })
         .collect();
@@ -507,6 +619,8 @@ fn run_post_asap_with_progress(
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
         let winner = &winners[i];
+        let (baseline_cost, selected_cost, benefit) =
+            winner_cost_annotations(winner.target, winner.consumer_count, winner.cost);
         let decision = DagDecision {
             id: i as u32,
             strategy: winner.candidate.strategy.to_string(),
@@ -514,6 +628,9 @@ fn run_post_asap_with_progress(
             rank: 0,
             cost: winner.cost,
             role: "replacement_region",
+            baseline_cost: Some(baseline_cost),
+            selected_cost: Some(selected_cost),
+            benefit: Some(benefit),
         };
         Some(match &winners[i].candidate.replacement {
             Replacement::Rewrite(rc) => PostAsapSubstitution::Rewrite {
@@ -711,6 +828,7 @@ async fn main() {
             replacements: Vec::new(),
             post_graph: None,
             rejections: Vec::new(),
+            workload_cost: None,
         });
     }
     for (explanation, matched) in explanations.iter().zip(matched) {
@@ -759,7 +877,54 @@ async fn main() {
         assign_workload_node_ids(&mut post_graphs);
     }
 
-    let workload = WorkloadGraph { queries };
+    // Whole selected-workload cost/benefit (issue #286) — per query, and
+    // for the whole selected workload. `decision.id` (== the winning
+    // `Winner`'s own index — see `run_post_asap_with_progress`) is already
+    // a collision-free dedup key for a decision shared across multiple
+    // nodes (a replacement region spans several nodes, all carrying the
+    // same `decision.id`) and across multiple queries (a CSE-shared target
+    // reachable from more than one query's root) alike, so it's reused
+    // directly as `sum_workload_costs`'s dedup key — no separate lookup
+    // needed.
+    let mut workload_entries = Vec::new();
+    for query in &mut queries {
+        let Some(post_graph) = &query.post_graph else {
+            continue;
+        };
+        let entries = decision_cost_entries(post_graph);
+        if entries.is_empty() {
+            continue;
+        }
+        match asap_types::cost::workload_cost_summary(
+            entries.iter().map(|(id, baseline, selected)| (Some(*id), baseline, selected)),
+            "dag_export-workload-cost-v1",
+        ) {
+            Ok(summary) => query.workload_cost = Some(summary),
+            Err(mismatch) => eprintln!("dag_export: workload cost aggregation for {:?} skipped — {mismatch}", query.name),
+        }
+        workload_entries.extend(entries);
+    }
+    let workload_cost = if workload_entries.is_empty() {
+        None
+    } else {
+        match asap_types::cost::workload_cost_summary(
+            workload_entries
+                .iter()
+                .map(|(id, baseline, selected)| (Some(*id), baseline, selected)),
+            "dag_export-workload-cost-v1",
+        ) {
+            Ok(summary) => Some(summary),
+            Err(mismatch) => {
+                eprintln!("dag_export: workload-wide cost aggregation skipped — {mismatch}");
+                None
+            }
+        }
+    };
+
+    let workload = WorkloadGraph {
+        queries,
+        workload_cost,
+    };
     if progress {
         eprintln!(
             "Total planner time: {:.2} ms",
