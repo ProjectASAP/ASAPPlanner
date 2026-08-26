@@ -87,7 +87,7 @@
             "notes": [
               {
                 "kind": "SketchApproximation",
-                "reason": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with); count realizes as a CountSketch sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)"
+                "reason": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with); count realizes as a CountSketch sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with); count realizes as a shared HydraCms structure over Cms serving every subpopulation of this grouped aggregate, instead of one Cms instance per distinct `by` key — legal because this aggregate has a non-empty subpopulation concept and Cms has a modeled Hydra variant (asap_types::post_asap::hydra_kind_for); whether it's *worth* the shared/independent trade-off for the actual subpopulation cardinality is a CostModel's call, not this strategy's; count realizes as a shared HydraCountSketch structure over CountSketch serving every subpopulation of this grouped aggregate, instead of one CountSketch instance per distinct `by` key — legal because this aggregate has a non-empty subpopulation concept and CountSketch has a modeled Hydra variant (asap_types::post_asap::hydra_kind_for); whether it's *worth* the shared/independent trade-off for the actual subpopulation cardinality is a CostModel's call, not this strategy's"
               }
             ]
           },
@@ -119,6 +119,339 @@
           }
         ],
         "root": 2
+      },
+      "replacements": [
+        {
+          "decision_id": 0,
+          "target_pre_id": 1,
+          "strategy": "SketchAlgorithmStrategy",
+          "rationale": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)",
+          "rank": 0,
+          "cost": 3.0,
+          "before": {
+            "nodes": [
+              {
+                "id": 0,
+                "kind": "Scan",
+                "label": "Scan(metrics)",
+                "detail": {
+                  "predicates": [],
+                  "schema": {
+                    "closed": true,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "service",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "region",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "latency",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "int64",
+                        "name": "bytes",
+                        "nullable": false,
+                        "table": "metrics"
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "source": {
+                    "Table": {
+                      "table_ref": "metrics"
+                    }
+                  }
+                },
+                "children": [],
+                "hash": 2606922452740434172
+              },
+              {
+                "id": 1,
+                "kind": "Aggregate",
+                "label": "Aggregate(1 measures)",
+                "detail": {
+                  "having": null,
+                  "measures": [
+                    {
+                      "accuracy": {
+                        "Epsilon": 0.01
+                      },
+                      "kind": "count"
+                    }
+                  ],
+                  "output_names": [
+                    "count(*)"
+                  ],
+                  "reduction": {
+                    "Reduce": [
+                      1
+                    ]
+                  }
+                },
+                "children": [
+                  0
+                ],
+                "hash": 12396162568747900801
+              }
+            ],
+            "root": 1
+          },
+          "after": {
+            "kind": "Summary",
+            "graph": {
+              "nodes": [
+                {
+                  "id": 0,
+                  "kind": "KeepPreAsap",
+                  "label": "KeepPreAsap(Scan)",
+                  "detail": {
+                    "pre_asap_subgraph": {
+                      "nodes": [
+                        {
+                          "children": [],
+                          "detail": {
+                            "predicates": [],
+                            "schema": {
+                              "closed": true,
+                              "columns": [
+                                {
+                                  "dtype": "timestamp",
+                                  "name": "ts",
+                                  "nullable": false,
+                                  "table": "metrics"
+                                },
+                                {
+                                  "dtype": "utf8",
+                                  "name": "service",
+                                  "nullable": false,
+                                  "table": "metrics"
+                                },
+                                {
+                                  "dtype": "utf8",
+                                  "name": "region",
+                                  "nullable": false,
+                                  "table": "metrics"
+                                },
+                                {
+                                  "dtype": "float64",
+                                  "name": "latency",
+                                  "nullable": false,
+                                  "table": "metrics"
+                                },
+                                {
+                                  "dtype": "int64",
+                                  "name": "bytes",
+                                  "nullable": false,
+                                  "table": "metrics"
+                                }
+                              ],
+                              "time_index": 0,
+                              "unique_keys": []
+                            },
+                            "source": {
+                              "Table": {
+                                "table_ref": "metrics"
+                              }
+                            }
+                          },
+                          "hash": 2606922452740434172,
+                          "id": 0,
+                          "kind": "Scan",
+                          "label": "Scan(metrics)"
+                        }
+                      ],
+                      "root": 0
+                    }
+                  },
+                  "children": []
+                },
+                {
+                  "id": 1,
+                  "kind": "SummaryAgg",
+                  "label": "SummaryAgg(Sketch(Cms))",
+                  "detail": {
+                    "col": "SampleValue",
+                    "family": "Sketch(SketchKind { category: Frequency, algorithm: Cms, params: Cms { width: 272, depth: 5 } }, PerSubpopulationInstance)",
+                    "grouping": "PerSubpopulationInstance",
+                    "reduction": {
+                      "Reduce": [
+                        1
+                      ]
+                    }
+                  },
+                  "children": [
+                    0
+                  ]
+                },
+                {
+                  "id": 2,
+                  "kind": "SummaryEstimate",
+                  "label": "SummaryEstimate(PointCount { key: SampleValue, value: None })",
+                  "detail": {
+                    "query": "PointCount { key: SampleValue, value: None }"
+                  },
+                  "children": [
+                    1
+                  ]
+                }
+              ],
+              "root": 2
+            }
+          }
+        }
+      ],
+      "post_graph": {
+        "nodes": [
+          {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(metrics)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": true,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "service",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "region",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "int64",
+                    "name": "bytes",
+                    "nullable": false,
+                    "table": "metrics"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "Table": {
+                  "table_ref": "metrics"
+                }
+              }
+            },
+            "children": [],
+            "hash": 2606922452740434172,
+            "decision": {
+              "id": 0,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)",
+              "rank": 0,
+              "cost": 3.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 1,
+            "kind": "SummaryAgg",
+            "label": "SummaryAgg(Sketch(Cms))",
+            "detail": {
+              "col": "SampleValue",
+              "family": "Sketch(SketchKind { category: Frequency, algorithm: Cms, params: Cms { width: 272, depth: 5 } }, PerSubpopulationInstance)",
+              "grouping": "PerSubpopulationInstance",
+              "reduction": {
+                "Reduce": [
+                  1
+                ]
+              }
+            },
+            "children": [
+              0
+            ],
+            "decision": {
+              "id": 0,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)",
+              "rank": 0,
+              "cost": 3.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 2,
+            "kind": "SummaryEstimate",
+            "label": "SummaryEstimate(PointCount { key: SampleValue, value: None })",
+            "detail": {
+              "query": "PointCount { key: SampleValue, value: None }"
+            },
+            "children": [
+              1
+            ],
+            "decision": {
+              "id": 0,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)",
+              "rank": 0,
+              "cost": 3.0,
+              "role": "replacement_root"
+            }
+          },
+          {
+            "id": 3,
+            "kind": "Project",
+            "label": "Project(2 cols)",
+            "detail": {
+              "cols": [
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 0
+                  }
+                },
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 1
+                  }
+                }
+              ],
+              "qualifier": null
+            },
+            "children": [
+              2
+            ],
+            "hash": 17063396757587155626
+          }
+        ],
+        "root": 3
       }
     },
     {
@@ -232,6 +565,575 @@
           }
         ],
         "root": 2
+      },
+      "replacements": [
+        {
+          "decision_id": 1,
+          "target_pre_id": 1,
+          "strategy": "AvgToSumOverCountStrategy",
+          "rationale": "avg has no summary realization at all (replacement::implementations_for_with dispatches it to PassThrough) and so can never share or sketch; rewriting it into sum/count under the same grouping — re-divided back into the original avg column by a wrapping Project — computes the same result from two ordinary mergeable accumulators SharedSubtreeStrategy (and a future sketch-family search) can actually reuse across the workload",
+          "rank": 0,
+          "cost": 2.0,
+          "before": {
+            "nodes": [
+              {
+                "id": 0,
+                "kind": "Scan",
+                "label": "Scan(metrics)",
+                "detail": {
+                  "predicates": [],
+                  "schema": {
+                    "closed": true,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "service",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "region",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "latency",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "int64",
+                        "name": "bytes",
+                        "nullable": false,
+                        "table": "metrics"
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "source": {
+                    "Table": {
+                      "table_ref": "metrics"
+                    }
+                  }
+                },
+                "children": [],
+                "hash": 2606922452740434172
+              },
+              {
+                "id": 1,
+                "kind": "Aggregate",
+                "label": "Aggregate(1 measures)",
+                "detail": {
+                  "having": null,
+                  "measures": [
+                    {
+                      "col": 3,
+                      "kind": "avg"
+                    }
+                  ],
+                  "output_names": [
+                    "avg(metrics.latency)"
+                  ],
+                  "reduction": {
+                    "Reduce": [
+                      1
+                    ]
+                  }
+                },
+                "children": [
+                  0
+                ],
+                "hash": 5109904469838189862
+              }
+            ],
+            "root": 1
+          },
+          "after": {
+            "kind": "Rewrite",
+            "graph": {
+              "nodes": [
+                {
+                  "id": 0,
+                  "kind": "Scan",
+                  "label": "Scan(metrics)",
+                  "detail": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": true,
+                      "columns": [
+                        {
+                          "dtype": "timestamp",
+                          "name": "ts",
+                          "nullable": false,
+                          "table": "metrics"
+                        },
+                        {
+                          "dtype": "utf8",
+                          "name": "service",
+                          "nullable": false,
+                          "table": "metrics"
+                        },
+                        {
+                          "dtype": "utf8",
+                          "name": "region",
+                          "nullable": false,
+                          "table": "metrics"
+                        },
+                        {
+                          "dtype": "float64",
+                          "name": "latency",
+                          "nullable": false,
+                          "table": "metrics"
+                        },
+                        {
+                          "dtype": "int64",
+                          "name": "bytes",
+                          "nullable": false,
+                          "table": "metrics"
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "Table": {
+                        "table_ref": "metrics"
+                      }
+                    }
+                  },
+                  "children": [],
+                  "hash": 2606922452740434172
+                },
+                {
+                  "id": 1,
+                  "kind": "Aggregate",
+                  "label": "Aggregate(1 measures)",
+                  "detail": {
+                    "having": null,
+                    "measures": [
+                      {
+                        "col": 3,
+                        "kind": "sum"
+                      }
+                    ],
+                    "output_names": [],
+                    "reduction": {
+                      "Reduce": [
+                        1
+                      ]
+                    }
+                  },
+                  "children": [
+                    0
+                  ],
+                  "hash": 18377191452169790973
+                },
+                {
+                  "id": 2,
+                  "kind": "Project",
+                  "label": "Project(2 cols)",
+                  "detail": {
+                    "cols": [
+                      {
+                        "alias": null,
+                        "expr": {
+                          "Column": 0
+                        }
+                      },
+                      {
+                        "alias": "avg(metrics.latency)",
+                        "expr": {
+                          "Cast": {
+                            "expr": {
+                              "Column": 1
+                            },
+                            "to": "float64",
+                            "try_cast": false
+                          }
+                        }
+                      }
+                    ],
+                    "qualifier": null
+                  },
+                  "children": [
+                    1
+                  ],
+                  "hash": 11401885529025699918
+                },
+                {
+                  "id": 3,
+                  "kind": "Scan",
+                  "label": "Scan(metrics)",
+                  "detail": {
+                    "predicates": [],
+                    "schema": {
+                      "closed": true,
+                      "columns": [
+                        {
+                          "dtype": "timestamp",
+                          "name": "ts",
+                          "nullable": false,
+                          "table": "metrics"
+                        },
+                        {
+                          "dtype": "utf8",
+                          "name": "service",
+                          "nullable": false,
+                          "table": "metrics"
+                        },
+                        {
+                          "dtype": "utf8",
+                          "name": "region",
+                          "nullable": false,
+                          "table": "metrics"
+                        },
+                        {
+                          "dtype": "float64",
+                          "name": "latency",
+                          "nullable": false,
+                          "table": "metrics"
+                        },
+                        {
+                          "dtype": "int64",
+                          "name": "bytes",
+                          "nullable": false,
+                          "table": "metrics"
+                        }
+                      ],
+                      "time_index": 0,
+                      "unique_keys": []
+                    },
+                    "source": {
+                      "Table": {
+                        "table_ref": "metrics"
+                      }
+                    }
+                  },
+                  "children": [],
+                  "hash": 2606922452740434172
+                },
+                {
+                  "id": 4,
+                  "kind": "Aggregate",
+                  "label": "Aggregate(1 measures)",
+                  "detail": {
+                    "having": null,
+                    "measures": [
+                      {
+                        "accuracy": "Exact",
+                        "kind": "count"
+                      }
+                    ],
+                    "output_names": [],
+                    "reduction": {
+                      "Reduce": [
+                        1
+                      ]
+                    }
+                  },
+                  "children": [
+                    3
+                  ],
+                  "hash": 6760740959892251122
+                },
+                {
+                  "id": 5,
+                  "kind": "BinaryOp",
+                  "label": "BinaryOp(/)",
+                  "detail": {
+                    "op": "/",
+                    "vector_match": null
+                  },
+                  "children": [
+                    2,
+                    4
+                  ],
+                  "hash": 16391872732257280252
+                }
+              ],
+              "root": 5
+            }
+          }
+        }
+      ],
+      "post_graph": {
+        "nodes": [
+          {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(metrics)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": true,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "service",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "region",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "int64",
+                    "name": "bytes",
+                    "nullable": false,
+                    "table": "metrics"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "Table": {
+                  "table_ref": "metrics"
+                }
+              }
+            },
+            "children": [],
+            "hash": 2606922452740434172,
+            "decision": {
+              "id": 3,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rank": 0,
+              "cost": 3.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 1,
+            "kind": "SummaryAgg",
+            "label": "SummaryAgg(ExactAggregate(Sum))",
+            "detail": {
+              "col": {
+                "Qualified": {
+                  "name": "latency",
+                  "table": "metrics"
+                }
+              },
+              "family": "ExactAggregate(Sum, Sum)",
+              "grouping": "PerSubpopulationInstance",
+              "reduction": {
+                "Reduce": [
+                  1
+                ]
+              }
+            },
+            "children": [
+              0
+            ],
+            "decision": {
+              "id": 3,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rank": 0,
+              "cost": 3.0,
+              "role": "replacement_root"
+            }
+          },
+          {
+            "id": 2,
+            "kind": "Project",
+            "label": "Project(2 cols)",
+            "detail": {
+              "cols": [
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 0
+                  }
+                },
+                {
+                  "alias": "avg(metrics.latency)",
+                  "expr": {
+                    "Cast": {
+                      "expr": {
+                        "Column": 1
+                      },
+                      "to": "float64",
+                      "try_cast": false
+                    }
+                  }
+                }
+              ],
+              "qualifier": null
+            },
+            "children": [
+              1
+            ],
+            "hash": 11401885529025699918,
+            "decision": {
+              "id": 1,
+              "strategy": "AvgToSumOverCountStrategy",
+              "rationale": "avg has no summary realization at all (replacement::implementations_for_with dispatches it to PassThrough) and so can never share or sketch; rewriting it into sum/count under the same grouping — re-divided back into the original avg column by a wrapping Project — computes the same result from two ordinary mergeable accumulators SharedSubtreeStrategy (and a future sketch-family search) can actually reuse across the workload",
+              "rank": 0,
+              "cost": 2.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 3,
+            "kind": "Scan",
+            "label": "Scan(metrics)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": true,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "service",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "utf8",
+                    "name": "region",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "latency",
+                    "nullable": false,
+                    "table": "metrics"
+                  },
+                  {
+                    "dtype": "int64",
+                    "name": "bytes",
+                    "nullable": false,
+                    "table": "metrics"
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "Table": {
+                  "table_ref": "metrics"
+                }
+              }
+            },
+            "children": [],
+            "hash": 2606922452740434172,
+            "decision": {
+              "id": 4,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "count realizes as an exact Count accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rank": 0,
+              "cost": 3.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 4,
+            "kind": "SummaryAgg",
+            "label": "SummaryAgg(ExactAggregate(Count))",
+            "detail": {
+              "col": "SampleValue",
+              "family": "ExactAggregate(Count, Count)",
+              "grouping": "PerSubpopulationInstance",
+              "reduction": {
+                "Reduce": [
+                  1
+                ]
+              }
+            },
+            "children": [
+              3
+            ],
+            "decision": {
+              "id": 4,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "count realizes as an exact Count accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rank": 0,
+              "cost": 3.0,
+              "role": "replacement_root"
+            }
+          },
+          {
+            "id": 5,
+            "kind": "BinaryOp",
+            "label": "BinaryOp(/)",
+            "detail": {
+              "op": "/",
+              "vector_match": null
+            },
+            "children": [
+              2,
+              4
+            ],
+            "hash": 16391872732257280252,
+            "decision": {
+              "id": 1,
+              "strategy": "AvgToSumOverCountStrategy",
+              "rationale": "avg has no summary realization at all (replacement::implementations_for_with dispatches it to PassThrough) and so can never share or sketch; rewriting it into sum/count under the same grouping — re-divided back into the original avg column by a wrapping Project — computes the same result from two ordinary mergeable accumulators SharedSubtreeStrategy (and a future sketch-family search) can actually reuse across the workload",
+              "rank": 0,
+              "cost": 2.0,
+              "role": "replacement_root"
+            }
+          },
+          {
+            "id": 6,
+            "kind": "Project",
+            "label": "Project(2 cols)",
+            "detail": {
+              "cols": [
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 0
+                  }
+                },
+                {
+                  "alias": null,
+                  "expr": {
+                    "Column": 1
+                  }
+                }
+              ],
+              "qualifier": null
+            },
+            "children": [
+              5
+            ],
+            "hash": 5277207484379927121
+          }
+        ],
+        "root": 6
       }
     },
     {
@@ -308,6 +1210,301 @@
               1
             ],
             "hash": 12607242477503010192
+          },
+          {
+            "id": 3,
+            "kind": "Sort",
+            "label": "Sort(1 keys)",
+            "detail": {
+              "keys": [
+                {
+                  "ascending": false,
+                  "expr": {
+                    "Column": 1
+                  },
+                  "nulls_first": false
+                }
+              ],
+              "partition_by": []
+            },
+            "children": [
+              2
+            ],
+            "hash": 3760917937445997010
+          },
+          {
+            "id": 4,
+            "kind": "Limit",
+            "label": "Limit(5)",
+            "detail": {
+              "n": 5,
+              "offset": 0
+            },
+            "children": [
+              3
+            ],
+            "hash": 7672123412300577486
+          }
+        ],
+        "root": 4
+      },
+      "replacements": [
+        {
+          "decision_id": 2,
+          "target_pre_id": 2,
+          "strategy": "SketchAlgorithmStrategy",
+          "rationale": "Rate realizes as an exact Rate accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+          "rank": 0,
+          "cost": 4.0,
+          "before": {
+            "nodes": [
+              {
+                "id": 0,
+                "kind": "Scan",
+                "label": "Scan(http_requests_total)",
+                "detail": {
+                  "predicates": [],
+                  "schema": {
+                    "closed": false,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "value",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
+                  "source": {
+                    "TimeSeries": {
+                      "metric": "http_requests_total"
+                    }
+                  }
+                },
+                "children": [],
+                "hash": 16569634401303792668
+              },
+              {
+                "id": 1,
+                "kind": "TimeRange",
+                "label": "TimeRange(300s)",
+                "detail": {
+                  "range": {
+                    "nanos": 0,
+                    "secs": 300
+                  }
+                },
+                "children": [
+                  0
+                ],
+                "hash": 12007712336004404578
+              },
+              {
+                "id": 2,
+                "kind": "Aggregate",
+                "label": "Aggregate(1 measures)",
+                "detail": {
+                  "having": null,
+                  "measures": [
+                    {
+                      "kind": "rate"
+                    }
+                  ],
+                  "output_names": [
+                    ""
+                  ],
+                  "reduction": "PerEntity"
+                },
+                "children": [
+                  1
+                ],
+                "hash": 12607242477503010192
+              }
+            ],
+            "root": 2
+          },
+          "after": {
+            "kind": "Summary",
+            "graph": {
+              "nodes": [
+                {
+                  "id": 0,
+                  "kind": "KeepPreAsap",
+                  "label": "KeepPreAsap(TimeRange)",
+                  "detail": {
+                    "pre_asap_subgraph": {
+                      "nodes": [
+                        {
+                          "children": [],
+                          "detail": {
+                            "predicates": [],
+                            "schema": {
+                              "closed": false,
+                              "columns": [
+                                {
+                                  "dtype": "timestamp",
+                                  "name": "ts",
+                                  "nullable": false,
+                                  "table": null
+                                },
+                                {
+                                  "dtype": "float64",
+                                  "name": "value",
+                                  "nullable": false,
+                                  "table": null
+                                }
+                              ],
+                              "time_index": 0,
+                              "unique_keys": []
+                            },
+                            "source": {
+                              "TimeSeries": {
+                                "metric": "http_requests_total"
+                              }
+                            }
+                          },
+                          "hash": 16569634401303792668,
+                          "id": 0,
+                          "kind": "Scan",
+                          "label": "Scan(http_requests_total)"
+                        },
+                        {
+                          "children": [
+                            0
+                          ],
+                          "detail": {
+                            "range": {
+                              "nanos": 0,
+                              "secs": 300
+                            }
+                          },
+                          "hash": 12007712336004404578,
+                          "id": 1,
+                          "kind": "TimeRange",
+                          "label": "TimeRange(300s)"
+                        }
+                      ],
+                      "root": 1
+                    }
+                  },
+                  "children": []
+                },
+                {
+                  "id": 1,
+                  "kind": "SummaryAgg",
+                  "label": "SummaryAgg(ExactAggregate(Rate))",
+                  "detail": {
+                    "col": "SampleValue",
+                    "family": "ExactAggregate(Rate, Rate)",
+                    "grouping": "PerSubpopulationInstance",
+                    "reduction": "PerEntity"
+                  },
+                  "children": [
+                    0
+                  ]
+                }
+              ],
+              "root": 1
+            }
+          }
+        }
+      ],
+      "post_graph": {
+        "nodes": [
+          {
+            "id": 0,
+            "kind": "Scan",
+            "label": "Scan(http_requests_total)",
+            "detail": {
+              "predicates": [],
+              "schema": {
+                "closed": false,
+                "columns": [
+                  {
+                    "dtype": "timestamp",
+                    "name": "ts",
+                    "nullable": false,
+                    "table": null
+                  },
+                  {
+                    "dtype": "float64",
+                    "name": "value",
+                    "nullable": false,
+                    "table": null
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": []
+              },
+              "source": {
+                "TimeSeries": {
+                  "metric": "http_requests_total"
+                }
+              }
+            },
+            "children": [],
+            "hash": 16569634401303792668,
+            "decision": {
+              "id": 2,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "Rate realizes as an exact Rate accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rank": 0,
+              "cost": 4.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 1,
+            "kind": "TimeRange",
+            "label": "TimeRange(300s)",
+            "detail": {
+              "range": {
+                "nanos": 0,
+                "secs": 300
+              }
+            },
+            "children": [
+              0
+            ],
+            "hash": 12007712336004404578,
+            "decision": {
+              "id": 2,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "Rate realizes as an exact Rate accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rank": 0,
+              "cost": 4.0,
+              "role": "replacement_region"
+            }
+          },
+          {
+            "id": 2,
+            "kind": "SummaryAgg",
+            "label": "SummaryAgg(ExactAggregate(Rate))",
+            "detail": {
+              "col": "SampleValue",
+              "family": "ExactAggregate(Rate, Rate)",
+              "grouping": "PerSubpopulationInstance",
+              "reduction": "PerEntity"
+            },
+            "children": [
+              1
+            ],
+            "decision": {
+              "id": 2,
+              "strategy": "SketchAlgorithmStrategy",
+              "rationale": "Rate realizes as an exact Rate accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rank": 0,
+              "cost": 4.0,
+              "role": "replacement_root"
+            }
           },
           {
             "id": 3,

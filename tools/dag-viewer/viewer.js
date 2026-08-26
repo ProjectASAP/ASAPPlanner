@@ -718,7 +718,10 @@ function renderBeforeAfter() {
   const missing = selected.filter((q) => !q.post_graph);
   if (missing.length > 0) {
     viewTitleEl.textContent = selected.length === 1 ? `Before/After: ${selected[0].name}` : `Batch Before/After: ${selected.length} queries`;
-    showModeHint(`No post-ASAP graph for: ${missing.map((q) => q.name).join(', ')}. Re-export with dag_export --post-asap.`);
+    const action = document.getElementById('plannerRun')
+      ? 'Open Query planner and click “Plan selected workload”, or re-export with dag_export --post-asap.'
+      : 'Re-export with dag_export --post-asap.';
+    showModeHint(`No post-ASAP graph for: ${missing.map((q) => q.name).join(', ')}. ${action}`);
     return;
   }
   hideModeHint();
