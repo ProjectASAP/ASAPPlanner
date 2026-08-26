@@ -13,6 +13,11 @@ The viewer has one visualization mode: **Pre/Post-ASAP**.
   target operation derives its output schema in the details panel.
 - The details panel shows the selected workload's bound table/metric schemas
   and can be resized by dragging its left edge.
+- A post-ASAP node whose winning decision carries a cost/benefit annotation
+  shows a concise `▼NN%`/`▲NN%` badge next to its label; the sidebar and the
+  workload-scope summary show the full baseline/selected/benefit breakdown,
+  with units and provenance, wherever the export provides one — see "Cost/
+  benefit annotations" below.
 
 There are no separate Single, Compare, or Union modes.
 
@@ -91,7 +96,10 @@ a selected replacement directly contains:
     "rationale": "count realizes as a Cms sketch",
     "rank": 0,
     "cost": 3.0,
-    "role": "replacement_root"
+    "role": "replacement_root",
+    "baseline_cost": { "value": 6.0, "unit": "RelativeStructuralUnits", "source": "Modeled", "model_version": "dag_export-structural-cost-v1" },
+    "selected_cost": { "value": 3.0, "unit": "RelativeStructuralUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "delta": 3.0, "benefit_ratio": 0.5 },
+    "benefit": { "value": 3.0, "unit": "RelativeStructuralUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "benefit_ratio": 0.5 }
   }
 }
 ```
@@ -105,6 +113,34 @@ Node boxes use concrete IR fields: aggregate measures/grouping, sort keys,
 filter predicates, projections, sources, summary families, and readout
 queries. Category icons are deliberately omitted so they cannot be confused
 with IR text.
+
+### Cost/benefit annotations (issue #286)
+
+`decision.baseline_cost` / `.selected_cost` / `.benefit` are structured
+[`CostAnnotation`](../../crates/types/src/cost.rs)s: `value` + `unit` +
+`source` (`Modeled` / `Measured` / `Unavailable`), optionally `baseline` +
+`delta` + `benefit_ratio`, and `model_version`/`benchmark_id`/`inputs` for
+provenance. A missing `value` (`source: "Unavailable"`) always renders as
+**Not estimated** — the viewer never fabricates a number. Today every value
+`dag_export` produces is unit-tagged `RelativeStructuralUnits`: a
+structural-size proxy (the same one `asap_aware_mapping::cost_model`
+already uses for ranking), not a real cost-per-second rate — issue #287's
+recurrence-aware inputs (`update_rate`/`evaluation_rate`/`query_interval`)
+are what would let a future export use `CostUnitsPerSecond` instead; the
+annotation plumbing already accepts that unit unchanged.
+
+The same three fields also appear on `TargetReplacement`
+(replacement-region baseline/selected/benefit), `NamedGraph.workload_cost` /
+`WorkloadGraph.workload_cost` (whole selected-workload cost/benefit, shared
+nodes counted once via `decision.id` dedup), and `DagGraph.edge_annotations`
+(materialization/read cost on an edge into a genuine DAG merge point — never
+a guessed multi-hop path cost). The sidebar shows the full breakdown
+(value, unit, provenance, baseline, ratio, inputs) on node/edge click and in
+the workload-scope summary; a post-ASAP node with a costed decision also
+gets a concise on-graph `▼NN%`/`▲NN%` badge next to its label.
+
+All of this is additive and optional: an export with none of these fields
+(anything produced before issue #286) renders exactly as before.
 
 ## Tests
 

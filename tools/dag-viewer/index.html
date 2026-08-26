@@ -372,6 +372,40 @@
   .leg .swatchLabel { font-weight: 650; }
   .leg .swatchDesc { color: var(--muted); display: block; }
   .leg .swatch.ring { background: transparent; border-radius: 999px; border-width: 2px; }
+
+  /* Issue #286: structured cost/benefit annotations. */
+  .costBlock {
+    margin: 0.5rem 0;
+    padding: 0.5rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel2);
+  }
+  .costBlock h4 {
+    margin: 0 0 0.35rem;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--muted);
+  }
+  .costRow { display: flex; align-items: baseline; gap: 0.4rem; flex-wrap: wrap; margin: 0.15rem 0; }
+  .costRow .costLabel { color: var(--muted); font-size: 0.72rem; min-width: 72px; }
+  .costRow .costValue { font-weight: 650; font-variant-numeric: tabular-nums; }
+  .costBadge {
+    display: inline-block;
+    font-size: 0.64rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .02em;
+    border-radius: 4px;
+    padding: 0.05rem 0.35rem;
+  }
+  .costBadge--modeled { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .costBadge--measured { color: #15803d; background: color-mix(in srgb, #15803d 16%, transparent); }
+  .costBadge--unavailable { color: var(--muted); background: color-mix(in srgb, var(--muted) 16%, transparent); }
+  .costMeta { color: var(--muted); font-size: 0.68rem; margin-top: 0.15rem; }
+  .costInputs { margin: 0.3rem 0 0; padding: 0; list-style: none; font-size: 0.68rem; color: var(--muted); }
+  .costInputs li { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.05rem 0; }
 </style>
 </head>
 <body>
