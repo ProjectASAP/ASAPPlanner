@@ -140,7 +140,7 @@
   .schemaHint { color:var(--muted); font-size:.7rem; }
   .plannerActions { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.55rem; }
   #plannerStatus { color: var(--muted); font-size: 0.75rem; }
-  #baPicker {
+  #scopePicker {
     display: none;
     flex-wrap: wrap;
     gap: 0.6rem 1.2rem;
@@ -148,15 +148,15 @@
     border-bottom: 1px solid var(--border);
     background: var(--panel);
   }
-  #baPicker.visible { display: flex; }
-  .baGroup { display: flex; flex-direction: column; gap: 0.3rem; min-width: 220px; }
-  .baGroupLabel {
+  #scopePicker.visible { display: flex; }
+  .scopeGroup { display: flex; flex-direction: column; gap: 0.3rem; min-width: 220px; }
+  .scopeGroupLabel {
     font-size: 0.72rem;
     text-transform: uppercase;
     letter-spacing: .03em;
     color: var(--muted);
   }
-  .baRow {
+  .scopeRow {
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -165,29 +165,16 @@
     border-radius: 8px;
     background: var(--panel2);
     color: var(--fg);
-    cursor: pointer;
     font: inherit;
     font-size: 0.78rem;
     text-align: left;
   }
-  .baRow:hover { border-color: var(--accent); }
-  .baRow:disabled { opacity: 0.55; cursor: not-allowed; }
-  .baRow:disabled:hover { border-color: var(--border); }
-  .baRow.active {
+  .scopeRow.active {
     border-color: var(--accent);
     background: var(--bg);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
   }
-  .baRow .baWinner {
-    font-size: 0.66rem;
-    font-weight: 700;
-    color: var(--accent);
-    border: 1px solid var(--accent);
-    border-radius: 999px;
-    padding: 0.05rem 0.4rem;
-    flex-shrink: 0;
-  }
-  .baRow .baMeta { color: var(--muted); font-size: 0.72rem; margin-left: auto; white-space: nowrap; }
+  .scopeRow .scopeMeta { color: var(--muted); font-size: 0.72rem; margin-left: auto; white-space: nowrap; }
   .proxyNote {
     font-size: 0.72rem;
     color: var(--muted);
@@ -424,7 +411,7 @@
 </div>
 
 <div id="tabs"></div>
-<div id="baPicker"></div>
+<div id="scopePicker"></div>
 
 <div id="main">
   <div id="empty">
