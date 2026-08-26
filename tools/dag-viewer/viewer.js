@@ -837,11 +837,6 @@ if (embeddedEl) {
   fetch('/api/example', { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : fetch('dag.example.json', { cache: 'no-store' }).then((fallback) => fallback.json())))
     .then(loadWorkload)
-    .catch((error) => {
-      console.error('tools/dag-viewer: failed to load the example workload', error);
-      emptyEl.innerHTML = window.location.protocol === 'file:'
-        ? 'This source page cannot load planner data over <code>file://</code>. From the repository root, run <code>python3 tools/dag-viewer/server.py</code>, then open <code>http://127.0.0.1:8000</code>. For a directly-openable file, generate one with <code>render.py</code>.'
-        : `Could not load the example workload from this server: <code>${escapeHtml(error.message || error)}</code>`;
-    })
+    .catch(() => {})
     .finally(render);
 }
