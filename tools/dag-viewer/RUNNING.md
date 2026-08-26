@@ -1,7 +1,7 @@
 # Run the DAG viewer
 
 ```bash
-cd /mydata/wt-post-asap-integration
+cd ASAPPlanner
 python3 tools/dag-viewer/server.py
 ```
 
