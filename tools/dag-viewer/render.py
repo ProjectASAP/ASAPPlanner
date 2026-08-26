@@ -98,21 +98,25 @@ def _column(value: object, input_schema: object = None) -> str:
     return _compact(value)
 
 
-def _measure(value: object) -> str:
+def _measure(value: object, input_schema: object = None) -> str:
     if not isinstance(value, dict):
         return _compact(value)
     kind = str(value.get("kind", "aggregate"))
     args = []
     if value.get("col") is not None:
-        args.append(_column(value["col"]))
+        args.append(_column(value["col"], input_schema))
     for key in ("q", "k", "population", "label", "lower", "upper"):
         if key in value:
             args.append(f"{key}={_compact(value[key])}")
-    accuracy = value.get("accuracy")
-    if isinstance(accuracy, dict) and len(accuracy) == 1:
-        name, amount = next(iter(accuracy.items()))
-        args.append(f"{name.lower()}={_compact(amount)}")
     return f"{kind}({', '.join(args)})" if args else f"{kind}()"
+
+
+def _bounded_lines(lines: list[str], maximum: int = 4, width: int = 64) -> str:
+    """Keep graph boxes scannable; the sidebar owns the lossless detail."""
+    shortened = [line if len(line) <= width else line[: width - 1] + "…" for line in lines]
+    if len(shortened) > maximum:
+        shortened = shortened[: maximum - 1] + [f"… +{len(shortened) - maximum + 1} more"]
+    return "\n".join(shortened)
 
 
 def _grouping(reduction: object, input_schema: object = None) -> str | None:
@@ -157,7 +161,7 @@ def _semantic_label(node: dict, input_schema: object = None) -> str:
             lines.append(f"where: {_compact(detail['predicates'])}")
     elif kind == "Aggregate":
         measures = detail.get("measures") or []
-        lines.extend(f"compute: {_measure(measure)}" for measure in measures)
+        lines.extend(f"measure: {_measure(measure, input_schema)}" for measure in measures)
         grouping = _grouping(detail.get("reduction"), input_schema)
         if grouping:
             lines.append(grouping)
@@ -168,13 +172,13 @@ def _semantic_label(node: dict, input_schema: object = None) -> str:
         if detail.get("partition_by"):
             lines.append(f"within: {_compact(detail['partition_by'])}")
     elif kind == "Project":
-        for item in detail.get("cols") or []:
-            if isinstance(item, dict):
-                expr = _compact(item.get("expr"))
-                alias = item.get("alias")
-                lines.append(f"output: {expr}" + (f" as {alias}" if alias else ""))
-            else:
-                lines.append(f"output: {_compact(item)}")
+        output_schema = node.get("schema")
+        output_columns = output_schema.get("columns") if isinstance(output_schema, dict) else None
+        if isinstance(output_columns, list) and output_columns:
+            names = [str(column.get("name", "?")) for column in output_columns if isinstance(column, dict)]
+            lines.append("columns: " + ", ".join(names))
+        else:
+            lines.append(f"columns: {len(detail.get('cols') or [])}")
     elif kind == "Filter":
         lines.append(f"where: {_compact(detail.get('pred'))}")
     elif kind == "Join":
@@ -220,7 +224,7 @@ def _semantic_label(node: dict, input_schema: object = None) -> str:
             if key not in {"schema", "pre_asap_subgraph"} and value not in (None, [], {}):
                 lines.append(f"{key}: {_compact(value)}")
 
-    return "\n".join(lines)
+    return _bounded_lines(lines)
 
 
 def prepare_workload(workload: dict) -> dict:

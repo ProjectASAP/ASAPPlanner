@@ -178,7 +178,7 @@ class SemanticLabelTests(unittest.TestCase):
         }
         self.assertEqual(
             _semantic_label(node),
-            "Aggregate\ncompute: quantile(col[6], q=0.95)\ngroup by col[1]",
+            "Aggregate\nmeasure: quantile(col[6], q=0.95)\ngroup by col[1]",
         )
 
     def test_summary_aggregate_names_reduction_as_group_by(self):
@@ -193,8 +193,7 @@ class SemanticLabelTests(unittest.TestCase):
         }
         self.assertEqual(
             _semantic_label(node),
-            "SummaryAgg\nfamily: Sketch(Cms)\ninput: SampleValue\n"
-            "group by col[1]\nsummary layout: PerSubpopulationInstance",
+            "SummaryAgg\nfamily: Sketch(Cms)\ninput: SampleValue\n… +2 more",
         )
 
     def test_sort_names_expression_direction_and_null_order(self):
@@ -232,7 +231,7 @@ class SemanticLabelTests(unittest.TestCase):
             query["replacements"][0]["before"]["nodes"][0]["label"],
             query["replacements"][0]["after"]["graph"]["nodes"][0]["label"],
         ]
-        self.assertEqual(labels, ["Aggregate\ncompute: avg(col[3])"] * 4)
+        self.assertEqual(labels, ["Aggregate\nmeasure: avg(col[3])"] * 4)
 
     def test_cse_before_after_makes_reuse_decision_visible(self):
         node = {

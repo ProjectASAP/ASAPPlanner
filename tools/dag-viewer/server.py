@@ -134,6 +134,16 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as error:  # surface planner failures to this local UI
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.path == "/api/example":
+            try:
+                example = json.loads((HERE / "dag.example.json").read_text(encoding="utf-8"))
+                self._send_json(HTTPStatus.OK, prepare_workload(example))
+            except Exception as error:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+            return
+        super().do_GET()
+
     def end_headers(self) -> None:
         # This is a local development viewer: stale HTML/JS/example JSON is
         # more harmful than the tiny files are expensive to reload.

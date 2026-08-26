@@ -716,7 +716,15 @@ function renderPrePostAsap() {
   buildCy(elements);
   finalizeGraphInteractions();
   applyHighlighting();
-  clearDetail();
+  const initial = cy.nodes().filter((node) =>
+    !node.data('isLane') && node.data('stage') === 'pre' && node.data('root')
+  ).first();
+  if (initial && initial.length) {
+    initial.select();
+    showBeforeAfterDetail(initial.data());
+  } else {
+    clearDetail();
+  }
   fitAndSyncZoom();
 }
 
@@ -1211,8 +1219,8 @@ if (embeddedEl) {
   // Do not silently prefer a leftover scratch dag.json: it may predate
   // post_graph and make Before/After appear broken. Users can load scratch
   // exports explicitly with the picker or run them through Query planner.
-  fetch('dag.example.json', { cache: 'no-store' })
-    .then((r) => (r.ok ? r.json() : null))
+  fetch('/api/example', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : fetch('dag.example.json', { cache: 'no-store' }).then((fallback) => fallback.json())))
     .then(loadWorkload)
     .catch(() => {})
     .finally(render);
