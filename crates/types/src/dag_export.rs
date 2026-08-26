@@ -61,6 +61,10 @@ pub struct DagNode {
     /// Short human-readable summary for a node's collapsed on-graph label.
     pub label: String,
     pub detail: serde_json::Value,
+    /// Output schema carried by every exported node. Edge renderers use the
+    /// child node's schema as the schema flowing along child → consumer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
     /// Child node ids, in the variant's field order (e.g. `Join` is
     /// `[left, right]`).
     pub children: Vec<u32>,
@@ -642,6 +646,10 @@ fn push_node(
         kind,
         label,
         detail,
+        schema: expr
+            .output_schema()
+            .ok()
+            .and_then(|schema| serde_json::to_value(schema).ok()),
         children,
         hash,
         source_expr: Some(expr.clone()),
@@ -675,6 +683,7 @@ fn push_summary_originated_node(
         kind,
         label,
         detail,
+        schema: None,
         children,
         hash: None,
         source_expr: None,
@@ -710,7 +719,20 @@ fn build_summary_hybrid(
         .map(|child| build_summary_hybrid(child, nodes, cache, find_winner))
         .collect();
     let (kind, label, detail) = summary_shape(&node.expr);
-    push_summary_originated_node(nodes, kind, label, detail, children)
+    let id = push_summary_originated_node(nodes, kind, label, detail, children);
+    nodes[id as usize].schema = Some(summary_schema_json(&node.schema));
+    id
+}
+
+fn summary_schema_json(schema: &crate::post_asap::SummarySchema) -> serde_json::Value {
+    serde_json::json!({
+        "fields": schema.fields.iter().map(|field| serde_json::json!({
+            "name": field.name,
+            "dtype": format!("{:?}", field.dtype),
+            "nullable": field.nullable,
+        })).collect::<Vec<_>>(),
+        "time_index": schema.time_index,
+    })
 }
 
 fn source_label(source: &Source) -> String {
@@ -1221,6 +1243,7 @@ mod tests {
         let graph = export(&scan("metrics", value_col()));
         assert!(graph.nodes[0].notes.is_empty());
         assert!(graph.nodes[0].decision.is_none());
+        assert!(graph.nodes[0].schema.is_some());
         let json = serde_json::to_string(&graph.nodes[0]).unwrap();
         assert!(
             !json.contains("notes"),

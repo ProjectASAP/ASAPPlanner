@@ -9,6 +9,9 @@ The viewer has one visualization mode: **Pre/Post-ASAP**.
 - Pre-ASAP nodes show only their original IR content.
 - Post-ASAP nodes show their translated IR content and the explicit planner
   decision carried by that node.
+- **Show edge schemas** optionally labels each data-flow edge with the source
+  node's output columns and types. It is off by default to keep large DAGs
+  readable.
 
 There are no separate Single, Compare, or Union modes.
 

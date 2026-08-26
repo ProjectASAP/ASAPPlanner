@@ -25,6 +25,7 @@ let queries = [];
 let activeIndex = -1;
 let cy = null;
 let highlightOn = true;
+let showEdgeSchemas = false;
 let zoom = 1;
 // The viewer has one Pre/Post-ASAP mode. One selected query renders its own
 // two DAGs; multiple selected queries union each stage into one workload DAG.
@@ -34,6 +35,7 @@ const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const clearBtn = document.getElementById('clearBtn');
 const highlightToggle = document.getElementById('highlightToggle');
+const schemaToggle = document.getElementById('schemaToggle');
 const tabsEl = document.getElementById('tabs');
 const baPickerEl = document.getElementById('baPicker');
 const cyOuterEl = document.getElementById('cyOuter');
@@ -64,6 +66,10 @@ clearBtn.addEventListener('click', () => {
 highlightToggle.addEventListener('change', () => {
   highlightOn = highlightToggle.checked;
   applyHighlighting();
+});
+schemaToggle.addEventListener('change', () => {
+  showEdgeSchemas = schemaToggle.checked;
+  applyEdgeSchemaVisibility();
 });
 
 function loadFiles(fileList) {
@@ -304,9 +310,24 @@ function buildCyStyle() {
         'target-arrow-color': edgeColor,
         'target-arrow-shape': 'triangle',
         'curve-style': 'bezier',
+        'label': '',
+        'font-size': 9,
+        'color': textColor,
+        'text-background-color': panelColor,
+        'text-background-opacity': 0.92,
+        'text-background-padding': 3,
+        'text-rotation': 'autorotate',
+        'text-wrap': 'wrap',
+        'text-max-width': 260,
         'transition-property': 'opacity',
         'transition-duration': '260ms',
         'transition-timing-function': 'ease-in-out',
+      },
+    },
+    {
+      selector: 'edge.showSchema',
+      style: {
+        'label': 'data(schemaLabel)',
       },
     },
     {
@@ -449,6 +470,7 @@ function renderGraph(query) {
   buildCy(elements);
   finalizeGraphInteractions();
   applyHighlighting();
+  applyEdgeSchemaVisibility();
   clearDetail();
   zoom = 1;
   applyZoom();
@@ -637,6 +659,7 @@ function renderUnion(chosen) {
   buildCy(elements);
   finalizeGraphInteractions();
   applyHighlighting();
+  applyEdgeSchemaVisibility();
   clearDetail();
   fitAndSyncZoom();
 }
@@ -680,6 +703,7 @@ function renderPrePostAsap() {
   buildCy(elements);
   finalizeGraphInteractions();
   applyHighlighting();
+  applyEdgeSchemaVisibility();
   clearDetail();
   fitAndSyncZoom();
 }
@@ -715,7 +739,7 @@ function unionStageLaneElements(stage, chosen) {
   });
   const keyFor = (qIdx, node) => sharedIds.get(signatures.get(qIdx).get(node.id)) || `${laneId}-q${qIdx}-${node.id}`;
   const entries = new Map();
-  const edges = new Set();
+  const edges = new Map();
   const elements = [
     { data: { id: laneId, label: `${stage === 'pre' ? 'pre-ASAP' : 'post-ASAP'} · workload union`, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
   ];
@@ -735,7 +759,8 @@ function unionStageLaneElements(stage, chosen) {
       if (node.id === graph.root) entry.rootFor.add(query.name);
       node.children.forEach((childId) => {
         const childKey = keyFor(qIdx, byId.get(childId));
-        edges.add(`${childKey}\u0000${key}`);
+        const child = byId.get(childId);
+        edges.set(`${childKey}\u0000${key}`, formatSchema(child.schema));
       });
     });
   });
@@ -759,9 +784,9 @@ function unionStageLaneElements(stage, chosen) {
     classes: entry.sourceQueries.size > 1 ? 'unionShared' : '',
   }));
   let edgeIndex = 0;
-  edges.forEach((edge) => {
+  edges.forEach((schemaLabel, edge) => {
     const [source, target] = edge.split('\u0000');
-    elements.push({ data: { id: `${laneId}-edge-${edgeIndex++}`, source, target } });
+    elements.push({ data: { id: `${laneId}-edge-${edgeIndex++}`, source, target, schemaLabel } });
   });
   return elements;
 }
@@ -775,6 +800,7 @@ function unionStageLaneElements(stage, chosen) {
 // read by this function or by showBeforeAfterDetail below.
 function laneElements(laneId, laneLabel, graph, query, stage) {
   const nodes = graph.nodes;
+  const byId = new Map(nodes.map((node) => [node.id, node]));
   const elements = [
     { data: { id: laneId, label: laneLabel, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
   ];
@@ -809,11 +835,30 @@ function laneElements(laneId, laneLabel, graph, query, stage) {
           id: `e-${laneId}-${node.id}-${childId}`,
           source: `${laneId}-${childId}`,
           target: `${laneId}-${node.id}`,
+          schemaLabel: formatSchema(byId.get(childId).schema),
         },
       });
     }
   }
   return elements;
+}
+
+function formatSchema(schema) {
+  if (!schema || typeof schema !== 'object') return 'schema unavailable';
+  const fields = Array.isArray(schema.columns) ? schema.columns : schema.fields;
+  if (!Array.isArray(fields) || fields.length === 0) return 'empty schema';
+  return fields.map((field) => {
+    const name = field && field.name !== undefined ? field.name : '?';
+    const dtype = field && field.dtype !== undefined
+      ? (typeof field.dtype === 'string' ? field.dtype : JSON.stringify(field.dtype))
+      : '?';
+    return `${name}: ${dtype}${field && field.nullable ? '?' : ''}`;
+  }).join(' · ');
+}
+
+function applyEdgeSchemaVisibility() {
+  if (!cy) return;
+  cy.edges().toggleClass('showSchema', showEdgeSchemas);
 }
 
 function renderBaScopeSummary(selected) {

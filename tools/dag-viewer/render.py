@@ -233,7 +233,11 @@ def prepare_workload(workload: dict) -> dict:
         by_id = {node.get("id"): node for node in graph.get("nodes", [])}
         for node in graph.get("nodes", []):
             child = by_id.get((node.get("children") or [None])[0])
-            input_schema = (child.get("detail") or {}).get("schema") if isinstance(child, dict) else None
+            input_schema = (
+                child.get("schema") or (child.get("detail") or {}).get("schema")
+                if isinstance(child, dict)
+                else None
+            )
             node["label"] = _semantic_label(node, input_schema)
             nested = (node.get("detail") or {}).get("pre_asap_subgraph")
             prepare_graph(nested)

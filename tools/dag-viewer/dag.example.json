@@ -54,6 +54,43 @@
                 }
               }
             },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "float64",
+                  "name": "latency",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "int64",
+                  "name": "bytes",
+                  "nullable": false,
+                  "table": "metrics"
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
             "children": [],
             "hash": 2606922452740434172
           },
@@ -79,6 +116,29 @@
                   1
                 ]
               }
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "int64",
+                  "name": "count(*)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
             },
             "children": [
               0
@@ -111,6 +171,29 @@
                 }
               ],
               "qualifier": null
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "int64",
+                  "name": "count(*)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
             },
             "children": [
               1
@@ -179,6 +262,43 @@
                     }
                   }
                 },
+                "schema": {
+                  "closed": true,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "service",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "region",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "latency",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "int64",
+                      "name": "bytes",
+                      "nullable": false,
+                      "table": "metrics"
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
                 "children": [],
                 "hash": 2606922452740434172
               },
@@ -204,6 +324,29 @@
                       1
                     ]
                   }
+                },
+                "schema": {
+                  "closed": true,
+                  "columns": [
+                    {
+                      "dtype": "utf8",
+                      "name": "service",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "int64",
+                      "name": "count(*)",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": null,
+                  "unique_keys": [
+                    [
+                      0
+                    ]
+                  ]
                 },
                 "children": [
                   0
@@ -274,7 +417,44 @@
                           "hash": 2606922452740434172,
                           "id": 0,
                           "kind": "Scan",
-                          "label": "Scan(metrics)"
+                          "label": "Scan(metrics)",
+                          "schema": {
+                            "closed": true,
+                            "columns": [
+                              {
+                                "dtype": "timestamp",
+                                "name": "ts",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "utf8",
+                                "name": "service",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "utf8",
+                                "name": "region",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "float64",
+                                "name": "latency",
+                                "nullable": false,
+                                "table": "metrics"
+                              },
+                              {
+                                "dtype": "int64",
+                                "name": "bytes",
+                                "nullable": false,
+                                "table": "metrics"
+                              }
+                            ],
+                            "time_index": 0,
+                            "unique_keys": []
+                          }
                         }
                       ],
                       "root": 0
@@ -368,6 +548,43 @@
                 }
               }
             },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "float64",
+                  "name": "latency",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "int64",
+                  "name": "bytes",
+                  "nullable": false,
+                  "table": "metrics"
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
             "children": [],
             "hash": 2606922452740434172,
             "decision": {
@@ -393,6 +610,21 @@
                 ]
               }
             },
+            "schema": {
+              "fields": [
+                {
+                  "dtype": "Plain(Utf8)",
+                  "name": "service",
+                  "nullable": false
+                },
+                {
+                  "dtype": "Sketch(SketchKind { category: Frequency, algorithm: Cms, params: Cms { width: 272, depth: 5 } }, PerSubpopulationInstance)",
+                  "name": "count(*)",
+                  "nullable": false
+                }
+              ],
+              "time_index": null
+            },
             "children": [
               0
             ],
@@ -411,6 +643,21 @@
             "label": "SummaryEstimate(PointCount { key: SampleValue, value: None })",
             "detail": {
               "query": "PointCount { key: SampleValue, value: None }"
+            },
+            "schema": {
+              "fields": [
+                {
+                  "dtype": "Plain(Utf8)",
+                  "name": "service",
+                  "nullable": false
+                },
+                {
+                  "dtype": "Plain(Int64)",
+                  "name": "count(*)",
+                  "nullable": false
+                }
+              ],
+              "time_index": null
             },
             "children": [
               1
@@ -444,6 +691,29 @@
                 }
               ],
               "qualifier": null
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "int64",
+                  "name": "count(*)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
             },
             "children": [
               2
@@ -508,6 +778,43 @@
                 }
               }
             },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "float64",
+                  "name": "latency",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "int64",
+                  "name": "bytes",
+                  "nullable": false,
+                  "table": "metrics"
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
             "children": [],
             "hash": 2606922452740434172
           },
@@ -531,6 +838,29 @@
                   1
                 ]
               }
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "float64",
+                  "name": "avg(metrics.latency)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
             },
             "children": [
               0
@@ -557,6 +887,29 @@
                 }
               ],
               "qualifier": null
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "avg(metrics.latency)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
             },
             "children": [
               1
@@ -625,6 +978,43 @@
                     }
                   }
                 },
+                "schema": {
+                  "closed": true,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "service",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "utf8",
+                      "name": "region",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "latency",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "int64",
+                      "name": "bytes",
+                      "nullable": false,
+                      "table": "metrics"
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
                 "children": [],
                 "hash": 2606922452740434172
               },
@@ -648,6 +1038,29 @@
                       1
                     ]
                   }
+                },
+                "schema": {
+                  "closed": true,
+                  "columns": [
+                    {
+                      "dtype": "utf8",
+                      "name": "service",
+                      "nullable": false,
+                      "table": "metrics"
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "avg(metrics.latency)",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": null,
+                  "unique_keys": [
+                    [
+                      0
+                    ]
+                  ]
                 },
                 "children": [
                   0
@@ -710,6 +1123,43 @@
                       }
                     }
                   },
+                  "schema": {
+                    "closed": true,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "service",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "region",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "latency",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "int64",
+                        "name": "bytes",
+                        "nullable": false,
+                        "table": "metrics"
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
                   "children": [],
                   "hash": 2606922452740434172
                 },
@@ -731,6 +1181,29 @@
                         1
                       ]
                     }
+                  },
+                  "schema": {
+                    "closed": true,
+                    "columns": [
+                      {
+                        "dtype": "utf8",
+                        "name": "service",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "sum",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": null,
+                    "unique_keys": [
+                      [
+                        0
+                      ]
+                    ]
                   },
                   "children": [
                     0
@@ -763,6 +1236,29 @@
                       }
                     ],
                     "qualifier": null
+                  },
+                  "schema": {
+                    "closed": true,
+                    "columns": [
+                      {
+                        "dtype": "utf8",
+                        "name": "service",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "avg(metrics.latency)",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": null,
+                    "unique_keys": [
+                      [
+                        0
+                      ]
+                    ]
                   },
                   "children": [
                     1
@@ -818,6 +1314,43 @@
                       }
                     }
                   },
+                  "schema": {
+                    "closed": true,
+                    "columns": [
+                      {
+                        "dtype": "timestamp",
+                        "name": "ts",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "service",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "utf8",
+                        "name": "region",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "latency",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "int64",
+                        "name": "bytes",
+                        "nullable": false,
+                        "table": "metrics"
+                      }
+                    ],
+                    "time_index": 0,
+                    "unique_keys": []
+                  },
                   "children": [],
                   "hash": 2606922452740434172
                 },
@@ -840,6 +1373,29 @@
                       ]
                     }
                   },
+                  "schema": {
+                    "closed": true,
+                    "columns": [
+                      {
+                        "dtype": "utf8",
+                        "name": "service",
+                        "nullable": false,
+                        "table": "metrics"
+                      },
+                      {
+                        "dtype": "int64",
+                        "name": "count",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": null,
+                    "unique_keys": [
+                      [
+                        0
+                      ]
+                    ]
+                  },
                   "children": [
                     3
                   ],
@@ -852,6 +1408,29 @@
                   "detail": {
                     "op": "/",
                     "vector_match": null
+                  },
+                  "schema": {
+                    "closed": true,
+                    "columns": [
+                      {
+                        "dtype": "utf8",
+                        "name": "service",
+                        "nullable": false,
+                        "table": null
+                      },
+                      {
+                        "dtype": "float64",
+                        "name": "avg(metrics.latency)",
+                        "nullable": false,
+                        "table": null
+                      }
+                    ],
+                    "time_index": null,
+                    "unique_keys": [
+                      [
+                        0
+                      ]
+                    ]
                   },
                   "children": [
                     2,
@@ -916,6 +1495,43 @@
                 }
               }
             },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "utf8",
+                  "name": "region",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "float64",
+                  "name": "latency",
+                  "nullable": false,
+                  "table": "metrics"
+                },
+                {
+                  "dtype": "int64",
+                  "name": "bytes",
+                  "nullable": false,
+                  "table": "metrics"
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
             "children": [],
             "hash": 2606922452740434172,
             "decision": {
@@ -945,6 +1561,21 @@
                   1
                 ]
               }
+            },
+            "schema": {
+              "fields": [
+                {
+                  "dtype": "Plain(Utf8)",
+                  "name": "service",
+                  "nullable": false
+                },
+                {
+                  "dtype": "ExactAggregate(Sum, Sum)",
+                  "name": "sum",
+                  "nullable": false
+                }
+              ],
+              "time_index": null
             },
             "children": [
               0
@@ -985,6 +1616,29 @@
               ],
               "qualifier": null
             },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "avg(metrics.latency)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
+            },
             "children": [
               1
             ],
@@ -1012,6 +1666,21 @@
                 ]
               }
             },
+            "schema": {
+              "fields": [
+                {
+                  "dtype": "Plain(Utf8)",
+                  "name": "service",
+                  "nullable": false
+                },
+                {
+                  "dtype": "ExactAggregate(Count, Count)",
+                  "name": "count",
+                  "nullable": false
+                }
+              ],
+              "time_index": null
+            },
             "children": [
               0
             ],
@@ -1031,6 +1700,29 @@
             "detail": {
               "op": "/",
               "vector_match": null
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "avg(metrics.latency)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
             },
             "children": [
               2,
@@ -1066,6 +1758,29 @@
                 }
               ],
               "qualifier": null
+            },
+            "schema": {
+              "closed": true,
+              "columns": [
+                {
+                  "dtype": "utf8",
+                  "name": "service",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "avg(metrics.latency)",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": null,
+              "unique_keys": [
+                [
+                  0
+                ]
+              ]
             },
             "children": [
               4
@@ -1112,6 +1827,25 @@
                 }
               }
             },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
             "children": [],
             "hash": 16569634401303792668
           },
@@ -1124,6 +1858,25 @@
                 "nanos": 0,
                 "secs": 300
               }
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
             },
             "children": [
               0
@@ -1146,6 +1899,25 @@
               ],
               "reduction": "PerEntity"
             },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
             "children": [
               1
             ],
@@ -1167,6 +1939,25 @@
               ],
               "partition_by": []
             },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
             "children": [
               2
             ],
@@ -1179,6 +1970,25 @@
             "detail": {
               "n": 5,
               "offset": 0
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
             },
             "children": [
               3
@@ -1229,6 +2039,25 @@
                     }
                   }
                 },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
+                },
                 "children": [],
                 "hash": 16569634401303792668
               },
@@ -1241,6 +2070,25 @@
                     "nanos": 0,
                     "secs": 300
                   }
+                },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
                 },
                 "children": [
                   0
@@ -1262,6 +2110,25 @@
                     ""
                   ],
                   "reduction": "PerEntity"
+                },
+                "schema": {
+                  "closed": false,
+                  "columns": [
+                    {
+                      "dtype": "timestamp",
+                      "name": "ts",
+                      "nullable": false,
+                      "table": null
+                    },
+                    {
+                      "dtype": "float64",
+                      "name": "value",
+                      "nullable": false,
+                      "table": null
+                    }
+                  ],
+                  "time_index": 0,
+                  "unique_keys": []
                 },
                 "children": [
                   1
@@ -1314,7 +2181,26 @@
                           "hash": 16569634401303792668,
                           "id": 0,
                           "kind": "Scan",
-                          "label": "Scan(http_requests_total)"
+                          "label": "Scan(http_requests_total)",
+                          "schema": {
+                            "closed": false,
+                            "columns": [
+                              {
+                                "dtype": "timestamp",
+                                "name": "ts",
+                                "nullable": false,
+                                "table": null
+                              },
+                              {
+                                "dtype": "float64",
+                                "name": "value",
+                                "nullable": false,
+                                "table": null
+                              }
+                            ],
+                            "time_index": 0,
+                            "unique_keys": []
+                          }
                         },
                         {
                           "children": [
@@ -1329,7 +2215,26 @@
                           "hash": 12007712336004404578,
                           "id": 1,
                           "kind": "TimeRange",
-                          "label": "TimeRange(300s)"
+                          "label": "TimeRange(300s)",
+                          "schema": {
+                            "closed": false,
+                            "columns": [
+                              {
+                                "dtype": "timestamp",
+                                "name": "ts",
+                                "nullable": false,
+                                "table": null
+                              },
+                              {
+                                "dtype": "float64",
+                                "name": "value",
+                                "nullable": false,
+                                "table": null
+                              }
+                            ],
+                            "time_index": 0,
+                            "unique_keys": []
+                          }
                         }
                       ],
                       "root": 1
@@ -1390,6 +2295,25 @@
                 }
               }
             },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
             "children": [],
             "hash": 16569634401303792668,
             "decision": {
@@ -1410,6 +2334,25 @@
                 "nanos": 0,
                 "secs": 300
               }
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
             },
             "children": [
               0
@@ -1433,6 +2376,21 @@
               "family": "ExactAggregate(Rate, Rate)",
               "grouping": "PerSubpopulationInstance",
               "reduction": "PerEntity"
+            },
+            "schema": {
+              "fields": [
+                {
+                  "dtype": "Plain(Timestamp)",
+                  "name": "ts",
+                  "nullable": false
+                },
+                {
+                  "dtype": "ExactAggregate(Rate, Rate)",
+                  "name": "value",
+                  "nullable": false
+                }
+              ],
+              "time_index": 0
             },
             "children": [
               1
@@ -1462,6 +2420,25 @@
               ],
               "partition_by": []
             },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
+            },
             "children": [
               2
             ],
@@ -1474,6 +2451,25 @@
             "detail": {
               "n": 5,
               "offset": 0
+            },
+            "schema": {
+              "closed": false,
+              "columns": [
+                {
+                  "dtype": "timestamp",
+                  "name": "ts",
+                  "nullable": false,
+                  "table": null
+                },
+                {
+                  "dtype": "float64",
+                  "name": "value",
+                  "nullable": false,
+                  "table": null
+                }
+              ],
+              "time_index": 0,
+              "unique_keys": []
             },
             "children": [
               3
