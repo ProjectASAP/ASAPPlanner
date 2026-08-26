@@ -11,12 +11,17 @@ import threading
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from render import prepare_workload
+from render import prepare_workload, render
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 BINARY = REPO / "target" / "debug" / "dag_export"
+
+
+def example_workload() -> dict:
+    return json.loads((HERE / "dag.example.json").read_text(encoding="utf-8"))
 
 
 def build_exporter() -> None:
@@ -135,10 +140,19 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-        if self.path == "/api/example":
+        path = urlsplit(self.path).path
+        if path in {"/", "/index.html"}:
             try:
-                example = json.loads((HERE / "dag.example.json").read_text(encoding="utf-8"))
-                self._send_json(HTTPStatus.OK, prepare_workload(example))
+                # Serve one self-contained document so initial rendering does
+                # not depend on separate JS or /api/example requests. The
+                # planner remains interactive through POST /api/plan.
+                self._send_html(HTTPStatus.OK, render(example_workload()))
+            except Exception as error:
+                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+            return
+        if path == "/api/example":
+            try:
+                self._send_json(HTTPStatus.OK, prepare_workload(example_workload()))
             except Exception as error:
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
             return
@@ -154,6 +168,14 @@ class Handler(SimpleHTTPRequestHandler):
         body = json.dumps(value).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, status: HTTPStatus, value: str) -> None:
+        body = value.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
