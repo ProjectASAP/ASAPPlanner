@@ -324,10 +324,38 @@ fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapRes
     let space = search_workload(roots);
     let ranked_groups = space.cost_sorted(&DefaultCostModel);
 
+    // A group's top candidate can be `keep_pre_asap`'s own conservative
+    // fallback — `Replacement::Summary(SummaryNode { expr:
+    // KeepPreAsap(Box::new(target.clone())), .. })` — the *whole target*
+    // wrapped as unbound, e.g. for a multi-measure/`HAVING`-bearing
+    // aggregate, or (the case that actually surfaces this: `STDDEV_POP`/
+    // `AVG`/`VARIANCE` dispatch to `Implementation::PassThrough` with no
+    // alternative at all, per `implementations_for_with`'s own doc) an
+    // intent with no summary realization whatsoever. This isn't a
+    // replacement decision — it's `SketchAlgorithmStrategy` saying "nothing
+    // to bind here" — the identical "no-op candidate" concept
+    // `explanation.rs`'s own `sketch_finding_reason` already excludes from
+    // being reported as a finding ("a candidate list containing only the
+    // trivial no-op realization... isn't an opportunity, it's just the
+    // target's existing shape reflected back"). Filtered out here for a
+    // second, load-bearing reason beyond just matching that precedent:
+    // `export_post_asap`'s `find_winner` re-checks every node reached
+    // inside a spliced-in `KeepPreAsap` payload (by design, so a target
+    // nested underneath one still gets found) — if that payload structurally
+    // *is* the enclosing target, `find_winner` immediately matches the same
+    // winner again, forever. Treating this candidate as "no winner" (same
+    // as an empty candidate list) avoids ever handing `export_post_asap` a
+    // winner that can't help but recurse into itself.
     let winners: Vec<Winner<'_>> = ranked_groups
         .iter()
         .filter_map(|group| {
             let candidate = group.candidates.first()?;
+            if matches!(
+                &candidate.replacement,
+                Replacement::Summary(node) if matches!(node.expr, SummaryExpr::KeepPreAsap(_))
+            ) {
+                return None;
+            }
             Some(Winner {
                 target: group.target,
                 candidate,
@@ -641,5 +669,57 @@ mod tests {
                 "post_graph for {name:?} must not be empty"
             );
         }
+    }
+
+    /// Regression test for a real stack overflow found via manual testing
+    /// against real corpus queries (a `STDDEV_POP` aggregate, which — like
+    /// `AVG` — dispatches to `Implementation::PassThrough` with no
+    /// alternative strategy of its own, so its *only* candidate is
+    /// `keep_pre_asap`'s conservative fallback: `Replacement::Summary`
+    /// wrapping the *entire target* as `SummaryExpr::KeepPreAsap`).
+    /// `run_post_asap` must not treat that as a real winner: splicing it
+    /// into `export_post_asap` would recurse forever, since `find_winner`
+    /// re-checks every node inside a spliced `KeepPreAsap` payload by
+    /// design, and this payload structurally *is* the enclosing target — a
+    /// fresh `find_winner` call finds the identical winner again,
+    /// unconditionally, every time. Filtering this shape out of `winners`
+    /// (same "no-op candidate" concept `explanation.rs`'s own
+    /// `sketch_finding_reason` already excludes from being a finding) is
+    /// what keeps this terminating: this test's only assertion that matters
+    /// is that `run_post_asap` returns at all instead of overflowing the
+    /// stack.
+    #[tokio::test]
+    async fn post_asap_does_not_recurse_forever_on_a_trivial_keep_pre_asap_winner() {
+        let cat = catalog();
+        let stddev_query = lower_sql(
+            "SELECT STDDEV_POP(latency) FROM metrics",
+            &cat,
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .await
+        .unwrap();
+        let lowered_queries = vec![(
+            "stddev".to_string(),
+            "SELECT STDDEV_POP(latency) FROM metrics".to_string(),
+            stddev_query,
+        )];
+
+        let results = run_post_asap(&lowered_queries);
+
+        // A trivial keep_pre_asap winner must be filtered before it ever
+        // becomes a flat `TargetReplacement` — there's no real replacement
+        // to report for a target with no alternative at all.
+        assert!(
+            results.replacements.is_empty(),
+            "a target whose only candidate is the trivial keep_pre_asap fallback \
+             shouldn't produce a flat replacement entry: {:?}",
+            results
+                .replacements
+                .iter()
+                .map(|(name, r)| (name.clone(), r.strategy.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(results.post_graphs.len(), 1);
+        assert!(!results.post_graphs[0].1.nodes.is_empty());
     }
 }
