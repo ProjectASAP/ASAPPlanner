@@ -3,7 +3,43 @@ use std::rc::Rc;
 use super::guarantee::ResultGuarantee;
 use super::schema::{SummaryFamilyType, SummarySchema};
 use super::sketch::{GroupingStrategy, SketchQuery};
+use crate::pre_asap::agg_intent::AggIntent;
+use crate::pre_asap::query_expr::Predicate;
 use crate::pre_asap::{ColumnRef, QueryExpr, Reduction};
+
+// ── Exact operators composed with summary plans (issue #171) ────────────────
+
+/// An exact, plain-row operator that a mixed exact/summary plan executes at
+/// an explicit phase — the payload of [`SummaryExpr::ExactTransform`]
+/// (update path) and [`SummaryExpr::ExactPostProcess`] (after readout).
+///
+/// Deliberately **not** an intact pre-ASAP [`QueryExpr`] subtree: a
+/// `QueryExpr`'s children are always `Rc<QueryExpr>`, so embedding one here
+/// would point back at pre-ASAP nodes and recreate exactly the opaque
+/// boundary [`SummaryExpr::KeepPreAsap`] already has (a logical parent
+/// swallowing an otherwise-realizable descendant). Instead this carries only
+/// the operator's *own* fields; its input is the post-ASAP `child` of the
+/// enclosing `SummaryExpr` variant.
+///
+/// `#[non_exhaustive]`: starts with the one payload issue #171 needs. Future
+/// PRs add `Filter`/`Project`/`BinaryOp`/`Sort`/`Limit` payloads when a
+/// concrete mixed plan needs them — never every relational `QueryExpr`
+/// variant at once.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ExactOperator {
+    /// The same fields a pre-ASAP `QueryExpr::Aggregate` carries, applied
+    /// exactly (no summary family) over the enclosing node's post-ASAP
+    /// `child`. Output schema follows
+    /// `pre_asap::query_expr::aggregate_output_schema` over the child's
+    /// plain schema.
+    Aggregate {
+        reduction: Reduction,
+        measures: Vec<AggIntent>,
+        output_names: Vec<String>,
+        having: Option<Predicate>,
+    },
+}
 
 // ── Post-ASAP DAG node ───────────────────────────────────────────────────────
 
@@ -134,4 +170,26 @@ pub enum SummaryExpr {
     /// allocator (not modeled in this crate) on cut edges.
     /// Output schema: one field (same family + params as inputs).
     SummaryMerge { children: Vec<Rc<SummaryNode>> },
+
+    /// Exact plain-row transformation executed on the **update/ingest
+    /// path** (issue #171). Consumes `child`'s plain update values and
+    /// produces plain update values, so its output may feed a downstream
+    /// [`SummaryAgg`](SummaryExpr::SummaryAgg)'s maintenance — the "outer
+    /// summary over an inner non-accumulator exact transform" direction.
+    /// See [`super::phase::ExecutionAvailability`] for the edge contract.
+    ExactTransform {
+        child: Rc<SummaryNode>,
+        op: ExactOperator,
+    },
+
+    /// Exact operation executed **after** `child`'s summary has been read
+    /// out (issue #171). Consumes plain readout values and produces the
+    /// final plain query result — the "outer exact fold over an inner
+    /// summary readout" direction. Can never feed maintained state: a
+    /// `SummaryAgg` above one of these is a plan-time
+    /// [`super::phase::PhaseError`], never a runtime failure.
+    ExactPostProcess {
+        child: Rc<SummaryNode>,
+        op: ExactOperator,
+    },
 }

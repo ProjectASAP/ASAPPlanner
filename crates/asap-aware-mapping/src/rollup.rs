@@ -690,7 +690,7 @@ mod tests {
             .iter()
             .find_map(|candidate| match &candidate.replacement {
                 Replacement::Rewrite(rewrite) => Some(rewrite),
-                Replacement::Summary(_) => None,
+                Replacement::Summary(_) | Replacement::ExactComposition(_) => None,
             })
             .expect("default search must include the roll-up rewrite");
         let QueryExpr::Aggregate { child, .. } = rewrite.as_ref() else {

@@ -251,6 +251,56 @@ struct Winner<'a> {
     target: &'a Rc<QueryExpr>,
     candidate: &'a ReplacementSubDAG,
     cost: f64,
+    /// The unit `cost` is in — `None` for the legacy unitless structural
+    /// estimate, `Some("cost_units_per_second")` for a composed decision
+    /// `global_selection` costed as a recurring rate (issue #171).
+    cost_unit: Option<&'static str>,
+    /// For a `Replacement::ExactComposition` winner: the composed node
+    /// `GlobalSelection::materialize` linked over the child's own committed
+    /// decision — the shape actually exported. `None` otherwise.
+    materialized: Option<Rc<asap_types::post_asap::SummaryNode>>,
+    /// For a composed winner: the child target it was committed with.
+    child_target: Option<&'a Rc<QueryExpr>>,
+}
+
+impl Winner<'_> {
+    /// The post-ASAP node to export for this winner, if it is a bound
+    /// (`Summary` or materialized composition) shape.
+    fn summary_node(&self) -> Option<Rc<asap_types::post_asap::SummaryNode>> {
+        match &self.candidate.replacement {
+            Replacement::Summary(node) => Some(Rc::clone(node)),
+            Replacement::ExactComposition(_) => self.materialized.clone(),
+            Replacement::Rewrite(_) => None,
+        }
+    }
+}
+
+/// The `DagDecision` for winner `i`, with explicit provenance/unit and —
+/// for a composed winner — the child decision it was committed with, so a
+/// viewer never infers composition from graph shape (issue #171).
+fn decision_for(i: usize, winners: &[Winner<'_>], role: &'static str) -> DagDecision {
+    let winner = &winners[i];
+    let child_decisions = winner
+        .child_target
+        .into_iter()
+        .filter_map(|child| {
+            winners
+                .iter()
+                .position(|w| Rc::ptr_eq(w.target, child))
+                .map(|j| j as u32)
+        })
+        .collect();
+    DagDecision {
+        id: i as u32,
+        strategy: winner.candidate.strategy.to_string(),
+        rationale: decision_rationale(winner),
+        rank: 0,
+        cost: winner.cost,
+        role,
+        provenance: Some(format!("{:?}", winner.candidate.provenance)),
+        cost_unit: winner.cost_unit.map(str::to_string),
+        child_decisions,
+    }
 }
 
 /// Short explanation intended for a selected winner in node-level UI. The
@@ -280,6 +330,18 @@ fn decision_rationale(winner: &Winner<'_>) -> String {
             "Derives this smaller top-k from a compatible larger top-k result shared by the workload."
                 .to_string()
         }
+        "ExactCompositionStrategy" => match winner.candidate.provenance {
+            asap_aware_mapping::replacement::ReplacementProvenance::ExactPostProcess => {
+                "Applies the exact fold at query time over the child's committed summary readout."
+                    .to_string()
+            }
+            asap_aware_mapping::replacement::ReplacementProvenance::ExactTransform => {
+                "Runs the exact row transform on the update path, feeding the maintained summary above it."
+                    .to_string()
+            }
+            _ => "Composes an exact operator with a summary plan across an explicit phase boundary."
+                .to_string(),
+        },
         _ => {
             let summary = winner
                 .candidate
@@ -325,12 +387,13 @@ fn target_replacement(
 ) -> TargetReplacement {
     let strategy = winner.candidate.strategy.to_string();
     let before = dag_export::export(winner.target);
-    let after = match &winner.candidate.replacement {
-        Replacement::Summary(node) => {
-            TargetReplacementAfter::Summary(dag_export::export_summary(node))
-        }
-        Replacement::Rewrite(rewritten) => {
+    let after = match (&winner.candidate.replacement, winner.summary_node()) {
+        (Replacement::Rewrite(rewritten), _) => {
             TargetReplacementAfter::Rewrite(dag_export::export(rewritten))
+        }
+        (_, Some(node)) => TargetReplacementAfter::Summary(dag_export::export_summary(&node)),
+        (_, None) => {
+            unreachable!("a composed winner always carries its materialized node")
         }
     };
     TargetReplacement {
@@ -428,6 +491,10 @@ fn run_post_asap_with_progress(
         .collect();
     let space = search_workload(roots);
     let ranked_groups = space.cost_sorted(&DefaultCostModel);
+    // Composed decisions (issue #171) are only ever committed by
+    // `global_selection`, together with the child decision they compose
+    // over — never by per-group `cost_sorted` ranking.
+    let selection = space.global_selection(&DefaultCostModel);
 
     // A group's top candidate can be `keep_pre_asap`'s own conservative
     // fallback — `Replacement::Summary(SummaryNode { expr:
@@ -454,7 +521,26 @@ fn run_post_asap_with_progress(
     let winners: Vec<Winner<'_>> = ranked_groups
         .iter()
         .filter_map(|group| {
-            let candidate = group.candidates.first()?;
+            if let Some(selected) = selection.for_target(group.target) {
+                if let (Some(chosen), Some(decision)) = (selected.chosen, &selected.composition) {
+                    let materialized = selection.materialize(group.target).ok().flatten()?;
+                    return Some(Winner {
+                        target: group.target,
+                        candidate: chosen,
+                        cost: decision.cost_rate.units_per_second,
+                        cost_unit: Some(decision.inputs.unit.as_str()),
+                        materialized: Some(materialized),
+                        child_target: Some(decision.child_target),
+                    });
+                }
+            }
+            // A composition not committed by `global_selection` is never a
+            // winner on its own — it has no child to compose over.
+            let (i, candidate) = group
+                .candidates
+                .iter()
+                .enumerate()
+                .find(|(_, c)| !matches!(c.replacement, Replacement::ExactComposition(_)))?;
             if matches!(
                 &candidate.replacement,
                 Replacement::Summary(node) if matches!(node.expr, SummaryExpr::KeepPreAsap(_))
@@ -464,7 +550,10 @@ fn run_post_asap_with_progress(
             Some(Winner {
                 target: group.target,
                 candidate,
-                cost: group.costs[0],
+                cost: group.costs[i],
+                cost_unit: None,
+                materialized: None,
+                child_target: None,
             })
         })
         .collect();
@@ -507,24 +596,20 @@ fn run_post_asap_with_progress(
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
         let winner = &winners[i];
-        let decision = DagDecision {
-            id: i as u32,
-            strategy: winner.candidate.strategy.to_string(),
-            rationale: decision_rationale(winner),
-            rank: 0,
-            cost: winner.cost,
-            role: "replacement_region",
-        };
-        Some(match &winners[i].candidate.replacement {
-            Replacement::Rewrite(rc) => PostAsapSubstitution::Rewrite {
-                replacement: Rc::clone(rc),
-                decision,
+        let decision = decision_for(i, &winners, "replacement_region");
+        Some(
+            match (&winner.candidate.replacement, winner.summary_node()) {
+                (Replacement::Rewrite(rc), _) => PostAsapSubstitution::Rewrite {
+                    replacement: Rc::clone(rc),
+                    decision,
+                },
+                (_, Some(node)) => PostAsapSubstitution::Summary {
+                    replacement: node,
+                    decision,
+                },
+                (_, None) => unreachable!("a composed winner always carries its materialized node"),
             },
-            Replacement::Summary(rc) => PostAsapSubstitution::Summary {
-                replacement: Rc::clone(rc),
-                decision,
-            },
-        })
+        )
     };
     let post_graphs: Vec<(String, DagGraph)> = lowered_queries
         .iter()
