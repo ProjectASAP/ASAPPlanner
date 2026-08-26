@@ -100,11 +100,12 @@ fn catalog() -> SqlCatalog {
 /// "<label>"` pairs off argv, in the order given, plus one optional global
 /// `--epsilon <f64>` and one optional global `--post-asap` flag. `--name` is
 /// optional and applies to the immediately preceding `--sql`/`--promql`.
-fn parse_args() -> (Vec<(String, Lang, String)>, AccuracyTarget, bool) {
+fn parse_args() -> (Vec<(String, Lang, String)>, AccuracyTarget, bool, bool) {
     let mut entries: Vec<(String, Lang, String)> = Vec::new();
     let mut pending: Option<(Lang, String)> = None;
     let mut accuracy = AccuracyTarget::Exact;
     let mut post_asap = false;
+    let mut progress = false;
     let mut args = std::env::args().skip(1);
 
     fn flush(entries: &mut Vec<(String, Lang, String)>, pending: &mut Option<(Lang, String)>) {
@@ -142,11 +143,14 @@ fn parse_args() -> (Vec<(String, Lang, String)>, AccuracyTarget, bool) {
             "--post-asap" => {
                 post_asap = true;
             }
+            "--progress" => {
+                progress = true;
+            }
             other => panic!("unrecognized argument: {other}"),
         }
     }
     flush(&mut entries, &mut pending);
-    (entries, accuracy, post_asap)
+    (entries, accuracy, post_asap, progress)
 }
 
 /// Attach workload-wide replacement explanations to their exact graph nodes.
@@ -259,7 +263,13 @@ struct PostAsapResults {
 /// exact same set of winning candidates (see [`Winner`]), so the flat
 /// `replacements` list and the merged `post_graph` can never disagree about
 /// which candidate won for a given target.
-fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapResults {
+fn run_post_asap_with_progress(
+    lowered_queries: &[(String, String, QueryExpr)],
+    progress: bool,
+) -> PostAsapResults {
+    if progress {
+        eprintln!("[3/4] ASAP-aware mapping is running…");
+    }
     let roots: Vec<(String, Rc<QueryExpr>)> = lowered_queries
         .iter()
         .map(|(name, _, qe)| (name.clone(), Rc::new(qe.clone())))
@@ -331,6 +341,9 @@ fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapRes
     // every node inside it too), so the flat-`replacements` pass below
     // checks there before deciding a miss is a real anomaly worth a
     // warning.
+    if progress {
+        eprintln!("[4/4] Post-ASAP DAG generation is running…");
+    }
     let mut post_graph_cache = HashCache::new();
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
@@ -431,9 +444,14 @@ fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapRes
     }
 }
 
+#[cfg(test)]
+fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapResults {
+    run_post_asap_with_progress(lowered_queries, false)
+}
+
 #[tokio::main]
 async fn main() {
-    let (entries, accuracy, post_asap) = parse_args();
+    let (entries, accuracy, post_asap, progress) = parse_args();
     if entries.is_empty() {
         eprintln!(
             "usage: dag_export --sql \"<query>\" [--name <label>] [--epsilon <f64>] [--post-asap] ..."
@@ -442,6 +460,9 @@ async fn main() {
     }
 
     let mut lowered_queries = Vec::new();
+    if progress {
+        eprintln!("[1/4] Parsing and lowering SQL/PromQL queries…");
+    }
     for (name, lang, query) in entries {
         let lowered = match lang {
             Lang::Sql => lower_sql(&query, &catalog(), accuracy.clone())
@@ -457,6 +478,9 @@ async fn main() {
         }
     }
 
+    if progress {
+        eprintln!("[2/4] Pre-ASAP DAG generation is running…");
+    }
     let explanations = asap_aware_mapping::explain_replacements(
         lowered_queries
             .iter()
@@ -486,7 +510,7 @@ async fn main() {
     }
 
     if post_asap {
-        let results = run_post_asap(&lowered_queries);
+        let results = run_post_asap_with_progress(&lowered_queries, progress);
         for (query_name, replacement) in results.replacements {
             if let Some(named) = queries.iter_mut().find(|q| q.name == query_name) {
                 named.replacements.push(replacement);

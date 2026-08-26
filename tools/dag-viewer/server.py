@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import tempfile
+import threading
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,7 +33,7 @@ def plan_workload(payload: dict) -> dict:
     if not 0 < epsilon < 1:
         raise ValueError("epsilon must be between 0 and 1")
 
-    args = [str(BINARY), "--post-asap", "--epsilon", str(epsilon)]
+    args = [str(BINARY), "--post-asap", "--progress", "--epsilon", str(epsilon)]
     for index, query in enumerate(queries, 1):
         if not isinstance(query, dict):
             raise ValueError(f"query #{index} must be an object")
@@ -44,11 +46,43 @@ def plan_workload(payload: dict) -> dict:
             raise ValueError(f"query #{index}: text must contain 1–100000 characters")
         args.extend([f"--{language}", text, "--name", str(name)])
 
-    result = subprocess.run(args, cwd=REPO, text=True, capture_output=True, timeout=120)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "dag_export failed")
-    workload = json.loads(result.stdout)
-    workload["planner_stderr"] = result.stderr
+    print(f"\n[planner] Received workload with {len(queries)} quer{'y' if len(queries) == 1 else 'ies'}", flush=True)
+    stderr_lines: list[str] = []
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file:
+        process = subprocess.Popen(
+            args,
+            cwd=REPO,
+            text=True,
+            stdout=stdout_file,
+            stderr=subprocess.PIPE,
+        )
+
+        def relay_stderr() -> None:
+            assert process.stderr is not None
+            for line in process.stderr:
+                line = line.rstrip()
+                stderr_lines.append(line)
+                print(f"[planner] {line}", flush=True)
+
+        relay = threading.Thread(target=relay_stderr, daemon=True)
+        relay.start()
+        try:
+            returncode = process.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            relay.join()
+            raise
+        relay.join()
+        stdout_file.seek(0)
+        stdout = stdout_file.read()
+
+    stderr = "\n".join(stderr_lines)
+    if returncode != 0:
+        raise RuntimeError(stderr.strip() or "dag_export failed")
+    workload = json.loads(stdout)
+    workload["planner_stderr"] = stderr
+    print(f"[planner] Complete: generated {len(workload.get('queries', []))} pre/post DAG pairs", flush=True)
     return workload
 
 
