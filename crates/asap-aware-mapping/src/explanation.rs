@@ -216,6 +216,13 @@ pub enum ExplanationKind {
     /// cross-subpopulation reuse entries, all the same underlying structural
     /// fact.
     CommonSubexpressionReuse,
+    /// A `TargetSubDAG`'s candidate list contains at least one
+    /// [`Replacement::ExactComposition`] —
+    /// [`crate::exact_composition::ExactCompositionStrategy`] found an exact
+    /// operator that can be composed with a summary plan across an explicit
+    /// update/readout boundary instead of collapsing the whole tree into
+    /// `KeepPreAsap` (issue #171).
+    ExactComposition,
 }
 
 /// Why a [`Replacement`] of `kind` exists at `location` (a human-readable
@@ -319,6 +326,15 @@ fn findings_from_plan_space(space: &PlanSpace<String>) -> Vec<ReplacementExplana
         if let Some(reason) = shared_subexpr_finding_reason(group) {
             findings.push(ReplacementExplanation {
                 kind: ExplanationKind::CommonSubexpressionReuse,
+                location: location.clone(),
+                reason,
+                node_hash,
+                target: Rc::clone(&group.target),
+            });
+        }
+        if let Some(reason) = composition_finding_reason(group) {
+            findings.push(ReplacementExplanation {
+                kind: ExplanationKind::ExactComposition,
                 location,
                 reason,
                 node_hash,
@@ -327,6 +343,23 @@ fn findings_from_plan_space(space: &PlanSpace<String>) -> Vec<ReplacementExplana
         }
     }
     findings
+}
+
+/// Does `group`'s candidate list contain an exact composition (issue
+/// #171)? If so, the finding's `reason` is every such candidate's own
+/// `rationale`, joined.
+fn composition_finding_reason(group: &MemoGroup) -> Option<String> {
+    let reasons: Vec<&str> = group
+        .candidates
+        .iter()
+        .filter(|c| matches!(c.replacement, Replacement::ExactComposition(_)))
+        .map(|c| c.rationale.as_str())
+        .collect();
+    if reasons.is_empty() {
+        None
+    } else {
+        Some(reasons.join("; "))
+    }
 }
 
 /// Does `group`'s candidate list contain a genuine sketch-family realization?

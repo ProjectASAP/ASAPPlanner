@@ -56,6 +56,7 @@ use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
+use crate::exact_composition::{CompositionPhase, ExactComposition};
 use crate::recurrence::{
     self, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
 };
@@ -63,6 +64,257 @@ use crate::replacement::{
     realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
     TargetSubDAG,
 };
+
+// ── Recurring-cost vocabulary for mixed exact/summary plans (issue #171) ──
+
+/// The unit a recurring cost is expressed in. One variant today; an enum so
+/// a JSON/DAG export names the unit explicitly instead of a consumer
+/// assuming it, and so a future per-resource unit can be added without
+/// changing every hook's signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CostUnit {
+    /// Abstract cost units per wall-clock second — the common currency
+    /// every recurring alternative (maintain-and-read vs. recompute-per-eval)
+    /// is compared in.
+    CostUnitsPerSecond,
+}
+
+impl CostUnit {
+    /// Stable name for export (`"cost_units_per_second"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CostUnitsPerSecond => "cost_units_per_second",
+        }
+    }
+}
+
+/// A recurring cost in [`CostUnit::CostUnitsPerSecond`]. Distinct from the
+/// unitless one-shot [`Cost`] so the two can never be added or compared by
+/// accident.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct CostRate {
+    pub units_per_second: f64,
+}
+
+impl CostRate {
+    pub const UNIT: CostUnit = CostUnit::CostUnitsPerSecond;
+
+    /// `total_cost(H) = recurring_cost_rate * H + one_shot_cost` — the cost
+    /// of running this rate for a finite horizon of `horizon_seconds`,
+    /// plus any one-shot work (`Cost` is unitless and treated as the same
+    /// abstract cost unit).
+    pub fn total_over_horizon(self, horizon_seconds: f64, one_shot: Cost) -> f64 {
+        self.units_per_second * horizon_seconds + one_shot.0
+    }
+}
+
+/// How often a plan is evaluated, in evaluations per second. For a shared
+/// plan serving several repeating consumers,
+/// `evaluation_rate = Σ 1 / query_interval_i` — see
+/// [`EvaluationRate::from_intervals`].
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct EvaluationRate {
+    pub per_second: f64,
+}
+
+impl EvaluationRate {
+    /// `Σ 1 / interval_i` over every consumer's own evaluation interval.
+    /// Non-positive/non-finite intervals contribute nothing (they describe
+    /// no repeating consumer). Returns `None` for an empty consumer set —
+    /// an unknown rate stays unknown, never zero.
+    pub fn from_intervals(intervals: &[std::time::Duration]) -> Option<Self> {
+        let mut per_second = 0.0;
+        let mut any = false;
+        for interval in intervals {
+            let secs = interval.as_secs_f64();
+            if secs.is_finite() && secs > 0.0 {
+                per_second += 1.0 / secs;
+                any = true;
+            }
+        }
+        any.then_some(Self { per_second })
+    }
+}
+
+/// Who produced a set of [`ExactCompositionCostInputs`], and under which
+/// model version — carried into every composed decision's explanation and
+/// DAG export so a reviewer can tell a deployment's measured numbers from
+/// a placeholder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CostProvenance {
+    /// The cost model's own name (e.g. `"DefaultCostModel"`).
+    pub model: String,
+    /// The model's own version string, whatever scheme it uses.
+    pub version: String,
+}
+
+/// Which mixed-execution shapes the downstream runtime can actually
+/// execute (issue #171). [`crate::exact_composition::ExactCompositionStrategy`]
+/// proposes an `ExactPostProcess` candidate only when
+/// `exact_post_process` is set, and an `ExactTransform` candidate only
+/// when `exact_update_transform` is — a runtime that cannot run an exact
+/// operator on the update path must never be handed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MixedExecutionCapabilities {
+    /// The runtime can apply an exact operator to summary readouts at
+    /// query evaluation time.
+    pub exact_post_process: bool,
+    /// The runtime can apply an exact row transform on the update path,
+    /// feeding its output into maintained summary state.
+    pub exact_update_transform: bool,
+}
+
+impl MixedExecutionCapabilities {
+    /// Neither shape supported.
+    pub const NONE: Self = Self {
+        exact_post_process: false,
+        exact_update_transform: false,
+    };
+    /// Both shapes supported.
+    pub const ALL: Self = Self {
+        exact_post_process: true,
+        exact_update_transform: true,
+    };
+
+    pub fn supports(self, phase: CompositionPhase) -> bool {
+        match phase {
+            CompositionPhase::PostProcess => self.exact_post_process,
+            CompositionPhase::Transform => self.exact_update_transform,
+        }
+    }
+}
+
+/// What [`CostModel::exact_composition_cost_inputs`] is asked about: one
+/// composed alternative at one site, paired with the concrete summary it
+/// composes with.
+#[derive(Debug, Clone, Copy)]
+pub struct ExactCompositionCostRequest<'a> {
+    /// The pre-ASAP target the composed candidate replaces.
+    pub target: &'a QueryExpr,
+    /// The composition itself — phase, operator, child target.
+    pub composition: &'a ExactComposition,
+    /// For [`CompositionPhase::PostProcess`]: the child target's *selected*
+    /// summary readout candidate the exact operator consumes. For
+    /// [`CompositionPhase::Transform`]: the maintained summary *above* the
+    /// transform that consumes its output (the `SummaryAgg` this transform
+    /// feeds). Either way, the summary whose maintenance/read cost the
+    /// formula charges.
+    pub summary: &'a SummaryNode,
+    /// How many times this site actually runs once ancestors' own choices
+    /// are accounted for (see `PlanSpace::global_selection`).
+    pub effective_consumer_count: usize,
+}
+
+/// Every input the issue #171 cost formulas need, each individually
+/// optional: **an unknown stays `None` — never a zero** — so a formula
+/// with a missing input yields no rate at all rather than a spuriously
+/// cheap one, and global selection then keeps the conservative
+/// `KeepPreAsap` behavior. A deployment model that wants defaults supplies
+/// them explicitly by overriding [`CostModel::exact_composition_cost_inputs`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExactCompositionCostInputs {
+    /// Exact operator cost per row it processes — per readout row for a
+    /// post-process, per input row for an update-path transform.
+    pub exact_cost_per_row: Option<f64>,
+    /// Rows the exact operator consumes per evaluation (post-process) or
+    /// per update (transform).
+    pub expected_input_rows: Option<f64>,
+    /// Rows the exact operator emits per evaluation/update.
+    pub expected_output_rows: Option<f64>,
+    /// Cost of one update to the composed-with summary's maintained state.
+    pub summary_maintenance_cost_per_update: Option<f64>,
+    /// Cost of one readout of that summary at evaluation time.
+    pub summary_read_cost: Option<f64>,
+    /// Update (ingest) events per second reaching this site.
+    pub update_rate: Option<f64>,
+    /// Evaluations per second across every consumer of this site.
+    pub evaluation_rate: Option<EvaluationRate>,
+    /// Cost of one full raw recompute of the target from pre-ASAP data —
+    /// the `KeepPreAsap` baseline's per-evaluation cost.
+    pub raw_recompute_cost: Option<f64>,
+    pub unit: CostUnit,
+    pub provenance: CostProvenance,
+}
+
+impl ExactCompositionCostInputs {
+    /// Every input unknown, attributed to `provenance` — what a model that
+    /// has no statistics for a site returns.
+    pub fn unknown(provenance: CostProvenance) -> Self {
+        Self {
+            exact_cost_per_row: None,
+            expected_input_rows: None,
+            expected_output_rows: None,
+            summary_maintenance_cost_per_update: None,
+            summary_read_cost: None,
+            update_rate: None,
+            evaluation_rate: None,
+            raw_recompute_cost: None,
+            unit: CostUnit::CostUnitsPerSecond,
+            provenance,
+        }
+    }
+
+    /// The rate for whichever phase `phase` names —
+    /// [`postprocess_plan_cost_rate`] or [`pretransform_plan_cost_rate`].
+    pub fn composed_plan_cost_rate(&self, phase: CompositionPhase) -> Option<CostRate> {
+        match phase {
+            CompositionPhase::PostProcess => postprocess_plan_cost_rate(self),
+            CompositionPhase::Transform => pretransform_plan_cost_rate(self),
+        }
+    }
+}
+
+/// Outer exact post-process over a maintained summary:
+///
+/// ```text
+/// postprocess_plan_cost_rate =
+///     update_rate * summary_maintenance_cost_per_update
+///   + evaluation_rate * (summary_read_cost
+///                        + output_rows_per_eval * exact_postprocess_cost_per_row)
+/// ```
+///
+/// `None` if any input is unknown — see [`ExactCompositionCostInputs`].
+pub fn postprocess_plan_cost_rate(inputs: &ExactCompositionCostInputs) -> Option<CostRate> {
+    let maintenance = inputs.update_rate? * inputs.summary_maintenance_cost_per_update?;
+    let per_eval =
+        inputs.summary_read_cost? + inputs.expected_output_rows? * inputs.exact_cost_per_row?;
+    let evaluation = inputs.evaluation_rate?.per_second * per_eval;
+    finite_rate(maintenance + evaluation)
+}
+
+/// Outer maintained summary over an exact update-time transform:
+///
+/// ```text
+/// pretransform_plan_cost_rate =
+///     update_rate * (exact_transform_cost_per_input_row
+///                    + summary_maintenance_cost_per_update)
+///   + evaluation_rate * summary_read_cost
+/// ```
+///
+/// `None` if any input is unknown — see [`ExactCompositionCostInputs`].
+pub fn pretransform_plan_cost_rate(inputs: &ExactCompositionCostInputs) -> Option<CostRate> {
+    let per_update = inputs.exact_cost_per_row? + inputs.summary_maintenance_cost_per_update?;
+    let maintenance = inputs.update_rate? * per_update;
+    let evaluation = inputs.evaluation_rate?.per_second * inputs.summary_read_cost?;
+    finite_rate(maintenance + evaluation)
+}
+
+/// The raw/pre-ASAP fallback baseline:
+///
+/// ```text
+/// raw_recompute_cost_rate = evaluation_rate * raw_recompute_cost
+/// ```
+///
+/// `None` if either input is unknown — see [`ExactCompositionCostInputs`].
+pub fn raw_recompute_cost_rate(inputs: &ExactCompositionCostInputs) -> Option<CostRate> {
+    finite_rate(inputs.evaluation_rate?.per_second * inputs.raw_recompute_cost?)
+}
+
+fn finite_rate(units_per_second: f64) -> Option<CostRate> {
+    units_per_second
+        .is_finite()
+        .then_some(CostRate { units_per_second })
+}
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
@@ -504,6 +756,47 @@ pub trait CostModel {
         let _ = (candidate, target);
         f64::NAN
     }
+
+    /// Which mixed exact/summary execution shapes the downstream runtime
+    /// advertises (issue #171). Gates candidate *generation* in
+    /// [`crate::exact_composition::ExactCompositionStrategy`]: a shape the
+    /// runtime can't execute is never proposed, so it can't be selected
+    /// either.
+    ///
+    /// Default: [`MixedExecutionCapabilities::ALL`]. The built-in model
+    /// describes no particular runtime, and leaving both shapes *visible*
+    /// in `PlanSpace` (for explanations and the DAG viewer) is the more
+    /// informative default; selection is still gated separately by
+    /// [`Self::exact_composition_cost_inputs`], whose default supplies no
+    /// statistics, so nothing is ever *committed* to under the built-in
+    /// model. A deployment whose runtime lacks a shape narrows this.
+    fn mixed_execution_capabilities(&self) -> MixedExecutionCapabilities {
+        MixedExecutionCapabilities::ALL
+    }
+
+    /// The statistics the issue #171 recurring-cost formulas need for one
+    /// composed alternative — see [`ExactCompositionCostInputs`] for each
+    /// input and [`postprocess_plan_cost_rate`]/
+    /// [`pretransform_plan_cost_rate`]/[`raw_recompute_cost_rate`] for how
+    /// they combine. One structured hook rather than eight scalar ones, so
+    /// a deployment answers them all from one place (and can attach its own
+    /// [`CostProvenance`]).
+    ///
+    /// Default: every input unknown ([`ExactCompositionCostInputs::unknown`])
+    /// — unknown is never zero, and with no rate derivable
+    /// `PlanSpace::global_selection` keeps the conservative `KeepPreAsap`
+    /// behavior for the site. A deployment that wants defaults must supply
+    /// them here explicitly.
+    fn exact_composition_cost_inputs(
+        &self,
+        request: &ExactCompositionCostRequest<'_>,
+    ) -> ExactCompositionCostInputs {
+        let _ = request;
+        ExactCompositionCostInputs::unknown(CostProvenance {
+            model: "CostModel::exact_composition_cost_inputs (default)".into(),
+            version: "unknown".into(),
+        })
+    }
 }
 
 fn sketch_state(
@@ -661,6 +954,12 @@ impl CostModel for DefaultCostModel {
                     (self.cse_recompute_cost(&cse) * consumer_count).0
                 }
             }
+            // A composed candidate is costed in cost-units-per-second by
+            // `PlanSpace::global_selection` against the child decision it
+            // is committed with — a different unit from this structural
+            // estimate, and unknowable here without that child. `NaN`
+            // keeps it from ever out-ranking a real estimate by accident.
+            Replacement::ExactComposition(_) => f64::NAN,
         }
     }
 }
@@ -803,6 +1102,102 @@ mod tests {
             DiscreteKllRungs.size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
             crate::replacement::default_size_params(SketchAlgorithm::Hll, &intent, 0.01, 0.01),
         );
+    }
+
+    // ── Recurring-cost formulas (issue #171) ─────────────────────────────
+
+    fn known_inputs() -> ExactCompositionCostInputs {
+        ExactCompositionCostInputs {
+            exact_cost_per_row: Some(0.1),
+            expected_input_rows: Some(50.0),
+            expected_output_rows: Some(10.0),
+            summary_maintenance_cost_per_update: Some(0.01),
+            summary_read_cost: Some(1.0),
+            update_rate: Some(100.0),
+            evaluation_rate: Some(EvaluationRate { per_second: 2.0 }),
+            raw_recompute_cost: Some(100.0),
+            unit: CostUnit::CostUnitsPerSecond,
+            provenance: CostProvenance {
+                model: "test".into(),
+                version: "1".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn composition_formulas_match_the_issue_definitions() {
+        let inputs = known_inputs();
+        // 100 * 0.01 + 2 * (1 + 10 * 0.1) = 1 + 4 = 5
+        assert_eq!(
+            postprocess_plan_cost_rate(&inputs)
+                .unwrap()
+                .units_per_second,
+            5.0
+        );
+        // 100 * (0.1 + 0.01) + 2 * 1 = 11 + 2 = 13
+        assert!(
+            (pretransform_plan_cost_rate(&inputs)
+                .unwrap()
+                .units_per_second
+                - 13.0)
+                .abs()
+                < 1e-9
+        );
+        // 2 * 100
+        assert_eq!(
+            raw_recompute_cost_rate(&inputs).unwrap().units_per_second,
+            200.0
+        );
+        assert_eq!(
+            CostRate {
+                units_per_second: 5.0
+            }
+            .total_over_horizon(10.0, Cost(3.0)),
+            53.0
+        );
+    }
+
+    #[test]
+    fn a_missing_input_yields_no_rate_not_zero() {
+        let mut inputs = known_inputs();
+        inputs.summary_maintenance_cost_per_update = None;
+        assert_eq!(postprocess_plan_cost_rate(&inputs), None);
+        assert_eq!(pretransform_plan_cost_rate(&inputs), None);
+        // The baseline doesn't need maintenance and is still known.
+        assert!(raw_recompute_cost_rate(&inputs).is_some());
+        let unknown = ExactCompositionCostInputs::unknown(known_inputs().provenance);
+        assert_eq!(raw_recompute_cost_rate(&unknown), None);
+    }
+
+    #[test]
+    fn evaluation_rate_sums_reciprocal_intervals() {
+        use std::time::Duration;
+        let rate =
+            EvaluationRate::from_intervals(&[Duration::from_secs(10), Duration::from_secs(5)])
+                .unwrap();
+        assert!((rate.per_second - 0.3).abs() < 1e-12);
+        assert_eq!(EvaluationRate::from_intervals(&[]), None);
+        assert_eq!(EvaluationRate::from_intervals(&[Duration::ZERO]), None);
+    }
+
+    #[test]
+    fn default_model_advertises_capabilities_but_no_statistics() {
+        assert_eq!(
+            DefaultCostModel.mixed_execution_capabilities(),
+            MixedExecutionCapabilities::ALL
+        );
+        assert!(MixedExecutionCapabilities::NONE
+            .supports(CompositionPhase::PostProcess)
+            .not());
+    }
+
+    trait Not {
+        fn not(self) -> bool;
+    }
+    impl Not for bool {
+        fn not(self) -> bool {
+            !self
+        }
     }
 
     // ── CSE sharing (issue #237, #223 stage 4) ──────────────────────────
