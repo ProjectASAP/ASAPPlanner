@@ -20,7 +20,22 @@ multiple files, or run the exporter more than once); their queries are merged.
 Add `--epsilon <f64>` to also populate `notes` with sketch-approximation
 findings — see "Replacement explanations (`notes`)" below.
 
-## Open the viewer
+## Run the interactive planner viewer
+
+```sh
+python3 tools/dag-viewer/server.py
+# open http://127.0.0.1:8000
+```
+
+The server builds `dag_export` once, serves the UI, and exposes a local
+`POST /api/plan`. Open **Query editor**, add SQL/PromQL entries, choose which
+ones belong to the workload, and click **Plan selected workload**. The backend
+passes the whole batch to the real `dag_export --post-asap` binary as an argv
+array (never a shell command), running pre-ASAP lowering, ASAP-aware workload
+mapping, and post-ASAP export before returning the `WorkloadGraph` to the UI.
+It listens on `127.0.0.1` by default.
+
+## Open a static export
 
 This is a static page with no server or build step — open `index.html`
 directly in a browser (`file://tools/dag-viewer/index.html`), or serve the
@@ -33,18 +48,16 @@ picker.
   the default). Nodes that are structurally identical to a node in *another*
   loaded query get a blue ring — toggle this off with "Highlight shared
   subtrees".
-- Each query's root node (its final output) gets a small red badge.
-- A node whose `notes` array is non-empty gets a small colored badge in the
-  bottom-right corner — click the node to see each note's kind and reason in
-  the side panel. See "Replacement explanations (`notes`)" below.
-- Node color/icon is driven by category — see the legend in the side panel,
+- Each query's root node (its final output) gets a heavier border.
+- A node whose `notes` array is non-empty gets a double border; click it to
+  see each note's kind and reason in the side panel.
+- Node color is driven by category — see the legend in the side panel,
   or `node-style.js` for the underlying `kind -> category` table.
 - Once two or more queries are loaded, switch to **Compare** or **Union**
   mode (buttons next to the drop zone) to see them together instead of one
   at a time — see below.
 - If a query's export carries `replacements` (`dag_export --post-asap`),
-  switch to **Before/After** mode to see one claimed replacement's before
-  and after subtrees side by side — see "Before/After mode" below.
+  switch to **Before/After** mode for complete pre-/post-ASAP DAGs — see below.
 
 ## Render a standalone page from Python
 
@@ -76,14 +89,13 @@ load) are animated in both — see `viewer.js`'s `LAYOUT_ANIMATION` and the
 `transition-property` entries in `buildCyStyle()` if you want to retune or
 disable that.
 
-Per-node cost isn't rendered anywhere in either page — `dag_export` doesn't
-emit one today (no cost estimator is wired into pre-ASAP IR yet). The side
-panel already dumps a clicked node's full `detail` verbatim, so a future
-`cost` field added there would show up with no viewer change needed.
+Pre-ASAP nodes have no per-node execution cost. Post-ASAP replacement nodes
+do carry the chosen candidate's estimated cost as part of `decision` and the
+side panel renders it alongside strategy/rationale.
 
 ## Visual style and node categories
 
-Node colors, icons, and shapes are adapted from
+Node colors and shapes are adapted from
 [`ProjectASAP/bgp-query-dag-explorer`](https://github.com/ProjectASAP/bgp-query-dag-explorer)'s
 visual language, applied to the real `QueryExpr` IR instead of that repo's
 hardcoded BGP query set. `tools/dag-viewer/node-style.js` is the single
@@ -242,15 +254,13 @@ subtree repeated within one query (e.g. the same branch appearing on both
 sides of a `BinaryOp`), which `share_common_subtrees` can detect regardless
 of accuracy target.
 
-In the viewer, a node with non-empty `notes` gets a small colored badge in
-its bottom-right corner (color keyed to `kind` — see `node-style.js`'s
-`NOTE_KIND_COLOR`); click the node to see each note's kind and full reason
-text in the side panel, the same "click for detail" pattern the rest of the
-side panel already uses for a node's `detail`/root/shared-subtree status.
+In the viewer, a node with non-empty `notes` gets a double border; click the
+node to see each note's kind and full reason text in the side panel, the same
+"click for detail" pattern used for IR content and translation decisions.
 
 ## Before/After mode
 
-`dag_export --post-asap` additionally attaches a `replacements` array to each
+`dag_export --post-asap` attaches a `replacements` array to each
 query — one entry per place in the query where `asap-aware-mapping` actually
 *chose* a real optimization (cost-ranked, not just "could apply"): a sketch
 mapping, a CSE share/recompute, a workload-aware rollup, Hydra
@@ -262,24 +272,20 @@ carries its own small `before` subtree (the pre-ASAP nodes it replaced) and
 `provenance`, a human `rationale`, and this candidate's `rank`/`cost` among
 whatever else was considered for the same target (`rank: 0` is the winner).
 
-**Before/After** mode (only shown once a query with `replacements` is
-loaded) reuses the Single-mode tab bar to pick a query, then shows a
-secondary picker below the tabs listing every entry, grouped by which
-pre-ASAP node it targets (so a node with several ranked candidates — e.g.
-one query's Kll sketch vs. a Hydra-grouped alternative for the same
-aggregate — reads as one section instead of unrelated rows) and sorted by
-rank within a group so the winner is always first and marked. Pick a row and
-the main view draws that entry's `before` and `after` as two fixed lanes —
-**Before** / **After** — using the same compound-lane layout Compare mode
-uses for its per-query lanes, just with exactly two lanes fed from one
-entry's two subtrees instead of N lanes fed from N queries.
+**Before/After** uses checkbox tabs as a workload selector. Select one query
+to see its complete `graph` (pre-ASAP) and complete `post_graph` side by side.
+Select several queries to see every selected query's complete pre-ASAP DAG
+and post-ASAP DAG in one batch view. Per-target mini-subtrees are not the main
+view; their replacement records instead explain clicked nodes.
 
-The picker also always offers a **Whole query** option: `query.graph`
-(Before) against the query's whole-query merged post-ASAP graph,
-`query.post_graph` (After) — the `NamedGraph`-level counterpart to picking
-one target's tiny subtrees. It's disabled rather than hidden when a query's
-export has no `post_graph` (no `--post-asap`, or the query had zero
-replacements) — the option always exists, it just isn't always populated.
+Every `post_graph.nodes[]` entry produced or carried by a winning replacement
+contains a self-contained `decision` object with `id`, `strategy`,
+`rationale`, `rank`, `cost`, and `role` (`replacement_root` or
+`replacement_region`). This is a hard export contract: the viewer reads that
+field directly and never guesses provenance from a label, structural hash, or
+similarity to a replacement subtree. Clicking a post-ASAP node shows exactly
+why it was translated (or carried inside a translated region), while clicking
+the corresponding pre-ASAP target shows the selected replacement entry.
 
 A Summary graph's nodes (`SummaryDagNode`, from `after.kind === "Summary"` or
 from `post_graph`) are a different shape than the pre-ASAP `DagNode`s

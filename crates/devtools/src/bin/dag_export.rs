@@ -53,15 +53,12 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::replacement::{
-    search_workload, Replacement, ReplacementProvenance, ReplacementSubDAG,
-};
+use asap_aware_mapping::replacement::{search_workload, Replacement, ReplacementSubDAG};
 use asap_types::dag_export::{
-    self, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetReplacement,
+    self, DagDecision, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetReplacement,
     TargetReplacementAfter, WorkloadGraph,
 };
-use asap_types::post_asap::{GroupingStrategy, SummaryExpr};
-use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::post_asap::SummaryExpr;
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -178,65 +175,6 @@ fn annotate_with_explanations(
     }
 }
 
-/// Which display `strategy` label a winning candidate earns, derived from
-/// its `ReplacementProvenance` plus (for `SummaryImplementation`/
-/// `LogicalRewrite`, which each cover more than one concrete strategy) a
-/// look at the winning candidate's own shape:
-///
-/// - `SummaryImplementation` covers both `SketchAlgorithmStrategy` and
-///   `HydraGroupingStrategy` — both produce `Replacement::Summary`
-///   candidates with this same provenance, distinguished only by whether
-///   the bound `SummaryAgg`'s own `grouping` chose
-///   `GroupingStrategy::SharedMultiSubpopulation` (Hydra) or not (an
-///   ordinary per-subpopulation sketch instance).
-/// - `CseShare`/`CseRecompute` both come from `SharedSubtreeStrategy`'s own
-///   two-way share-vs-recompute pair — one label either way, since the
-///   *choice* of which of the two won is exactly what `rank`/`cost`/`after`
-///   already show, not something the strategy label itself needs to encode.
-/// - `LogicalRewrite` covers both `AvgToSumOverCountStrategy` and
-///   `RollupStrategy` — both emit a `Replacement::Rewrite` with this same
-///   provenance, and (per `rollup.rs`) `RollupStrategy` never sets
-///   `provenance` to anything else either, so provenance alone can't tell
-///   them apart. Disambiguated instead by `target`'s own shape:
-///   `AvgToSumOverCountStrategy::matches` requires exactly one
-///   `AggIntent::Avg` measure (`rewrite.rs`'s own `avg_rewrite_target`
-///   precondition) — and `Avg` has no summary/accumulator realization at
-///   all (`implementations_for_with` dispatches it straight to
-///   `PassThrough`), so it can never be a `RollupStrategy` source either
-///   (that strategy only rolls up ordinary mergeable accumulators). A
-///   target whose sole measure is `Avg` is therefore unambiguously an
-///   `AvgToSumOverCountStrategy` candidate, and everything else this
-///   provenance produces is `RollupStrategy`'s.
-fn classify_strategy(target: &QueryExpr, winner: &ReplacementSubDAG) -> String {
-    match winner.provenance {
-        ReplacementProvenance::SummaryImplementation => match &winner.replacement {
-            Replacement::Summary(node) => match &node.expr {
-                SummaryExpr::SummaryAgg {
-                    grouping: GroupingStrategy::SharedMultiSubpopulation { .. },
-                    ..
-                } => "HydraGrouping".to_string(),
-                _ => "Sketch".to_string(),
-            },
-            // Never actually produced by SketchAlgorithmStrategy/
-            // HydraGroupingStrategy (both only ever emit
-            // Replacement::Summary) — a defensive fallback, not a case this
-            // binary expects to hit.
-            Replacement::Rewrite(_) => "Sketch".to_string(),
-        },
-        ReplacementProvenance::CseShare | ReplacementProvenance::CseRecompute => {
-            "SharedSubtree".to_string()
-        }
-        ReplacementProvenance::LogicalRewrite => {
-            if let QueryExpr::Aggregate { measures, .. } = target {
-                if let [AggIntent::Avg { .. }] = measures.as_slice() {
-                    return "AvgToSumRewrite".to_string();
-                }
-            }
-            "Rollup".to_string()
-        }
-    }
-}
-
 /// One `MemoGroup`'s best-ranked candidate, kept alongside its own `target`
 /// and `cost` — the unit both [`PostAsapResults::replacements`] and
 /// [`PostAsapResults::post_graphs`] are built from, so the two outputs can
@@ -271,8 +209,12 @@ fn lookup_winner(
 
 /// Build a [`TargetReplacement`] for `winner`, matching this file's own
 /// per-target `before`/`after` construction.
-fn target_replacement(target_pre_id: u32, winner: &Winner<'_>) -> TargetReplacement {
-    let strategy = classify_strategy(winner.target, winner.candidate);
+fn target_replacement(
+    decision_id: u32,
+    target_pre_id: u32,
+    winner: &Winner<'_>,
+) -> TargetReplacement {
+    let strategy = winner.candidate.strategy.to_string();
     let before = dag_export::export(winner.target);
     let after = match &winner.candidate.replacement {
         Replacement::Summary(node) => {
@@ -283,6 +225,7 @@ fn target_replacement(target_pre_id: u32, winner: &Winner<'_>) -> TargetReplacem
         }
     };
     TargetReplacement {
+        decision_id,
         target_pre_id,
         strategy,
         rationale: winner.candidate.rationale.clone(),
@@ -391,9 +334,24 @@ fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapRes
     let mut post_graph_cache = HashCache::new();
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
+        let winner = &winners[i];
+        let decision = DagDecision {
+            id: i as u32,
+            strategy: winner.candidate.strategy.to_string(),
+            rationale: winner.candidate.rationale.clone(),
+            rank: 0,
+            cost: winner.cost,
+            role: "replacement_region",
+        };
         Some(match &winners[i].candidate.replacement {
-            Replacement::Rewrite(rc) => PostAsapSubstitution::Rewrite(Rc::clone(rc)),
-            Replacement::Summary(rc) => PostAsapSubstitution::Summary(Rc::clone(rc)),
+            Replacement::Rewrite(rc) => PostAsapSubstitution::Rewrite {
+                replacement: Rc::clone(rc),
+                decision,
+            },
+            Replacement::Summary(rc) => PostAsapSubstitution::Summary {
+                replacement: Rc::clone(rc),
+                decision,
+            },
         })
     };
     let post_graphs: Vec<(String, DagGraph)> = lowered_queries
@@ -427,7 +385,10 @@ fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapRes
                 continue; // never true for a plain `export` — defensive only.
             };
             if let Some(i) = lookup_winner(&by_hash, &winners, &mut lookup_cache, source_expr) {
-                replacements.push((name.clone(), target_replacement(node.id, &winners[i])));
+                replacements.push((
+                    name.clone(),
+                    target_replacement(i as u32, node.id, &winners[i]),
+                ));
                 matched[i] = true;
             }
         }
@@ -454,7 +415,7 @@ fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapRes
     // `post_graph`'s own construction already handled correctly.
     for (winner, matched) in winners.iter().zip(&matched) {
         if !matched {
-            let strategy = classify_strategy(winner.target, winner.candidate);
+            let strategy = winner.candidate.strategy;
             eprintln!(
                 "dag_export: post-asap replacement ({strategy}) has no node in any query's \
                  original graph — expected for a winner exposed only inside another winner's \
@@ -660,7 +621,7 @@ mod tests {
         assert!(results
             .replacements
             .iter()
-            .any(|(_, r)| r.strategy == "AvgToSumRewrite"));
+            .any(|(_, r)| r.strategy == "AvgToSumOverCountStrategy"));
 
         assert_eq!(results.post_graphs.len(), 2, "one post_graph per query");
         for (name, graph) in &results.post_graphs {
@@ -668,6 +629,19 @@ mod tests {
                 !graph.nodes.is_empty(),
                 "post_graph for {name:?} must not be empty"
             );
+        }
+        let decisions: Vec<_> = results
+            .post_graphs
+            .iter()
+            .flat_map(|(_, graph)| graph.nodes.iter().filter_map(|node| node.decision.as_ref()))
+            .collect();
+        assert!(
+            !decisions.is_empty(),
+            "post_graph nodes must carry explicit strategy metadata"
+        );
+        for decision in decisions {
+            assert!(!decision.strategy.is_empty());
+            assert!(!decision.rationale.is_empty());
         }
     }
 

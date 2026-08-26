@@ -100,6 +100,11 @@ pub struct DagNode {
     /// by default, so every existing [`export`] caller and test is unaffected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<DagNote>,
+    /// Explicit workload-level decision that produced or carried this node.
+    /// Present only in `post_graph`; consumers must read this rather than
+    /// infer strategy provenance from labels, hashes, or graph similarity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DagDecision>,
 }
 
 /// One reporting-layer annotation attached to a [`DagNode`] by a higher
@@ -118,6 +123,20 @@ pub struct DagNote {
     /// Human-readable explanation text (e.g. an
     /// `asap_aware_mapping::ReplacementExplanation::reason`).
     pub reason: String,
+}
+
+/// Self-contained explanation of a winning workload-level post-ASAP
+/// decision, serialized directly on every node it produced or carried.
+#[derive(Debug, Clone, Serialize)]
+pub struct DagDecision {
+    pub id: u32,
+    pub strategy: String,
+    pub rationale: String,
+    pub rank: usize,
+    pub cost: f64,
+    /// `replacement_root` for the node replacing the pre-ASAP target;
+    /// `replacement_region` for its generated or carried descendants.
+    pub role: &'static str,
 }
 
 /// One query's exported graph. `nodes[root as usize]` is the tree's root.
@@ -417,13 +436,18 @@ fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
 /// populates it).
 #[derive(Debug, Clone, Serialize)]
 pub struct TargetReplacement {
+    /// Stable id of this workload-level winning decision. Nodes in
+    /// [`NamedGraph::post_graph`] produced by this decision carry the same id,
+    /// so renderers can explain a clicked post-ASAP node without guessing by
+    /// label, hash, or graph shape.
+    pub decision_id: u32,
     /// Id of the [`DagNode`] (in this query's own `graph.nodes`, i.e. the
     /// [`NamedGraph`] this `TargetReplacement` is attached to) this
     /// replacement's `before` subtree is rooted at.
     pub target_pre_id: u32,
     /// Human label for which strategy proposed the winning candidate —
     /// e.g. `"Sketch"` / `"HydraGrouping"` / `"SharedSubtree"` /
-    /// `"AvgToSumRewrite"` / `"Rollup"`. The higher layer derives this from
+    /// `"AvgToSumCountRewrite"` / `"Rollup"`. The higher layer derives this from
     /// `ReplacementProvenance` plus which strategy's shape actually
     /// produced the winning candidate; `asap_types` has no opinion on the
     /// string values here at all — purely a display label.
@@ -498,11 +522,17 @@ pub enum PostAsapSubstitution {
     /// [`build`] renders it via the same ordinary `DagNode` path — see
     /// [`build`]'s own doc for why `.0`'s own top level is rendered without
     /// re-querying `find_winner` on it (its descendants still are).
-    Rewrite(Rc<QueryExpr>),
+    Rewrite {
+        replacement: Rc<QueryExpr>,
+        decision: DagDecision,
+    },
     /// This exact node has a winning `Replacement::Summary` — switch to
     /// rendering `.0`'s bound `SummaryNode` shape from here down, via
     /// [`build_summary_hybrid`].
-    Summary(Rc<SummaryNode>),
+    Summary {
+        replacement: Rc<SummaryNode>,
+        decision: DagDecision,
+    },
 }
 
 /// Build one merged "whole query, but post-ASAP" [`DagGraph`] by walking
@@ -579,6 +609,7 @@ fn push_node(
         hash,
         source_expr: Some(expr.clone()),
         notes: Vec::new(),
+        decision: None,
     });
     id
 }
@@ -610,6 +641,7 @@ fn push_summary_originated_node(
         hash: None,
         source_expr: None,
         notes: Vec::new(),
+        decision: None,
     });
     id
 }
@@ -677,11 +709,43 @@ fn build(
     find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
 ) -> u32 {
     match find_winner(expr) {
-        Some(PostAsapSubstitution::Rewrite(replacement)) => {
-            return build_no_recheck(&replacement, nodes, cache, find_winner);
+        Some(PostAsapSubstitution::Rewrite {
+            replacement,
+            decision,
+        }) => {
+            let first = nodes.len();
+            let root = build_no_recheck(&replacement, nodes, cache, find_winner);
+            for node in &mut nodes[first..] {
+                if node.decision.is_none() {
+                    let mut node_decision = decision.clone();
+                    node_decision.role = if node.id == root {
+                        "replacement_root"
+                    } else {
+                        "replacement_region"
+                    };
+                    node.decision = Some(node_decision);
+                }
+            }
+            return root;
         }
-        Some(PostAsapSubstitution::Summary(node)) => {
-            return build_summary_hybrid(&node, nodes, cache, find_winner);
+        Some(PostAsapSubstitution::Summary {
+            replacement,
+            decision,
+        }) => {
+            let first = nodes.len();
+            let root = build_summary_hybrid(&replacement, nodes, cache, find_winner);
+            for node in &mut nodes[first..] {
+                if node.decision.is_none() {
+                    let mut node_decision = decision.clone();
+                    node_decision.role = if node.id == root {
+                        "replacement_root"
+                    } else {
+                        "replacement_region"
+                    };
+                    node.decision = Some(node_decision);
+                }
+            }
+            return root;
         }
         None => {}
     }
@@ -1110,19 +1174,22 @@ mod tests {
         assert!(graph.nodes[0].children.is_empty());
     }
 
-    /// `export` itself never populates `notes` — that's a higher layer's
-    /// job (see the module doc) — and an empty `notes` must not appear in
-    /// the serialized JSON at all, so every existing consumer of `export`'s
-    /// output (in particular `tools/dag-viewer`, which predates this field)
-    /// keeps parsing the same shape it always has.
+    /// `export` itself never populates higher-layer annotations. Empty
+    /// annotations must not appear in serialized JSON, so ordinary (non-ASAP)
+    /// exports retain their existing shape.
     #[test]
-    fn export_never_populates_notes_and_it_is_omitted_from_json() {
+    fn export_omits_empty_higher_layer_annotations() {
         let graph = export(&scan("metrics", value_col()));
         assert!(graph.nodes[0].notes.is_empty());
+        assert!(graph.nodes[0].decision.is_none());
         let json = serde_json::to_string(&graph.nodes[0]).unwrap();
         assert!(
             !json.contains("notes"),
             "empty `notes` must be skipped, not serialized as `[]`: {json}"
+        );
+        assert!(
+            !json.contains("decision"),
+            "empty `decision` must be skipped, not serialized as `null`: {json}"
         );
     }
 

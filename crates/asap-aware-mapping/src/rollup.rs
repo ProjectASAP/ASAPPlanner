@@ -372,6 +372,7 @@ fn build_rollup(
     };
 
     Some(ReplacementSubDAG {
+        strategy: "RollupStrategy",
         replacement: Replacement::Rewrite(Rc::new(rewritten)),
         provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
         rationale: format!(

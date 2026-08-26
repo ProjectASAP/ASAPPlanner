@@ -110,6 +110,26 @@
   .tab.checkTab { display: flex; align-items: center; gap: 0.35rem; cursor: default; }
   .tab.checkTab input { cursor: pointer; }
   .modeToggle { display: flex; gap: 0.3rem; }
+  #plannerPanel {
+    display: none;
+    padding: 0.65rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #plannerPanel.visible { display: block; }
+  #plannerRows { display: flex; flex-direction: column; gap: 0.45rem; }
+  .plannerRow { display: grid; grid-template-columns: auto 140px 90px minmax(280px, 1fr) auto; gap: 0.45rem; align-items: center; }
+  .plannerRow input, .plannerRow select, .plannerRow textarea, #plannerEpsilon {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 0.35rem 0.45rem;
+    font: inherit;
+  }
+  .plannerRow textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.75rem; }
+  .plannerActions { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.55rem; }
+  #plannerStatus { color: var(--muted); font-size: 0.75rem; }
   #baPicker {
     display: none;
     flex-wrap: wrap;
@@ -283,6 +303,26 @@
   }
   .noteKind { font-size: 0.72rem; font-weight: 700; }
   .noteReason { font-size: 0.75rem; color: var(--fg); margin-top: 0.15rem; }
+  .translationBlock {
+    margin: 0.65rem 0;
+    padding: 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+    border-radius: 8px;
+    background: var(--bg);
+  }
+  .translationBlock h3, .detailSubhead {
+    margin: 0 0 0.4rem;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    color: var(--muted);
+  }
+  .translationCard + .translationCard { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.5rem; }
+  .translationStrategy { color: var(--accent); font-weight: 750; }
+  .translationMeta, .translationTarget { color: var(--muted); font-size: 0.7rem; margin-top: 0.2rem; }
+  .translationReason { margin-top: 0.35rem; line-height: 1.35; }
+  .translationBlock.unchanged { border-style: dashed; color: var(--muted); }
+  .detailSubhead { margin-top: 0.65rem; }
   #detailSection pre {
     white-space: pre-wrap;
     word-break: break-word;
@@ -336,12 +376,23 @@
     <button class="btn" id="modeBeforeAfterBtn" data-mode="beforeafter">Before/After</button>
   </div>
   <span class="proxyNote" id="proxyNote" style="display:none">"Shared" = same structural hash across independent exports, not live Rc identity — see README.</span>
+  <button class="btn" id="plannerToggle">Query editor</button>
   <button class="btn" id="clearBtn">Clear all</button>
   <label class="toggle">
     <input id="highlightToggle" type="checkbox" checked />
     Highlight shared subtrees
   </label>
 </header>
+
+<div id="plannerPanel">
+  <div id="plannerRows"></div>
+  <div class="plannerActions">
+    <button class="btn" id="plannerAdd" type="button">Add query</button>
+    <label class="toggle">epsilon <input id="plannerEpsilon" type="number" min="0.000001" max="0.999999" step="0.001" value="0.01" /></label>
+    <button class="btn" id="plannerRun" type="button">Plan selected workload</button>
+    <span id="plannerStatus">Requires the local interactive server.</span>
+  </div>
+</div>
 
 <div id="tabs"></div>
 <div id="baPicker"></div>
@@ -384,5 +435,6 @@
 </div>
 
 <script src="viewer.js"></script>
+<script src="planner-ui.js"></script>
 </body>
 </html>

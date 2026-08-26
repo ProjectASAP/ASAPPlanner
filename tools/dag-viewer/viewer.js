@@ -32,22 +32,13 @@ let zoom = 1;
 // 'union' merges selected queries into one graph, collapsing every node
 // whose hash is shared by >= 2 of them into a single node with converging
 // edges. See the "Compare and Union mode" section of README.md. 'beforeafter'
-// picks one query (via the same tab bar as 'single') and one entry from its
-// `replacements[]` (via the secondary picker in #baPicker), then draws that
-// entry's `before` and `after.graph` as two fixed Compare-mode-style lanes.
+// draws the complete pre-ASAP and post-ASAP DAG for every checked query.
+// One checked query is the single-query view; 2+ checked queries are a
+// workload/batch view. Replacement entries are explanations attached to
+// clicked nodes, not separate tiny-subtree views.
 let mode = 'single';
 // Indices into `queries` currently selected to participate in compare/union.
 let participants = new Set();
-// Before/After mode only: index into `queries[activeIndex].replacements`
-// currently shown in the two lanes. -1 means "nothing picked yet" (defaults
-// to the first entry on render). Reset whenever the active query changes,
-// since an index is only meaningful within that query's own array.
-let baSelectedIndex = -1;
-// Before/After mode only: true when the picker's "Whole query" option is
-// selected instead of a per-target replacement entry — draws the query's
-// whole `graph` (Before) against its whole `post_graph` (After) rather than
-// one entry's tiny before/after subgraphs. Reset alongside baSelectedIndex.
-let baWholeQuery = false;
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
@@ -80,8 +71,6 @@ clearBtn.addEventListener('click', () => {
   activeIndex = -1;
   mode = 'single';
   participants = new Set();
-  baSelectedIndex = -1;
-  baWholeQuery = false;
   setModeButtons();
   render();
 });
@@ -99,13 +88,11 @@ document.querySelectorAll('#modeToggle .btn').forEach((btn) => {
     if ((mode === 'compare' || mode === 'union') && participants.size === 0) {
       queries.forEach((_, i) => participants.add(i));
     }
-    // First switch into Before/After: reuse the single-view tab selection
-    // (defaulting to the first query) and let renderBeforeAfter default
-    // baSelectedIndex to that query's first replacement.
+    // First switch into Before/After: start with the currently active query.
+    // The checkbox tabs can then expand that into a batch workload.
     if (mode === 'beforeafter') {
       if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
-      baSelectedIndex = -1;
-      baWholeQuery = false;
+      if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
     }
     render();
   });
@@ -216,24 +203,20 @@ function render() {
 
 function renderTabs() {
   tabsEl.innerHTML = '';
-  if (mode === 'single' || mode === 'beforeafter') {
+  if (mode === 'single') {
     queries.forEach((q, i) => {
       const tab = document.createElement('div');
       tab.className = 'tab' + (i === activeIndex ? ' active' : '');
       tab.textContent = q.name;
       tab.addEventListener('click', () => {
         activeIndex = i;
-        if (mode === 'beforeafter') {
-          baSelectedIndex = -1;
-          baWholeQuery = false;
-        }
         render();
       });
       tabsEl.appendChild(tab);
     });
     return;
   }
-  // Compare/Union: checkboxes choose which loaded queries participate.
+  // Compare/Union/Before-After: checkboxes choose the workload.
   queries.forEach((q, i) => {
     const chip = document.createElement('label');
     chip.className = 'tab checkTab' + (participants.has(i) ? ' active' : '');
@@ -279,18 +262,11 @@ function buildCyStyle() {
         'text-wrap': 'wrap',
         'text-valign': 'center',
         'text-halign': 'center',
-        'text-margin-y': 9,
         'font-size': 10,
         'width': 'label',
         'height': 'label',
-        'padding': '16px',
+        'padding': '12px',
         'border-width': 1.5,
-        'background-fit': 'contain',
-        'background-position-x': '50%',
-        'background-position-y': '17%',
-        'background-width': '30%',
-        'background-height': '30%',
-        'background-clip': 'none',
         // Lets class/style changes below (the '.shared' ring, '.unionShared'
         // double border, ':selected' outline, and buildCy's fade-in) animate
         // instead of snapping — cytoscape treats these like CSS transitions,
@@ -305,7 +281,10 @@ function buildCyStyle() {
       selector: 'node[category = "data"]',
       style: { 'corner-radius': 999, 'border-style': 'dashed' },
     },
-    ...categoryStyles,
+    ...categoryStyles.map((entry) => ({
+      ...entry,
+      style: { ...entry.style, 'background-image': 'none' },
+    })),
     {
       // KeepPreAsap (Before/After mode's After lane only) is post-ASAP-only
       // as a *kind*, but represents literally unchanged pre-ASAP content —
@@ -320,8 +299,16 @@ function buildCyStyle() {
         'background-color': panelColor,
         'border-color': borderColor,
         'border-style': 'dashed',
-        'background-image': keepPreAsapIconDataUri(),
+        'background-image': 'none',
       },
+    },
+    {
+      selector: 'node.root',
+      style: { 'border-width': 2.5 },
+    },
+    {
+      selector: 'node.hasNotes',
+      style: { 'border-style': 'double', 'border-width': 3 },
     },
     {
       selector: 'node.shared',
@@ -435,41 +422,16 @@ function buildCy(elements, layout) {
 // Root badges + notes badges + click/tap wiring — identical across
 // single/compare/union.
 function finalizeGraphInteractions() {
-  // Root nodes get a second, smaller badge icon layered in the corner —
-  // QueryExpr has no dedicated terminal "output" kind the way the reference
-  // repo's BGP `out_*` steps do, so the root is marked structurally instead.
-  cy.nodes('[?root]').forEach((n) => {
-    n.addClass('root').style({
-      'background-image': [categoryIconDataUri(n.data('category')), rootBadgeIconDataUri()],
-      'background-position-x': ['46%', '86%'],
-      'background-position-y': ['17%', '15%'],
-      'background-width': ['26%', '22%'],
-      'background-height': ['26%', '22%'],
-      'background-clip': ['none', 'none'],
-    });
-  });
+  // Use borders rather than pictograms so IR text owns the whole node box.
+  cy.nodes('[?root]').addClass('root');
 
-  // Nodes carrying a non-empty `notes` array (issue #257: asap-aware-mapping
-  // explained a replacement at this node, matched by structural hash — see
-  // README.md) get a third badge in the opposite corner from the root badge,
-  // so a node can be both at once without the two colliding.
+  // A double border marks nodes carrying planner notes without taking space
+  // away from the IR text.
   cy.nodes().forEach((n) => {
     if (n.data('isLane')) return;
     const node = n.data('node');
     if (!node || !node.notes || !node.notes.length) return;
-    const isRoot = n.hasClass('root');
-    n.addClass('hasNotes').style({
-      'background-image': [
-        categoryIconDataUri(n.data('category')),
-        ...(isRoot ? [rootBadgeIconDataUri()] : []),
-        noteBadgeIconDataUri(node.notes),
-      ],
-      'background-position-x': ['46%', ...(isRoot ? ['86%'] : []), '86%'],
-      'background-position-y': ['17%', ...(isRoot ? ['15%'] : []), '83%'],
-      'background-width': ['26%', ...(isRoot ? ['22%'] : []), '22%'],
-      'background-height': ['26%', ...(isRoot ? ['22%'] : []), '22%'],
-      'background-clip': isRoot ? ['none', 'none', 'none'] : ['none', 'none'],
-    });
+    n.addClass('hasNotes');
   });
 
   cy.on('tap', 'node', (evt) => {
@@ -521,7 +483,7 @@ function renderGraph(query) {
     elements.push({
       data: {
         id: String(node.id),
-        label: `${node.kind}\n${node.label}`,
+        label: node.label,
         node,
         category: categoryOf(node.kind),
         root: node.id === query.graph.root,
@@ -584,7 +546,7 @@ function renderCompare(chosen) {
         data: {
           id: `q${qIdx}-${node.id}`,
           parent: laneId,
-          label: `${node.kind}\n${node.label}`,
+          label: node.label,
           node,
           category: categoryOf(node.kind),
           root: node.id === q.graph.root,
@@ -718,7 +680,7 @@ function renderUnion(chosen) {
     elements.push({
       data: {
         id: key,
-        label: `${entry.node.kind}\n${entry.node.label}`,
+        label: entry.node.label,
         node: entry.node,
         category: entry.category,
         isUnion: true,
@@ -738,63 +700,41 @@ function renderUnion(chosen) {
   fitAndSyncZoom();
 }
 
-// ── Before/After mode: one replacement site's before/after subtree ───────
-// Reuses the Single-mode tab bar to pick a query, then a secondary picker
-// (#baPicker, built by renderBaPicker) to pick one entry from that query's
-// `replacements[]`. The chosen entry's `before` and `after.graph` are drawn
-// as exactly two Compare-mode-style lanes ("Before" / "After") via the same
-// compound-lane pattern renderCompare uses for N query lanes — here it's
-// always exactly 2, and both lanes come from one entry instead of from two
-// different queries.
+// ── Before/After mode: complete query/workload pre/post DAGs ─────────────
+// Checkbox tabs select one query or a batch. Every selected query contributes
+// a complete pre-ASAP lane and complete post-ASAP lane. Replacement records
+// power node-click explanations instead of being rendered as tiny subtrees.
 function renderBeforeAfter() {
-  const query = activeIndex >= 0 ? queries[activeIndex] : undefined;
-  const replacements = (query && query.replacements) || [];
-  const hasPostGraph = !!(query && query.post_graph);
-  renderBaPicker(query, replacements, hasPostGraph);
+  const chosen = getParticipants();
+  const selected = chosen.map((i) => queries[i]);
+  renderBaScopeSummary(selected);
+  renderSourcePanel(selected);
 
-  if (!query) {
+  if (selected.length === 0) {
     viewTitleEl.textContent = 'Before/After';
-    renderSourcePanel([]);
-    showModeHint('Select a query above to inspect its replacements.');
+    showModeHint('Select one query for a complete pre/post DAG, or several queries for a batch workload view.');
     return;
   }
-  renderSourcePanel([query]);
-  if (replacements.length === 0 && !hasPostGraph) {
-    viewTitleEl.textContent = `Before/After: ${query.name}`;
-    showModeHint(`${query.name} has no recorded replacements in this export.`);
+  const missing = selected.filter((q) => !q.post_graph);
+  if (missing.length > 0) {
+    viewTitleEl.textContent = selected.length === 1 ? `Before/After: ${selected[0].name}` : `Batch Before/After: ${selected.length} queries`;
+    showModeHint(`No post-ASAP graph for: ${missing.map((q) => q.name).join(', ')}. Re-export with dag_export --post-asap.`);
     return;
   }
-  // A query with no per-target replacements but a post_graph (or the user's
-  // explicit pick) falls back to the whole-query view rather than a hint —
-  // it's the one option that's actually available.
-  if (!baWholeQuery && replacements.length === 0) baWholeQuery = true;
   hideModeHint();
+  viewTitleEl.textContent = selected.length === 1
+    ? `Before/After: ${selected[0].name} — complete IR DAG`
+    : `Batch Before/After: ${selected.length} queries`;
 
-  let beforeNodes, beforeRoot, afterNodes, afterRoot, titleSuffix, afterLabel;
-  if (baWholeQuery) {
-    beforeNodes = query.graph.nodes;
-    beforeRoot = query.graph.root;
-    afterNodes = query.post_graph.nodes;
-    afterRoot = query.post_graph.root;
-    titleSuffix = 'whole query';
-    afterLabel = 'After (post-ASAP graph)';
-  } else {
-    if (baSelectedIndex === -1 || baSelectedIndex >= replacements.length) baSelectedIndex = 0;
-    const entry = replacements[baSelectedIndex];
-    beforeNodes = entry.before.nodes;
-    beforeRoot = entry.before.root;
-    afterNodes = entry.after.graph.nodes;
-    afterRoot = entry.after.graph.root;
-    titleSuffix = `${entry.strategy} (rank ${entry.rank})`;
-    afterLabel = entry.after.kind === 'Summary' ? 'After (Summary)' : 'After (Rewrite)';
-  }
-
-  viewTitleEl.textContent = `Before/After: ${query.name} — ${titleSuffix}`;
-
-  const elements = [
-    ...laneElements('ba-before', 'Before', beforeNodes, beforeRoot),
-    ...laneElements('ba-after', afterLabel, afterNodes, afterRoot),
-  ];
+  const elements = [];
+  chosen.forEach((qIdx) => {
+    const query = queries[qIdx];
+    elements.push(...laneElements(`ba-pre-${qIdx}`, `${query.name} · pre-ASAP`, query.graph, query, 'pre'));
+  });
+  chosen.forEach((qIdx) => {
+    const query = queries[qIdx];
+    elements.push(...laneElements(`ba-post-${qIdx}`, `${query.name} · post-ASAP`, query.post_graph, query, 'post'));
+  });
 
   buildCy(elements);
   finalizeGraphInteractions();
@@ -810,7 +750,8 @@ function renderBeforeAfter() {
 // both shapes carry id/kind/label/detail/children, which is all a lane
 // needs; SummaryDagNode's missing `hash`/`notes` fields are simply never
 // read by this function or by showBeforeAfterDetail below.
-function laneElements(laneId, laneLabel, nodes, rootId) {
+function laneElements(laneId, laneLabel, graph, query, stage) {
+  const nodes = graph.nodes;
   const elements = [
     { data: { id: laneId, label: laneLabel, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
   ];
@@ -819,7 +760,7 @@ function laneElements(laneId, laneLabel, nodes, rootId) {
       data: {
         id: `${laneId}-${node.id}`,
         parent: laneId,
-        label: `${node.kind}\n${node.label}`,
+        label: node.label,
         node,
         // Flat (not nested under `node`) so buildCyStyle's
         // `node[kind = "KeepPreAsap"]` selector can actually match it —
@@ -827,9 +768,12 @@ function laneElements(laneId, laneLabel, nodes, rootId) {
         // object.
         kind: node.kind,
         category: categoryOf(node.kind),
-        root: node.id === rootId,
+        root: node.id === graph.root,
         isBeforeAfter: true,
         laneId,
+        stage,
+        queryName: query.name,
+        translations: translationsForNode(query, node, stage),
       },
     });
   }
@@ -849,109 +793,63 @@ function laneElements(laneId, laneLabel, nodes, rootId) {
   return elements;
 }
 
-// Secondary picker shown below #tabs while Before/After mode is active:
-// a "Whole query" option (query.graph vs query.post_graph in full, disabled
-// rather than omitted when this query's export has no post_graph — the
-// option always exists, it just isn't always populated) followed by one row
-// per `replacements[]` entry, grouped by `target_pre_id` (so a node with
-// multiple ranked candidates — e.g. p95_pktlen's Sketch vs HydraGrouping
-// fixture — reads as one section instead of two unrelated rows) and sorted
-// by rank within a group so the winner (rank 0) is always listed first and
-// visually marked.
-function renderBaPicker(query, replacements, hasPostGraph) {
-  baPickerEl.innerHTML = '';
-  if (!query || (replacements.length === 0 && !hasPostGraph)) {
-    baPickerEl.classList.remove('visible');
-    return;
-  }
+function renderBaScopeSummary(selected) {
   baPickerEl.classList.add('visible');
-
-  const wholeGroup = document.createElement('div');
-  wholeGroup.className = 'baGroup';
-  const wholeLabel = document.createElement('div');
-  wholeLabel.className = 'baGroupLabel';
-  wholeLabel.textContent = 'Whole query';
-  wholeGroup.appendChild(wholeLabel);
-  const wholeRow = document.createElement('button');
-  wholeRow.type = 'button';
-  wholeRow.className = 'baRow' + (baWholeQuery ? ' active' : '');
-  wholeRow.disabled = !hasPostGraph;
-  wholeRow.innerHTML = hasPostGraph
-    ? `<span>Whole query — ${query.graph.nodes.length} nodes vs. post-ASAP graph</span>`
-    : `<span>Whole query</span><span class="baMeta">no post-ASAP graph in this export</span>`;
-  if (hasPostGraph) {
-    wholeRow.addEventListener('click', () => {
-      baWholeQuery = true;
-      render();
-    });
-  }
-  wholeGroup.appendChild(wholeRow);
-  baPickerEl.appendChild(wholeGroup);
-
-  if (replacements.length === 0) return;
-
-  const groups = new Map(); // target_pre_id -> [index into replacements]
-  replacements.forEach((r, idx) => {
-    if (!groups.has(r.target_pre_id)) groups.set(r.target_pre_id, []);
-    groups.get(r.target_pre_id).push(idx);
-  });
-  const byId = new Map(query.graph.nodes.map((n) => [n.id, n]));
-
-  for (const [targetId, idxs] of groups) {
-    idxs.sort((a, b) => replacements[a].rank - replacements[b].rank);
-    const targetNode = byId.get(targetId);
-    const nodeDesc = targetNode ? `${targetNode.kind} — ${targetNode.label}` : `node #${targetId}`;
-
-    const group = document.createElement('div');
-    group.className = 'baGroup';
-    const groupLabel = document.createElement('div');
-    groupLabel.className = 'baGroupLabel';
-    groupLabel.textContent = idxs.length > 1 ? `${nodeDesc} — ${idxs.length} candidates` : nodeDesc;
-    group.appendChild(groupLabel);
-
-    idxs.forEach((idx) => {
-      const r = replacements[idx];
-      const row = document.createElement('button');
-      row.type = 'button';
-      row.className = 'baRow' + (!baWholeQuery && idx === baSelectedIndex ? ' active' : '');
-      const rationale = r.rationale || '';
-      const rationalePrefix = rationale.length > 90 ? `${rationale.slice(0, 90)}…` : rationale;
-      row.innerHTML = `${r.rank === 0 ? '<span class="baWinner">winner</span>' : ''}<span>${escapeHtml(r.strategy)} — ${escapeHtml(rationalePrefix)}</span><span class="baMeta">rank ${r.rank}, cost ${r.cost}</span>`;
-      row.addEventListener('click', () => {
-        baWholeQuery = false;
-        baSelectedIndex = idx;
-        render();
-      });
-      group.appendChild(row);
-    });
-    baPickerEl.appendChild(group);
-  }
+  const strategies = new Set();
+  selected.forEach((q) => (q.replacements || []).filter((r) => r.rank === 0).forEach((r) => strategies.add(r.strategy)));
+  const scope = selected.length === 1 ? 'Single query' : `Batch workload · ${selected.length} queries`;
+  const strategyText = strategies.size ? `Winning strategies: ${Array.from(strategies).join(', ')}` : 'No selected replacements';
+  baPickerEl.innerHTML = `<div class="baGroup"><div class="baGroupLabel">View scope</div><div class="baRow active"><span>${escapeHtml(scope)}</span><span class="baMeta">${escapeHtml(strategyText)}</span></div></div>`;
 }
 
-// Before/After mode's variant of showDetail/showUnionDetail: `data` is one
-// lane node's cytoscape data (see laneElements above). Deliberately skips
-// the cross-query "shared with" note those two render (meaningless for two
-// lanes drawn from one entry's own before/after subtrees) — notesHtml and
-// JSON.stringify(node.detail) below already degrade cleanly when `notes`/
-// other pre-ASAP-only fields are simply absent, which is the SummaryDagNode
-// case (no `hash`, no `notes`).
+function translationsForNode(query, node, stage) {
+  const replacements = (query.replacements || []).filter((r) => r.rank === 0);
+  if (stage === 'pre') return replacements.filter((r) => r.target_pre_id === node.id);
+  if (!node.decision) return [];
+  const replacement = replacements.find((r) => r.decision_id === node.decision.id);
+  return [{
+    ...node.decision,
+    target_pre_id: replacement ? replacement.target_pre_id : undefined,
+    after: replacement ? replacement.after : undefined,
+  }];
+}
+
 function showBeforeAfterDetail(data) {
   const node = data.node;
   const category = categoryOf(node.kind);
   const catColors = categoryColors(category);
   const catLabel = (CATEGORIES[category] || {}).label || category;
-  const laneName = data.laneId === 'ba-before' ? 'Before' : 'After';
+  const stageName = data.stage === 'pre' ? 'pre-ASAP' : 'post-ASAP';
 
   const rootHtml = data.root
-    ? `<div class="rootNote">This is the root of the ${laneName} subtree.</div>`
+    ? `<div class="rootNote">This is the root of ${escapeHtml(data.queryName)}'s complete ${stageName} DAG.</div>`
     : '';
+
+  const decisions = data.translations || [];
+  let translationHtml = '';
+  if (decisions.length > 0) {
+    const cards = decisions.map((entry) => `
+      <div class="translationCard">
+        <div class="translationStrategy">${escapeHtml(entry.strategy)}</div>
+        <div class="translationMeta">rank ${entry.rank} · estimated cost ${escapeHtml(entry.cost)}</div>
+        <div class="translationMeta">${entry.role === 'replacement_root' ? 'This node replaces the pre-ASAP target.' : 'This node is generated or carried inside the replacement region.'}</div>
+        <div class="translationReason">${escapeHtml(entry.rationale || 'No rationale recorded.')}</div>
+        <div class="translationTarget">${entry.target_pre_id === undefined ? `decision #${entry.id}` : `pre-ASAP target node #${entry.target_pre_id}`} · output ${escapeHtml((entry.after || {}).kind || node.kind)}</div>
+      </div>`).join('');
+    const heading = data.stage === 'post' ? 'Why this post-ASAP translation' : 'Selected post-ASAP strategy for this node';
+    translationHtml = `<div class="translationBlock"><h3>${heading}</h3>${cards}</div>`;
+  } else if (data.stage === 'post') {
+    translationHtml = `<div class="translationBlock unchanged"><h3>Translation</h3><div>No replacement targets this node; it is unchanged support structure in the post-ASAP DAG.</div></div>`;
+  }
 
   detailSection.innerHTML = `
     <h2>Selected node</h2>
     <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(catLabel)} · ${escapeHtml(node.kind)}</span>
     <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
     ${rootHtml}
+    ${translationHtml}
     ${notesHtml(node)}
+    <h3 class="detailSubhead">IR node content</h3>
     <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
   `;
 }
@@ -984,11 +882,30 @@ function renderSourcePanel(qs) {
 function applyHighlighting() {
   if (!cy) return;
   if (mode === 'beforeafter') {
-    // Shared-subtree highlighting is a cross-query proxy (computeHashOwners
-    // matches a hash across distinct query names) — meaningless for two
-    // lanes drawn from one query's own before/after subtrees, so Before/
-    // After mode never marks '.shared'.
-    cy.nodes().forEach((n) => n.removeClass('shared'));
+    const selected = getParticipants().map((i) => queries[i]);
+    const ownersFor = (graphOf) => {
+      const owners = new Map();
+      selected.forEach((q) => {
+        const seen = new Set();
+        const graph = graphOf(q);
+        (graph ? graph.nodes : []).forEach((node) => {
+          if (node.hash === undefined || seen.has(node.hash)) return;
+          seen.add(node.hash);
+          if (!owners.has(node.hash)) owners.set(node.hash, new Set());
+          owners.get(node.hash).add(q.name);
+        });
+      });
+      return owners;
+    };
+    const preOwners = ownersFor((q) => q.graph);
+    const postOwners = ownersFor((q) => q.post_graph);
+    cy.nodes().forEach((n) => {
+      if (n.data('isLane')) return;
+      const node = n.data('node');
+      const owners = n.data('stage') === 'post' ? postOwners : preOwners;
+      const sharedWith = node && owners.get(node.hash);
+      n.toggleClass('shared', !!(highlightOn && sharedWith && sharedWith.size > 1));
+    });
     return;
   }
   const owners = mode === 'single' ? computeHashOwners() : computeHashOwners(getParticipants().map((i) => queries[i]));
@@ -1143,6 +1060,20 @@ function loadWorkload(parsed) {
   if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
 }
 
+// Entry point used by planner-ui.js after the local HTTP backend returns a
+// freshly generated WorkloadGraph. Replace (rather than append to) the
+// current data and open the complete workload pre/post view.
+window.renderPlannerWorkload = function renderPlannerWorkload(parsed) {
+  queries = [];
+  participants = new Set();
+  activeIndex = -1;
+  loadWorkload(parsed);
+  queries.forEach((_, index) => participants.add(index));
+  mode = 'beforeafter';
+  setModeButtons();
+  render();
+};
+
 // render.py's standalone output bakes the WorkloadGraph JSON directly into
 // the page as a <script type="application/json"> tag instead of relying on
 // fetch('dag.json') — a `file://` page can't fetch a sibling file in most
@@ -1161,7 +1092,11 @@ if (embeddedEl) {
   const requestedMode = window.__DAG_RENDER__ && window.__DAG_RENDER__.mode;
   if (requestedMode && requestedMode !== 'single') {
     mode = requestedMode;
-    queries.forEach((_, i) => participants.add(i));
+    if (mode === 'beforeafter') {
+      if (queries.length > 0) participants.add(0);
+    } else {
+      queries.forEach((_, i) => participants.add(i));
+    }
     setModeButtons();
   }
   render();
