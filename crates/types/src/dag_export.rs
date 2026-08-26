@@ -1594,4 +1594,196 @@ mod tests {
             .get("rejections")
             .is_none());
     }
+
+    // ── Issue #187: tools/dag-viewer/node-style.js stays in sync ───────────
+    //
+    // node-style.js's `KIND_CATEGORY` table is hand-maintained JS, not
+    // generated from this file, so nothing stops it drifting from the real
+    // `&'static str` kind tags below the moment a `QueryExpr`/`SummaryExpr`
+    // operator variant is added, renamed, or removed. That's exactly how it
+    // drifted before #187: the table was keyed on names from an old design
+    // doc (`InfoJoin`, `LetBinding`/`Ref`, `Window`/`WindowFunc`, `Distinct`,
+    // `Merge`) that don't match what `build_no_recheck`/`summary_shape`
+    // actually emit today, so most of those entries were dead and several
+    // real kinds (`PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`,
+    // `Concat`, `Dedup`, `SQLWindowFunc`, `CurrentTimestamp`, …) had no entry
+    // at all and silently fell back to the `derive` category. This test
+    // parses node-style.js's own source and checks its `KIND_CATEGORY` keys
+    // against the literal kind list below — kept exhaustive by the `other @
+    // (...)` unreachable arm in `build_no_recheck` above (a new operator
+    // variant fails to compile there until it's given a `push_node` call,
+    // which is this list's own source of truth).
+
+    /// Every `&'static str` kind tag [`build_no_recheck`] and
+    /// [`summary_shape`]/[`build_summary`] can push onto a [`DagNode`] /
+    /// [`SummaryDagNode`] — i.e. every legal value of `DagNode.kind` a
+    /// consumer (`tools/dag-viewer`) can actually see. Scalar `QueryExpr`
+    /// variants (`Column`, `Literal`, `Compare`, …) are deliberately absent:
+    /// `build_no_recheck`'s final `unreachable!` arm confirms they never
+    /// reach `push_node` on their own — they're always embedded as opaque
+    /// `detail` JSON inside an operator node instead (see that arm's doc).
+    const DAG_NODE_KINDS: &[&str] = &[
+        // Pre-ASAP (QueryExpr operator variants; from build_no_recheck).
+        "Scan",
+        "PromqlScalarBridge",
+        "EvalTimestamp",
+        "CurrentTimestamp",
+        "PromqlVectorFromScalar",
+        "PromqlScalarFromVector",
+        "PromqlRelabel",
+        "PromqlInfoEnrich",
+        "PromqlSeriesSample",
+        "Filter",
+        "Project",
+        "Aggregate",
+        "Dedup",
+        "Concat",
+        "Join",
+        "SetOp",
+        "Sort",
+        "Limit",
+        "PromqlSubquery",
+        "TimeRange",
+        "TimeShift",
+        "SQLWindowFunc",
+        "BinaryOp",
+        // Post-ASAP (SummaryExpr variants; from summary_shape/build_summary).
+        "KeepPreAsap",
+        "SummaryAgg",
+        "SummaryJoin",
+        "SummarySubtract",
+        "SummaryDelete",
+        "SummaryEstimate",
+        "SummaryMerge",
+    ];
+
+    fn node_style_js_source() -> String {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/dag-viewer/node-style.js"
+        );
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
+    }
+
+    /// Slice `src` between a `"const {name} = {{"` marker and the next
+    /// top-level `"\n}};"` close (this file's object literals never nest a
+    /// `"\n};"`-shaped line, so the first occurrence after the marker is
+    /// always the matching close) — the body of that object literal.
+    fn object_literal_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let marker = format!("const {name} = {{");
+        let start = src
+            .find(&marker)
+            .unwrap_or_else(|| panic!("node-style.js has no `{marker}`"))
+            + marker.len();
+        let end = src[start..].find("\n};").unwrap_or_else(|| {
+            panic!("node-style.js's `{name}` object literal never closes with `\\n}};`")
+        });
+        &src[start..start + end]
+    }
+
+    /// Parse `KIND_CATEGORY`'s `Kind: 'category',` entries (skipping comment
+    /// and blank lines) into `(kind, category)` pairs, in source order.
+    fn parse_kind_category(src: &str) -> Vec<(String, String)> {
+        object_literal_body(src, "KIND_CATEGORY")
+            .lines()
+            // Strip a trailing `// ...` line comment (this table annotates
+            // several entries that way) before trimming, so it never leaks
+            // into the parsed category value.
+            .map(|line| line.split("//").next().unwrap_or("").trim())
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let (key, rest) = line
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("malformed KIND_CATEGORY line: {line:?}"));
+                let value = rest
+                    .trim()
+                    .trim_end_matches(',')
+                    .trim_matches('\'')
+                    .to_string();
+                (key.trim().to_string(), value)
+            })
+            .collect()
+    }
+
+    /// Parse `CATEGORIES`'s top-level `name: {` keys (2-space-indented lines
+    /// opening a nested object; nested fields inside each category are
+    /// indented 4+ spaces, so this doesn't pick those up) into a `Vec` of
+    /// category names, in source order.
+    fn parse_category_names(src: &str) -> Vec<String> {
+        object_literal_body(src, "CATEGORIES")
+            .lines()
+            .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with("//") {
+                    return None;
+                }
+                trimmed
+                    .strip_suffix('{')
+                    .map(|prefix| prefix.trim().trim_end_matches(':').to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn node_style_js_categorizes_every_dag_node_kind_exactly_once() {
+        let src = node_style_js_source();
+        let entries = parse_kind_category(&src);
+
+        let mut seen = std::collections::HashSet::new();
+        for (kind, _) in &entries {
+            assert!(
+                seen.insert(kind.clone()),
+                "node-style.js's KIND_CATEGORY lists {kind:?} more than once"
+            );
+        }
+
+        let mapped: std::collections::HashSet<&str> =
+            entries.iter().map(|(k, _)| k.as_str()).collect();
+        let canonical: std::collections::HashSet<&str> = DAG_NODE_KINDS.iter().copied().collect();
+
+        let missing: Vec<&&str> = DAG_NODE_KINDS
+            .iter()
+            .filter(|k| !mapped.contains(*k))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "node-style.js's KIND_CATEGORY is missing an entry for: {missing:?} — \
+             every DagNode.kind dag_export.rs can produce must have an explicit \
+             category, or it silently falls back to `derive` in the viewer"
+        );
+
+        let orphaned: Vec<&str> = mapped
+            .iter()
+            .filter(|k| !canonical.contains(*k))
+            .copied()
+            .collect();
+        assert!(
+            orphaned.is_empty(),
+            "node-style.js's KIND_CATEGORY has entries for kinds \
+             dag_export.rs's build_no_recheck/summary_shape never produce: \
+             {orphaned:?} — likely a stale name left over from a rename \
+             (see issue #187)"
+        );
+    }
+
+    #[test]
+    fn node_style_js_every_kind_category_value_is_a_declared_category() {
+        let src = node_style_js_source();
+        let entries = parse_kind_category(&src);
+        let categories: std::collections::HashSet<String> =
+            parse_category_names(&src).into_iter().collect();
+        assert!(
+            !categories.is_empty(),
+            "failed to parse any category name out of node-style.js's CATEGORIES object"
+        );
+
+        for (kind, category) in &entries {
+            assert!(
+                categories.contains(category),
+                "node-style.js maps {kind:?} to category {category:?}, which \
+                 CATEGORIES never declares"
+            );
+        }
+    }
 }
