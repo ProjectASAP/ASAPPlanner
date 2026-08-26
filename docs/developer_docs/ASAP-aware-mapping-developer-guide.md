@@ -13,7 +13,7 @@ guide when you want to:
 - add a new kind of replacement without duplicating existing planner logic,
 - write the tests expected for a new extension.
 
-The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and replacement-plan-search design, see the separate design document, [`docs/design_docs/asap_aware_mapping.md`](../design_docs/asap_aware_mapping.md).
+The focus here is the **current code interfaces and their contracts**. For the higher-level motivation and replacement-plan-search design, see the separate design document, [`docs/design_docs/asap-aware-mapping/README.md`](../design_docs/asap-aware-mapping/README.md).
 
 Names such as `MyStrategy`, `MyCostModel`, and `PreferDDSketch` are
 illustrative; they do not ship with this crate. Samples that use real public

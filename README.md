@@ -220,7 +220,7 @@ semantic information that matters downstream.
 
 - Change input from a single query string to `QueryWorkload` (tracked in [#194](https://github.com/ProjectASAP/ASAPPlanner/issues/194)
 - Remove legacy data structures and types (tracked in [#179](https://github.com/ProjectASAP/ASAPPlanner/issues/179), [#205](https://github.com/ProjectASAP/ASAPPlanner/issues/205)
-- Implement the ASAP-aware mapping [logic and interfaces](docs/design_docs/asap_aware_mapping.md)
+- Implement the ASAP-aware mapping [logic and interfaces](docs/design_docs/asap-aware-mapping/README.md)
 - Connect output of ASAPPlanner to asap-fusion
 - Connect output of ASAPPlanner to ASAPCollector and ASAPQuery (see open question #1 below)
 
@@ -229,7 +229,7 @@ semantic information that matters downstream.
 - [Description of pre-ASAP IR](docs/design_docs/pre-asap-ir.md)
 - [Description of post-ASAP IR](docs/design_docs/post-asap-ir.md)
 - [Converting a QueryWorkload to a pre-ASAP plan](docs/design_docs/parse_and_canonicalize.md)
-- [Converting a pre-ASAP plan to a post-ASAP plan](docs/design_docs/asap_aware_mapping.md)
+- [Converting a pre-ASAP plan to a post-ASAP plan](docs/design_docs/asap-aware-mapping/README.md)
 - [Guide on how to use ASAPPlanner](docs/user-guide/user-guide.md)
 
 # Open questions
