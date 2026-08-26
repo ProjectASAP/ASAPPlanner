@@ -125,7 +125,7 @@
           "decision_id": 0,
           "target_pre_id": 1,
           "strategy": "SketchAlgorithmStrategy",
-          "rationale": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)",
+          "rationale": "count realizes as a Cms sketch",
           "rank": 0,
           "cost": 3.0,
           "before": {
@@ -373,7 +373,7 @@
             "decision": {
               "id": 0,
               "strategy": "SketchAlgorithmStrategy",
-              "rationale": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)",
+              "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 3.0,
               "role": "replacement_region"
@@ -399,7 +399,7 @@
             "decision": {
               "id": 0,
               "strategy": "SketchAlgorithmStrategy",
-              "rationale": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)",
+              "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 3.0,
               "role": "replacement_region"
@@ -418,7 +418,7 @@
             "decision": {
               "id": 0,
               "strategy": "SketchAlgorithmStrategy",
-              "rationale": "count realizes as a Cms sketch — one of summary_candidates' alternatives for this intent (asap_aware_mapping::replacement::implementations_for_with)",
+              "rationale": "count realizes as a Cms sketch",
               "rank": 0,
               "cost": 3.0,
               "role": "replacement_root"
@@ -571,7 +571,7 @@
           "decision_id": 1,
           "target_pre_id": 1,
           "strategy": "AvgToSumOverCountStrategy",
-          "rationale": "avg has no summary realization at all (replacement::implementations_for_with dispatches it to PassThrough) and so can never share or sketch; rewriting it into sum/count under the same grouping — re-divided back into the original avg column by a wrapping Project — computes the same result from two ordinary mergeable accumulators SharedSubtreeStrategy (and a future sketch-family search) can actually reuse across the workload",
+          "rationale": "Rewrites AVG into SUM and COUNT under the same grouping, then divides SUM by COUNT.",
           "rank": 0,
           "cost": 2.0,
           "before": {
@@ -921,7 +921,7 @@
             "decision": {
               "id": 3,
               "strategy": "SketchAlgorithmStrategy",
-              "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator",
               "rank": 0,
               "cost": 3.0,
               "role": "replacement_region"
@@ -952,7 +952,7 @@
             "decision": {
               "id": 3,
               "strategy": "SketchAlgorithmStrategy",
-              "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rationale": "Sum { col: Some(3) } realizes as an exact Sum accumulator",
               "rank": 0,
               "cost": 3.0,
               "role": "replacement_root"
@@ -992,7 +992,7 @@
             "decision": {
               "id": 1,
               "strategy": "AvgToSumOverCountStrategy",
-              "rationale": "avg has no summary realization at all (replacement::implementations_for_with dispatches it to PassThrough) and so can never share or sketch; rewriting it into sum/count under the same grouping — re-divided back into the original avg column by a wrapping Project — computes the same result from two ordinary mergeable accumulators SharedSubtreeStrategy (and a future sketch-family search) can actually reuse across the workload",
+              "rationale": "Rewrites AVG into SUM and COUNT under the same grouping, then divides SUM by COUNT.",
               "rank": 0,
               "cost": 2.0,
               "role": "replacement_region"
@@ -1000,66 +1000,6 @@
           },
           {
             "id": 3,
-            "kind": "Scan",
-            "label": "Scan(metrics)",
-            "detail": {
-              "predicates": [],
-              "schema": {
-                "closed": true,
-                "columns": [
-                  {
-                    "dtype": "timestamp",
-                    "name": "ts",
-                    "nullable": false,
-                    "table": "metrics"
-                  },
-                  {
-                    "dtype": "utf8",
-                    "name": "service",
-                    "nullable": false,
-                    "table": "metrics"
-                  },
-                  {
-                    "dtype": "utf8",
-                    "name": "region",
-                    "nullable": false,
-                    "table": "metrics"
-                  },
-                  {
-                    "dtype": "float64",
-                    "name": "latency",
-                    "nullable": false,
-                    "table": "metrics"
-                  },
-                  {
-                    "dtype": "int64",
-                    "name": "bytes",
-                    "nullable": false,
-                    "table": "metrics"
-                  }
-                ],
-                "time_index": 0,
-                "unique_keys": []
-              },
-              "source": {
-                "Table": {
-                  "table_ref": "metrics"
-                }
-              }
-            },
-            "children": [],
-            "hash": 2606922452740434172,
-            "decision": {
-              "id": 4,
-              "strategy": "SketchAlgorithmStrategy",
-              "rationale": "count realizes as an exact Count accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
-              "rank": 0,
-              "cost": 3.0,
-              "role": "replacement_region"
-            }
-          },
-          {
-            "id": 4,
             "kind": "SummaryAgg",
             "label": "SummaryAgg(ExactAggregate(Count))",
             "detail": {
@@ -1073,19 +1013,19 @@
               }
             },
             "children": [
-              3
+              0
             ],
             "decision": {
               "id": 4,
               "strategy": "SketchAlgorithmStrategy",
-              "rationale": "count realizes as an exact Count accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rationale": "count realizes as an exact Count accumulator",
               "rank": 0,
               "cost": 3.0,
               "role": "replacement_root"
             }
           },
           {
-            "id": 5,
+            "id": 4,
             "kind": "BinaryOp",
             "label": "BinaryOp(/)",
             "detail": {
@@ -1094,20 +1034,20 @@
             },
             "children": [
               2,
-              4
+              3
             ],
             "hash": 16391872732257280252,
             "decision": {
               "id": 1,
               "strategy": "AvgToSumOverCountStrategy",
-              "rationale": "avg has no summary realization at all (replacement::implementations_for_with dispatches it to PassThrough) and so can never share or sketch; rewriting it into sum/count under the same grouping — re-divided back into the original avg column by a wrapping Project — computes the same result from two ordinary mergeable accumulators SharedSubtreeStrategy (and a future sketch-family search) can actually reuse across the workload",
+              "rationale": "Rewrites AVG into SUM and COUNT under the same grouping, then divides SUM by COUNT.",
               "rank": 0,
               "cost": 2.0,
               "role": "replacement_root"
             }
           },
           {
-            "id": 6,
+            "id": 5,
             "kind": "Project",
             "label": "Project(2 cols)",
             "detail": {
@@ -1128,12 +1068,12 @@
               "qualifier": null
             },
             "children": [
-              5
+              4
             ],
             "hash": 5277207484379927121
           }
         ],
-        "root": 6
+        "root": 5
       }
     },
     {
@@ -1253,7 +1193,7 @@
           "decision_id": 2,
           "target_pre_id": 2,
           "strategy": "SketchAlgorithmStrategy",
-          "rationale": "Rate realizes as an exact Rate accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+          "rationale": "Rate realizes as an exact Rate accumulator",
           "rank": 0,
           "cost": 4.0,
           "before": {
@@ -1455,7 +1395,7 @@
             "decision": {
               "id": 2,
               "strategy": "SketchAlgorithmStrategy",
-              "rationale": "Rate realizes as an exact Rate accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
               "cost": 4.0,
               "role": "replacement_region"
@@ -1478,7 +1418,7 @@
             "decision": {
               "id": 2,
               "strategy": "SketchAlgorithmStrategy",
-              "rationale": "Rate realizes as an exact Rate accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
               "cost": 4.0,
               "role": "replacement_region"
@@ -1500,7 +1440,7 @@
             "decision": {
               "id": 2,
               "strategy": "SketchAlgorithmStrategy",
-              "rationale": "Rate realizes as an exact Rate accumulator — the only realization implementations_for_with produces for this intent (no approximate candidate applies)",
+              "rationale": "Rate realizes as an exact Rate accumulator",
               "rank": 0,
               "cost": 4.0,
               "role": "replacement_root"

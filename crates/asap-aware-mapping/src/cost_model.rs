@@ -676,7 +676,7 @@ mod tests {
         SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child: std::rc::Rc::new(SummaryNode {
-                    expr: SummaryExpr::KeepPreAsap(Box::new(scan())),
+                    expr: SummaryExpr::KeepPreAsap(Rc::new(scan())),
                     schema: SummarySchema {
                         fields: vec![],
                         time_index: None,

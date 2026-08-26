@@ -41,6 +41,7 @@
 //! `asap_types` itself never constructs a `DagNote` — see [`DagNode::notes`]
 //! for the layering rule this keeps.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use serde::Serialize;
@@ -91,6 +92,11 @@ pub struct DagNode {
     /// produces is pre-ASAP by construction and always carries `Some`.
     #[serde(skip)]
     pub source_expr: Option<QueryExpr>,
+    /// In-process identity of the source `QueryExpr`. Unlike `source_expr`'s
+    /// structural value, this preserves an `Rc` child reached from multiple
+    /// parents so post-ASAP flattening can retain true DAG sharing.
+    #[serde(skip)]
+    source_ptr: Option<usize>,
     /// Arbitrary reporting-layer annotations for this node — e.g. why a
     /// replacement exists here. `asap_types` never populates this itself
     /// (it has no notion of a "replacement" at all — see the module doc's
@@ -577,9 +583,40 @@ pub fn export_post_asap(
     let mut nodes = Vec::new();
     let mut cache = HashCache::new();
     let root_id = build(root, &mut nodes, &mut cache, find_winner);
+    deduplicate_pointer_shared_nodes(nodes, root_id)
+}
+
+fn deduplicate_pointer_shared_nodes(nodes: Vec<DagNode>, root: u32) -> DagGraph {
+    let mut by_source_ptr = HashMap::<usize, u32>::new();
+    let mut old_to_new = vec![0_u32; nodes.len()];
+    let mut deduplicated = Vec::with_capacity(nodes.len());
+
+    for mut node in nodes {
+        node.children = node
+            .children
+            .into_iter()
+            .map(|child| old_to_new[child as usize])
+            .collect();
+        if let Some(existing) = node
+            .source_ptr
+            .and_then(|source_ptr| by_source_ptr.get(&source_ptr).copied())
+        {
+            old_to_new[node.id as usize] = existing;
+            continue;
+        }
+        let old_id = node.id;
+        let new_id = deduplicated.len() as u32;
+        node.id = new_id;
+        if let Some(source_ptr) = node.source_ptr {
+            by_source_ptr.insert(source_ptr, new_id);
+        }
+        old_to_new[old_id as usize] = new_id;
+        deduplicated.push(node);
+    }
+
     DagGraph {
-        nodes,
-        root: root_id,
+        nodes: deduplicated,
+        root: old_to_new[root as usize],
     }
 }
 
@@ -608,6 +645,7 @@ fn push_node(
         children,
         hash,
         source_expr: Some(expr.clone()),
+        source_ptr: Some(expr as *const QueryExpr as usize),
         notes: Vec::new(),
         decision: None,
     });
@@ -640,6 +678,7 @@ fn push_summary_originated_node(
         children,
         hash: None,
         source_expr: None,
+        source_ptr: None,
         notes: Vec::new(),
         decision: None,
     });

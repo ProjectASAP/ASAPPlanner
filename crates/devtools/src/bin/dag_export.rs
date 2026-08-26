@@ -316,7 +316,7 @@ fn run_post_asap_with_progress(
 
     // A group's top candidate can be `keep_pre_asap`'s own conservative
     // fallback — `Replacement::Summary(SummaryNode { expr:
-    // KeepPreAsap(Box::new(target.clone())), .. })` — the *whole target*
+    // KeepPreAsap(Rc::new(target.clone())), .. })` — the *whole target*
     // wrapped as unbound, e.g. for a multi-measure/`HAVING`-bearing
     // aggregate, or (the case that actually surfaces this: `STDDEV_POP`/
     // `AVG`/`VARIANCE` dispatch to `Implementation::PassThrough` with no
@@ -691,6 +691,21 @@ mod tests {
                 "post_graph for {name:?} must not be empty"
             );
         }
+        let avg_post = &results
+            .post_graphs
+            .iter()
+            .find(|(name, _)| name == "avg")
+            .expect("avg post graph")
+            .1;
+        assert_eq!(
+            avg_post
+                .nodes
+                .iter()
+                .filter(|node| node.kind == "Scan")
+                .count(),
+            1,
+            "AVG's SUM and COUNT branches must retain their shared input as one DAG node"
+        );
         let decisions: Vec<_> = results
             .post_graphs
             .iter()

@@ -1234,10 +1234,14 @@ pub(crate) fn realize_child(
 /// candidate for a target, or a deployment wants to force a node its own
 /// runtime can't actually implement — through the same fallback this
 /// crate's own dispatch uses, without duplicating the schema-lift logic.
-pub fn keep_pre_asap(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
+pub fn keep_pre_asap(expr: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementError> {
+    keep_pre_asap_rc(Rc::clone(expr))
+}
+
+fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementError> {
     let schema = expr.output_schema()?;
     Ok(Rc::new(SummaryNode {
-        expr: SummaryExpr::KeepPreAsap(Box::new(expr.clone())),
+        expr: SummaryExpr::KeepPreAsap(expr),
         schema: lift(&schema),
     }))
 }
@@ -1307,7 +1311,7 @@ pub(crate) fn construct_summary(
             }
         }
     }
-    keep_pre_asap(expr)
+    keep_pre_asap_rc(Rc::new(expr.clone()))
 }
 
 /// Translate an [`Implementation`] into the `(family, needs a
