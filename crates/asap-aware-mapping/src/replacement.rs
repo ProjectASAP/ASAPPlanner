@@ -3597,6 +3597,7 @@ fn direct_child_counts(node: &QueryExpr) -> Vec<(*const QueryExpr, usize)> {
             }
             Concat {
                 children: concat_children,
+                ..
             } => {
                 for c in concat_children {
                     collect(c, children);
@@ -4183,7 +4184,7 @@ fn walk_children(
         | SQLWindowFunc { child, .. }
         | Sort { child, .. }
         | Limit { child, .. } => walk(child, order, nodes, counts),
-        Concat { children } => {
+        Concat { children, .. } => {
             for c in children {
                 walk_children(c, order, nodes, counts);
             }
@@ -5124,7 +5125,7 @@ mod tests {
                 | SQLWindowFunc { child, .. }
                 | Sort { child, .. }
                 | Limit { child, .. } => walk(child, counts),
-                Concat { children } => {
+                Concat { children, .. } => {
                     for c in children {
                         walk_children(c, counts);
                     }

@@ -1205,13 +1205,18 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::Concat { children } => {
+        QueryExpr::Concat {
+            children,
+            discriminator_unique_key,
+        } => {
             let ids: Vec<u32> = children
                 .iter()
                 .map(|c| build(c, nodes, cache, find_winner))
                 .collect();
             let label = format!("Concat({} branches)", ids.len());
-            push_node(nodes, expr, cache, label, serde_json::json!({}), ids)
+            let detail =
+                serde_json::json!({ "discriminator_unique_key": discriminator_unique_key });
+            push_node(nodes, expr, cache, label, detail, ids)
         }
         QueryExpr::Join {
             kind,
@@ -1531,13 +1536,11 @@ mod tests {
 
     #[test]
     fn merge_keeps_every_branch_as_a_child() {
-        let expr = QueryExpr::Concat {
-            children: vec![
-                scan("a", value_col()),
-                scan("b", value_col()),
-                scan("c", value_col()),
-            ],
-        };
+        let expr = QueryExpr::concat(vec![
+            scan("a", value_col()),
+            scan("b", value_col()),
+            scan("c", value_col()),
+        ]);
         let graph = export(&expr);
         assert_eq!(graph.nodes.len(), 4, "3 branches + the Concat node");
         let merge = &graph.nodes[graph.root as usize];

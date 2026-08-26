@@ -742,7 +742,13 @@ fn walk_histogram_quantiles(call: &Call) -> Result<Unresolved> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(Unresolved::Concat { children: branches })
+    // No discriminator asserted here today (issue #228): the φ value each
+    // branch carries via `PromqlRelabel` *is* structurally a distinct
+    // per-branch discriminator, but nothing downstream currently needs the
+    // resulting compound unique key — see
+    // `docs/design_docs/concat-unique-keys-decision.md`. `Unresolved::concat`
+    // keeps `output_schema`'s default (drop `unique_keys` entirely).
+    Ok(Unresolved::concat(branches))
 }
 
 /// Prometheus's `labels.FormatOpenMetricsFloat` — how `histogram_quantiles`

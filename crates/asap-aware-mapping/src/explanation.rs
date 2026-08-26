@@ -438,7 +438,7 @@ fn visit_children(
         | SQLWindowFunc { child, .. }
         | Sort { child, .. }
         | Limit { child, .. } => visit(child, format!("{label} > child"), locations),
-        Concat { children } => {
+        Concat { children, .. } => {
             for (i, c) in children.iter().enumerate() {
                 visit_children(c, &format!("{label} > concat[{i}]"), locations);
             }

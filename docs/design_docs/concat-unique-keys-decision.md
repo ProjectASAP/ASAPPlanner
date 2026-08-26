@@ -1,4 +1,14 @@
-# `Concat` and `unique_keys`: defer the discriminator override (issue #228)
+# `Concat` and `unique_keys`: the discriminator override (issue #228)
+
+> **Update**: the investigation below found no current call site paying for a
+> redundant `Dedup` that this override would remove, and the original version
+> of this document recommended deferring Option 1 on that basis. The repo
+> owner reviewed that finding and explicitly asked for Option 1 to be built
+> anyway — a deliberate "ship the extension point ahead of a proven call-site
+> win" call, not a disagreement with the investigation. See "Decision" below
+> for what actually shipped and the safety argument for why it's safe to ship
+> unused. The investigation section is otherwise unchanged from the original
+> write-up, since nothing about it stopped being true.
 
 ## Context
 
@@ -71,38 +81,135 @@ Both current `Concat`-constructing call sites, and every consumer of
   perfectly-preserved `unique_keys` on these `Concat` nodes would not, by
   itself, delete any node from any plan that exists today.
 
-## Decision: defer (Option 2 for now — no code change)
+## Decision: build Option 1 anyway, unwired (explicit override of the defer)
 
-Neither `histogram_quantiles` nor `ROLLUP`/`CUBE`/`GROUPING SETS` lowering
-emits a `Dedup`, or anything playing that role, after its `Concat` today.
-There is nothing redundant in the tree for a discriminator-based override to
-remove. Building the producer-supplied-override machinery (Option 1) now
-would be pure speculative surface area — new trust-boundary code
-(`output_schema()` accepting a caller-asserted key that must actually be
-sound, forever) with no current call site to exercise or justify it, exactly
-what the issue's own "before implementing either" section says to avoid.
+The investigation's conclusion stands: neither `histogram_quantiles` nor
+`ROLLUP`/`CUBE`/`GROUPING SETS` lowering emits a `Dedup` (or anything playing
+that role) after its `Concat` today, so there is nothing redundant in the
+tree for a discriminator-based override to remove *right now*. On review,
+the decision was made to build the extension point anyway, ahead of a proven
+call-site win, rather than wait for one. That is a legitimate call to make
+differently from the investigation's own recommendation — "no current
+payoff" is a statement about today's call sites, not about whether the
+shape is safe to add — and the rest of this section is the safety argument
+for why it's fine to ship unused.
 
-This defers, it does not foreclose. If a future change adds a real consumer
-— e.g. a canonicalization rule that drops a provably-redundant `Dedup` based
-on a child's `unique_keys`, or a workload-level CSE scenario that actually
-puts two identical `histogram_quantiles`/grouping-set `Concat`s in front of
-`share_common_subtrees` — Option 1 (producer-supplied override, additive,
-`output_schema()`'s default unchanged for ordinary callers) is still the
-right shape for it then, for the reasons #228 already gives: it's strictly
-additive, and the alternative of changing `Concat`'s default is unsound (a
-key unique within one branch is not unique across the union unless the
-branches are provably disjoint, and nothing about matching schemas or
-matching per-branch keys establishes that on its own).
+### What shipped
 
-For SQL grouping sets specifically, note that the natural discriminator
-(`__grouping_id`) is not just unwired but actively discarded on purpose today
-because `GROUPING()` itself is rejected — so revisiting this decision for SQL
-means revisiting that rejection first, which is its own design question, not
-a corollary of #228.
+`QueryExpr::Concat` gained an opt-in field, `discriminator_unique_key: Option<ConcatDiscriminatorKey<C>>`
+(`crates/types/src/pre_asap/query_expr.rs`), plus:
 
-## No code change
+- `ConcatDiscriminatorKey<C>` — a small struct with **private** `discriminator: C` /
+  `inner_key: Vec<C>` fields, buildable only via `ConcatDiscriminatorKey::new(discriminator, inner_key)`.
+  Privacy is the enforcement mechanism for "the caller must explicitly name a
+  discriminator column" (see "Safety argument" below) — there is no path to a
+  non-empty `unique_keys` claim that doesn't go through a call site literally
+  writing out which column it's proving is distinct.
+- `QueryExpr::concat(children)` — the ordinary constructor (`discriminator_unique_key: None`),
+  meant to replace the bare `QueryExpr::Concat { children }` struct literal
+  everywhere in the tree so a future field addition doesn't force every call
+  site to re-litigate this choice.
+- `QueryExpr::concat_with_discriminator(children, discriminator, inner_key)` —
+  the override constructor.
+- `output_schema()`'s `Concat` arm: unchanged default (`unique_keys` cleared
+  unconditionally) when `discriminator_unique_key` is `None`; when `Some`,
+  adds `(discriminator, inner_key)` as the sole unique key, trusting the
+  caller's claim without checking it.
+- `resolve.rs`'s `Concat` arm resolves a pre-bind (`ColumnRef`) discriminator
+  key into its post-bind (`ColumnId`) equivalent against the first resolved
+  branch's own output schema — the same schema `output_schema()` derives the
+  merged shape from — so the feature works correctly end-to-end for a future
+  caller upstream of `resolve_root`, even though no such caller exists yet.
+- Every other match/construction site touching `Concat` across the tree
+  (`canonicalize.rs`, `cse.rs`, `binder.rs`, `dag_export.rs`,
+  `asap-aware-mapping`'s `replacement.rs`/`explanation.rs`, and every
+  test/tooling AST walker) was mechanically updated to bind or ignore the new
+  field — most just added `, ..`; the two places that *rebuild* a `Concat`
+  node (`cse.rs`'s `rebuild_children`, part of CSE interning) thread
+  `discriminator_unique_key` through unchanged rather than dropping it.
 
-This document is the entire change for #228: an investigation write-up, with
-no implementation. `merge_drops_the_branches_unique_keys` and
-`merge_and_setop_agree_on_unique_keys` continue to describe `Concat`'s only
-behavior — dropping `unique_keys` unconditionally — unchanged.
+### Not wired into any lowering call site (deliberately)
+
+Per the explicit instruction accompanying this decision, `histogram_quantiles`
+and `lower_grouping_sets` were **not** changed to call
+`concat_with_discriminator` — both still call the plain `concat(children)`
+builder, byte-for-byte the same `output_schema()` behavior they had before
+this issue. The investigation's own findings are exactly why: `histogram_quantiles`
+does have a structurally-available discriminator (φ, via `PromqlRelabel`) but
+nothing downstream needs the resulting unique key yet, and SQL's natural
+discriminator (`__grouping_id`) is actively discarded today because this
+front end rejects `GROUPING()` — wiring that one in is a separate,
+larger change (reopening that rejection) outside this issue's scope. Both
+remain noted as future work at their call sites (see the comments added
+there) and are not attempted here.
+
+### Safety argument: why the default is unaffected
+
+Three independent things hold `discriminator_unique_key: None` as the
+observable behavior for every caller that doesn't ask for the override:
+
+1. **Every real construction path defaults to `None`.** `QueryExpr::concat`
+   hardcodes it; every call site in the tree (including both real lowering
+   call sites) uses `concat`, not `concat_with_discriminator`, so nothing in
+   the current tree can produce `Some` at all.
+2. **`output_schema()`'s branch on the field is additive.** The `None` arm is
+   textually the same clear-and-return the code already did — `s.unique_keys.clear(); ... Ok(s)`
+   — with the `Some` branch reached only when the field is populated. This is
+   exactly what `merge_drops_the_branches_unique_keys` and
+   `merge_and_setop_agree_on_unique_keys` assert, and both pass unchanged.
+3. **`Serialize`/`Deserialize` back-compat.** `#[serde(default)]` on the field
+   means a pre-#228 serialized `Concat` (missing the field entirely)
+   deserializes to `None`, matching its old unconditional-drop behavior. No
+   test in the repo constructs raw JSON for a `Concat` node to check this
+   directly, but the field shape follows the same `#[serde(default)]`
+   convention already used elsewhere on this enum (e.g. `Aggregate.output_names`,
+   `Scan.predicates`) for exactly this reason.
+
+### Safety argument: why the discriminator must be caller-proven, not inferred
+
+`ConcatDiscriminatorKey`'s fields are private; the only constructor,
+`ConcatDiscriminatorKey::new(discriminator, inner_key)`, takes `discriminator`
+as a required, explicitly-named argument — there is no default, no inference
+from the branches' schemas, and no way to derive one structurally (e.g. "the
+first column all branches disagree on"). This mirrors the same
+private-field-plus-smart-constructor shape `GroupKeys` already uses in this
+file for its own `by`/`without` invariant. Concretely, this means:
+
+- `output_schema()` never has enough information to fabricate a discriminator
+  on its own — it can only read one that a constructor already supplied.
+- Nothing prevents a caller from asserting a **wrong** discriminator (one
+  that isn't actually distinct per branch) — the type system enforces "you
+  named a column," not "you were right about it." That obligation is
+  documented on `ConcatDiscriminatorKey` itself and is the same shape of
+  unverified claim `QueryExpr::Dedup.cols` already carries elsewhere in this
+  module (nothing checks a `Dedup`'s `cols` are actually a real key of its
+  child either).
+- The `no_way_to_fabricate_a_unique_key_without_naming_a_discriminator` test
+  (in `query_expr.rs`) checks the two "how would you accidentally get
+  `Some`?" shapes concretely: the ordinary `concat` builder, and a bare
+  struct literal with `discriminator_unique_key: None` — both still produce
+  `unique_keys: []`.
+
+### Tests added (`crates/types/src/pre_asap/query_expr.rs`)
+
+- `merge_drops_the_branches_unique_keys` / `merge_and_setop_agree_on_unique_keys` —
+  unchanged, still pass (default behavior untouched).
+- `discriminator_override_produces_a_compound_unique_key` — `concat_with_discriminator`
+  on two branches individually deduplicated on the same column (the exact
+  "looks safe but isn't" shape `merge_drops_the_branches_unique_keys` warns
+  about) yields `unique_keys == [[discriminator, inner_key…]]`.
+- `ordinary_concat_struct_literal_still_drops_unique_keys_by_default` — the
+  bare struct literal (`discriminator_unique_key: None`) still drops
+  `unique_keys`, confirming the field addition didn't change the literal
+  construction path's behavior.
+- `no_way_to_fabricate_a_unique_key_without_naming_a_discriminator` — the
+  misuse check described above.
+
+## Future work (explicitly out of scope here)
+
+- Wiring `concat_with_discriminator` into `histogram_quantiles` (discriminator
+  readily available; no current downstream consumer).
+- Reopening SQL's rejection of `GROUPING()` so `lower_grouping_sets` has a
+  real discriminator (`__grouping_id`) to assert — a separate design decision.
+- Any canonicalization rule or CSE/rollup scenario that would actually *read*
+  a `Concat`'s asserted `unique_keys` for the first time in the current tree.

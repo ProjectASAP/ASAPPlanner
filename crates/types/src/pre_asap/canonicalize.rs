@@ -100,7 +100,7 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
         | PromqlInfoEnrich { child, .. }
         | Sort { child, .. }
         | Limit { child, .. } => vec![rc_mut(child)],
-        Concat { children } => children.iter_mut().collect(),
+        Concat { children, .. } => children.iter_mut().collect(),
         Join { left, right, .. } | SetOp { left, right, .. } => {
             vec![rc_mut(left), rc_mut(right)]
         }

@@ -561,6 +561,68 @@ impl<C> Reduction<C> {
     }
 }
 
+/// A caller-proven compound unique key for a [`QueryExpr::Concat`] (issue
+/// #228) — built only via [`QueryExpr::concat_with_discriminator`] /
+/// [`ConcatDiscriminatorKey::new`], never by naming `discriminator` directly
+/// in a struct literal (both fields are private): the only way to end up
+/// with one of these is to hand over a specific column as the discriminator,
+/// by name, at the call site.
+///
+/// # Soundness
+///
+/// `Concat`'s default (see its own doc) is to drop `unique_keys`
+/// unconditionally, because a key unique **within** one branch is not unique
+/// **across** the concatenation unless the branches' value sets for that key
+/// are provably disjoint — nothing about matching schemas or matching
+/// per-branch keys establishes that on its own. Two different branches can
+/// trivially emit the same `inner_key` value (e.g. two PromQL
+/// `histogram_quantiles` branches keyed on `(host, le)` can both produce a
+/// `(host, le)` pair for different φ).
+///
+/// Prepending `discriminator` is what restores it: if `discriminator`'s
+/// value is **guaranteed to differ per branch** — a literal the producer
+/// just tagged the branch with (PromQL φ riding along via
+/// [`QueryExpr::PromqlRelabel`], a Postgres-style synthetic `GROUPING()` id
+/// for `ROLLUP`/`CUBE`, …), never something inferred structurally from the
+/// branches' own data — then `discriminator` alone partitions rows into
+/// disjoint sets independent of what the branches actually contain, so
+/// `(discriminator, inner_key)` is sound regardless of whether `inner_key`
+/// values repeat across branches.
+///
+/// This is a **caller-proven claim, not something `Concat` can verify**:
+/// nothing stops a caller from asserting a discriminator that in fact
+/// repeats across branches, in which case the resulting `unique_keys` claim
+/// is simply wrong — `output_schema` trusts it without checking. The
+/// obligation is on the constructor call site, exactly as it is on
+/// [`QueryExpr::Dedup`]'s `cols` or any other unverified `unique_keys`
+/// producer in this module.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
+pub struct ConcatDiscriminatorKey<C: ColState = ColumnId> {
+    discriminator: C,
+    inner_key: Vec<C>,
+}
+
+impl<C: ColState> ConcatDiscriminatorKey<C> {
+    /// The only constructor — `discriminator` must be named explicitly by
+    /// the caller. See the type's doc for the soundness obligation this
+    /// puts on that caller.
+    pub fn new(discriminator: C, inner_key: Vec<C>) -> Self {
+        Self {
+            discriminator,
+            inner_key,
+        }
+    }
+
+    pub fn discriminator(&self) -> &C {
+        &self.discriminator
+    }
+
+    pub fn inner_key(&self) -> &[C] {
+        &self.inner_key
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
 pub enum QueryExpr<C: ColState = ColumnId> {
@@ -722,11 +784,25 @@ pub enum QueryExpr<C: ColState = ColumnId> {
     /// project the branches into a common shape first.
     ///
     /// A row may appear in several branches, so no branch's unique key survives
-    /// the union — `unique_keys` is dropped, as in `SetOp`.
+    /// the union — `unique_keys` is dropped, as in `SetOp`. **Unless** the
+    /// constructor asserted `discriminator_unique_key` (issue #228,
+    /// [`QueryExpr::concat_with_discriminator`]): a caller-proven claim that
+    /// one column's value is guaranteed distinct per branch, which makes
+    /// `(discriminator, inner_key)` a sound compound unique key regardless of
+    /// whether `inner_key` alone repeats across branches. `None` — every
+    /// ordinary construction path, including the plain struct literal and
+    /// [`QueryExpr::concat`] — reproduces the old, unconditional-drop
+    /// behavior exactly; see [`ConcatDiscriminatorKey`]'s doc for the
+    /// soundness argument and the obligation this puts on whoever asserts it.
     ///
     /// Empty children is an error ([`QueryExprError::EmptyConcat`]), not an
     /// empty relation: there would be no schema to derive.
-    Concat { children: Vec<QueryExpr<C>> },
+    Concat {
+        children: Vec<QueryExpr<C>>,
+        /// See the field-level doc above and [`ConcatDiscriminatorKey`].
+        #[serde(default)]
+        discriminator_unique_key: Option<ConcatDiscriminatorKey<C>>,
+    },
 
     /// Logical join. Post-ASAP binding picks the physical alternative.
     Join {
@@ -908,6 +984,37 @@ impl<C: ColState> QueryExpr<C> {
     /// write `QueryExpr::PromqlScalar(v)` should use instead.
     pub fn promql_scalar(v: f64) -> Self {
         QueryExpr::PromqlScalarBridge(Rc::new(QueryExpr::Literal(ScalarValue::Float64(v))))
+    }
+
+    /// Build an ordinary [`Concat`](Self::Concat) — the ordinary/default
+    /// construction path every call site should prefer over the bare struct
+    /// literal: `output_schema` drops `unique_keys` unconditionally, exactly
+    /// as before issue #228. Use
+    /// [`concat_with_discriminator`](Self::concat_with_discriminator) instead
+    /// when the caller can prove branch disjointness via a discriminator
+    /// column.
+    pub fn concat(children: Vec<QueryExpr<C>>) -> Self {
+        QueryExpr::Concat {
+            children,
+            discriminator_unique_key: None,
+        }
+    }
+
+    /// Build a [`Concat`](Self::Concat) whose output schema carries the
+    /// caller-proven compound unique key `(discriminator, inner_key)` (issue
+    /// #228). See [`ConcatDiscriminatorKey`]'s doc for the soundness
+    /// argument and the obligation this puts on the caller —
+    /// `output_schema` trusts this claim without verifying it: nothing here
+    /// checks that `discriminator`'s value is actually distinct per branch.
+    pub fn concat_with_discriminator(
+        children: Vec<QueryExpr<C>>,
+        discriminator: C,
+        inner_key: Vec<C>,
+    ) -> Self {
+        QueryExpr::Concat {
+            children,
+            discriminator_unique_key: Some(ConcatDiscriminatorKey::new(discriminator, inner_key)),
+        }
     }
 
     /// The value of a [`PromqlScalarBridge`](Self::PromqlScalarBridge) leaf
@@ -1134,13 +1241,26 @@ impl QueryExpr<ColumnId> {
             // ⊕ — the branches are union-compatible by construction, so the
             // output shape is the first child's. A row can appear in more than
             // one branch, so no key of one branch is a key of the union: drop
-            // unique_keys, exactly as `SetOp` does.
-            QueryExpr::Concat { children } => {
+            // unique_keys, exactly as `SetOp` does — unless the constructor
+            // asserted `discriminator_unique_key` (issue #228), in which case
+            // `(discriminator, inner_key)` becomes the sole unique key. That
+            // assertion is trusted verbatim here, never checked: see
+            // `ConcatDiscriminatorKey`'s doc for the soundness argument and
+            // whose obligation it is.
+            QueryExpr::Concat {
+                children,
+                discriminator_unique_key,
+            } => {
                 let mut s = children
                     .first()
                     .ok_or(QueryExprError::EmptyConcat)
                     .and_then(|c| c.output_schema())?;
                 s.unique_keys.clear();
+                if let Some(key) = discriminator_unique_key {
+                    let mut compound = vec![*key.discriminator()];
+                    compound.extend(key.inner_key().iter().copied());
+                    s.add_unique_key(compound);
+                }
                 Ok(s)
             }
             // Set operations are union-compatible: both sides share the left's
@@ -1716,9 +1836,7 @@ mod tests {
             "a Dedup branch does have a unique key on its own"
         );
 
-        let merged = QueryExpr::Concat {
-            children: vec![branch(), branch()],
-        };
+        let merged = QueryExpr::concat(vec![branch(), branch()]);
         let schema = merged.output_schema().unwrap();
         assert!(
             schema.unique_keys.is_empty(),
@@ -1735,9 +1853,7 @@ mod tests {
             cols: vec![0],
             child: Rc::new(scan(vec![col("k", DataType::Utf8, false)], None, vec![])),
         };
-        let merged = QueryExpr::Concat {
-            children: vec![branch(), branch()],
-        };
+        let merged = QueryExpr::concat(vec![branch(), branch()]);
         let setop = QueryExpr::SetOp {
             kind: SetOpKind::Union,
             all: true,
@@ -1753,9 +1869,104 @@ mod tests {
     #[test]
     fn an_empty_merge_has_no_schema() {
         assert!(matches!(
-            QueryExpr::Concat { children: vec![] }.output_schema(),
+            QueryExpr::concat(vec![]).output_schema(),
             Err(QueryExprError::EmptyConcat)
         ));
+    }
+
+    /// Issue #228: a `Concat` built via `concat_with_discriminator` gets a
+    /// sound compound `(discriminator, inner_key)` unique key, even though
+    /// each branch's own `inner_key` alone repeats across branches (exactly
+    /// the shape `merge_drops_the_branches_unique_keys` shows is unsafe
+    /// *without* a discriminator).
+    #[test]
+    fn discriminator_override_produces_a_compound_unique_key() {
+        // Two branches, each individually deduplicated on column 0 (`k`) —
+        // but, per `merge_drops_the_branches_unique_keys`, that alone proves
+        // nothing about the union. Column 1 (`branch_id`) stands in for a
+        // discriminator the constructor has separately proven distinct per
+        // branch (PromQL φ, a synthetic `GROUPING()` id, ...) — this
+        // schema-level test only checks the shape `output_schema` derives
+        // from asserting one, not how a real caller proves distinctness.
+        let branch = || QueryExpr::Dedup {
+            cols: vec![0],
+            child: Rc::new(scan(
+                vec![
+                    col("k", DataType::Utf8, false),
+                    col("branch_id", DataType::Int64, false),
+                ],
+                None,
+                vec![],
+            )),
+        };
+        let merged = QueryExpr::concat_with_discriminator(
+            vec![branch(), branch()],
+            /* discriminator */ 1,
+            /* inner_key */ vec![0],
+        );
+        let schema = merged.output_schema().unwrap();
+        assert_eq!(
+            schema.unique_keys,
+            vec![vec![1, 0]],
+            "(discriminator, inner_key) is the sole asserted unique key"
+        );
+        assert_eq!(
+            schema.columns.len(),
+            2,
+            "column shape is still the first branch's"
+        );
+    }
+
+    /// The override is opt-in: building a `Concat` without asserting a
+    /// discriminator — via the plain struct literal, exactly like every call
+    /// site before issue #228 — still drops `unique_keys` by default,
+    /// unchanged.
+    #[test]
+    fn ordinary_concat_struct_literal_still_drops_unique_keys_by_default() {
+        let branch = || QueryExpr::Dedup {
+            cols: vec![0],
+            child: Rc::new(scan(vec![col("k", DataType::Utf8, false)], None, vec![])),
+        };
+        let merged = QueryExpr::Concat {
+            children: vec![branch(), branch()],
+            discriminator_unique_key: None,
+        };
+        assert!(merged.output_schema().unwrap().unique_keys.is_empty());
+    }
+
+    /// Misuse check (issue #228): there is no way to end up with a
+    /// discriminator-backed unique key without a call site literally naming
+    /// a column as the discriminator. Neither the ordinary `concat`
+    /// constructor nor a bare struct literal with `discriminator_unique_key:
+    /// None` can be coaxed into fabricating one — the only path that
+    /// produces `Some` is `concat_with_discriminator` /
+    /// `ConcatDiscriminatorKey::new`, both of which require `discriminator`
+    /// as an explicit, named argument.
+    #[test]
+    fn no_way_to_fabricate_a_unique_key_without_naming_a_discriminator() {
+        let branch = || QueryExpr::Dedup {
+            cols: vec![0],
+            child: Rc::new(scan(vec![col("k", DataType::Utf8, false)], None, vec![])),
+        };
+        // The ordinary builder.
+        assert_eq!(
+            QueryExpr::concat(vec![branch(), branch()])
+                .output_schema()
+                .unwrap()
+                .unique_keys,
+            Vec::<Vec<usize>>::new()
+        );
+        // The bare struct literal, explicitly opting out.
+        assert_eq!(
+            QueryExpr::Concat {
+                children: vec![branch(), branch()],
+                discriminator_unique_key: None,
+            }
+            .output_schema()
+            .unwrap()
+            .unique_keys,
+            Vec::<Vec<usize>>::new()
+        );
     }
 
     #[test]

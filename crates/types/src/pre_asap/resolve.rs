@@ -59,8 +59,8 @@ use super::column_resolution::{
 };
 use super::expr_ir::ColumnRef;
 use super::query_expr::{
-    aggregate_output_schema, GroupKeys, Predicate, ProjectItem, QueryExprError, Reduction,
-    ResolvedQueryExpr, SortKey, UnresolvedQueryExpr,
+    aggregate_output_schema, ConcatDiscriminatorKey, GroupKeys, Predicate, ProjectItem,
+    QueryExprError, Reduction, ResolvedQueryExpr, SortKey, UnresolvedQueryExpr,
 };
 use super::schema::{ColumnId, Schema};
 
@@ -242,12 +242,40 @@ fn resolve(
             }
         }
 
-        QE::Concat { children } => QE::Concat {
-            children: children
+        QE::Concat {
+            children,
+            discriminator_unique_key,
+        } => {
+            let children: Vec<_> = children
                 .iter()
                 .map(|c| resolve(c, fallback))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
+                .collect::<Result<Vec<_>, _>>()?;
+            // No front end asserts this today (issue #228 shipped the
+            // extension point ahead of a wired call site) — resolved here
+            // regardless, against the first resolved branch's own output
+            // schema, exactly the schema `output_schema`'s `Concat` arm
+            // derives the merged schema from, so a future direct
+            // `concat_with_discriminator` caller upstream of `resolve_root`
+            // gets a correctly positional `ConcatDiscriminatorKey` out the
+            // other side.
+            let discriminator_unique_key = discriminator_unique_key
+                .as_ref()
+                .map(|key| -> Result<_, ResolveTreeError> {
+                    let schema = children
+                        .first()
+                        .ok_or(QueryExprError::EmptyConcat)?
+                        .output_schema()?;
+                    Ok(ConcatDiscriminatorKey::new(
+                        resolve_column_ref(key.discriminator(), &schema)?,
+                        resolve_column_refs(key.inner_key(), &schema)?,
+                    ))
+                })
+                .transpose()?;
+            QE::Concat {
+                children,
+                discriminator_unique_key,
+            }
+        }
 
         QE::Join {
             kind,

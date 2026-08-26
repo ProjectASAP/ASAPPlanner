@@ -163,7 +163,7 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
         | QE::TimeRange { child, .. }
         | QE::TimeShift { child, .. }
         | QE::SQLWindowFunc { child, .. } => leftmost_scan_name(child),
-        QE::Concat { children } => children.first().and_then(leftmost_scan_name),
+        QE::Concat { children, .. } => children.first().and_then(leftmost_scan_name),
         QE::Join { left, .. } | QE::SetOp { left, .. } | QE::BinaryOp { lhs: left, .. } => {
             leftmost_scan_name(left)
         }
@@ -310,7 +310,7 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
             | QE::PromqlSubquery { child, .. }
             | QE::TimeRange { child, .. }
             | QE::TimeShift { child, .. } => walk(child, out),
-            QE::Concat { children } => children.iter().for_each(|c| walk(c, out)),
+            QE::Concat { children, .. } => children.iter().for_each(|c| walk(c, out)),
             QE::SetOp { left, right, .. } => {
                 walk(left, out);
                 walk(right, out);
