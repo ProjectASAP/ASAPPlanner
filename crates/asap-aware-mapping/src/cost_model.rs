@@ -223,6 +223,34 @@ pub trait CostModel {
         crate::replacement::default_size_params(kind, intent, eps, delta)
     }
 
+    /// Whether an `AggIntent::TopK { accuracy: Exact, .. }` request should
+    /// still be offered [`summary_candidates`](crate::replacement::summary_candidates)'s
+    /// sketch family (`CmsWithHeap`/`CountSketchWithHeap`) via
+    /// [`rank_candidates`](Self::rank_candidates)/[`size_params`](Self::size_params)
+    /// — sized at the tightest accuracy budget `AccuracyTarget::Exact`
+    /// resolves to (see `replacement::accuracy_budget`) — instead of
+    /// `implementations_for_with` declining straight to
+    /// `Implementation::PassThrough` (issue #151).
+    ///
+    /// There is no *exact* mergeable top-k accumulator (unlike `Count`), so
+    /// `asap-plan` itself has no way to decide between "no summary at all"
+    /// and "the closest available approximation" for an `Exact`-accuracy
+    /// top-k request — that's a deployment policy call. A deployment that
+    /// wants the latter overrides this to return `true` (optionally only
+    /// for the specific `TopK` shapes it cares about); `rank_candidates`
+    /// and `size_params` are then consulted exactly as they are for any
+    /// other top-k sketch candidate, so a `CostModel` gets one place to
+    /// answer both "should this even be considered" and "which one, sized
+    /// how" instead of reimplementing the same pre-pass client-side.
+    ///
+    /// Default: `false` — preserves today's `PassThrough` behavior for
+    /// every deployment that doesn't override this, including one whose own
+    /// `rank_candidates` override doesn't special-case `TopK`'s `Exact`
+    /// case (it is never consulted here unless this method also says yes).
+    fn topk_exact_offers_sketch(&self, _intent: &AggIntent) -> bool {
+        false
+    }
+
     /// Estimated number of distinct subpopulations produced by `target`'s
     /// grouping keys. `None` means the deployment has no cardinality estimate;
     /// grouping alternatives remain legal but keep their discovery order.
