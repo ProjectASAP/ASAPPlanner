@@ -413,6 +413,37 @@ Given an accuracy target, the mapping layer should expose configurations that sa
 
 Accuracy requirements therefore act as **constraints on the search space**, rather than as a separate decision made after a summary family has already been chosen.
 
+## End-to-end guarantees for nested summaries (issue #172)
+
+A single summary is sized against its own `AccuracyTarget`, but a summary
+over another summary's *readout* is only legal if the composed error still
+meets the requirement on the outer value. `asap-aware-mapping` therefore
+runs legality strictly before costing:
+
+```text
+candidate generation
+    -> guarantee propagation            (AccuracyModel::propagate)
+    -> AccuracyTarget satisfaction      (AccuracyModel::satisfies)
+    -> legal candidates only            (illegal ones -> MemoGroup::rejected)
+    -> cost ranking / global selection  (CostModel)
+```
+
+Every finalized post-ASAP value carries a machine-readable
+`ResultGuarantee` (`asap_types::post_asap::guarantee`): a typed
+`ErrorMetric`, a symbolic `BoundExpr`, a `ProbabilityExpr`, and a
+provenance trail. Exact values are zero-error; a sketch readout's guarantee
+inverts the sizing formula that produced its parameters. The default
+`AccuracyModel` (`asap_aware_mapping::accuracy`) is deliberately
+conservative: same-metric additive/relative/Lipschitz rules and exact
+sum/max/min over approximate inputs, union-bound probabilities (no
+independence), unknown statistics kept unknown, and
+`AccuracyError::UnsupportedComposition` for everything else — never
+"treat the child as exact". An `AccuracyBudgetAllocator` (initially an
+equal split) proposes re-sized layers so a legal nested plan can exist at
+all; `CostModel` ranks only what survives. See that module's docs for the
+precedence rules between a root `QueryRequirements.accuracy` and per-node
+`AggIntent.accuracy`.
+
 ---
 
 # Design Dimensions
