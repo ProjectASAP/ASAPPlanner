@@ -183,6 +183,6 @@ Match on `post_asap.expr` (a `SummaryExpr`):
 - `SummaryEstimate { summary_input, query }` — wraps a sketch `SummaryAgg`; `query` is what to
   read out of it (`Quantile`, `Cardinality`, `TopK`, `PointCount`).
 
-`docs/design_docs/asap_aware_mapping.md` has the conceptual background (why this layer exists, what an
+`docs/design_docs/asap-aware-mapping/README.md` has the conceptual background (why this layer exists, what an
 "implementation" is); `docs/design_docs/pre-asap-ir.md` / `docs/design_docs/post-asap-ir.md` are the node-by-node IR
 reference.
