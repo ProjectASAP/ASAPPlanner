@@ -465,6 +465,20 @@ pub enum ReplacementProvenance {
     CseShare,
     CseRecompute,
     LogicalRewrite,
+    /// [`crate::accuracy_reconciliation::AccuracyReconciliationStrategy`]'s
+    /// "read a strictly-tighter sibling instead of building an independent,
+    /// looser copy" candidate (issue #273). Kept distinct from
+    /// `LogicalRewrite` — even though both are structurally-different,
+    /// semantically-equivalent rewrites — because
+    /// [`crate::cost_model::DefaultCostModel::estimate_cost`] needs to price
+    /// it differently: `LogicalRewrite` candidates (`RollupStrategy`,
+    /// `TopKLimitReuseStrategy`) still rebuild `target` itself from a
+    /// different source, so pricing them like an independent rebuild is
+    /// correct; this candidate never rebuilds `target` at all; it reads a
+    /// sibling that (per this strategy's own safety argument) is built
+    /// regardless, so pricing it like a full independent rebuild would be
+    /// the wrong shape of cost, not just the wrong number.
+    AccuracyReconciliation,
 }
 
 /// A replacement strategy: given a [`TargetSubDAG`], does this strategy have
