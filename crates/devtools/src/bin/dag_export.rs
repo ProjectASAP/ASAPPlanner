@@ -79,15 +79,23 @@ const STRUCTURAL_COST_MODEL_VERSION: &str = "dag_export-structural-cost-v1";
 /// carried.
 ///
 /// The baseline is always [`BaselineRef::PreAsapRecomputation`]: the cost of
-/// recomputing `target` independently at every one of its `consumer_count`
-/// use sites, via
-/// [`default_cse_recompute_cost`] — the exact structural-size proxy
-/// `asap_aware_mapping::cost_model`'s own `DefaultCostModel` already uses,
-/// not a second formula. This baseline is always computable (never
-/// `Unavailable`) since it only needs `target` itself, unlike `selected`,
-/// which is `Unavailable` whenever `selected_cost` is `NaN` (the plugged-in
-/// cost model has no numeric estimate for that particular candidate shape —
-/// see [`RankedGroup::costs`](asap_aware_mapping::replacement::RankedGroup::costs)'s
+/// recomputing the winner's own target independently at every one of its
+/// `consumer_count` use sites. `per_consumer_recompute` is that one-site cost
+/// — [`default_cse_recompute_cost`] applied to the target, the exact
+/// structural-size proxy `asap_aware_mapping::cost_model`'s own
+/// `DefaultCostModel` already uses, not a second formula — passed in
+/// pre-computed rather than taking `target: &QueryExpr` and recomputing it
+/// here: this function is called once per matched *node position* a winner
+/// produced or carried (once per `target_replacement` flat entry, once per
+/// `find_winner` hit), and the same winner's target can be reached from more
+/// than one node position, so callers memoize `default_cse_recompute_cost`
+/// once per winner (see `run_post_asap_with_progress`'s
+/// `per_consumer_recompute_costs`) instead of this function re-walking the
+/// identical subtree on every call. This baseline is always computable
+/// (never `Unavailable`), unlike `selected`, which is `Unavailable` whenever
+/// `selected_cost` is `NaN` (the plugged-in cost model has no numeric
+/// estimate for that particular candidate shape — see
+/// [`RankedGroup::costs`](asap_aware_mapping::replacement::RankedGroup::costs)'s
 /// own doc).
 ///
 /// Every value here is unit-tagged [`CostUnit::RelativeStructuralUnits`],
@@ -96,11 +104,10 @@ const STRUCTURAL_COST_MODEL_VERSION: &str = "dag_export-structural-cost-v1";
 /// (issue #287's job) — see `asap_types::cost`'s module doc for why this
 /// crate refuses to mislabel a structural proxy as a real rate.
 fn winner_cost_annotations(
-    target: &QueryExpr,
+    per_consumer_recompute: f64,
     consumer_count: usize,
     selected_cost: f64,
 ) -> (CostAnnotation, CostAnnotation, CostAnnotation) {
-    let per_consumer_recompute = default_cse_recompute_cost(target).0;
     let baseline_value = per_consumer_recompute * consumer_count.max(1) as f64;
     let baseline = CostAnnotation::modeled(
         baseline_value,
@@ -414,7 +421,8 @@ fn decision_cost_entries(graph: &DagGraph) -> Vec<(u32, CostAnnotation, CostAnno
         if !seen.insert(decision.id) {
             continue;
         }
-        let (Some(baseline), Some(selected)) = (&decision.baseline_cost, &decision.selected_cost) else {
+        let (Some(baseline), Some(selected)) = (&decision.baseline_cost, &decision.selected_cost)
+        else {
             continue;
         };
         entries.push((decision.id, baseline.clone(), selected.clone()));
@@ -423,11 +431,15 @@ fn decision_cost_entries(graph: &DagGraph) -> Vec<(u32, CostAnnotation, CostAnno
 }
 
 /// Build a [`TargetReplacement`] for `winner`, matching this file's own
-/// per-target `before`/`after` construction.
+/// per-target `before`/`after` construction. `per_consumer_recompute` is
+/// `winner`'s own memoized [`default_cse_recompute_cost`] — see
+/// `winner_cost_annotations`'s own doc for why callers pass this in instead
+/// of recomputing it here.
 fn target_replacement(
     decision_id: u32,
     target_pre_id: u32,
     winner: &Winner<'_>,
+    per_consumer_recompute: f64,
 ) -> TargetReplacement {
     let strategy = winner.candidate.strategy.to_string();
     let before = dag_export::export(winner.target);
@@ -440,14 +452,20 @@ fn target_replacement(
         }
     };
     let (baseline_cost, selected_cost, benefit) =
-        winner_cost_annotations(winner.target, winner.consumer_count, winner.cost);
+        winner_cost_annotations(per_consumer_recompute, winner.consumer_count, winner.cost);
+    // Derived from `selected_cost` (not read from `winner.cost` a second
+    // time) so the legacy scalar field and the structured annotation can
+    // never drift apart at this call site — see `winner_cost_annotations`'s
+    // own doc for why `selected_cost.value` is `None` (and this is `NaN`)
+    // in exactly the same case `winner.cost` itself would already be `NaN`.
+    let cost = selected_cost.value.unwrap_or(f64::NAN);
     TargetReplacement {
         decision_id,
         target_pre_id,
         strategy,
         rationale: decision_rationale(winner),
         rank: 0,
-        cost: winner.cost,
+        cost,
         before,
         after,
         baseline_cost: Some(baseline_cost),
@@ -581,6 +599,20 @@ fn run_post_asap_with_progress(
         })
         .collect();
 
+    // One `default_cse_recompute_cost` walk per *winner*, not per node a
+    // winner's decision ends up cloned onto: `winner_cost_annotations` is
+    // called once per matched node position — once per `target_replacement`
+    // flat entry, and once per `find_winner` hit inside `export_post_asap`'s
+    // traversal — and a single target can be reached from more than one
+    // node position (an internally-shared subtree within one query, or the
+    // same CSE-shared target reached from several queries), so recomputing
+    // this per call would re-walk the identical subtree redundantly.
+    // Indexed in parallel with `winners`.
+    let per_consumer_recompute_costs: Vec<f64> = winners
+        .iter()
+        .map(|winner| default_cse_recompute_cost(winner.target).0)
+        .collect();
+
     // `by_hash` only narrows the search; `lookup_winner`'s own structural
     // equality check is the real decision — see that function's doc.
     let mut by_hash_cache = HashCache::new();
@@ -619,14 +651,20 @@ fn run_post_asap_with_progress(
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
         let winner = &winners[i];
-        let (baseline_cost, selected_cost, benefit) =
-            winner_cost_annotations(winner.target, winner.consumer_count, winner.cost);
+        let (baseline_cost, selected_cost, benefit) = winner_cost_annotations(
+            per_consumer_recompute_costs[i],
+            winner.consumer_count,
+            winner.cost,
+        );
+        // Derived from `selected_cost`, not `winner.cost` a second time —
+        // see `target_replacement`'s identical derivation for why.
+        let cost = selected_cost.value.unwrap_or(f64::NAN);
         let decision = DagDecision {
             id: i as u32,
             strategy: winner.candidate.strategy.to_string(),
             rationale: decision_rationale(winner),
             rank: 0,
-            cost: winner.cost,
+            cost,
             role: "replacement_region",
             baseline_cost: Some(baseline_cost),
             selected_cost: Some(selected_cost),
@@ -688,7 +726,12 @@ fn run_post_asap_with_progress(
             if let Some(i) = lookup_winner(&by_hash, &winners, &mut lookup_cache, source_expr) {
                 replacements.push((
                     name.clone(),
-                    target_replacement(i as u32, node.id, &winners[i]),
+                    target_replacement(
+                        i as u32,
+                        node.id,
+                        &winners[i],
+                        per_consumer_recompute_costs[i],
+                    ),
                 ));
                 matched[i] = true;
             }
@@ -896,11 +939,16 @@ async fn main() {
             continue;
         }
         match asap_types::cost::workload_cost_summary(
-            entries.iter().map(|(id, baseline, selected)| (Some(*id), baseline, selected)),
+            entries
+                .iter()
+                .map(|(id, baseline, selected)| (Some(*id), baseline, selected)),
             "dag_export-workload-cost-v1",
         ) {
             Ok(summary) => query.workload_cost = Some(summary),
-            Err(mismatch) => eprintln!("dag_export: workload cost aggregation for {:?} skipped — {mismatch}", query.name),
+            Err(mismatch) => eprintln!(
+                "dag_export: workload cost aggregation for {:?} skipped — {mismatch}",
+                query.name
+            ),
         }
         workload_entries.extend(entries);
     }

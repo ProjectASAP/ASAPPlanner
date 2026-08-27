@@ -248,15 +248,22 @@ pub struct NamedGraph {
     /// same additive rule as `replacements`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rejections: Vec<TargetRejection>,
-    /// This query's whole selected-workload cost/benefit — one of issue
-    /// #286's granularity items. Built by summing this query's own
+    /// This query's own selected-workload cost/benefit — one of issue
+    /// #286's granularity items. Built by summing *this query's own*
     /// `post_graph` decision-node cost annotations, deduplicated by
-    /// `workload_node_id` (a node this query shares with an earlier query
-    /// in the same export is still counted once here, since
-    /// `assign_workload_node_ids` assigns identity workload-wide, not
-    /// per-query). `None` unless a higher layer built one (same
+    /// `decision.id` **within this one query only** (a decision spanning
+    /// several nodes in this query's own replacement region is still
+    /// counted once here). `None` unless a higher layer built one (same
     /// `--post-asap`-gated pattern as `post_graph`); omitted from JSON when
     /// absent.
+    ///
+    /// This does **not** dedupe across queries: a target shared by two
+    /// queries (e.g. a common `Scan` after workload-wide CSE) is counted
+    /// once in *each* query's own `workload_cost` — summing several
+    /// `NamedGraph.workload_cost` values by hand double-counts any decision
+    /// shared between them. For a cross-query total that dedupes correctly,
+    /// use [`WorkloadGraph::workload_cost`] instead, which is built
+    /// specifically to cover every query in one pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_cost: Option<crate::cost::WorkloadCostSummary>,
 }
@@ -722,6 +729,18 @@ fn deduplicate_pointer_shared_nodes(nodes: Vec<DagNode>, root: u32) -> DagGraph 
     let mut by_source_ptr = HashMap::<usize, u32>::new();
     let mut old_to_new = vec![0_u32; nodes.len()];
     let mut deduplicated = Vec::with_capacity(nodes.len());
+    // Built in the same pass as `deduplicated` itself, rather than by a
+    // second full walk over `deduplicated` afterward (see
+    // `shared_node_edge_annotations`'s own doc for why one pass suffices):
+    // `HashSet`, not `Vec`, per child — a *distinct* consuming node is what
+    // "consumer" means here. A single parent can reference the same shared
+    // child from two of its own operand slots at once (e.g. a `Join` whose
+    // left and right are the same `Rc` post pointer-dedup) — that's one
+    // downstream consumer reading the child twice, structurally, not two
+    // separate consumers, and it must not inflate `consumer_count` (which
+    // would understate `per_edge_cost`) or produce two colliding `(from,
+    // to)` `EdgeCostAnnotation` entries for the exact same edge.
+    let mut parents_of: HashMap<u32, std::collections::HashSet<u32>> = HashMap::new();
 
     for mut node in nodes {
         node.children = node
@@ -743,10 +762,21 @@ fn deduplicate_pointer_shared_nodes(nodes: Vec<DagNode>, root: u32) -> DagGraph 
             by_source_ptr.insert(source_ptr, new_id);
         }
         old_to_new[old_id as usize] = new_id;
+        // `node.children` is already remapped to final new-id space above,
+        // and post-order guarantees every child was already pushed (with
+        // its own final id) before this parent is reached — so this is safe
+        // to record right here, once, rather than re-deriving it from
+        // `deduplicated` in a later pass. A node this loop *doesn't* push
+        // (the dedup-hit `continue` above) never reaches this line, but that
+        // never loses information: its first-pushed duplicate already had
+        // its own (identical) children recorded when *it* was processed.
+        for &child_new_id in &node.children {
+            parents_of.entry(child_new_id).or_default().insert(new_id);
+        }
         deduplicated.push(node);
     }
 
-    let edge_annotations = shared_node_edge_annotations(&deduplicated);
+    let edge_annotations = shared_node_edge_annotations(&deduplicated, &parents_of);
     DagGraph {
         nodes: deduplicated,
         root: old_to_new[root as usize],
@@ -766,21 +796,24 @@ fn deduplicate_pointer_shared_nodes(nodes: Vec<DagNode>, root: u32) -> DagGraph 
 /// evenly divided across every consuming edge — never a guessed multi-hop
 /// path cost (explicitly out of scope per the issue).
 ///
+/// `parents_of` is [`deduplicate_pointer_shared_nodes`]'s own
+/// already-built child -> distinct-parents map, passed in rather than
+/// rebuilt here by a second walk over `nodes`'s edges — that caller has
+/// already visited every edge exactly once while assigning final node ids,
+/// so redoing the same walk here would just re-derive what it already
+/// knows.
+///
 /// Uses [`dag_node_count`] (the same structural-size proxy
 /// `asap_aware_mapping::cost_model::default_cse_recompute_cost` computes;
 /// duplicated here in plain terms since `asap_types` may not depend on that
 /// higher crate) rather than a real per-byte transfer cost — honestly
 /// unit-tagged [`CostUnit::RelativeStructuralUnits`], not a rate.
-fn shared_node_edge_annotations(nodes: &[DagNode]) -> Vec<EdgeCostAnnotation> {
-    let mut parents_of: HashMap<u32, Vec<u32>> = HashMap::new();
-    for node in nodes {
-        for &child in &node.children {
-            parents_of.entry(child).or_default().push(node.id);
-        }
-    }
-
+fn shared_node_edge_annotations(
+    nodes: &[DagNode],
+    parents_of: &HashMap<u32, std::collections::HashSet<u32>>,
+) -> Vec<EdgeCostAnnotation> {
     let mut annotations = Vec::new();
-    for (child_id, parents) in &parents_of {
+    for (child_id, parents) in parents_of {
         if parents.len() < 2 {
             continue;
         }
@@ -1466,16 +1499,23 @@ mod tests {
 
     #[test]
     fn export_post_asap_annotates_edges_into_a_genuinely_shared_node() {
-        // Two parents (a Join's own two sides) share the exact same `Rc`
-        // Scan — `export_post_asap`'s `deduplicate_pointer_shared_nodes`
-        // must merge them onto one node id, and (issue #286) attach an
+        // Two *distinct* parents (a Dedup and a Limit, each with their own
+        // single child slot) share the exact same `Rc` Scan —
+        // `export_post_asap`'s `deduplicate_pointer_shared_nodes` must merge
+        // them onto one node id, and (issue #286) attach an
         // `EdgeCostAnnotation` on each of the two edges running into it.
         let shared_scan = Rc::new(scan("metrics", value_col()));
-        let root = QueryExpr::Join {
-            kind: crate::pre_asap::query_expr::JoinKind::Inner,
-            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
-            left: Rc::clone(&shared_scan),
-            right: Rc::clone(&shared_scan),
+        let left_branch = QueryExpr::Dedup {
+            cols: vec![0],
+            child: Rc::clone(&shared_scan),
+        };
+        let right_branch = QueryExpr::Limit {
+            n: 5,
+            offset: 0,
+            child: Rc::clone(&shared_scan),
+        };
+        let root = QueryExpr::Concat {
+            children: vec![left_branch, right_branch],
         };
         let graph = export_post_asap(&root, &mut |_| None);
 
@@ -1490,12 +1530,64 @@ mod tests {
             .iter()
             .filter(|edge| edge.from == scan_id)
             .collect();
-        assert_eq!(edges_into_scan.len(), 2, "one annotation per consuming edge");
+        assert_eq!(
+            edges_into_scan.len(),
+            2,
+            "one annotation per distinct consuming parent"
+        );
+        let distinct_parents: std::collections::HashSet<_> =
+            edges_into_scan.iter().map(|edge| edge.to).collect();
+        assert_eq!(
+            distinct_parents.len(),
+            2,
+            "the two parents (Dedup, Limit) must be distinct"
+        );
         for edge in &edges_into_scan {
-            assert_eq!(edge.cost.value, Some(0.5), "1 unique node / 2 consumers");
-            assert_eq!(edge.cost.unit, crate::cost::CostUnit::RelativeStructuralUnits);
+            assert_eq!(
+                edge.cost.value,
+                Some(0.5),
+                "1 unique node / 2 distinct consumers"
+            );
+            assert_eq!(
+                edge.cost.unit,
+                crate::cost::CostUnit::RelativeStructuralUnits
+            );
             assert_eq!(edge.cost.source, crate::cost::CostSource::Modeled);
         }
+    }
+
+    /// Regression test: a single parent referencing the same shared child
+    /// from two of its own operand slots at once (a `Join` whose left and
+    /// right sides are the exact same `Rc`, post pointer-dedup) is *one*
+    /// downstream consumer, not two — this must not inflate
+    /// `consumer_count`, must not halve the reported per-edge cost, and
+    /// must not produce two colliding `(from, to)` `EdgeCostAnnotation`
+    /// entries for what is structurally a single edge. Since there is only
+    /// one *distinct* consumer here, this shape isn't "genuinely shared" at
+    /// all in the `>= 2 distinct consumers` sense `shared_node_edge_annotations`
+    /// requires, so no annotation should be produced for it.
+    #[test]
+    fn a_single_parent_referencing_a_shared_child_twice_is_one_consumer_not_two() {
+        let shared_scan = Rc::new(scan("metrics", value_col()));
+        let root = QueryExpr::Join {
+            kind: crate::pre_asap::query_expr::JoinKind::Inner,
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            left: Rc::clone(&shared_scan),
+            right: Rc::clone(&shared_scan),
+        };
+        let graph = export_post_asap(&root, &mut |_| None);
+
+        assert_eq!(
+            graph.nodes.iter().filter(|n| n.kind == "Scan").count(),
+            1,
+            "the shared Scan must be merged onto one node, not duplicated"
+        );
+        assert!(
+            graph.edge_annotations.is_empty(),
+            "a single parent referencing the same child twice is one consumer, not a genuine \
+             multi-consumer share — got: {:?}",
+            graph.edge_annotations
+        );
     }
 
     #[test]

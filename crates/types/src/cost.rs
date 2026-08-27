@@ -236,11 +236,32 @@ pub fn benefit_ratio(baseline_value: f64, delta: f64) -> Option<f64> {
 
 /// `total_cost(H) = recurring_cost_rate * H + one_shot_cost` — finite-run or
 /// one-shot totals require an explicit horizon. Returns `None` (never a
-/// fabricated total) when both terms are `None`, or when `horizon` isn't a
-/// finite, non-negative number for a `Some(rate)`. Rate and one-shot costs
-/// are passed as separate arguments specifically so they can never be
-/// silently added by a caller before this function ever sees them.
-pub fn total_cost(recurring_cost_rate: Option<f64>, horizon: f64, one_shot_cost: Option<f64>) -> Option<f64> {
+/// fabricated or poisoned total) when both terms are `None`, when `horizon`
+/// isn't a finite, non-negative number for a `Some(rate)`, or when either
+/// `recurring_cost_rate` or `one_shot_cost` is itself non-finite (`NaN` or
+/// infinite) — a non-finite input must never silently produce `Some(NaN)`.
+/// Rate and one-shot costs are passed as separate arguments specifically so
+/// they can never be silently added by a caller before this function ever
+/// sees them.
+pub fn total_cost(
+    recurring_cost_rate: Option<f64>,
+    horizon: f64,
+    one_shot_cost: Option<f64>,
+) -> Option<f64> {
+    // A non-finite input anywhere here (NaN/±inf — e.g. from a future #287
+    // caller upstream) must never quietly poison the total into `Some(NaN)`:
+    // that would violate this module's own "never fabricate, never a
+    // poisoned total" rule as much as inventing a number from nothing would.
+    if let Some(rate) = recurring_cost_rate {
+        if !rate.is_finite() {
+            return None;
+        }
+    }
+    if let Some(one_shot) = one_shot_cost {
+        if !one_shot.is_finite() {
+            return None;
+        }
+    }
     let recurring = match recurring_cost_rate {
         Some(rate) => {
             if !horizon.is_finite() || horizon < 0.0 {
@@ -371,11 +392,19 @@ pub fn workload_cost_summary<'a, I>(
 where
     I: IntoIterator<Item = (Option<u32>, &'a CostAnnotation, &'a CostAnnotation)> + Clone,
 {
-    let baseline_cost = sum_workload_costs(entries.clone().into_iter().map(|(id, baseline, _)| (id, baseline)))?;
-    let selected_cost = sum_workload_costs(entries.into_iter().map(|(id, _, selected)| (id, selected)))?;
+    let baseline_cost = sum_workload_costs(
+        entries
+            .clone()
+            .into_iter()
+            .map(|(id, baseline, _)| (id, baseline)),
+    )?;
+    let selected_cost =
+        sum_workload_costs(entries.into_iter().map(|(id, _, selected)| (id, selected)))?;
 
     let benefit = match (baseline_cost.value, selected_cost.value) {
-        (Some(baseline_value), Some(selected_value)) if baseline_cost.unit == selected_cost.unit => {
+        (Some(baseline_value), Some(selected_value))
+            if baseline_cost.unit == selected_cost.unit =>
+        {
             let delta = baseline_value - selected_value;
             CostAnnotation {
                 value: Some(delta),
@@ -454,6 +483,26 @@ mod tests {
         assert_eq!(total_cost(Some(2.0), f64::NAN, None), None);
         assert_eq!(total_cost(Some(2.0), f64::INFINITY, None), None);
         assert_eq!(total_cost(Some(2.0), -1.0, None), None);
+    }
+
+    /// A non-finite `recurring_cost_rate` (e.g. a stray `NaN` from a future
+    /// #287 caller) must never silently produce `Some(NaN)` — that's a
+    /// poisoned total, exactly the kind of fabricated-looking value this
+    /// module's "never fabricate" rule exists to prevent.
+    #[test]
+    fn total_cost_rejects_a_non_finite_recurring_rate() {
+        assert_eq!(total_cost(Some(f64::NAN), 5.0, None), None);
+        assert_eq!(total_cost(Some(f64::INFINITY), 5.0, None), None);
+        assert_eq!(total_cost(Some(f64::NEG_INFINITY), 5.0, Some(1.0)), None);
+    }
+
+    /// Same guard on the one-shot addend — a `NaN`/infinite one-shot cost
+    /// must not poison the total either, even when the recurring side is
+    /// perfectly well-formed.
+    #[test]
+    fn total_cost_rejects_a_non_finite_one_shot_cost() {
+        assert_eq!(total_cost(Some(2.0), 5.0, Some(f64::NAN)), None);
+        assert_eq!(total_cost(None, 5.0, Some(f64::INFINITY)), None);
     }
 
     fn ann(value: f64, unit: CostUnit) -> CostAnnotation {
