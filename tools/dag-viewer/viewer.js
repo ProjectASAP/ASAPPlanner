@@ -20,7 +20,12 @@ cytoscape.use(window.cytoscapeDagre);
 // like "SummaryAgg" mixed in, and any such node has no `hash` — there's no
 // corresponding QueryExpr to hash) — left `undefined` when absent (omitted
 // whenever --post-asap wasn't set, or this query had zero replacements),
-// unlike `replacements` which always defaults to an array.
+// unlike `replacements` which always defaults to an array. `workload_cost`
+// is the optional per-query `NamedGraph.workload_cost` (issue #286), also
+// left `undefined` when absent. `sourceBatch` is a viewer-assigned integer
+// (never present in the JSON itself) shared by every query loaded from the
+// same document — see computeSelectionWorkloadCost's own doc for why it
+// exists and how it's used.
 let queries = [];
 let activeIndex = -1;
 let cy = null;
@@ -29,6 +34,13 @@ let zoom = 1;
 // The viewer has one Pre/Post-ASAP mode. One selected query renders its own
 // two DAGs; multiple selected queries union each stage into one workload DAG.
 let participants = new Set();
+// Every query pushed from the *same* loaded JSON document (one `dag_export`
+// process invocation) shares one `sourceBatch` id, assigned here. Needed
+// because `DagDecision.id` is only unique *within* one dag_export run, not
+// across independently-generated files — computeSelectionWorkloadCost below
+// dedups by `${sourceBatch}:${decision.id}`, never `decision.id` alone, so
+// two files that happen to reuse the same small integer id never collide.
+let nextSourceBatch = 0;
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
@@ -101,11 +113,14 @@ function loadFiles(fileList) {
           lifecycle_summary: lifecyclePlanSummary(parsed),
         }] : []);
         const existingNames = new Set(queries.map((q) => q.name));
+        // One batch id per *file* — every query this one dag_export
+        // invocation produced shares its decision.id numbering.
+        const sourceBatch = nextSourceBatch++;
         incoming.forEach((q) => {
           let name = q.name;
           if (existingNames.has(name)) name = `${q.name} (${file.name})`;
           existingNames.add(name);
-          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary });
+          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, workload_cost: q.workload_cost, sourceBatch, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary });
         });
       } catch (err) {
         alert(`Failed to parse ${file.name}: ${err.message}`);
@@ -700,13 +715,21 @@ function nodeCostBadgeSuffix(node) {
 }
 
 // Workload-wide baseline/selected/benefit for the currently selected
-// queries, deduplicated by `decision.id` — the same collision-free key
-// `crates/devtools/src/bin/dag_export.rs`'s own `decision_cost_entries`
-// dedupes by (a decision spans every node in its replacement region, and a
-// CSE-shared target can appear in more than one selected query). This
-// aggregates explicit per-node `CostAnnotation`s already in the export; it
-// never estimates a cost itself. Returns `null` when nothing in the
-// selection carries a cost annotation, or when selected annotations
+// queries, deduplicated by `decision.id` *within one loaded document* — the
+// same collision-free key `crates/devtools/src/bin/dag_export.rs`'s own
+// `decision_cost_entries` dedupes by (a decision spans every node in its
+// replacement region, and a CSE-shared target can appear in more than one
+// selected query from the same dag_export run). `decision.id` is only
+// unique within the one `dag_export` process invocation that produced it,
+// never across independently-generated files — the viewer explicitly
+// supports loading and selecting across several files at once — so the
+// dedup key is `${query.sourceBatch}:${decision.id}`, not `decision.id`
+// alone; two files that happen to reuse the same small integer id must
+// never collide and silently drop one file's cost from the total.
+//
+// This aggregates explicit per-node `CostAnnotation`s already in the
+// export; it never estimates a cost itself. Returns `null` when nothing in
+// the selection carries a cost annotation, or when selected annotations
 // disagree on unit (unit-incompatible aggregation is refused, not mixed).
 function computeSelectionWorkloadCost(selected) {
   const seenDecisions = new Set();
@@ -718,8 +741,10 @@ function computeSelectionWorkloadCost(selected) {
     const nodes = (query.post_graph && query.post_graph.nodes) || [];
     for (const node of nodes) {
       const decision = node.decision;
-      if (!decision || seenDecisions.has(decision.id)) continue;
-      seenDecisions.add(decision.id);
+      if (!decision) continue;
+      const dedupKey = `${query.sourceBatch}:${decision.id}`;
+      if (seenDecisions.has(dedupKey)) continue;
+      seenDecisions.add(dedupKey);
       const baseline = decision.baseline_cost;
       const selectedCost = decision.selected_cost;
       if (!baseline || !selectedCost) continue;
@@ -1039,7 +1064,9 @@ document.getElementById('resetBtn').addEventListener('click', () => { zoom = 1; 
 
 function loadWorkload(parsed) {
   const incoming = (parsed && parsed.queries) || [];
-  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary }));
+  // One batch id for this whole document — see `sourceBatch`'s own doc above.
+  const sourceBatch = nextSourceBatch++;
+  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, workload_cost: q.workload_cost, sourceBatch, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary }));
   if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
   if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
 }
