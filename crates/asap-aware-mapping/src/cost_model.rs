@@ -214,6 +214,17 @@ pub trait CostModel {
     /// [`replacement::default_size_params`], `asap-plan`'s built-in formulas
     /// (unchanged) — a deployment that only needs to reorder candidates,
     /// not resize them, can leave this method unimplemented.
+    ///
+    /// # Contract
+    ///
+    /// The returned parameters MUST make `kind` satisfy the supplied
+    /// `(eps, delta)` accuracy budget. This is a semantic requirement, not a
+    /// requirement that parameter fields themselves be numerically monotonic:
+    /// catalog rungs and empirically tuned layouts are allowed, but returning
+    /// a configuration that misses the requested budget makes the resulting
+    /// plan invalid. Accuracy reconciliation relies on this same contract;
+    /// any implementation satisfying a tighter budget necessarily satisfies
+    /// a looser budget for the identical aggregate query.
     fn size_params(
         &self,
         kind: SketchAlgorithm,

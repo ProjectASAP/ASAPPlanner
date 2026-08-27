@@ -2112,12 +2112,29 @@ impl<Id> PlanSpace<Id> {
             };
 
             let outgoing_multiplier = multiplier(*ptr, &effective_uses, &chosen_share);
-            let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
-                Some(Replacement::Rewrite(rewrite)) => rewrite,
-                Some(Replacement::Summary(_)) | None => &group.target,
-            };
-            for (child, edge_count) in direct_child_counts(selected_rewrite) {
-                *effective_uses.entry(child).or_insert(0) += edge_count * outgoing_multiplier;
+            match chosen {
+                Some(ReplacementSubDAG {
+                    replacement: Replacement::Rewrite(source),
+                    provenance: ReplacementProvenance::AccuracyReconciliation,
+                    ..
+                }) => {
+                    // Accuracy reconciliation reads another discovered memo
+                    // group, rather than inlining that group's children. Let
+                    // the source group receive the uses and propagate them
+                    // through its own selected implementation when its turn
+                    // arrives in topological order.
+                    *effective_uses.entry(Rc::as_ptr(source)).or_insert(0) += outgoing_multiplier;
+                }
+                _ => {
+                    let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
+                        Some(Replacement::Rewrite(rewrite)) => rewrite,
+                        Some(Replacement::Summary(_)) | None => &group.target,
+                    };
+                    for (child, edge_count) in direct_child_counts(selected_rewrite) {
+                        *effective_uses.entry(child).or_insert(0) +=
+                            edge_count * outgoing_multiplier;
+                    }
+                }
             }
 
             groups.insert(
@@ -2278,7 +2295,10 @@ struct ReferenceGraph {
 }
 
 /// Build an ordering graph containing every edge that could be selected:
-/// the original target's edges plus every rewrite candidate's edges. The
+/// the original target's edges plus every rewrite candidate's edges. An
+/// accuracy-reconciliation rewrite points at another discovered memo group,
+/// so it contributes an edge to that group itself; other rewrites contribute
+/// their relational children as before. The
 /// graph is deliberately only used for topological ordering; effective-use
 /// counts are propagated through the one candidate actually selected.
 fn reference_graph<Id>(space: &PlanSpace<Id>) -> ReferenceGraph {
@@ -2298,7 +2318,11 @@ fn reference_graph<Id>(space: &PlanSpace<Id>) -> ReferenceGraph {
         record_possible_edges(*ptr, &group.target, &mut graph);
         for candidate in &group.candidates {
             if let Replacement::Rewrite(rewrite) = &candidate.replacement {
-                record_possible_edges(*ptr, rewrite, &mut graph);
+                if candidate.provenance == ReplacementProvenance::AccuracyReconciliation {
+                    add_edge(*ptr, Rc::as_ptr(rewrite), 1, &mut graph);
+                } else {
+                    record_possible_edges(*ptr, rewrite, &mut graph);
+                }
             }
         }
     }

@@ -66,18 +66,20 @@
 //! `implementations_for_with`'s `sketch_implementations` feeds into
 //! `CostModel::size_params` — the same numbers `default_size_params`'
 //! `kll_k` / `cms_width` / `cms_depth` / `hll_precision` / `kmv_k` / DDSketch's
-//! own `alpha == eps` invert. Every one of those formulas is monotonic in its
-//! input: a smaller `eps` (or `delta`) never produces a smaller/less-accurate
-//! structure. So a sketch sized to budget `(e1, d1)` also satisfies any
+//! own `alpha == eps` invert. Every shipped formula is monotonic in its
+//! input, and custom [`crate::cost_model::CostModel::size_params`]
+//! implementations are contractually required to return parameters that
+//! satisfy their supplied budget. So a sketch satisfying budget `(e1, d1)`
+//! also satisfies any
 //! requirement `(e2, d2)` with `e1 <= e2 && d1 <= d2` — [`dominates`]'s exact
 //! check — regardless of which of `Epsilon`/`EpsilonDelta` either side is
 //! spelled as, because both resolve through the identical `accuracy_budget`
 //! mapping before sizing ever happens. Combined with "same [`AggIntent`]
-//! variant apart from accuracy" (point 3 above), both consumers rank/select
-//! from the exact same [`crate::replacement::summary_candidates`] family
-//! list, so tightening never changes *which* sketch algorithm would be
-//! picked — only how tightly its parameters are sized. That is the whole
-//! safety argument this module leans on: **never** a claim that some
+//! variant apart from accuracy" (point 3 above), every algorithm the tighter
+//! sibling may select answers the identical aggregate query and must satisfy
+//! the tighter budget; the two groups need not independently choose the same
+//! algorithm. That is the whole safety argument this module leans on:
+//! **never** a claim that some
 //! `AccuracyTarget` is "close enough" by fuzzy/heuristic similarity, always
 //! a literal Pareto-domination check on the exact numbers a build would be
 //! sized with.
@@ -139,22 +141,13 @@
 //! priced with, reflecting "one more reference into a structure that's
 //! already being maintained" rather than "build a whole new one."
 //!
-//! **Known limitation, not fixed here:** `PlanSpace::global_selection`'s
-//! cross-group dynamic program (see `replacement.rs`'s "Whole-plan
-//! (cross-group) selection" docs) propagates `effective_consumer_count`
-//! along the *original* parent → child edges `discover_targets` found in the
-//! workload tree. When a target selects this strategy's `Rewrite(rc)`
-//! candidate, `rc` is a **sibling**, not a structural child of `target` —
-//! no edge for "`target` now effectively reads `rc`" exists in that graph,
-//! so `rc`'s own `effective_consumer_count` is never incremented to account
-//! for it. The three-consumer example from the module docs above (a tight
-//! build serving its own consumer *and* two reconciled looser ones) is
-//! therefore not yet priced as the three-way-shared build it actually would
-//! be; `rc`'s own group still only ever sees its own direct, structural
-//! consumers. Wiring a cross-sibling edge into that DP is real surgery on
-//! `global_selection`'s reference graph (a new edge kind the topological
-//! sort and cycle-freedom argument don't currently account for) rather than
-//! a local fix to this module, so it's left as documented follow-up.
+//! `PlanSpace::global_selection` treats this rewrite as a cross-group edge:
+//! selecting it increments `rc`'s own `effective_consumer_count`, then lets
+//! that sibling group propagate the uses through its selected implementation.
+//! Accuracy edges are directed strictly from looser to tighter budgets, so
+//! they cannot cycle among themselves; both near-duplicates also have the
+//! same structural child, so adding the edge preserves the reference graph's
+//! parent-before-child topological ordering.
 
 use std::cmp::Ordering;
 use std::rc::Rc;
@@ -394,6 +387,7 @@ impl ReplacementStrategy for AccuracyReconciliationStrategy {
 mod tests {
     use super::*;
     use crate::cost_model::{CostModel, DefaultCostModel};
+    use asap_types::post_asap::SketchAlgorithm;
     use asap_types::pre_asap::cse::share_common_subtrees;
     use asap_types::pre_asap::query_expr::{GroupKeys, Source};
     use asap_types::pre_asap::schema::{Column, ColumnId, DataType, Schema};
@@ -904,6 +898,61 @@ mod tests {
         assert_eq!(
             chosen.map(|c| c.provenance),
             Some(crate::replacement::ReplacementProvenance::CseShare)
+        );
+    }
+
+    #[test]
+    fn global_selection_propagates_reconciled_consumers_to_the_tighter_group() {
+        struct PreferReconciliation;
+
+        impl CostModel for PreferReconciliation {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+
+            fn estimate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _target: &TargetSubDAG<'_>,
+            ) -> f64 {
+                if candidate.provenance == ReplacementProvenance::AccuracyReconciliation {
+                    0.0
+                } else {
+                    100.0
+                }
+            }
+        }
+
+        let scan = metric_scan();
+        let tight = quantile(0.99, AccuracyTarget::Epsilon(0.01), &scan);
+        let loose = quantile(0.99, AccuracyTarget::Epsilon(0.05), &scan);
+        let space = crate::replacement::search_workload(vec![
+            ("tight", Rc::clone(&tight)),
+            ("loose", Rc::clone(&loose)),
+        ]);
+
+        let selected = space.global_selection(&PreferReconciliation);
+        let tight_root = &space.roots[0].1;
+        let loose_root = &space.roots[1].1;
+        assert_eq!(
+            selected
+                .for_target(loose_root)
+                .and_then(|group| group.chosen)
+                .map(|candidate| candidate.provenance),
+            Some(ReplacementProvenance::AccuracyReconciliation),
+            "fixture must select the cross-sibling rewrite"
+        );
+        assert_eq!(
+            selected
+                .for_target(tight_root)
+                .expect("the tighter sibling is a discovered memo group")
+                .effective_consumer_count,
+            2,
+            "the tighter build serves its original root and the reconciled looser root"
         );
     }
 }
