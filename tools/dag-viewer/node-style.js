@@ -1,117 +1,41 @@
-// Category table for QueryExpr node kinds — the single source of truth for
-// how the viewer colors and labels each `DagNode.kind`. Edit this file to
-// reclassify a kind or retune a palette; nothing else in index.html needs to
-// change.
-//
-// Also covers the 7 post-ASAP-only SummaryDagNode kinds (KeepPreAsap,
-// SummaryAgg, SummaryJoin, SummarySubtract, SummaryDelete, SummaryEstimate,
-// SummaryMerge) that appear in the post-ASAP lane — see the `summary`
-// category below.
-//
-// Issue #187: this table's kind list is kept in exact sync with the literal
-// `&'static str` kind tags `build_no_recheck`/`summary_shape` emit in
-// crates/types/src/dag_export.rs — NOT with the older `QueryExpr`-algebra
-// design doc (old_docs/docs/l2-intent-algebra.md), which used names
-// (`InfoJoin`, `Ref`/`LetBinding`, `Window`/`WindowFunc`, `Distinct`,
-// `Merge`, plain `Sample`) that predate a rename/restructuring of the actual
-// IR and no longer correspond to anything `DagNode.kind` produces at
-// runtime. A kind name here that doesn't appear in dag_export.rs's `build_*`
-// match arms is dead weight (or worse, silently wrong); a `DagNode.kind`
-// dag_export.rs can emit that isn't a key here silently falls back to
-// `derive` via `categoryOf`'s `||` — see the categorization rationale below
-// for how each of the 23 pre-ASAP + 7 post-ASAP kinds was placed, especially
-// the ones issue #187 called out by name.
-
-// kind (DagNode.kind from crates/types/src/dag_export.rs) -> category name.
-const KIND_CATEGORY = {
-  // ── data — leaves that introduce a value, nothing flows in ─────────────
-  Scan: 'data',
-  PromqlScalarBridge: 'data', // a scalar literal sitting in an operator-tree position (issue #220) — no QueryExpr child of its own; a leaf like Scan, not a transform.
-  EvalTimestamp: 'data',
-  CurrentTimestamp: 'data',
-
-  // ── filter — narrows rows by a boolean predicate ────────────────────────
-  Filter: 'filter',
-
-  // ── sample — narrows *series*, but not by a predicate (issue #187) ──────
-  // PromqlSeriesSample (`limitk`/`limit_ratio`) keeps a deterministic subset
-  // of whole series per group. Its own doc is explicit that it is "not a
-  // ranking (TopK) and not a reduction" — and it's equally not a Filter:
-  // nothing here is a boolean predicate over row contents, it's a
-  // selection-by-quota. Grouping it with Filter (the old mapping) implied it
-  // narrows rows the same way a WHERE clause does, which overstates the
-  // similarity; giving it its own category keeps that distinction visible.
-  PromqlSeriesSample: 'sample',
-
-  // ── derive — transforms or enriches columns; child's rows pass through 1:1
-  Project: 'derive',
-  PromqlRelabel: 'derive',
-  // PromqlInfoEnrich (issue #187, was "InfoJoin" bucketed with `join`): it
-  // has exactly ONE QueryExpr child (`child`), unlike Join's two — the
-  // "other side" it enriches from (an info metric matched by `selector`) is
-  // never a QueryExpr/DagNode at all, it's resolved at runtime by the
-  // post-ASAP binder. So there is no second relation in this graph for it to
-  // "join" the way Join or SetOp genuinely combine two DAG inputs. What it
-  // actually does — graft extra label columns onto rows that pass through
-  // unchanged, same shape of operation as PromqlRelabel's column rewrite —
-  // is a `derive`, not a `join`.
-  PromqlInfoEnrich: 'derive',
-  PromqlVectorFromScalar: 'derive',
-  PromqlScalarFromVector: 'derive',
-  BinaryOp: 'derive',
-
-  // ── aggregate — groups and reduces (fewer rows out than in) ─────────────
-  Aggregate: 'aggregate',
-
-  // ── window — reads or positions a scoped window of rows/time ────────────
-  TimeRange: 'window',
-  PromqlSubquery: 'window',
-  // TimeShift (issue #187 follow-up, not in the original 4 examples but
-  // caught by the "review every other kind too" instruction): the old
-  // mapping put it in `derive` ("transforms values"), but its own doc says
-  // it "moves *when* `child` is evaluated... but leaves its schema
-  // unchanged" — no column is transformed at all, only the temporal window
-  // the rest of the plan reads from shifts. That's the same "scoped window
-  // of time" concept TimeRange/PromqlSubquery represent, not a value
-  // derivation, so it belongs here instead.
-  TimeShift: 'window',
-  SQLWindowFunc: 'window',
-
-  // ── join — genuinely combines two DAG inputs on a predicate ─────────────
-  Join: 'join',
-
-  // ── set — enforces or computes set semantics on rows already gathered ───
-  // Dedup (SQL DISTINCT, formerly labeled "Distinct" here) and SetOp
-  // (UNION/INTERSECT/EXCEPT) both make a relation behave like a *set*
-  // (eliminate duplicates, or combine two relations using set-theoretic
-  // membership) rather than an arbitrary bag operation.
-  Dedup: 'set',
-  SetOp: 'set',
-
-  // ── combine — n-ary fan-in with no set semantics (issue #187) ───────────
-  // Concat (formerly labeled "Merge" here, and lumped into `set` with
-  // Dedup/SetOp) is an *exact*, n-ary UNION ALL: rows are concatenated,
-  // never deduplicated, and its own doc explicitly contrasts it with SetOp
-  // ("SQL's UNION/INTERSECT/EXCEPT are QueryExpr::SetOp, not this"). Lumping
-  // it with `set` implied it carries the same dedup/set-theoretic semantics
-  // SetOp and Dedup do, which is exactly backwards — Concat is pure
-  // branch-fan-in (ROLLUP/CUBE grouping-set branches, histogram_quantiles
-  // branches, sharded/fan-in plans), so it gets its own category instead.
-  Concat: 'combine',
-
-  // ── sort — orders or caps rows, doesn't change which columns exist ──────
-  Sort: 'sort',
-  Limit: 'sort',
-
-  // Post-ASAP SummaryDagNode kinds (post-ASAP lane only).
-  KeepPreAsap: 'summary',
-  SummaryAgg: 'summary',
-  SummaryJoin: 'summary',
-  SummarySubtract: 'summary',
-  SummaryDelete: 'summary',
-  SummaryEstimate: 'summary',
-  SummaryMerge: 'summary',
-};
+// Logical QueryExpr/SummaryExpr kinds exported by
+// crates/types/src/dag_export.rs. Categories describe the visible logical DAG
+// shape. They do not model hidden physical inputs: for example,
+// PromqlInfoEnrich is a one-child enrichment here even if physical costing
+// later accounts for an auxiliary source scan.
+const KIND_CATEGORY_JSON = `{
+  "Scan": "data",
+  "PromqlScalarBridge": "data",
+  "EvalTimestamp": "data",
+  "CurrentTimestamp": "data",
+  "Filter": "filter",
+  "PromqlSeriesSample": "sample",
+  "Project": "derive",
+  "PromqlRelabel": "derive",
+  "PromqlInfoEnrich": "derive",
+  "PromqlVectorFromScalar": "derive",
+  "PromqlScalarFromVector": "derive",
+  "BinaryOp": "derive",
+  "Aggregate": "aggregate",
+  "TimeRange": "window",
+  "PromqlSubquery": "window",
+  "TimeShift": "window",
+  "SQLWindowFunc": "window",
+  "Join": "join",
+  "Dedup": "set",
+  "SetOp": "set",
+  "Concat": "combine",
+  "Sort": "sort",
+  "Limit": "sort",
+  "KeepPreAsap": "summary",
+  "SummaryAgg": "summary",
+  "SummaryJoin": "summary",
+  "SummarySubtract": "summary",
+  "SummaryDelete": "summary",
+  "SummaryEstimate": "summary",
+  "SummaryMerge": "summary"
+}`;
+const KIND_CATEGORY = Object.freeze(JSON.parse(KIND_CATEGORY_JSON));
 
 // name -> { label, description, light: {bg, border}, dark: {bg, border} }
 const CATEGORIES = {
@@ -175,25 +99,27 @@ const CATEGORIES = {
     light: { bg: '#eef4fd', border: '#1d4ed8' },
     dark: { bg: '#12233d', border: '#60a5fa' },
   },
-  // Post-ASAP only (post-ASAP lane): every other category
-  // above is a saturated, hand-picked hue for a pre-ASAP QueryExpr operator.
-  // `summary` is deliberately plain neutral gray instead of another hue —
-  // partly because an 11th saturated color starts getting hard to
-  // distinguish at a glance from its 10 neighbors (data's blue and sort's
-  // blue are already close), and partly because "materialized post-ASAP
-  // structure" reads better as a visually distinct *family* (muted,
-  // grayscale) than as one more member of the pre-ASAP rainbow. KeepPreAsap
-  // (unchanged pre-ASAP content passed through) gets its own even-more-muted
-  // override in viewer.js's buildCyStyle rather than its own category, since
-  // it's a variant *within* "post-ASAP" (something bothered to carry it
-  // through) rather than a different concept.
+  // Post-ASAP nodes use a neutral palette; KeepPreAsap has a muted override.
   summary: {
     label: 'Summary',
     description: 'KeepPreAsap, SummaryAgg, SummaryJoin, SummarySubtract, SummaryDelete, SummaryEstimate, SummaryMerge — post-ASAP materialized structures',
     light: { bg: '#f1f2f4', border: '#4b5563' },
     dark: { bg: '#20242b', border: '#9ca3af' },
   },
+  // Loud fallback for malformed or version-skewed exports.
+  unknown: {
+    label: 'Unknown kind',
+    description: 'A DagNode.kind with no KIND_CATEGORY entry — update node-style.js',
+    light: { bg: '#fef2f2', border: '#b91c1c' },
+    dark: { bg: '#2a1212', border: '#f87171' },
+  },
 };
+
+for (const [kind, category] of Object.entries(KIND_CATEGORY)) {
+  if (!Object.prototype.hasOwnProperty.call(CATEGORIES, category)) {
+    throw new Error(`DagNode kind ${kind} uses undeclared category ${category}`);
+  }
+}
 
 const ROOT_BADGE = {
   label: 'Query root',
@@ -207,11 +133,17 @@ function isDarkMode() {
 }
 
 function categoryOf(kind) {
-  return KIND_CATEGORY[kind] || 'derive';
+  const category = KIND_CATEGORY[kind];
+  if (category) return category;
+  console.warn(
+    `node-style.js: DagNode.kind ${JSON.stringify(kind)} has no KIND_CATEGORY entry — ` +
+    'rendering as "Unknown kind" instead of silently guessing. Add an entry to KIND_CATEGORY.'
+  );
+  return 'unknown';
 }
 
 function categoryColors(name) {
-  const cat = CATEGORIES[name] || CATEGORIES.derive;
+  const cat = CATEGORIES[name] || CATEGORIES.unknown;
   return isDarkMode() ? cat.dark : cat.light;
 }
 

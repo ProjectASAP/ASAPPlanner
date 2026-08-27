@@ -391,7 +391,33 @@ fn family_label(family: &crate::post_asap::SummaryFamilyType) -> String {
 /// shared [`DagGraph`] node list — see [`export_post_asap`]) can't drift
 /// apart on how every *other* variant's own shape is described, since
 /// nothing about that description differs between the two.
+macro_rules! define_summary_kind_tags {
+    ($($pattern:pat => $tag:literal),+ $(,)?) => {
+        #[cfg(test)]
+        const SUMMARY_KIND_TAGS: &[&str] = &[$($tag),+];
+
+        fn summary_kind_tag(expr: &SummaryExpr) -> &'static str {
+            match expr {
+                SummaryExpr::KeepPreAsap(_) => unreachable!(
+                    "summary_kind_tag's callers special-case KeepPreAsap"
+                ),
+                $($pattern => $tag),+
+            }
+        }
+    };
+}
+
+define_summary_kind_tags! {
+    SummaryExpr::SummaryAgg { .. } => "SummaryAgg",
+    SummaryExpr::SummaryJoin { .. } => "SummaryJoin",
+    SummaryExpr::SummarySubtract { .. } => "SummarySubtract",
+    SummaryExpr::SummaryDelete { .. } => "SummaryDelete",
+    SummaryExpr::SummaryEstimate { .. } => "SummaryEstimate",
+    SummaryExpr::SummaryMerge { .. } => "SummaryMerge",
+}
+
 fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value) {
+    let kind = summary_kind_tag(expr);
     match expr {
         SummaryExpr::KeepPreAsap(_) => {
             unreachable!("summary_shape's callers special-case KeepPreAsap before calling it")
@@ -410,7 +436,7 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
                 "reduction": reduction,
                 "grouping": format!("{grouping:?}"),
             });
-            ("SummaryAgg", label, detail)
+            (kind, label, detail)
         }
         SummaryExpr::SummaryJoin { key, family, .. } => {
             let label = format!("SummaryJoin({})", family_label(family));
@@ -418,25 +444,23 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
                 "key": key,
                 "family": format!("{family:?}"),
             });
-            ("SummaryJoin", label, detail)
+            (kind, label, detail)
         }
-        SummaryExpr::SummarySubtract { .. } => (
-            "SummarySubtract",
-            "SummarySubtract".into(),
-            serde_json::json!({}),
-        ),
+        SummaryExpr::SummarySubtract { .. } => {
+            (kind, "SummarySubtract".into(), serde_json::json!({}))
+        }
         SummaryExpr::SummaryDelete { key, .. } => {
             let detail = serde_json::json!({ "key": key });
-            ("SummaryDelete", "SummaryDelete".into(), detail)
+            (kind, "SummaryDelete".into(), detail)
         }
         SummaryExpr::SummaryEstimate { query, .. } => {
             let label = format!("SummaryEstimate({query:?})");
             let detail = serde_json::json!({ "query": format!("{query:?}") });
-            ("SummaryEstimate", label, detail)
+            (kind, label, detail)
         }
         SummaryExpr::SummaryMerge { children } => {
             let label = format!("SummaryMerge({} children)", children.len());
-            ("SummaryMerge", label, serde_json::json!({}))
+            (kind, label, serde_json::json!({}))
         }
     }
 }
@@ -671,17 +695,71 @@ fn deduplicate_pointer_shared_nodes(nodes: Vec<DagNode>, root: u32) -> DagGraph 
     }
 }
 
+macro_rules! define_query_kind_tags {
+    ($($pattern:pat => $tag:literal),+ $(,)?) => {
+        #[cfg(test)]
+        const QUERY_KIND_TAGS: &[&str] = &[$($tag),+];
+
+        fn kind_tag(expr: &QueryExpr) -> &'static str {
+            match expr {
+                $($pattern => $tag),+,
+                other @ (QueryExpr::Column(_)
+                | QueryExpr::Literal(_)
+                | QueryExpr::Compare { .. }
+                | QueryExpr::BoolAnd(_)
+                | QueryExpr::BoolOr(_)
+                | QueryExpr::Not(_)
+                | QueryExpr::IsNull(_)
+                | QueryExpr::IsNotNull(_)
+                | QueryExpr::Cast { .. }
+                | QueryExpr::InList { .. }
+                | QueryExpr::FunctionCall { .. }
+                | QueryExpr::Arithmetic { .. }
+                | QueryExpr::Case { .. }) => unreachable!(
+                    "kind_tag reached a scalar QueryExpr variant directly: {other:?}"
+                ),
+            }
+        }
+    };
+}
+
+define_query_kind_tags! {
+    QueryExpr::Scan { .. } => "Scan",
+    QueryExpr::PromqlScalarBridge(_) => "PromqlScalarBridge",
+    QueryExpr::EvalTimestamp => "EvalTimestamp",
+    QueryExpr::CurrentTimestamp => "CurrentTimestamp",
+    QueryExpr::PromqlVectorFromScalar(_) => "PromqlVectorFromScalar",
+    QueryExpr::PromqlScalarFromVector(_) => "PromqlScalarFromVector",
+    QueryExpr::PromqlRelabel { .. } => "PromqlRelabel",
+    QueryExpr::PromqlInfoEnrich { .. } => "PromqlInfoEnrich",
+    QueryExpr::PromqlSeriesSample { .. } => "PromqlSeriesSample",
+    QueryExpr::Filter { .. } => "Filter",
+    QueryExpr::Project { .. } => "Project",
+    QueryExpr::Aggregate { .. } => "Aggregate",
+    QueryExpr::Dedup { .. } => "Dedup",
+    QueryExpr::Concat { .. } => "Concat",
+    QueryExpr::Join { .. } => "Join",
+    QueryExpr::SetOp { .. } => "SetOp",
+    QueryExpr::Sort { .. } => "Sort",
+    QueryExpr::Limit { .. } => "Limit",
+    QueryExpr::PromqlSubquery { .. } => "PromqlSubquery",
+    QueryExpr::TimeRange { .. } => "TimeRange",
+    QueryExpr::TimeShift { .. } => "TimeShift",
+    QueryExpr::SQLWindowFunc { .. } => "SQLWindowFunc",
+    QueryExpr::BinaryOp { .. } => "BinaryOp",
+}
+
 /// Push one flattened node for `expr`. `expr` is the *whole* subtree this
 /// node represents (not just its own fields) — `hash` is
 /// [`structural_hash(expr)`](structural_hash), the identical function and
 /// the identical input `InternTable::intern` would hash for this same
 /// subtree, so this node's `hash` matches what `cse::share_common_subtrees`
-/// would bucket it under.
+/// would bucket it under. `kind` is [`kind_tag(expr)`](kind_tag), not a
+/// caller-supplied argument — see that function's doc for why.
 fn push_node(
     nodes: &mut Vec<DagNode>,
     expr: &QueryExpr,
     cache: &mut HashCache,
-    kind: &'static str,
     label: String,
     detail: serde_json::Value,
     children: Vec<u32>,
@@ -690,7 +768,7 @@ fn push_node(
     let hash = Some(structural_hash(expr, cache));
     nodes.push(DagNode {
         id,
-        kind,
+        kind: kind_tag(expr),
         label,
         detail,
         schema: expr
@@ -896,7 +974,7 @@ fn build_no_recheck(
                 "predicates": predicates,
                 "schema": schema,
             });
-            push_node(nodes, expr, cache, "Scan", label, detail, vec![])
+            push_node(nodes, expr, cache, label, detail, vec![])
         }
         // The bridged child is a scalar-sub-language node (issue #220), not
         // an operator node `build` can recurse into — serialize it as opaque
@@ -909,7 +987,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "PromqlScalarBridge",
                 format!("PromqlScalarBridge({inner:?})"),
                 detail,
                 vec![],
@@ -919,7 +996,6 @@ fn build_no_recheck(
             nodes,
             expr,
             cache,
-            "EvalTimestamp",
             "EvalTimestamp".into(),
             serde_json::json!({}),
             vec![],
@@ -928,7 +1004,6 @@ fn build_no_recheck(
             nodes,
             expr,
             cache,
-            "CurrentTimestamp",
             "CurrentTimestamp".into(),
             serde_json::json!({}),
             vec![],
@@ -939,7 +1014,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "PromqlVectorFromScalar",
                 "vector()".into(),
                 serde_json::json!({}),
                 vec![c],
@@ -951,7 +1025,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "PromqlScalarFromVector",
                 "scalar()".into(),
                 serde_json::json!({}),
                 vec![c],
@@ -964,7 +1037,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "PromqlRelabel",
                 format!("PromqlRelabel(dst={dst})"),
                 detail,
                 vec![c],
@@ -977,7 +1049,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "PromqlInfoEnrich",
                 "PromqlInfoEnrich".into(),
                 detail,
                 vec![c],
@@ -990,7 +1061,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "PromqlSeriesSample",
                 format!("PromqlSeriesSample({kind:?})"),
                 detail,
                 vec![c],
@@ -999,15 +1069,7 @@ fn build_no_recheck(
         QueryExpr::Filter { pred, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "pred": pred });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                "Filter",
-                "Filter".into(),
-                detail,
-                vec![c],
-            )
+            push_node(nodes, expr, cache, "Filter".into(), detail, vec![c])
         }
         QueryExpr::Project {
             cols,
@@ -1020,7 +1082,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "Project",
                 format!("Project({} cols)", cols.len()),
                 detail,
                 vec![c],
@@ -1044,7 +1105,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "Aggregate",
                 format!("Aggregate({} measures)", measures.len()),
                 detail,
                 vec![c],
@@ -1057,7 +1117,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "Dedup",
                 format!("Dedup({} cols)", cols.len()),
                 detail,
                 vec![c],
@@ -1069,15 +1128,7 @@ fn build_no_recheck(
                 .map(|c| build(c, nodes, cache, find_winner))
                 .collect();
             let label = format!("Concat({} branches)", ids.len());
-            push_node(
-                nodes,
-                expr,
-                cache,
-                "Concat",
-                label,
-                serde_json::json!({}),
-                ids,
-            )
+            push_node(nodes, expr, cache, label, serde_json::json!({}), ids)
         }
         QueryExpr::Join {
             kind,
@@ -1092,7 +1143,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "Join",
                 format!("Join({kind:?})"),
                 detail,
                 vec![l, r],
@@ -1111,7 +1161,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "SetOp",
                 format!("SetOp({kind:?})"),
                 detail,
                 vec![l, r],
@@ -1128,7 +1177,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "Sort",
                 format!("Sort({} keys)", keys.len()),
                 detail,
                 vec![c],
@@ -1137,15 +1185,7 @@ fn build_no_recheck(
         QueryExpr::Limit { n, offset, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "n": n, "offset": offset });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                "Limit",
-                format!("Limit({n})"),
-                detail,
-                vec![c],
-            )
+            push_node(nodes, expr, cache, format!("Limit({n})"), detail, vec![c])
         }
         QueryExpr::PromqlSubquery {
             range,
@@ -1154,15 +1194,7 @@ fn build_no_recheck(
         } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "range": range, "resolution": resolution });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                "PromqlSubquery",
-                "PromqlSubquery".into(),
-                detail,
-                vec![c],
-            )
+            push_node(nodes, expr, cache, "PromqlSubquery".into(), detail, vec![c])
         }
         QueryExpr::TimeRange { range, child } => {
             let c = build(child, nodes, cache, find_winner);
@@ -1171,7 +1203,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "TimeRange",
                 format!("TimeRange({range:?})"),
                 detail,
                 vec![c],
@@ -1180,15 +1211,7 @@ fn build_no_recheck(
         QueryExpr::TimeShift { shift, child } => {
             let c = build(child, nodes, cache, find_winner);
             let detail = serde_json::json!({ "shift": shift });
-            push_node(
-                nodes,
-                expr,
-                cache,
-                "TimeShift",
-                "TimeShift".into(),
-                detail,
-                vec![c],
-            )
+            push_node(nodes, expr, cache, "TimeShift".into(), detail, vec![c])
         }
         QueryExpr::SQLWindowFunc {
             func,
@@ -1212,7 +1235,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "SQLWindowFunc",
                 format!("SQLWindowFunc({func:?})"),
                 detail,
                 vec![c],
@@ -1231,7 +1253,6 @@ fn build_no_recheck(
                 nodes,
                 expr,
                 cache,
-                "BinaryOp",
                 format!("BinaryOp({op})"),
                 detail,
                 vec![l, r],
@@ -1595,195 +1616,38 @@ mod tests {
             .is_none());
     }
 
-    // ── Issue #187: tools/dag-viewer/node-style.js stays in sync ───────────
-    //
-    // node-style.js's `KIND_CATEGORY` table is hand-maintained JS, not
-    // generated from this file, so nothing stops it drifting from the real
-    // `&'static str` kind tags below the moment a `QueryExpr`/`SummaryExpr`
-    // operator variant is added, renamed, or removed. That's exactly how it
-    // drifted before #187: the table was keyed on names from an old design
-    // doc (`InfoJoin`, `LetBinding`/`Ref`, `Window`/`WindowFunc`, `Distinct`,
-    // `Merge`) that don't match what `build_no_recheck`/`summary_shape`
-    // actually emit today, so most of those entries were dead and several
-    // real kinds (`PromqlRelabel`, `PromqlInfoEnrich`, `PromqlSeriesSample`,
-    // `Concat`, `Dedup`, `SQLWindowFunc`, `CurrentTimestamp`, …) had no entry
-    // at all and silently fell back to the `derive` category. This test
-    // parses node-style.js's own source and checks its `KIND_CATEGORY` keys
-    // against the literal kind list below — kept exhaustive by the `other @
-    // (...)` unreachable arm in `build_no_recheck` above (a new operator
-    // variant fails to compile there until it's given a `push_node` call,
-    // which is this list's own source of truth).
-
-    /// Every `&'static str` kind tag [`build_no_recheck`] and
-    /// [`summary_shape`]/[`build_summary`] can push onto a [`DagNode`] /
-    /// [`SummaryDagNode`] — i.e. every legal value of `DagNode.kind` a
-    /// consumer (`tools/dag-viewer`) can actually see. Scalar `QueryExpr`
-    /// variants (`Column`, `Literal`, `Compare`, …) are deliberately absent:
-    /// `build_no_recheck`'s final `unreachable!` arm confirms they never
-    /// reach `push_node` on their own — they're always embedded as opaque
-    /// `detail` JSON inside an operator node instead (see that arm's doc).
-    const DAG_NODE_KINDS: &[&str] = &[
-        // Pre-ASAP (QueryExpr operator variants; from build_no_recheck).
-        "Scan",
-        "PromqlScalarBridge",
-        "EvalTimestamp",
-        "CurrentTimestamp",
-        "PromqlVectorFromScalar",
-        "PromqlScalarFromVector",
-        "PromqlRelabel",
-        "PromqlInfoEnrich",
-        "PromqlSeriesSample",
-        "Filter",
-        "Project",
-        "Aggregate",
-        "Dedup",
-        "Concat",
-        "Join",
-        "SetOp",
-        "Sort",
-        "Limit",
-        "PromqlSubquery",
-        "TimeRange",
-        "TimeShift",
-        "SQLWindowFunc",
-        "BinaryOp",
-        // Post-ASAP (SummaryExpr variants; from summary_shape/build_summary).
-        "KeepPreAsap",
-        "SummaryAgg",
-        "SummaryJoin",
-        "SummarySubtract",
-        "SummaryDelete",
-        "SummaryEstimate",
-        "SummaryMerge",
-    ];
-
-    fn node_style_js_source() -> String {
-        let path = concat!(
+    fn viewer_kind_categories() -> std::collections::BTreeMap<String, String> {
+        const START: &str = "const KIND_CATEGORY_JSON = `";
+        let source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../tools/dag-viewer/node-style.js"
-        );
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
-    }
-
-    /// Slice `src` between a `"const {name} = {{"` marker and the next
-    /// top-level `"\n}};"` close (this file's object literals never nest a
-    /// `"\n};"`-shaped line, so the first occurrence after the marker is
-    /// always the matching close) — the body of that object literal.
-    fn object_literal_body<'a>(src: &'a str, name: &str) -> &'a str {
-        let marker = format!("const {name} = {{");
-        let start = src
-            .find(&marker)
-            .unwrap_or_else(|| panic!("node-style.js has no `{marker}`"))
-            + marker.len();
-        let end = src[start..].find("\n};").unwrap_or_else(|| {
-            panic!("node-style.js's `{name}` object literal never closes with `\\n}};`")
-        });
-        &src[start..start + end]
-    }
-
-    /// Parse `KIND_CATEGORY`'s `Kind: 'category',` entries (skipping comment
-    /// and blank lines) into `(kind, category)` pairs, in source order.
-    fn parse_kind_category(src: &str) -> Vec<(String, String)> {
-        object_literal_body(src, "KIND_CATEGORY")
-            .lines()
-            // Strip a trailing `// ...` line comment (this table annotates
-            // several entries that way) before trimming, so it never leaks
-            // into the parsed category value.
-            .map(|line| line.split("//").next().unwrap_or("").trim())
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                let (key, rest) = line
-                    .split_once(':')
-                    .unwrap_or_else(|| panic!("malformed KIND_CATEGORY line: {line:?}"));
-                let value = rest
-                    .trim()
-                    .trim_end_matches(',')
-                    .trim_matches('\'')
-                    .to_string();
-                (key.trim().to_string(), value)
-            })
-            .collect()
-    }
-
-    /// Parse `CATEGORIES`'s top-level `name: {` keys (2-space-indented lines
-    /// opening a nested object; nested fields inside each category are
-    /// indented 4+ spaces, so this doesn't pick those up) into a `Vec` of
-    /// category names, in source order.
-    fn parse_category_names(src: &str) -> Vec<String> {
-        object_literal_body(src, "CATEGORIES")
-            .lines()
-            .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if trimmed.starts_with("//") {
-                    return None;
-                }
-                trimmed
-                    .strip_suffix('{')
-                    .map(|prefix| prefix.trim().trim_end_matches(':').to_string())
-            })
-            .collect()
+        ));
+        let json = source
+            .split_once(START)
+            .expect("node-style.js must declare KIND_CATEGORY_JSON")
+            .1
+            .split_once("`;")
+            .expect("KIND_CATEGORY_JSON must be a template literal")
+            .0;
+        serde_json::from_str(json).expect("KIND_CATEGORY_JSON must be valid JSON")
     }
 
     #[test]
-    fn node_style_js_categorizes_every_dag_node_kind_exactly_once() {
-        let src = node_style_js_source();
-        let entries = parse_kind_category(&src);
-
-        let mut seen = std::collections::HashSet::new();
-        for (kind, _) in &entries {
-            assert!(
-                seen.insert(kind.clone()),
-                "node-style.js's KIND_CATEGORY lists {kind:?} more than once"
-            );
-        }
-
-        let mapped: std::collections::HashSet<&str> =
-            entries.iter().map(|(k, _)| k.as_str()).collect();
-        let canonical: std::collections::HashSet<&str> = DAG_NODE_KINDS.iter().copied().collect();
-
-        let missing: Vec<&&str> = DAG_NODE_KINDS
+    fn viewer_categorizes_exactly_the_exported_node_kinds() {
+        let expected: std::collections::BTreeSet<_> = QUERY_KIND_TAGS
             .iter()
-            .filter(|k| !mapped.contains(*k))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "node-style.js's KIND_CATEGORY is missing an entry for: {missing:?} — \
-             every DagNode.kind dag_export.rs can produce must have an explicit \
-             category, or it silently falls back to `derive` in the viewer"
-        );
-
-        let orphaned: Vec<&str> = mapped
-            .iter()
-            .filter(|k| !canonical.contains(*k))
+            .chain(SUMMARY_KIND_TAGS)
             .copied()
+            .chain(std::iter::once("KeepPreAsap"))
             .collect();
-        assert!(
-            orphaned.is_empty(),
-            "node-style.js's KIND_CATEGORY has entries for kinds \
-             dag_export.rs's build_no_recheck/summary_shape never produce: \
-             {orphaned:?} — likely a stale name left over from a rename \
-             (see issue #187)"
+        assert_eq!(
+            expected.len(),
+            QUERY_KIND_TAGS.len() + SUMMARY_KIND_TAGS.len() + 1,
+            "exported kind tags must be unique"
         );
-    }
+        let categories = viewer_kind_categories();
+        let actual: std::collections::BTreeSet<_> = categories.keys().map(String::as_str).collect();
 
-    #[test]
-    fn node_style_js_every_kind_category_value_is_a_declared_category() {
-        let src = node_style_js_source();
-        let entries = parse_kind_category(&src);
-        let categories: std::collections::HashSet<String> =
-            parse_category_names(&src).into_iter().collect();
-        assert!(
-            !categories.is_empty(),
-            "failed to parse any category name out of node-style.js's CATEGORIES object"
-        );
-
-        for (kind, category) in &entries {
-            assert!(
-                categories.contains(category),
-                "node-style.js maps {kind:?} to category {category:?}, which \
-                 CATEGORIES never declares"
-            );
-        }
+        assert_eq!(actual, expected);
     }
 }
