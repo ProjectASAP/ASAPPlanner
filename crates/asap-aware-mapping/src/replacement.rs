@@ -365,7 +365,9 @@ use thiserror::Error;
 
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
-use crate::recurrence::{evaluation_rate_of, RecurrenceProfile, RootRecurrence, UpdateRate};
+use crate::recurrence::{
+    evaluation_rate_of, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
+};
 use crate::rollup::RollupStrategy;
 use crate::topk_reuse::TopKLimitReuseStrategy;
 
@@ -1774,6 +1776,65 @@ impl<Id> PlanSpace<Id> {
             })
             .collect()
     }
+
+    /// Recurrence-aware counterpart to [`Self::cost_sorted`]. CSE
+    /// share/recompute pairs are ordered with the target's recurrence
+    /// profile; all other candidate shapes retain their existing ranking.
+    pub fn cost_sorted_with_recurrence(
+        &self,
+        cost_model: &dyn CostModel,
+        profiles: &RecurrenceProfileMap,
+        horizon: Option<Horizon>,
+    ) -> Result<Vec<RankedGroup<'_>>, RecurrenceError> {
+        self.order
+            .iter()
+            .map(|ptr| {
+                let group = &self.groups[ptr];
+                let mut candidates = rank_group(group, cost_model);
+                if cse_candidate_pair(group).is_some() {
+                    if let Some(decision) = decide_group_with_recurrence(
+                        group,
+                        group.consumer_count,
+                        profiles.for_target(&group.target),
+                        horizon,
+                        cost_model,
+                    )? {
+                        candidates.sort_by_key(|candidate| match candidate.provenance {
+                            ReplacementProvenance::CseShare if decision == ShareDecision::Share => {
+                                0
+                            }
+                            ReplacementProvenance::CseRecompute
+                                if decision == ShareDecision::RecomputeIndependently =>
+                            {
+                                0
+                            }
+                            ReplacementProvenance::CseShare
+                            | ReplacementProvenance::CseRecompute => 2,
+                            _ => 1,
+                        });
+                    }
+                }
+                let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
+                let costs = candidates
+                    .iter()
+                    .map(|candidate| {
+                        cost_model
+                            .grouping_state_cost(candidate, &target)
+                            .map_or_else(
+                                || cost_model.estimate_cost(candidate, &target),
+                                |cost| cost.0,
+                            )
+                    })
+                    .collect();
+                Ok(RankedGroup {
+                    target: &group.target,
+                    consumer_count: group.consumer_count,
+                    candidates,
+                    costs,
+                })
+            })
+            .collect()
+    }
 }
 
 // ── Recurrence-aware cost context (issue #287) ──────────────────────────
@@ -1851,15 +1912,11 @@ impl<Id> PlanSpace<Id> {
     /// A parent that structurally references the same child more than once
     /// (e.g. `BinaryOp{lhs: X, rhs: X}`) credits that child with one
     /// contribution per reference, not one contribution per distinct node —
-    /// matching how [`MemoGroup::consumer_count`] already counts that exact
-    /// occurrence twice (issue #287 review: fixes an evaluation-rate
-    /// undercount for repeated in-query references). This does not
-    /// propagate multiplicities transitively past one level, the same raw,
-    /// non-effective scope `MemoGroup::consumer_count` itself has —
-    /// composing contributions across an *ancestor chain* is
-    /// [`PlanSpace::global_selection`]'s job, deliberately not wired to
-    /// this recurrence-aware cost context yet (see this file's own
-    /// "Whole-plan (cross-group) selection" module docs).
+    /// matching how [`MemoGroup::consumer_count`] counts that occurrence.
+    /// Multiplicity is propagated through the full descendant path: if the
+    /// repeated parent is independently evaluated twice, its child is also
+    /// evaluated twice. This supplies recurrence-aware selection with the
+    /// effective structural execution rate rather than mere reachability.
     ///
     /// **Unreachable sites**: [`PlanSpace`] can contain a site no root's own
     /// structural tree actually reaches — e.g. one only ever produced by a
@@ -1905,45 +1962,35 @@ impl<Id> PlanSpace<Id> {
         for ((_, root), recurrence) in self.roots.iter().zip(root_recurrence) {
             let recurrence = *recurrence;
             let root_ptr = Rc::as_ptr(root);
-            // Nodes whose children have already been enqueued once for this
-            // root — mirrors `discover_targets`' own `walk` (count every
-            // occurrence, recurse into children only the first time) rather
-            // than a plain reachability set, so `contribute`'s `times`
-            // (from `direct_child_counts`' own edge multiplicity) is honored
-            // without also re-expanding — and so double-contributing beyond
-            // what one root can produce — an already-queued child.
-            let mut expanded: HashSet<*const QueryExpr> = HashSet::new();
-            let mut queue: VecDeque<*const QueryExpr> = VecDeque::new();
+            // Carry path multiplicity transitively. If a shared ancestor is
+            // referenced twice, every descendant below an independently
+            // recomputed occurrence is evaluated twice as well; stopping
+            // expansion after the first pointer visit undercounts exactly
+            // the effective-consumer rate recurrence-aware costing needs.
+            let mut queue: VecDeque<(*const QueryExpr, usize)> = VecDeque::new();
+            queue.push_back((root_ptr, 1));
 
-            contribute(
-                root_ptr,
-                1,
-                recurrence,
-                &mut intervals,
-                &mut one_shot_counts,
-                &mut reached,
-            );
-            expanded.insert(root_ptr);
-            queue.push_back(root_ptr);
-
-            while let Some(ptr) = queue.pop_front() {
+            while let Some((ptr, path_count)) = queue.pop_front() {
+                contribute(
+                    ptr,
+                    path_count,
+                    recurrence,
+                    &mut intervals,
+                    &mut one_shot_counts,
+                    &mut reached,
+                );
                 // Every reachable node was itself discovered as its own
                 // `MemoGroup` (`discover_targets` walks the identical
                 // relational-skeleton scope) — its own `target` is the
                 // canonical `Rc` to read children off.
                 if let Some(group) = self.groups.get(&ptr) {
                     for (child, edge_count) in direct_child_counts(&group.target) {
-                        contribute(
+                        queue.push_back((
                             child,
-                            edge_count,
-                            recurrence,
-                            &mut intervals,
-                            &mut one_shot_counts,
-                            &mut reached,
-                        );
-                        if expanded.insert(child) {
-                            queue.push_back(child);
-                        }
+                            path_count
+                                .checked_mul(edge_count)
+                                .expect("query DAG path multiplicity overflowed usize"),
+                        ));
                     }
                 }
             }
@@ -2271,6 +2318,29 @@ impl<Id> PlanSpace<Id> {
     /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
     /// group's own raw [`MemoGroup::consumer_count`].
     pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
+        self.global_selection_impl(cost_model, None, None)
+            .expect("structural global selection cannot produce a recurrence error")
+    }
+
+    /// Recurrence-aware counterpart to [`Self::global_selection`]. The same
+    /// whole-plan traversal and effective structural consumer counts are
+    /// retained, while every CSE share/recompute choice is made from the
+    /// corresponding recurrence profile.
+    pub fn global_selection_with_recurrence(
+        &self,
+        cost_model: &dyn CostModel,
+        profiles: &RecurrenceProfileMap,
+        horizon: Option<Horizon>,
+    ) -> Result<GlobalSelection<'_>, RecurrenceError> {
+        self.global_selection_impl(cost_model, Some(profiles), horizon)
+    }
+
+    fn global_selection_impl(
+        &self,
+        cost_model: &dyn CostModel,
+        profiles: Option<&RecurrenceProfileMap>,
+        horizon: Option<Horizon>,
+    ) -> Result<GlobalSelection<'_>, RecurrenceError> {
         let graph = reference_graph(self);
         let topo = topological_order(&self.order, &graph);
 
@@ -2285,7 +2355,18 @@ impl<Id> PlanSpace<Id> {
             effective_uses.insert(*ptr, effective);
 
             let chosen = if effective >= 2 && cse_candidate_pair(group).is_some() {
-                match decide_with_effective_count(group, effective, cost_model) {
+                let decision = if let Some(profiles) = profiles {
+                    decide_group_with_recurrence(
+                        group,
+                        effective,
+                        profiles.for_target(&group.target),
+                        horizon,
+                        cost_model,
+                    )?
+                } else {
+                    decide_with_effective_count(group, effective, cost_model)
+                };
+                match decision {
                     Some(decision) => {
                         let cse = pick_shared_subtree_candidate(group, decision);
                         let effective_target =
@@ -2353,10 +2434,10 @@ impl<Id> PlanSpace<Id> {
             );
         }
 
-        GlobalSelection {
+        Ok(GlobalSelection {
             order: self.order.clone(),
             groups,
-        }
+        })
     }
 }
 
@@ -2454,6 +2535,28 @@ fn decide_with_effective_count(
         consumer_count: effective_consumer_count,
     };
     Some(cost_model.cse_share_decision(&candidate))
+}
+
+fn decide_group_with_recurrence(
+    group: &MemoGroup,
+    effective_consumer_count: usize,
+    recurrence: RecurrenceProfile,
+    horizon: Option<Horizon>,
+    cost_model: &dyn CostModel,
+) -> Result<Option<ShareDecision>, RecurrenceError> {
+    let Some(bound) = realize_child(&group.target, cost_model).ok() else {
+        return Ok(None);
+    };
+    let candidate = CseCandidate {
+        subtree: &group.target,
+        bound_summary: &bound,
+        consumer_count: effective_consumer_count,
+    };
+    Ok(Some(
+        cost_model
+            .cse_share_decision_with_recurrence(&candidate, &recurrence, horizon)?
+            .decision,
+    ))
 }
 
 /// The [`SharedSubtreeStrategy`] candidate matching `decision`: the one

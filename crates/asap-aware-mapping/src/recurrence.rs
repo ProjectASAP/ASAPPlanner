@@ -441,6 +441,9 @@ pub struct RecurrenceCostExplanation {
     /// `raw_recompute_cost` — cost units/recomputation. `None` on the
     /// structural fallback path.
     pub raw_recompute_cost: Option<Cost>,
+    /// `summary_build_cost` — one-time cost of materializing the maintained
+    /// summary. `None` on the structural fallback path.
+    pub summary_build_cost: Option<Cost>,
     /// Human-readable provenance: which model/path produced this
     /// explanation (e.g. "recurrence-aware: <CostModel type>" or the
     /// structural fallback note when `RecurrenceProfile::is_empty()`).
@@ -484,8 +487,9 @@ impl fmt::Display for RecurrenceCostExplanation {
         if let Some(h) = self.horizon {
             writeln!(
                 f,
-                "  horizon = {}s; maintained_total = {:?}, recompute_total = {:?}",
-                h.0, self.maintained_total, self.recompute_total
+                "  horizon = {}s; summary_build_cost = {:?}; maintained_total = {:?}, \
+                 recompute_total = {:?}",
+                h.0, self.summary_build_cost, self.maintained_total, self.recompute_total
             )?;
         }
         Ok(())
@@ -529,6 +533,7 @@ pub(crate) fn decide<C: CostModel + ?Sized>(
             maintenance_cost_per_update: None,
             summary_read_cost: None,
             raw_recompute_cost: None,
+            summary_build_cost: None,
             provenance: "structural fallback: no recurrence metadata supplied — delegated to \
                          CostModel::cse_share_decision (consumer_count-based), preserving \
                          pre-#287 behavior exactly"
@@ -620,6 +625,7 @@ pub(crate) fn decide<C: CostModel + ?Sized>(
         maintenance_cost_per_update: Some(maintenance_cost_per_update),
         summary_read_cost: Some(summary_read_cost),
         raw_recompute_cost: Some(raw_recompute_cost),
+        summary_build_cost: Some(summary_build_cost),
         provenance: "recurrence-aware: maintained_cost_rate vs recompute_cost_rate (cost \
                      units/second), per issue #287"
             .to_string(),
@@ -883,6 +889,7 @@ mod tests {
         .unwrap();
         assert!(explanation.maintained_total.is_some());
         assert!(explanation.recompute_total.is_some());
+        assert!(explanation.summary_build_cost.is_some());
         assert_eq!(explanation.horizon, Some(Horizon(3600.0)));
     }
 
@@ -1233,6 +1240,82 @@ mod tests {
     }
 
     #[test]
+    fn plan_selection_uses_recurrence_profiles_for_cse_choices() {
+        let roots = vec![
+            ("a", Rc::new(filtered_root(1))),
+            ("b", Rc::new(filtered_root(2))),
+        ];
+        let space = search_workload(roots);
+        let shared = space
+            .groups()
+            .find(|group| matches!(group.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .expect("the aggregate is shared by both roots");
+        let update_rate = Some(UpdateRate(10.0));
+
+        let frequent = space
+            .recurrence_profiles(
+                &[
+                    RootRecurrence::Repeating(interval(10)),
+                    RootRecurrence::Repeating(interval(10)),
+                ],
+                update_rate,
+            )
+            .unwrap();
+        let infrequent = space
+            .recurrence_profiles(
+                &[
+                    RootRecurrence::Repeating(interval(100_000)),
+                    RootRecurrence::Repeating(interval(100_000)),
+                ],
+                update_rate,
+            )
+            .unwrap();
+
+        let frequent_ranked = space
+            .cost_sorted_with_recurrence(&DeterministicUnitCostModel, &frequent, None)
+            .unwrap();
+        let infrequent_ranked = space
+            .cost_sorted_with_recurrence(&DeterministicUnitCostModel, &infrequent, None)
+            .unwrap();
+        let first_provenance = |ranked: &[crate::replacement::RankedGroup<'_>]| {
+            ranked
+                .iter()
+                .find(|group| Rc::ptr_eq(group.target, &shared.target))
+                .and_then(|group| group.candidates.first())
+                .map(|candidate| candidate.provenance)
+        };
+        assert_eq!(
+            first_provenance(&frequent_ranked),
+            Some(crate::replacement::ReplacementProvenance::CseShare)
+        );
+        assert_eq!(
+            first_provenance(&infrequent_ranked),
+            Some(crate::replacement::ReplacementProvenance::CseRecompute)
+        );
+
+        let frequent_selected = space
+            .global_selection_with_recurrence(&DeterministicUnitCostModel, &frequent, None)
+            .unwrap();
+        let infrequent_selected = space
+            .global_selection_with_recurrence(&DeterministicUnitCostModel, &infrequent, None)
+            .unwrap();
+        assert_eq!(
+            frequent_selected
+                .for_target(&shared.target)
+                .and_then(|group| group.chosen)
+                .map(|candidate| candidate.provenance),
+            Some(crate::replacement::ReplacementProvenance::CseShare)
+        );
+        assert_eq!(
+            infrequent_selected
+                .for_target(&shared.target)
+                .and_then(|group| group.chosen)
+                .map(|candidate| candidate.provenance),
+            Some(crate::replacement::ReplacementProvenance::CseRecompute)
+        );
+    }
+
+    #[test]
     fn recurrence_profiles_propagates_an_invalid_interval_error() {
         let root = Rc::new(scan());
         let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
@@ -1374,6 +1457,19 @@ mod tests {
             (profile.evaluation_rate.unwrap().0 - 2.0).abs() < 1e-9,
             "evaluation_rate={:?}",
             profile.evaluation_rate
+        );
+
+        let scan_group = space
+            .groups()
+            .find(|group| matches!(group.target.as_ref(), QueryExpr::Scan { .. }))
+            .expect("the shared aggregate has a scan descendant");
+        assert_eq!(
+            profiles
+                .for_target(&scan_group.target)
+                .evaluation_rate
+                .unwrap(),
+            EvaluationRate(2.0),
+            "ancestor multiplicity must propagate transitively to descendants"
         );
     }
 
