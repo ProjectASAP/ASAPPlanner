@@ -362,6 +362,7 @@ use asap_types::types::AccuracyTarget;
 use std::rc::Rc;
 use thiserror::Error;
 
+use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
 use crate::rollup::RollupStrategy;
@@ -464,6 +465,20 @@ pub enum ReplacementProvenance {
     CseShare,
     CseRecompute,
     LogicalRewrite,
+    /// [`crate::accuracy_reconciliation::AccuracyReconciliationStrategy`]'s
+    /// "read a strictly-tighter sibling instead of building an independent,
+    /// looser copy" candidate (issue #273). Kept distinct from
+    /// `LogicalRewrite` — even though both are structurally-different,
+    /// semantically-equivalent rewrites — because
+    /// [`crate::cost_model::DefaultCostModel::estimate_cost`] needs to price
+    /// it differently: `LogicalRewrite` candidates (`RollupStrategy`,
+    /// `TopKLimitReuseStrategy`) still rebuild `target` itself from a
+    /// different source, so pricing them like an independent rebuild is
+    /// correct; this candidate never rebuilds `target` at all; it reads a
+    /// sibling that (per this strategy's own safety argument) is built
+    /// regardless, so pricing it like a full independent rebuild would be
+    /// the wrong shape of cost, not just the wrong number.
+    AccuracyReconciliation,
 }
 
 /// A replacement strategy: given a [`TargetSubDAG`], does this strategy have
@@ -2097,12 +2112,29 @@ impl<Id> PlanSpace<Id> {
             };
 
             let outgoing_multiplier = multiplier(*ptr, &effective_uses, &chosen_share);
-            let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
-                Some(Replacement::Rewrite(rewrite)) => rewrite,
-                Some(Replacement::Summary(_)) | None => &group.target,
-            };
-            for (child, edge_count) in direct_child_counts(selected_rewrite) {
-                *effective_uses.entry(child).or_insert(0) += edge_count * outgoing_multiplier;
+            match chosen {
+                Some(ReplacementSubDAG {
+                    replacement: Replacement::Rewrite(source),
+                    provenance: ReplacementProvenance::AccuracyReconciliation,
+                    ..
+                }) => {
+                    // Accuracy reconciliation reads another discovered memo
+                    // group, rather than inlining that group's children. Let
+                    // the source group receive the uses and propagate them
+                    // through its own selected implementation when its turn
+                    // arrives in topological order.
+                    *effective_uses.entry(Rc::as_ptr(source)).or_insert(0) += outgoing_multiplier;
+                }
+                _ => {
+                    let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
+                        Some(Replacement::Rewrite(rewrite)) => rewrite,
+                        Some(Replacement::Summary(_)) | None => &group.target,
+                    };
+                    for (child, edge_count) in direct_child_counts(selected_rewrite) {
+                        *effective_uses.entry(child).or_insert(0) +=
+                            edge_count * outgoing_multiplier;
+                    }
+                }
             }
 
             groups.insert(
@@ -2263,7 +2295,10 @@ struct ReferenceGraph {
 }
 
 /// Build an ordering graph containing every edge that could be selected:
-/// the original target's edges plus every rewrite candidate's edges. The
+/// the original target's edges plus every rewrite candidate's edges. An
+/// accuracy-reconciliation rewrite points at another discovered memo group,
+/// so it contributes an edge to that group itself; other rewrites contribute
+/// their relational children as before. The
 /// graph is deliberately only used for topological ordering; effective-use
 /// counts are propagated through the one candidate actually selected.
 fn reference_graph<Id>(space: &PlanSpace<Id>) -> ReferenceGraph {
@@ -2283,7 +2318,11 @@ fn reference_graph<Id>(space: &PlanSpace<Id>) -> ReferenceGraph {
         record_possible_edges(*ptr, &group.target, &mut graph);
         for candidate in &group.candidates {
             if let Replacement::Rewrite(rewrite) = &candidate.replacement {
-                record_possible_edges(*ptr, rewrite, &mut graph);
+                if candidate.provenance == ReplacementProvenance::AccuracyReconciliation {
+                    add_edge(*ptr, Rc::as_ptr(rewrite), 1, &mut graph);
+                } else {
+                    record_possible_edges(*ptr, rewrite, &mut graph);
+                }
             }
         }
     }
@@ -2438,7 +2477,9 @@ fn topological_order(order: &[*const QueryExpr], graph: &ReferenceGraph) -> Vec<
 
 /// The context-free strategies [`search_workload`] runs in the built-in
 /// [`DefaultCostModel`] configuration. Workload-dependent strategies such as
-/// [`RollupStrategy`] are added by [`search_workload`] after CSE and target
+/// [`RollupStrategy`] and [`AccuracyReconciliationStrategy`] (issue #273,
+/// cross-consumer accuracy reconciliation for CSE sharing — see that
+/// module's own docs) are added by [`search_workload`] after CSE and target
 /// discovery, when their sibling context exists.
 /// [`crate::explanation::explain_replacements`] (issue #257) uses
 /// this same set (via [`search_workload`]) rather than keeping a second,
@@ -2550,6 +2591,7 @@ fn search_cse_workload_with<'s, Id>(
         })
         .collect();
     let rollup_strategy = RollupStrategy::new(&siblings);
+    let accuracy_reconciliation_strategy = AccuracyReconciliationStrategy::new(&siblings);
     let limits: Vec<Rc<QueryExpr>> = order
         .iter()
         .filter_map(|ptr| {
@@ -2612,6 +2654,18 @@ fn search_cse_workload_with<'s, Id>(
                         candidate
                     },
                 ));
+            }
+            if accuracy_reconciliation_strategy.matches(&target) {
+                let name = accuracy_reconciliation_strategy.name();
+                proposed.extend(
+                    accuracy_reconciliation_strategy
+                        .replacements(&target)
+                        .into_iter()
+                        .map(|mut candidate| {
+                            candidate.strategy = name;
+                            candidate
+                        }),
+                );
             }
             if topk_reuse_strategy.matches(&target) {
                 let name = topk_reuse_strategy.name();

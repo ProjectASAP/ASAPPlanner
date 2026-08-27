@@ -57,7 +57,8 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::replacement::{
-    realize_child, Implementation, Replacement, ReplacementSubDAG, TargetSubDAG,
+    realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
+    TargetSubDAG,
 };
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
@@ -213,6 +214,17 @@ pub trait CostModel {
     /// [`replacement::default_size_params`], `asap-plan`'s built-in formulas
     /// (unchanged) — a deployment that only needs to reorder candidates,
     /// not resize them, can leave this method unimplemented.
+    ///
+    /// # Contract
+    ///
+    /// The returned parameters MUST make `kind` satisfy the supplied
+    /// `(eps, delta)` accuracy budget. This is a semantic requirement, not a
+    /// requirement that parameter fields themselves be numerically monotonic:
+    /// catalog rungs and empirically tuned layouts are allowed, but returning
+    /// a configuration that misses the requested budget makes the resulting
+    /// plan invalid. Accuracy reconciliation relies on this same contract;
+    /// any implementation satisfying a tighter budget necessarily satisfies
+    /// a looser budget for the identical aggregate query.
     fn size_params(
         &self,
         kind: SketchAlgorithm,
@@ -478,6 +490,18 @@ impl CostModel for DefaultCostModel {
     ///   only if `target` itself can't be bound at all (schema derivation
     ///   failed) — never expected for a target that's already part of a
     ///   legitimate workload tree.
+    ///
+    ///   **Exception**: a [`ReplacementProvenance::AccuracyReconciliation`]
+    ///   candidate (issue #273) never rebuilds `target` — it reads a
+    ///   sibling `rc` that this crate builds regardless — so it gets its
+    ///   own arm: `cse_shared_maintenance_cost` against `rc`'s **own** bound
+    ///   summary (a "read", not a "rebuild `target` per consumer") instead
+    ///   of the `cse_recompute_cost * consumer_count` formula the other
+    ///   `Rewrite` shapes fall through to. See
+    ///   `accuracy_reconciliation.rs`'s own "Costing this candidate shape"
+    ///   module docs for why that formula would otherwise misprice it (in
+    ///   the wrong direction, worse the more consumers would actually
+    ///   benefit from sharing).
     fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
         let consumer_count = target.consumer_count.max(1);
         match &candidate.replacement {
@@ -488,6 +512,25 @@ impl CostModel for DefaultCostModel {
                     consumer_count,
                 };
                 (self.cse_recompute_cost(&cse) + self.cse_shared_maintenance_cost(&cse)).0
+            }
+            Replacement::Rewrite(rc)
+                if candidate.provenance == ReplacementProvenance::AccuracyReconciliation =>
+            {
+                let Ok(sibling_bound) = realize_child(rc, self) else {
+                    return f64::NAN;
+                };
+                let cse = CseCandidate {
+                    subtree: rc,
+                    bound_summary: &sibling_bound,
+                    // One additional reference into `rc`'s own (already
+                    // necessary) build, from this one consumer's
+                    // perspective — not `target`'s own `consumer_count`,
+                    // which would conflate the reader-side multiplicity
+                    // with a maintenance metric that's `rc`'s own group's
+                    // concern, not this candidate's.
+                    consumer_count: 1,
+                };
+                self.cse_shared_maintenance_cost(&cse).0
             }
             Replacement::Rewrite(rc) => {
                 let Ok(bound) = realize_child(target.root, self) else {
