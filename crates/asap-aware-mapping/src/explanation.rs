@@ -541,6 +541,13 @@ mod tests {
         );
     }
 
+    /// True for every `AggIntent` this crate has no opt-in sketch path for
+    /// under an `Exact` accuracy target, and for `TopK { accuracy: Exact,
+    /// .. }` specifically under the *default* `CostModel` (no
+    /// `topk_exact_accuracy_target` override) — see
+    /// `topk_exact_opted_in_cost_model_reports_a_sketch_applicability_finding`
+    /// below for the one case (an opted-in `CostModel`, issue #151) where an
+    /// `Exact` accuracy target *does* report sketch-applicability.
     #[test]
     fn exact_quantile_is_not_a_sketch_applicability_finding() {
         let q = agg(
@@ -558,6 +565,57 @@ mod tests {
                 .iter()
                 .all(|f| f.kind != ExplanationKind::SketchApproximation),
             "an Exact accuracy target must not report sketch-applicability, got {findings:?}"
+        );
+    }
+
+    /// The one exception to the invariant above (issue #151): a `CostModel`
+    /// that opts a `TopK { accuracy: Exact, .. }` request into a sketch
+    /// candidate via `CostModel::topk_exact_accuracy_target` makes that
+    /// candidate a real, non-trivial alternative in the `TargetSubDAG`'s
+    /// candidate list (alongside `PassThrough`) — exactly the shape this
+    /// module's own framing ("does this candidate list contain anything
+    /// other than the trivial, no-op realization?") reports as a
+    /// `SketchApproximation` finding. No special-casing was needed in this
+    /// module for that: `sketch_finding_reason` already reads whatever
+    /// `crate::replacement` decided, and the finding's `reason` is that
+    /// candidate's own rationale, which names the sketch kind explicitly —
+    /// a reviewer reading the finding can already tell an approximation was
+    /// used, even though the query asked for `Exact`.
+    #[test]
+    fn topk_exact_opted_in_cost_model_reports_a_sketch_applicability_finding() {
+        struct OffersSketchForExactTopK;
+        impl crate::cost_model::CostModel for OffersSketchForExactTopK {
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[asap_types::post_asap::SketchAlgorithm],
+            ) -> Vec<asap_types::post_asap::SketchAlgorithm> {
+                candidates.to_vec()
+            }
+            fn topk_exact_accuracy_target(&self, _intent: &AggIntent) -> Option<AccuracyTarget> {
+                Some(AccuracyTarget::Epsilon(0.1))
+            }
+        }
+
+        let q = agg(
+            vec![2],
+            AggIntent::TopK {
+                k: 10,
+                accuracy: AccuracyTarget::Exact,
+            },
+            metric_scan(&["job"]),
+        );
+        let cost_model = OffersSketchForExactTopK;
+        let strategies = replacement::default_strategies_with(&cost_model);
+        let findings = explain_replacements_with(vec![("exact_top10", q)], &strategies);
+        let sketch = findings
+            .iter()
+            .find(|f| f.kind == ExplanationKind::SketchApproximation)
+            .expect("an opted-in CostModel should report a sketch finding for TopK{Exact}");
+        assert!(
+            sketch.reason.to_lowercase().contains("cmswithheap"),
+            "reason should name the sketch kind actually offered, got {:?}",
+            sketch.reason
         );
     }
 

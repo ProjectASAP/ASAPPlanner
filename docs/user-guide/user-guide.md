@@ -163,7 +163,7 @@ else {
 a deployment that wants its own candidate ranking or parameter sizing instead of this crate's
 built-in static preference order (`DefaultCostModel` — what `default_cost_model()` uses).
 See the `CostModel` trait doc in `crates/asap-aware-mapping/src/cost_model.rs` for its overridable
-hooks (`rank_candidates`, `size_params`, `realize_extension`, …).
+hooks (`rank_candidates`, `size_params`, `topk_exact_accuracy_target`, `realize_extension`, …).
 
 To see every root of a whole workload at once — including the candidates CSE-shared subtrees get
 (a shared subtree's `MemoGroup` carries both the "share" and "recompute independently" options,

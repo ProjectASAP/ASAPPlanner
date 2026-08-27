@@ -670,17 +670,14 @@ pub(crate) fn implementations_for_with(
         | AggIntent::TopK { accuracy, .. } => match accuracy {
             // `TopK` is the one approximate-capable intent whose `Exact`
             // case a `CostModel` may still want a sketch candidate for
-            // (issue #151, see `CostModel::topk_exact_offers_sketch`'s
+            // (issue #151, see `CostModel::topk_exact_accuracy_target`'s
             // docs) — there's no *exact* mergeable top-k accumulator
             // (unlike `Count`), so "closest available approximation" is a
             // real, deployment-chosen alternative to `PassThrough`, not a
             // fallback core can pick on its own. Quantile/Cardinality/Count
             // still route through `exact_realization` unconditionally.
-            AccuracyTarget::Exact
-                if matches!(intent, AggIntent::TopK { .. })
-                    && cost_model.topk_exact_offers_sketch(intent) =>
-            {
-                sketch_implementations(intent, accuracy, cost_model)
+            AccuracyTarget::Exact if matches!(intent, AggIntent::TopK { .. }) => {
+                topk_exact_realization(intent, cost_model)
             }
             AccuracyTarget::Exact => vec![exact_realization(intent)],
             _ => sketch_implementations(intent, accuracy, cost_model),
@@ -772,10 +769,12 @@ pub(crate) fn implementations_for_with(
 /// Exact realization of an approximate-capable intent whose target is
 /// `AccuracyTarget::Exact`. `Count` has a mergeable exact accumulator; exact
 /// quantile / top-k / cardinality have no single-value summary form (they
-/// need the full multiset / heap / set) and pass through by default. A
-/// `CostModel` can opt a `TopK { accuracy: Exact, .. }` request out of this
-/// function entirely — see [`CostModel::topk_exact_offers_sketch`] and
-/// [`implementations_for_with`]'s `AccuracyTarget::Exact` arm (issue #151).
+/// need the full multiset / heap / set) and pass through by default. For
+/// `TopK` specifically, `implementations_for_with` doesn't even call this —
+/// see [`topk_exact_realization`] and [`CostModel::topk_exact_accuracy_target`]
+/// (issue #151) — because `PassThrough` there is only ever the *default*,
+/// not the only possible answer, the way it is for the other two variants
+/// this function handles.
 fn exact_realization(intent: &AggIntent) -> Implementation {
     match intent {
         AggIntent::Count { .. } => exact_accumulator(intent, ExactKind::Count, ExactParams::Count),
@@ -793,16 +792,54 @@ fn exact_accumulator(intent: &AggIntent, kind: ExactKind, params: ExactParams) -
     Implementation::ExactAggregate { kind, params }
 }
 
+/// `AggIntent::TopK { accuracy: Exact, .. }`'s realization (issue #151) —
+/// `implementations_for_with`'s dedicated arm for this one shape, kept
+/// separate from [`exact_realization`] because unlike every other intent
+/// that function handles, `PassThrough` here is never the *only* legal
+/// answer, just the default one.
+///
+/// `Implementation::PassThrough` always stays in the returned list — this
+/// crate has no *exact* mergeable top-k accumulator, so it is always a
+/// legal candidate, and [`implementations_for_with`]'s exhaustive,
+/// never-prune contract (the same one [`CostModel::rank_candidates`] itself
+/// is bound by) means opting into a sketch candidate must never remove it.
+/// [`CostModel::topk_exact_accuracy_target`] decides whether a real sketch
+/// candidate joins it: `None` (the default) leaves `PassThrough` as the
+/// only candidate — today's behavior, unchanged; `Some(target)` sizes the
+/// same `CmsWithHeap`/`CountSketchWithHeap` family an approximate `TopK`
+/// request would get (via [`sketch_implementations`], ranked via
+/// `rank_candidates` exactly as usual) against the deployment-supplied
+/// `target` instead of `Exact`'s own degenerate one, and puts those ranked
+/// candidates ahead of `PassThrough` — a deployment that opted in this
+/// explicitly prefers its approximation over no summary at all, but
+/// `PassThrough` remains available for a caller (e.g.
+/// [`CostModel::estimate_cost`]) that wants to weigh it against the rest.
+fn topk_exact_realization(intent: &AggIntent, cost_model: &dyn CostModel) -> Vec<Implementation> {
+    match cost_model.topk_exact_accuracy_target(intent) {
+        Some(target) => {
+            let mut candidates = sketch_implementations(intent, &target, cost_model);
+            candidates.push(Implementation::PassThrough);
+            candidates
+        }
+        None => vec![Implementation::PassThrough],
+    }
+}
+
 /// Resolve an [`AccuracyTarget`] into the `(eps, delta)` budget
 /// [`CostModel::size_params`] needs. Shared by [`sketch_implementations`] and
 /// this crate's own sizing — one place this resolution happens, so nothing
 /// can drift apart on it.
 ///
-/// `Exact` is unreachable via [`implementations_for_with`] for every
-/// approximate-capable intent except `TopK` under an opted-in `CostModel`
-/// (issue #151, [`CostModel::topk_exact_offers_sketch`]) — that path sizes
-/// its sketch candidate(s) at the tightest budget this degrades to, the same
-/// as a caller that resolves `Exact` directly.
+/// `Exact` is unreachable via [`implementations_for_with`] — every
+/// approximate-capable intent either has its own exact realization
+/// ([`exact_realization`]) or, for `TopK`, resolves a deployment-supplied
+/// replacement target first ([`topk_exact_realization`],
+/// [`CostModel::topk_exact_accuracy_target`], issue #151) rather than ever
+/// sizing against `Exact` itself. Still degrades to the tightest parameters
+/// here for a caller that resolves `Exact` directly anyway (or a
+/// `CostModel` that deliberately returns `Some(AccuracyTarget::Exact)` from
+/// `topk_exact_accuracy_target` — see that method's docs for why that's a
+/// pitfall, not a use case).
 pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
     match accuracy {
         AccuracyTarget::Exact => (f64::MIN_POSITIVE, DEFAULT_DELTA),
@@ -3203,11 +3240,17 @@ mod tests {
     // ── TopK{accuracy: Exact} sketch opt-in (issue #151) ────────────────
 
     /// A `CostModel` that opts every `TopK { accuracy: Exact, .. }` request
-    /// into the sketch family via `topk_exact_offers_sketch`, otherwise
-    /// behaving exactly like `DefaultCostModel`.
-    struct OffersSketchForExactTopK;
+    /// into the sketch family via `topk_exact_accuracy_target`, sizing at
+    /// `target` (a sane, deployment-chosen budget — never `Exact`'s own
+    /// degenerate one), otherwise behaving exactly like `DefaultCostModel`.
+    /// `target: Option<AccuracyTarget>` so
+    /// `topk_exact_default_cost_model_still_passes_through` below can reuse
+    /// this same struct with `None` instead of a second near-identical impl.
+    struct TopkExactCostModel {
+        target: Option<AccuracyTarget>,
+    }
 
-    impl CostModel for OffersSketchForExactTopK {
+    impl CostModel for TopkExactCostModel {
         fn rank_candidates(
             &self,
             _intent: &AggIntent,
@@ -3216,8 +3259,8 @@ mod tests {
             candidates.to_vec()
         }
 
-        fn topk_exact_offers_sketch(&self, intent: &AggIntent) -> bool {
-            matches!(intent, AggIntent::TopK { .. })
+        fn topk_exact_accuracy_target(&self, _intent: &AggIntent) -> Option<AccuracyTarget> {
+            self.target.clone()
         }
     }
 
@@ -3229,11 +3272,12 @@ mod tests {
     }
 
     /// (a) No regression: with no `CostModel` overriding
-    /// `topk_exact_offers_sketch`, `TopK { accuracy: Exact, .. }` still
-    /// resolves to `PassThrough` — `implementations_for_with`'s
-    /// `AccuracyTarget::Exact` arm now *consults* a `CostModel` hook before
-    /// declining, but `DefaultCostModel`'s default (`false`) declines
-    /// exactly like the old unconditional short-circuit did.
+    /// `topk_exact_accuracy_target` (default: `None`), `TopK { accuracy:
+    /// Exact, .. }` still resolves to `PassThrough`, and *only*
+    /// `PassThrough` — `implementations_for_with`'s `AccuracyTarget::Exact`
+    /// arm now consults a `CostModel` hook before declining, but
+    /// `DefaultCostModel`'s default (`None`) declines exactly like the old
+    /// unconditional short-circuit did, byte for byte.
     #[test]
     fn topk_exact_default_cost_model_still_passes_through() {
         assert_eq!(preferred(&topk_exact(10)), Implementation::PassThrough);
@@ -3242,54 +3286,88 @@ mod tests {
             implementations_for_with(&topk_exact(10), &DefaultCostModel),
             vec![Implementation::PassThrough]
         );
+        // A `CostModel` that explicitly declines (`None`, same as the
+        // default) behaves identically — the opt-in really is off unless a
+        // real target is supplied.
+        assert_eq!(
+            implementations_for_with(&topk_exact(10), &TopkExactCostModel { target: None }),
+            vec![Implementation::PassThrough]
+        );
     }
 
-    /// (b) A `CostModel` that opts in via `topk_exact_offers_sketch` gets a
-    /// real sketch candidate — ranked via `rank_candidates` and sized via
-    /// `size_params` exactly like an approximate `TopK` request, at the
-    /// tightest budget `AccuracyTarget::Exact` resolves to (issue #151).
+    /// (b) A `CostModel` that opts in via `topk_exact_accuracy_target` with
+    /// a sane budget (eps=0.1, not `Exact`'s own degenerate one) gets a
+    /// real, correctly-sized sketch candidate *alongside* `PassThrough` —
+    /// ranked via `rank_candidates` and sized via `size_params` exactly
+    /// like an approximate `TopK` request, against the supplied target
+    /// (issue #151). Pins width/depth explicitly so a regression back to
+    /// `accuracy_budget(Exact)`'s clamp-saturated `(width=1<<26, ..)` is
+    /// caught immediately, not silently.
     #[test]
     fn topk_exact_opted_in_cost_model_offers_sketch_candidates() {
         let intent = topk_exact(10);
-        let candidates = implementations_for_with(&intent, &OffersSketchForExactTopK);
-        // Same candidate family/order as an approximate TopK request would
-        // get: [CmsWithHeap, CountSketchWithHeap].
-        let kinds: Vec<SketchAlgorithm> = candidates
+        let cost_model = TopkExactCostModel {
+            target: Some(AccuracyTarget::Epsilon(0.1)),
+        };
+        let candidates = implementations_for_with(&intent, &cost_model);
+
+        // Exhaustive, never-prune: PassThrough is still in the set, not
+        // replaced by the sketch candidates.
+        assert!(candidates.contains(&Implementation::PassThrough));
+
+        let sketches: Vec<&SketchKind> = candidates
             .iter()
-            .map(|implementation| match implementation {
-                Implementation::Sketch(kind) => kind.algorithm().clone(),
-                other => panic!("expected Sketch, got {other:?}"),
+            .filter_map(|implementation| match implementation {
+                Implementation::Sketch(kind) => Some(kind),
+                _ => None,
             })
             .collect();
         assert_eq!(
-            kinds,
+            sketches
+                .iter()
+                .map(|k| k.algorithm().clone())
+                .collect::<Vec<_>>(),
             vec![
                 SketchAlgorithm::CmsWithHeap,
                 SketchAlgorithm::CountSketchWithHeap
             ]
         );
-        // The preferred (first) candidate is a real, heap-sized sketch —
-        // not PassThrough.
-        match implementations_for_with(&intent, &OffersSketchForExactTopK)
-            .into_iter()
-            .next()
-            .unwrap()
-        {
+
+        // The preferred (first) candidate is the ranked sketch, sized at
+        // eps=0.1 (not Exact's clamp-to-maximum) — width=⌈e/0.1⌉=28,
+        // depth=⌈ln(1/DEFAULT_DELTA)⌉=5, a world away from the
+        // 1<<26 = 67_108_864 the old `accuracy_budget(Exact)` fallback
+        // would have produced.
+        match &candidates[0] {
             Implementation::Sketch(kind) => {
                 assert_eq!(kind.algorithm(), &SketchAlgorithm::CmsWithHeap);
-                let SketchParams::CmsWithHeap { heap_size, .. } = kind.params() else {
+                let SketchParams::CmsWithHeap {
+                    width,
+                    depth,
+                    heap_size,
+                } = kind.params()
+                else {
                     unreachable!("SketchKind validates CmsWithHeap params")
                 };
+                assert_eq!(
+                    *width, 28,
+                    "width must track the eps=0.1 target, not Exact's clamp"
+                );
+                assert_eq!(*depth, 5);
                 assert_eq!(*heap_size, 10);
             }
             other => panic!("expected Sketch, got {other:?}"),
         }
+        // PassThrough is last: an opted-in deployment prefers its own
+        // approximation over no summary, but PassThrough is still offered
+        // for a caller that wants to weigh it (e.g. `estimate_cost`).
+        assert_eq!(candidates.last(), Some(&Implementation::PassThrough));
     }
 
     /// (c) `Count { accuracy: Exact }` is unaffected by the `TopK`-specific
     /// opt-in: it keeps routing through `exact_realization`'s mergeable
     /// accumulator regardless of what a `CostModel` says about
-    /// `topk_exact_offers_sketch` (which only ever gates the `TopK` arm).
+    /// `topk_exact_accuracy_target` (which only ever gates the `TopK` arm).
     #[test]
     fn count_exact_unaffected_by_topk_exact_opt_in() {
         let intent = AggIntent::Count {
@@ -3304,22 +3382,12 @@ mod tests {
         );
         // Even a CostModel that unconditionally opts every intent into the
         // TopK-exact sketch path leaves Count's exact accumulator alone —
-        // `topk_exact_offers_sketch` is never even consulted for it.
-        struct OptsEverythingIn;
-        impl CostModel for OptsEverythingIn {
-            fn rank_candidates(
-                &self,
-                _intent: &AggIntent,
-                candidates: &[SketchAlgorithm],
-            ) -> Vec<SketchAlgorithm> {
-                candidates.to_vec()
-            }
-            fn topk_exact_offers_sketch(&self, _intent: &AggIntent) -> bool {
-                true
-            }
-        }
+        // `topk_exact_accuracy_target` is never even consulted for it.
+        let cost_model = TopkExactCostModel {
+            target: Some(AccuracyTarget::Epsilon(0.1)),
+        };
         assert_eq!(
-            implementations_for_with(&intent, &OptsEverythingIn),
+            implementations_for_with(&intent, &cost_model),
             vec![Implementation::ExactAggregate {
                 kind: ExactKind::Count,
                 params: ExactParams::Count,

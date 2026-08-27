@@ -55,6 +55,7 @@ use asap_types::post_asap::{
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::types::AccuracyTarget;
 
 use crate::replacement::{
     realize_child, Implementation, Replacement, ReplacementSubDAG, TargetSubDAG,
@@ -223,32 +224,45 @@ pub trait CostModel {
         crate::replacement::default_size_params(kind, intent, eps, delta)
     }
 
-    /// Whether an `AggIntent::TopK { accuracy: Exact, .. }` request should
-    /// still be offered [`summary_candidates`](crate::replacement::summary_candidates)'s
-    /// sketch family (`CmsWithHeap`/`CountSketchWithHeap`) via
-    /// [`rank_candidates`](Self::rank_candidates)/[`size_params`](Self::size_params)
-    /// — sized at the tightest accuracy budget `AccuracyTarget::Exact`
-    /// resolves to (see `replacement::accuracy_budget`) — instead of
-    /// `implementations_for_with` declining straight to
-    /// `Implementation::PassThrough` (issue #151).
+    /// The accuracy budget to size a sketch candidate at for an
+    /// `AggIntent::TopK { accuracy: Exact, .. }` request, or `None` to
+    /// decline entirely (issue #151).
     ///
     /// There is no *exact* mergeable top-k accumulator (unlike `Count`), so
     /// `asap-plan` itself has no way to decide between "no summary at all"
     /// and "the closest available approximation" for an `Exact`-accuracy
-    /// top-k request — that's a deployment policy call. A deployment that
-    /// wants the latter overrides this to return `true` (optionally only
-    /// for the specific `TopK` shapes it cares about); `rank_candidates`
-    /// and `size_params` are then consulted exactly as they are for any
-    /// other top-k sketch candidate, so a `CostModel` gets one place to
-    /// answer both "should this even be considered" and "which one, sized
-    /// how" instead of reimplementing the same pre-pass client-side.
+    /// top-k request — that's a deployment policy call, and if it opts in,
+    /// *what budget to size at* is also a deployment call: `AccuracyTarget
+    /// ::Exact` itself resolves (via `replacement::accuracy_budget`) to the
+    /// tightest parameters every sketch family's sizing formula clamps to
+    /// (e.g. `cms_width`'s `1 << 26`), which is not a meaningful target for
+    /// any real deployment — sizing an opted-in candidate at that clamp
+    /// would silently produce the largest possible sketch (hundreds of MB
+    /// to GB per instance, multiplied per subpopulation for a grouped
+    /// top-k) for every un-annotated top-k query, since both this crate's
+    /// SQL and PromQL frontends default to `Exact` when no accuracy is
+    /// specified. Returning `Some` here instead requires the deployment to
+    /// state the budget it actually wants (e.g.
+    /// `Some(AccuracyTarget::Epsilon(1.0 / k as f64))`, or a fixed
+    /// deployment-wide epsilon) — [`rank_candidates`](Self::rank_candidates)
+    /// and [`size_params`](Self::size_params) are then consulted exactly as
+    /// they are for any other top-k sketch candidate, sized against that
+    /// returned target rather than `Exact`'s own degenerate one.
     ///
-    /// Default: `false` — preserves today's `PassThrough` behavior for
+    /// The sketch candidate(s) this produces are offered *alongside*
+    /// `Implementation::PassThrough`, not instead of it — `PassThrough`
+    /// stays in the exhaustive candidate set `implementations_for_with`
+    /// returns; ranking (via `rank_candidates`, and ultimately whichever
+    /// candidate a caller commits to) decides which one wins, the same as
+    /// every other exhaustive-then-ranked candidate set this crate builds.
+    ///
+    /// Default: `None` — preserves today's `PassThrough`-only behavior for
     /// every deployment that doesn't override this, including one whose own
     /// `rank_candidates` override doesn't special-case `TopK`'s `Exact`
-    /// case (it is never consulted here unless this method also says yes).
-    fn topk_exact_offers_sketch(&self, _intent: &AggIntent) -> bool {
-        false
+    /// case (it is never consulted here unless this method also returns
+    /// `Some`).
+    fn topk_exact_accuracy_target(&self, _intent: &AggIntent) -> Option<AccuracyTarget> {
+        None
     }
 
     /// Estimated number of distinct subpopulations produced by `target`'s

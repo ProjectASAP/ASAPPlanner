@@ -424,6 +424,7 @@ The crate cannot hardcode real deployment costs: `asap-aware-mapping` depends on
 |---|---|---|
 | `rank_candidates` | Order valid sketch algorithms | No |
 | `size_params` | Convert an accuracy target into sketch parameters | Yes |
+| `topk_exact_accuracy_target` | Opt a `TopK{accuracy: Exact}` request into a sketch candidate, and supply the budget to size it at | Yes (`None`: stays `PassThrough`-only) |
 | `realize_extension` | Map a custom intent to an implementation | Yes |
 | `readout_extension` | Query a custom extension summary | Panics until paired with a custom realization |
 | `cse_recompute_cost` | Estimate independent recomputation | Yes |
@@ -442,6 +443,16 @@ The crate cannot hardcode real deployment costs: `asap-aware-mapping` depends on
   ```rust
   fn size_params(&self, kind: SketchAlgorithm, intent: &AggIntent, eps: f64, delta: f64) -> SketchParams;
   ```
+
+- **`topk_exact_accuracy_target`** — opt an `AggIntent::TopK { accuracy: Exact, .. }` request into a real sketch candidate, and supply the accuracy budget to size it at. There is no exact mergeable top-k accumulator (unlike `Count`), so `implementations_for_with` cannot decide on its own between "no summary" and "the closest available approximation"—that policy call, and the budget to size it against, belong to the deployment. The default (`None`) declines: the candidate list stays `PassThrough`-only, unchanged from before this hook existed.
+
+  ```rust
+  fn topk_exact_accuracy_target(&self, intent: &AggIntent) -> Option<AccuracyTarget> {
+      None
+  }
+  ```
+
+  Returning `Some(target)` does **not** replace `PassThrough`—`implementations_for_with` keeps it in the candidate list and adds a ranked, `target`-sized sketch (via `rank_candidates`/`size_params`, the same hooks an approximate `TopK` request already uses) ahead of it. Size at a real budget, never `AccuracyTarget::Exact` itself: `Exact` resolves to the tightest parameters every sketch family's sizing formula clamps to (e.g. `cms_width`'s `1 << 26`), which is not a meaningful target for any real deployment—both this crate's SQL and PromQL frontends default to `Exact` when no accuracy is specified, so sizing at that clamp would put the largest possible sketch behind every un-annotated `topk` query. Prefer something budget-shaped instead, such as `AccuracyTarget::Epsilon(1.0 / k as f64)` or a fixed deployment-wide epsilon.
 
 - **`realize_extension`** — map a deployment-defined `AggIntent::Extension` to a post-ASAP `Implementation`. The default is `Implementation::PassThrough`.
 
@@ -850,7 +861,7 @@ flowchart LR
   C --> F["Output Vec&lt;ReplacementSubDAG&gt;<br/>each entry contains a constructed SummaryNode and rationale;<br/>all candidates retained in preferred order"]
 ```
 
-For an approximate quantile, the candidate list includes both KLL and DDSketch even though the cost model ranks one ahead of the other. When only one realization is legal, such as an exact accumulator or pass-through, the strategy returns that single candidate.
+For an approximate quantile, the candidate list includes both KLL and DDSketch even though the cost model ranks one ahead of the other. When only one realization is legal, such as an exact accumulator or pass-through, the strategy returns that single candidate—except `TopK { accuracy: Exact, .. }` under a `CostModel` that overrides `topk_exact_accuracy_target`: `pass-through` stays a candidate, but a ranked, sized sketch candidate joins it (see the `CostModel` hook table above).
 
 ---
 
@@ -1211,6 +1222,33 @@ flowchart LR
 
 ---
 
+#### `topk_exact_accuracy_target`
+
+Use when you want an `AggIntent::TopK { accuracy: Exact, .. }` request to still get a real sketch candidate—the "closest available approximation" policy—instead of only `PassThrough`.
+
+Signature:
+
+```rust
+fn topk_exact_accuracy_target(&self, intent: &AggIntent) -> Option<AccuracyTarget>;
+```
+
+Return `None` (the default) to decline—`PassThrough` stays the only candidate, unchanged from before this hook existed. Return `Some(target)` to opt in: `implementations_for_with` adds a `target`-sized, `rank_candidates`-ranked `CmsWithHeap`/`CountSketchWithHeap` candidate ahead of `PassThrough`, which stays in the list.
+
+`target` must be a real budget your deployment is willing to size against—never `AccuracyTarget::Exact` itself, which resolves to the tightest parameters every sizing formula clamps to (e.g. `1 << 26` for CMS width). A reasonable choice scales with `k`:
+
+```rust
+fn topk_exact_accuracy_target(&self, intent: &AggIntent) -> Option<AccuracyTarget> {
+    match intent {
+        AggIntent::TopK { k, .. } => Some(AccuracyTarget::Epsilon(1.0 / *k as f64)),
+        _ => None,
+    }
+}
+```
+
+This hook is only ever consulted for `TopK`'s `Exact` case; every other approximate-capable intent (`Quantile`, `Cardinality`) and `Count { accuracy: Exact }` are unaffected by it.
+
+---
+
 #### `realize_extension`
 
 Use for extension-defined implementation kinds.
@@ -1546,6 +1584,7 @@ Use this table to find the right place for a change.
 | Add a new built-in sketch candidate | `replacement.rs`'s summary-candidate mapping |
 | Prefer one sketch algorithm over another | `CostModel::rank_candidates` |
 | Change sketch sizing for an accuracy target | `CostModel::size_params` |
+| Offer a sketch alternative for an `Exact`-accuracy top-k request | `CostModel::topk_exact_accuracy_target` |
 | Add extension-defined implementation behavior | `CostModel::realize_extension` |
 | Add extension-defined readout behavior | `CostModel::readout_extension` |
 | Change CSE recomputation cost | `CostModel::cse_recompute_cost` |
