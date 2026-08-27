@@ -1784,9 +1784,17 @@ impl<Id> PlanSpace<Id> {
 /// half of issue #287. Looked up by `Rc` pointer identity, the same
 /// currency [`PlanSpace::group_for`]/[`GlobalSelection::for_target`] already
 /// use.
+/// Holds an owned `Rc<QueryExpr>` clone alongside each profile (not just its
+/// raw pointer) so this map keeps every node it describes alive for as long
+/// as the map itself lives — a `RecurrenceProfileMap` is safe to outlive the
+/// `PlanSpace` it was built from. Without this, a raw `*const QueryExpr` key
+/// could, after the originating `PlanSpace` (the only other owner of those
+/// `Rc`s) is dropped, collide with an unrelated, later allocation that
+/// happens to reuse the same freed address — silently returning a stale
+/// profile for the wrong node (issue #287 review, bug 4).
 #[derive(Debug, Clone)]
 pub struct RecurrenceProfileMap {
-    profiles: HashMap<*const QueryExpr, RecurrenceProfile>,
+    profiles: HashMap<*const QueryExpr, (Rc<QueryExpr>, RecurrenceProfile)>,
 }
 
 impl RecurrenceProfileMap {
@@ -1798,7 +1806,7 @@ impl RecurrenceProfileMap {
     pub fn for_target(&self, target: &Rc<QueryExpr>) -> RecurrenceProfile {
         self.profiles
             .get(&Rc::as_ptr(target))
-            .copied()
+            .map(|(_, profile)| *profile)
             .unwrap_or(RecurrenceProfile::EMPTY)
     }
 }
@@ -1830,7 +1838,9 @@ impl<Id> PlanSpace<Id> {
     /// reflecting all of them, per issue #287's "support a shared sub-DAG
     /// consumed by queries with different intervals".
     ///
-    /// `update_rate` is applied uniformly to every discovered site: today's
+    /// `update_rate` is applied uniformly to every discovered site *that
+    /// this walk actually reached from some root* (see the "unreachable
+    /// sites" note below): today's
     /// [`asap_types::workload::DataCharacteristics`] is a single
     /// workload-level value (applies to every query in a `QueryWorkload`),
     /// not per-target, so there is no finer-grained source to attach
@@ -1838,48 +1848,100 @@ impl<Id> PlanSpace<Id> {
     /// preserves "missing metadata" behavior for the update-rate term alone
     /// even when repeating/one-shot consumer information is present.
     ///
+    /// A parent that structurally references the same child more than once
+    /// (e.g. `BinaryOp{lhs: X, rhs: X}`) credits that child with one
+    /// contribution per reference, not one contribution per distinct node —
+    /// matching how [`MemoGroup::consumer_count`] already counts that exact
+    /// occurrence twice (issue #287 review: fixes an evaluation-rate
+    /// undercount for repeated in-query references). This does not
+    /// propagate multiplicities transitively past one level, the same raw,
+    /// non-effective scope `MemoGroup::consumer_count` itself has —
+    /// composing contributions across an *ancestor chain* is
+    /// [`PlanSpace::global_selection`]'s job, deliberately not wired to
+    /// this recurrence-aware cost context yet (see this file's own
+    /// "Whole-plan (cross-group) selection" module docs).
+    ///
+    /// **Unreachable sites**: [`PlanSpace`] can contain a site no root's own
+    /// structural tree actually reaches — e.g. one only ever produced by a
+    /// [`Replacement::Rewrite`] candidate a [`ReplacementStrategy`] invented
+    /// (this walk only follows [`MemoGroup::target`]'s own structural
+    /// children, the same scope [`discover_targets`] uses for the original
+    /// roots, never a candidate's rewritten value). Such a site gets
+    /// [`RecurrenceProfile::EMPTY`] — in particular, `update_rate` is
+    /// **not** stamped onto it — so it falls back to the ordinary
+    /// structural decision instead of being charged an ingest-driven
+    /// maintenance cost against a real evaluation/one-shot signal of
+    /// exactly zero, which previously made `RecomputeIndependently` win
+    /// there unconditionally, regardless of the site's actual
+    /// `consumer_count` (issue #287 review, bug 2).
+    ///
     /// Returns [`RecurrenceError::InvalidInterval`] if any
-    /// `RootRecurrence::Repeating` interval is zero.
+    /// `RootRecurrence::Repeating` interval is zero,
+    /// [`RecurrenceError::InvalidUpdateRate`] if `update_rate` is non-finite
+    /// or negative, or [`RecurrenceError::RootCountMismatch`] if
+    /// `root_recurrence.len() != self.roots.len()`.
     pub fn recurrence_profiles(
         &self,
         root_recurrence: &[RootRecurrence],
         update_rate: Option<UpdateRate>,
     ) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
-        assert_eq!(
-            root_recurrence.len(),
-            self.roots.len(),
-            "recurrence_profiles: root_recurrence must have one entry per root, in the same \
-             order self.roots is in (got {} entries for {} roots)",
-            root_recurrence.len(),
-            self.roots.len()
-        );
+        if root_recurrence.len() != self.roots.len() {
+            return Err(crate::recurrence::RecurrenceError::RootCountMismatch {
+                expected: self.roots.len(),
+                got: root_recurrence.len(),
+            });
+        }
+        if let Some(rate) = update_rate {
+            crate::recurrence::validate_update_rate(rate)?;
+        }
 
         let mut intervals: HashMap<*const QueryExpr, Vec<RepetitionInterval>> = HashMap::new();
         let mut one_shot_counts: HashMap<*const QueryExpr, usize> = HashMap::new();
+        // Sites actually reached by at least one root's own recurrence tag
+        // during the walk below — see this method's own "Unreachable
+        // sites" doc.
+        let mut reached: HashSet<*const QueryExpr> = HashSet::new();
 
         for ((_, root), recurrence) in self.roots.iter().zip(root_recurrence) {
-            let mut seen: HashSet<*const QueryExpr> = HashSet::new();
-            let mut queue: VecDeque<*const QueryExpr> = VecDeque::new();
+            let recurrence = *recurrence;
             let root_ptr = Rc::as_ptr(root);
-            seen.insert(root_ptr);
+            // Nodes whose children have already been enqueued once for this
+            // root — mirrors `discover_targets`' own `walk` (count every
+            // occurrence, recurse into children only the first time) rather
+            // than a plain reachability set, so `contribute`'s `times`
+            // (from `direct_child_counts`' own edge multiplicity) is honored
+            // without also re-expanding — and so double-contributing beyond
+            // what one root can produce — an already-queued child.
+            let mut expanded: HashSet<*const QueryExpr> = HashSet::new();
+            let mut queue: VecDeque<*const QueryExpr> = VecDeque::new();
+
+            contribute(
+                root_ptr,
+                1,
+                recurrence,
+                &mut intervals,
+                &mut one_shot_counts,
+                &mut reached,
+            );
+            expanded.insert(root_ptr);
             queue.push_back(root_ptr);
 
             while let Some(ptr) = queue.pop_front() {
-                match recurrence {
-                    RootRecurrence::Repeating(interval) => {
-                        intervals.entry(ptr).or_default().push(*interval);
-                    }
-                    RootRecurrence::OneShot => {
-                        *one_shot_counts.entry(ptr).or_insert(0) += 1;
-                    }
-                }
                 // Every reachable node was itself discovered as its own
                 // `MemoGroup` (`discover_targets` walks the identical
                 // relational-skeleton scope) — its own `target` is the
                 // canonical `Rc` to read children off.
                 if let Some(group) = self.groups.get(&ptr) {
-                    for (child, _) in direct_child_counts(&group.target) {
-                        if seen.insert(child) {
+                    for (child, edge_count) in direct_child_counts(&group.target) {
+                        contribute(
+                            child,
+                            edge_count,
+                            recurrence,
+                            &mut intervals,
+                            &mut one_shot_counts,
+                            &mut reached,
+                        );
+                        if expanded.insert(child) {
                             queue.push_back(child);
                         }
                     }
@@ -1887,22 +1949,65 @@ impl<Id> PlanSpace<Id> {
             }
         }
 
+        let empty_intervals: Vec<RepetitionInterval> = Vec::new();
         let mut profiles = HashMap::with_capacity(self.order.len());
         for ptr in &self.order {
-            let evaluation_rate =
-                evaluation_rate_of(intervals.get(ptr).cloned().unwrap_or_default())?;
+            let site_intervals = intervals.get(ptr).unwrap_or(&empty_intervals);
+            let evaluation_rate = evaluation_rate_of(site_intervals.iter().copied())?;
             let one_shot_consumers = one_shot_counts.get(ptr).copied().unwrap_or(0);
+            // Bug 2 fix (see "Unreachable sites" above): only a reached
+            // site carries the caller-supplied `update_rate`.
+            let site_update_rate = if reached.contains(ptr) {
+                update_rate
+            } else {
+                None
+            };
+            let node = Rc::clone(&self.groups[ptr].target);
             profiles.insert(
                 *ptr,
-                RecurrenceProfile {
-                    evaluation_rate,
-                    one_shot_consumers,
-                    update_rate,
-                },
+                (
+                    node,
+                    RecurrenceProfile {
+                        evaluation_rate,
+                        one_shot_consumers,
+                        update_rate: site_update_rate,
+                    },
+                ),
             );
         }
 
         Ok(RecurrenceProfileMap { profiles })
+    }
+}
+
+/// Record `times` occurrences of `recurrence` against `ptr` — `times > 1`
+/// when a single parent structurally references `ptr` more than once (see
+/// [`PlanSpace::recurrence_profiles`]'s own doc on edge multiplicity).
+/// A no-op for `times == 0` (an `Rc` returned as a `direct_child_counts`
+/// child always has `edge_count >= 1` in practice, but this keeps the
+/// helper correct regardless).
+fn contribute(
+    ptr: *const QueryExpr,
+    times: usize,
+    recurrence: RootRecurrence,
+    intervals: &mut HashMap<*const QueryExpr, Vec<RepetitionInterval>>,
+    one_shot_counts: &mut HashMap<*const QueryExpr, usize>,
+    reached: &mut HashSet<*const QueryExpr>,
+) {
+    if times == 0 {
+        return;
+    }
+    reached.insert(ptr);
+    match recurrence {
+        RootRecurrence::Repeating(interval) => {
+            intervals
+                .entry(ptr)
+                .or_default()
+                .extend(std::iter::repeat_n(interval, times));
+        }
+        RootRecurrence::OneShot => {
+            *one_shot_counts.entry(ptr).or_insert(0) += times;
+        }
     }
 }
 

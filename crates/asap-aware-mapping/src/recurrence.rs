@@ -191,6 +191,72 @@ pub enum RecurrenceError {
          recurrence::total_cost)"
     )]
     MissingHorizon,
+    /// An [`UpdateRate`] that isn't finite and non-negative (NaN, infinite,
+    /// or negative) was supplied — such a value would silently corrupt
+    /// every downstream comparison (a NaN rate makes every `<=`/`>`
+    /// comparison `false`, which [`decide`] would otherwise read as "always
+    /// recompute" with no diagnostic at all). Validated the same way
+    /// [`evaluation_rate_of`] validates a zero [`RepetitionInterval`].
+    #[error(
+        "invalid UpdateRate({0:?}Hz): an update rate must be finite and >= 0 to contribute a \
+         well-defined maintained_cost_rate"
+    )]
+    InvalidUpdateRate(UpdateRate),
+    /// A [`Horizon`] that isn't finite and strictly positive (NaN,
+    /// infinite, zero, or negative) was supplied — a non-positive or
+    /// infinite horizon would silently drop or invert the recurring
+    /// `CostRate` term in [`total_cost`], exactly the "silently combine"
+    /// outcome [`MissingHorizon`](Self::MissingHorizon) exists to prevent.
+    #[error(
+        "invalid Horizon({0:?}s): an evaluation horizon must be finite and > 0 to combine a \
+         CostRate with a one-shot Cost without distorting the comparison"
+    )]
+    InvalidHorizon(Horizon),
+    /// [`crate::replacement::PlanSpace::recurrence_profiles`] was called
+    /// with a `root_recurrence` slice whose length doesn't match the
+    /// `PlanSpace`'s own root count — a caller error, but recoverable
+    /// (this method's whole signature promises a `Result`, so this is
+    /// reported the same way every other input-validation failure is,
+    /// never a panic).
+    #[error(
+        "recurrence_profiles: root_recurrence must have one entry per root, in the same order \
+         PlanSpace::roots is in (got {got} entries for {expected} roots)"
+    )]
+    RootCountMismatch {
+        /// `PlanSpace::roots.len()`.
+        expected: usize,
+        /// `root_recurrence.len()`.
+        got: usize,
+    },
+}
+
+/// Reject a non-finite or negative [`UpdateRate`] — the same validation
+/// discipline [`evaluation_rate_of`] applies to each [`RepetitionInterval`],
+/// applied at every point an `UpdateRate` enters a [`RecurrenceProfile`]
+/// ([`RecurrenceProfile::with_update_rate`],
+/// [`update_rate_from_data_characteristics`],
+/// [`crate::replacement::PlanSpace::recurrence_profiles`]'s own parameter)
+/// *and*, as a backstop that can't be bypassed by constructing a
+/// `RecurrenceProfile` via its public fields directly, inside [`decide`]
+/// itself before any comparison uses it.
+pub fn validate_update_rate(rate: UpdateRate) -> Result<UpdateRate, RecurrenceError> {
+    if rate.0.is_finite() && rate.0 >= 0.0 {
+        Ok(rate)
+    } else {
+        Err(RecurrenceError::InvalidUpdateRate(rate))
+    }
+}
+
+/// Reject a non-finite or non-positive [`Horizon`] — validated inside
+/// [`decide`] wherever a caller-supplied `horizon` is used, so `Horizon(0.0)`
+/// or a negative horizon can't silently zero out or invert the recurring
+/// `CostRate` term in [`total_cost`].
+pub fn validate_horizon(horizon: Horizon) -> Result<Horizon, RecurrenceError> {
+    if horizon.0.is_finite() && horizon.0 > 0.0 {
+        Ok(horizon)
+    } else {
+        Err(RecurrenceError::InvalidHorizon(horizon))
+    }
 }
 
 // ── Aggregation ──────────────────────────────────────────────────────────
@@ -224,8 +290,18 @@ where
 /// value describes. A proxy, not a measurement: a deployment with a more
 /// precise per-target ingest rate should compute its own `UpdateRate`
 /// rather than rely on this conversion.
-pub fn update_rate_from_data_characteristics(dc: &DataCharacteristics) -> UpdateRate {
-    UpdateRate(dc.series_count as f64 * dc.samples_per_sec_per_series)
+///
+/// Validated via [`validate_update_rate`]: `samples_per_sec_per_series` is
+/// caller-supplied `f64` with no type-level guarantee of being finite or
+/// non-negative, so a garbage `DataCharacteristics` value (NaN, infinite,
+/// or negative) is rejected here rather than silently propagating into a
+/// [`RecurrenceProfile`].
+pub fn update_rate_from_data_characteristics(
+    dc: &DataCharacteristics,
+) -> Result<UpdateRate, RecurrenceError> {
+    validate_update_rate(UpdateRate(
+        dc.series_count as f64 * dc.samples_per_sec_per_series,
+    ))
 }
 
 // ── RecurrenceProfile ────────────────────────────────────────────────────
@@ -290,10 +366,12 @@ impl RecurrenceProfile {
     }
 
     /// Attach an ingest/update rate (from [`update_rate_from_data_characteristics`]
-    /// or a deployment-specific measurement).
-    pub fn with_update_rate(mut self, update_rate: UpdateRate) -> Self {
-        self.update_rate = Some(update_rate);
-        self
+    /// or a deployment-specific measurement). Validated via
+    /// [`validate_update_rate`] — rejects a NaN, infinite, or negative rate
+    /// rather than silently storing it.
+    pub fn with_update_rate(mut self, update_rate: UpdateRate) -> Result<Self, RecurrenceError> {
+        self.update_rate = Some(validate_update_rate(update_rate)?);
+        Ok(self)
     }
 }
 
@@ -330,10 +408,16 @@ pub struct RecurrenceCostExplanation {
     /// The selected alternative.
     pub decision: ShareDecision,
     /// `maintained_cost_rate` — cost units/second — as defined in the
-    /// module docs' "Cost semantics" section.
-    pub maintained_cost_rate: CostRate,
-    /// `recompute_cost_rate` — cost units/second.
-    pub recompute_cost_rate: CostRate,
+    /// module docs' "Cost semantics" section. `None` on the structural
+    /// fallback path (`RecurrenceProfile::is_empty()`): no rate was
+    /// computed at all there (the decision came from
+    /// [`CostModel::cse_share_decision`] instead), so this is "not
+    /// computed", deliberately distinct from a real, computed rate of
+    /// exactly zero.
+    pub maintained_cost_rate: Option<CostRate>,
+    /// `recompute_cost_rate` — cost units/second. `None` on the same
+    /// structural fallback path, for the same reason.
+    pub recompute_cost_rate: Option<CostRate>,
     /// `total_cost(horizon)` for the maintained alternative, when `horizon`
     /// is `Some`.
     pub maintained_total: Option<Cost>,
@@ -348,12 +432,15 @@ pub struct RecurrenceCostExplanation {
     pub evaluation_rate: Option<EvaluationRate>,
     /// The one-shot consumer count input used.
     pub one_shot_consumers: usize,
-    /// `maintenance_cost_per_update` — cost units/update.
-    pub maintenance_cost_per_update: Cost,
-    /// `summary_read_cost` — cost units/read.
-    pub summary_read_cost: Cost,
-    /// `raw_recompute_cost` — cost units/recomputation.
-    pub raw_recompute_cost: Cost,
+    /// `maintenance_cost_per_update` — cost units/update. `None` on the
+    /// structural fallback path (not computed there).
+    pub maintenance_cost_per_update: Option<Cost>,
+    /// `summary_read_cost` — cost units/read. `None` on the structural
+    /// fallback path.
+    pub summary_read_cost: Option<Cost>,
+    /// `raw_recompute_cost` — cost units/recomputation. `None` on the
+    /// structural fallback path.
+    pub raw_recompute_cost: Option<Cost>,
     /// Human-readable provenance: which model/path produced this
     /// explanation (e.g. "recurrence-aware: <CostModel type>" or the
     /// structural fallback note when `RecurrenceProfile::is_empty()`).
@@ -363,23 +450,36 @@ pub struct RecurrenceCostExplanation {
 impl fmt::Display for RecurrenceCostExplanation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "decision: {:?} ({})", self.decision, self.provenance)?;
-        writeln!(
-            f,
-            "  maintained_cost_rate = {} (update_rate={:?}Hz * maintenance_cost_per_update={} + \
-             evaluation_rate={:?}Hz * summary_read_cost={})",
-            self.maintained_cost_rate,
-            self.update_rate.map(|r| r.0),
-            self.maintenance_cost_per_update,
-            self.evaluation_rate.map(|r| r.0),
-            self.summary_read_cost,
-        )?;
-        writeln!(
-            f,
-            "  recompute_cost_rate  = {} (evaluation_rate={:?}Hz * raw_recompute_cost={})",
-            self.recompute_cost_rate,
-            self.evaluation_rate.map(|r| r.0),
-            self.raw_recompute_cost,
-        )?;
+        match (self.maintained_cost_rate, self.recompute_cost_rate) {
+            (Some(maintained), Some(recompute)) => {
+                writeln!(
+                    f,
+                    "  maintained_cost_rate = {} (update_rate={:?}Hz * \
+                     maintenance_cost_per_update={:?} + evaluation_rate={:?}Hz * \
+                     summary_read_cost={:?})",
+                    maintained,
+                    self.update_rate.map(|r| r.0),
+                    self.maintenance_cost_per_update,
+                    self.evaluation_rate.map(|r| r.0),
+                    self.summary_read_cost,
+                )?;
+                writeln!(
+                    f,
+                    "  recompute_cost_rate  = {} (evaluation_rate={:?}Hz * \
+                     raw_recompute_cost={:?})",
+                    recompute,
+                    self.evaluation_rate.map(|r| r.0),
+                    self.raw_recompute_cost,
+                )?;
+            }
+            _ => {
+                writeln!(
+                    f,
+                    "  maintained_cost_rate / recompute_cost_rate: not computed (structural \
+                     fallback — no recurrence metadata was supplied)"
+                )?;
+            }
+        }
         writeln!(f, "  one_shot_consumers = {}", self.one_shot_consumers)?;
         if let Some(h) = self.horizon {
             writeln!(
@@ -402,21 +502,33 @@ pub(crate) fn decide<C: CostModel + ?Sized>(
     recurrence: &RecurrenceProfile,
     horizon: Option<Horizon>,
 ) -> Result<RecurrenceCostExplanation, RecurrenceError> {
+    // Backstop validation: a `RecurrenceProfile`/`Horizon` may have reached
+    // here via a direct struct literal (bypassing `with_update_rate`'s own
+    // check) or a caller-supplied `horizon` argument — this is the one
+    // choke point every path funnels through before a value actually enters
+    // a comparison, so it's validated here regardless of how it arrived.
+    if let Some(rate) = recurrence.update_rate {
+        validate_update_rate(rate)?;
+    }
+    if let Some(h) = horizon {
+        validate_horizon(h)?;
+    }
+
     if recurrence.is_empty() {
         let decision = cost_model.cse_share_decision(candidate);
         return Ok(RecurrenceCostExplanation {
             decision,
-            maintained_cost_rate: CostRate::ZERO,
-            recompute_cost_rate: CostRate::ZERO,
+            maintained_cost_rate: None,
+            recompute_cost_rate: None,
             maintained_total: None,
             recompute_total: None,
             horizon: None,
             update_rate: None,
             evaluation_rate: None,
             one_shot_consumers: 0,
-            maintenance_cost_per_update: Cost::ZERO,
-            summary_read_cost: Cost::ZERO,
-            raw_recompute_cost: Cost::ZERO,
+            maintenance_cost_per_update: None,
+            summary_read_cost: None,
+            raw_recompute_cost: None,
             provenance: "structural fallback: no recurrence metadata supplied — delegated to \
                          CostModel::cse_share_decision (consumer_count-based), preserving \
                          pre-#287 behavior exactly"
@@ -435,6 +547,15 @@ pub(crate) fn decide<C: CostModel + ?Sized>(
     let maintenance_cost_per_update = cost_model.maintenance_cost_per_update(candidate);
     let summary_read_cost = cost_model.summary_read_cost(candidate);
     let raw_recompute_cost = cost_model.raw_recompute_cost(candidate);
+    // The one-time cost of materializing the shared summary at all, before
+    // any read or update — see `CostModel::summary_build_cost`'s own doc.
+    // Without this term, a purely (or mostly) one-shot comparison modeled
+    // "maintained" as free to construct, so `Share` won unconditionally
+    // for *any* number of one-shot consumers (issue #287 review, bug 1) —
+    // this term is what makes materializing-and-reading actually cost more
+    // than a single direct recompute for a lone consumer, while still
+    // amortizing correctly across many.
+    let summary_build_cost = cost_model.summary_build_cost(candidate);
 
     let maintained_cost_rate = CostRate(
         update_rate * maintenance_cost_per_update.0 + evaluation_rate * summary_read_cost.0,
@@ -455,7 +576,11 @@ pub(crate) fn decide<C: CostModel + ?Sized>(
         .or_else(|| (recurrence.one_shot_consumers > 0 && !has_recurring).then_some(Horizon(1.0)));
 
     let (maintained_total, recompute_total, decision) = if let Some(h) = effective_horizon {
-        let one_shot_maintained = Cost(summary_read_cost.0 * recurrence.one_shot_consumers as f64);
+        // `summary_build_cost` is paid exactly once — whether the summary
+        // is ever read again by a repeating consumer or not — never scaled
+        // by `one_shot_consumers`.
+        let one_shot_maintained =
+            Cost(summary_read_cost.0 * recurrence.one_shot_consumers as f64) + summary_build_cost;
         let one_shot_recompute = Cost(raw_recompute_cost.0 * recurrence.one_shot_consumers as f64);
         let maintained = total_cost(maintained_cost_rate, h, one_shot_maintained);
         let recompute = total_cost(recompute_cost_rate, h, one_shot_recompute);
@@ -468,7 +593,12 @@ pub(crate) fn decide<C: CostModel + ?Sized>(
     } else {
         // Pure recurring, no one-shot consumers at all: comparing the bare
         // rates is exactly equivalent to comparing `rate * H` for any fixed
-        // `H > 0`, so no horizon is needed to get a correct decision.
+        // `H > 0` in the limit of a long-lived, continuously-maintained
+        // summary, so no horizon is needed to get a correct decision — the
+        // one-time `summary_build_cost` is asymptotically negligible next
+        // to an ongoing rate term and is deliberately not charged here (it
+        // only enters the comparison when a caller actually needs an
+        // absolute total over a finite horizon, via the branch above).
         let decision = if maintained_cost_rate.0 <= recompute_cost_rate.0 {
             ShareDecision::Share
         } else {
@@ -479,17 +609,17 @@ pub(crate) fn decide<C: CostModel + ?Sized>(
 
     Ok(RecurrenceCostExplanation {
         decision,
-        maintained_cost_rate,
-        recompute_cost_rate,
+        maintained_cost_rate: Some(maintained_cost_rate),
+        recompute_cost_rate: Some(recompute_cost_rate),
         maintained_total,
         recompute_total,
         horizon: effective_horizon,
         update_rate: recurrence.update_rate,
         evaluation_rate: recurrence.evaluation_rate,
         one_shot_consumers: recurrence.one_shot_consumers,
-        maintenance_cost_per_update,
-        summary_read_cost,
-        raw_recompute_cost,
+        maintenance_cost_per_update: Some(maintenance_cost_per_update),
+        summary_read_cost: Some(summary_read_cost),
+        raw_recompute_cost: Some(raw_recompute_cost),
         provenance: "recurrence-aware: maintained_cost_rate vs recompute_cost_rate (cost \
                      units/second), per issue #287"
             .to_string(),
@@ -545,8 +675,21 @@ mod tests {
             distinct_keys_per_window: None,
             data_distribution: Default::default(),
         };
-        let rate = update_rate_from_data_characteristics(&dc);
+        let rate = update_rate_from_data_characteristics(&dc).unwrap();
         assert!((rate.0 - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn update_rate_from_data_characteristics_rejects_a_negative_sample_rate() {
+        let dc = DataCharacteristics {
+            series_count: 1_000,
+            samples_per_sec_per_series: -0.1,
+            bytes_per_raw_sample: 80,
+            distinct_keys_per_window: None,
+            data_distribution: Default::default(),
+        };
+        let err = update_rate_from_data_characteristics(&dc).unwrap_err();
+        assert!(matches!(err, RecurrenceError::InvalidUpdateRate(_)));
     }
 
     // ── RecurrenceProfile ─────────────────────────────────────────────────
@@ -564,12 +707,30 @@ mod tests {
             .is_empty());
         assert!(!RecurrenceProfile::EMPTY
             .with_update_rate(UpdateRate(1.0))
+            .unwrap()
             .is_empty());
         assert!(
             !RecurrenceProfile::from_repeating_intervals(vec![interval(1000)])
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn with_update_rate_rejects_nan_infinite_and_negative() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let err = RecurrenceProfile::EMPTY
+                .with_update_rate(UpdateRate(bad))
+                .unwrap_err();
+            assert!(
+                matches!(err, RecurrenceError::InvalidUpdateRate(_)),
+                "bad={bad}, err={err:?}"
+            );
+        }
+        // Zero is a legitimate (if unusual) update rate: no ingest at all.
+        assert!(RecurrenceProfile::EMPTY
+            .with_update_rate(UpdateRate(0.0))
+            .is_ok());
     }
 
     #[test]
@@ -776,19 +937,21 @@ mod tests {
         // High frequency: a consumer firing every 10ms => 100Hz.
         let frequent = RecurrenceProfile::from_repeating_intervals(vec![interval(10)])
             .unwrap()
-            .with_update_rate(update_rate);
+            .with_update_rate(update_rate)
+            .unwrap();
         let frequent_explanation =
             decide(&DeterministicUnitCostModel, &candidate, &frequent, None).unwrap();
         assert_eq!(frequent_explanation.decision, ShareDecision::Share);
         assert!(
-            frequent_explanation.maintained_cost_rate.0
-                < frequent_explanation.recompute_cost_rate.0
+            frequent_explanation.maintained_cost_rate.unwrap().0
+                < frequent_explanation.recompute_cost_rate.unwrap().0
         );
 
         // Low frequency: a consumer firing every 100s => 0.01Hz.
         let infrequent = RecurrenceProfile::from_repeating_intervals(vec![interval(100_000)])
             .unwrap()
-            .with_update_rate(update_rate);
+            .with_update_rate(update_rate)
+            .unwrap();
         let infrequent_explanation =
             decide(&DeterministicUnitCostModel, &candidate, &infrequent, None).unwrap();
         assert_eq!(
@@ -796,8 +959,8 @@ mod tests {
             ShareDecision::RecomputeIndependently
         );
         assert!(
-            infrequent_explanation.maintained_cost_rate.0
-                > infrequent_explanation.recompute_cost_rate.0
+            infrequent_explanation.maintained_cost_rate.unwrap().0
+                > infrequent_explanation.recompute_cost_rate.unwrap().0
         );
     }
 
@@ -822,7 +985,7 @@ mod tests {
         };
 
         let base = RecurrenceProfile::from_repeating_intervals(vec![interval(1000)]).unwrap();
-        let with_update = base.with_update_rate(UpdateRate(1000.0));
+        let with_update = base.with_update_rate(UpdateRate(1000.0)).unwrap();
 
         let base_explanation =
             decide(&DeterministicUnitCostModel, &candidate, &base, None).unwrap();
@@ -831,8 +994,8 @@ mod tests {
 
         // Bumping update_rate alone raises maintained_cost_rate...
         assert!(
-            with_update_explanation.maintained_cost_rate.0
-                > base_explanation.maintained_cost_rate.0
+            with_update_explanation.maintained_cost_rate.unwrap().0
+                > base_explanation.maintained_cost_rate.unwrap().0
         );
         // ...but leaves recompute_cost_rate (a pure function of
         // evaluation_rate, unchanged between the two profiles) untouched.
@@ -845,9 +1008,9 @@ mod tests {
     /// One-shot consumers alone (no repeating consumer, no update rate) —
     /// still produce a real decision with no explicit `Horizon` required,
     /// by comparing the one-shot costs directly (see `decide`'s
-    /// `effective_horizon` fallback): a cheap-to-recompute, expensive-to-read
-    /// target should recompute; an expensive-to-recompute, cheap-to-read one
-    /// should share.
+    /// `effective_horizon` fallback): with enough one-shot consumers, the
+    /// fixed `summary_build_cost` amortizes and sharing wins even though
+    /// `raw_recompute_cost` is expensive.
     #[test]
     fn one_shot_only_consumer_decides_without_an_explicit_horizon() {
         let subtree = scan();
@@ -863,12 +1026,80 @@ mod tests {
         let profile = RecurrenceProfile::EMPTY.with_one_shot_consumers(3);
 
         // raw_recompute_cost=50 >> summary_read_cost=1: sharing wins even
-        // for purely one-shot consumers, since materializing once and
-        // reading it 3 times beats recomputing all 3 times independently.
+        // for purely one-shot consumers, since materializing once (paying
+        // summary_build_cost=50 exactly once — DeterministicUnitCostModel's
+        // default delegates build cost to raw_recompute_cost) and reading it
+        // 3 times (3 * 1 = 3) totals 53, cheaper than recomputing
+        // independently 3 times (50 * 3 = 150).
         let explanation = decide(&DeterministicUnitCostModel, &candidate, &profile, None).unwrap();
         assert_eq!(explanation.decision, ShareDecision::Share);
-        assert_eq!(explanation.maintained_total, Some(Cost(3.0)));
+        assert_eq!(explanation.maintained_total, Some(Cost(53.0)));
         assert_eq!(explanation.recompute_total, Some(Cost(150.0)));
+    }
+
+    /// Regression for issue #287 review bug 1: without a `summary_build_cost`
+    /// term, a purely one-shot comparison modeled "maintained" as free to
+    /// construct, so `Share` won unconditionally for *any* number of
+    /// one-shot consumers — including exactly one, where sharing can never
+    /// make sense (you always pay at least as much to build-then-read once
+    /// as you would to just recompute once directly). With the fix, a
+    /// single one-shot consumer strictly prefers `RecomputeIndependently`.
+    #[test]
+    fn one_shot_only_single_consumer_does_not_unconditionally_prefer_share() {
+        let subtree = scan();
+        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+            ExactKind::Sum,
+            ExactParams::Sum,
+        ));
+        let candidate = CseCandidate {
+            subtree: &subtree,
+            bound_summary: &bound,
+            consumer_count: 1,
+        };
+        let profile = RecurrenceProfile::EMPTY.with_one_shot_consumers(1);
+
+        let explanation = decide(&DeterministicUnitCostModel, &candidate, &profile, None).unwrap();
+        // build(50) + read(1) = 51 > recompute(50) * 1 = 50.
+        assert_eq!(explanation.decision, ShareDecision::RecomputeIndependently);
+        assert_eq!(explanation.maintained_total, Some(Cost(51.0)));
+        assert_eq!(explanation.recompute_total, Some(Cost(50.0)));
+    }
+
+    /// A batch-only workload (no `DataCharacteristics`, only one-shot
+    /// consumers) with the *default* `DefaultCostModel` must not
+    /// unconditionally prefer `Share` regardless of how many one-shot
+    /// consumers there are — issue #287 review bug 1's original repro,
+    /// pinned against the real default cost model rather than the test's
+    /// own `DeterministicUnitCostModel`.
+    #[test]
+    fn batch_only_workload_does_not_unconditionally_prefer_share_under_default_cost_model() {
+        let subtree = scan();
+        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+            ExactKind::Sum,
+            ExactParams::Sum,
+        ));
+        let candidate = CseCandidate {
+            subtree: &subtree,
+            bound_summary: &bound,
+            consumer_count: 1,
+        };
+        // `DefaultCostModel`'s `raw_recompute_cost`/`summary_build_cost`
+        // both delegate to the same structural-size proxy
+        // (`cse_recompute_cost`), and `summary_read_cost` defaults to a
+        // nominal `1.0` — build and recompute cost the same, so reading a
+        // materialized copy even once more than a bare recompute can never
+        // pay off: for every one-shot-only consumer count, the maintained
+        // total (`build + read * n`) must be strictly greater than the
+        // recompute total (`recompute * n`), i.e. `Share` must never win.
+        for n in [1usize, 2, 10, 1_000] {
+            let profile = RecurrenceProfile::EMPTY.with_one_shot_consumers(n);
+            let explanation = decide(&DefaultCostModel, &candidate, &profile, None).unwrap();
+            assert_eq!(
+                explanation.decision,
+                ShareDecision::RecomputeIndependently,
+                "n={n}, explanation={explanation:?}"
+            );
+        }
     }
 
     // ── multiple roots sharing a sub-DAG, via PlanSpace ──────────────────
@@ -1012,12 +1243,164 @@ mod tests {
         assert_eq!(err, RecurrenceError::InvalidInterval(interval(0)));
     }
 
+    /// Issue #287 review bug 6: a length mismatch is a recoverable
+    /// `RecurrenceError`, not a panic — `recurrence_profiles`'s whole
+    /// signature promises a `Result`.
     #[test]
-    #[should_panic(expected = "must have one entry per root")]
-    fn recurrence_profiles_asserts_slice_length_matches_root_count() {
+    fn recurrence_profiles_reports_a_root_count_mismatch_as_an_error_not_a_panic() {
         let root = Rc::new(scan());
         let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
         let space = search_workload(roots);
-        let _ = space.recurrence_profiles(&[], None);
+        let err = space.recurrence_profiles(&[], None).unwrap_err();
+        assert_eq!(
+            err,
+            RecurrenceError::RootCountMismatch {
+                expected: 1,
+                got: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn recurrence_profiles_rejects_an_invalid_update_rate() {
+        let root = Rc::new(scan());
+        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
+        let space = search_workload(roots);
+        let err = space
+            .recurrence_profiles(&[RootRecurrence::OneShot], Some(UpdateRate(f64::NAN)))
+            .unwrap_err();
+        assert!(matches!(err, RecurrenceError::InvalidUpdateRate(_)));
+    }
+
+    /// Issue #287 review bug 2: a site no root's own structural tree
+    /// actually reaches must not have the caller-supplied `update_rate`
+    /// stamped onto it. `AvgToSumOverCountStrategy` (part of
+    /// `default_strategies`, so included by `search_workload`) is a real,
+    /// already-shipped source of exactly this shape: it rewrites a bare
+    /// `avg` `Aggregate` into a *brand new* `Project(sum, count)` sub-DAG —
+    /// `sum`/`count` are genuinely new `Rc`s, discovered via
+    /// `discover_new_descendant_targets` from the *candidate's* own
+    /// children, never reachable by walking the original `avg` root's own
+    /// structural children (which is just the raw scan). Before the fix,
+    /// this `count` site would get `{evaluation_rate: None,
+    /// one_shot_consumers: 0, update_rate: Some(rate)}` — `maintained_cost_rate
+    /// > 0` against a `recompute_cost_rate` of exactly `0` — unconditionally
+    /// `RecomputeIndependently`, regardless of the site's own real
+    /// `consumer_count`.
+    #[test]
+    fn recurrence_profiles_does_not_stamp_update_rate_on_a_site_unreachable_from_any_root() {
+        let avg_root = QueryExpr::Aggregate {
+            reduction: QueryReduction::by(vec![]),
+            measures: vec![AggIntent::Avg { col: None }],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(scan()),
+        };
+        let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("q", Rc::new(avg_root))];
+        let space = search_workload(roots);
+
+        let count_group = space
+            .groups()
+            .find(|g| {
+                matches!(
+                    g.target.as_ref(),
+                    QueryExpr::Aggregate { measures, .. }
+                        if measures.iter().any(|m| matches!(m, AggIntent::Count { .. }))
+                )
+            })
+            .expect(
+                "AvgToSumOverCountStrategy should have introduced a new Count aggregate \
+                 target, unreachable from the original avg root's own structural children",
+            );
+
+        let root_recurrence = vec![RootRecurrence::Repeating(interval(1_000))];
+        let profiles = space
+            .recurrence_profiles(&root_recurrence, Some(UpdateRate(5.0)))
+            .unwrap();
+
+        let count_profile = profiles.for_target(&count_group.target);
+        assert_eq!(
+            count_profile,
+            RecurrenceProfile::EMPTY,
+            "a site unreachable from any root's own structural tree must fall back to \
+             RecurrenceProfile::EMPTY (no update_rate, no evaluation_rate, no one-shot \
+             consumers), not just an evaluation-rate-free profile that still carries the \
+             caller's update_rate"
+        );
+
+        // The root itself (and the raw scan directly beneath it, which the
+        // walk *does* reach) still get the real update_rate.
+        let root_profile = profiles.for_target(&space.roots[0].1);
+        assert_eq!(root_profile.update_rate, Some(UpdateRate(5.0)));
+    }
+
+    /// Issue #287 review (lower-priority item): a parent referencing the
+    /// same shared child twice (`BinaryOp{lhs: X, rhs: X}`, the same shape
+    /// `pre_asap::cse`'s own within-one-query sharing collapses onto one
+    /// `Rc`) must credit that child with 2 contributions per repeating
+    /// root, matching how `MemoGroup::consumer_count` already counts that
+    /// exact structural occurrence twice — not 1, which a plain
+    /// reachability-set walk would (wrongly) collapse it to.
+    #[test]
+    fn recurrence_profiles_credits_a_direct_repeated_reference_by_its_multiplicity() {
+        let root = QueryExpr::BinaryOp {
+            op: asap_types::pre_asap::query_expr::BinaryOpKind::Compare(
+                asap_types::pre_asap::expr_ir::CompareOpKind::Eq,
+            ),
+            lhs: Rc::new(sum_agg()),
+            rhs: Rc::new(sum_agg()),
+            vector_match: None,
+        };
+        let space = search_workload(vec![("q", Rc::new(root))]);
+
+        let shared_group = space
+            .groups()
+            .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
+            .expect("sum_agg() should merge onto one shared Rc, referenced twice from BinaryOp");
+        assert_eq!(
+            shared_group.consumer_count, 2,
+            "fixture sanity: referenced twice from the same BinaryOp parent"
+        );
+
+        let root_recurrence = vec![RootRecurrence::Repeating(interval(1_000))]; // 1 Hz
+        let profiles = space.recurrence_profiles(&root_recurrence, None).unwrap();
+        let profile = profiles.for_target(&shared_group.target);
+
+        // Referenced twice from the one root: evaluation_rate should be
+        // 2 * 1Hz = 2Hz, matching consumer_count's own multiplicity — not
+        // 1Hz, which would undercount by treating "reachable at all" as
+        // the whole story.
+        assert!(
+            (profile.evaluation_rate.unwrap().0 - 2.0).abs() < 1e-9,
+            "evaluation_rate={:?}",
+            profile.evaluation_rate
+        );
+    }
+
+    // ── Horizon validation ────────────────────────────────────────────────
+
+    #[test]
+    fn decide_rejects_a_zero_or_negative_horizon() {
+        let subtree = scan();
+        let bound = summary_node(SummaryFamilyType::ExactAggregate(
+            ExactKind::Sum,
+            ExactParams::Sum,
+        ));
+        let candidate = CseCandidate {
+            subtree: &subtree,
+            bound_summary: &bound,
+            consumer_count: 2,
+        };
+        let profile = RecurrenceProfile::from_repeating_intervals(vec![interval(1000)])
+            .unwrap()
+            .with_one_shot_consumers(1);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let err =
+                decide(&DefaultCostModel, &candidate, &profile, Some(Horizon(bad))).unwrap_err();
+            assert!(
+                matches!(err, RecurrenceError::InvalidHorizon(_)),
+                "bad={bad}, err={err:?}"
+            );
+        }
     }
 }

@@ -356,13 +356,28 @@ pub trait CostModel {
     /// Cost of maintaining `candidate`'s bound summary for a single ingest
     /// update event. Units: cost units per update — the
     /// `maintenance_cost_per_update` term of `maintained_cost_rate`
-    /// (`crate::recurrence`). Default: delegates to
+    /// (`crate::recurrence`), where it is multiplied by an `UpdateRate` in
+    /// **Hz** (`update_rate * maintenance_cost_per_update`).
+    ///
+    /// Default: a small nominal constant, `Cost(0.01)` — deliberately
+    /// **not** derived from
     /// [`cse_shared_maintenance_cost`](Self::cse_shared_maintenance_cost)'s
-    /// per-family weight table, reinterpreted as a per-update charge — a
-    /// deployment with a real measured per-update cost (e.g. observed
-    /// sketch-insert latency) should override this instead.
-    fn maintenance_cost_per_update(&self, candidate: &CseCandidate) -> Cost {
-        self.cse_shared_maintenance_cost(candidate)
+    /// per-family weight table. That table's values (~1-6) are calibrated
+    /// against [`cse_recompute_cost`](Self::cse_recompute_cost)'s
+    /// structural-size proxy for a *life-of-the-workload*, one-time
+    /// maintenance magnitude — multiplying them by a real ingest rate (even
+    /// a modest one, e.g. 100 events/s) inflates `maintained_cost_rate` far
+    /// past any realistic `recompute_cost_rate`, making `Share`
+    /// unreachable regardless of how infrequently the summary is actually
+    /// read (issue #287 review). `Cost(0.01)` — one order of magnitude
+    /// below [`summary_read_cost`](Self::summary_read_cost)'s own nominal
+    /// default — reflects only that an incremental per-event update is
+    /// normally far cheaper than a full read or recompute, not a measured
+    /// ratio; a deployment with a real per-update cost (e.g. observed
+    /// sketch-insert latency) should override this instead of relying on
+    /// this placeholder.
+    fn maintenance_cost_per_update(&self, _candidate: &CseCandidate) -> Cost {
+        Cost(0.01)
     }
 
     /// Cost of one read against `candidate`'s already-maintained summary.
@@ -381,6 +396,29 @@ pub trait CostModel {
     /// structural-size proxy `cse_share_decision` already uses).
     fn raw_recompute_cost(&self, candidate: &CseCandidate) -> Cost {
         self.cse_recompute_cost(candidate)
+    }
+
+    /// The one-time cost of materializing `candidate`'s bound summary for
+    /// the *first* time — before any read or ingest-driven update charges
+    /// anything. Units: cost units (a one-time [`Cost`], not a rate).
+    ///
+    /// This is what makes a purely (or mostly) one-shot comparison
+    /// economically sound: without a build cost, "maintained" looked free
+    /// to construct, so `Share` won unconditionally for any number of
+    /// one-shot consumers, no matter how few (issue #287 review, bug 1).
+    /// With it, a single one-shot consumer never benefits from sharing
+    /// (build + one read costs more than one direct recompute), while many
+    /// one-shot consumers still amortize the fixed build cost across their
+    /// reads, same as before.
+    ///
+    /// Default: delegates to
+    /// [`raw_recompute_cost`](Self::raw_recompute_cost) — materializing a
+    /// summary for the first time costs about as much as computing its
+    /// answer once from raw, since there's no delta history yet to apply
+    /// incrementally. A deployment with a distinct measured "cold build"
+    /// cost should override this instead.
+    fn summary_build_cost(&self, candidate: &CseCandidate) -> Cost {
+        self.raw_recompute_cost(candidate)
     }
 
     /// The recurrence-aware counterpart to
