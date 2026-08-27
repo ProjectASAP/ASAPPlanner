@@ -649,4 +649,45 @@ mod tests {
             lhs.output_schema().unwrap()
         );
     }
+
+    /// Issue #228 review, end-to-end: `resolve_root` over a `Concat` whose
+    /// discriminator column is referenced *nowhere else* in the tree, with a
+    /// schema-less (usage-derived) leaf `Scan` in the first branch — exactly
+    /// the scenario the review flagged. Before the `binder.rs` fix, the
+    /// Binder's fallback schema wouldn't contain `phi` at all, and this
+    /// `resolve_column_ref` call would fail `NotFound` for a column the
+    /// caller correctly named. It must resolve cleanly, and the resolved
+    /// `ConcatDiscriminatorKey` must carry the *positional* `ColumnId`s of
+    /// the branch's own (usage-derived) schema.
+    #[test]
+    fn resolve_root_seeds_and_resolves_an_otherwise_unreferenced_discriminator_column() {
+        let branch = || UnresolvedQueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: None,
+        };
+        let unresolved = UnresolvedQueryExpr::concat_with_discriminator(
+            vec![branch(), branch()],
+            ColumnRef::Named("phi".into()),
+            vec![ColumnRef::Named("host".into())],
+        );
+
+        let resolved = resolve_root(&unresolved).expect("resolves");
+        let QueryExpr::Concat {
+            children,
+            discriminator_unique_key,
+        } = &resolved
+        else {
+            panic!("expected a resolved Concat, got {resolved:?}");
+        };
+        let schema = children[0].output_schema().unwrap();
+        let key = discriminator_unique_key
+            .as_ref()
+            .expect("discriminator key survives resolution");
+        assert_eq!(*key.discriminator(), schema.column_id("phi").unwrap());
+        assert_eq!(
+            key.inner_key().to_vec(),
+            vec![schema.column_id("host").unwrap()]
+        );
+    }
 }

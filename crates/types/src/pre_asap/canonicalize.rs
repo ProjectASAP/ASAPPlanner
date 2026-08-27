@@ -38,11 +38,52 @@ pub fn canonicalize(mut expr: QueryExpr) -> QueryExpr {
 }
 
 fn canon(expr: &mut QueryExpr) {
+    // A `Concat` asserting a caller-proven `discriminator_unique_key` (issue
+    // #228) had that key's `ColumnId`s resolved, in `resolve.rs`, against
+    // exactly the first branch's output schema *as it stood before this
+    // pass ran*. `try_promote_heavy_hitter`/`try_rewrite_rownumber_topk`
+    // below can restructure that branch (anywhere within it — not only at
+    // its own top level, since the same recursive walk can rewrite a node
+    // nested under a pass-through wrapper too) into a shape with a
+    // different output schema, which would leave those `ColumnId`s
+    // pointing at the wrong column, or out of bounds, of the
+    // post-canonicalize schema. Snapshot the schema the discriminator key
+    // was actually resolved against, right here, before recursing into the
+    // children — this is the exact tree state `resolve.rs` saw.
+    let discriminator_branch_schema_before = match expr {
+        QueryExpr::Concat {
+            children,
+            discriminator_unique_key: Some(_),
+        } => children.first().and_then(|c| c.output_schema().ok()),
+        _ => None,
+    };
+
     // Bottom-up: canonicalize every child before matching at this node, so an
     // inner heavy-hitter is promoted before an enclosing rewrite inspects it.
     for child in children_mut(expr) {
         canon(child);
     }
+
+    // If the first branch's output schema moved out from under the asserted
+    // key, the key can no longer be trusted — drop it (never re-derive it by
+    // guessing at name/position: the two rewrites above don't preserve
+    // column identity in a way that's safe to infer). A wrong `unique_keys`
+    // claim is a wrong query answer, not a missed optimization — see
+    // `ConcatDiscriminatorKey`'s soundness doc — so this errs conservatively:
+    // any difference at all (not just a column-count/type change) drops the
+    // key, including the schema becoming undecidable in either direction.
+    if let QueryExpr::Concat {
+        children,
+        discriminator_unique_key: key @ Some(_),
+    } = expr
+    {
+        let discriminator_branch_schema_after =
+            children.first().and_then(|c| c.output_schema().ok());
+        if discriminator_branch_schema_before != discriminator_branch_schema_after {
+            *key = None;
+        }
+    }
+
     // Local rewrites chain: a `ROW_NUMBER()`-partitioned top-k rewrites to a
     // `Limit{Sort}`, which the heavy-hitter rule may then promote to an
     // `Aggregate([TopK])`. Each rule strictly simplifies the node, so applying
@@ -396,6 +437,71 @@ mod tests {
         let once = canonicalize(q);
         let twice = canonicalize(once.clone());
         assert_eq!(once, twice, "canonicalize must be idempotent");
+    }
+
+    // ── Concat's discriminator_unique_key vs. canonicalize (issue #228 review) ──
+    //
+    // `resolve.rs` resolves `discriminator_unique_key`'s `ColumnId`s against
+    // the first branch's *pre-canonicalize* output schema. If canonicalize
+    // then restructures that branch (heavy-hitter promotion, the
+    // `ROW_NUMBER()` top-k rewrite), those `ColumnId`s can end up pointing at
+    // the wrong column — or out of bounds — of the new schema. The two tests
+    // below pin the fix: the key is dropped whenever the branch's schema
+    // actually changed, and survives untouched otherwise. Never guessed at.
+
+    #[test]
+    fn concat_discriminator_key_survives_canonicalize_when_first_branch_is_unaffected() {
+        // A plain `Aggregate` first branch matches neither rewrite trigger,
+        // so its schema is identical before and after canonicalize.
+        let q = QueryExpr::concat_with_discriminator(
+            vec![count_by_service(), count_by_service()],
+            /* discriminator */ 0,
+            /* inner_key */ vec![1],
+        );
+        let QueryExpr::Concat {
+            discriminator_unique_key,
+            ..
+        } = canonicalize(q)
+        else {
+            panic!("expected Concat");
+        };
+        assert!(
+            discriminator_unique_key.is_some(),
+            "an untouched first branch's discriminator key must survive canonicalize"
+        );
+    }
+
+    #[test]
+    fn concat_discriminator_key_is_dropped_when_first_branch_gets_rewritten() {
+        // The first branch is exactly the heavy-hitter promotion trigger —
+        // `Limit{Sort{Aggregate([Count])}}`, with an empty (global)
+        // `partition_by` — so canonicalize rewrites it in place to
+        // `Aggregate{TopK}`, whose own output is a single column, not the
+        // original two (`[service, count]`). A discriminator key resolved
+        // against the original 2-column shape (`discriminator` = `service`
+        // at index 0, `inner_key` = `count` at index 1) must not silently
+        // survive pointing at the new 1-column schema.
+        let promotable_branch = limit(5, 0, sort(desc(1), count_by_service()));
+        let q = QueryExpr::concat_with_discriminator(
+            vec![promotable_branch, count_by_service()],
+            /* discriminator */ 0,
+            /* inner_key */ vec![1],
+        );
+        let QueryExpr::Concat {
+            children,
+            discriminator_unique_key,
+        } = canonicalize(q)
+        else {
+            panic!("expected Concat");
+        };
+        assert!(
+            is_topk_over_count(&children[0]),
+            "the first branch is still promoted normally"
+        );
+        assert!(
+            discriminator_unique_key.is_none(),
+            "a stale discriminator key must be dropped, never silently kept wrong"
+        );
     }
 
     #[test]

@@ -102,9 +102,14 @@ for why it's fine to ship unused.
 - `ConcatDiscriminatorKey<C>` — a small struct with **private** `discriminator: C` /
   `inner_key: Vec<C>` fields, buildable only via `ConcatDiscriminatorKey::new(discriminator, inner_key)`.
   Privacy is the enforcement mechanism for "the caller must explicitly name a
-  discriminator column" (see "Safety argument" below) — there is no path to a
-  non-empty `unique_keys` claim that doesn't go through a call site literally
-  writing out which column it's proving is distinct.
+  discriminator column" (see "Safety argument" below) — from other Rust code,
+  there is no path to a non-empty `unique_keys` claim that doesn't go through
+  a call site literally writing out which column it's proving is distinct.
+  Caveat: this is an API-level guarantee, not a data-level one — the derived
+  `Deserialize` impl bypasses `new()` entirely and can build one directly from
+  arbitrary field values in untrusted JSON. Not a reachable concern today (see
+  "Safety argument" below for why), but stated precisely rather than
+  overclaimed.
 - `QueryExpr::concat(children)` — the ordinary constructor (`discriminator_unique_key: None`),
   meant to replace the bare `QueryExpr::Concat { children }` struct literal
   everywhere in the tree so a future field addition doesn't force every call
@@ -190,6 +195,20 @@ file for its own `by`/`without` invariant. Concretely, this means:
   struct literal with `discriminator_unique_key: None` — both still produce
   `unique_keys: []`.
 
+**Caveat, stated precisely (review fix, see "Review fixes" below): this is a
+guarantee against *other Rust code*, not against arbitrary data.**
+`#[derive(Deserialize)]` on `ConcatDiscriminatorKey` generates same-module
+code that builds one directly from whatever `discriminator`/`inner_key`
+values are present in the input, bypassing `new()` and its
+naming-requirement entirely. A `Concat` node deserialized from untrusted JSON
+could therefore carry a `discriminator_unique_key` nobody's Rust call site
+ever named. This is not a reachable concern in the current repo — the only
+place a whole `QueryExpr` is deserialized at all is a same-file unit test —
+so no runtime hardening (a custom `Deserialize` impl, a post-deserialize
+validation pass) was added for it; if `QueryExpr` ever gains a real
+external-input deserialization path, this is the guarantee that would need
+revisiting there.
+
 ### Tests added (`crates/types/src/pre_asap/query_expr.rs`)
 
 - `merge_drops_the_branches_unique_keys` / `merge_and_setop_agree_on_unique_keys` —
@@ -204,6 +223,74 @@ file for its own `by`/`without` invariant. Concretely, this means:
   construction path's behavior.
 - `no_way_to_fabricate_a_unique_key_without_naming_a_discriminator` — the
   misuse check described above.
+
+## Review fixes
+
+A code review of the initial implementation found two real correctness gaps
+in the untested `resolve()`/`canonicalize()` path, plus a documentation
+accuracy issue. All three are fixed on the same PR:
+
+1. **`binder.rs`'s `collect_referenced_columns` didn't walk
+   `discriminator_unique_key`'s `ColumnRef`s.** This function seeds every
+   name a query references into the Binder's usage-derived fallback schema,
+   which a schema-less `Scan` leaf (PromQL) falls back to. The `Concat` arm
+   was updated with `, ..` only, unlike the analogous `Dedup.cols` case
+   (which *is* walked, `push_ref_name`-style). Concretely: a future
+   `concat_with_discriminator(branches, discriminator_col, inner_key)` call
+   over an open query, where the discriminator column isn't otherwise
+   referenced anywhere else in the tree, with a schema-less leaf `Scan` in
+   the first branch — the Binder's fallback schema wouldn't contain the
+   discriminator name, and `resolve.rs`'s later `resolve_column_ref` call
+   would fail `NotFound` for a column the caller correctly named. Fixed:
+   the `Concat` arm now pushes `key.discriminator()` and every
+   `key.inner_key()` column into the walk, mirroring `Dedup.cols` exactly.
+
+2. **Resolved `ColumnId`s in `discriminator_unique_key` could go stale after
+   `canonicalize()` runs.** `resolve_root_with_inherited` calls `resolve()`
+   first — which resolves the key's `ColumnRef`s into `ColumnId`s against
+   `children.first()`'s output schema *as it stood at that point* — then
+   `canonicalize()` runs afterward and can restructure that same first
+   branch: `try_promote_heavy_hitter` and `try_rewrite_rownumber_topk` both
+   replace a `Limit{Sort{Aggregate}}`/`Filter{...}` shape with a
+   differently-shaped `Aggregate`, anywhere within the branch (not only at
+   its own top level — the walk is recursive), potentially changing its
+   column count/order. `output_schema()` read the previously-resolved
+   `ColumnId`s with no consistency check, so a future branch matching one of
+   these rewrite triggers could silently produce a wrong `unique_keys` claim
+   — a wrong query answer, not a missed optimization (per `cse.rs`'s own
+   module doc). Fixed in `canon()` (`canonicalize.rs`): before recursing
+   into a `Concat`'s children, if `discriminator_unique_key` is `Some`,
+   snapshot `children.first()`'s output schema — exactly the schema
+   `resolve.rs` resolved the key against. After the children have been
+   canonicalized, re-derive that schema and compare by full equality
+   (`Schema` is `PartialEq`/`Eq`); any difference at all — not just a
+   column-count/type change, since a same-shaped-but-different schema is
+   just as unsafe to trust positionally — drops the key (`None`) rather
+   than risk keeping a `ColumnId` that now points at the wrong column or is
+   out of bounds. The key is never *re-derived* by guessing at name or
+   position: the two rewrites don't preserve column identity in a way
+   that's safe to infer, so dropping is the only sound outcome once the
+   schema has moved. Two new tests in `canonicalize.rs`'s test module cover
+   both outcomes: `concat_discriminator_key_survives_canonicalize_when_first_branch_is_unaffected`
+   (an untouched branch keeps its key) and
+   `concat_discriminator_key_is_dropped_when_first_branch_gets_rewritten`
+   (a branch matching the heavy-hitter promotion trigger — 2 columns
+   collapsing to 1 — drops its key, never keeps a wrong one).
+
+3. **Documentation overclaimed the privacy guarantee.** Both the doc comment
+   on `ConcatDiscriminatorKey` and this document's "Safety argument" section
+   said flatly "there is no path to a non-empty `unique_keys` claim that
+   doesn't go through a call site literally writing out which column it's
+   proving is distinct" — true for other *Rust code*, but not for
+   `#[derive(Deserialize)]`, which is same-module generated code that builds
+   the struct directly from field values in arbitrary JSON, bypassing
+   `new()` entirely. Currently unreachable (the only place a whole
+   `QueryExpr` is deserialized in the repo is a same-file unit test, not an
+   external-input path), but the claim was factually incomplete as stated.
+   Fixed by narrowing both to "from other Rust code" and adding the
+   `Deserialize` caveat explicitly, rather than adding speculative runtime
+   hardening for a currently-unreachable path (per the review's preferred
+   option).
 
 ## Future work (explicitly out of scope here)
 

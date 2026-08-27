@@ -564,9 +564,21 @@ impl<C> Reduction<C> {
 /// A caller-proven compound unique key for a [`QueryExpr::Concat`] (issue
 /// #228) — built only via [`QueryExpr::concat_with_discriminator`] /
 /// [`ConcatDiscriminatorKey::new`], never by naming `discriminator` directly
-/// in a struct literal (both fields are private): the only way to end up
-/// with one of these is to hand over a specific column as the discriminator,
-/// by name, at the call site.
+/// in a struct literal (both fields are private): from *other Rust code*,
+/// the only way to end up with one of these is to hand over a specific
+/// column as the discriminator, by name, at the call site.
+///
+/// Caveat: this is a Rust-API-level guarantee, not a data-level one. The
+/// derived `Deserialize` impl below is same-module generated code, so it
+/// builds a `ConcatDiscriminatorKey` directly from field values found in
+/// arbitrary input, bypassing `new()` and its "name the discriminator"
+/// requirement entirely — untrusted JSON can put in place any `discriminator`
+/// / `inner_key` an attacker likes. This is not a reachable concern today:
+/// the only place a whole `QueryExpr` is ever deserialized in this repo is a
+/// same-file unit test, not an external input path. If `QueryExpr` (or a
+/// subtree of it) ever gains a real from-external-input deserialization call
+/// site, this guarantee would need revisiting there (a custom `Deserialize`
+/// impl, or a post-deserialize validation pass) — nothing here does that yet.
 ///
 /// # Soundness
 ///
