@@ -9,3 +9,6 @@
 # Python bytecode cache (tools/clickhouse/extract_functions.py)
 __pycache__/
 *.pyc
+
+# Generated corpus IR dumps and anomaly reports
+/artifacts/

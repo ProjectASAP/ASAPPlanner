@@ -29,6 +29,24 @@ You can also provide the queries through stdin:
 cargo run -p asap-devtools --bin show_pre_asap_ir < queries.txt
 ```
 
+To dump and compare every PromQL corpus, run:
+
+```sh
+cargo run -p asap-devtools --bin analyze_corpora -- --corpora --out-dir artifacts/promql_pre_asap
+```
+
+This writes one successful-lowering JSONL dump and one error JSONL dump per
+corpus, plus per-query JSON files under `<corpus>/` and `<corpus>.errors/`,
+`summary.json`, and the heuristic `anomalies.md` report. The anomaly report
+compares exact duplicates, whitespace/case-normalized queries, coarse
+structural shapes, and distinct expressions that produce identical IR.
+
+The corresponding SQL corpus analysis is:
+
+```sh
+cargo run -p asap-devtools --bin analyze_corpora -- --sql-corpora --out-dir artifacts/sql_pre_asap
+```
+
 ## 3. Show the post-ASAP IR
 
 Run:

@@ -16,5 +16,7 @@ asap-aware-mapping = { path = "../asap-aware-mapping" }
 # async SQL path, JSON output) and by the topk_ir / canonical_examples
 # examples. Regular deps, not dev-deps: `[[bin]]` targets can't see dev-deps.
 asap-types = { path = "../types" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
