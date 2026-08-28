@@ -6,6 +6,12 @@ This document is for ASAPPlanner developers, architects, and researchers. It
 defines how the planner represents, composes, checks, and explains approximation
 guarantees for post-ASAP plans, including nested summaries.
 
+Implementation contracts, sketch formulas, extension steps, and validation
+commands live in the
+[developer guide](../developer_docs/end-to-end-accuracy-guarantees.md). This
+document is the authority for architectural decisions and correctness
+invariants; the developer guide is the authority for implementing them.
+
 ASAPPlanner is a mathematical planner. It does not execute sketches or import a
 sketch runtime. The planner derives guarantees from committed parameters and
 keeps data- or runtime-dependent quantities symbolic. A serving system may
@@ -179,260 +185,28 @@ comparison through floating-point behavior.
 This information is exported with candidate and rejection data so that a plan
 can be audited without reconstructing the proof from planner internals.
 
-### Extension points
-
-Accuracy reasoning and allocation are separate from cost modeling:
-
-```rust
-trait AccuracyModel {
-    fn local_guarantee(/* family, query, parameters */)
-        -> Option<ResultGuarantee>;
-
-    fn propagate(
-        &self,
-        op: &CompositionOperator,
-        inputs: &[ResultGuarantee],
-        local: Option<&ResultGuarantee>,
-        stats: &PropagationStats,
-    ) -> Result<ResultGuarantee, AccuracyError>;
-
-    fn satisfies(
-        &self,
-        guarantee: &ResultGuarantee,
-        target: &AccuracyTarget,
-    ) -> bool;
-}
-```
-
-`AccuracyBudgetAllocator` proposes finite parameter allocations for nested
-approximate layers. `CostModel` may rank only the candidates that survive
-guarantee propagation and target checking. Deployments may provide stronger
-accuracy models, but the default model remains conservative.
-
-### Core composition rules
-
-#### Exact values
-
-An exact value contributes zero error and zero failure probability:
-
-```text
-B_exact = 0
-delta_exact = 0
-```
-
-An exact input does not exempt a local approximate sketch from target checking.
-This matters when parameter ranges are clamped and the tightest representable
-configuration still misses the requested target.
-
-#### Additive and Lipschitz composition
-
-Compatible absolute bounds compose without an independence assumption:
-
-```text
-B_total <= B_input + B_local
-delta_total <= delta_input + delta_local
-```
-
-For a registered `L`-Lipschitz transformation:
-
-```text
-B_output <= L * B_input + B_local
-delta_output <= delta_input + delta_local
-```
-
-Failure probabilities use a union bound.
-
-#### Relative composition
-
-For a registered multiplicative rule whose values are known to be
-non-negative:
-
-```text
-epsilon_total =
-    epsilon_input
-  + epsilon_local
-  + epsilon_input * epsilon_local
-```
-
-The rule is rejected when sign information is missing or values may cross
-zero.
-
-#### Exact aggregation over approximate values
-
-For an exact sum, input bounds are summed and input failures are union-bounded.
-When the number of folded rows is required but unknown, the resulting bound
-stays symbolic.
-
-For exact minimum or maximum, the value-error bound is the maximum input bound
-and failures are union-bounded. This bounds the returned value; it does not by
-itself prove the identity of a winning key.
-
-#### Unsupported composition
-
-Approximate-over-approximate composition is accepted only when the model has a
-rule for the operator and metric. Cross-metric composition and unregistered
-same-metric composition return `UnsupportedComposition`. They never treat an
-approximate child as exact.
-
-### Sketch contracts
-
-The formulas below are planner contracts derived from committed sketch
-parameters. Parameter clamps are followed by a target check.
-
-#### KLL
-
-For quantile and rank queries, the built-in contract follows Apache
-DataSketches' empirical 99th-percentile single-sided normalized rank-error fit:
-
-```text
-epsilon_rank = 2.296 / k^0.9723
-k = ceil((2.296 / requested_epsilon)^(1 / 0.9723))
-```
-
-The contract has failure probability `0.01`. A target with a tighter `delta`
-requires a stronger deployment-specific model or an amplification contract and
-otherwise fails closed. The coefficients are specific to the cited KLL contract
-and must change if the selected implementation uses different semantics. See
-[Apache DataSketches KLL accuracy](https://datasketches.apache.org/docs/KLL/KLLAccuracyAndSize.html)
-and its
-[C++ contract](https://github.com/apache/datasketches-cpp/blob/master/kll/include/kll_sketch.hpp).
-
-#### DDSketch
-
-DDSketch uses its committed deterministic relative-error parameter:
-
-```text
-epsilon_relative = alpha
-delta = 0
-```
-
-#### HLL
-
-HLL starts from relative standard error:
-
-```text
-RSE = 1.04 / sqrt(2^p)
-```
-
-The default model uses a conservative Chebyshev 99% interval:
-
-```text
-epsilon_cardinality = 10 * 1.04 / sqrt(2^p)
-delta = 0.01
-```
-
-Sizing inverts this bound. If the supported precision cap cannot satisfy the
-target, HLL is rejected even when it would be the cheaper or preferred family.
-This contract requires an estimator whose variance is bounded by the stated RSE;
-changing estimator semantics requires changing the accuracy model.
-
-#### KMV and Theta
-
-The default model uses:
-
-```text
-RSE <= 1 / sqrt(k - 2)
-epsilon_cardinality = 10 / sqrt(max(k - 2, 1))
-delta = 0.01
-k = ceil(100 / requested_epsilon^2 + 2)
-```
-
-This is also a conservative Chebyshev 99% contract. Tighter confidence fails
-closed unless another model proves it. The variance premise follows the
-[Theta/KMV equations](https://datasketches.apache.org/docs/pdf/ThetaSketchEquations.pdf).
-
-#### Count-Min Sketch
-
-CMS uses an L1-normalized one-sided frequency bound:
-
-```text
-epsilon_l1 = e / width
-delta <= exp(-depth)
-absolute_error <= epsilon_l1 * ||f||_1
-```
-
-Sizing uses:
-
-```text
-width = ceil(e / requested_epsilon)
-depth = ceil(ln(1 / requested_delta))
-```
-
-Posterior CMS relaxation may reduce its width only under its documented L1
-assumptions.
-
-#### CountSketch
-
-CountSketch has a separate L2-normalized point-frequency contract. It does not
-reuse CMS sizing or posterior relaxation:
-
-```text
-epsilon_l2 = sqrt(3 / width)
-absolute_error <= epsilon_l2 * ||f||_2
-```
-
-One row is bad with probability at most `1/3`. For an independent odd number of
-rows, the median is assigned the conservative Hoeffding bound:
-
-```text
-delta <= exp(-depth / 18)
-width = ceil(3 / requested_epsilon^2)
-depth = an odd integer >= ceil(18 * ln(1 / requested_delta))
-```
-
-Zero or even depth has no modeled guarantee. Width/depth caps are checked
-against the target after sizing.
-
-### TopK membership certificate
-
-A heap attached to CMS or CountSketch can provide point-frequency estimates,
-but those estimates do not prove that the returned keys are the true TopK set.
-
-`PropagationStats` therefore accepts three pieces of evidence:
-
-- the lower confidence bound of the kth selected item;
-- the greatest upper confidence bound among excluded items; and
-- the union-bound failure probability of all intervals used by the
-  certificate.
-
-The intervals must already be widened by the underlying sketch error. Exact
-membership is certified only when:
-
-```text
-selected_kth_lower_bound > excluded_max_upper_bound
-```
-
-The result then has metric `TopKMembership`, zero membership error, and the
-provided interval failure probability. Missing values, non-finite values,
-invalid probabilities, equality, or overlap reject the candidate.
-
-Static planning currently has no ordinary source for these boundary intervals,
-so TopK sketch candidates remain fail-closed until planning-time or runtime
-evidence is supplied.
-
-### Hydra shared-grid composition
-
-A Hydra result includes both the inner per-subpopulation sketch error and an
-outer shared-grid collision term:
-
-```text
-B_hydra = B_inner + B_shared_grid
-delta_hydra <= delta_inner + delta_shared_grid
-```
-
-The second expression is a union bound. The shared-grid collision bound and
-failure probability depend on deployment/data statistics, so the default
-planner records them as:
-
-```text
-hydra_shared_grid_collision_bound
-hydra_shared_grid_failure_probability
-```
-
-The resulting expression and provenance are visible in the IR. Because these
-leaves cannot yet be evaluated, an accuracy-targeted Hydra candidate is not
-admitted. Copying the inner guarantee onto Hydra without the shared term would
-be unsound.
+### Accuracy-model boundary
+
+Accuracy reasoning and budget allocation are separate from cost modeling.
+The accuracy model derives local guarantees, propagates compatible guarantees,
+and checks the caller-visible result against its target. The budget allocator
+only proposes allocations; it does not prove them. `CostModel` may rank only
+candidates that survive the complete accuracy check.
+
+Composition rules are explicit and metric-aware. The built-in model supports
+only registered exact, additive, Lipschitz, relative, and exact-aggregation
+rules. It uses union bounds rather than assuming independence. Cross-metric and
+unregistered approximate compositions are unsupported and fail closed.
+
+Sketch contracts are derived from the parameters committed to the plan and
+must identify any estimator-specific premise. Count-Min Sketch and CountSketch
+remain distinct L1- and L2-frequency contracts. TopK membership requires a
+selection-margin certificate; a point-frequency guarantee is insufficient.
+Hydra must include both its inner error and shared-grid collision error.
+
+The concrete interfaces, formulas, evidence fields, and extension procedure
+are defined in the
+[developer guide](../developer_docs/end-to-end-accuracy-guarantees.md).
 
 ### Accuracy targets and allocation
 
@@ -549,34 +323,13 @@ a candidate was rejected.
 - **Security and robustness:** malformed non-finite or out-of-range numeric
   leaves fail closed.
 
-## Acceptance and test design
+## Verification requirements
 
-Acceptance behavior was derived from the required formulas and fail-closed
-boundaries. The current tests were written alongside or after implementation,
-so they are not an independent test design; final review is likewise not
-independent unless performed by another reviewer.
-
-Tests cover:
-
-- exact, additive, relative, Lipschitz, sum, and extremum propagation;
-- incompatible metrics and unsupported composition;
-- malformed and unknown symbolic values;
-- target checking after parameter clamps;
-- CountSketch L2 sizing distinct from CMS L1 sizing;
-- accepted separated and rejected overlapping TopK intervals;
-- Hydra inner-plus-shared-grid symbolic composition;
-- KLL/HLL/KMV/Theta confidence and `EpsilonDelta` behavior;
-- rejection before cost ranking and global selection; and
-- DAG export and frontend-to-post-ASAP integration.
-
-The repository validation commands are:
-
-```text
-cargo fmt --all
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-git diff --check
-```
+Tests must cover every registered local contract and composition rule, their
+invalid and unknown boundaries, target checking after parameter clamps,
+rejection before cost ranking, and exported proof or rejection data. The
+detailed test matrix and repository validation commands are maintained in the
+[developer guide](../developer_docs/end-to-end-accuracy-guarantees.md#validation).
 
 ## Risks, rollout, and exit criteria
 
