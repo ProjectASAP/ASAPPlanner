@@ -95,3 +95,50 @@ Does the summary's error behavior change as more items are inserted?
 Some summaries provide guarantees largely independent of stream length, while others may degrade or require resizing.
 
 The planner needs this information when selecting long-lived summaries.
+
+## End-to-end guarantees for nested summaries
+
+A single summary is sized against its own `AccuracyTarget`, but a summary
+over another summary's readout is legal only if the composed error still
+meets the requirement on the outer value. Legality is established before
+costing:
+
+```text
+candidate generation
+    -> guarantee propagation            (AccuracyModel::propagate)
+    -> AccuracyTarget satisfaction      (AccuracyModel::satisfies)
+    -> legal candidates only            (illegal ones -> MemoGroup::rejected)
+    -> cost ranking / global selection  (CostModel)
+```
+
+Every finalized post-ASAP value carries a machine-readable
+`ResultGuarantee`: a typed error metric, symbolic bound and probability
+expressions, and provenance. Exact values have zero error; a sketch
+readout's guarantee is derived from the sizing formula that produced its
+parameters.
+
+The built-in sketch contracts distinguish their error norms and confidence
+semantics:
+
+- CMS uses an L1-frequency bound, while CountSketch uses an L2-frequency
+  bound and is sized from both width and odd median depth. The two are not
+  interchangeable.
+- KLL, KMV, and Theta expose identified 99%-confidence contracts derived from
+  committed parameters. HLL retains its RSE magnitude but has unknown failure
+  probability because its current parameters encode precision, not a
+  confidence-level budget; it therefore cannot satisfy `EpsilonDelta`.
+- TopK membership is certified only when the widened confidence interval of
+  the kth selected item is strictly above every excluded item's widened
+  interval. Missing or overlapping interval evidence fails closed.
+- Hydra adds its shared-grid collision error to the inner sketch error and
+  union-bounds their failure probabilities. A typed evidence provider may
+  instantiate the shared-grid terms; without it they remain symbolic and an
+  accuracy-targeted Hydra candidate is not admitted.
+
+The default `AccuracyModel` is deliberately conservative. It supports
+registered same-metric additive, relative, and Lipschitz rules and exact
+sum/max/min over approximate inputs. It uses union-bound probabilities
+without assuming independence, preserves unknown statistics as unknown,
+and rejects unsupported composition instead of treating the child as exact.
+An `AccuracyBudgetAllocator` can propose resized layers; the `CostModel`
+ranks only candidates that satisfy the accuracy requirement.

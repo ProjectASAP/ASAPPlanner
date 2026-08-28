@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use super::guarantee::ResultGuarantee;
 use super::schema::{SummaryFamilyType, SummarySchema};
 use super::sketch::{GroupingStrategy, SketchQuery};
 use crate::pre_asap::{ColumnRef, QueryExpr, Reduction};
@@ -16,6 +17,18 @@ pub struct SummaryNode {
     /// Output schema of `expr` — the schema of the data flowing on the edge
     /// leading *from* this node to its parent(s).
     pub schema: SummarySchema,
+    /// The machine-readable accuracy guarantee of the *value* this node
+    /// produces (issue #172) — `Some` on every finalized, caller-visible
+    /// value: a `SummaryEstimate` readout, an `ExactAggregate`-family
+    /// `SummaryAgg` (its state *is* the value), or a `KeepPreAsap` subtree
+    /// (executed exactly). `None` on raw summary state — a sketch-family
+    /// `SummaryAgg`, `SummaryMerge`, `SummarySubtract`, `SummaryDelete`,
+    /// `SummaryJoin` — whose guarantee only exists once something reads it
+    /// out; and `None` on a readout of a family the plugged-in
+    /// `AccuracyModel` has no local guarantee for (`Sample`/`Wavelet`/
+    /// `StatModel`), which a fail-closed consumer must treat as "unknown",
+    /// never as exact.
+    pub guarantee: Option<ResultGuarantee>,
 }
 
 // ── Post-ASAP sketch-bound IR ────────────────────────────────────────────────

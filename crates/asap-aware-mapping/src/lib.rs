@@ -168,7 +168,20 @@
 //! don't reduce to a fact about a summary family's kind alone. `control_plane`'s own
 //! `sketch_algebra::capability::Capability`/`is_satisfied_by` is the
 //! reference downstream implementation.
+//!
+//! - [`accuracy`] — the [`AccuracyModel`](accuracy::AccuracyModel) /
+//!   [`AccuracyBudgetAllocator`](accuracy::AccuracyBudgetAllocator)
+//!   extension points (issue #172): the planning-time algebra that derives
+//!   a machine-readable [`ResultGuarantee`](asap_types::post_asap::ResultGuarantee)
+//!   for every finalized post-ASAP value, propagates it through
+//!   approximate-over-approximate compositions under conservative rules
+//!   (no independence assumptions, unknown statistics stay unknown), and
+//!   rejects — before any `CostModel` ranks anything — every candidate with
+//!   no sound rule or one that misses the applicable `AccuracyTarget`.
+//!   Legality and cost are separate responsibilities; see that module's
+//!   docs for the pipeline order and the root-vs-per-node precedence rules.
 
+pub mod accuracy;
 pub mod accuracy_reconciliation;
 pub mod cost_model;
 pub mod explanation;
@@ -179,6 +192,11 @@ pub mod rewrite;
 pub mod rollup;
 pub mod topk_reuse;
 
+pub use accuracy::{
+    AccuracyAllocation, AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel,
+    CompositionShape, DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
+    PropagationStats,
+};
 pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use explanation::{
@@ -192,10 +210,11 @@ pub use recurrence::{
 };
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
-    summary_candidates, GlobalSelection, ImplementError, Implementation, Matcher, MemoGroup,
-    PlanSpace, RankedGroup, RecurrenceProfileMap, Replacement, ReplacementProvenance,
-    ReplacementStrategy, ReplacementSubDAG, SelectedGroup, SharedSubtreeStrategy,
-    SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
+    search_workload_with_targets, summary_candidates, GlobalSelection, ImplementError,
+    Implementation, Matcher, MemoGroup, PlanSpace, Proposals, RankedGroup, RecurrenceProfileMap,
+    RejectedCandidate, Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG,
+    SelectedGroup, SharedSubtreeStrategy, SketchAlgorithmStrategy, TargetSubDAG,
+    MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;
 pub use topk_reuse::TopKLimitReuseStrategy;

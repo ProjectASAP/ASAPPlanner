@@ -88,6 +88,8 @@ The design is split into focused documents:
   subpopulation and time organization, roll-ups, sharing, semantic rewrites, and hybrid execution.
 - [Summary properties](summary_properties.md) lists the capabilities used to determine whether
   summaries and optimizations can be composed safely.
+- [End-to-end accuracy guarantees](end-to-end-accuracy-guarantees.md) specifies the typed
+  guarantee IR, sketch contracts, composition rules, target checking, and fail-closed boundaries.
 - [Explainability](explainability.md) describes how the planner reports available replacements
   using the same candidate space it optimizes.
 

@@ -143,13 +143,13 @@ async fn sql_full_query_root_stays_logical_under_the_identity_projection() {
 ///
 /// ```text
 /// SummaryEstimate { query: Quantile{0.99} }            → {…: Float64}
-/// └─ SummaryAgg { Kll{k:200}, col: metrics.latency }    → {…: Sketch(Kll, {k:200})}
+/// └─ SummaryAgg { Kll{k:269}, col: metrics.latency }    → {…: Sketch(Kll, {k:269})}
 ///    └─ KeepPreAsap(Scan)                                → {ts, service, latency, bytes}
 /// ```
 ///
 /// The SQL counterpart of `promql_to_post_asap.rs`'s
 /// `promql_quantile_of_rate_binds_kll_over_rate_accumulator`: same intent
-/// (`Quantile`), same KLL sizing (k=200 from ε=0.01), but the summarised
+/// (`Quantile`), same 99%-confidence KLL sizing (k=269 from ε=0.01), but the summarised
 /// column is the intent's own *named* SQL column rather than PromQL's
 /// synthetic sample value.
 #[tokio::test]
@@ -194,7 +194,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     assert_eq!(
         family,
         &SummaryFamilyType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()
         )
     );
@@ -214,7 +214,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     assert_eq!(
         summary_input.schema.fields[0].dtype,
         SummaryFamilyType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()
         )
     );
@@ -240,7 +240,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 /// distinct branch of the sketch-vs-exact decision than the quantile test
 /// above.
 #[tokio::test]
-async fn sql_count_distinct_binds_hll_sketch_over_named_column() {
+async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
     let pre_asap = lower(
         "SELECT COUNT(DISTINCT service) FROM metrics",
         AccuracyTarget::Epsilon(0.01),

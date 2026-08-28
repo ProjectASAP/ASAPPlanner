@@ -56,8 +56,8 @@ use std::time::Instant;
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{search_workload, Replacement, ReplacementSubDAG};
 use asap_types::dag_export::{
-    self, DagDecision, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetReplacement,
-    TargetReplacementAfter, WorkloadGraph,
+    self, DagDecision, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetRejection,
+    TargetReplacement, TargetReplacementAfter, WorkloadGraph,
 };
 use asap_types::post_asap::SummaryExpr;
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
@@ -358,6 +358,10 @@ struct PostAsapResults {
     /// [`dag_export::export_post_asap`] — every winning candidate spliced
     /// directly into that query's own pre-ASAP shape in place.
     post_graphs: Vec<(String, DagGraph)>,
+    /// One `(query_name, TargetRejection)` per accuracy-illegal candidate
+    /// the search refused (`MemoGroup::rejected`, issue #172) whose target
+    /// node is found in that query's own exported graph.
+    rejections: Vec<(String, TargetRejection)>,
 }
 
 /// Assign collision-free, explicit identities to structurally equal nodes
@@ -545,7 +549,19 @@ fn run_post_asap_with_progress(
     // subtree and inside `post_graph` as a whole.
     let mut lookup_cache = HashCache::new();
     let mut replacements = Vec::new();
+    let mut rejections = Vec::new();
     let mut matched = vec![false; winners.len()];
+    // Groups with accuracy-refused candidates (issue #172): matched to a
+    // query's graph nodes the same hash-then-structural-equality way.
+    let rejected_groups: Vec<_> = space
+        .groups()
+        .filter(|group| !group.rejected.is_empty())
+        .collect();
+    let mut rejected_by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (i, group) in rejected_groups.iter().enumerate() {
+        let hash = structural_hash(&group.target, &mut by_hash_cache);
+        rejected_by_hash.entry(hash).or_default().push(i);
+    }
     for (name, _, qe) in lowered_queries {
         let graph = dag_export::export(qe);
         for node in &graph.nodes {
@@ -558,6 +574,24 @@ fn run_post_asap_with_progress(
                     target_replacement(i as u32, node.id, &winners[i]),
                 ));
                 matched[i] = true;
+            }
+            let hash = structural_hash(source_expr, &mut lookup_cache);
+            for &i in rejected_by_hash.get(&hash).into_iter().flatten() {
+                let group = rejected_groups[i];
+                if *source_expr != *group.target {
+                    continue;
+                }
+                rejections.extend(group.rejected.iter().map(|rejected| {
+                    (
+                        name.clone(),
+                        TargetRejection {
+                            target_pre_id: node.id,
+                            strategy: rejected.strategy.to_string(),
+                            description: rejected.description.clone(),
+                            error: rejected.error.clone(),
+                        },
+                    )
+                }));
             }
         }
     }
@@ -602,6 +636,7 @@ fn run_post_asap_with_progress(
     PostAsapResults {
         replacements,
         post_graphs,
+        rejections,
     }
 }
 
@@ -675,6 +710,7 @@ async fn main() {
             graph,
             replacements: Vec::new(),
             post_graph: None,
+            rejections: Vec::new(),
         });
     }
     for (explanation, matched) in explanations.iter().zip(matched) {
@@ -702,6 +738,11 @@ async fn main() {
         for (query_name, post_graph) in results.post_graphs {
             if let Some(named) = queries.iter_mut().find(|q| q.name == query_name) {
                 named.post_graph = Some(post_graph);
+            }
+        }
+        for (query_name, rejection) in results.rejections {
+            if let Some(named) = queries.iter_mut().find(|q| q.name == query_name) {
+                named.rejections.push(rejection);
             }
         }
     }

@@ -26,10 +26,12 @@
 //!   with no grouping concept at all) has nothing for a
 //!   shared-multi-subpopulation structure to multiplex across.
 //! - **The family has a Hydra variant**
-//!   ([`asap_types::post_asap::hydra_kind_for`]): only `Cms` and
-//!   `CountSketch` are selectable today because their error guarantees are
-//!   modeled. `HydraKll` remains an explicit experimental IR value, but the
-//!   paper excludes quantiles and search therefore never emits it.
+//!   ([`asap_types::post_asap::hydra_kind_for`]): `Cms` and `CountSketch`
+//!   have structural Hydra mappings. `HydraKll` remains an explicit
+//!   experimental IR value, but the paper excludes quantiles and search
+//!   therefore never emits it. The shared-grid term is represented
+//!   symbolically and accuracy-targeted candidates are withheld until its
+//!   required statistics are supplied.
 //!
 //! Whether Hydra is *worth it* for a given estimated subpopulation
 //! cardinality is a cost-model question, deliberately out of scope here —
@@ -71,17 +73,21 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    default_hydra_params, hydra_kind_for, GroupingStrategy, HydraKind, SketchAlgorithm,
-    SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
+    default_hydra_params, hydra_kind_for, BoundExpr, CompositionOperator, GroupingStrategy,
+    GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams,
+    SummaryExpr, SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
 
+use crate::accuracy::{
+    AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, PropagationStats,
+};
 use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::replacement::{
-    bindable_intent, construct_summary, describe_intent, implementations_for_with,
-    summary_candidates, Implementation, Replacement, ReplacementStrategy, ReplacementSubDAG,
-    TargetSubDAG,
+    accuracy_target, bindable_intent, construct_summary_with, describe_intent,
+    implementations_for_with, summary_candidates, Implementation, Models, Replacement,
+    ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
 };
 
 /// Whether `reduction` has a genuine subpopulation concept for
@@ -121,7 +127,7 @@ static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 /// latter, matching every other strategy in this crate's "one strategy, one
 /// concern" shape.
 pub struct HydraGroupingStrategy<'a> {
-    cost_model: &'a dyn CostModel,
+    models: Models<'a>,
 }
 
 impl HydraGroupingStrategy<'static> {
@@ -131,7 +137,7 @@ impl HydraGroupingStrategy<'static> {
     /// offers.
     pub fn default_cost_model() -> Self {
         Self {
-            cost_model: &DEFAULT_COST_MODEL,
+            models: Models::with_default_accuracy(&DEFAULT_COST_MODEL),
         }
     }
 }
@@ -141,7 +147,25 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// static preference order — the same customization point
     /// [`crate::replacement::SketchAlgorithmStrategy::new`] already offers.
     pub fn new(cost_model: &'a dyn CostModel) -> Self {
-        Self { cost_model }
+        Self {
+            models: Models::with_default_accuracy(cost_model),
+        }
+    }
+
+    pub fn with_models_and_evidence(
+        cost_model: &'a dyn CostModel,
+        accuracy_model: &'a dyn AccuracyModel,
+        allocator: &'a dyn AccuracyBudgetAllocator,
+        evidence: &'a dyn AccuracyEvidenceProvider,
+    ) -> Self {
+        Self {
+            models: Models {
+                cost: cost_model,
+                accuracy: accuracy_model,
+                allocator,
+                evidence,
+            },
+        }
     }
 
     /// Every legal `SharedMultiSubpopulation` candidate for `target` — empty
@@ -170,7 +194,7 @@ impl<'a> HydraGroupingStrategy<'a> {
     /// Find the already-ranked candidate [`Implementation::Sketch`] matching
     /// `sketch_kind` among [`implementations_for_with`]'s exhaustive list for
     /// `intent`, bind `root` to that exact, already-decided candidate via
-    /// [`crate::replacement::construct_summary`] (no steering/forcing — see
+    /// [`crate::replacement::construct_summary_with`] (no steering/forcing — see
     /// the module docs' "No `ForceSketchKind`-style steering"), then swap the
     /// resulting `SummaryAgg`'s `grouping` field from the default
     /// `PerSubpopulationInstance` to
@@ -185,12 +209,13 @@ impl<'a> HydraGroupingStrategy<'a> {
         sketch_kind: SketchAlgorithm,
         hydra_kind: HydraKind,
     ) -> Option<ReplacementSubDAG> {
-        let implementation = implementations_for_with(intent, self.cost_model)
+        let implementation = implementations_for_with(intent, self.models.cost)
             .into_iter()
             .find(|candidate| {
                 matches!(candidate, Implementation::Sketch(kind) if *kind.algorithm() == sketch_kind)
             })?;
-        let node = construct_summary(root, implementation, self.cost_model).ok()?;
+        let node =
+            construct_summary_with(root, intent, implementation, self.models, None, None).ok()?;
         let per_subpopulation_params = per_subpopulation_sketch_params(&node)?;
         let params = default_hydra_params(hydra_kind.clone(), &per_subpopulation_params)?;
         let grouping = GroupingStrategy::SharedMultiSubpopulation {
@@ -198,7 +223,27 @@ impl<'a> HydraGroupingStrategy<'a> {
             params,
         };
 
-        let patched = with_grouping(node, grouping);
+        let (family, query) = match &node.expr {
+            SummaryExpr::SummaryEstimate {
+                summary_input,
+                query,
+            } => match &summary_input.expr {
+                SummaryExpr::SummaryAgg { family, .. } => (family, Some(query)),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let stats = self.models.evidence.propagation_stats(
+            &CompositionOperator::ApproximateAggregate,
+            family,
+            query,
+        );
+        let patched = with_grouping(node, grouping, &stats);
+        if let (Some(target), Some(guarantee)) = (accuracy_target(intent), &patched.guarantee) {
+            if !self.models.accuracy.satisfies(guarantee, target) {
+                return None;
+            }
+        }
         Some(ReplacementSubDAG {
             strategy: "HydraGroupingStrategy",
             replacement: Replacement::Summary(patched),
@@ -264,17 +309,22 @@ fn per_subpopulation_sketch_params(node: &SummaryNode) -> Option<SketchParams> {
 /// Recurses through a `SummaryEstimate` readout wrapper (the shape every
 /// sketch candidate this module builds actually has) to reach the
 /// `SummaryAgg` underneath.
-fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<SummaryNode> {
+fn with_grouping(
+    node: Rc<SummaryNode>,
+    grouping: GroupingStrategy,
+    stats: &PropagationStats,
+) -> Rc<SummaryNode> {
     match &node.expr {
         SummaryExpr::SummaryEstimate {
             summary_input,
             query,
         } => Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryEstimate {
-                summary_input: with_grouping(Rc::clone(summary_input), grouping),
+                summary_input: with_grouping(Rc::clone(summary_input), grouping, stats),
                 query: query.clone(),
             },
             schema: node.schema.clone(),
+            guarantee: node.guarantee.as_ref().map(|g| hydra_guarantee(g, stats)),
         }),
         SummaryExpr::SummaryAgg {
             child,
@@ -304,10 +354,11 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
                     grouping,
                 },
                 schema: grouped_schema,
+                guarantee: None,
             })
         }
         // Never reached by this module's own callers (they only ever pass a
-        // node `construct_summary` just bound for a `Sketch`
+        // node `construct_summary_with` just bound for a `Sketch`
         // candidate, which is always `SummaryAgg` or
         // `SummaryEstimate(SummaryAgg)`) — returning the node unchanged
         // rather than panicking keeps this as conservative as the rest of
@@ -316,10 +367,64 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
     }
 }
 
+/// Compose the inner per-subpopulation guarantee with Hydra's outer shared
+/// grid. The paper's collision term depends on deployment/data statistics;
+/// keeping those leaves symbolic makes the formula explicit while ensuring
+/// target satisfaction fails closed until a caller supplies them.
+fn hydra_guarantee(inner: &ResultGuarantee, stats: &PropagationStats) -> ResultGuarantee {
+    let mut provenance = inner.provenance.clone();
+    provenance.extend(stats.evidence_provenance.clone());
+    provenance.push(GuaranteeSource::ChildGuarantee {
+        input_index: 0,
+        guarantee: Box::new(inner.clone()),
+    });
+    if stats.hydra_shared_grid_collision_bound.is_none() {
+        provenance.push(GuaranteeSource::UnavailableStatistic {
+            statistic: "hydra_shared_grid_collision_bound".into(),
+        });
+    }
+    if stats.hydra_shared_grid_failure_probability.is_none() {
+        provenance.push(GuaranteeSource::UnavailableStatistic {
+            statistic: "hydra_shared_grid_failure_probability".into(),
+        });
+    }
+    provenance.push(GuaranteeSource::CompositionStep {
+        operator: CompositionOperator::ApproximateAggregate,
+        rule: "hydra_shared_grid_union_bound".into(),
+    });
+    ResultGuarantee {
+        metric: inner.metric,
+        bound: BoundExpr::Sum {
+            terms: vec![
+                inner.bound.clone(),
+                stats.hydra_shared_grid_collision_bound.map_or_else(
+                    || BoundExpr::Unknown {
+                        statistic: "hydra_shared_grid_collision_bound".into(),
+                    },
+                    |value| BoundExpr::Constant { value },
+                ),
+            ],
+        },
+        failure_probability: ProbabilityExpr::UnionBound {
+            terms: vec![
+                inner.failure_probability.clone(),
+                stats.hydra_shared_grid_failure_probability.map_or_else(
+                    || ProbabilityExpr::Unknown {
+                        statistic: "hydra_shared_grid_failure_probability".into(),
+                    },
+                    |value| ProbabilityExpr::Constant { value },
+                ),
+            ],
+        },
+        provenance,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::post_asap::HydraParams;
+    use crate::accuracy::{DefaultAccuracyModel, EqualSplitAllocator};
+    use asap_types::post_asap::ErrorMetric;
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -385,10 +490,39 @@ mod tests {
         ))));
     }
 
+    #[test]
+    fn hydra_composes_inner_and_shared_grid_error_symbolically() {
+        let inner = ResultGuarantee {
+            metric: ErrorMetric::Frequency,
+            bound: BoundExpr::Constant { value: 0.01 },
+            failure_probability: ProbabilityExpr::Constant { value: 0.02 },
+            provenance: vec![],
+        };
+        let composed = hydra_guarantee(&inner, &PropagationStats::default());
+
+        assert_eq!(composed.metric, ErrorMetric::Frequency);
+        assert!(matches!(
+            composed.bound,
+            BoundExpr::Sum { ref terms }
+                if matches!(terms.as_slice(), [
+                    BoundExpr::Constant { value },
+                    BoundExpr::Unknown { statistic },
+                ] if *value == 0.01 && statistic == "hydra_shared_grid_collision_bound")
+        ));
+        assert!(matches!(
+            composed.failure_probability,
+            ProbabilityExpr::UnionBound { ref terms }
+                if matches!(terms.as_slice(), [
+                    ProbabilityExpr::Constant { value },
+                    ProbabilityExpr::Unknown { statistic },
+                ] if *value == 0.02 && statistic == "hydra_shared_grid_failure_probability")
+        ));
+    }
+
     // ── HydraGroupingStrategy ─────────────────────────────────────────────
 
     #[test]
-    fn matches_a_grouped_count_aggregate() {
+    fn does_not_match_a_grouped_count_with_an_unprovable_accuracy_target() {
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -397,7 +531,7 @@ mod tests {
         };
         let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        assert!(HydraGroupingStrategy::default_cost_model().matches(&target));
+        assert!(!HydraGroupingStrategy::default_cost_model().matches(&target));
     }
 
     #[test]
@@ -438,10 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn count_offers_hydra_candidates_for_cms_and_count_sketch() {
-        // summary_candidates(Count) = [Cms, CountSketch] — both are now
-        // mapped to a Hydra variant (and, per `HydraKind`'s own doc, both
-        // are the Hydra paper's actual proven construction, unlike KLL's).
+    fn count_with_an_accuracy_target_has_no_hydra_candidate() {
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -451,74 +582,50 @@ mod tests {
         let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
-        assert_eq!(replacements.len(), 2, "{replacements:?}");
+        assert!(replacements.is_empty(), "{replacements:?}");
+    }
 
-        for replacement in &replacements {
-            let Replacement::Summary(node) = &replacement.replacement else {
-                panic!("expected a Summary replacement");
-            };
-            let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
-                panic!("expected SummaryEstimate root, got {:?}", node.expr);
-            };
-            let SummaryExpr::SummaryAgg {
-                family, grouping, ..
-            } = &summary_input.expr
-            else {
-                panic!("expected SummaryAgg, got {:?}", summary_input.expr);
-            };
-            let SummaryFamilyType::Sketch(kind, state_grouping) = family else {
-                panic!("expected a Sketch family, got {family:?}");
-            };
-            assert_eq!(state_grouping, grouping);
-            assert!(summary_input
-                .schema
-                .fields
-                .iter()
-                .any(|field| &field.dtype == family));
+    struct ZeroSharedGridEvidence;
 
-            // The Hydra params must carry over exactly the same
-            // (width, depth) the per-subpopulation candidate committed to —
-            // `default_hydra_params` generalizes over *which* inner sketch
-            // it's wrapping rather than assuming a KLL-shaped `k`.
-            match kind.algorithm() {
-                SketchAlgorithm::Cms => {
-                    let SketchParams::Cms { width, depth } = kind.params() else {
-                        panic!("expected Cms params, got {:?}", kind.params());
-                    };
-                    assert_eq!(
-                        grouping,
-                        &GroupingStrategy::SharedMultiSubpopulation {
-                            kind: HydraKind::HydraCms,
-                            params: HydraParams::HydraCms {
-                                width: *width,
-                                depth: *depth,
-                                shared_rows: *depth,
-                                shared_columns: *width,
-                            },
-                        }
-                    );
-                }
-                SketchAlgorithm::CountSketch => {
-                    let SketchParams::CountSketch { width, depth } = kind.params() else {
-                        panic!("expected CountSketch params, got {:?}", kind.params());
-                    };
-                    assert_eq!(
-                        grouping,
-                        &GroupingStrategy::SharedMultiSubpopulation {
-                            kind: HydraKind::HydraCountSketch,
-                            params: HydraParams::HydraCountSketch {
-                                width: *width,
-                                depth: *depth,
-                                shared_rows: *depth,
-                                shared_columns: *width,
-                            },
-                        }
-                    );
-                }
-                other => panic!("unexpected Hydra candidate algorithm: {other:?}"),
+    impl AccuracyEvidenceProvider for ZeroSharedGridEvidence {
+        fn propagation_stats(
+            &self,
+            _op: &CompositionOperator,
+            _family: &SummaryFamilyType,
+            _query: Option<&asap_types::post_asap::SketchQuery>,
+        ) -> PropagationStats {
+            PropagationStats {
+                hydra_shared_grid_collision_bound: Some(0.0),
+                hydra_shared_grid_failure_probability: Some(0.0),
+                ..Default::default()
             }
-            assert!(!replacement.rationale.is_empty());
         }
+    }
+
+    #[test]
+    fn hydra_shared_grid_evidence_is_consumed_by_candidate_construction() {
+        let intent = AggIntent::Count {
+            accuracy: AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        };
+        let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
+        let strategy = HydraGroupingStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &ZeroSharedGridEvidence,
+        );
+        let replacements = strategy.replacements(&TargetSubDAG::new(&q));
+        assert_eq!(replacements.len(), 2, "{replacements:?}");
+        assert!(replacements.iter().all(|candidate| matches!(
+            &candidate.replacement,
+            Replacement::Summary(node)
+                if node.guarantee.as_ref().is_some_and(|g|
+                    g.bound.evaluate().is_some()
+                        && g.failure_probability.evaluate().is_some())
+        )));
     }
 
     #[test]
