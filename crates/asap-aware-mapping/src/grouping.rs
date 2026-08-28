@@ -275,6 +275,11 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
                 query: query.clone(),
             },
             schema: node.schema.clone(),
+            // The per-subpopulation guarantee carries over unchanged: this
+            // axis only patches `grouping`. Hydra's own shared-grid noise
+            // term (issue #256, Theorem 2) is not folded in here — see
+            // issue #172's follow-ups.
+            guarantee: node.guarantee.clone(),
         }),
         SummaryExpr::SummaryAgg {
             child,
@@ -304,6 +309,7 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
                     grouping,
                 },
                 schema: grouped_schema,
+                guarantee: node.guarantee.clone(),
             })
         }
         // Never reached by this module's own callers (they only ever pass a

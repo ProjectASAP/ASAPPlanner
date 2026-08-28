@@ -838,6 +838,7 @@ mod tests {
                         fields: vec![],
                         time_index: None,
                     },
+                    guarantee: None,
                 }),
                 family: family.clone(),
                 col: asap_types::pre_asap::expr_ir::ColumnRef::Named("value".into()),
@@ -852,6 +853,7 @@ mod tests {
                 }],
                 time_index: None,
             },
+            guarantee: None,
         }
     }
 

@@ -46,7 +46,7 @@ use std::rc::Rc;
 
 use serde::Serialize;
 
-use crate::post_asap::{SummaryExpr, SummaryNode};
+use crate::post_asap::{AccuracyError, ResultGuarantee, SummaryExpr, SummaryNode};
 use crate::pre_asap::cse::{structural_hash, HashCache};
 use crate::pre_asap::query_expr::{QueryExpr, Source};
 
@@ -199,6 +199,12 @@ pub struct NamedGraph {
     /// `NamedGraph` is unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_graph: Option<DagGraph>,
+    /// Accuracy-illegal candidates a higher layer's search refused for
+    /// targets in this query (issue #172) — see [`TargetRejection`]. Always
+    /// empty coming out of this module; omitted from the JSON when empty,
+    /// same additive rule as `replacements`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejections: Vec<TargetRejection>,
 }
 
 /// A batch of named queries — the shape the viewer's multi-query / compare
@@ -277,6 +283,33 @@ pub struct SummaryDagNode {
     /// Child node ids, in the variant's field order (e.g. `SummaryJoin` is
     /// `[outer, inner]`).
     pub children: Vec<u32>,
+    /// The value's machine-readable accuracy guarantee (issue #172) —
+    /// [`SummaryNode::guarantee`] serialized structurally (metric, symbolic
+    /// bound, failure probability, provenance including any budget
+    /// allocation), not as prose. Omitted when the node carries none (raw
+    /// summary state, or a family with no error model), so every consumer
+    /// predating this field parses the same shape it always has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guarantee: Option<ResultGuarantee>,
+}
+
+/// One accuracy-illegal candidate a higher layer's search refused for a
+/// target (issue #172) — `asap_aware_mapping::replacement::RejectedCandidate`
+/// re-shaped into this crate's own crate-agnostic vocabulary, the same
+/// layering rule as [`TargetReplacement`]. Carried on
+/// [`NamedGraph::rejections`] so a renderer can explain *why* a target kept
+/// its raw/pre-ASAP form, not only what won elsewhere.
+#[derive(Debug, Clone, Serialize)]
+pub struct TargetRejection {
+    /// Id of the [`DagNode`] in this query's own `graph.nodes` the refused
+    /// candidate targeted.
+    pub target_pre_id: u32,
+    /// Which strategy considered the candidate.
+    pub strategy: String,
+    /// What the candidate would have been.
+    pub description: String,
+    /// The typed reason it was refused.
+    pub error: AccuracyError,
 }
 
 /// One post-ASAP `SummaryNode` tree, flattened the same way [`DagGraph`]
@@ -315,6 +348,7 @@ fn push_summary_node(
     label: String,
     detail: serde_json::Value,
     children: Vec<u32>,
+    guarantee: Option<ResultGuarantee>,
 ) -> u32 {
     let id = nodes.len() as u32;
     nodes.push(SummaryDagNode {
@@ -323,6 +357,7 @@ fn push_summary_node(
         label,
         detail,
         children,
+        guarantee,
     });
     id
 }
@@ -433,14 +468,21 @@ fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
         let inner_kind = pre_asap_subgraph.nodes[pre_asap_subgraph.root as usize].kind;
         let label = format!("KeepPreAsap({inner_kind})");
         let detail = serde_json::json!({ "pre_asap_subgraph": pre_asap_subgraph });
-        return push_summary_node(nodes, "KeepPreAsap", label, detail, vec![]);
+        return push_summary_node(
+            nodes,
+            "KeepPreAsap",
+            label,
+            detail,
+            vec![],
+            node.guarantee.clone(),
+        );
     }
     let children: Vec<u32> = summary_children(&node.expr)
         .into_iter()
         .map(|child| build_summary(child, nodes))
         .collect();
     let (kind, label, detail) = summary_shape(&node.expr);
-    push_summary_node(nodes, kind, label, detail, children)
+    push_summary_node(nodes, kind, label, detail, children, node.guarantee.clone())
 }
 
 /// One replacement site a higher layer (the `dag_export` binary) found by
@@ -725,7 +767,17 @@ fn build_summary_hybrid(
         .into_iter()
         .map(|child| build_summary_hybrid(child, nodes, cache, find_winner))
         .collect();
-    let (kind, label, detail) = summary_shape(&node.expr);
+    let (kind, label, mut detail) = summary_shape(&node.expr);
+    // The merged graph's `DagNode` has no dedicated guarantee field (it is
+    // the pre-ASAP node shape); the guarantee rides in `detail` under the
+    // same key/shape `SummaryDagNode::guarantee` uses, additively.
+    if let Some(guarantee) = &node.guarantee {
+        if let (serde_json::Value::Object(map), Ok(value)) =
+            (&mut detail, serde_json::to_value(guarantee))
+        {
+            map.insert("guarantee".into(), value);
+        }
+    }
     let id = push_summary_originated_node(nodes, kind, label, detail, children);
     nodes[id as usize].schema = Some(summary_schema_json(&node.schema));
     id
@@ -1414,5 +1466,132 @@ mod tests {
             "the exported Aggregate node's hash must match cse::structural_hash \
              on the Aggregate subtree it represents, not just the root"
         );
+    }
+
+    /// Issue #172: a readout's guarantee is exported structurally — metric,
+    /// symbolic bound, failure probability, provenance (allocation
+    /// included) — and a rejection carries its typed reason.
+    #[test]
+    fn export_carries_guarantee_allocation_and_rejection_reason() {
+        use crate::post_asap::{
+            BoundExpr, CompositionOperator, ErrorMetric, GroupingStrategy, GuaranteeSource,
+            ProbabilityExpr, SketchAlgorithm, SketchKind, SketchParams, SketchQuery,
+            SummaryFamilyType, SummarySchema,
+        };
+        let leaf = Rc::new(scan("t", vec![Column::new("v", DataType::Float64, false)]));
+        let kept = Rc::new(SummaryNode {
+            expr: SummaryExpr::KeepPreAsap(Rc::clone(&leaf)),
+            schema: SummarySchema {
+                fields: vec![],
+                time_index: None,
+            },
+            guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
+        });
+        let agg = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryAgg {
+                child: kept,
+                family: SummaryFamilyType::Sketch(
+                    SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 40 }),
+                    GroupingStrategy::default(),
+                ),
+                col: crate::pre_asap::expr_ir::ColumnRef::Named("v".into()),
+                reduction: Reduction::by(vec![]),
+                grouping: GroupingStrategy::default(),
+            },
+            schema: SummarySchema {
+                fields: vec![],
+                time_index: None,
+            },
+            guarantee: None,
+        });
+        let guarantee = ResultGuarantee {
+            metric: ErrorMetric::Rank,
+            bound: BoundExpr::Sum {
+                terms: vec![
+                    BoundExpr::Constant { value: 0.05 },
+                    BoundExpr::Constant { value: 0.05 },
+                ],
+            },
+            failure_probability: ProbabilityExpr::UnionBound {
+                terms: vec![ProbabilityExpr::Constant { value: 0.01 }],
+            },
+            provenance: vec![
+                GuaranteeSource::CompositionStep {
+                    operator: CompositionOperator::ApproximateAggregate,
+                    rule: "additive_union_bound".into(),
+                },
+                GuaranteeSource::BudgetAllocation {
+                    allocator: "EqualSplitAllocator".into(),
+                    layer: 0,
+                    layer_count: 2,
+                    local_target: AccuracyTarget::Epsilon(0.05),
+                    end_to_end_target: AccuracyTarget::Epsilon(0.1),
+                },
+            ],
+        };
+        let root = SummaryNode {
+            expr: SummaryExpr::SummaryEstimate {
+                summary_input: agg,
+                query: SketchQuery::Quantile { q: 0.99 },
+            },
+            schema: SummarySchema {
+                fields: vec![],
+                time_index: None,
+            },
+            guarantee: Some(guarantee),
+        };
+        let graph = export_summary(&root);
+        let json = serde_json::to_value(&graph).unwrap();
+        let root_json = &json["nodes"][graph.root as usize];
+        assert_eq!(root_json["guarantee"]["metric"], "rank");
+        assert_eq!(root_json["guarantee"]["bound"]["op"], "sum");
+        assert_eq!(
+            root_json["guarantee"]["failure_probability"]["op"],
+            "union_bound"
+        );
+        let provenance = root_json["guarantee"]["provenance"].as_array().unwrap();
+        assert!(provenance
+            .iter()
+            .any(|s| s["kind"] == "budget_allocation" && s["layer_count"] == 2));
+        assert!(provenance.iter().any(|s| s["kind"] == "composition_step"));
+        // Raw sketch state carries none; the exact leaf carries zero error.
+        let state = &json["nodes"][1];
+        assert_eq!(state["kind"], "SummaryAgg");
+        assert!(state.get("guarantee").is_none());
+        assert_eq!(json["nodes"][0]["guarantee"]["bound"]["op"], "zero");
+
+        let named = NamedGraph {
+            name: "q".into(),
+            source: None,
+            graph: export(&leaf),
+            replacements: vec![],
+            post_graph: None,
+            rejections: vec![TargetRejection {
+                target_pre_id: 0,
+                strategy: "SketchAlgorithmStrategy".into(),
+                description: "quantile over quantile".into(),
+                error: AccuracyError::UnsupportedComposition {
+                    operator: CompositionOperator::ApproximateAggregate,
+                    input_metrics: vec![ErrorMetric::Rank],
+                    local_metric: Some(ErrorMetric::Rank),
+                    reason: "no registered rule".into(),
+                },
+            }],
+        };
+        let json = serde_json::to_value(&named).unwrap();
+        assert_eq!(
+            json["rejections"][0]["error"]["kind"],
+            "unsupported_composition"
+        );
+        assert_eq!(json["rejections"][0]["error"]["input_metrics"][0], "rank");
+        // Additive: a graph with no rejections omits the key entirely.
+        let plain = NamedGraph {
+            rejections: vec![],
+            ..named
+        };
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("rejections")
+            .is_none());
     }
 }
