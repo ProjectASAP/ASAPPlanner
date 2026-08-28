@@ -56,8 +56,12 @@ use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
+use crate::recurrence::{
+    self, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
+};
 use crate::replacement::{
-    realize_child, Implementation, Replacement, ReplacementSubDAG, TargetSubDAG,
+    realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
+    TargetSubDAG,
 };
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
@@ -213,6 +217,17 @@ pub trait CostModel {
     /// [`replacement::default_size_params`], `asap-plan`'s built-in formulas
     /// (unchanged) — a deployment that only needs to reorder candidates,
     /// not resize them, can leave this method unimplemented.
+    ///
+    /// # Contract
+    ///
+    /// The returned parameters MUST make `kind` satisfy the supplied
+    /// `(eps, delta)` accuracy budget. This is a semantic requirement, not a
+    /// requirement that parameter fields themselves be numerically monotonic:
+    /// catalog rungs and empirically tuned layouts are allowed, but returning
+    /// a configuration that misses the requested budget makes the resulting
+    /// plan invalid. Accuracy reconciliation relies on this same contract;
+    /// any implementation satisfying a tighter budget necessarily satisfies
+    /// a looser budget for the identical aggregate query.
     fn size_params(
         &self,
         kind: SketchAlgorithm,
@@ -338,6 +353,117 @@ pub trait CostModel {
         } else {
             ShareDecision::RecomputeIndependently
         }
+    }
+
+    // ── Recurrence-aware costing (issue #287) ───────────────────────────
+    //
+    // See `crate::recurrence`'s module docs for the full cost model
+    // (`maintained_cost_rate`/`recompute_cost_rate` formulas, units,
+    // provenance of every new input). The three hooks below are the
+    // per-update-event/per-read/per-recomputation cost primitives that
+    // formula is built from; `cse_share_decision_with_recurrence` is the
+    // composed decision, mirroring how `cse_share_decision` above composes
+    // `cse_recompute_cost`/`cse_shared_maintenance_cost`.
+
+    /// Cost of maintaining `candidate`'s bound summary for a single ingest
+    /// update event. Units: cost units per update — the
+    /// `maintenance_cost_per_update` term of `maintained_cost_rate`
+    /// (`crate::recurrence`), where it is multiplied by an `UpdateRate` in
+    /// **Hz** (`update_rate * maintenance_cost_per_update`).
+    ///
+    /// Default: a small nominal constant, `Cost(0.01)` — deliberately
+    /// **not** derived from
+    /// [`cse_shared_maintenance_cost`](Self::cse_shared_maintenance_cost)'s
+    /// per-family weight table. That table's values (~1-6) are calibrated
+    /// against [`cse_recompute_cost`](Self::cse_recompute_cost)'s
+    /// structural-size proxy for a *life-of-the-workload*, one-time
+    /// maintenance magnitude — multiplying them by a real ingest rate (even
+    /// a modest one, e.g. 100 events/s) inflates `maintained_cost_rate` far
+    /// past any realistic `recompute_cost_rate`, making `Share`
+    /// unreachable regardless of how infrequently the summary is actually
+    /// read (issue #287 review). `Cost(0.01)` — one order of magnitude
+    /// below [`summary_read_cost`](Self::summary_read_cost)'s own nominal
+    /// default — reflects only that an incremental per-event update is
+    /// normally far cheaper than a full read or recompute, not a measured
+    /// ratio; a deployment with a real per-update cost (e.g. observed
+    /// sketch-insert latency) should override this instead of relying on
+    /// this placeholder.
+    fn maintenance_cost_per_update(&self, _candidate: &CseCandidate) -> Cost {
+        Cost(0.01)
+    }
+
+    /// Cost of one read against `candidate`'s already-maintained summary.
+    /// Units: cost units per read — the `summary_read_cost` term of
+    /// `maintained_cost_rate`. Default: `Cost(1.0)`, a nominal unit read —
+    /// illustrative, like every other numeric default in this trait; a
+    /// deployment with a real read-path cost should override this.
+    fn summary_read_cost(&self, _candidate: &CseCandidate) -> Cost {
+        Cost(1.0)
+    }
+
+    /// Cost of recomputing `candidate.subtree` once, from the pre-ASAP/raw
+    /// path. Units: cost units per recomputation — the `raw_recompute_cost`
+    /// term of `recompute_cost_rate`. Default: delegates to
+    /// [`cse_recompute_cost`](Self::cse_recompute_cost) (the same
+    /// structural-size proxy `cse_share_decision` already uses).
+    fn raw_recompute_cost(&self, candidate: &CseCandidate) -> Cost {
+        self.cse_recompute_cost(candidate)
+    }
+
+    /// The one-time cost of materializing `candidate`'s bound summary for
+    /// the *first* time — before any read or ingest-driven update charges
+    /// anything. Units: cost units (a one-time [`Cost`], not a rate).
+    ///
+    /// This is what makes a purely (or mostly) one-shot comparison
+    /// economically sound: without a build cost, "maintained" looked free
+    /// to construct, so `Share` won unconditionally for any number of
+    /// one-shot consumers, no matter how few (issue #287 review, bug 1).
+    /// With it, a single one-shot consumer never benefits from sharing
+    /// (build + one read costs more than one direct recompute), while many
+    /// one-shot consumers still amortize the fixed build cost across their
+    /// reads, same as before.
+    ///
+    /// Default: delegates to
+    /// [`raw_recompute_cost`](Self::raw_recompute_cost) — materializing a
+    /// summary for the first time costs about as much as computing its
+    /// answer once from raw, since there's no delta history yet to apply
+    /// incrementally. A deployment with a distinct measured "cold build"
+    /// cost should override this instead.
+    fn summary_build_cost(&self, candidate: &CseCandidate) -> Cost {
+        self.raw_recompute_cost(candidate)
+    }
+
+    /// The recurrence-aware counterpart to
+    /// [`cse_share_decision`](Self::cse_share_decision): the same
+    /// `Share`/`RecomputeIndependently` choice, weighted by how *often*
+    /// `candidate`'s consumers actually run (`recurrence`) instead of only
+    /// how many structurally exist (`candidate.consumer_count`). See
+    /// `crate::recurrence`'s module docs for the full design.
+    ///
+    /// - `recurrence.is_empty()` (no [`RepeatingEntry`]/[`DataCharacteristics`]-derived
+    ///   metadata available): delegates to
+    ///   [`cse_share_decision`](Self::cse_share_decision), preserving
+    ///   today's structural-consumer-count behavior exactly — issue #287's
+    ///   "preserve existing behavior when recurrence metadata is
+    ///   unavailable" requirement.
+    /// - Otherwise: compares `maintained_cost_rate` against
+    ///   `recompute_cost_rate` (both cost units/second). If
+    ///   `recurrence.one_shot_consumers > 0` alongside any recurring rate
+    ///   (mixed one-shot + repeating work), `horizon` MUST be `Some` —
+    ///   `Err(RecurrenceError::MissingHorizon)` otherwise, per "the cost
+    ///   model must not silently combine rate-valued and one-shot costs".
+    ///   With no one-shot consumers, `horizon` is optional (comparing bare
+    ///   rates is equivalent to comparing `rate * H` for any fixed `H > 0`).
+    ///
+    /// [`RepeatingEntry`]: asap_types::workload::RepeatingEntry
+    /// [`DataCharacteristics`]: asap_types::workload::DataCharacteristics
+    fn cse_share_decision_with_recurrence(
+        &self,
+        candidate: &CseCandidate,
+        recurrence: &RecurrenceProfile,
+        horizon: Option<Horizon>,
+    ) -> Result<RecurrenceCostExplanation, RecurrenceError> {
+        recurrence::decide(self, candidate, recurrence, horizon)
     }
 
     /// Estimate a comparable, numeric cost for one already-constructed
@@ -478,6 +604,18 @@ impl CostModel for DefaultCostModel {
     ///   only if `target` itself can't be bound at all (schema derivation
     ///   failed) — never expected for a target that's already part of a
     ///   legitimate workload tree.
+    ///
+    ///   **Exception**: a [`ReplacementProvenance::AccuracyReconciliation`]
+    ///   candidate (issue #273) never rebuilds `target` — it reads a
+    ///   sibling `rc` that this crate builds regardless — so it gets its
+    ///   own arm: `cse_shared_maintenance_cost` against `rc`'s **own** bound
+    ///   summary (a "read", not a "rebuild `target` per consumer") instead
+    ///   of the `cse_recompute_cost * consumer_count` formula the other
+    ///   `Rewrite` shapes fall through to. See
+    ///   `accuracy_reconciliation.rs`'s own "Costing this candidate shape"
+    ///   module docs for why that formula would otherwise misprice it (in
+    ///   the wrong direction, worse the more consumers would actually
+    ///   benefit from sharing).
     fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
         let consumer_count = target.consumer_count.max(1);
         match &candidate.replacement {
@@ -488,6 +626,25 @@ impl CostModel for DefaultCostModel {
                     consumer_count,
                 };
                 (self.cse_recompute_cost(&cse) + self.cse_shared_maintenance_cost(&cse)).0
+            }
+            Replacement::Rewrite(rc)
+                if candidate.provenance == ReplacementProvenance::AccuracyReconciliation =>
+            {
+                let Ok(sibling_bound) = realize_child(rc, self) else {
+                    return f64::NAN;
+                };
+                let cse = CseCandidate {
+                    subtree: rc,
+                    bound_summary: &sibling_bound,
+                    // One additional reference into `rc`'s own (already
+                    // necessary) build, from this one consumer's
+                    // perspective — not `target`'s own `consumer_count`,
+                    // which would conflate the reader-side multiplicity
+                    // with a maintenance metric that's `rc`'s own group's
+                    // concern, not this candidate's.
+                    consumer_count: 1,
+                };
+                self.cse_shared_maintenance_cost(&cse).0
             }
             Replacement::Rewrite(rc) => {
                 let Ok(bound) = realize_child(target.root, self) else {

@@ -182,9 +182,11 @@
 //!   docs for the pipeline order and the root-vs-per-node precedence rules.
 
 pub mod accuracy;
+pub mod accuracy_reconciliation;
 pub mod cost_model;
 pub mod explanation;
 pub mod grouping;
+pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
@@ -194,17 +196,24 @@ pub use accuracy::{
     AccuracyAllocation, AccuracyBudgetAllocator, AccuracyModel, CompositionShape,
     DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
 };
+pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
 pub use cost_model::{CostModel, DefaultCostModel};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
+pub use recurrence::{
+    evaluation_rate_of, total_cost, update_rate_from_data_characteristics, CostRate,
+    EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
+    RootRecurrence, UpdateRate,
+};
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
     search_workload_with_targets, summary_candidates, GlobalSelection, ImplementError,
-    Implementation, Matcher, MemoGroup, PlanSpace, Proposals, RankedGroup, RejectedCandidate,
-    Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, SelectedGroup,
-    SharedSubtreeStrategy, SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
+    Implementation, Matcher, MemoGroup, PlanSpace, Proposals, RankedGroup, RecurrenceProfileMap,
+    RejectedCandidate, Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG,
+    SelectedGroup, SharedSubtreeStrategy, SketchAlgorithmStrategy, TargetSubDAG,
+    MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;
 pub use topk_reuse::TopKLimitReuseStrategy;
