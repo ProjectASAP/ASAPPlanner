@@ -101,8 +101,11 @@ composition. It does not introduce another correctness policy alongside
 
 The design must:
 
-1. Use the existing `AccuracyTarget::{Exact, Epsilon, EpsilonDelta}` as the
-   correctness requirement.
+1. Represent each summary's caller-visible correctness requirement with an
+   `AccuracyTarget`. The existing `Exact`, `Epsilon`, and `EpsilonDelta`
+   variants remain valid where their semantics match, but they are not a
+   closed set: add or refine target variants when a new summary requires a
+   correctness contract that those variants cannot express faithfully.
 2. Preserve the meaning of each error metric instead of treating every bound
    as an interchangeable epsilon.
 3. Derive local guarantees from the same committed parameters used to size the
@@ -437,6 +440,21 @@ be unsound.
 `AccuracyTarget::Epsilon` checks the evaluated magnitude. An
 `AccuracyTarget::EpsilonDelta` requires both an evaluated magnitude no greater
 than epsilon and an evaluated failure probability no greater than delta.
+
+These variants are the currently supported target vocabulary, not a permanent
+restriction on summary semantics. A new summary may introduce or motivate a
+change to `AccuracyTarget` when its caller-visible requirement is not an
+epsilon-style numeric error contract. Any new or revised target must define:
+
+- the result semantics being constrained, including its error metric;
+- the evidence and parameters required to prove satisfaction;
+- the satisfaction rule and its unknown/unsupported behavior; and
+- its serialization, explainability, allocation, and compatibility behavior.
+
+The planner must fail closed until the corresponding guarantee model,
+propagation rules, and final satisfaction check exist. It must not force a new
+summary into `Exact`, `Epsilon`, or `EpsilonDelta` merely to reuse the existing
+API.
 
 The initial allocator uses conservative finite choices, including equal splits
 for additive nested layers:
