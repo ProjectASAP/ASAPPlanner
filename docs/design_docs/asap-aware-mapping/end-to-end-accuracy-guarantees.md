@@ -8,7 +8,7 @@ guarantees for post-ASAP plans, including nested summaries.
 
 Implementation contracts, sketch formulas, extension steps, and validation
 commands live in the
-[developer guide](../developer_docs/end-to-end-accuracy-guarantees.md). This
+[developer guide](../../developer_docs/end-to-end-accuracy-guarantees.md). This
 document is the authority for architectural decisions and correctness
 invariants; the developer guide is the authority for implementing them.
 
@@ -206,7 +206,7 @@ Hydra must include both its inner error and shared-grid collision error.
 
 The concrete interfaces, formulas, evidence fields, and extension procedure
 are defined in the
-[developer guide](../developer_docs/end-to-end-accuracy-guarantees.md).
+[developer guide](../../developer_docs/end-to-end-accuracy-guarantees.md).
 
 ### Accuracy targets and allocation
 
@@ -329,7 +329,7 @@ Tests must cover every registered local contract and composition rule, their
 invalid and unknown boundaries, target checking after parameter clamps,
 rejection before cost ranking, and exported proof or rejection data. The
 detailed test matrix and repository validation commands are maintained in the
-[developer guide](../developer_docs/end-to-end-accuracy-guarantees.md#validation).
+[developer guide](../../developer_docs/end-to-end-accuracy-guarantees.md#validation).
 
 ## Risks, rollout, and exit criteria
 

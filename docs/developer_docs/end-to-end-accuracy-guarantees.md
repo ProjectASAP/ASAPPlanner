@@ -2,7 +2,8 @@
 
 This guide explains how to implement, extend, and validate the end-to-end
 accuracy model. Read the
-[design document](../design_docs/end-to-end-accuracy-guarantees.md) first. The
+[design document](../design_docs/asap-aware-mapping/end-to-end-accuracy-guarantees.md)
+first. The
 design document owns architectural decisions and correctness invariants; this
 guide owns concrete interfaces, formulas, evidence requirements, and developer
 workflow.
