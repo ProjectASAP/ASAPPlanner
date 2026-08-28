@@ -28,16 +28,11 @@
 //! — see `asap_aware_mapping::grouping`'s module docs for why.
 
 pub mod expr;
-pub mod guarantee;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;
 
 pub use expr::{SummaryExpr, SummaryNode};
-pub use guarantee::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
-    ResultGuarantee,
-};
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,
     cu_sketch_posterior_error_bound, traditional_a_priori_bound,
