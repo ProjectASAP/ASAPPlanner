@@ -126,21 +126,6 @@ pub trait AccuracyModel {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultAccuracyModel;
 
-/// Failure probability this crate attributes to a KLL bound sized by
-/// `k = ⌈2/ε⌉`: the 99%-confidence convention the `k`-to-rank-error tables
-/// of the reference implementation (Apache DataSketches) quote that formula
-/// at. KLL's sizing ignores δ, so this is the confidence level the sizing
-/// implicitly claims, not something re-derived from `k`.
-pub const KLL_FAILURE_PROBABILITY: f64 = 0.01;
-
-/// Failure probability this crate attributes to an HLL/Theta/KMV bound
-/// sized by its relative *standard error* (`1.04/√m`, `1/√k`): a
-/// one-standard-deviation bound of an approximately Gaussian estimator is
-/// exceeded with probability ≈ 0.3173. Those families' sizing ignores δ, so
-/// an `EpsilonDelta` target with a tighter δ is honestly not met by the
-/// parameters the sizing picked; the guarantee says so instead of hiding it.
-pub const STANDARD_ERROR_FAILURE_PROBABILITY: f64 = 0.3173;
-
 /// Small relative tolerance for comparing an evaluated bound against a
 /// target, so a parameter sized by `⌈·⌉` to *exactly* meet ε is not rejected
 /// by floating-point noise.
@@ -155,13 +140,19 @@ impl DefaultAccuracyModel {
         params: &SketchParams,
         query: &SketchQuery,
     ) -> Option<ResultGuarantee> {
+        // A frequency bound for each reported key does not certify that the
+        // reported key set is the true top-k set. Until a margin certificate
+        // is modeled, TopK has no end-to-end guarantee.
+        if matches!(query, SketchQuery::TopK { .. }) {
+            return None;
+        }
         let (metric, bound, delta) = match params {
             // KLL: rank error ε ≈ 2/k.
             SketchParams::Kll { k } => (
                 ErrorMetric::Rank,
                 2.0 / f64::from(*k),
-                ProbabilityExpr::Constant {
-                    value: KLL_FAILURE_PROBABILITY,
+                ProbabilityExpr::Unknown {
+                    statistic: "kll_failure_probability".into(),
                 },
             ),
             // DDSketch: deterministic relative value error α.
@@ -172,46 +163,40 @@ impl DefaultAccuracyModel {
             SketchParams::Hll { precision } => (
                 ErrorMetric::Cardinality,
                 1.04 / 2f64.powi(i32::from(*precision)).sqrt(),
-                ProbabilityExpr::Constant {
-                    value: STANDARD_ERROR_FAILURE_PROBABILITY,
+                ProbabilityExpr::Unknown {
+                    statistic: "hll_failure_probability".into(),
                 },
             ),
             // KMV / Theta: relative standard error 1/√k.
             SketchParams::Kmv { k } | SketchParams::Theta { k } => (
                 ErrorMetric::Cardinality,
                 1.0 / f64::from(*k).sqrt(),
-                ProbabilityExpr::Constant {
-                    value: STANDARD_ERROR_FAILURE_PROBABILITY,
+                ProbabilityExpr::Unknown {
+                    statistic: "kmv_theta_failure_probability".into(),
                 },
             ),
-            // CMS family: over-count ≤ (e/w)·‖f‖₁ with probability ≥ 1 − e^{−d}.
-            // Count-Sketch is sized with the same placeholder formula (see
-            // `default_size_params`), so it gets the same placeholder bound.
-            SketchParams::Cms { width, depth }
-            | SketchParams::CountSketch { width, depth }
-            | SketchParams::CmsWithHeap { width, depth, .. }
-            | SketchParams::CountSketchWithHeap { width, depth, .. } => (
-                ErrorMetric::Frequency,
-                std::f64::consts::E / f64::from(*width),
-                ProbabilityExpr::Constant {
-                    value: (-f64::from(*depth)).exp(),
-                },
-            ),
+            // CMS: over-count ≤ (e/w)·‖f‖₁ with probability ≥ 1 − e^{−d}.
+            SketchParams::Cms { width, depth } | SketchParams::CmsWithHeap { width, depth, .. } => {
+                (
+                    ErrorMetric::Frequency,
+                    std::f64::consts::E / f64::from(*width),
+                    ProbabilityExpr::Constant {
+                        value: (-f64::from(*depth)).exp(),
+                    },
+                )
+            }
+            // CountSketch has an L2-based error bound and a different sizing
+            // relationship. Its current sizing is explicitly a placeholder,
+            // so it cannot support a formal guarantee.
+            SketchParams::CountSketch { .. } | SketchParams::CountSketchWithHeap { .. } => {
+                return None
+            }
         };
-        let mut provenance = vec![GuaranteeSource::SketchReadout {
+        let provenance = vec![GuaranteeSource::SketchReadout {
             algorithm: format!("{algorithm:?}"),
             params: serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
             query: format!("{query:?}"),
         }];
-        // A `TopK` readout's count for each *reported* key carries the
-        // sketch's frequency bound; which keys are reported is not certified
-        // by anything here (issue #172, PR 3) — say so in the trail rather
-        // than claiming `TopKMembership`.
-        if matches!(query, SketchQuery::TopK { .. }) {
-            provenance.push(GuaranteeSource::UnavailableStatistic {
-                statistic: "topk_membership_margin_certificate".into(),
-            });
-        }
         Some(ResultGuarantee {
             metric,
             bound: BoundExpr::Constant { value: bound },
@@ -987,6 +972,14 @@ mod tests {
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Rank);
         assert!(DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
+        assert_eq!(g.failure_probability.evaluate(), None);
+        assert!(!DefaultAccuracyModel.satisfies(
+            &g,
+            &AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            }
+        ));
         assert_eq!(g.approximate_layer_count(), 1);
 
         let c = default_cardinality();
@@ -1002,6 +995,7 @@ mod tests {
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Cardinality);
         assert!(DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
+        assert_eq!(g.failure_probability.evaluate(), None);
 
         let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
         let g = DefaultAccuracyModel
@@ -1021,6 +1015,42 @@ mod tests {
                 delta: 0.001
             }
         ));
+    }
+
+    #[test]
+    fn unsupported_sketch_guarantees_fail_closed() {
+        use crate::replacement::default_size_params;
+        use asap_types::pre_asap::agg_intent::default_cardinality;
+
+        let intent = default_cardinality();
+        let count_sketch = default_size_params(SketchAlgorithm::CountSketch, &intent, 0.01, 0.01);
+        assert!(DefaultAccuracyModel
+            .local_guarantee(
+                &SummaryFamilyType::Sketch(
+                    SketchKind::new(SketchAlgorithm::CountSketch, count_sketch),
+                    GroupingStrategy::default(),
+                ),
+                &SketchQuery::PointCount {
+                    key: asap_types::pre_asap::expr_ir::ColumnRef::SampleValue,
+                    value: None,
+                },
+            )
+            .is_none());
+
+        let cms_heap = SketchParams::CmsWithHeap {
+            width: 272,
+            depth: 5,
+            heap_size: 10,
+        };
+        assert!(DefaultAccuracyModel
+            .local_guarantee(
+                &SummaryFamilyType::Sketch(
+                    SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
+                    GroupingStrategy::default(),
+                ),
+                &SketchQuery::TopK { k: 10 },
+            )
+            .is_none());
     }
 
     #[test]

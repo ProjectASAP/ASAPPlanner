@@ -6724,4 +6724,32 @@ mod tests {
             Replacement::Rewrite(_) => true,
         }));
     }
+
+    #[test]
+    fn topk_accuracy_target_rejects_uncertified_membership() {
+        let q = Rc::new(agg(
+            vec![2],
+            AggIntent::TopK {
+                k: 10,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            metric_scan(&["job"]),
+        ));
+        let space = search_workload_with_targets(
+            vec![("q", Rc::clone(&q), Some(AccuracyTarget::Epsilon(0.01)))],
+            &default_strategies(),
+            &DefaultAccuracyModel,
+        );
+        let group = space.group_for(&space.roots[0].1).unwrap();
+
+        assert!(group
+            .candidates
+            .iter()
+            .all(|candidate| matches!(candidate.replacement, Replacement::Rewrite(_))));
+        assert!(!group.rejected.is_empty());
+        assert!(group
+            .rejected
+            .iter()
+            .all(|rejected| matches!(rejected.error, AccuracyError::TargetNotSatisfied { .. })));
+    }
 }

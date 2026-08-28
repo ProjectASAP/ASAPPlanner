@@ -275,11 +275,10 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
                 query: query.clone(),
             },
             schema: node.schema.clone(),
-            // The per-subpopulation guarantee carries over unchanged: this
-            // axis only patches `grouping`. Hydra's own shared-grid noise
-            // term (issue #256, Theorem 2) is not folded in here — see
-            // issue #172's follow-ups.
-            guarantee: node.guarantee.clone(),
+            // Hydra adds shared-grid collision noise beyond the inner
+            // sketch's per-subpopulation error. Until that term is modeled,
+            // the finalized value's end-to-end guarantee is unknown.
+            guarantee: None,
         }),
         SummaryExpr::SummaryAgg {
             child,
@@ -309,7 +308,7 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
                     grouping,
                 },
                 schema: grouped_schema,
-                guarantee: node.guarantee.clone(),
+                guarantee: None,
             })
         }
         // Never reached by this module's own callers (they only ever pass a
@@ -463,6 +462,10 @@ mod tests {
             let Replacement::Summary(node) = &replacement.replacement else {
                 panic!("expected a Summary replacement");
             };
+            assert!(
+                node.guarantee.is_none(),
+                "Hydra's shared-grid collision error is not modeled yet"
+            );
             let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
                 panic!("expected SummaryEstimate root, got {:?}", node.expr);
             };
@@ -472,6 +475,7 @@ mod tests {
             else {
                 panic!("expected SummaryAgg, got {:?}", summary_input.expr);
             };
+            assert!(summary_input.guarantee.is_none());
             let SummaryFamilyType::Sketch(kind, state_grouping) = family else {
                 panic!("expected a Sketch family, got {family:?}");
             };
