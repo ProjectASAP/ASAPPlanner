@@ -4,7 +4,9 @@
 
 This document is for ASAPPlanner developers, architects, and researchers. It
 defines how the planner represents, composes, checks, and explains approximation
-guarantees for post-ASAP plans, including nested summaries.
+guarantees for post-ASAP plans. The parameter-configuration model applies to
+both single-summary and nested-summary plans; nesting is one consumer of the
+model, not its scope boundary.
 
 Implementation contracts, sketch formulas, extension steps, and validation
 commands live in the
@@ -42,9 +44,11 @@ operations, such as TopK selection, need evidence that cannot be expressed by
 adding point-estimation epsilons.
 
 Without an end-to-end model, the planner can select a locally well-sized sketch
-whose caller-visible result violates the requested accuracy. Nested summaries,
-shared grouping, and cross-query reuse make this a planning concern rather than
-an isolated sketch-implementation detail.
+whose caller-visible result violates the requested accuracy. Even a single
+summary must keep its parameter source and correctness evidence aligned.
+Nested summaries, shared grouping, and cross-query reuse add composition
+requirements, but do not define the scope of parameter configuration. This is
+a planning concern rather than an isolated sketch-implementation detail.
 
 ## Inputs, outputs, and end-to-end behavior
 
@@ -123,6 +127,9 @@ The design must:
    reasons in the post-ASAP IR and DAG export.
 7. Fail closed for invalid numeric values, unknown required statistics,
    incompatible metrics, and unsupported compositions.
+8. Record whether committed parameters came from a mathematical model,
+   empirical input, or a future combination of both, without treating the
+   parameter-selection method as correctness evidence by itself.
 
 ## Proposed design
 
@@ -207,6 +214,74 @@ Hydra must include both its inner error and shared-grid collision error.
 The concrete interfaces, formulas, evidence fields, and extension procedure
 are defined in the
 [developer guide](../../developer_docs/end-to-end-accuracy-guarantees.md).
+
+### Parameter-configuration modes
+
+Parameter configuration is a planner-wide concern for every summary candidate,
+not a mechanism specific to nested queries. ASAPPlanner must distinguish the
+source of a candidate's committed parameters from the guarantee used to prove
+that candidate legal.
+
+The design recognizes three modes:
+
+| Mode | Parameter input | Current status |
+| --- | --- | --- |
+| Mathematical | `AccuracyTarget` plus an algorithm contract, inverted into parameters | Implemented and wired into candidate generation |
+| Empirical-input | Observed or estimated workload/data characteristics supplied as planning input | Designed as an extension point; not wired into end-to-end candidate generation yet |
+| Combined | Mathematical constraints and empirical input jointly choose parameters | Future work |
+
+#### Mathematical configuration
+
+The mathematical path selects parameters by inverting a registered sketch
+contract. For example, an epsilon and delta may determine width and depth. The
+planner derives the local guarantee again from the parameters it actually
+commits, including clamps, and checks that guarantee against the target. This
+is the default path currently available in ASAPPlanner.
+
+#### Empirical-input configuration
+
+The empirical path uses explicit information about the expected input or
+workload, such as cardinality, frequency distribution, skew, stream norms, or
+observed collision behavior. The evidence may come from a catalog, a prior
+measurement, or a runtime-facing integration, but it must enter the planner as
+typed input with provenance, freshness, and applicability semantics.
+
+This mode is not wired into the current end-to-end candidate-generation path.
+Existing symbolic statistics and posterior-related helpers do not constitute
+that integration. Until the planner can carry empirical input through sizing,
+guarantee derivation, target checking, and export, the built-in planner must
+not claim that an empirical configuration was considered or selected.
+
+Empirical input can recommend smaller or differently shaped parameters, but a
+recommendation is not automatically a correctness proof. If the empirical
+method supplies only an expectation or heuristic, legality still requires an
+independent guarantee satisfying the target. If it supplies a statistical
+certificate, the model must state its population, confidence, validity window,
+and failure behavior.
+
+#### Combined configuration
+
+The future combined path may use empirical input to refine a mathematically
+safe configuration, select among multiple proven contracts, or allocate an
+accuracy budget more efficiently. It must define an explicit composition rule
+between mathematical and empirical evidence. The planner must not silently
+take the smaller of two bounds, assume independence, or use empirical input to
+weaken a mathematical requirement.
+
+All modes converge on the same downstream contract:
+
+```text
+parameter inputs
+    -> committed summary parameters
+    -> guarantee derived for those committed parameters
+    -> AccuracyTarget satisfaction
+    -> cost ranking
+```
+
+The post-ASAP IR and DAG export should identify the configuration mode, input
+provenance, committed parameters, resulting guarantee, and any unavailable
+evidence. This keeps parameter choice auditable and allows future empirical or
+combined implementations without creating a second legality pipeline.
 
 ### Accuracy targets and allocation
 
@@ -342,6 +417,11 @@ The main availability risk is conservative rejection. TopK and Hydra stay on
 the exact/pre-ASAP path until their required evidence is available. This is the
 intended rollback behavior: removing or disabling a questionable rule reduces
 optimization opportunities without weakening correctness.
+
+Empirical-input parameterization remains a follow-up until typed empirical
+inputs are threaded through candidate sizing, guarantee derivation, target
+checking, provenance, and export. Combined parameterization remains future work
+until its evidence-composition rule is specified and tested.
 
 The design is ready for use when all workspace tests and warnings-as-errors
 checks pass, every selected approximate result has an evaluable satisfying
