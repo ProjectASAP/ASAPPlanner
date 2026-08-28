@@ -771,8 +771,8 @@ mod tests {
 
     use crate::cost_model::CseCandidate;
     use asap_types::post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, SummaryExpr, SummaryFamilyType, SummaryField,
-        SummaryNode, SummarySchema,
+        ExactKind, ExactParams, GroupingStrategy, ResultGuarantee, SummaryExpr, SummaryFamilyType,
+        SummaryField, SummaryNode, SummarySchema,
     };
     use asap_types::pre_asap::expr_ir::ColumnRef;
     use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
@@ -803,6 +803,7 @@ mod tests {
                         fields: vec![],
                         time_index: None,
                     },
+                    guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
                 }),
                 family: family.clone(),
                 col: ColumnRef::Named("value".into()),
@@ -817,6 +818,7 @@ mod tests {
                 }],
                 time_index: None,
             },
+            guarantee: None,
         }
     }
 
