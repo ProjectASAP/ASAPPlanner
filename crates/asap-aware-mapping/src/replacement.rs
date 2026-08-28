@@ -366,7 +366,8 @@ use thiserror::Error;
 
 use crate::accuracy::{
     AccuracyBudgetAllocator, AccuracyModel, CompositionShape, DefaultAccuracyModel,
-    EqualSplitAllocator, PropagationStats,
+    EqualSplitAllocator, PropagationStats, KLL_RANK_ERROR_COEFFICIENT_99,
+    KLL_RANK_ERROR_EXPONENT_99,
 };
 use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
@@ -1068,10 +1069,14 @@ pub fn posterior_aware_size_params(
 // smallest parameter satisfying the target, clamped to the family's sane
 // range. A non-positive ε saturates to the clamp maximum (tightest allowed).
 
-/// KLL: rank error ε ≈ 2/k ⇒ `k = ⌈2/ε⌉`. ε = 0.01 → k = 200, matching the
-/// design doc's worked example (`KLL{k=200}` satisfies ε=0.01).
+/// Invert Apache DataSketches' empirical 99th-percentile, single-sided KLL
+/// normalized rank-error fit: `epsilon = 2.296 / k^0.9723`.
 fn kll_k(eps: f64) -> u32 {
-    saturating_ceil(2.0 / eps, 8, 65_535)
+    saturating_ceil(
+        (KLL_RANK_ERROR_COEFFICIENT_99 / eps).powf(1.0 / KLL_RANK_ERROR_EXPONENT_99),
+        8,
+        65_535,
+    )
 }
 
 /// HLL standard-error inversion. The committed guarantee applies the
@@ -3981,7 +3986,7 @@ mod tests {
             preferred(&approx),
             Implementation::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 200 }, // design.md worked example
+                SketchParams::Kll { k: 269 },
             ))
         );
 
@@ -3994,7 +3999,7 @@ mod tests {
             preferred(&looser),
             Implementation::Sketch(SketchKind::new(
                 SketchAlgorithm::Kll,
-                SketchParams::Kll { k: 40 }, // ⌈2/0.05⌉
+                SketchParams::Kll { k: 52 },
             ))
         );
     }
@@ -5860,7 +5865,7 @@ mod tests {
     #[test]
     fn quantile_realizes_kll_wrapped_in_estimate() {
         // quantile by (job) (m) at ε=0.01 → Estimate(Quantile) over
-        // SummaryAgg(Kll{k:200}) over KeepPreAsap(Scan). job = col 2.
+        // SummaryAgg(Kll{k:269}) over KeepPreAsap(Scan). job = col 2.
         let q = agg(vec![2], default_quantile(0.99), metric_scan(&["job"]));
         let root = realize(&q).unwrap();
 
@@ -5895,7 +5900,7 @@ mod tests {
         assert_eq!(
             family,
             &SummaryFamilyType::Sketch(
-                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
                 GroupingStrategy::default()
             )
         );
@@ -5905,7 +5910,7 @@ mod tests {
         assert_eq!(
             field(&summary_input.schema, "quantile_0_99").dtype,
             SummaryFamilyType::Sketch(
-                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+                SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
                 GroupingStrategy::default()
             )
         );
@@ -6497,7 +6502,10 @@ mod tests {
             .as_ref()
             .expect("a readout carries a guarantee");
         assert_eq!(guarantee.metric, ErrorMetric::Rank);
-        assert_eq!(guarantee.bound.evaluate(), Some(2.0 / 200.0));
+        assert_eq!(
+            guarantee.bound.evaluate(),
+            Some(crate::accuracy::kll_rank_error_99(269))
+        );
         assert_eq!(guarantee.approximate_layer_count(), 1);
         assert!(guarantee.provenance.iter().any(|s| matches!(
             s,
@@ -6560,8 +6568,8 @@ mod tests {
     #[test]
     fn equal_split_allocation_makes_a_legal_tighter_candidate_and_rejects_the_declared_one() {
         // With a registered rank-additive rule: outer ε=0.1 over inner ε=0.1
-        // composes to 0.2 > 0.1 as declared (cheap: k=20 each) — illegal.
-        // The equal split (0.05 + 0.05) re-sizes both layers to k=40 —
+        // composes above 0.1 as declared (cheap: k=26 each) — illegal.
+        // The equal split re-sizes both layers to k=52 —
         // pricier, and the only legal way to meet the outer target.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
@@ -6583,7 +6591,8 @@ mod tests {
                         bound: Some(b),
                         target: AccuracyTarget::Epsilon(e),
                         ..
-                    } if (b - 0.2).abs() < 1e-12 && *e == 0.1
+                    } if (b - 2.0 * crate::accuracy::kll_rank_error_99(26)).abs() < 1e-12
+                        && *e == 0.1
                 )
             })
             .count();
@@ -6611,11 +6620,13 @@ mod tests {
             "exactly one legal KLL candidate (the allocated one)"
         );
         let node = kll[0];
-        assert_eq!(kll_k_of(node), 40, "outer re-sized to ε/2");
-        assert_eq!(kll_k_of(summary_child(node)), 40, "inner re-sized to ε/2");
+        assert_eq!(kll_k_of(node), 52, "outer re-sized to ε/2");
+        assert_eq!(kll_k_of(summary_child(node)), 52, "inner re-sized to ε/2");
         let guarantee = node.guarantee.as_ref().unwrap();
         assert_eq!(guarantee.metric, ErrorMetric::Rank);
-        assert!((guarantee.bound.evaluate().unwrap() - 0.1).abs() < 1e-12);
+        let composed_bound = guarantee.bound.evaluate().unwrap();
+        assert!(composed_bound <= 0.1);
+        assert!((composed_bound - 2.0 * crate::accuracy::kll_rank_error_99(52)).abs() < 1e-12);
         assert_eq!(guarantee.approximate_layer_count(), 2);
         assert!(guarantee.provenance.iter().any(|s| matches!(
             s,
@@ -6669,7 +6680,7 @@ mod tests {
         let Replacement::Summary(node) = &chosen.replacement else {
             panic!()
         };
-        assert_eq!(kll_k_of(node), 40);
+        assert_eq!(kll_k_of(node), 52);
     }
 
     #[test]

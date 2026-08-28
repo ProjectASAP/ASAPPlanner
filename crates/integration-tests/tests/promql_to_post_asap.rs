@@ -56,7 +56,7 @@ fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
 ///
 /// ```text
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile_0_99: Float64}
-/// └─ SummaryAgg { Kll{k:200}, col: SampleValue }     → {quantile_0_99: Sketch(Kll, {k:200})}
+/// └─ SummaryAgg { Kll{k:269}, col: SampleValue }     → {quantile_0_99: Sketch(Kll, {k:269})}
 ///    └─ SummaryAgg { Rate, col: SampleValue }        → {ts, value: ExactAggregate(Rate), …}
 ///       └─ KeepPreAsap(TimeRange{5m} → Scan)         → {ts, value}
 /// ```
@@ -88,7 +88,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
         "the summary-state type must not propagate past the estimate"
     );
 
-    // The quantile: KLL committed, k=200 sized from ε=0.01. `quantile(...)`
+    // The quantile: KLL committed, k=269 sized for ε=0.01 at 99% confidence.
     // is an aggregation operator with no `by(...)`: a genuine full
     // reduction, one output row — not to be confused with the inner rate's
     // per-entity grouping below, even though both once collapsed to the
@@ -106,7 +106,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     assert_eq!(
         family,
         &SummaryFamilyType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()
         )
     );
@@ -119,7 +119,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     assert_eq!(
         dtype(&summary_input.schema, "quantile_0_99"),
         &SummaryFamilyType::Sketch(
-            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 200 }),
+            SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 269 }),
             GroupingStrategy::default()
         )
     );

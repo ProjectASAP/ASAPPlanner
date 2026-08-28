@@ -140,6 +140,13 @@ pub struct DefaultAccuracyModel;
 /// by floating-point noise.
 const SATISFACTION_TOLERANCE: f64 = 1e-9;
 
+pub(crate) const KLL_RANK_ERROR_COEFFICIENT_99: f64 = 2.296;
+pub(crate) const KLL_RANK_ERROR_EXPONENT_99: f64 = 0.9723;
+
+pub(crate) fn kll_rank_error_99(k: u32) -> f64 {
+    KLL_RANK_ERROR_COEFFICIENT_99 / f64::from(k).powf(KLL_RANK_ERROR_EXPONENT_99)
+}
+
 fn count_sketch_failure_probability(depth: u32) -> Option<f64> {
     if depth == 0 || depth.is_multiple_of(2) {
         return None;
@@ -157,12 +164,12 @@ impl DefaultAccuracyModel {
         query: &SketchQuery,
     ) -> Option<ResultGuarantee> {
         let (metric, bound, delta) = match params {
-            // The committed KLL contract is its 99%-confidence normalized
-            // rank bound. Tighter confidence needs runtime-supported
-            // amplification and therefore remains unavailable.
+            // Apache DataSketches' single-sided KLL fit is the empirical 99th
+            // percentile normalized rank error for quantile/rank queries.
+            // Tighter confidence needs an amplification contract.
             SketchParams::Kll { k } => (
                 ErrorMetric::Rank,
-                2.0 / f64::from(*k),
+                kll_rank_error_99(*k),
                 ProbabilityExpr::Constant { value: 0.01 },
             ),
             // DDSketch: deterministic relative value error α.

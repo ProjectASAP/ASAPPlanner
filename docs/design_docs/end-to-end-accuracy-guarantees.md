@@ -1,11 +1,10 @@
-# End-to-End Accuracy Guarantees
+# Design: End-to-End Accuracy Guarantees
 
-## Status and scope
+## Audience and context
 
-This document specifies the accuracy design implemented by PR #303 and tracked
-by issue #172. It covers how ASAPPlanner represents, composes, checks, and
-explains approximation guarantees for post-ASAP plans, including nested
-summaries.
+This document is for ASAPPlanner developers, architects, and researchers. It
+defines how the planner represents, composes, checks, and explains approximation
+guarantees for post-ASAP plans, including nested summaries.
 
 ASAPPlanner is a mathematical planner. It does not execute sketches or import a
 sketch runtime. The planner derives guarantees from committed parameters and
@@ -18,7 +17,7 @@ The design has one governing rule:
 > Accuracy legality is decided before cost ranking. A cheaper candidate cannot
 > override a missing or insufficient guarantee.
 
-## Problem
+## Problem and why now
 
 A post-ASAP plan can contain more than one approximate layer:
 
@@ -36,6 +35,18 @@ may compose, and their failure probabilities consume a shared budget. Some
 operations, such as TopK selection, need evidence that cannot be expressed by
 adding point-estimation epsilons.
 
+Without an end-to-end model, the planner can select a locally well-sized sketch
+whose caller-visible result violates the requested accuracy. Nested summaries,
+shared grouping, and cross-query reuse make this a planning concern rather than
+an isolated sketch-implementation detail.
+
+## Inputs, outputs, and end-to-end behavior
+
+The observable input is a pre-ASAP query plan whose aggregate intents carry an
+`AccuracyTarget`, plus optional statistics and runtime observations. The output
+is a candidate space of post-ASAP plans. Each caller-visible approximate value
+has a typed `ResultGuarantee`, while rejected candidates carry a reason.
+
 ASAPPlanner therefore uses this pipeline:
 
 ```text
@@ -52,7 +63,41 @@ Rejected candidates remain available in explanatory output with a structured
 reason. The planner retains an exact or pre-ASAP fallback when no approximate
 candidate can be proved legal.
 
-## Requirements
+## Goals and non-goals
+
+The minimum successful outcome is that no selected approximate result lacks a
+machine-readable guarantee that satisfies its accuracy target. The model must
+also distinguish incompatible error metrics and preserve the evidence used to
+reach its decision.
+
+This design does not execute sketches, import a sketch runtime, assume
+statistical independence, or prove arbitrary nonlinear and cross-metric
+composition. It does not introduce another correctness policy alongside
+`AccuracyTarget`.
+
+## Heilmeier questions
+
+- **What are we trying to do?** Prevent the planner from selecting an
+  approximate plan unless it can prove the result meets the caller's accuracy
+  requirement.
+- **How is it done without this design?** Sketches can be sized locally, but a
+  nested plan has no common representation or rule for its combined error.
+- **What is new?** Typed guarantee expressions, explicit composition rules,
+  budget allocation, and legality filtering before cost ranking.
+- **Who cares?** Query authors need accuracy requirements to be meaningful;
+  planner and runtime developers need an auditable contract between selected
+  parameters and observable results.
+- **What are the risks and costs?** Conservative rules can reject useful plans;
+  incorrect estimator assumptions can admit unsound plans; symbolic evidence
+  increases IR and explanation size.
+- **How long will it take?** The core algebra and built-in contracts are one
+  planner change. Supplying runtime-dependent TopK and Hydra evidence is a
+  separate integration increment.
+- **How is success checked?** Unit tests exercise every registered rule and
+  rejection boundary; end-to-end tests confirm illegal candidates cannot reach
+  cost selection; exported plans expose the proof and rejection reason.
+
+## Required behavior
 
 The design must:
 
@@ -70,7 +115,9 @@ The design must:
 7. Fail closed for invalid numeric values, unknown required statistics,
    incompatible metrics, and unsupported compositions.
 
-## Guarantee IR
+## Proposed design
+
+### Guarantee IR
 
 Caller-visible post-ASAP values may carry a `ResultGuarantee`:
 
@@ -86,7 +133,7 @@ struct ResultGuarantee {
 Summary state does not itself claim a caller-visible result guarantee. The
 guarantee is attached to a finalized value, such as a `SummaryEstimate`.
 
-### Error metrics
+#### Error metrics
 
 The built-in model distinguishes:
 
@@ -104,7 +151,7 @@ These metrics are not implicitly convertible. In particular, Count-Min Sketch
 and CountSketch use different frequency norms, and a point-frequency guarantee
 does not prove TopK membership.
 
-### Symbolic expressions
+#### Symbolic expressions
 
 `BoundExpr` represents constants, sums, products, maxima, and unavailable
 statistics. `ProbabilityExpr` represents zero, constants, union bounds, and
@@ -115,7 +162,7 @@ Numeric leaves must be finite. Bounds must be non-negative, and probabilities
 must lie in `[0, 1]`. Invalid values fail closed rather than passing a target
 comparison through floating-point behavior.
 
-### Provenance
+#### Provenance
 
 `GuaranteeSource` records why a guarantee is believed:
 
@@ -129,7 +176,7 @@ comparison through floating-point behavior.
 This information is exported with candidate and rejection data so that a plan
 can be audited without reconstructing the proof from planner internals.
 
-## Extension points
+### Extension points
 
 Accuracy reasoning and allocation are separate from cost modeling:
 
@@ -159,9 +206,9 @@ approximate layers. `CostModel` may rank only the candidates that survive
 guarantee propagation and target checking. Deployments may provide stronger
 accuracy models, but the default model remains conservative.
 
-## Core composition rules
+### Core composition rules
 
-### Exact values
+#### Exact values
 
 An exact value contributes zero error and zero failure probability:
 
@@ -174,7 +221,7 @@ An exact input does not exempt a local approximate sketch from target checking.
 This matters when parameter ranges are clamped and the tightest representable
 configuration still misses the requested target.
 
-### Additive and Lipschitz composition
+#### Additive and Lipschitz composition
 
 Compatible absolute bounds compose without an independence assumption:
 
@@ -192,7 +239,7 @@ delta_output <= delta_input + delta_local
 
 Failure probabilities use a union bound.
 
-### Relative composition
+#### Relative composition
 
 For a registered multiplicative rule whose values are known to be
 non-negative:
@@ -207,7 +254,7 @@ epsilon_total =
 The rule is rejected when sign information is missing or values may cross
 zero.
 
-### Exact aggregation over approximate values
+#### Exact aggregation over approximate values
 
 For an exact sum, input bounds are summed and input failures are union-bounded.
 When the number of folded rows is required but unknown, the resulting bound
@@ -217,32 +264,37 @@ For exact minimum or maximum, the value-error bound is the maximum input bound
 and failures are union-bounded. This bounds the returned value; it does not by
 itself prove the identity of a winning key.
 
-### Unsupported composition
+#### Unsupported composition
 
 Approximate-over-approximate composition is accepted only when the model has a
 rule for the operator and metric. Cross-metric composition and unregistered
 same-metric composition return `UnsupportedComposition`. They never treat an
 approximate child as exact.
 
-## Sketch contracts
+### Sketch contracts
 
 The formulas below are planner contracts derived from committed sketch
 parameters. Parameter clamps are followed by a target check.
 
-### KLL
+#### KLL
 
-KLL uses normalized rank error:
+For quantile and rank queries, the built-in contract follows Apache
+DataSketches' empirical 99th-percentile single-sided normalized rank-error fit:
 
 ```text
-epsilon_rank = 2 / k
-k = ceil(2 / requested_epsilon)
+epsilon_rank = 2.296 / k^0.9723
+k = ceil((2.296 / requested_epsilon)^(1 / 0.9723))
 ```
 
-The built-in contract has failure probability `0.01` (99% confidence). A target
-with a tighter `delta` requires a stronger deployment-specific model or an
-amplification contract and otherwise fails closed.
+The contract has failure probability `0.01`. A target with a tighter `delta`
+requires a stronger deployment-specific model or an amplification contract and
+otherwise fails closed. The coefficients are specific to the cited KLL contract
+and must change if the selected implementation uses different semantics. See
+[Apache DataSketches KLL accuracy](https://datasketches.apache.org/docs/KLL/KLLAccuracyAndSize.html)
+and its
+[C++ contract](https://github.com/apache/datasketches-cpp/blob/master/kll/include/kll_sketch.hpp).
 
-### DDSketch
+#### DDSketch
 
 DDSketch uses its committed deterministic relative-error parameter:
 
@@ -251,7 +303,7 @@ epsilon_relative = alpha
 delta = 0
 ```
 
-### HLL
+#### HLL
 
 HLL starts from relative standard error:
 
@@ -268,8 +320,10 @@ delta = 0.01
 
 Sizing inverts this bound. If the supported precision cap cannot satisfy the
 target, HLL is rejected even when it would be the cheaper or preferred family.
+This contract requires an estimator whose variance is bounded by the stated RSE;
+changing estimator semantics requires changing the accuracy model.
 
-### KMV and Theta
+#### KMV and Theta
 
 The default model uses:
 
@@ -281,9 +335,10 @@ k = ceil(100 / requested_epsilon^2 + 2)
 ```
 
 This is also a conservative Chebyshev 99% contract. Tighter confidence fails
-closed unless another model proves it.
+closed unless another model proves it. The variance premise follows the
+[Theta/KMV equations](https://datasketches.apache.org/docs/pdf/ThetaSketchEquations.pdf).
 
-### Count-Min Sketch
+#### Count-Min Sketch
 
 CMS uses an L1-normalized one-sided frequency bound:
 
@@ -303,7 +358,7 @@ depth = ceil(ln(1 / requested_delta))
 Posterior CMS relaxation may reduce its width only under its documented L1
 assumptions.
 
-### CountSketch
+#### CountSketch
 
 CountSketch has a separate L2-normalized point-frequency contract. It does not
 reuse CMS sizing or posterior relaxation:
@@ -325,7 +380,7 @@ depth = an odd integer >= ceil(18 * ln(1 / requested_delta))
 Zero or even depth has no modeled guarantee. Width/depth caps are checked
 against the target after sizing.
 
-## TopK membership certificate
+### TopK membership certificate
 
 A heap attached to CMS or CountSketch can provide point-frequency estimates,
 but those estimates do not prove that the returned keys are the true TopK set.
@@ -352,7 +407,7 @@ Static planning currently has no ordinary source for these boundary intervals,
 so TopK sketch candidates remain fail-closed until planning-time or runtime
 evidence is supplied.
 
-## Hydra shared-grid composition
+### Hydra shared-grid composition
 
 A Hydra result includes both the inner per-subpopulation sketch error and an
 outer shared-grid collision term:
@@ -376,7 +431,7 @@ leaves cannot yet be evaluated, an accuracy-targeted Hydra candidate is not
 admitted. Copying the inner guarantee onto Hydra without the shared term would
 be unsound.
 
-## Accuracy targets and allocation
+### Accuracy targets and allocation
 
 `AccuracyTarget::Exact` accepts only a zero bound and zero failure probability.
 `AccuracyTarget::Epsilon` checks the evaluated magnitude. An
@@ -395,10 +450,10 @@ Every allocated candidate is resized, propagated, and checked. Allocation does
 not constitute proof by itself, and recording a requested delta in metadata is
 not evidence that an algorithm achieves it.
 
-## Planner and runtime boundary
+### Planner and runtime boundary
 
-PR #303 implements the guarantee algebra and the parameter-derived contracts in
-ASAPPlanner. It does not require ASAPPlanner to link to `asap_sketchlib`.
+The guarantee algebra and parameter-derived contracts live in ASAPPlanner. They
+do not require the planner to link to `asap_sketchlib`.
 
 Runtime or planning-time observations are still useful for quantities that are
 not fixed by static parameters:
@@ -412,7 +467,7 @@ Such evidence must enter through explicit observation/statistics fields and be
 recorded in provenance. Its absence leaves expressions symbolic and candidates
 unprovable.
 
-## Explainability and export
+### Explainability and export
 
 DAG export includes:
 
@@ -425,7 +480,63 @@ DAG export includes:
 This makes the correctness decision inspectable and ensures the explanation
 uses the same candidate space and legality checks as optimization.
 
-## Validation strategy
+## Minimal complexity
+
+Three concepts are necessary:
+
+- `ResultGuarantee` is the authoritative description of caller-visible error;
+  reusing `AccuracyTarget` would conflate a request with evidence that the
+  request was met.
+- `AccuracyModel` separates correctness rules from `CostModel`; embedding
+  legality in cost values would let ranking accidentally override correctness.
+- `AccuracyBudgetAllocator` separates a proposed per-layer budget from the
+  propagated proof; assigning the full target to every layer is unsound.
+
+Symbolic expressions are used instead of a general theorem prover or free-form
+text. They are the smallest representation that can preserve unknown
+statistics, evaluate supported formulas, serialize the result, and explain why
+a candidate was rejected.
+
+## Alternatives and decisions
+
+- **One untyped epsilon:** rejected because rank, cardinality, L1 frequency, L2
+  frequency, value, and membership errors are not interchangeable.
+- **Put correctness in `CostModel`:** rejected because legality must not depend
+  on ranking policy.
+- **Treat missing evidence as zero:** rejected because it silently converts an
+  unproved candidate into a valid one.
+- **Assume independent errors:** rejected; the default uses union bounds.
+- **Require a runtime library dependency:** rejected because parameter-derived
+  planning contracts and runtime observations have different lifecycles.
+- **Copy the inner guarantee onto Hydra:** rejected because it omits shared-grid
+  collisions.
+- **Use a point-frequency guarantee for TopK:** rejected because it does not
+  establish membership at the selection boundary.
+
+## Quality attributes and evidence
+
+- **Maintainability and extensibility:** each new sketch or composition adds one
+  local contract and focused tests; unknown variants remain fail-closed through
+  non-exhaustive enums.
+- **Debuggability and understandability:** DAG export exposes expressions,
+  provenance, allocations, and rejection reasons. The observable proxy is that
+  a rejected candidate can be diagnosed from exported data without replaying
+  cost ranking.
+- **Performance and scalability:** expressions are small trees evaluated during
+  candidate construction. No numerical performance claim is made; candidate
+  count and planning latency should be measured before adding richer allocation
+  enumeration.
+- **Operability:** runtime-dependent values have named symbolic leaves and an
+  explicit observation provenance path.
+- **Security and robustness:** malformed non-finite or out-of-range numeric
+  leaves fail closed.
+
+## Acceptance and test design
+
+Acceptance behavior was derived from the required formulas and fail-closed
+boundaries. The current tests were written alongside or after implementation,
+so they are not an independent test design; final review is likewise not
+independent unless performed by another reviewer.
 
 Tests cover:
 
@@ -449,14 +560,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 git diff --check
 ```
 
-## Non-goals
+## Risks, rollout, and exit criteria
 
-- Adding another correctness-policy enum alongside `AccuracyTarget`.
-- Assuming statistical independence by default.
-- Treating all sketch errors as a common epsilon.
-- Claiming arbitrary nonlinear or cross-metric composition.
-- Executing sketches or importing a sketch runtime into ASAPPlanner.
-- Treating unavailable runtime evidence as zero.
+The main correctness risk is a mismatch between a planner contract and the
+estimator actually selected by a serving implementation. Each parameter-derived
+contract must therefore state its estimator premise, and deployments with
+different semantics must replace the model rather than reuse the guarantee.
+
+The main availability risk is conservative rejection. TopK and Hydra stay on
+the exact/pre-ASAP path until their required evidence is available. This is the
+intended rollback behavior: removing or disabling a questionable rule reduces
+optimization opportunities without weakening correctness.
+
+The design is ready for use when all workspace tests and warnings-as-errors
+checks pass, every selected approximate result has an evaluable satisfying
+guarantee, and exported rejection data identifies unavailable evidence. Runtime
+observation integration exits its follow-up phase when TopK boundary and Hydra
+shared-grid fixtures can be supplied end to end without implicit assumptions.
 
 Advanced nonlinear, induced-norm, interval/Jacobian, and correlation-aware
-propagation belongs in separate follow-up work.
+propagation remains separate work.
