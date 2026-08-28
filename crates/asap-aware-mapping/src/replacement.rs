@@ -4718,7 +4718,7 @@ mod tests {
     // ── discovery + MEMO shape ───────────────────────────────────────────
 
     #[test]
-    fn single_bindable_aggregate_gets_every_sketch_and_grouping_candidate() {
+    fn single_bindable_aggregate_excludes_unprovable_hydra_candidates() {
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -4738,8 +4738,8 @@ mod tests {
         assert_eq!(agg_group.consumer_count, 1);
         assert_eq!(
             agg_group.candidates.len(),
-            4,
-            "grouped approximate count has independent and Hydra CMS/CountSketch candidates: {:?}",
+            2,
+            "only independent CMS/CountSketch candidates have modeled guarantees: {:?}",
             agg_group.candidates
         );
         assert!(agg_group
@@ -4766,8 +4766,8 @@ mod tests {
                     )
                 })
                 .count(),
-            2,
-            "the default workload search must register the Hydra grouping strategy"
+            0,
+            "Hydra shared-grid error is unmodeled, so accuracy-targeted candidates must be absent"
         );
 
         let scan_group = space
@@ -5094,7 +5094,7 @@ mod tests {
     }
 
     #[test]
-    fn grouping_cost_prefers_hydra_only_for_high_subpopulation_cardinality() {
+    fn grouping_cost_cannot_resurrect_unprovable_hydra_candidates() {
         struct EstimatedSubpopulations(usize);
 
         impl CostModel for EstimatedSubpopulations {
@@ -5139,10 +5139,10 @@ mod tests {
                 .clone()
         }
 
-        assert!(matches!(
+        assert_eq!(
             first_grouping(10_000),
-            GroupingStrategy::SharedMultiSubpopulation { .. }
-        ));
+            GroupingStrategy::PerSubpopulationInstance
+        );
         assert_eq!(
             first_grouping(10),
             GroupingStrategy::PerSubpopulationInstance

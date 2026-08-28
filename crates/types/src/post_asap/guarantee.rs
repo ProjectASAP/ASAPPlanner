@@ -111,18 +111,23 @@ impl BoundExpr {
     /// Numeric value of this bound, or `None` if any [`BoundExpr::Unknown`]
     /// leaf is reachable.
     pub fn evaluate(&self) -> Option<f64> {
-        match self {
+        let value = match self {
             BoundExpr::Zero => Some(0.0),
-            BoundExpr::Constant { value } => Some(*value),
+            BoundExpr::Constant { value } => value.is_finite().then_some(*value),
             BoundExpr::Sum { terms } => terms.iter().map(BoundExpr::evaluate).sum(),
             BoundExpr::Product { factors } => factors.iter().map(BoundExpr::evaluate).product(),
-            BoundExpr::Scaled { factor, inner } => inner.evaluate().map(|b| factor * b),
+            BoundExpr::Scaled { factor, inner } => factor
+                .is_finite()
+                .then_some(*factor)
+                .zip(inner.evaluate())
+                .map(|(factor, bound)| factor * bound),
             BoundExpr::Max { terms } => terms
                 .iter()
                 .map(BoundExpr::evaluate)
                 .try_fold(0.0_f64, |acc, t| t.map(|t| acc.max(t))),
             BoundExpr::Unknown { .. } => None,
-        }
+        }?;
+        (value.is_finite() && value >= 0.0).then_some(value)
     }
 
     /// `true` iff this bound is structurally zero (every leaf is
@@ -174,7 +179,8 @@ impl ProbabilityExpr {
     pub fn evaluate(&self) -> Option<f64> {
         let raw = match self {
             ProbabilityExpr::Zero => 0.0,
-            ProbabilityExpr::Constant { value } => *value,
+            ProbabilityExpr::Constant { value } if (0.0..=1.0).contains(value) => *value,
+            ProbabilityExpr::Constant { .. } => return None,
             ProbabilityExpr::UnionBound { terms } => terms
                 .iter()
                 .map(ProbabilityExpr::evaluate)
@@ -182,7 +188,7 @@ impl ProbabilityExpr {
             ProbabilityExpr::Scaled { count, inner } => count.evaluate()? * inner.evaluate()?,
             ProbabilityExpr::Unknown { .. } => return None,
         };
-        Some(raw.clamp(0.0, 1.0))
+        raw.is_finite().then(|| raw.clamp(0.0, 1.0))
     }
 
     /// `true` iff this probability is structurally zero.
@@ -400,6 +406,21 @@ mod tests {
             inner: Box::new(ProbabilityExpr::Constant { value: 0.01 }),
         };
         assert_eq!(p.evaluate(), None);
+    }
+
+    #[test]
+    fn invalid_numeric_leaves_fail_closed() {
+        assert_eq!(BoundExpr::Constant { value: -0.1 }.evaluate(), None);
+        assert_eq!(
+            BoundExpr::Scaled {
+                factor: -1.0,
+                inner: Box::new(BoundExpr::Constant { value: 0.1 }),
+            }
+            .evaluate(),
+            None
+        );
+        assert_eq!(ProbabilityExpr::Constant { value: -0.1 }.evaluate(), None);
+        assert_eq!(ProbabilityExpr::Constant { value: 1.1 }.evaluate(), None);
     }
 
     #[test]
