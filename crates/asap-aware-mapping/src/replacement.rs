@@ -817,6 +817,11 @@ fn exact_accumulator(intent: &AggIntent, kind: ExactKind, params: ExactParams) -
 fn topk_exact_realization(intent: &AggIntent, cost_model: &dyn CostModel) -> Vec<Implementation> {
     match cost_model.topk_exact_accuracy_target(intent) {
         Some(target) => {
+            assert!(
+                !matches!(target, AccuracyTarget::Exact),
+                "CostModel::topk_exact_accuracy_target must return an approximate accuracy \
+                 target, not AccuracyTarget::Exact"
+            );
             let mut candidates = sketch_implementations(intent, &target, cost_model);
             candidates.push(Implementation::PassThrough);
             candidates
@@ -835,11 +840,9 @@ fn topk_exact_realization(intent: &AggIntent, cost_model: &dyn CostModel) -> Vec
 /// ([`exact_realization`]) or, for `TopK`, resolves a deployment-supplied
 /// replacement target first ([`topk_exact_realization`],
 /// [`CostModel::topk_exact_accuracy_target`], issue #151) rather than ever
-/// sizing against `Exact` itself. Still degrades to the tightest parameters
-/// here for a caller that resolves `Exact` directly anyway (or a
-/// `CostModel` that deliberately returns `Some(AccuracyTarget::Exact)` from
-/// `topk_exact_accuracy_target` — see that method's docs for why that's a
-/// pitfall, not a use case).
+/// sizing against `Exact` itself; [`topk_exact_realization`] rejects that
+/// value as a `CostModel` contract violation. Still degrades to the tightest
+/// parameters here for a caller that resolves `Exact` directly anyway.
 pub fn accuracy_budget(accuracy: &AccuracyTarget) -> (f64, f64) {
     match accuracy {
         AccuracyTarget::Exact => (f64::MIN_POSITIVE, DEFAULT_DELTA),
@@ -3362,6 +3365,23 @@ mod tests {
         // approximation over no summary, but PassThrough is still offered
         // for a caller that wants to weigh it (e.g. `estimate_cost`).
         assert_eq!(candidates.last(), Some(&Implementation::PassThrough));
+    }
+
+    /// Returning `Exact` from the opt-in hook would size each sketch at the
+    /// clamp maximum, recreating the allocation hazard the explicit target
+    /// is intended to prevent. Reject it at the hook boundary rather than
+    /// relying on every downstream `CostModel` author to notice the warning.
+    #[test]
+    #[should_panic(
+        expected = "CostModel::topk_exact_accuracy_target must return an approximate accuracy target"
+    )]
+    fn topk_exact_opt_in_rejects_exact_sizing_target() {
+        implementations_for_with(
+            &topk_exact(10),
+            &TopkExactCostModel {
+                target: Some(AccuracyTarget::Exact),
+            },
+        );
     }
 
     /// (c) `Count { accuracy: Exact }` is unaffected by the `TopK`-specific

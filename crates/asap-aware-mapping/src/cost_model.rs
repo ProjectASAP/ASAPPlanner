@@ -244,10 +244,12 @@ pub trait CostModel {
     /// specified. Returning `Some` here instead requires the deployment to
     /// state the budget it actually wants (e.g.
     /// `Some(AccuracyTarget::Epsilon(1.0 / k as f64))`, or a fixed
-    /// deployment-wide epsilon) — [`rank_candidates`](Self::rank_candidates)
+    /// deployment-wide epsilon). Returning `Some(AccuracyTarget::Exact)` is
+    /// a contract violation and is rejected before sizing, preventing the
+    /// clamp-saturated allocation described above. [`rank_candidates`](Self::rank_candidates)
     /// and [`size_params`](Self::size_params) are then consulted exactly as
-    /// they are for any other top-k sketch candidate, sized against that
-    /// returned target rather than `Exact`'s own degenerate one.
+    /// they are for any other top-k sketch candidate, sized against the
+    /// returned approximate target rather than `Exact`'s own degenerate one.
     ///
     /// The sketch candidate(s) this produces are offered *alongside*
     /// `Implementation::PassThrough`, not instead of it — `PassThrough`
