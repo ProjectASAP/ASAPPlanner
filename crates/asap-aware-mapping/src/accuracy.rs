@@ -86,6 +86,15 @@ pub struct PropagationStats {
     /// of groups a `sum` folds), for `ExactSum`/`ExactExtremum`'s union
     /// bound over per-input failures.
     pub input_row_count: Option<u64>,
+    /// Lower confidence bound of the kth selected TopK item, after widening
+    /// the interval by the sketch's own estimation error.
+    pub topk_selected_lower_bound: Option<f64>,
+    /// Greatest upper confidence bound among excluded TopK items, after
+    /// widening the interval by the sketch's own estimation error.
+    pub topk_excluded_upper_bound: Option<f64>,
+    /// Union-bound failure probability of all intervals used by the margin
+    /// certificate.
+    pub topk_interval_failure_probability: Option<f64>,
 }
 
 /// The deployment-extensible accuracy algebra. `asap-aware-mapping` ships
@@ -131,6 +140,13 @@ pub struct DefaultAccuracyModel;
 /// by floating-point noise.
 const SATISFACTION_TOLERANCE: f64 = 1e-9;
 
+fn count_sketch_failure_probability(depth: u32) -> Option<f64> {
+    if depth == 0 || depth.is_multiple_of(2) {
+        return None;
+    }
+    Some((-f64::from(depth) / 18.0).exp())
+}
+
 impl DefaultAccuracyModel {
     /// The local guarantee of one sketch `(algorithm, params)` for `query`
     /// — each arm inverts the matching formula in
@@ -140,40 +156,32 @@ impl DefaultAccuracyModel {
         params: &SketchParams,
         query: &SketchQuery,
     ) -> Option<ResultGuarantee> {
-        // A frequency bound for each reported key does not certify that the
-        // reported key set is the true top-k set. Until a margin certificate
-        // is modeled, TopK has no end-to-end guarantee.
-        if matches!(query, SketchQuery::TopK { .. }) {
-            return None;
-        }
         let (metric, bound, delta) = match params {
-            // KLL: rank error ε ≈ 2/k.
+            // The committed KLL contract is its 99%-confidence normalized
+            // rank bound. Tighter confidence needs runtime-supported
+            // amplification and therefore remains unavailable.
             SketchParams::Kll { k } => (
                 ErrorMetric::Rank,
                 2.0 / f64::from(*k),
-                ProbabilityExpr::Unknown {
-                    statistic: "kll_failure_probability".into(),
-                },
+                ProbabilityExpr::Constant { value: 0.01 },
             ),
             // DDSketch: deterministic relative value error α.
             SketchParams::DDSketch { alpha } => {
                 (ErrorMetric::RelativeValue, *alpha, ProbabilityExpr::Zero)
             }
-            // HLL: relative standard error 1.04/√(2^p).
+            // HLL: RSE = 1.04/√(2^p). Chebyshev turns ten standard
+            // deviations into a distribution-free 99% confidence bound.
             SketchParams::Hll { precision } => (
                 ErrorMetric::Cardinality,
-                1.04 / 2f64.powi(i32::from(*precision)).sqrt(),
-                ProbabilityExpr::Unknown {
-                    statistic: "hll_failure_probability".into(),
-                },
+                10.0 * 1.04 / 2f64.powi(i32::from(*precision)).sqrt(),
+                ProbabilityExpr::Constant { value: 0.01 },
             ),
-            // KMV / Theta: relative standard error 1/√k.
+            // KMV / Theta: RSE <= 1/√(k-2); the same Chebyshev conversion
+            // gives a conservative parameter-derived 99% confidence bound.
             SketchParams::Kmv { k } | SketchParams::Theta { k } => (
                 ErrorMetric::Cardinality,
-                1.0 / f64::from(*k).sqrt(),
-                ProbabilityExpr::Unknown {
-                    statistic: "kmv_theta_failure_probability".into(),
-                },
+                10.0 / f64::from(k.saturating_sub(2).max(1)).sqrt(),
+                ProbabilityExpr::Constant { value: 0.01 },
             ),
             // CMS: over-count ≤ (e/w)·‖f‖₁ with probability ≥ 1 − e^{−d}.
             SketchParams::Cms { width, depth } | SketchParams::CmsWithHeap { width, depth, .. } => {
@@ -185,12 +193,18 @@ impl DefaultAccuracyModel {
                     },
                 )
             }
-            // CountSketch has an L2-based error bound and a different sizing
-            // relationship. Its current sizing is explicitly a placeholder,
-            // so it cannot support a formal guarantee.
-            SketchParams::CountSketch { .. } | SketchParams::CountSketchWithHeap { .. } => {
-                return None
-            }
+            // CountSketch: one row has variance at most ‖f‖₂²/w. With
+            // ε=√(3/w), Chebyshev makes a row bad with probability <=1/3;
+            // the median across independent odd-depth rows has the binomial
+            // tail bounded by Hoeffding below.
+            SketchParams::CountSketch { width, depth }
+            | SketchParams::CountSketchWithHeap { width, depth, .. } => (
+                ErrorMetric::L2Frequency,
+                (3.0 / f64::from(*width)).sqrt(),
+                ProbabilityExpr::Constant {
+                    value: count_sketch_failure_probability(*depth)?,
+                },
+            ),
         };
         let provenance = vec![GuaranteeSource::SketchReadout {
             algorithm: format!("{algorithm:?}"),
@@ -438,6 +452,7 @@ fn absolute_bound(input: &ResultGuarantee) -> Option<BoundExpr> {
         ErrorMetric::RelativeValue => "true_value_magnitude",
         ErrorMetric::Cardinality => "true_cardinality",
         ErrorMetric::Frequency => "stream_l1_norm",
+        ErrorMetric::L2Frequency => "stream_l2_norm",
         // `Rank` has no distribution-free conversion to a value error; a
         // metric this crate does not know has no registered conversion.
         ErrorMetric::Rank | ErrorMetric::TopKMembership | _ => return None,
@@ -506,7 +521,9 @@ impl AccuracyModel for DefaultAccuracyModel {
         stats: &PropagationStats,
     ) -> Result<ResultGuarantee, AccuracyError> {
         // Exact input: only the local guarantee remains (or the value is exact).
-        if inputs.iter().all(ResultGuarantee::is_exact) {
+        if inputs.iter().all(ResultGuarantee::is_exact)
+            && !matches!(op, CompositionOperator::TopKSelection)
+        {
             return Ok(match local {
                 Some(local) => {
                     let mut out = local.clone();
@@ -574,6 +591,7 @@ impl AccuracyModel for DefaultAccuracyModel {
                     ErrorMetric::Rank
                     | ErrorMetric::Cardinality
                     | ErrorMetric::Frequency
+                    | ErrorMetric::L2Frequency
                     | ErrorMetric::TopKMembership
                     | _ => Err(unsupported(format!(
                         "no registered same-metric composition rule for {:?} over {:?}",
@@ -601,11 +619,50 @@ impl AccuracyModel for DefaultAccuracyModel {
             }
             CompositionOperator::ExactSum => Self::exact_sum(op, inputs, stats),
             CompositionOperator::ExactExtremum => Self::exact_extremum(op, inputs, stats),
-            CompositionOperator::TopKSelection => Err(unsupported(
-                "top-k membership over approximate inputs needs a margin certificate \
-                 (issue #172, PR 3)"
-                    .into(),
-            )),
+            CompositionOperator::TopKSelection => {
+                let (Some(selected_lower), Some(excluded_upper), Some(delta)) = (
+                    stats.topk_selected_lower_bound,
+                    stats.topk_excluded_upper_bound,
+                    stats.topk_interval_failure_probability,
+                ) else {
+                    return Err(unsupported(
+                        "top-k membership needs selected-lower, excluded-upper, and interval \
+                         failure-probability evidence"
+                            .into(),
+                    ));
+                };
+                if !(selected_lower.is_finite()
+                    && excluded_upper.is_finite()
+                    && delta.is_finite()
+                    && (0.0..=1.0).contains(&delta)
+                    && selected_lower > excluded_upper)
+                {
+                    return Err(unsupported(
+                        "top-k confidence intervals overlap or contain invalid evidence".into(),
+                    ));
+                }
+                let mut provenance = inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(input_index, guarantee)| GuaranteeSource::ChildGuarantee {
+                        input_index,
+                        guarantee: Box::new(guarantee.clone()),
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(local) = local {
+                    provenance.extend(local.provenance.clone());
+                }
+                provenance.push(GuaranteeSource::CompositionStep {
+                    operator: op.clone(),
+                    rule: "topk_membership_margin_certificate".into(),
+                });
+                Ok(ResultGuarantee {
+                    metric: ErrorMetric::TopKMembership,
+                    bound: BoundExpr::Zero,
+                    failure_probability: ProbabilityExpr::Constant { value: delta },
+                    provenance,
+                })
+            }
             // An operator this crate does not know has no registered rule.
             _ => Err(unsupported("no registered rule for this operator".into())),
         }
@@ -942,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn topk_selection_is_unsupported() {
+    fn topk_selection_requires_a_separated_margin_certificate() {
         let err = DefaultAccuracyModel
             .propagate(
                 &CompositionOperator::TopKSelection,
@@ -952,6 +1009,36 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, AccuracyError::UnsupportedComposition { .. }));
+
+        let certified = DefaultAccuracyModel
+            .propagate(
+                &CompositionOperator::TopKSelection,
+                &[abs(0.1, 0.01)],
+                None,
+                &PropagationStats {
+                    topk_selected_lower_bound: Some(101.0),
+                    topk_excluded_upper_bound: Some(100.0),
+                    topk_interval_failure_probability: Some(0.005),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(certified.metric, ErrorMetric::TopKMembership);
+        assert_eq!(certified.bound.evaluate(), Some(0.0));
+        assert_eq!(certified.failure_probability.evaluate(), Some(0.005));
+
+        let overlapping = DefaultAccuracyModel.propagate(
+            &CompositionOperator::TopKSelection,
+            &[abs(0.1, 0.01)],
+            None,
+            &PropagationStats {
+                topk_selected_lower_bound: Some(100.0),
+                topk_excluded_upper_bound: Some(100.0),
+                topk_interval_failure_probability: Some(0.005),
+                ..Default::default()
+            },
+        );
+        assert!(overlapping.is_err());
     }
 
     #[test]
@@ -972,8 +1059,8 @@ mod tests {
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Rank);
         assert!(DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
-        assert_eq!(g.failure_probability.evaluate(), None);
-        assert!(!DefaultAccuracyModel.satisfies(
+        assert_eq!(g.failure_probability.evaluate(), Some(0.01));
+        assert!(DefaultAccuracyModel.satisfies(
             &g,
             &AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -994,8 +1081,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Cardinality);
-        assert!(DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
-        assert_eq!(g.failure_probability.evaluate(), None);
+        assert_eq!(g.failure_probability.evaluate(), Some(0.01));
+        assert!(!DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
 
         let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
         let g = DefaultAccuracyModel
@@ -1018,13 +1105,13 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_sketch_guarantees_fail_closed() {
+    fn count_sketch_uses_an_l2_guarantee() {
         use crate::replacement::default_size_params;
         use asap_types::pre_asap::agg_intent::default_cardinality;
 
         let intent = default_cardinality();
         let count_sketch = default_size_params(SketchAlgorithm::CountSketch, &intent, 0.01, 0.01);
-        assert!(DefaultAccuracyModel
+        let guarantee = DefaultAccuracyModel
             .local_guarantee(
                 &SummaryFamilyType::Sketch(
                     SketchKind::new(SketchAlgorithm::CountSketch, count_sketch),
@@ -1035,14 +1122,22 @@ mod tests {
                     value: None,
                 },
             )
-            .is_none());
+            .expect("CountSketch has a parameter-derived L2 guarantee");
+        assert_eq!(guarantee.metric, ErrorMetric::L2Frequency);
+        assert!(DefaultAccuracyModel.satisfies(
+            &guarantee,
+            &AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            }
+        ));
 
         let cms_heap = SketchParams::CmsWithHeap {
             width: 272,
             depth: 5,
             heap_size: 10,
         };
-        assert!(DefaultAccuracyModel
+        let topk_frequency = DefaultAccuracyModel
             .local_guarantee(
                 &SummaryFamilyType::Sketch(
                     SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
@@ -1050,7 +1145,8 @@ mod tests {
                 ),
                 &SketchQuery::TopK { k: 10 },
             )
-            .is_none());
+            .expect("heap sketch still provides per-key frequency intervals");
+        assert_eq!(topk_frequency.metric, ErrorMetric::Frequency);
     }
 
     #[test]

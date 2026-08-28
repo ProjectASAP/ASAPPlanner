@@ -240,7 +240,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
 /// distinct branch of the sketch-vs-exact decision than the quantile test
 /// above.
 #[tokio::test]
-async fn sql_count_distinct_binds_hll_sketch_over_named_column() {
+async fn sql_count_distinct_binds_a_confidence_certified_sketch_over_named_column() {
     let pre_asap = lower(
         "SELECT COUNT(DISTINCT service) FROM metrics",
         AccuracyTarget::Epsilon(0.01),
@@ -275,7 +275,7 @@ async fn sql_count_distinct_binds_hll_sketch_over_named_column() {
     assert_eq!(
         family,
         &SummaryFamilyType::Sketch(
-            SketchKind::new(SketchAlgorithm::Hll, SketchParams::Hll { precision: 14 }),
+            SketchKind::new(SketchAlgorithm::Theta, SketchParams::Theta { k: 1_000_002 }),
             GroupingStrategy::default()
         )
     );

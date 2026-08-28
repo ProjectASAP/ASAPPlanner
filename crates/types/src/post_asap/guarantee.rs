@@ -75,6 +75,10 @@ pub enum ErrorMetric {
     /// `|estimate − truth| ≤ bound · ‖f‖₁` for a point-frequency query
     /// (CMS's ε, normalized by the stream's L1 norm).
     Frequency,
+    /// `|estimate − truth| ≤ bound · ‖f‖₂` for a point-frequency query.
+    /// CountSketch uses this normalization; it is intentionally distinct
+    /// from CMS's [`ErrorMetric::Frequency`] (`L1`) guarantee.
+    L2Frequency,
     /// The returned key set equals the true top-k set. No shipped model
     /// produces this yet: it needs a per-key interval margin certificate
     /// (issue #172, PR 3). Present so the vocabulary can name the metric a

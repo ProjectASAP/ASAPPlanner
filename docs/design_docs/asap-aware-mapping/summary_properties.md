@@ -117,6 +117,23 @@ expressions, and provenance. Exact values have zero error; a sketch
 readout's guarantee is derived from the sizing formula that produced its
 parameters.
 
+The built-in sketch contracts distinguish their error norms and confidence
+semantics:
+
+- CMS uses an L1-frequency bound, while CountSketch uses an L2-frequency
+  bound and is sized from both width and odd median depth. The two are not
+  interchangeable.
+- KLL, HLL, KMV, and Theta expose conservative 99%-confidence guarantees
+  derived from their committed parameters. A tighter requested `delta` is
+  rejected unless another implementation supplies a stronger contract.
+- TopK membership is certified only when the widened confidence interval of
+  the kth selected item is strictly above every excluded item's widened
+  interval. Missing or overlapping interval evidence fails closed.
+- Hydra adds its shared-grid collision error to the inner sketch error and
+  union-bounds their failure probabilities. Until deployment/data statistics
+  instantiate the shared-grid terms, the expressions remain symbolic and an
+  accuracy-targeted Hydra candidate is not admitted.
+
 The default `AccuracyModel` is deliberately conservative. It supports
 registered same-metric additive, relative, and Lipschitz rules and exact
 sum/max/min over approximate inputs. It uses union-bound probabilities

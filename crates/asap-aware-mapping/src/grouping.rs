@@ -29,9 +29,9 @@
 //!   ([`asap_types::post_asap::hydra_kind_for`]): `Cms` and `CountSketch`
 //!   have structural Hydra mappings. `HydraKll` remains an explicit
 //!   experimental IR value, but the paper excludes quantiles and search
-//!   therefore never emits it. Accuracy-targeted candidates are also
-//!   withheld until the shared grid's collision error is composed with the
-//!   inner sketch guarantee.
+//!   therefore never emits it. The shared-grid term is represented
+//!   symbolically and accuracy-targeted candidates are withheld until its
+//!   required statistics are supplied.
 //!
 //! Whether Hydra is *worth it* for a given estimated subpopulation
 //! cardinality is a cost-model question, deliberately out of scope here —
@@ -73,8 +73,9 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    default_hydra_params, hydra_kind_for, GroupingStrategy, HydraKind, SketchAlgorithm,
-    SketchParams, SummaryExpr, SummaryFamilyType, SummaryNode,
+    default_hydra_params, hydra_kind_for, BoundExpr, CompositionOperator, GroupingStrategy,
+    GuaranteeSource, HydraKind, ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams,
+    SummaryExpr, SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -160,10 +161,9 @@ impl<'a> HydraGroupingStrategy<'a> {
         let Some(intent) = bindable_intent(target.root) else {
             return Vec::new();
         };
-        // Hydra adds shared-grid collision error that is not modeled yet.
-        // `with_grouping` clears the per-subpopulation guarantee so exports
-        // remain honest, but an unknown guarantee must also keep the
-        // candidate out of cost ranking when this node has a requirement.
+        // Hydra's shared-grid term is symbolic until deployment/data
+        // statistics instantiate it. Keep that unevaluable guarantee out of
+        // cost ranking when this node has an accuracy requirement.
         if accuracy_target(intent).is_some() {
             return Vec::new();
         }
@@ -284,10 +284,7 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
                 query: query.clone(),
             },
             schema: node.schema.clone(),
-            // Hydra adds shared-grid collision noise beyond the inner
-            // sketch's per-subpopulation error. Until that term is modeled,
-            // the finalized value's end-to-end guarantee is unknown.
-            guarantee: None,
+            guarantee: node.guarantee.as_ref().map(hydra_guarantee),
         }),
         SummaryExpr::SummaryAgg {
             child,
@@ -330,9 +327,52 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
     }
 }
 
+/// Compose the inner per-subpopulation guarantee with Hydra's outer shared
+/// grid. The paper's collision term depends on deployment/data statistics;
+/// keeping those leaves symbolic makes the formula explicit while ensuring
+/// target satisfaction fails closed until a caller supplies them.
+fn hydra_guarantee(inner: &ResultGuarantee) -> ResultGuarantee {
+    let mut provenance = inner.provenance.clone();
+    provenance.push(GuaranteeSource::ChildGuarantee {
+        input_index: 0,
+        guarantee: Box::new(inner.clone()),
+    });
+    provenance.push(GuaranteeSource::UnavailableStatistic {
+        statistic: "hydra_shared_grid_collision_bound".into(),
+    });
+    provenance.push(GuaranteeSource::UnavailableStatistic {
+        statistic: "hydra_shared_grid_failure_probability".into(),
+    });
+    provenance.push(GuaranteeSource::CompositionStep {
+        operator: CompositionOperator::ApproximateAggregate,
+        rule: "hydra_shared_grid_union_bound".into(),
+    });
+    ResultGuarantee {
+        metric: inner.metric,
+        bound: BoundExpr::Sum {
+            terms: vec![
+                inner.bound.clone(),
+                BoundExpr::Unknown {
+                    statistic: "hydra_shared_grid_collision_bound".into(),
+                },
+            ],
+        },
+        failure_probability: ProbabilityExpr::UnionBound {
+            terms: vec![
+                inner.failure_probability.clone(),
+                ProbabilityExpr::Unknown {
+                    statistic: "hydra_shared_grid_failure_probability".into(),
+                },
+            ],
+        },
+        provenance,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_types::post_asap::ErrorMetric;
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -396,6 +436,35 @@ mod tests {
         assert!(has_subpopulations(&Reduction::Reduce(GroupKeys::without(
             vec![]
         ))));
+    }
+
+    #[test]
+    fn hydra_composes_inner_and_shared_grid_error_symbolically() {
+        let inner = ResultGuarantee {
+            metric: ErrorMetric::Frequency,
+            bound: BoundExpr::Constant { value: 0.01 },
+            failure_probability: ProbabilityExpr::Constant { value: 0.02 },
+            provenance: vec![],
+        };
+        let composed = hydra_guarantee(&inner);
+
+        assert_eq!(composed.metric, ErrorMetric::Frequency);
+        assert!(matches!(
+            composed.bound,
+            BoundExpr::Sum { ref terms }
+                if matches!(terms.as_slice(), [
+                    BoundExpr::Constant { value },
+                    BoundExpr::Unknown { statistic },
+                ] if *value == 0.01 && statistic == "hydra_shared_grid_collision_bound")
+        ));
+        assert!(matches!(
+            composed.failure_probability,
+            ProbabilityExpr::UnionBound { ref terms }
+                if matches!(terms.as_slice(), [
+                    ProbabilityExpr::Constant { value },
+                    ProbabilityExpr::Unknown { statistic },
+                ] if *value == 0.02 && statistic == "hydra_shared_grid_failure_probability")
+        ));
     }
 
     // ── HydraGroupingStrategy ─────────────────────────────────────────────

@@ -907,7 +907,7 @@ pub fn default_size_params(
             depth: cms_depth(delta),
         },
         SketchAlgorithm::Hll => SketchParams::Hll {
-            precision: hll_precision(eps),
+            precision: hll_precision_99(eps),
         },
         SketchAlgorithm::CmsWithHeap => {
             let k = match intent {
@@ -924,17 +924,11 @@ pub fn default_size_params(
         // CountSketchWithHeap) are only reachable once a cost model picks
         // them; sized here so that wiring is local.
         SketchAlgorithm::DDSketch => SketchParams::DDSketch { alpha: eps },
-        SketchAlgorithm::Theta => SketchParams::Theta { k: kmv_k(eps) },
-        SketchAlgorithm::Kmv => SketchParams::Kmv { k: kmv_k(eps) },
-        // Count-Sketch is CMS's balanced/zero-mean-error alternative —
-        // same (width, depth) shape, sized the same way for now (a
-        // Count-Sketch-specific bound uses an L2-norm error guarantee
-        // rather than CMS's L1-norm one; this is a placeholder pending
-        // that refinement, same status as the other non-preferred
-        // candidates above).
+        SketchAlgorithm::Theta => SketchParams::Theta { k: kmv_k_99(eps) },
+        SketchAlgorithm::Kmv => SketchParams::Kmv { k: kmv_k_99(eps) },
         SketchAlgorithm::CountSketch => SketchParams::CountSketch {
-            width: cms_width(eps),
-            depth: cms_depth(delta),
+            width: count_sketch_width(eps),
+            depth: count_sketch_depth(delta),
         },
         SketchAlgorithm::CountSketchWithHeap => {
             let k = match intent {
@@ -942,8 +936,8 @@ pub fn default_size_params(
                 _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
             };
             SketchParams::CountSketchWithHeap {
-                width: cms_width(eps),
-                depth: cms_depth(delta),
+                width: count_sketch_width(eps),
+                depth: count_sketch_depth(delta),
                 heap_size: k as u32,
             }
         }
@@ -1045,20 +1039,14 @@ pub fn posterior_aware_size_params(
                 heap_size: k as u32,
             }
         }
-        SketchAlgorithm::CountSketch => SketchParams::CountSketch {
-            width: relaxed_width(eps),
-            depth: cms_depth(delta),
-        },
+        SketchAlgorithm::CountSketch => {
+            // CMS's expected-L1 collision relaxation is not a CountSketch
+            // L2 theorem; retain the formal CountSketch sizing unchanged.
+            default_size_params(kind, intent, eps, delta)
+        }
         SketchAlgorithm::CountSketchWithHeap => {
-            let k = match intent {
-                AggIntent::TopK { k, .. } => *k,
-                _ => unreachable!("CountSketchWithHeap is only a TopK candidate"),
-            };
-            SketchParams::CountSketchWithHeap {
-                width: relaxed_width(eps),
-                depth: cms_depth(delta),
-                heap_size: k as u32,
-            }
+            // As above, do not apply CMS's L1 relaxation to CountSketch.
+            default_size_params(kind, intent, eps, delta)
         }
         // Every other kind is untouched by this issue's CMS-specific
         // relaxation — defer to the existing formula verbatim. Spelled out
@@ -1086,10 +1074,15 @@ fn kll_k(eps: f64) -> u32 {
     saturating_ceil(2.0 / eps, 8, 65_535)
 }
 
-/// HLL: standard error ≈ 1.04/√(2^p) ⇒ `p = ⌈log2((1.04/ε)²)⌉`. The default
-/// `Cardinality` target (`asap-ir::default_cardinality`) inverts to p = 14.
+/// HLL standard-error inversion. The committed guarantee applies the
+/// 99%-confidence conversion below before calling this helper.
 fn hll_precision(eps: f64) -> u8 {
     saturating_ceil((1.04 / eps).powi(2).log2(), 4, 18) as u8
+}
+
+/// 99%-confidence HLL relative bound via Chebyshev: ten times the RSE.
+fn hll_precision_99(eps: f64) -> u8 {
+    hll_precision(eps / 10.0)
 }
 
 /// CMS: over-count ≤ ε·N with width `w = ⌈e/ε⌉` columns.
@@ -1103,9 +1096,29 @@ fn cms_depth(delta: f64) -> u32 {
     saturating_ceil((1.0 / delta).ln(), 1, 32)
 }
 
-/// KMV / theta: relative error ≈ 1/√k ⇒ `k = ⌈1/ε²⌉`.
-fn kmv_k(eps: f64) -> u32 {
-    saturating_ceil(1.0 / (eps * eps), 16, 1 << 26)
+/// 99%-confidence KMV/Theta relative bound via Chebyshev, using
+/// `RSE <= 1/sqrt(k-2)` and a ten-standard-deviation interval.
+fn kmv_k_99(eps: f64) -> u32 {
+    saturating_ceil(100.0 / (eps * eps) + 2.0, 16, 1 << 26)
+}
+
+/// CountSketch `L2` point-query width: ε = sqrt(3/w).
+fn count_sketch_width(eps: f64) -> u32 {
+    saturating_ceil(3.0 / (eps * eps), 2, 1 << 26)
+}
+
+/// Positive odd depth satisfying Hoeffding's median failure bound
+/// `exp(-depth/18) <= delta` for per-row failure at most 1/3.
+fn count_sketch_depth(delta: f64) -> u32 {
+    if !(delta.is_finite() && delta > 0.0 && delta < 1.0) {
+        return 255;
+    }
+    let depth = saturating_ceil(18.0 * (1.0 / delta).ln(), 1, 255);
+    if depth.is_multiple_of(2) {
+        (depth + 1).min(255)
+    } else {
+        depth
+    }
 }
 
 /// `⌈x⌉` clamped to `[lo, hi]`; NaN / non-positive x saturate to `hi`
@@ -1802,7 +1815,11 @@ fn compose_guarantee(
             )
         }
         (_, Some(query)) => (
-            CompositionOperator::ApproximateAggregate,
+            if matches!(query, PostAsapSketchQuery::TopK { .. }) {
+                CompositionOperator::TopKSelection
+            } else {
+                CompositionOperator::ApproximateAggregate
+            },
             accuracy.local_guarantee(family, query),
         ),
         (_, None) => (CompositionOperator::ApproximateAggregate, None),
@@ -1836,9 +1853,10 @@ fn compose_guarantee(
         guarantee.provenance.push(GuaranteeSource::AccuracyTarget {
             target: target.clone(),
         });
-        // Approximate over approximate: the composed guarantee must meet the
-        // target this node's value was requested at.
-        if !input.is_exact() && !accuracy.satisfies(&guarantee, target) {
+        // Check even over an exact input: parameter clamps or a conservative
+        // confidence conversion can make the tightest available sketch miss
+        // its requested target.
+        if !accuracy.satisfies(&guarantee, target) {
             return Err(AccuracyError::TargetNotSatisfied {
                 metric: guarantee.metric,
                 bound: guarantee.bound.evaluate(),
@@ -3982,14 +4000,12 @@ mod tests {
     }
 
     #[test]
-    fn default_cardinality_inverts_to_hll_precision_14() {
-        // `default_cardinality` encodes HLL's standard error at p=14; the
-        // sizing must invert it back exactly.
+    fn default_cardinality_uses_the_tightest_supported_hll_precision() {
         assert_eq!(
             preferred(&default_cardinality()),
             Implementation::Sketch(SketchKind::new(
                 SketchAlgorithm::Hll,
-                SketchParams::Hll { precision: 14 },
+                SketchParams::Hll { precision: 18 },
             ))
         );
     }
@@ -4197,7 +4213,7 @@ mod tests {
     }
 
     #[test]
-    fn posterior_aware_sizing_applies_to_every_cms_family_kind() {
+    fn posterior_aware_sizing_does_not_apply_cms_l1_relaxation_to_count_sketch() {
         let cms_heap_intent = AggIntent::TopK {
             k: 7,
             accuracy: eps(0.01),
@@ -4214,10 +4230,12 @@ mod tests {
                 0.01,
                 assumption
             ),
-            SketchParams::CountSketch {
-                width: 68,
-                depth: 5
-            }, // ceil(272 * 0.25)
+            default_size_params(
+                SketchAlgorithm::CountSketch,
+                &count_intent(0.01),
+                0.01,
+                0.01
+            ),
         );
         // CmsWithHeap / CountSketchWithHeap carry k through untouched.
         match posterior_aware_size_params(
@@ -4369,7 +4387,7 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_enumerates_all_three_summary_candidates() {
+    fn cardinality_rejects_hll_when_its_parameter_cap_misses_the_target() {
         let q = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
@@ -4382,12 +4400,8 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec![
-                SketchAlgorithm::Hll,
-                SketchAlgorithm::Theta,
-                SketchAlgorithm::Kmv
-            ],
-            "expected every summary_candidates entry for Cardinality"
+            vec![SketchAlgorithm::Theta, SketchAlgorithm::Kmv],
+            "the conservative 99% HLL bound cannot meet the target at precision <= 18"
         );
     }
 
@@ -4789,7 +4803,7 @@ mod tests {
             .groups()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .unwrap();
-        assert_eq!(agg_group.candidates.len(), 3);
+        assert_eq!(agg_group.candidates.len(), 2);
     }
 
     #[test]
@@ -6301,7 +6315,7 @@ mod tests {
     }
 
     #[test]
-    fn topk_realizes_cms_with_heap_and_topk_readout() {
+    fn topk_without_margin_evidence_falls_back_to_pre_asap() {
         let q = agg(
             vec![2],
             AggIntent::TopK {
@@ -6311,21 +6325,7 @@ mod tests {
             metric_scan(&["job"]),
         );
         let root = realize(&q).unwrap();
-        let SummaryExpr::SummaryEstimate {
-            summary_input,
-            query,
-        } = &root.expr
-        else {
-            panic!("expected estimate root, got {:?}", root.expr);
-        };
-        assert!(matches!(query, PostAsapSketchQuery::TopK { k: 5 }));
-        assert!(matches!(
-            &summary_input.expr,
-            SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(kind, _),
-                ..
-            } if kind.algorithm() == &SketchAlgorithm::CmsWithHeap
-        ));
+        assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
     #[test]
@@ -6747,9 +6747,9 @@ mod tests {
             .iter()
             .all(|candidate| matches!(candidate.replacement, Replacement::Rewrite(_))));
         assert!(!group.rejected.is_empty());
-        assert!(group
-            .rejected
-            .iter()
-            .all(|rejected| matches!(rejected.error, AccuracyError::TargetNotSatisfied { .. })));
+        assert!(group.rejected.iter().all(|rejected| matches!(
+            rejected.error,
+            AccuracyError::TargetNotSatisfied { .. } | AccuracyError::UnsupportedComposition { .. }
+        )));
     }
 }
