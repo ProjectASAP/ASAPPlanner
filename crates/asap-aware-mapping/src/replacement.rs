@@ -359,12 +359,16 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
 use asap_types::pre_asap::schema::Schema;
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::RepetitionInterval;
 use std::rc::Rc;
 use thiserror::Error;
 
 use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
+use crate::recurrence::{
+    evaluation_rate_of, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
+};
 use crate::rollup::RollupStrategy;
 use crate::topk_reuse::TopKLimitReuseStrategy;
 
@@ -1787,6 +1791,286 @@ impl<Id> PlanSpace<Id> {
             })
             .collect()
     }
+
+    /// Recurrence-aware counterpart to [`Self::cost_sorted`]. CSE
+    /// share/recompute pairs are ordered with the target's recurrence
+    /// profile; all other candidate shapes retain their existing ranking.
+    pub fn cost_sorted_with_recurrence(
+        &self,
+        cost_model: &dyn CostModel,
+        profiles: &RecurrenceProfileMap,
+        horizon: Option<Horizon>,
+    ) -> Result<Vec<RankedGroup<'_>>, RecurrenceError> {
+        self.order
+            .iter()
+            .map(|ptr| {
+                let group = &self.groups[ptr];
+                let mut candidates = rank_group(group, cost_model);
+                if cse_candidate_pair(group).is_some() {
+                    if let Some(decision) = decide_group_with_recurrence(
+                        group,
+                        group.consumer_count,
+                        profiles.for_target(&group.target),
+                        horizon,
+                        cost_model,
+                    )? {
+                        candidates.sort_by_key(|candidate| match candidate.provenance {
+                            ReplacementProvenance::CseShare if decision == ShareDecision::Share => {
+                                0
+                            }
+                            ReplacementProvenance::CseRecompute
+                                if decision == ShareDecision::RecomputeIndependently =>
+                            {
+                                0
+                            }
+                            ReplacementProvenance::CseShare
+                            | ReplacementProvenance::CseRecompute => 2,
+                            _ => 1,
+                        });
+                    }
+                }
+                let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
+                let costs = candidates
+                    .iter()
+                    .map(|candidate| {
+                        cost_model
+                            .grouping_state_cost(candidate, &target)
+                            .map_or_else(
+                                || cost_model.estimate_cost(candidate, &target),
+                                |cost| cost.0,
+                            )
+                    })
+                    .collect();
+                Ok(RankedGroup {
+                    target: &group.target,
+                    consumer_count: group.consumer_count,
+                    candidates,
+                    costs,
+                })
+            })
+            .collect()
+    }
+}
+
+// ── Recurrence-aware cost context (issue #287) ──────────────────────────
+
+/// One [`RecurrenceProfile`] per discovered [`MemoGroup`] target, built by
+/// [`PlanSpace::recurrence_profiles`] — the "carry `RepeatingEntry.interval`
+/// and relevant `DataCharacteristics` into ASAP-aware search/cost context"
+/// half of issue #287. Looked up by `Rc` pointer identity, the same
+/// currency [`PlanSpace::group_for`]/[`GlobalSelection::for_target`] already
+/// use.
+/// Holds an owned `Rc<QueryExpr>` clone alongside each profile (not just its
+/// raw pointer) so this map keeps every node it describes alive for as long
+/// as the map itself lives — a `RecurrenceProfileMap` is safe to outlive the
+/// `PlanSpace` it was built from. Without this, a raw `*const QueryExpr` key
+/// could, after the originating `PlanSpace` (the only other owner of those
+/// `Rc`s) is dropped, collide with an unrelated, later allocation that
+/// happens to reuse the same freed address — silently returning a stale
+/// profile for the wrong node (issue #287 review, bug 4).
+#[derive(Debug, Clone)]
+pub struct RecurrenceProfileMap {
+    profiles: HashMap<*const QueryExpr, (Rc<QueryExpr>, RecurrenceProfile)>,
+}
+
+impl RecurrenceProfileMap {
+    /// The [`RecurrenceProfile`] for `target`, or
+    /// [`RecurrenceProfile::EMPTY`] when `target` wasn't a discovered site
+    /// in the [`PlanSpace`] this map was built from (or carried no
+    /// recurring/one-shot/update-rate metadata at all) — always a valid,
+    /// "no metadata" answer, never a panic.
+    pub fn for_target(&self, target: &Rc<QueryExpr>) -> RecurrenceProfile {
+        self.profiles
+            .get(&Rc::as_ptr(target))
+            .map(|(_, profile)| *profile)
+            .unwrap_or(RecurrenceProfile::EMPTY)
+    }
+}
+
+impl<Id> PlanSpace<Id> {
+    /// Build one [`RecurrenceProfile`] per discovered site, by walking every
+    /// root's whole reachable sub-DAG (the same relational-skeleton
+    /// traversal [`discover_targets`] itself used to discover those sites)
+    /// and folding each root's own recurrence tag
+    /// ([`RootRecurrence::Repeating`]'s interval, or
+    /// [`RootRecurrence::OneShot`]) into every site reachable from it.
+    ///
+    /// `root_recurrence` is positional: `root_recurrence[i]` describes
+    /// `self.roots[i]` — the same order [`search_workload`]/
+    /// [`search_workload_with`] were originally called with (post-CSE
+    /// dedup preserves both root count and order — see
+    /// `asap_types::pre_asap::cse::share_common_subtrees`'s own
+    /// `.map(...).collect()` body). This keeps `Id` fully opaque (no `Eq`/
+    /// `Hash`/`Clone` bound needed on it at all — issue #287's "keep
+    /// caller/query identifiers opaque" requirement) at the cost of the
+    /// caller keeping the two slices in step; `root_recurrence.len()` must
+    /// equal `self.roots.len()`.
+    ///
+    /// A shared sub-DAG reachable from more than one root aggregates every
+    /// reaching root's contribution — repeating roots' intervals combine via
+    /// [`evaluation_rate_of`]'s `sum(1 / interval_i)`, one-shot roots
+    /// increment [`RecurrenceProfile::one_shot_consumers`] — so a summary
+    /// consumed by queries with different intervals gets one profile
+    /// reflecting all of them, per issue #287's "support a shared sub-DAG
+    /// consumed by queries with different intervals".
+    ///
+    /// `update_rate` is applied uniformly to every discovered site *that
+    /// this walk actually reached from some root* (see the "unreachable
+    /// sites" note below): today's
+    /// [`asap_types::workload::DataCharacteristics`] is a single
+    /// workload-level value (applies to every query in a `QueryWorkload`),
+    /// not per-target, so there is no finer-grained source to attach
+    /// instead. `None` when no `DataCharacteristics` were available —
+    /// preserves "missing metadata" behavior for the update-rate term alone
+    /// even when repeating/one-shot consumer information is present.
+    ///
+    /// A parent that structurally references the same child more than once
+    /// (e.g. `BinaryOp{lhs: X, rhs: X}`) credits that child with one
+    /// contribution per reference, not one contribution per distinct node —
+    /// matching how [`MemoGroup::consumer_count`] counts that occurrence.
+    /// Multiplicity is propagated through the full descendant path: if the
+    /// repeated parent is independently evaluated twice, its child is also
+    /// evaluated twice. This supplies recurrence-aware selection with the
+    /// effective structural execution rate rather than mere reachability.
+    ///
+    /// **Unreachable sites**: [`PlanSpace`] can contain a site no root's own
+    /// structural tree actually reaches — e.g. one only ever produced by a
+    /// [`Replacement::Rewrite`] candidate a [`ReplacementStrategy`] invented
+    /// (this walk only follows [`MemoGroup::target`]'s own structural
+    /// children, the same scope [`discover_targets`] uses for the original
+    /// roots, never a candidate's rewritten value). Such a site gets
+    /// [`RecurrenceProfile::EMPTY`] — in particular, `update_rate` is
+    /// **not** stamped onto it — so it falls back to the ordinary
+    /// structural decision instead of being charged an ingest-driven
+    /// maintenance cost against a real evaluation/one-shot signal of
+    /// exactly zero, which previously made `RecomputeIndependently` win
+    /// there unconditionally, regardless of the site's actual
+    /// `consumer_count` (issue #287 review, bug 2).
+    ///
+    /// Returns [`RecurrenceError::InvalidInterval`] if any
+    /// `RootRecurrence::Repeating` interval is zero,
+    /// [`RecurrenceError::InvalidUpdateRate`] if `update_rate` is non-finite
+    /// or negative, or [`RecurrenceError::RootCountMismatch`] if
+    /// `root_recurrence.len() != self.roots.len()`.
+    pub fn recurrence_profiles(
+        &self,
+        root_recurrence: &[RootRecurrence],
+        update_rate: Option<UpdateRate>,
+    ) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
+        if root_recurrence.len() != self.roots.len() {
+            return Err(crate::recurrence::RecurrenceError::RootCountMismatch {
+                expected: self.roots.len(),
+                got: root_recurrence.len(),
+            });
+        }
+        if let Some(rate) = update_rate {
+            crate::recurrence::validate_update_rate(rate)?;
+        }
+
+        let mut intervals: HashMap<*const QueryExpr, Vec<RepetitionInterval>> = HashMap::new();
+        let mut one_shot_counts: HashMap<*const QueryExpr, usize> = HashMap::new();
+        // Sites actually reached by at least one root's own recurrence tag
+        // during the walk below — see this method's own "Unreachable
+        // sites" doc.
+        let mut reached: HashSet<*const QueryExpr> = HashSet::new();
+
+        for ((_, root), recurrence) in self.roots.iter().zip(root_recurrence) {
+            let recurrence = *recurrence;
+            let root_ptr = Rc::as_ptr(root);
+            // Carry path multiplicity transitively. If a shared ancestor is
+            // referenced twice, every descendant below an independently
+            // recomputed occurrence is evaluated twice as well; stopping
+            // expansion after the first pointer visit undercounts exactly
+            // the effective-consumer rate recurrence-aware costing needs.
+            let mut queue: VecDeque<(*const QueryExpr, usize)> = VecDeque::new();
+            queue.push_back((root_ptr, 1));
+
+            while let Some((ptr, path_count)) = queue.pop_front() {
+                contribute(
+                    ptr,
+                    path_count,
+                    recurrence,
+                    &mut intervals,
+                    &mut one_shot_counts,
+                    &mut reached,
+                );
+                // Every reachable node was itself discovered as its own
+                // `MemoGroup` (`discover_targets` walks the identical
+                // relational-skeleton scope) — its own `target` is the
+                // canonical `Rc` to read children off.
+                if let Some(group) = self.groups.get(&ptr) {
+                    for (child, edge_count) in direct_child_counts(&group.target) {
+                        queue.push_back((
+                            child,
+                            path_count
+                                .checked_mul(edge_count)
+                                .expect("query DAG path multiplicity overflowed usize"),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let empty_intervals: Vec<RepetitionInterval> = Vec::new();
+        let mut profiles = HashMap::with_capacity(self.order.len());
+        for ptr in &self.order {
+            let site_intervals = intervals.get(ptr).unwrap_or(&empty_intervals);
+            let evaluation_rate = evaluation_rate_of(site_intervals.iter().copied())?;
+            let one_shot_consumers = one_shot_counts.get(ptr).copied().unwrap_or(0);
+            // Bug 2 fix (see "Unreachable sites" above): only a reached
+            // site carries the caller-supplied `update_rate`.
+            let site_update_rate = if reached.contains(ptr) {
+                update_rate
+            } else {
+                None
+            };
+            let node = Rc::clone(&self.groups[ptr].target);
+            profiles.insert(
+                *ptr,
+                (
+                    node,
+                    RecurrenceProfile {
+                        evaluation_rate,
+                        one_shot_consumers,
+                        update_rate: site_update_rate,
+                    },
+                ),
+            );
+        }
+
+        Ok(RecurrenceProfileMap { profiles })
+    }
+}
+
+/// Record `times` occurrences of `recurrence` against `ptr` — `times > 1`
+/// when a single parent structurally references `ptr` more than once (see
+/// [`PlanSpace::recurrence_profiles`]'s own doc on edge multiplicity).
+/// A no-op for `times == 0` (an `Rc` returned as a `direct_child_counts`
+/// child always has `edge_count >= 1` in practice, but this keeps the
+/// helper correct regardless).
+fn contribute(
+    ptr: *const QueryExpr,
+    times: usize,
+    recurrence: RootRecurrence,
+    intervals: &mut HashMap<*const QueryExpr, Vec<RepetitionInterval>>,
+    one_shot_counts: &mut HashMap<*const QueryExpr, usize>,
+    reached: &mut HashSet<*const QueryExpr>,
+) {
+    if times == 0 {
+        return;
+    }
+    reached.insert(ptr);
+    match recurrence {
+        RootRecurrence::Repeating(interval) => {
+            intervals
+                .entry(ptr)
+                .or_default()
+                .extend(std::iter::repeat_n(interval, times));
+        }
+        RootRecurrence::OneShot => {
+            *one_shot_counts.entry(ptr).or_insert(0) += times;
+        }
+    }
 }
 
 /// One [`MemoGroup`]'s candidates, ranked best-first by
@@ -2049,6 +2333,29 @@ impl<Id> PlanSpace<Id> {
     /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
     /// group's own raw [`MemoGroup::consumer_count`].
     pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
+        self.global_selection_impl(cost_model, None, None)
+            .expect("structural global selection cannot produce a recurrence error")
+    }
+
+    /// Recurrence-aware counterpart to [`Self::global_selection`]. The same
+    /// whole-plan traversal and effective structural consumer counts are
+    /// retained, while every CSE share/recompute choice is made from the
+    /// corresponding recurrence profile.
+    pub fn global_selection_with_recurrence(
+        &self,
+        cost_model: &dyn CostModel,
+        profiles: &RecurrenceProfileMap,
+        horizon: Option<Horizon>,
+    ) -> Result<GlobalSelection<'_>, RecurrenceError> {
+        self.global_selection_impl(cost_model, Some(profiles), horizon)
+    }
+
+    fn global_selection_impl(
+        &self,
+        cost_model: &dyn CostModel,
+        profiles: Option<&RecurrenceProfileMap>,
+        horizon: Option<Horizon>,
+    ) -> Result<GlobalSelection<'_>, RecurrenceError> {
         let graph = reference_graph(self);
         let topo = topological_order(&self.order, &graph);
 
@@ -2063,7 +2370,18 @@ impl<Id> PlanSpace<Id> {
             effective_uses.insert(*ptr, effective);
 
             let chosen = if effective >= 2 && cse_candidate_pair(group).is_some() {
-                match decide_with_effective_count(group, effective, cost_model) {
+                let decision = if let Some(profiles) = profiles {
+                    decide_group_with_recurrence(
+                        group,
+                        effective,
+                        profiles.for_target(&group.target),
+                        horizon,
+                        cost_model,
+                    )?
+                } else {
+                    decide_with_effective_count(group, effective, cost_model)
+                };
+                match decision {
                     Some(decision) => {
                         let cse = pick_shared_subtree_candidate(group, decision);
                         let effective_target =
@@ -2148,10 +2466,10 @@ impl<Id> PlanSpace<Id> {
             );
         }
 
-        GlobalSelection {
+        Ok(GlobalSelection {
             order: self.order.clone(),
             groups,
-        }
+        })
     }
 }
 
@@ -2249,6 +2567,28 @@ fn decide_with_effective_count(
         consumer_count: effective_consumer_count,
     };
     Some(cost_model.cse_share_decision(&candidate))
+}
+
+fn decide_group_with_recurrence(
+    group: &MemoGroup,
+    effective_consumer_count: usize,
+    recurrence: RecurrenceProfile,
+    horizon: Option<Horizon>,
+    cost_model: &dyn CostModel,
+) -> Result<Option<ShareDecision>, RecurrenceError> {
+    let Some(bound) = realize_child(&group.target, cost_model).ok() else {
+        return Ok(None);
+    };
+    let candidate = CseCandidate {
+        subtree: &group.target,
+        bound_summary: &bound,
+        consumer_count: effective_consumer_count,
+    };
+    Ok(Some(
+        cost_model
+            .cse_share_decision_with_recurrence(&candidate, &recurrence, horizon)?
+            .decision,
+    ))
 }
 
 /// The [`SharedSubtreeStrategy`] candidate matching `decision`: the one

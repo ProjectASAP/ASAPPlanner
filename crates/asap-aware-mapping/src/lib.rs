@@ -173,6 +173,7 @@ pub mod accuracy_reconciliation;
 pub mod cost_model;
 pub mod explanation;
 pub mod grouping;
+pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
@@ -184,12 +185,17 @@ pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
+pub use recurrence::{
+    evaluation_rate_of, total_cost, update_rate_from_data_characteristics, CostRate,
+    EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
+    RootRecurrence, UpdateRate,
+};
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
     summary_candidates, GlobalSelection, ImplementError, Implementation, Matcher, MemoGroup,
-    PlanSpace, RankedGroup, Replacement, ReplacementProvenance, ReplacementStrategy,
-    ReplacementSubDAG, SelectedGroup, SharedSubtreeStrategy, SketchAlgorithmStrategy, TargetSubDAG,
-    MAX_SEARCH_ITERATIONS,
+    PlanSpace, RankedGroup, RecurrenceProfileMap, Replacement, ReplacementProvenance,
+    ReplacementStrategy, ReplacementSubDAG, SelectedGroup, SharedSubtreeStrategy,
+    SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;
 pub use topk_reuse::TopKLimitReuseStrategy;
