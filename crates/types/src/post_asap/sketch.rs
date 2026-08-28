@@ -1,5 +1,3 @@
-use serde::{Deserialize, Serialize};
-
 use crate::pre_asap::ColumnRef;
 
 // ── Exact accumulators ──────────────────────────────────────────────────────
@@ -40,7 +38,7 @@ pub enum ExactParams {
 /// [`SketchParams`]. Each algorithm belongs to exactly one [`SketchKind`]
 /// category (e.g. `Kll` and `DDSketch` both realize quantile sketches);
 /// [`SketchKind::new`] is where that classification is made.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SketchAlgorithm {
     /// KLL quantile sketch (mergeable, ε-accurate rank queries).
     Kll,
@@ -69,7 +67,7 @@ pub enum SketchAlgorithm {
 /// instance. The variant must correspond to the associated `SketchAlgorithm`;
 /// mismatches are caught at post-ASAP bind time, before any later,
 /// deployment-specific stage ever sees the plan.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SketchParams {
     Kll {
         k: u32,

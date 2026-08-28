@@ -347,7 +347,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::post_asap::{
     ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm,
     SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams,
@@ -364,10 +363,6 @@ use asap_types::workload::RepetitionInterval;
 use std::rc::Rc;
 use thiserror::Error;
 
-use crate::accuracy::{
-    AccuracyBudgetAllocator, AccuracyModel, CompositionShape, DefaultAccuracyModel,
-    EqualSplitAllocator, PropagationStats,
-};
 use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
@@ -388,13 +383,6 @@ pub enum ImplementError {
     /// Schema derivation failed while lifting an edge to `SummarySchema`.
     #[error("schema derivation failed during pre-ASAP → post-ASAP binding: {0}")]
     Schema(#[from] QueryExprError),
-    /// The candidate is accuracy-illegal (issue #172): its composed
-    /// guarantee has no sound propagation rule, or misses the applicable
-    /// `AccuracyTarget`. Fail-closed — the candidate is never constructed
-    /// with the child "treated as exact". [`SketchAlgorithmStrategy::propose`]
-    /// records it as a [`RejectedCandidate`] instead of a candidate.
-    #[error("accuracy-illegal candidate: {0}")]
-    Accuracy(#[from] AccuracyError),
 }
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
@@ -497,31 +485,6 @@ pub enum ReplacementProvenance {
     AccuracyReconciliation,
 }
 
-/// A candidate a strategy considered for a target but refused to propose on
-/// accuracy-legality grounds (issue #172) — kept alongside the group's
-/// legal candidates in [`MemoGroup::rejected`] so a rejection is as
-/// inspectable (and exportable) as a selection. Never ranked: a
-/// [`CostModel`] only ever sees [`MemoGroup::candidates`].
-#[derive(Debug, Clone)]
-pub struct RejectedCandidate {
-    /// Name of the [`ReplacementStrategy`] that considered it.
-    pub strategy: &'static str,
-    /// What the candidate would have been (the same prose a
-    /// [`ReplacementSubDAG::rationale`] would have carried).
-    pub description: String,
-    /// The typed reason it is illegal.
-    pub error: AccuracyError,
-}
-
-/// Everything one [`ReplacementStrategy`] has to say about one target: the
-/// legal candidates it proposes plus the accuracy-illegal ones it refused —
-/// the output of [`ReplacementStrategy::propose`].
-#[derive(Debug, Clone, Default)]
-pub struct Proposals {
-    pub candidates: Vec<ReplacementSubDAG>,
-    pub rejected: Vec<RejectedCandidate>,
-}
-
 /// A replacement strategy: given a [`TargetSubDAG`], does this strategy have
 /// an opinion on it at all (`matches`), and if so, every semantically valid
 /// replacement (`replacements`)?
@@ -554,19 +517,6 @@ pub trait ReplacementStrategy {
     /// Reporting "every valid candidate" is this method's whole job; picking
     /// the best one is a [`CostModel`]'s job, out of scope here.
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG>;
-
-    /// [`replacements`](Self::replacements) plus the accuracy-illegal
-    /// candidates this strategy refused to propose (issue #172). Default:
-    /// every candidate from `replacements`, no rejections — a strategy that
-    /// never performs an accuracy check need not override this.
-    /// [`search_workload_with`] calls this (not `replacements`) so the
-    /// rejections land in [`MemoGroup::rejected`].
-    fn propose(&self, target: &TargetSubDAG<'_>) -> Proposals {
-        Proposals {
-            candidates: self.replacements(target),
-            rejected: Vec::new(),
-        }
-    }
 }
 
 // ── Implementation: how one AggIntent may be realised ───────────────────────
@@ -1124,33 +1074,6 @@ fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
 /// `DefaultCostModel` is a unit struct with no state, so one instance serves
 /// every caller.
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
-static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
-static DEFAULT_ALLOCATOR: EqualSplitAllocator = EqualSplitAllocator;
-
-/// The three deployment-pluggable models one candidate construction
-/// consults, bundled so the construction path threads one argument rather
-/// than three. `cost` ranks and sizes; `accuracy` and `allocator` decide
-/// legality (issue #172) — see [`crate::accuracy`]'s module docs for why
-/// those are separate from `cost` and run before it.
-#[derive(Clone, Copy)]
-pub(crate) struct Models<'a> {
-    pub cost: &'a dyn CostModel,
-    pub accuracy: &'a dyn AccuracyModel,
-    pub allocator: &'a dyn AccuracyBudgetAllocator,
-}
-
-impl<'a> Models<'a> {
-    /// `cost` with the built-in [`DefaultAccuracyModel`]/
-    /// [`EqualSplitAllocator`] — what every entry point that only takes a
-    /// `CostModel` uses.
-    pub(crate) fn with_default_accuracy(cost: &'a dyn CostModel) -> Self {
-        Self {
-            cost,
-            accuracy: &DEFAULT_ACCURACY_MODEL,
-            allocator: &DEFAULT_ALLOCATOR,
-        }
-    }
-}
 
 /// Wraps [`implementations_for_with`]'s exhaustive, ranked list directly: for
 /// a bindable `Aggregate`, every valid candidate summary realization as its
@@ -1161,17 +1084,8 @@ impl<'a> Models<'a> {
 /// [`SketchAlgorithmStrategy::new`] — so a deployment-specific cost model's
 /// other hooks (`size_params`, `realize_extension`, `readout_extension`) are
 /// still consulted while binding each candidate.
-///
-/// The one thing that *does* drop a candidate is accuracy legality (issue
-/// #172), decided by the [`AccuracyModel`] — never by the cost model: a
-/// sketch over an approximate child is proposed only if its composed
-/// guarantee has a sound propagation rule and satisfies the node's own
-/// `AccuracyTarget`; otherwise it is reported through
-/// [`ReplacementStrategy::propose`] as a [`RejectedCandidate`]. See
-/// [`crate::accuracy`]'s module docs for the rules and the precedence
-/// between root and per-node targets.
 pub struct SketchAlgorithmStrategy<'a> {
-    models: Models<'a>,
+    cost_model: &'a dyn CostModel,
 }
 
 impl SketchAlgorithmStrategy<'static> {
@@ -1179,7 +1093,7 @@ impl SketchAlgorithmStrategy<'static> {
     /// what a deployment gets with no custom cost model plugged in.
     pub fn default_cost_model() -> Self {
         Self {
-            models: Models::with_default_accuracy(&DEFAULT_COST_MODEL),
+            cost_model: &DEFAULT_COST_MODEL,
         }
     }
 }
@@ -1187,185 +1101,9 @@ impl SketchAlgorithmStrategy<'static> {
 impl<'a> SketchAlgorithmStrategy<'a> {
     /// A strategy that ranks/binds via `cost_model` instead of the built-in
     /// static preference order — the same customization point
-    /// [`implementations_for_with`] already offers. Accuracy legality stays
-    /// with the built-in [`DefaultAccuracyModel`]/[`EqualSplitAllocator`].
+    /// [`implementations_for_with`] already offers.
     pub fn new(cost_model: &'a dyn CostModel) -> Self {
-        Self {
-            models: Models::with_default_accuracy(cost_model),
-        }
-    }
-
-    /// A strategy with every model plugged in explicitly: `cost_model` for
-    /// ranking/sizing, `accuracy_model` for guarantee derivation/propagation/
-    /// satisfaction, `allocator` for end-to-end budget splits. One model
-    /// never overrides another: legality is settled by `accuracy_model`
-    /// before `cost_model` ranks what is left.
-    pub fn with_models(
-        cost_model: &'a dyn CostModel,
-        accuracy_model: &'a dyn AccuracyModel,
-        allocator: &'a dyn AccuracyBudgetAllocator,
-    ) -> Self {
-        Self {
-            models: Models {
-                cost: cost_model,
-                accuracy: accuracy_model,
-                allocator,
-            },
-        }
-    }
-
-    pub(crate) fn from_models(models: Models<'a>) -> Self {
-        Self { models }
-    }
-
-    /// The whole enumeration for one target, with `intent_override`
-    /// substituting the target's own intent (only ever its `AccuracyTarget`
-    /// differs — see [`realize_child_with`]).
-    fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
-        let mut proposals = Proposals::default();
-        let Some(declared) = bindable_intent(root) else {
-            return proposals;
-        };
-        let intent = intent_override.unwrap_or(declared);
-        let models = self.models;
-
-        // Is the child approximate? Probed once, up front: a candidate over
-        // an approximate child needs the end-to-end budget split across both
-        // layers, which changes which candidates exist at all.
-        let child_layers = aggregate_child(root)
-            .and_then(|child| realize_child_with(child, models, None).ok())
-            .and_then(|child| {
-                child
-                    .guarantee
-                    .as_ref()
-                    .filter(|g| !g.is_exact())
-                    .map(ResultGuarantee::approximate_layer_count)
-            });
-
-        // `implementations_for_with` is already exhaustive and ranked — no
-        // separate dispatch needed here. Only `Sketch` has more than one
-        // candidate in practice (every other variant's own dispatch produces
-        // exactly one `Implementation`), but this loop doesn't need to know
-        // that; it just constructs whatever the list contains.
-        for implementation in implementations_for_with(intent, models.cost) {
-            let rationale = describe_implementation(intent, &implementation);
-            // The as-declared composition: every layer sized to its own
-            // declared `AccuracyTarget`. Legal iff the composed guarantee
-            // satisfies this node's target — a front end copying one target
-            // onto every node does not make that so.
-            proposals.record(
-                rationale.clone(),
-                construct_summary_with(root, intent, implementation.clone(), models, None, None),
-            );
-
-            // Budget-split alternatives (issue #172, PR 2): re-size this
-            // layer and the approximate child under each allocation of this
-            // node's target across every approximate layer.
-            let (Some(child_layers), Implementation::Sketch(kind), Some(target)) =
-                (child_layers, &implementation, accuracy_target(intent))
-            else {
-                continue;
-            };
-            let Some(readout_query) = aggregate_child(root)
-                .and_then(|child| child.output_schema().ok())
-                .map(|schema| readout(intent, &summarised_column(intent, &schema), models.cost))
-            else {
-                continue;
-            };
-            let family = SummaryFamilyType::Sketch(kind.clone(), GroupingStrategy::default());
-            let Some(local) = models.accuracy.local_guarantee(&family, &readout_query) else {
-                continue;
-            };
-            let shape = CompositionShape {
-                metric: local.metric,
-                approximate_layer_count: 1 + child_layers,
-            };
-            let allocations = models.allocator.allocations(target, &shape);
-            if allocations.is_empty() {
-                proposals.rejected.push(RejectedCandidate {
-                    strategy: "SketchAlgorithmStrategy",
-                    description: rationale.clone(),
-                    error: AccuracyError::NoLegalAllocation {
-                        target: target.clone(),
-                        layer_count: shape.approximate_layer_count,
-                    },
-                });
-                continue;
-            }
-            let declared_child_target = aggregate_child(root)
-                .and_then(|child| bindable_intent(child))
-                .and_then(accuracy_target);
-            for allocation in allocations {
-                let outer_target = &allocation.layers[0];
-                let inner_target = allocation.inner_target(&shape);
-                let (eps, delta) = accuracy_budget(outer_target);
-                let resized = Implementation::Sketch(SketchKind::new(
-                    kind.algorithm().clone(),
-                    models
-                        .cost
-                        .size_params(kind.algorithm().clone(), intent, eps, delta),
-                ));
-                // Identical to the as-declared composition already recorded
-                // above — nothing new to propose.
-                if resized == implementation && inner_target.as_ref() == declared_child_target {
-                    continue;
-                }
-                let note = GuaranteeSource::BudgetAllocation {
-                    allocator: allocation.allocator.to_string(),
-                    layer: 0,
-                    layer_count: shape.approximate_layer_count,
-                    local_target: outer_target.clone(),
-                    end_to_end_target: target.clone(),
-                };
-                proposals.record(
-                    format!(
-                        "{rationale}; sized under {} budget split of {target:?} across \
-                         {} approximate layers (this layer {outer_target:?}, child subtree \
-                         {inner_target:?})",
-                        allocation.allocator, shape.approximate_layer_count
-                    ),
-                    construct_summary_with(
-                        root,
-                        intent,
-                        resized,
-                        models,
-                        inner_target.as_ref(),
-                        Some(note),
-                    ),
-                );
-            }
-        }
-        proposals
-    }
-}
-
-impl Proposals {
-    /// File one construction attempt: a legal node becomes a candidate, an
-    /// [`ImplementError::Accuracy`] becomes a [`RejectedCandidate`], and a
-    /// schema-derivation failure is skipped exactly as it always was.
-    fn record(&mut self, rationale: String, built: Result<Rc<SummaryNode>, ImplementError>) {
-        match built {
-            Ok(node) => self.candidates.push(ReplacementSubDAG {
-                strategy: "SketchAlgorithmStrategy",
-                replacement: Replacement::Summary(node),
-                provenance: ReplacementProvenance::SummaryImplementation,
-                rationale,
-            }),
-            Err(ImplementError::Accuracy(error)) => self.rejected.push(RejectedCandidate {
-                strategy: "SketchAlgorithmStrategy",
-                description: rationale,
-                error,
-            }),
-            Err(ImplementError::Schema(_)) => {}
-        }
-    }
-}
-
-/// The `child` of a [`bindable_intent`]-shaped `Aggregate`.
-fn aggregate_child(node: &QueryExpr) -> Option<&Rc<QueryExpr>> {
-    match node {
-        QueryExpr::Aggregate { child, .. } => Some(child),
-        _ => None,
+        Self { cost_model }
     }
 }
 
@@ -1375,11 +1113,27 @@ impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
     }
 
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
-        self.propose(target).candidates
-    }
-
-    fn propose(&self, target: &TargetSubDAG<'_>) -> Proposals {
-        self.propose_with(target.root, None)
+        let Some(intent) = bindable_intent(target.root) else {
+            return Vec::new();
+        };
+        // `implementations_for_with` is already exhaustive and ranked — no
+        // separate dispatch needed here. Only `Sketch` has more than one
+        // candidate in practice (every other variant's own dispatch produces
+        // exactly one `Implementation`), but this loop doesn't need to know
+        // that; it just constructs whatever the list contains.
+        implementations_for_with(intent, self.cost_model)
+            .into_iter()
+            .filter_map(|implementation| {
+                let rationale = describe_implementation(intent, &implementation);
+                let node = construct_summary(target.root, implementation, self.cost_model).ok()?;
+                Some(ReplacementSubDAG {
+                    strategy: "SketchAlgorithmStrategy",
+                    replacement: Replacement::Summary(node),
+                    provenance: ReplacementProvenance::SummaryImplementation,
+                    rationale,
+                })
+            })
+            .collect()
     }
 }
 
@@ -1470,32 +1224,9 @@ pub(crate) fn realize_child(
     root: &Rc<QueryExpr>,
     cost_model: &dyn CostModel,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
-    realize_child_with(root, Models::with_default_accuracy(cost_model), None)
-}
-
-/// [`realize_child`] with every model explicit, plus an optional
-/// `end_to_end_target` for `root`'s own value (issue #172): when an
-/// [`AccuracyBudgetAllocator`] hands an approximate child a share of its
-/// parent's budget, the child is re-enumerated with that share substituted
-/// for its declared `AccuracyTarget` — sizing its sketch (and, recursively,
-/// re-splitting for its own approximate children) under the allocated
-/// budget. A child whose declared target is `Exact` keeps it: an allocation
-/// never approximates something the caller declared exact.
-pub(crate) fn realize_child_with(
-    root: &Rc<QueryExpr>,
-    models: Models<'_>,
-    end_to_end_target: Option<&AccuracyTarget>,
-) -> Result<Rc<SummaryNode>, ImplementError> {
-    let overridden = end_to_end_target.and_then(|target| {
-        let declared = bindable_intent(root)?;
-        match accuracy_target(declared) {
-            Some(AccuracyTarget::Exact) | None => None,
-            Some(_) => Some(override_accuracy(declared, target)),
-        }
-    });
-    match SketchAlgorithmStrategy::from_models(models)
-        .propose_with(root, overridden.as_ref())
-        .candidates
+    let target = TargetSubDAG::new(root);
+    match SketchAlgorithmStrategy::new(cost_model)
+        .replacements(&target)
         .into_iter()
         .next()
     {
@@ -1511,26 +1242,10 @@ pub(crate) fn realize_child_with(
         }
         // No candidate at all: `root` isn't `bindable_intent` shape (or its
         // intent has no realization `implementations_for_with` can't
-        // produce — never happens, that match is exhaustive), or every
-        // candidate was accuracy-illegal — either way the same conservative
-        // fallback `SketchAlgorithmStrategy::matches` uses: keep the
-        // pre-ASAP subtree, executed exactly.
+        // produce — never happens, that match is exhaustive) — the same
+        // conservative fallback `SketchAlgorithmStrategy::matches` uses.
         None => keep_pre_asap(root),
     }
-}
-
-/// `intent` with its `AccuracyTarget` replaced by `target` — a no-op for an
-/// intent that carries none (see [`accuracy_target`]).
-fn override_accuracy(intent: &AggIntent, target: &AccuracyTarget) -> AggIntent {
-    let mut out = intent.clone();
-    match &mut out {
-        AggIntent::Quantile { accuracy, .. }
-        | AggIntent::Cardinality { accuracy, .. }
-        | AggIntent::Count { accuracy }
-        | AggIntent::TopK { accuracy, .. } => *accuracy = target.clone(),
-        _ => {}
-    }
-    out
 }
 
 /// Wrap an unrewritten pre-ASAP subtree, lifting its schema with every column
@@ -1548,9 +1263,6 @@ fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementErr
     Ok(Rc::new(SummaryNode {
         expr: SummaryExpr::KeepPreAsap(expr),
         schema: lift(&schema),
-        // A kept pre-ASAP subtree is executed exactly by the runtime
-        // (`Implementation::PassThrough`'s contract) — zero error.
-        guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
     }))
 }
 
@@ -1601,47 +1313,20 @@ pub(crate) fn construct_summary(
     implementation: Implementation,
     cost_model: &dyn CostModel,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
-    let models = Models::with_default_accuracy(cost_model);
-    match bindable_intent(expr) {
-        Some(intent) => construct_summary_with(expr, intent, implementation, models, None, None),
-        None => keep_pre_asap_rc(Rc::new(expr.clone())),
-    }
-}
-
-/// [`construct_summary`] with every model explicit (issue #172). `intent`
-/// is `expr`'s own [`bindable_intent`], or a copy of it with an allocated
-/// `AccuracyTarget` substituted (see [`realize_child_with`]).
-/// `child_target`, when set, is the end-to-end budget the child subtree is
-/// re-enumerated under; `allocation` is the provenance note recording the
-/// split that produced both. `Err(ImplementError::Accuracy)` is the
-/// fail-closed answer for a composition with no sound rule or one that
-/// misses `intent`'s target.
-pub(crate) fn construct_summary_with(
-    expr: &QueryExpr,
-    intent: &AggIntent,
-    implementation: Implementation,
-    models: Models<'_>,
-    child_target: Option<&AccuracyTarget>,
-    allocation: Option<GuaranteeSource>,
-) -> Result<Rc<SummaryNode>, ImplementError> {
     if let QueryExpr::Aggregate {
-        reduction, child, ..
+        reduction,
+        measures,
+        having,
+        child,
+        ..
     } = expr
     {
-        // `bindable_intent` already established the shape: exactly one
-        // intent, no HAVING. (Multi-intent nodes and HAVING stay logical.)
-        if bindable_intent(expr).is_some() {
+        // The bindable shape: exactly one intent, no HAVING. (Multi-intent
+        // nodes and HAVING stay logical — see `bindable_intent`.)
+        if let ([intent], None) = (measures.as_slice(), having) {
             if let Some((family, estimate)) = summary_family(implementation) {
                 return construct_summary_agg(
-                    expr,
-                    reduction,
-                    intent,
-                    child,
-                    family,
-                    estimate,
-                    models,
-                    child_target,
-                    allocation,
+                    expr, reduction, intent, child, family, estimate, cost_model,
                 );
             }
         }
@@ -1686,9 +1371,7 @@ fn construct_summary_agg(
     child: &Rc<QueryExpr>,
     family: SummaryFamilyType,
     estimate: bool,
-    models: Models<'_>,
-    child_target: Option<&AccuracyTarget>,
-    allocation: Option<GuaranteeSource>,
+    cost_model: &dyn CostModel,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
     let child_schema = child.output_schema()?;
     // The single canonical pre-ASAP derivation (per-series vs cross-series,
@@ -1703,28 +1386,12 @@ fn construct_summary_agg(
     let state_idx = summary_col_index(&out_schema, &by, per_series);
 
     let col = summarised_column(intent, &child_schema);
-    let query = estimate.then(|| readout(intent, &col, models.cost));
+    let query = estimate.then(|| readout(intent, &col, cost_model));
 
     let mut state_schema = lift(&out_schema);
     if let Some(field) = state_schema.fields.get_mut(state_idx) {
         field.dtype = family.clone();
     }
-
-    let bound_child = realize_child_with(child, models, child_target)?;
-
-    // ── Guarantee (issue #172) ──────────────────────────────────────────
-    // Derived *before* the node exists, so an illegal composition is never
-    // materialized: the local guarantee of this family's readout (or exact
-    // accumulator) composed over the child's, under the operator this
-    // family applies to the child's values.
-    let guarantee = compose_guarantee(
-        &family,
-        query.as_ref(),
-        &bound_child,
-        intent,
-        models.accuracy,
-        allocation,
-    )?;
 
     // `reduction` is carried onto `SummaryAgg` verbatim — not flattened to a
     // bare `Vec<ColumnId>` — so `SummaryExecutor::find_candidates` can tell
@@ -1733,16 +1400,13 @@ fn construct_summary_agg(
     // single place that decides this; nothing downstream re-derives it.
     let agg = Rc::new(SummaryNode {
         expr: SummaryExpr::SummaryAgg {
-            child: bound_child,
+            child: realize_child(child, cost_model)?,
             family,
             col,
             reduction: reduction.clone(),
             grouping: GroupingStrategy::default(),
         },
         schema: state_schema,
-        // Summary *state* carries no caller-visible guarantee; only a
-        // finalized value does. An exact accumulator's state is its value.
-        guarantee: if estimate { None } else { guarantee.clone() },
     });
     match query {
         // The readout: downstream of the estimate the schema is the plain
@@ -1754,100 +1418,9 @@ fn construct_summary_agg(
                 query,
             },
             schema: lift(&out_schema),
-            guarantee,
         })),
         None => Ok(agg),
     }
-}
-
-/// The guarantee of the value a `family` node produces over `child` —
-/// [`AccuracyModel::propagate`] under the [`CompositionOperator`] this family
-/// applies to its child's values — checked against `intent`'s own
-/// `AccuracyTarget` whenever the child is approximate (an approximate
-/// parent over an exact child is sized to that target by construction and
-/// is not re-checked here, so single-layer behavior is unchanged; see
-/// [`crate::accuracy`]'s precedence rules). `Ok(None)` is "no error model"
-/// (an approximate family the model has no local guarantee for, over an
-/// exact child) — unknown, never exact.
-fn compose_guarantee(
-    family: &SummaryFamilyType,
-    query: Option<&PostAsapSketchQuery>,
-    child: &SummaryNode,
-    intent: &AggIntent,
-    accuracy: &dyn AccuracyModel,
-    allocation: Option<GuaranteeSource>,
-) -> Result<Option<ResultGuarantee>, AccuracyError> {
-    let (op, local) = match (family, query) {
-        (SummaryFamilyType::ExactAggregate(kind, _), _) => {
-            let op = match kind {
-                ExactKind::Sum => CompositionOperator::ExactSum,
-                ExactKind::MinMax => CompositionOperator::ExactExtremum,
-                // A row count does not depend on the rows' values: exact
-                // regardless of the child's own error.
-                ExactKind::Count => {
-                    return Ok(Some(ResultGuarantee::exact(
-                        "ExactAggregate(Count): row count is independent of input values",
-                    )))
-                }
-                // Counter-reset detection over perturbed values has no finite
-                // Lipschitz constant — over an approximate child this is a
-                // deterministic transform with no registered rule.
-                ExactKind::Increase | ExactKind::Rate => CompositionOperator::Lipschitz {
-                    constant: f64::INFINITY,
-                },
-            };
-            (
-                op,
-                Some(ResultGuarantee::exact(format!("ExactAggregate({kind:?})"))),
-            )
-        }
-        (_, Some(query)) => (
-            CompositionOperator::ApproximateAggregate,
-            accuracy.local_guarantee(family, query),
-        ),
-        (_, None) => (CompositionOperator::ApproximateAggregate, None),
-    };
-    let Some(input) = child.guarantee.clone() else {
-        // A child with no guarantee at all is an unknown quantity, which
-        // nothing can be composed over (a `Sample` readout, say) — unless
-        // this node is itself the unknown family, in which case it inherits
-        // "unknown" rather than fabricating a guarantee for its child.
-        return match local {
-            Some(_) => Err(AccuracyError::MissingInputGuarantee {
-                operator: op,
-                input_index: 0,
-            }),
-            None => Ok(None),
-        };
-    };
-    if local.is_none() && input.is_exact() {
-        return Ok(None);
-    }
-    let mut guarantee = accuracy.propagate(
-        &op,
-        std::slice::from_ref(&input),
-        local.as_ref(),
-        &PropagationStats::default(),
-    )?;
-    if let Some(note) = allocation {
-        guarantee.provenance.push(note);
-    }
-    if let Some(target) = accuracy_target(intent) {
-        guarantee.provenance.push(GuaranteeSource::AccuracyTarget {
-            target: target.clone(),
-        });
-        // Approximate over approximate: the composed guarantee must meet the
-        // target this node's value was requested at.
-        if !input.is_exact() && !accuracy.satisfies(&guarantee, target) {
-            return Err(AccuracyError::TargetNotSatisfied {
-                metric: guarantee.metric,
-                bound: guarantee.bound.evaluate(),
-                failure_probability: guarantee.failure_probability.evaluate(),
-                target: target.clone(),
-            });
-        }
-    }
-    Ok(Some(guarantee))
 }
 
 /// Index of the summary-state column in the aggregate's output schema:
@@ -2026,12 +1599,6 @@ pub struct MemoGroup {
     /// order (not ranked — see [`PlanSpace::cost_sorted`] for the ranked
     /// view).
     pub candidates: Vec<ReplacementSubDAG>,
-    /// Every candidate a strategy considered for `target` but refused on
-    /// accuracy-legality grounds (issue #172), plus any `candidates` entry
-    /// the root-target check ([`search_workload_with_targets`]) moved here.
-    /// Never ranked — [`PlanSpace::cost_sorted`]/[`PlanSpace::global_selection`]
-    /// read only `candidates`, so a [`CostModel`] cannot resurrect one.
-    pub rejected: Vec<RejectedCandidate>,
 }
 
 impl MemoGroup {
@@ -2040,7 +1607,6 @@ impl MemoGroup {
             target,
             consumer_count,
             candidates: Vec::new(),
-            rejected: Vec::new(),
         }
     }
 
@@ -3334,93 +2900,6 @@ pub fn search_workload_with<'s, Id>(
     search_cse_workload_with(cse_workload(roots), strategies)
 }
 
-/// [`search_workload_with`] plus a per-root end-to-end `AccuracyTarget`
-/// (issue #172) — the workload's `QueryRequirements.accuracy`, threaded
-/// alongside each root. After the search, every root that carries a target
-/// has its group's bound [`Replacement::Summary`] candidates checked with
-/// `accuracy_model`'s [`AccuracyModel::satisfies`]: a candidate whose
-/// guarantee is absent (unknown) or misses the target is moved from
-/// [`MemoGroup::candidates`] to [`MemoGroup::rejected`] *before*
-/// [`PlanSpace::cost_sorted`]/[`PlanSpace::global_selection`] ever rank the
-/// group, so a `CostModel` cannot pick it. A `KeepPreAsap` candidate is
-/// exact and always survives — the raw/pre-ASAP alternative is what an
-/// unsatisfiable root keeps. Logical [`Replacement::Rewrite`] candidates
-/// are not bound values and are left alone; the targets *inside* a rewrite
-/// are their own groups.
-///
-/// Precedence against per-node `AggIntent.accuracy` is documented in
-/// [`crate::accuracy`]'s module docs.
-pub fn search_workload_with_targets<'s, Id>(
-    roots: Vec<(Id, Rc<QueryExpr>, Option<AccuracyTarget>)>,
-    strategies: &[Box<dyn ReplacementStrategy + 's>],
-    accuracy_model: &dyn AccuracyModel,
-) -> PlanSpace<Id> {
-    let mut targets = Vec::with_capacity(roots.len());
-    let roots = roots
-        .into_iter()
-        .map(|(id, root, target)| {
-            targets.push(target);
-            (id, root)
-        })
-        .collect();
-    let mut space = search_workload_with(roots, strategies);
-    // `cse_workload` preserves root order, so targets zip by position.
-    let root_ptrs: Vec<(*const QueryExpr, AccuracyTarget)> = space
-        .roots
-        .iter()
-        .zip(targets)
-        .filter_map(|((_, root), target)| target.map(|t| (Rc::as_ptr(root), t)))
-        .collect();
-    for (ptr, target) in root_ptrs {
-        let Some(group) = space.groups.get_mut(&ptr) else {
-            continue;
-        };
-        let (legal, illegal): (Vec<_>, Vec<_>) =
-            group
-                .candidates
-                .drain(..)
-                .partition(|candidate| match &candidate.replacement {
-                    Replacement::Summary(node) => node
-                        .guarantee
-                        .as_ref()
-                        .is_some_and(|g| accuracy_model.satisfies(g, &target)),
-                    Replacement::Rewrite(_) => true,
-                });
-        group.candidates = legal;
-        group.rejected.extend(illegal.into_iter().map(|candidate| {
-            let (metric, bound, failure_probability) = match &candidate.replacement {
-                Replacement::Summary(node) => node
-                    .guarantee
-                    .as_ref()
-                    .map(|g| {
-                        (
-                            g.metric,
-                            g.bound.evaluate(),
-                            g.failure_probability.evaluate(),
-                        )
-                    })
-                    .unwrap_or((
-                        asap_types::post_asap::ErrorMetric::AbsoluteValue,
-                        None,
-                        None,
-                    )),
-                Replacement::Rewrite(_) => unreachable!("rewrites are never rejected here"),
-            };
-            RejectedCandidate {
-                strategy: candidate.strategy,
-                description: format!("{} (root end-to-end target check)", candidate.rationale),
-                error: AccuracyError::TargetNotSatisfied {
-                    metric,
-                    bound,
-                    failure_probability,
-                    target: target.clone(),
-                },
-            }
-        }));
-    }
-    space
-}
-
 fn cse_workload<Id>(roots: Vec<(Id, Rc<QueryExpr>)>) -> Vec<(Id, Rc<QueryExpr>)> {
     // `share_common_subtrees` wants owned `QueryExpr`s, not already-`Rc`
     // roots — the same `Rc::try_unwrap`-with-clone-fallback pattern
@@ -3496,19 +2975,15 @@ fn search_cse_workload_with<'s, Id>(
             let target = TargetSubDAG::with_consumer_count(&root, consumer_count);
 
             let mut proposed = Vec::new();
-            let mut rejected = Vec::new();
             for strategy in strategies {
                 if strategy.matches(&target) {
                     let name = strategy.name();
-                    let proposals = strategy.propose(&target);
-                    proposed.extend(proposals.candidates.into_iter().map(|mut candidate| {
-                        candidate.strategy = name;
-                        candidate
-                    }));
-                    rejected.extend(proposals.rejected.into_iter().map(|mut rejection| {
-                        rejection.strategy = name;
-                        rejection
-                    }));
+                    proposed.extend(strategy.replacements(&target).into_iter().map(
+                        |mut candidate| {
+                            candidate.strategy = name;
+                            candidate
+                        },
+                    ));
                 }
             }
             if rollup_strategy.matches(&target) {
@@ -3554,7 +3029,6 @@ fn search_cse_workload_with<'s, Id>(
             for candidate in proposed {
                 group.add_candidate(candidate);
             }
-            group.rejected.extend(rejected);
         }
 
         // Any pointer `discover_new_descendant_targets` appended to `order`
@@ -4482,20 +3956,10 @@ mod tests {
     fn enumerating_the_targets_candidates_does_not_leak_into_a_nested_aggregate() {
         // outer: quantile(0.99, ...) over inner: quantile(0.5, m) — both
         // Quantile, so both share the [Kll, DDSketch] candidate list.
-        //
-        // Rank-over-rank has no registered rule in `DefaultAccuracyModel`
-        // (issue #172 — see `approximate_over_approximate_is_rejected_by_default`),
-        // so this test injects `RankAdditiveModel` to admit the composition
-        // and keep exercising the per-node enumeration property it is about.
         let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], default_quantile(0.99), inner));
         let target = TargetSubDAG::new(&outer);
-        let replacements = SketchAlgorithmStrategy::with_models(
-            &DefaultCostModel,
-            &RankAdditiveModel,
-            &EqualSplitAllocator,
-        )
-        .replacements(&target);
+        let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
 
         let ddsketch = replacements
             .iter()
@@ -6353,375 +5817,5 @@ mod tests {
             panic!("expected SummaryAgg, got {:?}", root.expr);
         };
         assert_eq!(col, &ColumnRef::Named("bytes".into()));
-    }
-
-    // ── Accuracy guarantees and fail-closed composition (issue #172) ─────
-
-    use asap_types::post_asap::{BoundExpr, ErrorMetric};
-
-    /// A test-only `AccuracyModel` that *registers* a rule the default
-    /// deliberately lacks — a sketch over rank-bounded inputs composes
-    /// additively, keeping the outer sketch's own metric — so the
-    /// composition/allocation machinery can be exercised end to end.
-    /// Everything else delegates to `DefaultAccuracyModel`.
-    struct RankAdditiveModel;
-
-    impl AccuracyModel for RankAdditiveModel {
-        fn local_guarantee(
-            &self,
-            family: &SummaryFamilyType,
-            query: &PostAsapSketchQuery,
-        ) -> Option<ResultGuarantee> {
-            DefaultAccuracyModel.local_guarantee(family, query)
-        }
-
-        fn propagate(
-            &self,
-            op: &CompositionOperator,
-            inputs: &[ResultGuarantee],
-            local: Option<&ResultGuarantee>,
-            stats: &PropagationStats,
-        ) -> Result<ResultGuarantee, AccuracyError> {
-            let rank = |g: &ResultGuarantee| g.is_exact() || g.metric == ErrorMetric::Rank;
-            if let (CompositionOperator::ApproximateAggregate, true, Some(local)) =
-                (op, inputs.iter().all(rank), local)
-            {
-                let relabel = |g: &ResultGuarantee| ResultGuarantee {
-                    metric: ErrorMetric::AbsoluteValue,
-                    ..g.clone()
-                };
-                let inputs: Vec<_> = inputs.iter().map(relabel).collect();
-                let mut out =
-                    DefaultAccuracyModel.propagate(op, &inputs, Some(&relabel(local)), stats)?;
-                out.metric = local.metric;
-                return Ok(out);
-            }
-            DefaultAccuracyModel.propagate(op, inputs, local, stats)
-        }
-
-        fn satisfies(&self, guarantee: &ResultGuarantee, target: &AccuracyTarget) -> bool {
-            DefaultAccuracyModel.satisfies(guarantee, target)
-        }
-    }
-
-    fn quantile_eps(q: f64, eps: f64) -> AggIntent {
-        AggIntent::Quantile {
-            col: None,
-            q,
-            accuracy: AccuracyTarget::Epsilon(eps),
-        }
-    }
-
-    /// The `SketchParams::Kll { k }` of the top `SummaryAgg` under `node`.
-    fn kll_k_of(node: &SummaryNode) -> u32 {
-        match &node.expr {
-            SummaryExpr::SummaryEstimate { summary_input, .. } => kll_k_of(summary_input),
-            SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(kind, _),
-                ..
-            } => match kind.params() {
-                SketchParams::Kll { k } => *k,
-                other => panic!("expected KLL params, got {other:?}"),
-            },
-            other => panic!("expected a sketch SummaryAgg, got {other:?}"),
-        }
-    }
-
-    fn summary_child(node: &SummaryNode) -> &Rc<SummaryNode> {
-        match &node.expr {
-            SummaryExpr::SummaryEstimate { summary_input, .. } => summary_child(summary_input),
-            SummaryExpr::SummaryAgg { child, .. } => child,
-            other => panic!("expected a SummaryAgg, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn approximate_over_approximate_is_rejected_by_default_not_treated_as_exact() {
-        // quantile(0.99, quantile by (job) (0.5, m)): rank over rank — no
-        // registered rule, so every outer sketch candidate is refused with a
-        // typed reason and the raw/pre-ASAP alternative is what remains.
-        let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["job"]));
-        let outer = Rc::new(agg(vec![], default_quantile(0.99), inner));
-        let proposals =
-            SketchAlgorithmStrategy::default_cost_model().propose(&TargetSubDAG::new(&outer));
-        assert!(
-            proposals.candidates.is_empty(),
-            "no outer sketch may be proposed over an approximate child without a rule: {:?}",
-            proposals.candidates
-        );
-        // Every attempt — the as-declared composition and the equal-split
-        // re-sizing, for each of KLL/DDSketch — is refused for the same
-        // typed reason: no rule, whatever the budget.
-        assert_eq!(proposals.rejected.len(), 4, "{:?}", proposals.rejected);
-        for rejection in &proposals.rejected {
-            assert!(
-                matches!(
-                    &rejection.error,
-                    AccuracyError::UnsupportedComposition { input_metrics, .. }
-                        if input_metrics == &vec![ErrorMetric::Rank]
-                ),
-                "{:?}",
-                rejection.error
-            );
-        }
-        // Fallback keeps the whole subtree pre-ASAP — executed exactly.
-        let realized = realize_child(&outer, &DefaultCostModel).unwrap();
-        assert!(matches!(realized.expr, SummaryExpr::KeepPreAsap(_)));
-        assert!(realized
-            .guarantee
-            .as_ref()
-            .is_some_and(ResultGuarantee::is_exact));
-
-        // Cross-metric: a quantile over a cardinality estimate.
-        let inner = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
-        let outer = Rc::new(agg(vec![], default_quantile(0.99), inner));
-        let proposals =
-            SketchAlgorithmStrategy::default_cost_model().propose(&TargetSubDAG::new(&outer));
-        assert!(proposals.candidates.is_empty());
-        assert!(proposals.rejected.iter().all(|r| matches!(
-            &r.error,
-            AccuracyError::UnsupportedComposition { input_metrics, .. }
-                if input_metrics == &vec![ErrorMetric::Cardinality]
-        )));
-    }
-
-    #[test]
-    fn exact_child_contributes_zero_error() {
-        // quantile(0.9, sum by (job) (m)): KLL over an exact Sum accumulator
-        // — the readout's guarantee is exactly KLL's own local guarantee.
-        let inner = agg(vec![2], AggIntent::Sum { col: None }, metric_scan(&["job"]));
-        let outer = agg(vec![], default_quantile(0.9), inner);
-        let root = realize(&outer).unwrap();
-        let guarantee = root
-            .guarantee
-            .as_ref()
-            .expect("a readout carries a guarantee");
-        assert_eq!(guarantee.metric, ErrorMetric::Rank);
-        assert_eq!(guarantee.bound.evaluate(), Some(2.0 / 200.0));
-        assert_eq!(guarantee.approximate_layer_count(), 1);
-        assert!(guarantee.provenance.iter().any(|s| matches!(
-            s,
-            GuaranteeSource::ChildGuarantee { guarantee, .. } if guarantee.is_exact()
-        )));
-        assert!(guarantee.provenance.iter().any(|s| matches!(
-            s,
-            GuaranteeSource::CompositionStep { rule, .. } if rule == "exact_input"
-        )));
-        // The sketch *state* node carries no guarantee; the exact
-        // accumulator's state is its value and does.
-        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
-            panic!()
-        };
-        assert!(summary_input.guarantee.is_none());
-        assert!(summary_child(&root)
-            .guarantee
-            .as_ref()
-            .is_some_and(ResultGuarantee::is_exact));
-    }
-
-    #[test]
-    fn exact_sum_over_approximate_child_keeps_the_row_count_unknown() {
-        // sum(count_distinct by (job) (m)): an exact sum over HLL estimates
-        // is representable (Σ B_i) but its bound depends on the group count
-        // and the true cardinalities — unknown at planning time, so the
-        // guarantee exists, says what it needs, and satisfies nothing.
-        let inner = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
-        let outer = agg(vec![], AggIntent::Sum { col: None }, inner);
-        let root = realize(&outer).unwrap();
-        let guarantee = root
-            .guarantee
-            .as_ref()
-            .expect("an exact sum carries a guarantee");
-        assert_eq!(guarantee.metric, ErrorMetric::AbsoluteValue);
-        assert_eq!(guarantee.bound.evaluate(), None);
-        assert!(guarantee.provenance.iter().any(|s| matches!(
-            s,
-            GuaranteeSource::UnavailableStatistic { statistic } if statistic == "input_row_count"
-        )));
-        assert!(!DefaultAccuracyModel.satisfies(guarantee, &AccuracyTarget::Epsilon(1e9)));
-
-        // count(...) over the same child is exact: a row count does not
-        // depend on the rows' values.
-        let inner = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
-        let outer = agg(
-            vec![],
-            AggIntent::Count {
-                accuracy: AccuracyTarget::Exact,
-            },
-            inner,
-        );
-        let root = realize(&outer).unwrap();
-        assert!(root
-            .guarantee
-            .as_ref()
-            .is_some_and(ResultGuarantee::is_exact));
-    }
-
-    #[test]
-    fn equal_split_allocation_makes_a_legal_tighter_candidate_and_rejects_the_declared_one() {
-        // With a registered rank-additive rule: outer ε=0.1 over inner ε=0.1
-        // composes to 0.2 > 0.1 as declared (cheap: k=20 each) — illegal.
-        // The equal split (0.05 + 0.05) re-sizes both layers to k=40 —
-        // pricier, and the only legal way to meet the outer target.
-        let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
-        let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
-        let strategy = SketchAlgorithmStrategy::with_models(
-            &DefaultCostModel,
-            &RankAdditiveModel,
-            &EqualSplitAllocator,
-        );
-        let proposals = strategy.propose(&TargetSubDAG::new(&outer));
-
-        let declared = proposals
-            .rejected
-            .iter()
-            .filter(|r| {
-                matches!(
-                    &r.error,
-                    AccuracyError::TargetNotSatisfied {
-                        metric: ErrorMetric::Rank,
-                        bound: Some(b),
-                        target: AccuracyTarget::Epsilon(e),
-                        ..
-                    } if (b - 0.2).abs() < 1e-12 && *e == 0.1
-                )
-            })
-            .count();
-        assert_eq!(
-            declared, 1,
-            "the as-declared KLL composition is rejected: {:?}",
-            proposals.rejected
-        );
-
-        let kll: Vec<_> = proposals
-            .candidates
-            .iter()
-            .filter_map(|c| match &c.replacement {
-                Replacement::Summary(node)
-                    if summary_family_algorithm(node) == SketchAlgorithm::Kll =>
-                {
-                    Some(node)
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            kll.len(),
-            1,
-            "exactly one legal KLL candidate (the allocated one)"
-        );
-        let node = kll[0];
-        assert_eq!(kll_k_of(node), 40, "outer re-sized to ε/2");
-        assert_eq!(kll_k_of(summary_child(node)), 40, "inner re-sized to ε/2");
-        let guarantee = node.guarantee.as_ref().unwrap();
-        assert_eq!(guarantee.metric, ErrorMetric::Rank);
-        assert!((guarantee.bound.evaluate().unwrap() - 0.1).abs() < 1e-12);
-        assert_eq!(guarantee.approximate_layer_count(), 2);
-        assert!(guarantee.provenance.iter().any(|s| matches!(
-            s,
-            GuaranteeSource::BudgetAllocation { allocator, layer_count: 2, .. }
-                if allocator == "EqualSplitAllocator"
-        )));
-        assert!(matches!(guarantee.bound, BoundExpr::Sum { .. }));
-        // No candidate with the cheaper illegal sizing exists anywhere.
-        assert!(proposals.candidates.iter().all(|c| match &c.replacement {
-            Replacement::Summary(node)
-                if summary_family_algorithm(node) == SketchAlgorithm::Kll =>
-                kll_k_of(node) != 20,
-            _ => true,
-        }));
-    }
-
-    #[test]
-    fn legality_precedes_cost_in_search_and_global_selection() {
-        // Same fixture through the workload search: the illegal cheaper
-        // candidate is absent from the group *before* any cost ranking, the
-        // rejection is recorded on the group, and global selection commits
-        // to the legal, more expensive one.
-        let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
-        let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
-        let strategies: Vec<Box<dyn ReplacementStrategy>> =
-            vec![Box::new(SketchAlgorithmStrategy::with_models(
-                &DefaultCostModel,
-                &RankAdditiveModel,
-                &EqualSplitAllocator,
-            ))];
-        let space = search_workload_with(vec![("q", Rc::clone(&outer))], &strategies);
-        let root = &space.roots[0].1;
-        let group = space.group_for(root).unwrap();
-        assert!(!group.rejected.is_empty());
-        assert!(group.candidates.iter().all(|c| match &c.replacement {
-            Replacement::Summary(node) => node.guarantee.as_ref().is_some_and(|g| {
-                DefaultAccuracyModel.satisfies(g, &AccuracyTarget::Epsilon(0.1))
-            }),
-            Replacement::Rewrite(_) => false,
-        }));
-        let ranked = space.cost_sorted(&DefaultCostModel);
-        let root_ranked = ranked.iter().find(|g| Rc::ptr_eq(g.target, root)).unwrap();
-        assert_eq!(root_ranked.candidates.len(), group.candidates.len());
-
-        let selection = space.global_selection(&DefaultCostModel);
-        let chosen = selection
-            .for_target(root)
-            .unwrap()
-            .chosen
-            .expect("a legal candidate wins");
-        let Replacement::Summary(node) = &chosen.replacement else {
-            panic!()
-        };
-        assert_eq!(kll_k_of(node), 40);
-    }
-
-    #[test]
-    fn root_target_check_removes_candidates_before_cost_ranking() {
-        let q = Rc::new(agg(vec![2], default_quantile(0.99), metric_scan(&["job"])));
-        // A root target tighter than the node's own ε=0.01: every sketch
-        // candidate misses it and is moved to `rejected`; nothing is left
-        // for the cost model to rank.
-        let space = search_workload_with_targets(
-            vec![("q", Rc::clone(&q), Some(AccuracyTarget::Epsilon(0.001)))],
-            &default_strategies(),
-            &DefaultAccuracyModel,
-        );
-        let root = &space.roots[0].1;
-        let group = space.group_for(root).unwrap();
-        assert!(group
-            .candidates
-            .iter()
-            .all(|c| matches!(c.replacement, Replacement::Rewrite(_))));
-        assert!(group.rejected.iter().all(|r| matches!(
-            r.error,
-            AccuracyError::TargetNotSatisfied { target: AccuracyTarget::Epsilon(e), .. } if e == 0.001
-        )));
-        assert!(group.rejected.len() >= 2);
-        let selection = space.global_selection(&DefaultCostModel);
-        assert!(selection.for_target(root).unwrap().chosen.is_none());
-
-        // A root target the node's own sizing meets keeps every candidate.
-        let space = search_workload_with_targets(
-            vec![("q", Rc::clone(&q), Some(AccuracyTarget::Epsilon(0.01)))],
-            &default_strategies(),
-            &DefaultAccuracyModel,
-        );
-        let group = space.group_for(&space.roots[0].1).unwrap();
-        assert!(group
-            .candidates
-            .iter()
-            .any(|c| matches!(c.replacement, Replacement::Summary(_))));
-
-        // An `Exact` root target admits only exact candidates.
-        let space = search_workload_with_targets(
-            vec![("q", Rc::clone(&q), Some(AccuracyTarget::Exact))],
-            &default_strategies(),
-            &DefaultAccuracyModel,
-        );
-        let group = space.group_for(&space.roots[0].1).unwrap();
-        assert!(group.candidates.iter().all(|c| match &c.replacement {
-            Replacement::Summary(node) => node
-                .guarantee
-                .as_ref()
-                .is_some_and(ResultGuarantee::is_exact),
-            Replacement::Rewrite(_) => true,
-        }));
     }
 }
