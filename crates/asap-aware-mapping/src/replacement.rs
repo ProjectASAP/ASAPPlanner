@@ -365,8 +365,8 @@ use std::rc::Rc;
 use thiserror::Error;
 
 use crate::accuracy::{
-    AccuracyBudgetAllocator, AccuracyModel, CompositionShape, DefaultAccuracyModel,
-    EqualSplitAllocator, PropagationStats, KLL_RANK_ERROR_COEFFICIENT_99,
+    AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel, CompositionShape,
+    DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence, KLL_RANK_ERROR_COEFFICIENT_99,
     KLL_RANK_ERROR_EXPONENT_99,
 };
 use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
@@ -908,7 +908,7 @@ pub fn default_size_params(
             depth: cms_depth(delta),
         },
         SketchAlgorithm::Hll => SketchParams::Hll {
-            precision: hll_precision_99(eps),
+            precision: hll_precision(eps),
         },
         SketchAlgorithm::CmsWithHeap => {
             let k = match intent {
@@ -1079,15 +1079,9 @@ fn kll_k(eps: f64) -> u32 {
     )
 }
 
-/// HLL standard-error inversion. The committed guarantee applies the
-/// 99%-confidence conversion below before calling this helper.
+/// HLL RSE-magnitude inversion. Generic HLL has no modeled confidence target.
 fn hll_precision(eps: f64) -> u8 {
     saturating_ceil((1.04 / eps).powi(2).log2(), 4, 18) as u8
-}
-
-/// 99%-confidence HLL relative bound via Chebyshev: ten times the RSE.
-fn hll_precision_99(eps: f64) -> u8 {
-    hll_precision(eps / 10.0)
 }
 
 /// CMS: over-count ≤ ε·N with width `w = ⌈e/ε⌉` columns.
@@ -1144,6 +1138,7 @@ fn saturating_ceil(x: f64, lo: u32, hi: u32) -> u32 {
 static DEFAULT_COST_MODEL: DefaultCostModel = DefaultCostModel;
 static DEFAULT_ACCURACY_MODEL: DefaultAccuracyModel = DefaultAccuracyModel;
 static DEFAULT_ALLOCATOR: EqualSplitAllocator = EqualSplitAllocator;
+static NO_ACCURACY_EVIDENCE: NoAccuracyEvidence = NoAccuracyEvidence;
 
 /// The three deployment-pluggable models one candidate construction
 /// consults, bundled so the construction path threads one argument rather
@@ -1155,6 +1150,7 @@ pub(crate) struct Models<'a> {
     pub cost: &'a dyn CostModel,
     pub accuracy: &'a dyn AccuracyModel,
     pub allocator: &'a dyn AccuracyBudgetAllocator,
+    pub evidence: &'a dyn AccuracyEvidenceProvider,
 }
 
 impl<'a> Models<'a> {
@@ -1166,6 +1162,7 @@ impl<'a> Models<'a> {
             cost,
             accuracy: &DEFAULT_ACCURACY_MODEL,
             allocator: &DEFAULT_ALLOCATOR,
+            evidence: &NO_ACCURACY_EVIDENCE,
         }
     }
 }
@@ -1228,6 +1225,25 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 cost: cost_model,
                 accuracy: accuracy_model,
                 allocator,
+                evidence: &NO_ACCURACY_EVIDENCE,
+            },
+        }
+    }
+
+    /// Like [`Self::with_models`], with typed planning-time evidence for
+    /// rules such as TopK membership and Hydra shared-grid composition.
+    pub fn with_models_and_evidence(
+        cost_model: &'a dyn CostModel,
+        accuracy_model: &'a dyn AccuracyModel,
+        allocator: &'a dyn AccuracyBudgetAllocator,
+        evidence: &'a dyn AccuracyEvidenceProvider,
+    ) -> Self {
+        Self {
+            models: Models {
+                cost: cost_model,
+                accuracy: accuracy_model,
+                allocator,
+                evidence,
             },
         }
     }
@@ -1595,11 +1611,6 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
     None
 }
 
-/// Construct `expr`'s [`ReplacementSubDAG`] payload for one already-decided
-/// [`Implementation`] of its top intent — the mechanical half of
-/// [`SketchAlgorithmStrategy::replacements`], called once per candidate that
-/// method enumerates.
-///
 /// `expr` must still be the [`bindable_intent`] shape for `implementation` to
 /// have any effect; anything else falls back to [`keep_pre_asap`].
 /// Only `expr`'s own top-level decision is forced — recursion into `expr`'s
@@ -1614,19 +1625,7 @@ pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
 /// candidate gets exactly the same schema derivation/column
 /// resolution/readout construction as every other candidate, patching only
 /// the `grouping` field this axis owns.
-pub(crate) fn construct_summary(
-    expr: &QueryExpr,
-    implementation: Implementation,
-    cost_model: &dyn CostModel,
-) -> Result<Rc<SummaryNode>, ImplementError> {
-    let models = Models::with_default_accuracy(cost_model);
-    match bindable_intent(expr) {
-        Some(intent) => construct_summary_with(expr, intent, implementation, models, None, None),
-        None => keep_pre_asap_rc(Rc::new(expr.clone())),
-    }
-}
-
-/// [`construct_summary`] with every model explicit (issue #172). `intent`
+/// Construct a summary with every model explicit (issue #172). `intent`
 /// is `expr`'s own [`bindable_intent`], or a copy of it with an allocated
 /// `AccuracyTarget` substituted (see [`realize_child_with`]).
 /// `child_target`, when set, is the end-to-end budget the child subtree is
@@ -1741,6 +1740,7 @@ fn construct_summary_agg(
         &bound_child,
         intent,
         models.accuracy,
+        models.evidence,
         allocation,
     )?;
 
@@ -1793,6 +1793,7 @@ fn compose_guarantee(
     child: &SummaryNode,
     intent: &AggIntent,
     accuracy: &dyn AccuracyModel,
+    evidence: &dyn AccuracyEvidenceProvider,
     allocation: Option<GuaranteeSource>,
 ) -> Result<Option<ResultGuarantee>, AccuracyError> {
     let (op, local) = match (family, query) {
@@ -1845,12 +1846,9 @@ fn compose_guarantee(
     if local.is_none() && input.is_exact() {
         return Ok(None);
     }
-    let mut guarantee = accuracy.propagate(
-        &op,
-        std::slice::from_ref(&input),
-        local.as_ref(),
-        &PropagationStats::default(),
-    )?;
+    let stats = evidence.propagation_stats(&op, family, query);
+    let mut guarantee =
+        accuracy.propagate(&op, std::slice::from_ref(&input), local.as_ref(), &stats)?;
     if let Some(note) = allocation {
         guarantee.provenance.push(note);
     }
@@ -3783,6 +3781,7 @@ fn walk_children(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accuracy::PropagationStats;
     use crate::cost_model::Cost;
     use asap_types::pre_asap::agg_intent::{
         agg_is_exact, default_cardinality, default_quantile, MathFunc, TimeFunc,
@@ -4005,12 +4004,12 @@ mod tests {
     }
 
     #[test]
-    fn default_cardinality_uses_the_tightest_supported_hll_precision() {
+    fn default_cardinality_sizes_hll_to_its_rse_magnitude() {
         assert_eq!(
             preferred(&default_cardinality()),
             Implementation::Sketch(SketchKind::new(
                 SketchAlgorithm::Hll,
-                SketchParams::Hll { precision: 18 },
+                SketchParams::Hll { precision: 14 },
             ))
         );
     }
@@ -4392,7 +4391,7 @@ mod tests {
     }
 
     #[test]
-    fn cardinality_rejects_hll_when_its_parameter_cap_misses_the_target() {
+    fn cardinality_epsilon_keeps_hll_but_epsilon_delta_rejects_unknown_confidence() {
         let q = Rc::new(agg(vec![2], default_cardinality(), metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = SketchAlgorithmStrategy::default_cost_model().replacements(&target);
@@ -4405,9 +4404,33 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec![SketchAlgorithm::Theta, SketchAlgorithm::Kmv],
-            "the conservative 99% HLL bound cannot meet the target at precision <= 18"
+            vec![
+                SketchAlgorithm::Hll,
+                SketchAlgorithm::Theta,
+                SketchAlgorithm::Kmv
+            ]
         );
+
+        let q = Rc::new(agg(
+            vec![2],
+            AggIntent::Cardinality {
+                col: None,
+                accuracy: AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                },
+            },
+            metric_scan(&["job"]),
+        ));
+        let kinds: Vec<_> = SketchAlgorithmStrategy::default_cost_model()
+            .replacements(&TargetSubDAG::new(&q))
+            .iter()
+            .map(|r| match &r.replacement {
+                Replacement::Summary(node) => summary_family_algorithm(node),
+                Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
+            })
+            .collect();
+        assert_eq!(kinds, vec![SketchAlgorithm::Theta, SketchAlgorithm::Kmv]);
     }
 
     #[test]
@@ -4808,7 +4831,7 @@ mod tests {
             .groups()
             .find(|g| matches!(g.target.as_ref(), QueryExpr::Aggregate { .. }))
             .unwrap();
-        assert_eq!(agg_group.candidates.len(), 2);
+        assert_eq!(agg_group.candidates.len(), 3);
     }
 
     #[test]
@@ -6331,6 +6354,58 @@ mod tests {
         );
         let root = realize(&q).unwrap();
         assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
+    }
+
+    struct SeparatedTopKEvidence;
+
+    impl AccuracyEvidenceProvider for SeparatedTopKEvidence {
+        fn propagation_stats(
+            &self,
+            op: &CompositionOperator,
+            _family: &SummaryFamilyType,
+            _query: Option<&PostAsapSketchQuery>,
+        ) -> PropagationStats {
+            if matches!(op, CompositionOperator::TopKSelection) {
+                PropagationStats {
+                    topk_selected_lower_bound: Some(101.0),
+                    topk_excluded_upper_bound: Some(100.0),
+                    topk_interval_failure_probability: Some(0.005),
+                    ..Default::default()
+                }
+            } else {
+                PropagationStats::default()
+            }
+        }
+    }
+
+    #[test]
+    fn topk_margin_evidence_is_consumed_by_candidate_construction() {
+        let q = Rc::new(agg(
+            vec![2],
+            AggIntent::TopK {
+                k: 5,
+                accuracy: AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.0,
+                    delta: 0.01,
+                },
+            },
+            metric_scan(&["job"]),
+        ));
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &SeparatedTopKEvidence,
+        );
+        let replacements = strategy.replacements(&TargetSubDAG::new(&q));
+        assert!(!replacements.is_empty());
+        assert!(replacements.iter().all(|candidate| matches!(
+            &candidate.replacement,
+            Replacement::Summary(node)
+                if node.guarantee.as_ref().is_some_and(|g|
+                    g.metric == ErrorMetric::TopKMembership
+                        && g.failure_probability.evaluate() == Some(0.005))
+        )));
     }
 
     #[test]

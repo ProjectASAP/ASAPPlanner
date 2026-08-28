@@ -119,7 +119,7 @@ contract and otherwise fails closed. The coefficients are specific to the
 cited implementation contract. See
 [Apache DataSketches KLL accuracy](https://datasketches.apache.org/docs/KLL/KLLAccuracyAndSize.html)
 and its
-[C++ contract](https://github.com/apache/datasketches-cpp/blob/master/kll/include/kll_sketch.hpp).
+[C++ contract pinned at `a9b42755072b`](https://github.com/apache/datasketches-cpp/blob/a9b42755072b079fd90b29b9851adc121015c58e/kll/include/kll_sketch.hpp).
 
 ### DDSketch
 
@@ -130,18 +130,19 @@ delta = 0
 
 ### HLL
 
-The modeled estimator contract is:
+Generic HLL exposes only its RSE magnitude:
 
 ```text
 RSE = 1.04 / sqrt(2^p)
-epsilon_cardinality = 10 * 1.04 / sqrt(2^p)
-delta = 0.01
+epsilon_cardinality = 1.04 / sqrt(2^p)
+delta = unknown
 ```
 
-Sizing inverts the bound. Reject HLL when the supported precision cap misses
-the target. The confidence claim requires an estimator whose bias and variance
-premises justify the modeled interval; do not attach it to a generic HLL family
-without that implementation contract.
+Sizing inverts the magnitude. HLL's current parameter model contains precision
+only; it does not encode a confidence-level budget. HLL may therefore satisfy
+`Epsilon` but cannot satisfy `EpsilonDelta`. Supporting a confidence target
+would require an explicitly identified estimator contract and corresponding
+parameters whose semantics prove the requested failure probability.
 
 ### KMV and Theta
 
@@ -191,7 +192,9 @@ with probability at most `1/3`. Zero or even depth has no modeled guarantee.
 
 ASAPPlanner contains the guarantee algebra and parameter-derived contracts; it
 does not import `asap_sketchlib`. Data- or runtime-dependent evidence enters
-through explicit statistics fields and is recorded in provenance.
+through an `AccuracyEvidenceProvider`, is exposed to propagation as typed
+`PropagationStats`, and is recorded in provenance. `NoAccuracyEvidence` is the
+default and preserves fail-closed behavior.
 
 ### TopK membership
 

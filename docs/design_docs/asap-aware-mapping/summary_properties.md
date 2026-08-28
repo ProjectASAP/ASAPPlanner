@@ -123,15 +123,16 @@ semantics:
 - CMS uses an L1-frequency bound, while CountSketch uses an L2-frequency
   bound and is sized from both width and odd median depth. The two are not
   interchangeable.
-- KLL, HLL, KMV, and Theta expose conservative 99%-confidence guarantees
-  derived from their committed parameters. A tighter requested `delta` is
-  rejected unless another implementation supplies a stronger contract.
+- KLL, KMV, and Theta expose identified 99%-confidence contracts derived from
+  committed parameters. HLL retains its RSE magnitude but has unknown failure
+  probability because its current parameters encode precision, not a
+  confidence-level budget; it therefore cannot satisfy `EpsilonDelta`.
 - TopK membership is certified only when the widened confidence interval of
   the kth selected item is strictly above every excluded item's widened
   interval. Missing or overlapping interval evidence fails closed.
 - Hydra adds its shared-grid collision error to the inner sketch error and
-  union-bounds their failure probabilities. Until deployment/data statistics
-  instantiate the shared-grid terms, the expressions remain symbolic and an
+  union-bounds their failure probabilities. A typed evidence provider may
+  instantiate the shared-grid terms; without it they remain symbolic and an
   accuracy-targeted Hydra candidate is not admitted.
 
 The default `AccuracyModel` is deliberately conservative. It supports

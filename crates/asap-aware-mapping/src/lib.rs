@@ -193,8 +193,9 @@ pub mod rollup;
 pub mod topk_reuse;
 
 pub use accuracy::{
-    AccuracyAllocation, AccuracyBudgetAllocator, AccuracyModel, CompositionShape,
-    DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
+    AccuracyAllocation, AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel,
+    CompositionShape, DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
+    PropagationStats,
 };
 pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
 pub use cost_model::{CostModel, DefaultCostModel};

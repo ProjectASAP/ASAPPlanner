@@ -79,11 +79,9 @@ pub enum ErrorMetric {
     /// CountSketch uses this normalization; it is intentionally distinct
     /// from CMS's [`ErrorMetric::Frequency`] (`L1`) guarantee.
     L2Frequency,
-    /// The returned key set equals the true top-k set. No shipped model
-    /// produces this yet: it needs a per-key interval margin certificate
-    /// (issue #172, PR 3). Present so the vocabulary can name the metric a
-    /// `TopK` readout would need without pretending a frequency bound is
-    /// one.
+    /// The returned key set equals the true top-k set. The built-in model
+    /// produces this only from a supplied per-key interval margin certificate;
+    /// a frequency bound alone is insufficient.
     TopKMembership,
 }
 
@@ -253,6 +251,9 @@ pub enum GuaranteeSource {
     /// The concrete sketch a readout's local guarantee was derived from.
     SketchReadout {
         algorithm: String,
+        /// Stable estimator/analysis contract used to derive this guarantee.
+        #[serde(default)]
+        contract: String,
         params: serde_json::Value,
         query: String,
     },

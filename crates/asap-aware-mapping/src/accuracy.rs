@@ -78,6 +78,8 @@ use asap_types::types::AccuracyTarget;
 /// [`BoundExpr::Unknown`] leaf (or rejects) rather than guessing.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PropagationStats {
+    /// Provenance for supplied evidence (source, observation identity, etc.).
+    pub evidence_provenance: Vec<GuaranteeSource>,
     /// Whether every input value is known to be non-negative — required by
     /// the multiplicative relative-error rule, which is unsound across a
     /// sign change.
@@ -95,7 +97,28 @@ pub struct PropagationStats {
     /// Union-bound failure probability of all intervals used by the margin
     /// certificate.
     pub topk_interval_failure_probability: Option<f64>,
+    /// Hydra shared-grid collision error in the inner guarantee's metric.
+    pub hydra_shared_grid_collision_bound: Option<f64>,
+    /// Failure probability assigned to the Hydra shared-grid term.
+    pub hydra_shared_grid_failure_probability: Option<f64>,
 }
+
+/// Supplies typed planning-time evidence required by propagation rules.
+pub trait AccuracyEvidenceProvider {
+    fn propagation_stats(
+        &self,
+        _op: &CompositionOperator,
+        _family: &SummaryFamilyType,
+        _query: Option<&SketchQuery>,
+    ) -> PropagationStats {
+        PropagationStats::default()
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoAccuracyEvidence;
+
+impl AccuracyEvidenceProvider for NoAccuracyEvidence {}
 
 /// The deployment-extensible accuracy algebra. `asap-aware-mapping` ships
 /// [`DefaultAccuracyModel`]; a deployment with a proof for a composition the
@@ -176,12 +199,15 @@ impl DefaultAccuracyModel {
             SketchParams::DDSketch { alpha } => {
                 (ErrorMetric::RelativeValue, *alpha, ProbabilityExpr::Zero)
             }
-            // HLL: RSE = 1.04/√(2^p). Chebyshev turns ten standard
-            // deviations into a distribution-free 99% confidence bound.
+            // HLL parameters encode precision, not a confidence-level budget.
+            // They therefore provide an RSE magnitude here but no failure
+            // probability against true cardinality.
             SketchParams::Hll { precision } => (
                 ErrorMetric::Cardinality,
-                10.0 * 1.04 / 2f64.powi(i32::from(*precision)).sqrt(),
-                ProbabilityExpr::Constant { value: 0.01 },
+                1.04 / 2f64.powi(i32::from(*precision)).sqrt(),
+                ProbabilityExpr::Unknown {
+                    statistic: "hll_estimator_failure_probability".into(),
+                },
             ),
             // KMV / Theta: RSE <= 1/√(k-2); the same Chebyshev conversion
             // gives a conservative parameter-derived 99% confidence bound.
@@ -215,6 +241,20 @@ impl DefaultAccuracyModel {
         };
         let provenance = vec![GuaranteeSource::SketchReadout {
             algorithm: format!("{algorithm:?}"),
+            contract: match params {
+                SketchParams::Kll { .. } => "apache_datasketches_kll_empirical_99_a9b42755072b",
+                SketchParams::DDSketch { .. } => "ddsketch_relative_error_alpha_v1",
+                SketchParams::Hll { .. } => "generic_hll_rse_only_no_confidence_v1",
+                SketchParams::Kmv { .. } => "kmv_unbiased_variance_chebyshev_99_v1",
+                SketchParams::Theta { .. } => "theta_variance_chebyshev_99_v1",
+                SketchParams::Cms { .. } | SketchParams::CmsWithHeap { .. } => {
+                    "count_min_l1_markov_v1"
+                }
+                SketchParams::CountSketch { .. } | SketchParams::CountSketchWithHeap { .. } => {
+                    "count_sketch_l2_median_hoeffding_v1"
+                }
+            }
+            .into(),
             params: serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
             query: format!("{query:?}"),
         }];
@@ -656,6 +696,7 @@ impl AccuracyModel for DefaultAccuracyModel {
                         guarantee: Box::new(guarantee.clone()),
                     })
                     .collect::<Vec<_>>();
+                provenance.extend(stats.evidence_provenance.clone());
                 if let Some(local) = local {
                     provenance.extend(local.provenance.clone());
                 }
@@ -1075,6 +1116,11 @@ mod tests {
             }
         ));
         assert_eq!(g.approximate_layer_count(), 1);
+        assert!(g.provenance.iter().any(|source| matches!(
+            source,
+            GuaranteeSource::SketchReadout { contract, .. }
+                if contract == "apache_datasketches_kll_empirical_99_a9b42755072b"
+        )));
 
         let c = default_cardinality();
         let params = default_size_params(SketchAlgorithm::Hll, &c, 0.01, 0.01);
@@ -1088,8 +1134,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(g.metric, ErrorMetric::Cardinality);
-        assert_eq!(g.failure_probability.evaluate(), Some(0.01));
-        assert!(!DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
+        assert_eq!(g.failure_probability.evaluate(), None);
+        assert!(DefaultAccuracyModel.satisfies(&g, &AccuracyTarget::Epsilon(0.01)));
+        assert!(!DefaultAccuracyModel.satisfies(
+            &g,
+            &AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            }
+        ));
 
         let params = default_size_params(SketchAlgorithm::Cms, &c, 0.01, 0.001);
         let g = DefaultAccuracyModel
