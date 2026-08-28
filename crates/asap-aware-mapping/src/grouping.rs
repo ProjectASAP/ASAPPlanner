@@ -26,10 +26,12 @@
 //!   with no grouping concept at all) has nothing for a
 //!   shared-multi-subpopulation structure to multiplex across.
 //! - **The family has a Hydra variant**
-//!   ([`asap_types::post_asap::hydra_kind_for`]): only `Cms` and
-//!   `CountSketch` are selectable today because their error guarantees are
-//!   modeled. `HydraKll` remains an explicit experimental IR value, but the
-//!   paper excludes quantiles and search therefore never emits it.
+//!   ([`asap_types::post_asap::hydra_kind_for`]): `Cms` and `CountSketch`
+//!   have structural Hydra mappings. `HydraKll` remains an explicit
+//!   experimental IR value, but the paper excludes quantiles and search
+//!   therefore never emits it. Accuracy-targeted candidates are also
+//!   withheld until the shared grid's collision error is composed with the
+//!   inner sketch guarantee.
 //!
 //! Whether Hydra is *worth it* for a given estimated subpopulation
 //! cardinality is a cost-model question, deliberately out of scope here —
@@ -79,7 +81,7 @@ use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
 
 use crate::cost_model::{CostModel, DefaultCostModel};
 use crate::replacement::{
-    bindable_intent, construct_summary, describe_intent, implementations_for_with,
+    accuracy_target, bindable_intent, construct_summary, describe_intent, implementations_for_with,
     summary_candidates, Implementation, Replacement, ReplacementStrategy, ReplacementSubDAG,
     TargetSubDAG,
 };
@@ -158,6 +160,13 @@ impl<'a> HydraGroupingStrategy<'a> {
         let Some(intent) = bindable_intent(target.root) else {
             return Vec::new();
         };
+        // Hydra adds shared-grid collision error that is not modeled yet.
+        // `with_grouping` clears the per-subpopulation guarantee so exports
+        // remain honest, but an unknown guarantee must also keep the
+        // candidate out of cost ranking when this node has a requirement.
+        if accuracy_target(intent).is_some() {
+            return Vec::new();
+        }
         summary_candidates(intent)
             .iter()
             .filter_map(|kind| hydra_kind_for(kind).map(|hydra_kind| (kind.clone(), hydra_kind)))
@@ -324,7 +333,6 @@ fn with_grouping(node: Rc<SummaryNode>, grouping: GroupingStrategy) -> Rc<Summar
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::post_asap::HydraParams;
     use asap_types::pre_asap::agg_intent::{default_cardinality, default_quantile};
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -393,7 +401,7 @@ mod tests {
     // ── HydraGroupingStrategy ─────────────────────────────────────────────
 
     #[test]
-    fn matches_a_grouped_count_aggregate() {
+    fn does_not_match_a_grouped_count_with_an_unprovable_accuracy_target() {
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -402,7 +410,7 @@ mod tests {
         };
         let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
-        assert!(HydraGroupingStrategy::default_cost_model().matches(&target));
+        assert!(!HydraGroupingStrategy::default_cost_model().matches(&target));
     }
 
     #[test]
@@ -443,10 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn count_offers_hydra_candidates_for_cms_and_count_sketch() {
-        // summary_candidates(Count) = [Cms, CountSketch] — both are now
-        // mapped to a Hydra variant (and, per `HydraKind`'s own doc, both
-        // are the Hydra paper's actual proven construction, unlike KLL's).
+    fn count_with_an_accuracy_target_has_no_hydra_candidate() {
         let intent = AggIntent::Count {
             accuracy: AccuracyTarget::EpsilonDelta {
                 epsilon: 0.01,
@@ -456,79 +461,7 @@ mod tests {
         let q = Rc::new(agg(vec![2], intent, metric_scan(&["job"])));
         let target = TargetSubDAG::new(&q);
         let replacements = HydraGroupingStrategy::default_cost_model().replacements(&target);
-        assert_eq!(replacements.len(), 2, "{replacements:?}");
-
-        for replacement in &replacements {
-            let Replacement::Summary(node) = &replacement.replacement else {
-                panic!("expected a Summary replacement");
-            };
-            assert!(
-                node.guarantee.is_none(),
-                "Hydra's shared-grid collision error is not modeled yet"
-            );
-            let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
-                panic!("expected SummaryEstimate root, got {:?}", node.expr);
-            };
-            let SummaryExpr::SummaryAgg {
-                family, grouping, ..
-            } = &summary_input.expr
-            else {
-                panic!("expected SummaryAgg, got {:?}", summary_input.expr);
-            };
-            assert!(summary_input.guarantee.is_none());
-            let SummaryFamilyType::Sketch(kind, state_grouping) = family else {
-                panic!("expected a Sketch family, got {family:?}");
-            };
-            assert_eq!(state_grouping, grouping);
-            assert!(summary_input
-                .schema
-                .fields
-                .iter()
-                .any(|field| &field.dtype == family));
-
-            // The Hydra params must carry over exactly the same
-            // (width, depth) the per-subpopulation candidate committed to —
-            // `default_hydra_params` generalizes over *which* inner sketch
-            // it's wrapping rather than assuming a KLL-shaped `k`.
-            match kind.algorithm() {
-                SketchAlgorithm::Cms => {
-                    let SketchParams::Cms { width, depth } = kind.params() else {
-                        panic!("expected Cms params, got {:?}", kind.params());
-                    };
-                    assert_eq!(
-                        grouping,
-                        &GroupingStrategy::SharedMultiSubpopulation {
-                            kind: HydraKind::HydraCms,
-                            params: HydraParams::HydraCms {
-                                width: *width,
-                                depth: *depth,
-                                shared_rows: *depth,
-                                shared_columns: *width,
-                            },
-                        }
-                    );
-                }
-                SketchAlgorithm::CountSketch => {
-                    let SketchParams::CountSketch { width, depth } = kind.params() else {
-                        panic!("expected CountSketch params, got {:?}", kind.params());
-                    };
-                    assert_eq!(
-                        grouping,
-                        &GroupingStrategy::SharedMultiSubpopulation {
-                            kind: HydraKind::HydraCountSketch,
-                            params: HydraParams::HydraCountSketch {
-                                width: *width,
-                                depth: *depth,
-                                shared_rows: *depth,
-                                shared_columns: *width,
-                            },
-                        }
-                    );
-                }
-                other => panic!("unexpected Hydra candidate algorithm: {other:?}"),
-            }
-            assert!(!replacement.rationale.is_empty());
-        }
+        assert!(replacements.is_empty(), "{replacements:?}");
     }
 
     #[test]
