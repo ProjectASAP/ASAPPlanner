@@ -60,10 +60,12 @@ The planner receives four logically distinct inputs:
    distribution;
 4. existing summaries and the lifecycle actions available to the deployment.
 
-The output is a legal physical-plan choice plus explicit state deployments. A
+The implemented output is a phase-valid selected summary plan (or a
+cost-preferred raw-recomputation fallback) plus explicit state deployments. A
 state deployment states whether a summary is ephemeral, prepared, shared for a
-bounded period, or continuously maintained. Its cost explanation identifies
-the demand and data evidence used in the decision.
+bounded period, or continuously maintained. It retains costs, assumptions, and
+structured rejection reasons. Exporting full input provenance remains a later
+integration.
 
 ```text
             logical queries ---+
@@ -92,7 +94,8 @@ normalize query and data workloads
     -> validate summary capabilities and phase constraints
     -> derive and check accuracy guarantees
     -> normalize one-time and rate costs over an explicit horizon
-    -> rank legal alternatives
+    -> rank legal alternatives and compare the selected summary deployment
+       with raw recomputation
     -> emit plan, deployments, assumptions, and rejected alternatives
 ```
 
@@ -191,8 +194,8 @@ arbitrary approximation: the current normalization policy makes it
 whether the caller chose exactness or inherited the default. An unspecified
 response-latency requirement imposes no response-time constraint; it is not a
 zero-duration bound or evidence that every latency is acceptable. Accuracy is
-checked as a legality constraint, while response latency is used to reject
-plans that cannot meet the bound.
+checked as a legality constraint. The normalized model preserves response
+latency, but the current planner does not yet reject plans against that bound.
 
 #### Classification axes
 
@@ -393,7 +396,8 @@ struct Evidence<T> {
 ```
 
 This reuses the provenance and freshness principles from empirical summary
-parameter configuration. A missing or stale value remains unknown.
+parameter configuration. Missing, stale, or future-dated evidence remains
+unknown.
 
 ### Output cardinality is a derived or evidenced cost input
 
@@ -461,7 +465,9 @@ enum StateLifecycle {
 The summary family and its properties constrain which lifecycles are legal.
 For example, an append-only sketch may support continuous inserts but not a
 sliding-window lifecycle requiring deletion. Lifecycle legality is checked
-before cost ranking, like accuracy legality.
+before cost ranking, like accuracy legality. Deployments provide these
+per-summary properties through `summary_lifecycle_capabilities`; moving
+real-time windows require deletion support as well as incremental updates.
 
 ### Existing summaries are planning input
 
@@ -509,6 +515,12 @@ For repeated raw recomputation:
 total(H) = reads(H) * raw_recompute_cost
 ```
 
+The current lifecycle-aware materialization sums the selected summary
+deployments and can replace that plan with raw recomputation when the raw cost
+is lower or the summary lifecycle is uncostable. Jointly reconsidering every
+sibling semantic candidate under lifecycle costs remains a later optimizer
+integration; this document does not claim that broader search is implemented.
+
 For an ephemeral summary:
 
 ```text
@@ -552,15 +564,15 @@ The glossary review found the following required coverage and current gaps.
 
 | Glossary concept | Current ASAPPlanner representation | Missing design support |
 | --- | --- | --- |
-| Data at rest vs continuously ingesting | Continuous ingest characteristics are available; no explicit arrival mode | Add `DataArrival`; support at-rest statistics without inventing update rate |
-| Ingestion volume | Not a first-class workload input | Add evidenced volume with a time basis |
-| Ingestion rate | Derived from series count and sample rate | Preserve as evidenced rate; do not conflate with query evaluation rate |
-| Input cardinality | Partial `series_count` and distinct-key inputs | Associate each estimate with its dataset, metric, columns, and observation window |
-| Data distribution | Small built-in enum | Preserve source/freshness; permit deployment-specific distributions later |
-| Ad-hoc vs predictable | Not represented | Add predictability independently from recurrence |
-| One-time vs repeated | Batch entries and fixed-interval repeating entries | Add scheduled one-time, unknown recurrence, and estimated/scheduled repetition |
-| Query volume and characteristics | Fixed interval or structural consumer count | Add observation window, peak/burst and concurrency evidence where latency or capacity models require it |
-| Real-time vs longitudinal | Temporal IR can carry ranges; no workload classification | Add time scope plus concrete selection; avoid inferring scope from lookback alone |
+| Data at rest vs continuously ingesting | `DataArrival` is explicit | Runtime/catalog-specific arrival discovery remains external |
+| Ingestion volume | `DataWorkload::ingestion_volume` carries evidence | A concrete time basis for volume remains deployment-specific |
+| Ingestion rate | Evidenced independently from query evaluation rate | Preserve richer unit/provenance metadata when integrations require it |
+| Input cardinality | Evidenced workload-level cardinality feeds accuracy | Per-dataset/metric/column scoping remains future work |
+| Data distribution | Evidenced built-in enum | Permit deployment-specific distributions later |
+| Ad-hoc vs predictable | `Predictability` is independent from recurrence | Parameterized-template equivalence remains open |
+| One-time vs repeated | One-time, fixed, scheduled, estimated, and unknown recurrence | Forecast-policy integration remains future work |
+| Query volume and characteristics | Estimates preserve average/count, peak, concurrency, confidence, and freshness | Peak and concurrency are not yet consumed by cost or latency models |
+| Real-time vs longitudinal | `TimeSelection` carries scope, lookback, and `as_of` | Conflict policy with temporal IR remains open |
 | Output cardinality | May be inferred locally; no common evidenced input | Add derived/evidenced value and provenance for costing |
 | Lookback window | Represented in temporal query shapes/frontends | Establish query IR as authority and expose it to workload costing |
 | CTSA pipeline | Not explicitly modeled | Keep as architectural context; planner consumes collect/store/analyze facts but does not model transmission topology in the MVP |
@@ -655,9 +667,9 @@ and after aggregation.
 - **Understandability:** explanations use glossary terms and show each axis
   separately. Proxy: reviewers can distinguish repeated queries from continuous
   ingestion in exported plan evidence.
-- **Debuggability:** selected and rejected lifecycle alternatives record demand,
-  horizon, data statistics, and provenance. Proxy: no lifecycle decision is
-  explained only as a scalar cost.
+- **Debuggability:** selected and rejected lifecycle alternatives record costs,
+  horizon-derived decisions, assumptions, and typed rejection reasons. Full
+  demand/data provenance in exported explanations remains future work.
 - **Maintainability:** current recurrence types remain the cost authority;
   normalized workload types remain the source authority. No duplicate formula
   system is introduced.

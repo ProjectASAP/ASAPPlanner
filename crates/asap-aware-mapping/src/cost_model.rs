@@ -63,7 +63,9 @@ use crate::replacement::{
     realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
     TargetSubDAG,
 };
-use crate::summary_maintenance_lifecycle::SummaryMaintenanceLifecycleCostInputs;
+use crate::summary_maintenance_lifecycle::{
+    SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCostInputs,
+};
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
@@ -515,6 +517,22 @@ pub trait CostModel {
         _summary: &SummaryNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
         SummaryMaintenanceLifecycleCostInputs::default()
+    }
+
+    /// Physical update/merge/delete support for one concrete summary. The
+    /// conservative default advertises no long-lived maintenance capability.
+    fn summary_maintenance_capabilities(
+        &self,
+        _summary: &SummaryNode,
+    ) -> SummaryMaintenanceCapabilities {
+        SummaryMaintenanceCapabilities::default()
+    }
+
+    /// Cost of evaluating `target` directly from its logical/raw inputs once.
+    /// When known, lifecycle-aware materialization compares this fallback with
+    /// the aggregate cost of the selected summary deployments.
+    fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
+        None
     }
 }
 
