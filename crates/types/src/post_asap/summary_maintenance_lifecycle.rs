@@ -26,7 +26,7 @@ pub enum OutputRepresentation {
 
 /// How long one planned summary state deployment exists.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum StateLifecycle {
+pub enum SummaryMaintenanceLifecycle {
     Ephemeral,
     Prepared {
         activate_at: TimestampMs,
@@ -45,7 +45,7 @@ pub enum StateLifecycle {
 /// separate [`super::ResultGuarantee`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SummaryMaintenanceLifecycleGuarantee {
-    pub lifecycle: StateLifecycle,
+    pub summary_maintenance_lifecycle: SummaryMaintenanceLifecycle,
     pub evaluation_schedule: EvaluationSchedule,
     pub output_representation: OutputRepresentation,
 }

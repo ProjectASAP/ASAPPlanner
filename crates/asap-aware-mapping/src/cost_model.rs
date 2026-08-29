@@ -60,7 +60,6 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::exact_composition::{CompositionPhase, ExactComposition};
-use crate::lifecycle::{LifecycleCostInputs, SummaryLifecycleCapabilities};
 use crate::recurrence::{
     self, CostRate, EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError,
     RecurrenceProfile,
@@ -68,6 +67,9 @@ use crate::recurrence::{
 use crate::replacement::{
     realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
     TargetSubDAG,
+};
+use crate::summary_maintenance_lifecycle::{
+    SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCostInputs,
 };
 
 // ── Recurring-cost vocabulary for mixed exact/summary plans (issue #171) ──
@@ -523,7 +525,7 @@ pub trait CostModel {
     /// as shared state. This fallback has no query recurrence, data arrival,
     /// or horizon; workload-aware selection uses
     /// [`Self::cse_share_decision_with_recurrence`], and full physical
-    /// selection additionally uses [`Self::summary_lifecycle_cost_inputs`].
+    /// selection additionally uses [`Self::summary_maintenance_lifecycle_cost_inputs`].
     /// Default: [`default_cse_shared_maintenance_cost`] (a per-family
     /// weight table), applied to whichever field of
     /// `candidate.bound_summary`'s output schema actually carries summary
@@ -760,27 +762,30 @@ pub trait CostModel {
 
     /// Primitive build, update, read, retention, and retirement costs used to
     /// compare physical summary-state lifecycles. This is part of the same
-    /// cost model as candidate ranking and recurrence; lifecycle planning does
-    /// not introduce a second optimizer.
+    /// cost model as candidate ranking and recurrence; summary maintenance
+    /// lifecycle planning does not introduce a second optimizer.
     ///
     /// The default leaves every value unknown, which prevents a long-lived
     /// deployment from winning through optimistic zeroes.
-    fn summary_lifecycle_cost_inputs(&self, _summary: &SummaryNode) -> LifecycleCostInputs {
-        LifecycleCostInputs::default()
+    fn summary_maintenance_lifecycle_cost_inputs(
+        &self,
+        _summary: &SummaryNode,
+    ) -> SummaryMaintenanceLifecycleCostInputs {
+        SummaryMaintenanceLifecycleCostInputs::default()
     }
 
     /// Physical update/merge/delete support for one concrete summary. The
     /// conservative default advertises no long-lived maintenance capability.
-    fn summary_lifecycle_capabilities(
+    fn summary_maintenance_capabilities(
         &self,
         _summary: &SummaryNode,
-    ) -> SummaryLifecycleCapabilities {
-        SummaryLifecycleCapabilities::default()
+    ) -> SummaryMaintenanceCapabilities {
+        SummaryMaintenanceCapabilities::default()
     }
 
     /// Cost of evaluating `target` directly from its logical/raw inputs once.
-    /// When known, lifecycle-aware materialization compares this fallback with
-    /// the aggregate cost of the selected summary deployments.
+    /// When known, summary-maintenance-aware materialization compares this
+    /// fallback with the aggregate cost of the selected summary deployments.
     fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
         None
     }
