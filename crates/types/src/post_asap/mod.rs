@@ -53,4 +53,5 @@ pub use sketch::{
 pub use summary_maintenance::SummaryMaintenanceMode;
 pub use summary_maintenance_lifecycle::{
     EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee,
 };

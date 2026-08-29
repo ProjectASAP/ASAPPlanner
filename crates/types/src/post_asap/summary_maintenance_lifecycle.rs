@@ -26,7 +26,13 @@ pub enum OutputRepresentation {
     FinalizedValue,
 }
 
-/// Lifetime and reuse policy for one materialized summary-state deployment.
+/// Physical policy for when one materialized summary state is created,
+/// retained or shared, updated as data arrives, and retired.
+///
+/// This is not the lifecycle of the source data or query. Query recurrence
+/// provides the expected number and timing of reads; data arrival provides the
+/// expected state-update demand. The planner combines those quantities with
+/// costs and runtime capabilities to compare these policies.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SummaryMaintenanceLifecycle {
     Ephemeral,
@@ -38,4 +44,16 @@ pub enum SummaryMaintenanceLifecycle {
         retention: DurationMs,
     },
     ContinuouslyMaintained,
+}
+
+/// The lifecycle commitment emitted for one materialized summary deployment.
+///
+/// This names the summary-maintenance promise explicitly so consumers do not
+/// confuse it with guarantees about the broader data lifecycle. Accuracy is a
+/// separate [`super::ResultGuarantee`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SummaryMaintenanceLifecycleGuarantee {
+    pub summary_maintenance_lifecycle: SummaryMaintenanceLifecycle,
+    pub evaluation_schedule: EvaluationSchedule,
+    pub output_representation: OutputRepresentation,
 }
