@@ -1,4 +1,4 @@
-# Design: Workload Demand and Summary Lifecycle
+# Design: Query Workloads, Data Workloads, and Summary Lifecycle Maintenance
 
 ## Audience and context
 
@@ -53,8 +53,10 @@ same fact even though the glossary defines them on different axes.
 The planner receives four logically distinct inputs:
 
 1. logical queries and their correctness and latency requirements;
-2. query-workload demand, including predictability and recurrence;
-3. data-workload characteristics, including ingestion and queried time scope;
+2. query-workload demand, including predictability, recurrence, and queried
+   time scope;
+3. data-workload characteristics, including arrival, volume, cardinality, and
+   distribution;
 4. existing summaries and the lifecycle actions available to the deployment.
 
 The output is a legal physical-plan choice plus explicit state deployments. A
@@ -123,9 +125,6 @@ an explicit horizon.
 - **What are the risks and costs?** More inputs can make planning harder to
   configure, forecasts may be stale, and a large lifecycle search space can
   increase planning cost.
-- **How long will it take?** The minimum implementation can extend normalized
-  workload input, lifecycle candidates, and explanations incrementally. Demand
-  forecasting and runtime state catalogs are later integrations.
 - **What are the checks for success?** The acceptance cases below must produce
   different lifecycle alternatives and cost terms for identical query syntax
   under different workload contracts.
@@ -228,6 +227,25 @@ struct TimeSelection {
 }
 ```
 
+For example, the same five-minute lookback has a different scope depending on
+whether it is anchored at the current planning time or at a historical time:
+
+```rust
+// The last five minutes: real-time.
+TimeSelection {
+    scope: QueryTimeScope::RealTime,
+    lookback: Some(Duration::minutes(5)),
+    as_of: None,
+}
+
+// A five-minute interval from archived data: longitudinal.
+TimeSelection {
+    scope: QueryTimeScope::Longitudinal,
+    lookback: Some(Duration::minutes(5)),
+    as_of: Some(timestamp!("2024-01-01T12:05:00Z")),
+}
+```
+
 `lookback` is a query property already represented by temporal query nodes in
 some frontends. The normalized workload should reference or derive it rather
 than introduce a second conflicting value.
@@ -242,6 +260,16 @@ enum DataArrival {
     Unknown,
 }
 
+/// Statistical distribution of keys in the input data.
+enum DataDistribution {
+    /// A small number of keys account for most observations.
+    Zipf,
+    /// Keys are approximately equally likely.
+    Uniform,
+    /// Observations arrive in bursts with a temporarily concentrated key set.
+    Bursty,
+}
+
 struct DataWorkload {
     arrival: DataArrival,
     ingestion_volume: Evidence<u64>,
@@ -250,6 +278,12 @@ struct DataWorkload {
     distribution: Evidence<DataDistribution>,
 }
 ```
+
+`DataDistribution` reuses the existing ASAPPlanner classification. It describes
+the key-frequency shape used by summary accuracy and cost models, not whether
+data arrives continuously. An unavailable or unsupported distribution is
+represented by `Evidence.value = None` rather than by assuming the default
+distribution.
 
 The current `DataCharacteristics` supplies continuous-ingestion fields such as
 series count and samples per second. It should become one source for this model,
@@ -265,7 +299,6 @@ struct Evidence<T> {
     source: EvidenceSource,
     observed_at: Option<Timestamp>,
     valid_for: Option<Duration>,
-    applicability: Applicability,
 }
 ```
 
@@ -276,7 +309,7 @@ parameter configuration. A missing or stale value remains unknown.
 
 Output cardinality depends on input cardinality and grouping columns. The
 planner may derive it analytically, accept a catalog estimate, or leave it
-unknown. The source and applicability must be preserved because output
+unknown. The source and freshness metadata must be preserved because output
 cardinality affects summary size, read cost, post-processing cost, and network
 cost. It is not a query correctness requirement.
 
@@ -422,7 +455,7 @@ The glossary review found the following required coverage and current gaps.
 | Data at rest vs continuously ingesting | Continuous ingest characteristics are available; no explicit arrival mode | Add `DataArrival`; support at-rest statistics without inventing update rate |
 | Ingestion volume | Not a first-class workload input | Add evidenced volume with a time basis |
 | Ingestion rate | Derived from series count and sample rate | Preserve as evidenced rate; do not conflate with query evaluation rate |
-| Input cardinality | Partial `series_count` and distinct-key inputs | Define applicability to dataset, metric, columns, and time window |
+| Input cardinality | Partial `series_count` and distinct-key inputs | Associate each estimate with its dataset, metric, columns, and observation window |
 | Data distribution | Small built-in enum | Preserve source/freshness; permit deployment-specific distributions later |
 | Ad-hoc vs predictable | Not represented | Add predictability independently from recurrence |
 | One-time vs repeated | Batch entries and fixed-interval repeating entries | Add scheduled one-time, unknown recurrence, and estimated/scheduled repetition |
@@ -442,6 +475,25 @@ Two terminology corrections are required in future code changes:
    its one execution.
 
 ## Minimal complexity
+
+The minimum input model is determined by the downstream applications selected
+for integration, not by a context-free notion of the fewest possible fields.
+Each supported use case must contribute the workload facts that can change
+plan legality, accuracy, lifecycle, or cost:
+
+- Time-series metric queries require queried time scope and lookback.
+- Repeated dashboard queries, including an ASAPQuery integration, require
+  recurrence and evaluation frequency so the planner can cost reuse and
+  maintenance across executions.
+- Batch queries over data at rest require an explicit at-rest arrival mode and
+  must not be assigned a fabricated ingestion rate.
+- Summary techniques whose accuracy depends on the input distribution require
+  evidenced distribution characteristics; omitting them must produce unknown
+  accuracy or a conservative fallback rather than a favorable assumption.
+
+The initial implementation should include the union of fields required by its
+committed integrations. Additional workload dimensions should be added when a
+new downstream use case demonstrates that they affect a planning decision.
 
 The simplest alternative is to extend `BatchEntry` with optional schedule and
 classification fields and extend `RepeatingEntry` with time scope. That is a
