@@ -35,10 +35,13 @@
 //! ## CSE sharing (issue #237, #223 stage 4)
 //!
 //! [`CseCandidate`]/[`ShareDecision`]/[`CostModel::cse_share_decision`] below
-//! decide whether a CSE-detected shared subtree
+//! provide the context-free fallback for whether a CSE-detected shared subtree
 //! ([`asap_types::pre_asap::cse::share_common_subtrees`], issue #223 stages
 //! 1-2, PR #235) is actually worth sharing, via a real Volcano/Cascades-style
-//! cost comparison rather than a fixed rule. See
+//! cost comparison rather than a fixed rule. Workload-aware selection uses
+//! [`CostModel::cse_share_decision_with_recurrence`]; the target design also
+//! expands each share candidate with its legal summary-maintenance lifecycles
+//! before whole-plan ranking. See
 //! `docs/design_docs/cse-cost-model-decision.md` for the full design discussion (why
 //! cost-based, why not a full plan-search engine, the layering constraint
 //! that forces detection to stay cost-agnostic).
@@ -358,12 +361,12 @@ pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> Cost {
     Cost(asap_types::pre_asap::cse::dag_node_count(subtree) as f64)
 }
 
-/// Default [`CostModel::cse_shared_maintenance_cost`]: a small
+/// Default context-free [`CostModel::cse_shared_maintenance_cost`]: a small
 /// per-[`SummaryFamilyType`] weight, scaled to the same order of magnitude
 /// as [`default_cse_recompute_cost`]'s typical output (a small node
 /// count, not a byte length), reflecting that families differ in how
-/// expensive they are to keep *continuously updated* for the life of a
-/// workload — an exact accumulator is the cheapest (an O(1) merge),
+/// expensive they are to maintain as shared state — an exact accumulator is
+/// the cheapest (an O(1) merge),
 /// sketches/samples cost more (a whole data structure to update per new
 /// row), wavelets/fitted models cost the most (coefficient/parameter
 /// maintenance). These weights are illustrative, not measured — a
@@ -516,8 +519,11 @@ pub trait CostModel {
         default_cse_recompute_cost(candidate.subtree)
     }
 
-    /// Estimate the cost of maintaining `candidate.bound_summary` as one
-    /// continuously-updated shared summary for the life of the workload.
+    /// Estimate a context-free proxy for maintaining `candidate.bound_summary`
+    /// as shared state. This fallback has no query recurrence, data arrival,
+    /// or horizon; workload-aware selection uses
+    /// [`Self::cse_share_decision_with_recurrence`], and full physical
+    /// selection additionally uses [`Self::summary_lifecycle_cost_inputs`].
     /// Default: [`default_cse_shared_maintenance_cost`] (a per-family
     /// weight table), applied to whichever field of
     /// `candidate.bound_summary`'s output schema actually carries summary
