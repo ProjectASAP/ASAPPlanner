@@ -58,7 +58,8 @@ use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::exact_composition::{CompositionPhase, ExactComposition};
 use crate::recurrence::{
-    self, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
+    self, CostRate, EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError,
+    RecurrenceProfile,
 };
 use crate::replacement::{
     realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
@@ -85,54 +86,6 @@ impl CostUnit {
         match self {
             Self::CostUnitsPerSecond => "cost_units_per_second",
         }
-    }
-}
-
-/// A recurring cost in [`CostUnit::CostUnitsPerSecond`]. Distinct from the
-/// unitless one-shot [`Cost`] so the two can never be added or compared by
-/// accident.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub struct CostRate {
-    pub units_per_second: f64,
-}
-
-impl CostRate {
-    pub const UNIT: CostUnit = CostUnit::CostUnitsPerSecond;
-
-    /// `total_cost(H) = recurring_cost_rate * H + one_shot_cost` — the cost
-    /// of running this rate for a finite horizon of `horizon_seconds`,
-    /// plus any one-shot work (`Cost` is unitless and treated as the same
-    /// abstract cost unit).
-    pub fn total_over_horizon(self, horizon_seconds: f64, one_shot: Cost) -> f64 {
-        self.units_per_second * horizon_seconds + one_shot.0
-    }
-}
-
-/// How often a plan is evaluated, in evaluations per second. For a shared
-/// plan serving several repeating consumers,
-/// `evaluation_rate = Σ 1 / query_interval_i` — see
-/// [`EvaluationRate::from_intervals`].
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub struct EvaluationRate {
-    pub per_second: f64,
-}
-
-impl EvaluationRate {
-    /// `Σ 1 / interval_i` over every consumer's own evaluation interval.
-    /// Non-positive/non-finite intervals contribute nothing (they describe
-    /// no repeating consumer). Returns `None` for an empty consumer set —
-    /// an unknown rate stays unknown, never zero.
-    pub fn from_intervals(intervals: &[std::time::Duration]) -> Option<Self> {
-        let mut per_second = 0.0;
-        let mut any = false;
-        for interval in intervals {
-            let secs = interval.as_secs_f64();
-            if secs.is_finite() && secs > 0.0 {
-                per_second += 1.0 / secs;
-                any = true;
-            }
-        }
-        any.then_some(Self { per_second })
     }
 }
 
@@ -278,7 +231,7 @@ pub fn postprocess_plan_cost_rate(inputs: &ExactCompositionCostInputs) -> Option
     let maintenance = inputs.update_rate? * inputs.summary_maintenance_cost_per_update?;
     let per_eval =
         inputs.summary_read_cost? + inputs.expected_output_rows? * inputs.exact_cost_per_row?;
-    let evaluation = inputs.evaluation_rate?.per_second * per_eval;
+    let evaluation = inputs.evaluation_rate?.0 * per_eval;
     finite_rate(maintenance + evaluation)
 }
 
@@ -295,7 +248,7 @@ pub fn postprocess_plan_cost_rate(inputs: &ExactCompositionCostInputs) -> Option
 pub fn pretransform_plan_cost_rate(inputs: &ExactCompositionCostInputs) -> Option<CostRate> {
     let per_update = inputs.exact_cost_per_row? + inputs.summary_maintenance_cost_per_update?;
     let maintenance = inputs.update_rate? * per_update;
-    let evaluation = inputs.evaluation_rate?.per_second * inputs.summary_read_cost?;
+    let evaluation = inputs.evaluation_rate?.0 * inputs.summary_read_cost?;
     finite_rate(maintenance + evaluation)
 }
 
@@ -307,13 +260,13 @@ pub fn pretransform_plan_cost_rate(inputs: &ExactCompositionCostInputs) -> Optio
 ///
 /// `None` if either input is unknown — see [`ExactCompositionCostInputs`].
 pub fn raw_recompute_cost_rate(inputs: &ExactCompositionCostInputs) -> Option<CostRate> {
-    finite_rate(inputs.evaluation_rate?.per_second * inputs.raw_recompute_cost?)
+    finite_rate(inputs.evaluation_rate?.0 * inputs.raw_recompute_cost?)
 }
 
 fn finite_rate(units_per_second: f64) -> Option<CostRate> {
     units_per_second
         .is_finite()
-        .then_some(CostRate { units_per_second })
+        .then_some(CostRate(units_per_second))
 }
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
@@ -1114,7 +1067,7 @@ mod tests {
             summary_maintenance_cost_per_update: Some(0.01),
             summary_read_cost: Some(1.0),
             update_rate: Some(100.0),
-            evaluation_rate: Some(EvaluationRate { per_second: 2.0 }),
+            evaluation_rate: Some(EvaluationRate(2.0)),
             raw_recompute_cost: Some(100.0),
             unit: CostUnit::CostUnitsPerSecond,
             provenance: CostProvenance {
@@ -1128,32 +1081,14 @@ mod tests {
     fn composition_formulas_match_the_issue_definitions() {
         let inputs = known_inputs();
         // 100 * 0.01 + 2 * (1 + 10 * 0.1) = 1 + 4 = 5
-        assert_eq!(
-            postprocess_plan_cost_rate(&inputs)
-                .unwrap()
-                .units_per_second,
-            5.0
-        );
+        assert_eq!(postprocess_plan_cost_rate(&inputs).unwrap().0, 5.0);
         // 100 * (0.1 + 0.01) + 2 * 1 = 11 + 2 = 13
-        assert!(
-            (pretransform_plan_cost_rate(&inputs)
-                .unwrap()
-                .units_per_second
-                - 13.0)
-                .abs()
-                < 1e-9
-        );
+        assert!((pretransform_plan_cost_rate(&inputs).unwrap().0 - 13.0).abs() < 1e-9);
         // 2 * 100
+        assert_eq!(raw_recompute_cost_rate(&inputs).unwrap().0, 200.0);
         assert_eq!(
-            raw_recompute_cost_rate(&inputs).unwrap().units_per_second,
-            200.0
-        );
-        assert_eq!(
-            CostRate {
-                units_per_second: 5.0
-            }
-            .total_over_horizon(10.0, Cost(3.0)),
-            53.0
+            crate::recurrence::total_cost(CostRate(5.0), Horizon(10.0), Cost(3.0)),
+            Cost(53.0)
         );
     }
 
@@ -1167,17 +1102,6 @@ mod tests {
         assert!(raw_recompute_cost_rate(&inputs).is_some());
         let unknown = ExactCompositionCostInputs::unknown(known_inputs().provenance);
         assert_eq!(raw_recompute_cost_rate(&unknown), None);
-    }
-
-    #[test]
-    fn evaluation_rate_sums_reciprocal_intervals() {
-        use std::time::Duration;
-        let rate =
-            EvaluationRate::from_intervals(&[Duration::from_secs(10), Duration::from_secs(5)])
-                .unwrap();
-        assert!((rate.per_second - 0.3).abs() < 1e-12);
-        assert_eq!(EvaluationRate::from_intervals(&[]), None);
-        assert_eq!(EvaluationRate::from_intervals(&[Duration::ZERO]), None);
     }
 
     #[test]
