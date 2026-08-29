@@ -607,7 +607,7 @@ function laneElements(laneId, laneLabel, graph, query, stage) {
           // found this exact (child -> node) edge genuinely attributable
           // (a real DAG merge point); `undefined` otherwise, read by
           // showEdgeDetail.
-          edgeCost: edgeCostByPair.get(`${childId} ${node.id}`),
+          edgeCost: edgeCostByPair.get(`${childId}\u0000${node.id}`),
         },
       });
     }
