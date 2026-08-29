@@ -92,11 +92,7 @@ pub async fn lower_sql_batch(
 
     let mut results = Vec::with_capacity(entries.len());
     for entry in entries {
-        let accuracy = entry
-            .requirements
-            .as_ref()
-            .and_then(|r| r.accuracy.clone())
-            .unwrap_or(AccuracyTarget::Exact);
+        let accuracy = entry.requirements.accuracy.target();
         results.push(lower_sql_dialect(&entry.query.0, catalog, dialect.clone(), accuracy).await);
     }
     results

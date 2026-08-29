@@ -57,6 +57,7 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::exact_composition::{CompositionPhase, ExactComposition};
+use crate::lifecycle::LifecycleCostInputs;
 use crate::recurrence::{
     self, CostRate, EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError,
     RecurrenceProfile,
@@ -749,6 +750,17 @@ pub trait CostModel {
             model: "CostModel::exact_composition_cost_inputs (default)".into(),
             version: "unknown".into(),
         })
+    }
+
+    /// Primitive build, update, read, retention, and retirement costs used to
+    /// compare physical summary-state lifecycles. This is part of the same
+    /// cost model as candidate ranking and recurrence; lifecycle planning does
+    /// not introduce a second optimizer.
+    ///
+    /// The default leaves every value unknown, which prevents a long-lived
+    /// deployment from winning through optimistic zeroes.
+    fn summary_lifecycle_cost_inputs(&self, _summary: &SummaryNode) -> LifecycleCostInputs {
+        LifecycleCostInputs::default()
     }
 }
 

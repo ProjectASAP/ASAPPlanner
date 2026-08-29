@@ -88,6 +88,10 @@ pub struct PropagationStats {
     /// of groups a `sum` folds), for `ExactSum`/`ExactExtremum`'s union
     /// bound over per-input failures.
     pub input_row_count: Option<u64>,
+    /// Fresh key-frequency distribution evidence from the data workload.
+    /// Built-in rules preserve it for deployment-specific accuracy models;
+    /// they do not assume a favorable distribution when it is absent.
+    pub data_distribution: Option<asap_types::workload::DataDistribution>,
     /// Lower confidence bound of the kth selected TopK item, after widening
     /// the interval by the sketch's own estimation error.
     pub topk_selected_lower_bound: Option<f64>,
@@ -119,6 +123,29 @@ pub trait AccuracyEvidenceProvider {
 pub struct NoAccuracyEvidence;
 
 impl AccuracyEvidenceProvider for NoAccuracyEvidence {}
+
+/// Accuracy evidence backed by the normalized data workload. Freshness is
+/// checked at the planning time before values reach any accuracy rule.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkloadAccuracyEvidence<'a> {
+    pub data: &'a asap_types::workload::DataWorkload,
+    pub now_ms: u64,
+}
+
+impl AccuracyEvidenceProvider for WorkloadAccuracyEvidence<'_> {
+    fn propagation_stats(
+        &self,
+        _op: &CompositionOperator,
+        _family: &SummaryFamilyType,
+        _query: Option<&SketchQuery>,
+    ) -> PropagationStats {
+        PropagationStats {
+            input_row_count: self.data.input_cardinality.value_at(self.now_ms).copied(),
+            data_distribution: self.data.distribution.value_at(self.now_ms).cloned(),
+            ..PropagationStats::default()
+        }
+    }
+}
 
 /// The deployment-extensible accuracy algebra. `asap-aware-mapping` ships
 /// [`DefaultAccuracyModel`]; a deployment with a proof for a composition the
@@ -839,6 +866,7 @@ impl AccuracyBudgetAllocator for EqualSplitAllocator {
 mod tests {
     use super::*;
     use asap_types::post_asap::{GroupingStrategy, SketchKind};
+    use asap_types::workload::{DataDistribution, DataWorkload, Evidence, EvidenceSource};
 
     fn abs(bound: f64, delta: f64) -> ResultGuarantee {
         ResultGuarantee {
@@ -863,6 +891,54 @@ mod tests {
             metric,
             ..abs(bound, 0.0)
         }
+    }
+
+    #[test]
+    fn workload_accuracy_evidence_uses_only_fresh_data_characteristics() {
+        let data = DataWorkload {
+            input_cardinality: Evidence {
+                value: Some(42),
+                source: EvidenceSource::Observed,
+                observed_at_ms: Some(1_000),
+                valid_for_ms: Some(500),
+            },
+            distribution: Evidence {
+                value: Some(DataDistribution::Bursty),
+                source: EvidenceSource::Observed,
+                observed_at_ms: Some(1_000),
+                valid_for_ms: Some(500),
+            },
+            ..Default::default()
+        };
+        let provider = WorkloadAccuracyEvidence {
+            data: &data,
+            now_ms: 1_500,
+        };
+        let fresh = provider.propagation_stats(
+            &CompositionOperator::ExactSum,
+            &SummaryFamilyType::ExactAggregate(
+                asap_types::post_asap::ExactKind::Sum,
+                asap_types::post_asap::ExactParams::Sum,
+            ),
+            None,
+        );
+        assert_eq!(fresh.input_row_count, Some(42));
+        assert_eq!(fresh.data_distribution, Some(DataDistribution::Bursty));
+
+        let stale = WorkloadAccuracyEvidence {
+            data: &data,
+            now_ms: 1_501,
+        }
+        .propagation_stats(
+            &CompositionOperator::ExactSum,
+            &SummaryFamilyType::ExactAggregate(
+                asap_types::post_asap::ExactKind::Sum,
+                asap_types::post_asap::ExactParams::Sum,
+            ),
+            None,
+        );
+        assert_eq!(stale.input_row_count, None);
+        assert_eq!(stale.data_distribution, None);
     }
 
     #[test]

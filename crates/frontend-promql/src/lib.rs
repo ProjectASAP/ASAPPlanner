@@ -71,11 +71,7 @@ pub fn lower_promql_batch(workload: &QueryWorkload) -> Vec<Result<QueryExpr, Pro
     entries
         .iter()
         .map(|entry| {
-            let accuracy = entry
-                .requirements
-                .as_ref()
-                .and_then(|r| r.accuracy.clone())
-                .unwrap_or(AccuracyTarget::Exact);
+            let accuracy = entry.requirements.accuracy.target();
             lower_promql(&entry.query.0, accuracy)
         })
         .collect()
