@@ -30,13 +30,10 @@ summary guarantee as the final guarantee. For nested summaries, child and local
 guarantees are combined. `AccuracyTarget` is the requirement; `ResultGuarantee`
 is the evidence produced for one concrete candidate.
 
-Example: for a final absolute-error target of `0.10`, an allocator may propose
-`0.05` to each of two additive approximate layers. Parameter configuration
-turns those local targets into concrete sketch parameters. The implementation
-then derives guarantees from the committed parameters—not from the requested
-numbers—and propagates them. If the resulting bounds are `0.05` and `0.05`, the
-final bound is `0.10`; if they are `0.06` and `0.06` after parameter handling,
-the final bound is `0.12` and the candidate is rejected before costing.
+The design document's
+[end-to-end example](../design_docs/asap-aware-mapping/end-to-end-accuracy-guarantees.md#end-to-end-example)
+is the canonical numeric walkthrough from allocation through legality
+checking.
 
 The main implementation locations are:
 
