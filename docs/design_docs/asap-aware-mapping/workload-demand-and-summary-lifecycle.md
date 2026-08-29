@@ -223,6 +223,36 @@ enum RepeatedDemand {
     Scheduled(Vec<Timestamp>),
     EstimatedRate(DemandEstimate),
 }
+
+struct DemandEstimate {
+    /// Time range over which the demand was measured or forecast.
+    observation_window: ObservationWindow,
+    /// Expected demand, expressed in exactly one form.
+    expected: ExpectedDemand,
+    /// Highest expected invocation rate within the observation window.
+    peak_rate: Option<Rate>,
+    /// Highest expected number of simultaneously executing invocations.
+    max_concurrency: Option<u64>,
+    /// Confidence in this estimate, in the inclusive range [0.0, 1.0].
+    confidence: Confidence,
+    source: EvidenceSource,
+    observed_at: Option<Timestamp>,
+    valid_for: Option<Duration>,
+}
+
+enum ExpectedDemand {
+    /// Expected total invocations over `observation_window`.
+    InvocationCount(u64),
+    /// Expected average invocations per second over `observation_window`.
+    AverageRate(Rate),
+}
+
+struct ObservationWindow {
+    start: Timestamp,
+    end: Timestamp,
+}
+
+struct Confidence(f64);
 ```
 
 One-time means no recurrence is expected for that workload entry. Several
@@ -233,12 +263,14 @@ equivalence policy before their executions count as the same query.
 
 Query-workload volume is more than an average rate. Cost and latency can differ
 for the same total request count when requests arrive in bursts or concurrently.
-An empirical `DemandEstimate` should therefore be able to carry an observation
-window, expected invocation count or rate, peak rate, concurrency, confidence,
-and provenance. Fixed intervals and explicit schedules are declarations rather
-than estimates and do not need fabricated confidence. The MVP may cost only
-invocation count and evaluation rate, but it must preserve unsupported volume
-characteristics for explanation rather than silently discarding them.
+`ExpectedDemand` makes invocation count and average rate alternative
+representations, preventing conflicting values in one estimate. The observation
+window must be non-empty, rates must be finite and non-negative, and
+`Confidence` must be between zero and one. Fixed intervals and explicit
+schedules are declarations rather than estimates and do not need fabricated
+confidence. The MVP may cost only invocation count and evaluation rate, but it
+must preserve unsupported volume characteristics for explanation rather than
+silently discarding them.
 
 ##### Queried time scope
 
