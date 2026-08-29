@@ -7,7 +7,7 @@ use std::rc::Rc;
 use asap_aware_mapping::cost_model::Cost;
 use asap_aware_mapping::CostRate;
 use asap_aware_mapping::{
-    global_selection_with_summary_maintenance_lifecycles,
+    export_summary_maintenance_plan, global_selection_with_summary_maintenance_lifecycles,
     materialize_with_summary_maintenance_lifecycles, search_workload_with, CostModel, Horizon,
     SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCapabilities,
     SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecycleRejection, WorkloadDemand,
@@ -170,4 +170,19 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
         ) && alternative.rejection
             == Some(SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime)
     }));
+
+    let exported = serde_json::to_value(export_summary_maintenance_plan(&plan)).unwrap();
+    assert_eq!(
+        exported["deployments"][0]["selected"]["lifecycle"]["kind"],
+        "continuously_maintained"
+    );
+    assert_eq!(
+        exported["deployments"][0]["alternatives"][1]["rejection"],
+        "requires_predictable_one_time_query"
+    );
+    assert_eq!(
+        exported["deployments"][0]["alternatives"][2]["rejection"],
+        "unsupported_by_runtime"
+    );
+    assert!(exported["graph"]["nodes"].as_array().is_some());
 }
