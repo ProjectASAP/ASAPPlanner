@@ -23,6 +23,16 @@ decides whether a candidate is correct enough. Workload demand and state
 lifecycle decide whether building, maintaining, sharing, or recomputing that
 candidate is worthwhile. Neither decision may override the other.
 
+### Lifecycle terminology
+
+This document uses **summary maintenance lifecycle** for the lifetime of
+planner-selected summary state: build, prepare, share, incrementally maintain,
+read, and retire. The final plan's promises about those actions are its
+**summary maintenance lifecycle guarantees**. This term is intentionally
+distinct from the broader **data lifecycle**, which covers data collection,
+transmission, storage, and analytics. Unqualified "lifecycle guarantees" are
+avoided.
+
 ## Problem and why now
 
 A summary operator does not imply one execution lifecycle. The same exact or
@@ -111,19 +121,20 @@ preparing state in advance with building or recomputing at execution time. For
 repeated queries, it may amortize build and maintenance cost across reads over
 an explicit horizon.
 
-### End-to-end decision order
+### Target end-to-end decision order
 
 ```text
 normalize query and data workloads
     -> derive recurrence, time-scope, and data evidence
-    -> enumerate semantic plan alternatives
-    -> enumerate legal execution contracts and state lifecycles
-    -> validate summary capabilities and phase constraints
+    -> build a compact space of semantic plan alternatives
+    -> validate semantic, schema, summary-capability, and phase constraints
     -> derive and check accuracy guarantees
+    -> expand every legal candidate with summary-maintenance lifecycles
     -> normalize one-time and rate costs over an explicit horizon
-    -> rank legal alternatives and compare the selected summary deployment
-       with raw recomputation
-    -> emit plan, deployments, assumptions, and rejected alternatives
+    -> globally rank compatible plan-and-lifecycle combinations
+    -> emit plan, deployments, accuracy guarantees,
+       summary maintenance lifecycle guarantees, assumptions,
+       and rejected alternatives
 ```
 
 ## Goals and non-goals

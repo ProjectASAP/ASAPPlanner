@@ -1,11 +1,11 @@
 # ASAPPlanner Design Overview
 
-ASAPPlanner converts queries in supported source languages into candidate
-plans that use exact summaries, sketches, samples, wavelets, statistical
-models, sharing, and other ASAP-aware alternatives. It evaluates those
-candidates against workload requirements, accuracy guarantees, execution
-legality, and lifecycle-aware cost before emitting a plan and its deployment
-decisions.
+ASAPPlanner converts queries in supported source languages into a compact
+space of plans that use exact summaries, sketches, samples, wavelets,
+statistical models, sharing, and other ASAP-aware alternatives. It removes
+illegal alternatives, expands each remaining plan with legal summary
+maintenance lifecycles, costs the resulting combinations, and only then
+materializes a final plan.
 
 ## Planner component flow
 
@@ -29,36 +29,60 @@ flowchart LR
     end
 
     subgraph MAPPING[Semantic mapping DAG]
-        MAP[Map the Pre-ASAP DAG into all possible<br/>phase-valid Post-ASAP DAG candidates]
+        MAP[Build a compact space representing all<br/>Post-ASAP DAG candidates]
     end
 
-    subgraph ACCURACY[Accuracy model]
+    subgraph ACCURACY[Correctness and accuracy models]
+        LEGAL[Check semantic, schema,<br/>capability, and phase legality]
         PROP[Propagate guarantees through nested summaries]
         ACHECK[Keep candidates that satisfy each query's<br/>accuracy requirement; reject unknown guarantees]
-        PROP --> ACHECK
+        LEGAL --> PROP --> ACHECK
     end
 
-    subgraph COST[Cost model]
-        LIFE[For every candidate, consider lifecycle choices:<br/>build once / prepared / shared / incremental]
+    subgraph COST[Lifecycle expansion, cost model, and global selection]
+        LIFE[Expand every candidate with legal summary-maintenance lifecycles:<br/>build once / prepared / shared / incremental / existing state]
         EST[Estimate lifecycle-aware candidate cost over H:<br/>build + maintenance + reads + retention + retirement]
-        RANK[Rank candidate and lifecycle pairs]
+        RANK[Select the lowest-cost compatible<br/>whole-plan and lifecycle combination]
         LIFE --> EST --> RANK
     end
 
     subgraph OUTPUT[Materialization and explanation]
-        MAT[Materialize the selected Post-ASAP DAG<br/>with its selected summary lifecycle]
+        MAT[Materialize the selected Post-ASAP DAG<br/>with its selected summary-maintenance lifecycle]
         EMIT[Emit final plan, deployment actions,<br/>guarantees, assumptions, and rejections]
         MAT --> EMIT
     end
 
     PRE --> MAP
     W --> MAP
-    MAP --> PROP
+    MAP --> LEGAL
     W --> PROP
     ACHECK --> LIFE
     W --> LIFE
     RANK --> MAT
 ```
+
+The optimizer's decision unit is a compatible whole-plan combination:
+
+```text
+Post-ASAP candidate plan × summary-maintenance lifecycle assignment
+```
+
+It is not sound to select a summary implementation first and attach a
+lifecycle afterward. Workload and lifecycle can reverse the ranking: a
+summary that is cheapest to build once may be more expensive than another
+summary when maintained for a high-frequency dashboard.
+
+## Terminology: summary maintenance lifecycle
+
+This design uses **summary maintenance lifecycle** for the lifetime of planner-
+selected summary state: build, prepare, share, incrementally maintain, read,
+and retire. A final plan's promises about those actions are its **summary
+maintenance lifecycle guarantees**.
+
+This is narrower than the end-to-end **data lifecycle**, which covers data
+collection, transmission, storage, and analytics. Unqualified names such as
+"lifecycle guarantee" are avoided because they do not say which lifecycle is
+being guaranteed.
 
 ## Major components
 
@@ -95,14 +119,16 @@ Detailed design:
 
 ### Semantic mapping DAG
 
-Semantic mapping takes the Pre-ASAP DAG and enumerates possible Post-ASAP DAG
-candidates. Candidates may use different summary families, summary
-parameters, semantic rewrites, sharing arrangements, roll-ups, and generic
-update- or readout-phase value operations. Only semantically, schematically,
-and phase-legal alternatives proceed.
+Semantic mapping takes the Pre-ASAP DAG and constructs a compact candidate
+space. Candidates may use different summary families, summary parameters,
+semantic rewrites, sharing arrangements, roll-ups, and generic update- or
+readout-phase value operations. Shared structure and local alternative groups
+represent possible complete Post-ASAP DAGs without eagerly copying every full
+DAG.
 
-The output of this component is the candidate set, not an already deployed
-summary.
+Semantic mapping enumerates possibilities; it does not select or deploy one.
+Semantic equivalence, schema compatibility, summary capabilities, and phase
+contracts remove illegal combinations before costing.
 
 Detailed designs:
 
@@ -115,11 +141,12 @@ Detailed designs:
 
 ### Accuracy model
 
-The accuracy model derives a machine-readable guarantee for each candidate.
-It propagates guarantees through nested summaries and post-processing rather
-than checking each summary independently. A candidate remains eligible only
-when its end-to-end guarantee satisfies the corresponding query requirement;
-missing or unsupported guarantees fail closed.
+The accuracy model derives a machine-readable guarantee for each complete
+candidate plan. It propagates guarantees through nested summaries and post-
+processing rather than checking each summary independently. A candidate
+remains eligible only when its end-to-end guarantee satisfies the
+corresponding query requirement; missing evidence or unsupported propagation
+rules fail closed.
 
 Detailed design:
 
@@ -127,15 +154,23 @@ Detailed design:
 
 ### Cost model
 
-Costing considers the lifecycle of every eligible candidate. A summary may be
-built once for an ephemeral query, prepared for predictable demand, shared for
-a bounded period, or maintained incrementally as data arrives. Runtime and
-summary capabilities determine which lifecycle alternatives are legal.
+Every eligible semantic candidate is expanded with its legal summary-
+maintenance lifecycle alternatives. A summary may be built once for an
+ephemeral query, prepared for predictable demand, shared for a bounded period,
+maintained incrementally as data arrives, or read from compatible existing
+state. Runtime, summary, and existing-state capabilities determine which
+alternatives are legal.
 
-For each legal candidate-and-lifecycle pair, the model combines build,
-maintenance, read, retention, and retirement costs over the explicit horizon
-`H`. This makes the lifecycle decision part of candidate cost estimation,
-rather than a separate decision made after candidate ranking.
+The cost model estimates; it does not decide legality or silently remove an
+alternative. For each legal whole-plan and lifecycle assignment, it combines
+build, maintenance, read, retention, and retirement costs over the same
+explicit horizon `H`. Unknown costs remain unknown.
+
+The global optimizer then selects the lowest-cost compatible combination. It
+accounts for shared state once, validates lifecycle compatibility across
+nested summaries and consumers, and retains raw recomputation as an explicit
+fallback. Lifecycle is therefore part of candidate cost and global selection,
+not a separate decision made after semantic ranking.
 
 Detailed designs:
 
@@ -143,14 +178,29 @@ Detailed designs:
 
 ### Materialization and explanation
 
-The final output contains both the selected Post-ASAP DAG and the selected
-summary lifecycle. It also records deployment actions, end-to-end guarantees,
-assumptions, and rejected alternatives.
+The final output contains the selected Post-ASAP DAG, deployment actions,
+accuracy guarantees, and summary maintenance lifecycle guarantees. It also
+records cost evidence, assumptions, and rejected alternatives.
 
-Materialization commits the summary implementation and its lifecycle. For
-example, after a KLL summary is deployed for incremental maintenance, the
-runtime cannot silently maintain DDSketch instead. Switching summary type
-requires a new planning and materialization decision.
+Conceptually:
+
+```text
+FinalPlan {
+    post_asap_dag,
+    deployments,
+    accuracy_guarantees,
+    summary_maintenance_lifecycle_guarantees,
+    cost_estimates,
+    assumptions,
+    rejected_alternatives,
+}
+```
+
+Materialization commits the summary implementation and its maintenance
+lifecycle. For example, after a KLL summary is deployed for incremental
+maintenance, the runtime cannot silently maintain DDSketch instead. A later
+replan may select DDSketch, but the resulting deployment must explicitly
+build or migrate state, cut over readers, and retire the KLL state.
 
 Detailed design:
 

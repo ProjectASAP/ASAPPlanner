@@ -9,7 +9,9 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use asap_types::post_asap::{validate_execution_phases, StateLifecycle, SummaryExpr, SummaryNode};
-use asap_types::post_asap::{EvaluationSchedule, OutputRepresentation};
+use asap_types::post_asap::{
+    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycleGuarantee,
+};
 use asap_types::pre_asap::QueryExpr;
 use asap_types::workload::{
     DataArrival, Predictability, QueryRecurrence, QueryWorkload, RepeatedDemand, TimestampMs,
@@ -95,9 +97,7 @@ impl LifecycleAlternative {
 pub struct StateDeployment {
     pub summary_index: usize,
     pub summary: Rc<SummaryNode>,
-    pub selected: Option<StateLifecycle>,
-    pub evaluation_schedule: Option<EvaluationSchedule>,
-    pub output_representation: OutputRepresentation,
+    pub summary_maintenance_lifecycle_guarantee: Option<SummaryMaintenanceLifecycleGuarantee>,
     pub alternatives: Vec<LifecycleAlternative>,
 }
 
@@ -216,18 +216,26 @@ pub fn plan_summary_lifecycles(
                 StateLifecycle::Shared { .. } => EvaluationSchedule::OnRead,
                 StateLifecycle::ContinuouslyMaintained => EvaluationSchedule::PerUpdate,
             });
+            let summary_maintenance_lifecycle_guarantee =
+                selected.map(|lifecycle| SummaryMaintenanceLifecycleGuarantee {
+                    lifecycle,
+                    evaluation_schedule: evaluation_schedule
+                        .expect("a selected lifecycle always has an evaluation schedule"),
+                    output_representation: OutputRepresentation::SummaryState,
+                });
             StateDeployment {
                 summary_index,
                 summary,
-                selected,
-                evaluation_schedule,
-                output_representation: OutputRepresentation::SummaryState,
+                summary_maintenance_lifecycle_guarantee,
                 alternatives,
             }
         })
         .collect();
     let summary_total_cost = deployments.iter().try_fold(Cost::ZERO, |sum, deployment| {
-        let selected = deployment.selected.as_ref()?;
+        let selected = &deployment
+            .summary_maintenance_lifecycle_guarantee
+            .as_ref()?
+            .lifecycle;
         let cost = deployment
             .alternatives
             .iter()
@@ -918,6 +926,13 @@ mod tests {
         }
     }
 
+    fn selected_lifecycle(deployment: &StateDeployment) -> Option<&StateLifecycle> {
+        deployment
+            .summary_maintenance_lifecycle_guarantee
+            .as_ref()
+            .map(|guarantee| &guarantee.lifecycle)
+    }
+
     #[test]
     fn unpredictable_one_time_at_rest_selects_ephemeral() {
         let plan = plan_summary_lifecycles(
@@ -934,8 +949,17 @@ mod tests {
         .unwrap();
         assert_eq!(plan.deployments.len(), 1);
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::Ephemeral)
+            selected_lifecycle(&plan.deployments[0]),
+            Some(&StateLifecycle::Ephemeral)
+        );
+        let guarantee = plan.deployments[0]
+            .summary_maintenance_lifecycle_guarantee
+            .as_ref()
+            .unwrap();
+        assert_eq!(guarantee.evaluation_schedule, EvaluationSchedule::OneShot);
+        assert_eq!(
+            guarantee.output_representation,
+            OutputRepresentation::SummaryState
         );
         assert_eq!(
             plan.deployments[0].alternatives[0].total_cost,
@@ -975,8 +999,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::Shared {
+            selected_lifecycle(&plan.deployments[0]),
+            Some(&StateLifecycle::Shared {
                 retention: DurationMs(10_000)
             })
         );
@@ -1006,8 +1030,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::ContinuouslyMaintained)
+            selected_lifecycle(&plan.deployments[0]),
+            Some(&StateLifecycle::ContinuouslyMaintained)
         );
         assert_eq!(plan.evaluation_rate, Some(EvaluationRate(1.0)));
         assert_eq!(plan.update_rate, Some(UpdateRate(1.0)));
@@ -1048,7 +1072,7 @@ mod tests {
             &crate::cost_model::DefaultCostModel,
         )
         .unwrap();
-        assert_eq!(plan.deployments[0].selected, None);
+        assert_eq!(selected_lifecycle(&plan.deployments[0]), None);
         assert!(plan.deployments[0]
             .alternatives
             .iter()
@@ -1074,8 +1098,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::Ephemeral)
+            selected_lifecycle(&plan.deployments[0]),
+            Some(&StateLifecycle::Ephemeral)
         );
         assert_eq!(
             plan.deployments[0].alternatives[2].rejection,
