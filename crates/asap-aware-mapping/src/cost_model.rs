@@ -56,6 +56,7 @@ use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
+use crate::lifecycle::LifecycleCostInputs;
 use crate::recurrence::{
     self, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
 };
@@ -503,6 +504,14 @@ pub trait CostModel {
     fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
         let _ = (candidate, target);
         f64::NAN
+    }
+
+    /// Primitive build, update, read, retention, and retirement costs used to
+    /// compare physical summary-state lifecycles. Unknown values stay
+    /// unknown, preventing long-lived deployments from winning through
+    /// optimistic zeroes.
+    fn summary_lifecycle_cost_inputs(&self, _summary: &SummaryNode) -> LifecycleCostInputs {
+        LifecycleCostInputs::default()
     }
 }
 
