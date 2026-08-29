@@ -551,7 +551,8 @@ fn collect_summary_aggs(
                 collect_summary_aggs(child, seen, output);
             }
         }
-        SummaryExpr::ExactTransform { child, .. } | SummaryExpr::ExactPostProcess { child, .. } => {
+        SummaryExpr::UpdateTransform { child, .. }
+        | SummaryExpr::ReadoutPostProcess { child, .. } => {
             collect_summary_aggs(child, seen, output)
         }
         SummaryExpr::KeepPreAsap(_) => {}
