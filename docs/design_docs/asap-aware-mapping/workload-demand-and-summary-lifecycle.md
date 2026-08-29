@@ -82,6 +82,20 @@ preparing state in advance with building or recomputing at execution time. For
 repeated queries, it may amortize build and maintenance cost across reads over
 an explicit horizon.
 
+### End-to-end decision order
+
+```text
+normalize query and data workloads
+    -> derive recurrence, time-scope, and data evidence
+    -> enumerate semantic plan alternatives
+    -> enumerate legal execution contracts and state lifecycles
+    -> validate summary capabilities and phase constraints
+    -> derive and check accuracy guarantees
+    -> normalize one-time and rate costs over an explicit horizon
+    -> rank legal alternatives
+    -> emit plan, deployments, assumptions, and rejected alternatives
+```
+
 ## Goals and non-goals
 
 ### Goals
@@ -531,20 +545,6 @@ Future uncertain-demand support may add expected-cost, percentile-cost,
 worst-case, or regret objectives. Those policies must consume a typed estimate
 with confidence and provenance; they are not implicit behavior of
 `Predictability::Unknown`.
-
-### End-to-end decision order
-
-```text
-normalize query and data workload
-    -> derive demand, time-scope, and data evidence
-    -> enumerate semantic plan alternatives
-    -> enumerate legal execution contracts and state lifecycles
-    -> validate summary capabilities and phase constraints
-    -> derive and check accuracy guarantees
-    -> normalize one-time and rate costs over an explicit horizon
-    -> rank legal alternatives
-    -> emit plan, deployments, assumptions, and rejected alternatives
-```
 
 ## Review against the ProjectASAP glossary
 
