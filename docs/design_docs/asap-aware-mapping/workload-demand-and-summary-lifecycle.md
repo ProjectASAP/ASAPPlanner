@@ -498,8 +498,13 @@ total(H) = reads(H) * raw_recompute_cost
 For an ephemeral summary:
 
 ```text
-total = invocations * (build_cost + summary_read_cost + disposal_cost)
+total = invocations * (build_cost + summary_read_cost + retirement_cost)
 ```
+
+`retirement_cost` consistently means the one-time cost of ending a summary
+state lifecycle, including deallocation or other cleanup. For ephemeral state,
+retirement happens immediately after each invocation; for prepared, shared, or
+continuously maintained state, it happens when that deployment is retired.
 
 For prepared state, update and retention terms apply only between activation
 and retirement. Existing state does not pay a new build cost, but its catalog
