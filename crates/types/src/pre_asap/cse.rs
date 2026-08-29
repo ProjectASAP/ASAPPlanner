@@ -97,7 +97,7 @@
 //! from `asap_aware_mapping::replacement::PlanSpace::cost_sorted` (via that
 //! module's own `cse_preference`) — a real, Volcano/Cascades-style cost
 //! comparison over what this module detects, not a fixed rule. See
-//! `docs/design_docs/cse-cost-model-decision.md`. This module's own
+//! `docs/design_docs/cost-model.md`. This module's own
 //! unconditional "share whenever legal" behavior is unchanged: detection
 //! stays cost-agnostic by construction (this crate cannot depend on
 //! `asap-aware-mapping`'s `CostModel`), and the cost-aware decision is
