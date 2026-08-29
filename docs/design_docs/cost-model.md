@@ -37,8 +37,8 @@ The planner must keep three questions separate:
 The first question is not a cost decision. The second and third must be costed
 together over the query and data workloads.
 
-This document refines the original cost-based decision from issues #223 and
-#237 using the workload and summary-maintenance lifecycle model in PR #300.
+This document defines cost-based selection using the normalized workload and
+summary-maintenance lifecycle model.
 See also the [overall planner design](README.md) and the detailed
 [workload/lifecycle design](asap-aware-mapping/workload-demand-and-summary-lifecycle.md).
 
@@ -240,9 +240,9 @@ choose DDSketch, but deployment must explicitly build or migrate its state,
 cut over readers, and retire the KLL state. This commitment is represented by
 the final plan's summary maintenance lifecycle guarantees.
 
-## Current implementation status in PR #300
+## Required optimizer integration
 
-The current implementation provides the pieces needed for this design:
+The cost framework needs the following pieces:
 
 - CSE legality and share/recompute alternatives;
 - workload-derived recurrence and update-rate evidence;
@@ -252,17 +252,12 @@ The current implementation provides the pieces needed for this design:
 - typed `SummaryMaintenanceLifecycleGuarantee` output;
 - raw recomputation fallback.
 
-The integration is not yet a full joint optimizer. Today, semantic global
-selection chooses a plan first; lifecycle planning then selects deployments
-for that materialized plan and may replace it with raw recomputation. It does
-not yet reconsider every sibling semantic candidate using lifecycle-aware
-whole-plan cost.
-
-The target integration is to move lifecycle expansion and cost evaluation
-before the final global selection, so summary family, CSE sharing, and
-maintenance lifecycle are selected together. Until that integration lands,
-documentation and explanations must distinguish the target design from the
-currently implemented selection boundary.
+Lifecycle expansion and cost evaluation must happen before final global
+selection, so summary family, CSE sharing, and maintenance lifecycle are
+selected together. An implementation that selects a semantic plan first and
+only afterward attaches a lifecycle is a partial implementation of this
+design: it cannot reconsider sibling semantic candidates when lifecycle-aware
+whole-plan cost reverses their ranking.
 
 ## Defaults and fail-closed behavior
 
