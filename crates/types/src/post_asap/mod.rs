@@ -40,7 +40,9 @@ pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
 };
-pub use lifecycle::{EvaluationSchedule, OutputRepresentation, StateLifecycle};
+pub use lifecycle::{
+    EvaluationSchedule, OutputRepresentation, StateLifecycle, SummaryMaintenanceLifecycleGuarantee,
+};
 pub use phase::{
     assigned_child_stage, exact_operator_output_schema, produced_availability,
     validate_execution_phases, validate_execution_phases_at, ExactOperatorSchemaError,
