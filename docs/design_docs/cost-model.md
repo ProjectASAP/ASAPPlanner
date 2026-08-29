@@ -139,20 +139,49 @@ Cost depends on the complete Post-ASAP DAG, including:
 The same logical query can therefore have different costs for KLL, DDSketch,
 an exact accumulator, raw recomputation, or a nested composition.
 
-### Summary properties and runtime capabilities
+### Summary physical properties
 
-Summary and runtime properties determine which cost terms apply:
+Summary physical properties affect numeric cost because they determine how
+much state and work a legal candidate requires:
+
+- parameter-dependent state size and retention footprint;
+- update, merge, deletion, and readout complexity;
+- input and output cardinality;
+- number of physical instances created by grouping;
+- bytes transferred or stored;
+- rows processed by update-path transforms and readout post-processing.
+
+These properties are converted into primitive build, update, read, retention,
+retirement, and transfer estimates using runtime performance evidence.
+
+### Summary and runtime capabilities
+
+Capabilities determine legality, not numeric cost. They include:
 
 - incremental-update, merge, subtract, and deletion support;
-- state size and retention footprint;
-- update and readout complexity;
-- output cardinality;
 - supported update/readout execution phases;
 - available ephemeral, prepared, shared, and continuous lifecycles;
-- state placement, transfer, and storage capabilities when modeled.
+- supported state placement, transfer, and storage operations.
 
-Capabilities decide legality before costing. A low numeric cost cannot make an
-unsupported lifecycle legal.
+An unsupported alternative is rejected before costing. The planner must not
+represent an unsupported operation by assigning it an arbitrarily high cost:
+that would incorrectly allow it to win if every other estimate were even
+higher or unknown.
+
+### Runtime performance evidence
+
+Measured or modeled runtime performance may determine numeric cost, for
+example:
+
+- CPU time per summary update or readout;
+- storage cost per byte-second;
+- network cost per transferred byte;
+- fixed deployment and retirement overhead;
+- machine-, region-, or execution-stage-specific operator throughput.
+
+This evidence is distinct from capability flags. “The runtime supports KLL
+deletion” is a legality fact; “one KLL deletion costs X CPU units on this
+runtime” is cost evidence.
 
 ### Accuracy requirements and data characteristics
 
