@@ -298,7 +298,7 @@ fn max_and_avg_over_quantile_compose_as_post_process_with_statistics() {
         ));
 
         let composed = selection.materialize(&root).unwrap().unwrap();
-        let SummaryExpr::ExactPostProcess { child, .. } = &composed.expr else {
+        let SummaryExpr::ReadoutPostProcess { child, .. } = &composed.expr else {
             panic!(
                 "{intent:?}: expected ExactPostProcess root, got {:?}",
                 composed.expr
@@ -373,7 +373,7 @@ fn identity_and_genuine_multi_row_folds_both_compose() {
             .unwrap()
             .unwrap();
         assert!(
-            matches!(composed.expr, SummaryExpr::ExactPostProcess { .. }),
+            matches!(composed.expr, SummaryExpr::ReadoutPostProcess { .. }),
             "{label}: {:?}",
             composed.expr
         );
@@ -428,7 +428,7 @@ fn a_shared_inner_summary_is_materialized_once_for_several_outer_folds() {
         .map(|r| selection.materialize(r).unwrap().unwrap())
         .collect();
     let child_of = |n: &Rc<SummaryNode>| match &n.expr {
-        SummaryExpr::ExactPostProcess { child, .. } => Rc::clone(child),
+        SummaryExpr::ReadoutPostProcess { child, .. } => Rc::clone(child),
         other => panic!("expected ExactPostProcess, got {other:?}"),
     };
     assert!(
@@ -483,7 +483,7 @@ fn outer_summary_over_an_exact_transform_composes_on_the_update_path() {
     let SummaryExpr::SummaryAgg { child, .. } = &summary_input.expr else {
         panic!("expected SummaryAgg");
     };
-    let SummaryExpr::ExactTransform { child: raw, .. } = &child.expr else {
+    let SummaryExpr::UpdateTransform { child: raw, .. } = &child.expr else {
         panic!(
             "expected ExactTransform under the maintained summary, got {:?}",
             child.expr
@@ -617,7 +617,7 @@ fn dag_export_carries_explicit_stage_and_plain_schema_for_a_composed_plan() {
         .unwrap();
     let graph = dag_export::export_summary(&composed);
     let node = &graph.nodes[graph.root as usize];
-    assert_eq!(node.kind, "ExactPostProcess");
+    assert_eq!(node.kind, "ReadoutPostProcess");
     assert_eq!(node.detail["stage"], "readout_value");
     assert_eq!(node.detail["op"], "Aggregate");
     let stages: Vec<(&str, String)> = graph
@@ -668,7 +668,7 @@ fn promql_max_by_zone_over_quantile_over_time_composes() {
     let composed = selection.materialize(root).unwrap().unwrap();
     assert!(matches!(
         composed.expr,
-        SummaryExpr::ExactPostProcess { .. }
+        SummaryExpr::ReadoutPostProcess { .. }
     ));
     assert_eq!(
         selected.composition.as_ref().map(|d| d.inputs.unit),

@@ -37,6 +37,15 @@ Likewise, an exact stateless operator may run once over a batch, once per
 update in an incremental pipeline, or once per readout. Operator statefulness,
 execution schedule, and output representation are separate properties.
 
+The phase contract is also independent of accuracy semantics. A value
+operation may be exact, summary-derived, or approximate. The post-ASAP IR
+therefore uses the generic phase nodes `UpdateTransform` (`UpdateValue ->
+UpdateValue`) and `ReadoutPostProcess` (`ReadoutValue -> ReadoutValue`). Their
+`ValueOperator` payload identifies the computation; the enclosing node carries
+its output schema and accuracy guarantee. The exact-composition strategy emits
+`ValueOperator::Exact` today, but it is only the first producer of these phase
+nodes, not their definition.
+
 The query expression alone cannot determine those properties. The same query
 may arrive unexpectedly during exploration, run once at a scheduled time, or
 repeat every ten seconds on a dashboard. Planning summary state from syntax
@@ -63,6 +72,9 @@ repeating query therefore never implies streaming data.
 - `materialize_with_lifecycles` attaches those state deployments to PR #300's
   phase-validated global selection. Each deployment retains assumptions and
   rejected alternatives for explanation.
+- `UpdateTransform` and `ReadoutPostProcess` express availability boundaries
+  for any value operator. Exact, summary-derived, and approximate producers use
+  the same phase validation rather than defining accuracy-specific phase nodes.
 
 ## Inputs, outputs, and end-to-end behavior
 

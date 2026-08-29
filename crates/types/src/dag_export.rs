@@ -48,7 +48,7 @@ use serde::Serialize;
 
 use crate::post_asap::{
     assigned_child_stage, produced_availability, AccuracyError, ExactOperator,
-    ExecutionAvailability, ResultGuarantee, SummaryExpr, SummaryNode,
+    ExecutionAvailability, ResultGuarantee, SummaryExpr, SummaryNode, ValueOperator,
 };
 use crate::pre_asap::cse::{structural_hash, HashCache};
 use crate::pre_asap::query_expr::{QueryExpr, Source};
@@ -399,6 +399,23 @@ fn exact_operator_label(op: &ExactOperator) -> String {
     }
 }
 
+fn value_operator_detail(op: &ValueOperator) -> serde_json::Value {
+    match op {
+        ValueOperator::Exact(op) => exact_operator_detail(op),
+        ValueOperator::Extension { name } => serde_json::json!({
+            "op": "Extension",
+            "name": name,
+        }),
+    }
+}
+
+fn value_operator_label(op: &ValueOperator) -> String {
+    match op {
+        ValueOperator::Exact(op) => exact_operator_label(op),
+        ValueOperator::Extension { name } => name.clone(),
+    }
+}
+
 fn push_summary_node(
     nodes: &mut Vec<SummaryDagNode>,
     kind: &'static str,
@@ -503,13 +520,13 @@ fn summary_shape(
             let label = format!("SummaryMerge({} children)", children.len());
             ("SummaryMerge", label, serde_json::json!({}))
         }
-        SummaryExpr::ExactTransform { op, .. } => {
-            let label = format!("ExactTransform({})", exact_operator_label(op));
-            ("ExactTransform", label, exact_operator_detail(op))
+        SummaryExpr::UpdateTransform { op, .. } => {
+            let label = format!("UpdateTransform({})", value_operator_label(op));
+            ("UpdateTransform", label, value_operator_detail(op))
         }
-        SummaryExpr::ExactPostProcess { op, .. } => {
-            let label = format!("ExactPostProcess({})", exact_operator_label(op));
-            ("ExactPostProcess", label, exact_operator_detail(op))
+        SummaryExpr::ReadoutPostProcess { op, .. } => {
+            let label = format!("ReadoutPostProcess({})", value_operator_label(op));
+            ("ReadoutPostProcess", label, value_operator_detail(op))
         }
     };
     if let serde_json::Value::Object(map) = &mut detail {
@@ -535,7 +552,8 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
         SummaryExpr::SummaryDelete { summary_input, .. } => vec![summary_input],
         SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
         SummaryExpr::SummaryMerge { children } => children.iter().collect(),
-        SummaryExpr::ExactTransform { child, .. } | SummaryExpr::ExactPostProcess { child, .. } => {
+        SummaryExpr::UpdateTransform { child, .. }
+        | SummaryExpr::ReadoutPostProcess { child, .. } => {
             vec![child]
         }
     }

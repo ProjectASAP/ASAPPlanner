@@ -10,8 +10,8 @@ use crate::pre_asap::{ColumnRef, QueryExpr, Reduction};
 // ── Exact operators composed with summary plans (issue #171) ────────────────
 
 /// An exact, plain-row operator that a mixed exact/summary plan executes at
-/// an explicit phase — the payload of [`SummaryExpr::ExactTransform`]
-/// (update path) and [`SummaryExpr::ExactPostProcess`] (after readout).
+/// an explicit phase. Exact composition is one producer of the generic
+/// [`ValueOperator`] phase payload.
 ///
 /// Deliberately **not** an intact pre-ASAP [`QueryExpr`] subtree: a
 /// `QueryExpr`'s children are always `Rc<QueryExpr>`, so embedding one here
@@ -39,6 +39,22 @@ pub enum ExactOperator {
         output_names: Vec<String>,
         having: Option<Predicate>,
     },
+}
+
+/// An operation over values at a declared execution phase.
+///
+/// Phase placement is independent of whether the operation is exact or
+/// approximate: [`SummaryExpr::UpdateTransform`] and
+/// [`SummaryExpr::ReadoutPostProcess`] describe when their input is
+/// available, while this payload describes what is computed. The extension
+/// form lets summary families and approximate strategies name operations
+/// whose output schema and guarantee are carried by the enclosing
+/// [`SummaryNode`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ValueOperator {
+    Exact(ExactOperator),
+    Extension { name: String },
 }
 
 // ── Post-ASAP DAG node ───────────────────────────────────────────────────────
@@ -171,25 +187,25 @@ pub enum SummaryExpr {
     /// Output schema: one field (same family + params as inputs).
     SummaryMerge { children: Vec<Rc<SummaryNode>> },
 
-    /// Exact plain-row transformation executed on the **update/ingest
+    /// Value transformation executed on the **update/ingest
     /// path** (issue #171). Consumes `child`'s plain update values and
     /// produces plain update values, so its output may feed a downstream
     /// [`SummaryAgg`](SummaryExpr::SummaryAgg)'s maintenance — the "outer
     /// summary over an inner non-accumulator exact transform" direction.
     /// See [`super::phase::ExecutionAvailability`] for the edge contract.
-    ExactTransform {
+    UpdateTransform {
         child: Rc<SummaryNode>,
-        op: ExactOperator,
+        op: ValueOperator,
     },
 
-    /// Exact operation executed **after** `child`'s summary has been read
+    /// Operation executed **after** `child`'s summary has been read
     /// out (issue #171). Consumes plain readout values and produces the
     /// final plain query result — the "outer exact fold over an inner
     /// summary readout" direction. Can never feed maintained state: a
     /// `SummaryAgg` above one of these is a plan-time
     /// [`super::phase::PhaseError`], never a runtime failure.
-    ExactPostProcess {
+    ReadoutPostProcess {
         child: Rc<SummaryNode>,
-        op: ExactOperator,
+        op: ValueOperator,
     },
 }
