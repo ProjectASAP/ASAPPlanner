@@ -622,7 +622,7 @@ mod tests {
         assert!(!comp.accepts_child(summary_input));
         assert!(matches!(
             comp.compose(Rc::clone(summary_input)),
-            Err(ImplementError::ExactOperatorSchema(_))
+            Err(ImplementError::Phase(PhaseError::IllegalChildPhase { .. }))
         ));
         // The readout itself is accepted and composes to a plain schema.
         assert!(comp.accepts_child(&state_child));
