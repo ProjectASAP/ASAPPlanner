@@ -270,6 +270,20 @@ enum DataDistribution {
     Bursty,
 }
 
+/// Existing characteristics of data arriving at the ingestion layer.
+struct DataCharacteristics {
+    /// Number of distinct active time series for this metric.
+    series_count: u64,
+    /// Sample rate per series at the SDK or agent, in hertz.
+    samples_per_sec_per_series: f64,
+    /// Encoded size of one raw metric sample, in bytes.
+    bytes_per_raw_sample: u32,
+    /// Distinct keys per flush period, if known.
+    distinct_keys_per_window: Option<u64>,
+    /// Statistical distribution of keys in the input stream.
+    data_distribution: DataDistribution,
+}
+
 struct DataWorkload {
     arrival: DataArrival,
     ingestion_volume: Evidence<u64>,
