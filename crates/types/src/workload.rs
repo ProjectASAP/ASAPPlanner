@@ -50,8 +50,8 @@ pub struct BatchEntry {
     pub requirements: Option<QueryRequirements>,
 }
 
-/// One entry in a repeating (streaming) workload: a query that fires
-/// every `interval` milliseconds.
+/// One query that fires every `interval` milliseconds. Its recurrence does
+/// not imply that the queried data is continuously ingesting.
 #[derive(Debug, Clone)]
 pub struct RepeatingEntry {
     pub query: Query,
@@ -60,7 +60,18 @@ pub struct RepeatingEntry {
     pub requirements: Option<QueryRequirements>,
 }
 
-// ── Data characteristics ──────────────────────────────────────────────────────
+// ── Data workload ─────────────────────────────────────────────────────────────
+
+/// Whether the data queried by this workload is static, still arriving, or a
+/// mixture of both. This is independent of whether queries repeat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DataArrival {
+    AtRest,
+    ContinuouslyIngesting,
+    Mixed,
+    #[default]
+    Unknown,
+}
 
 /// Statistical distribution of keys in the incoming data stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -78,23 +89,51 @@ pub enum DataDistribution {
     Bursty,
 }
 
-/// Characteristics of the data arriving at the ingestion layer.
-/// Used by the cost model and sketch-parameter binder to size sketches
-/// and estimate transmission cost without running the query.
-#[derive(Debug, Clone)]
-pub struct DataCharacteristics {
-    /// Number of distinct active time series for this metric.
-    pub series_count: u64,
-    /// Sample rate per series at the SDK / agent (Hz).
-    pub samples_per_sec_per_series: f64,
-    /// Wire size of one raw OTLP metric data point after protobuf encoding
-    /// (bytes). Typical range: 50–200 bytes.
-    pub bytes_per_raw_sample: u32,
-    /// Known distinct key values per flush period for frequency / cardinality
-    /// sketches. `None` → inferred analytically from inserts and distribution.
-    pub distinct_keys_per_window: Option<u64>,
-    /// Statistical distribution of keys in the stream.
-    pub data_distribution: DataDistribution,
+/// Where an empirical workload value came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EvidenceSource {
+    Declared,
+    Observed,
+    Derived,
+    #[default]
+    Unknown,
+}
+
+/// A workload value together with the provenance and freshness needed to
+/// decide whether it is safe to use. Times and durations are milliseconds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Evidence<T> {
+    pub value: Option<T>,
+    pub source: EvidenceSource,
+    pub observed_at_ms: Option<u64>,
+    pub valid_for_ms: Option<u64>,
+}
+
+impl<T> Default for Evidence<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            source: EvidenceSource::Unknown,
+            observed_at_ms: None,
+            valid_for_ms: None,
+        }
+    }
+}
+
+/// Queries per second, samples per second, or another rate whose unit is
+/// established by the field that contains it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rate(pub f64);
+
+/// Workload-level facts about the data being queried. Unlike the former
+/// ingestion-only `DataCharacteristics`, this also represents data at rest.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DataWorkload {
+    pub arrival: DataArrival,
+    pub ingestion_volume: Evidence<u64>,
+    pub ingestion_rate: Evidence<Rate>,
+    pub input_cardinality: Evidence<u64>,
+    pub distribution: Evidence<DataDistribution>,
 }
 
 // ── Top-level workload ────────────────────────────────────────────────────────
@@ -111,9 +150,9 @@ pub struct QueryWorkload {
     pub language: QueryLanguage,
     /// One-shot queries executed together as a batch.
     pub query_batch: Option<Vec<BatchEntry>>,
-    /// Queries that repeat on a fixed interval (streaming / continuous).
+    /// Queries that repeat on a fixed interval.
     pub repeating_queries: Option<Vec<RepeatingEntry>>,
-    /// Workload-level data characteristics used for sketch sizing and cost
-    /// estimation. Applies to all queries in this workload.
-    pub data_characteristics: Option<DataCharacteristics>,
+    /// Workload-level data facts used for accuracy and cost estimation.
+    /// Applies to all queries in this workload.
+    pub data_workload: Option<DataWorkload>,
 }

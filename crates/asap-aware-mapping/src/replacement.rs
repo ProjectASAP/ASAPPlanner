@@ -2311,7 +2311,7 @@ impl<Id> PlanSpace<Id> {
 
 /// One [`RecurrenceProfile`] per discovered [`MemoGroup`] target, built by
 /// [`PlanSpace::recurrence_profiles`] — the "carry `RepeatingEntry.interval`
-/// and relevant `DataCharacteristics` into ASAP-aware search/cost context"
+/// and relevant `DataWorkload` into ASAP-aware search/cost context"
 /// half of issue #287. Looked up by `Rc` pointer identity, the same
 /// currency [`PlanSpace::group_for`]/[`GlobalSelection::for_target`] already
 /// use.
@@ -2372,10 +2372,10 @@ impl<Id> PlanSpace<Id> {
     /// `update_rate` is applied uniformly to every discovered site *that
     /// this walk actually reached from some root* (see the "unreachable
     /// sites" note below): today's
-    /// [`asap_types::workload::DataCharacteristics`] is a single
+    /// [`asap_types::workload::DataWorkload`] is a single
     /// workload-level value (applies to every query in a `QueryWorkload`),
     /// not per-target, so there is no finer-grained source to attach
-    /// instead. `None` when no `DataCharacteristics` were available —
+    /// instead. `None` when no `DataWorkload` evidence was available —
     /// preserves "missing metadata" behavior for the update-rate term alone
     /// even when repeating/one-shot consumer information is present.
     ///

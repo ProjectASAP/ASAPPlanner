@@ -204,9 +204,9 @@ pub use explanation::{
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
 pub use recurrence::{
-    evaluation_rate_of, total_cost, update_rate_from_data_characteristics, CostRate,
-    EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
-    RootRecurrence, UpdateRate,
+    evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
+    Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
+    UpdateRate,
 };
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,

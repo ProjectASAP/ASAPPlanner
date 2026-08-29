@@ -440,7 +440,7 @@ pub trait CostModel {
     /// how many structurally exist (`candidate.consumer_count`). See
     /// `crate::recurrence`'s module docs for the full design.
     ///
-    /// - `recurrence.is_empty()` (no [`RepeatingEntry`]/[`DataCharacteristics`]-derived
+    /// - `recurrence.is_empty()` (no [`RepeatingEntry`]/[`DataWorkload`]-derived
     ///   metadata available): delegates to
     ///   [`cse_share_decision`](Self::cse_share_decision), preserving
     ///   today's structural-consumer-count behavior exactly — issue #287's
@@ -456,7 +456,7 @@ pub trait CostModel {
     ///   rates is equivalent to comparing `rate * H` for any fixed `H > 0`).
     ///
     /// [`RepeatingEntry`]: asap_types::workload::RepeatingEntry
-    /// [`DataCharacteristics`]: asap_types::workload::DataCharacteristics
+    /// [`DataWorkload`]: asap_types::workload::DataWorkload
     fn cse_share_decision_with_recurrence(
         &self,
         candidate: &CseCandidate,

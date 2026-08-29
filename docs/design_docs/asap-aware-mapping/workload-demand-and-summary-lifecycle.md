@@ -104,7 +104,6 @@ an explicit horizon.
 - Defining a sketch runtime or state-storage protocol.
 - Choosing a concrete forecasting algorithm for uncertain demand.
 - Changing accuracy targets or guarantee algebra.
-- Implementing the proposed public types in this documentation-only PR.
 
 ## Heilmeier questions
 
@@ -270,20 +269,6 @@ enum DataDistribution {
     Bursty,
 }
 
-/// Existing characteristics of data arriving at the ingestion layer.
-struct DataCharacteristics {
-    /// Number of distinct active time series for this metric.
-    series_count: u64,
-    /// Sample rate per series at the SDK or agent, in hertz.
-    samples_per_sec_per_series: f64,
-    /// Encoded size of one raw metric sample, in bytes.
-    bytes_per_raw_sample: u32,
-    /// Distinct keys per flush period, if known.
-    distinct_keys_per_window: Option<u64>,
-    /// Statistical distribution of keys in the input stream.
-    data_distribution: DataDistribution,
-}
-
 struct DataWorkload {
     arrival: DataArrival,
     ingestion_volume: Evidence<u64>,
@@ -299,11 +284,12 @@ data arrives continuously. An unavailable or unsupported distribution is
 represented by `Evidence.value = None` rather than by assuming the default
 distribution.
 
-The current `DataCharacteristics` supplies continuous-ingestion fields such as
-series count and samples per second. It should become one source for this model,
-not the authoritative definition of all data workloads. Data at rest may have
-row count and scan statistics without a nonzero ingestion rate. Unknown arrival
-must not be interpreted as continuously ingesting or at rest.
+The former `DataCharacteristics` was a stale, continuous-ingestion-specific
+case built around series count and samples per second. `DataWorkload` replaces
+it as the normalized input rather than embedding that special case in the
+general model. Data at rest may have row count and scan statistics without a
+nonzero ingestion rate. Unknown arrival must not be interpreted as continuously
+ingesting or at rest.
 
 Every empirical value uses an evidence wrapper conceptually containing:
 
@@ -480,7 +466,7 @@ The glossary review found the following required coverage and current gaps.
 | CTSA pipeline | Not explicitly modeled | Keep as architectural context; planner consumes collect/store/analyze facts but does not model transmission topology in the MVP |
 | CSP(F) | Cost and fidelity partly modeled | Treat scale/performance/fidelity as objectives and constraints; do not collapse fidelity into cost |
 
-Two terminology corrections are required in future code changes:
+Two terminology constraints apply:
 
 1. A repeated query is not inherently a streaming-data workload. It may
    repeatedly query data at rest.
