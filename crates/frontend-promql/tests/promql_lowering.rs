@@ -7,7 +7,10 @@ use asap_types::pre_asap::{
     Source,
 };
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{BatchEntry, Query, QueryLanguage, QueryRequirements, QueryWorkload};
+use asap_types::workload::{
+    AccuracyRequirement, BatchEntry, Predictability, Query, QueryLanguage, QueryRequirements,
+    QueryWorkload, TimeSelection,
+};
 
 use asap_frontend_promql::{lower_promql, lower_promql_batch, PromqlError as LoweringError};
 
@@ -758,14 +761,22 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
         query_batch: Some(vec![
             BatchEntry {
                 query: Query("rate(a[5m])".into()),
-                requirements: None,
+                requirements: QueryRequirements::default(),
+                predictability: Predictability::Unknown,
+                invocations: 1,
+                execute_at: None,
+                time_selection: TimeSelection::default(),
             },
             BatchEntry {
                 query: Query("quantile_over_time(0.9, b[5m])".into()),
-                requirements: Some(QueryRequirements {
-                    accuracy: Some(AccuracyTarget::Epsilon(0.02)),
-                    latency_ms: None,
-                }),
+                requirements: QueryRequirements {
+                    accuracy: AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.02)),
+                    ..Default::default()
+                },
+                predictability: Predictability::Unknown,
+                invocations: 1,
+                execute_at: None,
+                time_selection: TimeSelection::default(),
             },
         ]),
         repeating_queries: None,
@@ -784,7 +795,11 @@ fn batch_rejects_non_promql_language() {
         language: QueryLanguage::SQL(SqlDialect::DataFusionSQL),
         query_batch: Some(vec![BatchEntry {
             query: Query("SELECT 1".into()),
-            requirements: None,
+            requirements: QueryRequirements::default(),
+            predictability: Predictability::Unknown,
+            invocations: 1,
+            execute_at: None,
+            time_selection: TimeSelection::default(),
         }]),
         repeating_queries: None,
         data_workload: None,

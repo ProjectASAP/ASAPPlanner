@@ -29,6 +29,7 @@
 
 pub mod expr;
 pub mod guarantee;
+pub mod lifecycle;
 pub mod phase;
 pub mod query_time;
 pub mod schema;
@@ -39,6 +40,7 @@ pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
 };
+pub use lifecycle::{EvaluationSchedule, OutputRepresentation, StateLifecycle};
 pub use phase::{
     assigned_child_stage, exact_operator_output_schema, produced_availability,
     validate_execution_phases, validate_execution_phases_at, ExactOperatorSchemaError,

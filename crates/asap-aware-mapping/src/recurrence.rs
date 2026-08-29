@@ -73,7 +73,7 @@
 //!
 //! ## Provenance of each new cost input
 //!
-//! - [`EvaluationRate`]: derived from [`asap_types::workload::RepeatingEntry::interval`]
+//! - [`EvaluationRate`]: derived from [`asap_types::workload::RepeatingEntry::demand`]
 //!   values of every repeating consumer reaching a target (via
 //!   [`evaluation_rate_of`], or [`crate::replacement::PlanSpace::recurrence_profiles`]
 //!   for a whole workload). A one-shot ([`asap_types::workload::BatchEntry`])
@@ -200,6 +200,10 @@ pub enum RecurrenceError {
          well-defined maintained_cost_rate"
     )]
     InvalidUpdateRate(UpdateRate),
+    #[error("invalid EvaluationRate({0:?}Hz): an evaluation rate must be finite and >= 0")]
+    InvalidEvaluationRate(EvaluationRate),
+    #[error(transparent)]
+    InvalidWorkload(#[from] asap_types::workload::WorkloadError),
     /// A [`Horizon`] that isn't finite and strictly positive (NaN,
     /// infinite, zero, or negative) was supplied — a non-positive or
     /// infinite horizon would silently drop or invert the recurring
@@ -374,16 +378,24 @@ impl RecurrenceProfile {
 /// already-opaque `Id` granularity `search_workload`'s callers already use
 /// — this crate needs no more of a caller's own query identity than "which
 /// of these two recurrence kinds is this root".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RootRecurrence {
     /// A one-shot (batch) root — contributes to a reached target's
     /// [`RecurrenceProfile::one_shot_consumers`], never to its
     /// `evaluation_rate`.
     OneShot,
+    /// A declared number of one-time invocations for this root.
+    OneShotCount(usize),
     /// A repeating root firing every `RepetitionInterval` — contributes to
     /// a reached target's `evaluation_rate` (`1 / interval`, aggregated via
     /// [`evaluation_rate_of`]).
     Repeating(RepetitionInterval),
+    /// A repeated root whose schedule or estimate has already been
+    /// normalized to evaluations per second.
+    RepeatingRate(EvaluationRate),
+    /// No reliable recurrence evidence was supplied. It contributes no read
+    /// count or evaluation rate, but remains distinct from zero demand.
+    Unknown,
 }
 
 // ── Explanation ──────────────────────────────────────────────────────────

@@ -187,6 +187,7 @@ pub mod cost_model;
 pub mod exact_composition;
 pub mod explanation;
 pub mod grouping;
+pub mod lifecycle;
 pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
@@ -196,19 +197,24 @@ pub mod topk_reuse;
 pub use accuracy::{
     AccuracyAllocation, AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel,
     CompositionShape, DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
-    PropagationStats,
+    PropagationStats, WorkloadAccuracyEvidence,
 };
 pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
 pub use cost_model::{
     postprocess_plan_cost_rate, pretransform_plan_cost_rate, raw_recompute_cost_rate, CostModel,
-    CostProvenance, CostRate, CostUnit, DefaultCostModel, EvaluationRate,
-    ExactCompositionCostInputs, ExactCompositionCostRequest, MixedExecutionCapabilities,
+    CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
+    ExactCompositionCostRequest, MixedExecutionCapabilities,
 };
 pub use exact_composition::{CompositionPhase, ExactComposition, ExactCompositionStrategy};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
+pub use lifecycle::{
+    materialize_with_lifecycles, plan_summary_lifecycles, LifecycleAlternative,
+    LifecycleCapabilities, LifecycleCostInputs, LifecyclePlan, LifecyclePlanError,
+    LifecycleRejection, MaterializeLifecycleError, StateDeployment,
+};
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
     Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,

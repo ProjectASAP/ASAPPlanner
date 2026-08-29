@@ -362,7 +362,9 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
 use asap_types::pre_asap::schema::Schema;
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::RepetitionInterval;
+use asap_types::workload::{
+    ExpectedDemand, QueryRecurrence, QueryWorkload, RepeatedDemand, RepetitionInterval,
+};
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -373,13 +375,14 @@ use crate::accuracy::{
 };
 use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{
-    raw_recompute_cost_rate, CostModel, CostRate, CseCandidate, DefaultCostModel,
-    ExactCompositionCostInputs, ExactCompositionCostRequest, ShareDecision,
+    raw_recompute_cost_rate, CostModel, CseCandidate, DefaultCostModel, ExactCompositionCostInputs,
+    ExactCompositionCostRequest, ShareDecision,
 };
 use crate::exact_composition::{CompositionPhase, ExactComposition, ExactCompositionStrategy};
 use crate::grouping::HydraGroupingStrategy;
 use crate::recurrence::{
-    evaluation_rate_of, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
+    evaluation_rate_of, CostRate, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence,
+    UpdateRate,
 };
 use crate::rollup::RollupStrategy;
 use crate::topk_reuse::TopKLimitReuseStrategy;
@@ -2368,7 +2371,7 @@ impl<Id> PlanSpace<Id> {
 // ── Recurrence-aware cost context (issue #287) ──────────────────────────
 
 /// One [`RecurrenceProfile`] per discovered [`MemoGroup`] target, built by
-/// [`PlanSpace::recurrence_profiles`] — the "carry `RepeatingEntry.interval`
+/// [`PlanSpace::recurrence_profiles`] — the "carry `RepeatingEntry.demand`
 /// and relevant `DataWorkload` into ASAP-aware search/cost context"
 /// half of issue #287. Looked up by `Rc` pointer identity, the same
 /// currency [`PlanSpace::group_for`]/[`GlobalSelection::for_target`] already
@@ -2479,8 +2482,18 @@ impl<Id> PlanSpace<Id> {
         if let Some(rate) = update_rate {
             crate::recurrence::validate_update_rate(rate)?;
         }
+        for recurrence in root_recurrence {
+            if let RootRecurrence::RepeatingRate(rate) = recurrence {
+                if !rate.0.is_finite() || rate.0 < 0.0 {
+                    return Err(crate::recurrence::RecurrenceError::InvalidEvaluationRate(
+                        *rate,
+                    ));
+                }
+            }
+        }
 
         let mut intervals: HashMap<*const QueryExpr, Vec<RepetitionInterval>> = HashMap::new();
+        let mut rates: HashMap<*const QueryExpr, f64> = HashMap::new();
         let mut one_shot_counts: HashMap<*const QueryExpr, usize> = HashMap::new();
         // Sites actually reached by at least one root's own recurrence tag
         // during the walk below — see this method's own "Unreachable
@@ -2504,6 +2517,7 @@ impl<Id> PlanSpace<Id> {
                     path_count,
                     recurrence,
                     &mut intervals,
+                    &mut rates,
                     &mut one_shot_counts,
                     &mut reached,
                 );
@@ -2528,7 +2542,12 @@ impl<Id> PlanSpace<Id> {
         let mut profiles = HashMap::with_capacity(self.order.len());
         for ptr in &self.order {
             let site_intervals = intervals.get(ptr).unwrap_or(&empty_intervals);
-            let evaluation_rate = evaluation_rate_of(site_intervals.iter().copied())?;
+            let interval_rate =
+                evaluation_rate_of(site_intervals.iter().copied())?.map_or(0.0, |rate| rate.0);
+            let direct_rate = rates.get(ptr).copied().unwrap_or(0.0);
+            let evaluation_rate = ((interval_rate + direct_rate) > 0.0).then_some(
+                crate::recurrence::EvaluationRate(interval_rate + direct_rate),
+            );
             let one_shot_consumers = one_shot_counts.get(ptr).copied().unwrap_or(0);
             // Bug 2 fix (see "Unreachable sites" above): only a reached
             // site carries the caller-supplied `update_rate`.
@@ -2553,6 +2572,80 @@ impl<Id> PlanSpace<Id> {
 
         Ok(RecurrenceProfileMap { profiles })
     }
+
+    /// Derive per-target recurrence profiles directly from the normalized
+    /// query and data workloads. This is the authoritative bridge from the
+    /// public workload model into recurrence-aware candidate costing.
+    pub fn recurrence_profiles_from_workload(
+        &self,
+        workload: &QueryWorkload,
+        now_ms: u64,
+        horizon: Option<Horizon>,
+    ) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
+        workload.validate()?;
+        if let Some(horizon) = horizon {
+            if !horizon.0.is_finite() || horizon.0 <= 0.0 {
+                return Err(crate::recurrence::RecurrenceError::InvalidHorizon(horizon));
+            }
+        }
+        let mut recurrences = Vec::new();
+        for entry in workload.entries() {
+            let recurrence = match entry.recurrence {
+                QueryRecurrence::OneTime { invocations, .. } => {
+                    RootRecurrence::OneShotCount(usize::try_from(invocations).unwrap_or(usize::MAX))
+                }
+                QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
+                    RootRecurrence::Repeating(interval)
+                }
+                QueryRecurrence::Repeated(RepeatedDemand::Scheduled(schedule)) => {
+                    let Some(horizon) = horizon else {
+                        return Err(crate::recurrence::RecurrenceError::MissingHorizon);
+                    };
+                    let end_ms = now_ms.saturating_add((horizon.0 * 1000.0) as u64);
+                    let count = schedule
+                        .iter()
+                        .filter(|at| at.0 >= now_ms && at.0 <= end_ms)
+                        .count();
+                    RootRecurrence::RepeatingRate(crate::recurrence::EvaluationRate(
+                        count as f64 / horizon.0,
+                    ))
+                }
+                QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
+                    let fresh = match (estimate.observed_at, estimate.valid_for) {
+                        (Some(observed), Some(valid_for)) => {
+                            now_ms <= observed.0.saturating_add(valid_for.0)
+                        }
+                        (None, Some(_)) => false,
+                        _ => true,
+                    };
+                    if !fresh {
+                        RootRecurrence::Unknown
+                    } else {
+                        let rate = match estimate.expected {
+                            ExpectedDemand::AverageRate(rate) => rate.0,
+                            ExpectedDemand::InvocationCount(count) => {
+                                let millis = estimate
+                                    .observation_window
+                                    .end
+                                    .0
+                                    .saturating_sub(estimate.observation_window.start.0);
+                                count as f64 / (millis as f64 / 1000.0)
+                            }
+                        };
+                        RootRecurrence::RepeatingRate(crate::recurrence::EvaluationRate(rate))
+                    }
+                }
+                QueryRecurrence::Unknown => RootRecurrence::Unknown,
+            };
+            recurrences.push(recurrence);
+        }
+        let update_rate = workload
+            .data_workload
+            .as_ref()
+            .and_then(|data| data.ingestion_rate.value_at(now_ms))
+            .map(|rate| UpdateRate(rate.0));
+        self.recurrence_profiles(&recurrences, update_rate)
+    }
 }
 
 /// Record `times` occurrences of `recurrence` against `ptr` — `times > 1`
@@ -2566,6 +2659,7 @@ fn contribute(
     times: usize,
     recurrence: RootRecurrence,
     intervals: &mut HashMap<*const QueryExpr, Vec<RepetitionInterval>>,
+    rates: &mut HashMap<*const QueryExpr, f64>,
     one_shot_counts: &mut HashMap<*const QueryExpr, usize>,
     reached: &mut HashSet<*const QueryExpr>,
 ) {
@@ -2580,9 +2674,16 @@ fn contribute(
                 .or_default()
                 .extend(std::iter::repeat_n(interval, times));
         }
+        RootRecurrence::RepeatingRate(rate) => {
+            *rates.entry(ptr).or_insert(0.0) += rate.0 * times as f64;
+        }
         RootRecurrence::OneShot => {
             *one_shot_counts.entry(ptr).or_insert(0) += times;
         }
+        RootRecurrence::OneShotCount(count) => {
+            *one_shot_counts.entry(ptr).or_insert(0) += count.saturating_mul(times);
+        }
+        RootRecurrence::Unknown => {}
     }
 }
 
@@ -3193,12 +3294,7 @@ impl<Id> PlanSpace<Id> {
             } else {
                 composition_options(group, &self.groups, effective, cost_model, &context)
                     .into_iter()
-                    .min_by(|a, b| {
-                        a.decision
-                            .cost_rate
-                            .units_per_second
-                            .total_cmp(&b.decision.cost_rate.units_per_second)
-                    })
+                    .min_by(|a, b| a.decision.cost_rate.0.total_cmp(&b.decision.cost_rate.0))
             };
             if let Some(option) = &composed {
                 if let Some(child_candidate) = option.decision.child_candidate {

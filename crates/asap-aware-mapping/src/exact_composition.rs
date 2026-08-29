@@ -77,7 +77,7 @@ use std::rc::Rc;
 use asap_types::post_asap::phase::validate_execution_phases_at;
 use asap_types::post_asap::{
     exact_operator_output_schema, produced_availability, CompositionOperator, ExactOperator,
-    ExecutionAvailability, SummaryExpr, SummaryNode, SummarySchema,
+    ExecutionAvailability, PhaseError, SummaryExpr, SummaryNode, SummarySchema,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -166,6 +166,18 @@ impl ExactComposition {
         child: Rc<SummaryNode>,
         accuracy_model: &dyn AccuracyModel,
     ) -> Result<Rc<SummaryNode>, ImplementError> {
+        if let Some(produced) = produced_availability(&child.expr) {
+            if produced != self.phase.availability() {
+                let edge = match self.phase {
+                    CompositionPhase::Transform => "ExactTransform.child",
+                    CompositionPhase::PostProcess => "ExactPostProcess.child",
+                };
+                return Err(ImplementError::Phase(PhaseError::IllegalChildPhase {
+                    edge,
+                    child: produced,
+                }));
+            }
+        }
         let schema = exact_operator_output_schema(&self.op, &child.schema)?;
         let guarantee = match &child.guarantee {
             None => None,
