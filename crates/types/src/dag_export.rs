@@ -46,7 +46,10 @@ use std::rc::Rc;
 
 use serde::Serialize;
 
-use crate::post_asap::{AccuracyError, ResultGuarantee, SummaryExpr, SummaryNode};
+use crate::post_asap::{
+    assigned_child_stage, produced_availability, AccuracyError, ExactOperator,
+    ExecutionAvailability, ResultGuarantee, SummaryExpr, SummaryNode, ValueOperator,
+};
 use crate::pre_asap::cse::{structural_hash, HashCache};
 use crate::pre_asap::query_expr::{QueryExpr, Source};
 
@@ -152,6 +155,24 @@ pub struct DagDecision {
     /// `replacement_root` for the node replacing the pre-ASAP target;
     /// `replacement_region` for its generated or carried descendants.
     pub role: &'static str,
+    /// Machine-readable origin of the winning candidate (a `Debug`-formatted
+    /// `asap_aware_mapping::ReplacementProvenance`, e.g.
+    /// `"ExactPostProcess"`), so a viewer never infers *how* a node was
+    /// composed from its label or shape (issue #171). Omitted when the
+    /// producing layer predates this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
+    /// The unit `cost` is expressed in — e.g. `"cost_units_per_second"` for
+    /// a recurring-rate comparison, or absent for the legacy unitless
+    /// structural estimate. Additive; consumers must not assume one unit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_unit: Option<String>,
+    /// For a composed decision (an exact operator over another target's
+    /// own selected decision), the `id`s of the child decisions this one
+    /// was committed together with — the explicit target-to-decision
+    /// provenance chain, never reconstructed from graph adjacency.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_decisions: Vec<u32>,
 }
 
 /// One query's exported graph. `nodes[root as usize]` is the tree's root.
@@ -338,8 +359,61 @@ pub struct SummaryDagGraph {
 /// top-level `DagNode::kind`.
 pub fn export_summary(node: &SummaryNode) -> SummaryDagGraph {
     let mut nodes = Vec::new();
-    let root = build_summary(node, &mut nodes);
+    let root = build_summary(node, &mut nodes, root_stage(node));
     SummaryDagGraph { nodes, root }
+}
+
+/// The explicit execution stage of an exported plan's root — its own
+/// produced availability, or query-time readout for a bare `KeepPreAsap`
+/// (the same convention `post_asap::phase::validate_execution_phases`
+/// uses for a root).
+fn root_stage(node: &SummaryNode) -> ExecutionAvailability {
+    produced_availability(&node.expr).unwrap_or(ExecutionAvailability::ReadoutValue)
+}
+
+/// `detail` for an [`ExactOperator`] payload — its own fields, rendered the
+/// same way the pre-ASAP `Aggregate` node renders them.
+fn exact_operator_detail(op: &ExactOperator) -> serde_json::Value {
+    match op {
+        ExactOperator::Aggregate {
+            reduction,
+            measures,
+            output_names,
+            having,
+        } => serde_json::json!({
+            "op": "Aggregate",
+            "reduction": reduction,
+            "measures": measures,
+            "output_names": output_names,
+            "having": having.as_ref().map(|p| export(&p.0)),
+        }),
+    }
+}
+
+fn exact_operator_label(op: &ExactOperator) -> String {
+    match op {
+        ExactOperator::Aggregate { measures, .. } => {
+            let funcs: Vec<String> = measures.iter().map(|m| format!("{m:?}")).collect();
+            format!("Aggregate[{}]", funcs.join(", "))
+        }
+    }
+}
+
+fn value_operator_detail(op: &ValueOperator) -> serde_json::Value {
+    match op {
+        ValueOperator::Exact(op) => exact_operator_detail(op),
+        ValueOperator::Extension { name } => serde_json::json!({
+            "op": "Extension",
+            "name": name,
+        }),
+    }
+}
+
+fn value_operator_label(op: &ValueOperator) -> String {
+    match op {
+        ValueOperator::Exact(op) => exact_operator_label(op),
+        ValueOperator::Extension { name } => name.clone(),
+    }
 }
 
 fn push_summary_node(
@@ -391,8 +465,16 @@ fn family_label(family: &crate::post_asap::SummaryFamilyType) -> String {
 /// shared [`DagGraph`] node list — see [`export_post_asap`]) can't drift
 /// apart on how every *other* variant's own shape is described, since
 /// nothing about that description differs between the two.
-fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value) {
-    match expr {
+///
+/// `stage` is the node's explicit execution phase (issue #171) — its own
+/// [`produced_availability`], or the edge-assigned phase for a `KeepPreAsap`
+/// — and is written into `detail.stage` on every post-ASAP node so a viewer
+/// reads it rather than inferring it from the node's kind.
+fn summary_shape(
+    expr: &SummaryExpr,
+    stage: ExecutionAvailability,
+) -> (&'static str, String, serde_json::Value) {
+    let (kind, label, mut detail) = match expr {
         SummaryExpr::KeepPreAsap(_) => {
             unreachable!("summary_shape's callers special-case KeepPreAsap before calling it")
         }
@@ -438,7 +520,22 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
             let label = format!("SummaryMerge({} children)", children.len());
             ("SummaryMerge", label, serde_json::json!({}))
         }
+        SummaryExpr::UpdateTransform { op, .. } => {
+            let label = format!("UpdateTransform({})", value_operator_label(op));
+            ("UpdateTransform", label, value_operator_detail(op))
+        }
+        SummaryExpr::ReadoutPostProcess { op, .. } => {
+            let label = format!("ReadoutPostProcess({})", value_operator_label(op));
+            ("ReadoutPostProcess", label, value_operator_detail(op))
+        }
+    };
+    if let serde_json::Value::Object(map) = &mut detail {
+        map.insert(
+            "stage".into(),
+            serde_json::Value::String(stage.as_str().into()),
+        );
     }
+    (kind, label, detail)
 }
 
 /// `expr`'s own `Rc<SummaryNode>` children, in the variant's field order
@@ -455,6 +552,10 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
         SummaryExpr::SummaryDelete { summary_input, .. } => vec![summary_input],
         SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
         SummaryExpr::SummaryMerge { children } => children.iter().collect(),
+        SummaryExpr::UpdateTransform { child, .. }
+        | SummaryExpr::ReadoutPostProcess { child, .. } => {
+            vec![child]
+        }
     }
 }
 
@@ -462,12 +563,19 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
 /// post-order (children pushed before their parent), and return the pushed
 /// root's id. Exhaustive over every [`SummaryExpr`] variant, matching this
 /// file's own exhaustive style for `QueryExpr` in [`build`].
-fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
+fn build_summary(
+    node: &SummaryNode,
+    nodes: &mut Vec<SummaryDagNode>,
+    stage: ExecutionAvailability,
+) -> u32 {
     if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
         let pre_asap_subgraph = export(inner);
         let inner_kind = pre_asap_subgraph.nodes[pre_asap_subgraph.root as usize].kind;
         let label = format!("KeepPreAsap({inner_kind})");
-        let detail = serde_json::json!({ "pre_asap_subgraph": pre_asap_subgraph });
+        let detail = serde_json::json!({
+            "pre_asap_subgraph": pre_asap_subgraph,
+            "stage": stage.as_str(),
+        });
         return push_summary_node(
             nodes,
             "KeepPreAsap",
@@ -479,9 +587,9 @@ fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDagNode>) -> u32 {
     }
     let children: Vec<u32> = summary_children(&node.expr)
         .into_iter()
-        .map(|child| build_summary(child, nodes))
+        .map(|child| build_summary(child, nodes, assigned_child_stage(&node.expr, child)))
         .collect();
-    let (kind, label, detail) = summary_shape(&node.expr);
+    let (kind, label, detail) = summary_shape(&node.expr, stage);
     push_summary_node(nodes, kind, label, detail, children, node.guarantee.clone())
 }
 
@@ -759,15 +867,24 @@ fn build_summary_hybrid(
     nodes: &mut Vec<DagNode>,
     cache: &mut HashCache,
     find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
+    stage: ExecutionAvailability,
 ) -> u32 {
     if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
         return build(inner, nodes, cache, find_winner);
     }
     let children: Vec<u32> = summary_children(&node.expr)
         .into_iter()
-        .map(|child| build_summary_hybrid(child, nodes, cache, find_winner))
+        .map(|child| {
+            build_summary_hybrid(
+                child,
+                nodes,
+                cache,
+                find_winner,
+                assigned_child_stage(&node.expr, child),
+            )
+        })
         .collect();
-    let (kind, label, mut detail) = summary_shape(&node.expr);
+    let (kind, label, mut detail) = summary_shape(&node.expr, stage);
     // The merged graph's `DagNode` has no dedicated guarantee field (it is
     // the pre-ASAP node shape); the guarantee rides in `detail` under the
     // same key/shape `SummaryDagNode::guarantee` uses, additively.
@@ -853,7 +970,13 @@ fn build(
             decision,
         }) => {
             let first = nodes.len();
-            let root = build_summary_hybrid(&replacement, nodes, cache, find_winner);
+            let root = build_summary_hybrid(
+                &replacement,
+                nodes,
+                cache,
+                find_winner,
+                root_stage(&replacement),
+            );
             for node in &mut nodes[first..] {
                 if node.decision.is_none() {
                     let mut node_decision = decision.clone();

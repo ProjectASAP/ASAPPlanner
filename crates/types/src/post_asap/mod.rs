@@ -29,14 +29,20 @@
 
 pub mod expr;
 pub mod guarantee;
+pub mod phase;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;
 
-pub use expr::{SummaryExpr, SummaryNode};
+pub use expr::{ExactOperator, SummaryExpr, SummaryNode, ValueOperator};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
+};
+pub use phase::{
+    assigned_child_stage, exact_operator_output_schema, produced_availability,
+    validate_execution_phases, validate_execution_phases_at, ExactOperatorSchemaError,
+    ExecutionAvailability, PhaseAssignment, PhaseError,
 };
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,
