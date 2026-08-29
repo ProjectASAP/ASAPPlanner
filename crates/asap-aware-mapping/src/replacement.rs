@@ -380,7 +380,6 @@ use crate::cost_model::{
 };
 use crate::exact_composition::{CompositionPhase, ExactComposition, ExactCompositionStrategy};
 use crate::grouping::HydraGroupingStrategy;
-use crate::recurrence::CostRate;
 use crate::recurrence::{
     evaluation_rate_of, CostRate, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence,
     UpdateRate,
