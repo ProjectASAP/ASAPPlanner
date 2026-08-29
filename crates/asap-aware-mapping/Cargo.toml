@@ -10,4 +10,5 @@ edition = "2021"
 [dependencies]
 asap-types = { path = "../types" }
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"

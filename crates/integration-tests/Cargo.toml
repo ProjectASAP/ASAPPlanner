@@ -10,4 +10,5 @@ asap-frontend-sql = { path = "../frontend-sql" }
 asap-aware-mapping = { path = "../asap-aware-mapping" }
 
 [dev-dependencies]
+serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
