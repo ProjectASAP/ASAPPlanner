@@ -460,6 +460,25 @@ that "reuse existing" and "create new" remain distinguishable alternatives.
 
 ### Cost over a horizon
 
+`H` is the optimization horizon: the future wall-clock duration over which the
+planner compares one-time and recurring costs. The existing cost model
+represents it in seconds:
+
+```rust
+/// A finite, strictly positive optimization duration, in seconds.
+struct Horizon(f64);
+```
+
+The horizon is not the query lookback, the queried time scope, or the response
+latency bound. It answers only "over how much future execution time should
+these alternatives be costed?" All alternatives in one decision must use the
+same `H`. `reads(H)` is the number of query evaluations expected or scheduled
+within that horizon; for a fixed evaluation rate it is
+`H * evaluation_rate`, plus any separately modeled one-time invocations.
+Who supplies `H`, and whether a deployment may default it, remains an explicit
+architecture decision below. If no horizon is available, the planner must not
+compare a one-time cost with a rate-valued cost.
+
 For a stateful incremental alternative over horizon `H`:
 
 ```text
