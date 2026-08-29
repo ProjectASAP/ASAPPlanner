@@ -21,7 +21,7 @@
 //!   only consume it as an opaque raw `KeepPreAsap` blob today, with no
 //!   explicit "this row transform runs on the update path" node.
 //!
-//! [`SummaryExpr::ExactPostProcess`] and [`SummaryExpr::ExactTransform`]
+//! [`SummaryExpr::ReadoutPostProcess`] and [`SummaryExpr::UpdateTransform`]
 //! are the two phase-explicit representations; this strategy is what
 //! proposes them.
 //!
@@ -77,7 +77,7 @@ use std::rc::Rc;
 use asap_types::post_asap::phase::validate_execution_phases_at;
 use asap_types::post_asap::{
     exact_operator_output_schema, produced_availability, CompositionOperator, ExactOperator,
-    ExecutionAvailability, PhaseError, SummaryExpr, SummaryNode, SummarySchema,
+    ExecutionAvailability, PhaseError, SummaryExpr, SummaryNode, SummarySchema, ValueOperator,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -95,9 +95,9 @@ use crate::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
 /// [`ExactComposition::compose`] builds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompositionPhase {
-    /// [`SummaryExpr::ExactPostProcess`]: after the child's readout.
+    /// [`SummaryExpr::ReadoutPostProcess`]: after the child's readout.
     PostProcess,
-    /// [`SummaryExpr::ExactTransform`]: on the update path, feeding
+    /// [`SummaryExpr::UpdateTransform`]: on the update path, feeding
     /// maintained state above.
     Transform,
 }
@@ -169,8 +169,8 @@ impl ExactComposition {
         if let Some(produced) = produced_availability(&child.expr) {
             if produced != self.phase.availability() {
                 let edge = match self.phase {
-                    CompositionPhase::Transform => "ExactTransform.child",
-                    CompositionPhase::PostProcess => "ExactPostProcess.child",
+                    CompositionPhase::Transform => "UpdateTransform.child",
+                    CompositionPhase::PostProcess => "ReadoutPostProcess.child",
                 };
                 return Err(ImplementError::Phase(PhaseError::IllegalChildPhase {
                     edge,
@@ -204,13 +204,13 @@ impl ExactComposition {
             }
         };
         let expr = match self.phase {
-            CompositionPhase::PostProcess => SummaryExpr::ExactPostProcess {
+            CompositionPhase::PostProcess => SummaryExpr::ReadoutPostProcess {
                 child,
-                op: self.op.clone(),
+                op: ValueOperator::Exact(self.op.clone()),
             },
-            CompositionPhase::Transform => SummaryExpr::ExactTransform {
+            CompositionPhase::Transform => SummaryExpr::UpdateTransform {
                 child,
-                op: self.op.clone(),
+                op: ValueOperator::Exact(self.op.clone()),
             },
         };
         let node = Rc::new(SummaryNode {
@@ -629,7 +629,7 @@ mod tests {
         let composed = comp.compose(state_child).unwrap();
         assert!(matches!(
             composed.expr,
-            SummaryExpr::ExactPostProcess { .. }
+            SummaryExpr::ReadoutPostProcess { .. }
         ));
         assert!(composed
             .schema
@@ -659,7 +659,7 @@ mod tests {
         assert!(comp.accepts_child(&raw));
         assert!(matches!(
             comp.compose(raw).unwrap().expr,
-            SummaryExpr::ExactTransform { .. }
+            SummaryExpr::UpdateTransform { .. }
         ));
     }
 }

@@ -6,9 +6,9 @@
 //! is produced). A plan that places a query-time residual *underneath* a
 //! maintained summary is not merely expensive — it is unexecutable, because
 //! the maintenance loop has no readout values to feed into that summary.
-//! [`SummaryExpr::ExactPostProcess`] is exactly such a residual, which is why
-//! it and [`SummaryExpr::ExactTransform`] are two separate variants rather
-//! than one phase-ambiguous `ExactOp { child }`.
+//! [`SummaryExpr::ReadoutPostProcess`] is exactly such a residual, which is
+//! why it and [`SummaryExpr::UpdateTransform`] are two separate variants
+//! rather than one phase-ambiguous value operation.
 //!
 //! [`ExecutionAvailability`] is what a node's output *is*, at which phase;
 //! [`validate_execution_phases`] checks every edge of a DAG against the
@@ -23,15 +23,15 @@
 //! | `SummaryEstimate.summary_input` | `SummaryState` (any family). Produces `ReadoutValue`. |
 //! | `SummaryJoin.outer/inner` | `UpdateValue` or `SummaryState`; never `ReadoutValue`. |
 //! | `SummarySubtract`/`SummaryDelete`/`SummaryMerge` | `SummaryState`. |
-//! | `ExactTransform.child` | `UpdateValue`. Produces `UpdateValue`. |
-//! | `ExactPostProcess.child` | `ReadoutValue`. Produces `ReadoutValue`. |
+//! | `UpdateTransform.child` | `UpdateValue`. Produces `UpdateValue`. |
+//! | `ReadoutPostProcess.child` | `ReadoutValue`. Produces `ReadoutValue`. |
 //!
 //! ## `KeepPreAsap` declares its phase through the derivation
 //!
 //! A [`SummaryExpr::KeepPreAsap`] leaf is a raw pre-ASAP computation that a
 //! runtime can execute at either phase: as update-path raw input beneath a
-//! `SummaryAgg`/`ExactTransform`, or as a query-time fallback beneath an
-//! `ExactPostProcess` (or at the root). It carries no phase field of its own
+//! `SummaryAgg`/`UpdateTransform`, or as a query-time fallback beneath a
+//! `ReadoutPostProcess` (or at the root). It carries no phase field of its own
 //! — every existing consumer pattern-matches the one-field shape — so its
 //! phase is *assigned* by [`validate_execution_phases`] from the edge that
 //! reaches it and reported in the returned [`PhaseAssignment`]. What it may
@@ -45,7 +45,7 @@ use std::rc::Rc;
 
 use thiserror::Error;
 
-use super::expr::{ExactOperator, SummaryExpr, SummaryNode};
+use super::expr::{ExactOperator, SummaryExpr, SummaryNode, ValueOperator};
 use super::schema::{SummaryFamilyType, SummaryField, SummarySchema};
 use crate::pre_asap::query_expr::{aggregate_output_schema, QueryExprError};
 use crate::pre_asap::schema::{Column, Schema};
@@ -92,8 +92,8 @@ pub enum PhaseEdge {
     SummarySubtractInput,
     SummaryDeleteInput,
     SummaryMergeInput,
-    ExactTransformChild,
-    ExactPostProcessChild,
+    UpdateTransformChild,
+    ReadoutPostProcessChild,
 }
 
 impl PhaseEdge {
@@ -105,8 +105,8 @@ impl PhaseEdge {
             Self::SummarySubtractInput => "SummarySubtract.{left,right}",
             Self::SummaryDeleteInput => "SummaryDelete.summary_input",
             Self::SummaryMergeInput => "SummaryMerge.children[]",
-            Self::ExactTransformChild => "ExactTransform.child",
-            Self::ExactPostProcessChild => "ExactPostProcess.child",
+            Self::UpdateTransformChild => "UpdateTransform.child",
+            Self::ReadoutPostProcessChild => "ReadoutPostProcess.child",
         }
     }
 }
@@ -116,7 +116,7 @@ impl PhaseEdge {
 /// it expects, and so tests can assert the *reason* a plan was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PhaseError {
-    /// A query-time value (`SummaryEstimate` / `ExactPostProcess` output)
+    /// A query-time value (`SummaryEstimate` / `ReadoutPostProcess` output)
     /// placed beneath a maintained summary — the one shape issue #171's
     /// phase split exists to make unrepresentable.
     #[error(
@@ -129,7 +129,7 @@ pub enum PhaseError {
     },
     /// Any other edge whose child availability the parent does not accept
     /// (e.g. plain update rows fed straight into a `SummaryEstimate`, or a
-    /// sketch's opaque state fed into an `ExactPostProcess`).
+    /// sketch's opaque state fed into a `ReadoutPostProcess`).
     #[error("{edge} does not accept a {child} input")]
     IllegalChildPhase {
         edge: &'static str,
@@ -153,9 +153,9 @@ pub enum PhaseError {
         first: ExecutionAvailability,
         second: ExecutionAvailability,
     },
-    /// An update-path-only node (`ExactTransform`) at the root of a plan:
+    /// An update-path-only node (`UpdateTransform`) at the root of a plan:
     /// nothing maintains state above it, so its output is never read.
-    #[error("ExactTransform cannot be a plan root: its update-path output feeds nothing")]
+    #[error("UpdateTransform cannot be a plan root: its update-path output feeds nothing")]
     UpdateValueAtRoot,
     /// An `ExactOperator` whose input columns are not all `Plain` at its
     /// declared phase.
@@ -197,10 +197,10 @@ pub fn produced_availability(expr: &SummaryExpr) -> Option<ExecutionAvailability
         | SummaryExpr::SummarySubtract { .. }
         | SummaryExpr::SummaryDelete { .. }
         | SummaryExpr::SummaryMerge { .. } => ExecutionAvailability::SummaryState,
-        SummaryExpr::SummaryEstimate { .. } | SummaryExpr::ExactPostProcess { .. } => {
+        SummaryExpr::SummaryEstimate { .. } | SummaryExpr::ReadoutPostProcess { .. } => {
             ExecutionAvailability::ReadoutValue
         }
-        SummaryExpr::ExactTransform { .. } => ExecutionAvailability::UpdateValue,
+        SummaryExpr::UpdateTransform { .. } => ExecutionAvailability::UpdateValue,
     })
 }
 
@@ -238,7 +238,7 @@ pub fn validate_execution_phases(root: &Rc<SummaryNode>) -> Result<PhaseAssignme
 }
 
 /// [`validate_execution_phases`] for a *sub*-plan whose root is known to
-/// sit at `stage` — e.g. an `ExactTransform` about to be placed beneath a
+/// sit at `stage` — e.g. an `UpdateTransform` about to be placed beneath a
 /// `SummaryAgg`, which would be rejected as a whole-plan root but is a
 /// legal update-path input. Validates every edge beneath `root` exactly
 /// as the whole-plan entry point does.
@@ -328,25 +328,29 @@ fn visit(
             let s = state_only(summary_input, PhaseEdge::SummaryEstimateInput)?;
             visit(summary_input, s, assignment)
         }
-        SummaryExpr::ExactTransform { child, op } => {
-            let s = child_stage(child, PhaseEdge::ExactTransformChild, |avail| match avail {
-                ExecutionAvailability::UpdateValue => Ok(()),
-                other => Err(PhaseError::IllegalChildPhase {
-                    edge: PhaseEdge::ExactTransformChild.describe(),
-                    child: other,
-                }),
-            })?;
+        SummaryExpr::UpdateTransform { child, op } => {
+            let s = child_stage(
+                child,
+                PhaseEdge::UpdateTransformChild,
+                |avail| match avail {
+                    ExecutionAvailability::UpdateValue => Ok(()),
+                    other => Err(PhaseError::IllegalChildPhase {
+                        edge: PhaseEdge::UpdateTransformChild.describe(),
+                        child: other,
+                    }),
+                },
+            )?;
             check_plain_operands(op, &child.schema)?;
             visit(child, s, assignment)
         }
-        SummaryExpr::ExactPostProcess { child, op } => {
+        SummaryExpr::ReadoutPostProcess { child, op } => {
             let s = child_stage(
                 child,
-                PhaseEdge::ExactPostProcessChild,
+                PhaseEdge::ReadoutPostProcessChild,
                 |avail| match avail {
                     ExecutionAvailability::ReadoutValue => Ok(()),
                     other => Err(PhaseError::IllegalChildPhase {
-                        edge: PhaseEdge::ExactPostProcessChild.describe(),
+                        edge: PhaseEdge::ReadoutPostProcessChild.describe(),
                         child: other,
                     }),
                 },
@@ -370,7 +374,7 @@ pub fn assigned_child_stage(parent: &SummaryExpr, child: &SummaryNode) -> Execut
         return avail;
     }
     match parent {
-        SummaryExpr::ExactPostProcess { .. } => ExecutionAvailability::ReadoutValue,
+        SummaryExpr::ReadoutPostProcess { .. } => ExecutionAvailability::ReadoutValue,
         SummaryExpr::KeepPreAsap(_)
         | SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
@@ -378,7 +382,7 @@ pub fn assigned_child_stage(parent: &SummaryExpr, child: &SummaryNode) -> Execut
         | SummaryExpr::SummaryDelete { .. }
         | SummaryExpr::SummaryEstimate { .. }
         | SummaryExpr::SummaryMerge { .. }
-        | SummaryExpr::ExactTransform { .. } => ExecutionAvailability::UpdateValue,
+        | SummaryExpr::UpdateTransform { .. } => ExecutionAvailability::UpdateValue,
     }
 }
 
@@ -403,8 +407,8 @@ fn child_stage(
             let assigned = match edge {
                 PhaseEdge::SummaryAggChild
                 | PhaseEdge::SummaryJoinInput
-                | PhaseEdge::ExactTransformChild => ExecutionAvailability::UpdateValue,
-                PhaseEdge::ExactPostProcessChild => ExecutionAvailability::ReadoutValue,
+                | PhaseEdge::UpdateTransformChild => ExecutionAvailability::UpdateValue,
+                PhaseEdge::ReadoutPostProcessChild => ExecutionAvailability::ReadoutValue,
                 PhaseEdge::SummaryEstimateInput
                 | PhaseEdge::SummarySubtractInput
                 | PhaseEdge::SummaryDeleteInput
@@ -437,7 +441,10 @@ fn state_only(
 /// The exact operator must consume only `Plain` columns of its input: for
 /// an `Aggregate` payload, every grouping key and every measure's input
 /// column.
-fn check_plain_operands(op: &ExactOperator, input: &SummarySchema) -> Result<(), PhaseError> {
+fn check_plain_operands(op: &ValueOperator, input: &SummarySchema) -> Result<(), PhaseError> {
+    let ValueOperator::Exact(op) = op else {
+        return check_all_plain(input);
+    };
     let ExactOperator::Aggregate {
         reduction,
         measures,
@@ -459,6 +466,18 @@ fn check_plain_operands(op: &ExactOperator, input: &SummarySchema) -> Result<(),
         if !(implicit || referenced.contains(&i)) {
             continue;
         }
+        if !matches!(field.dtype, SummaryFamilyType::Plain(_)) {
+            return Err(PhaseError::NonPlainOperand {
+                column: field.name.clone(),
+                dtype: format!("{:?}", field.dtype),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_all_plain(input: &SummarySchema) -> Result<(), PhaseError> {
+    for field in &input.fields {
         if !matches!(field.dtype, SummaryFamilyType::Plain(_)) {
             return Err(PhaseError::NonPlainOperand {
                 column: field.name.clone(),
@@ -506,7 +525,7 @@ pub fn lift_plain(schema: &Schema) -> SummarySchema {
 
 /// Output schema of `op` applied to a child whose edge carries `input` —
 /// the same canonical derivation the pre-ASAP `Aggregate` node uses, so an
-/// `ExactPostProcess`/`ExactTransform` never disagrees with the pre-ASAP
+/// exact `ReadoutPostProcess`/`UpdateTransform` never disagrees with the pre-ASAP
 /// target it was lowered from. `Err` when the child carries non-plain
 /// state the operator cannot read.
 pub fn exact_operator_output_schema(
@@ -670,9 +689,9 @@ mod tests {
     fn post_process_over_readout_is_legal_and_root_is_readout() {
         let inner = estimate(agg(keep(), kll()));
         let root = Rc::new(SummaryNode {
-            expr: SummaryExpr::ExactPostProcess {
+            expr: SummaryExpr::ReadoutPostProcess {
                 child: inner,
-                op: max_op(),
+                op: ValueOperator::Exact(max_op()),
             },
             schema: plain(&["max"]),
             guarantee: None,
@@ -685,12 +704,33 @@ mod tests {
     }
 
     #[test]
+    fn non_exact_operator_uses_the_same_readout_phase_contract() {
+        let inner = estimate(agg(keep(), kll()));
+        let root = Rc::new(SummaryNode {
+            expr: SummaryExpr::ReadoutPostProcess {
+                child: inner,
+                op: ValueOperator::Extension {
+                    name: "approximate_calibration".into(),
+                },
+            },
+            schema: plain(&["calibrated"]),
+            guarantee: None,
+        });
+
+        let assignment = validate_execution_phases(&root).unwrap();
+        assert_eq!(
+            assignment.stage_of(&root),
+            Some(ExecutionAvailability::ReadoutValue)
+        );
+    }
+
+    #[test]
     fn post_process_under_summary_agg_is_rejected() {
         let inner = estimate(agg(keep(), kll()));
         let post = Rc::new(SummaryNode {
-            expr: SummaryExpr::ExactPostProcess {
+            expr: SummaryExpr::ReadoutPostProcess {
                 child: inner,
-                op: max_op(),
+                op: ValueOperator::Exact(max_op()),
             },
             schema: plain(&["max"]),
             guarantee: None,
@@ -708,9 +748,9 @@ mod tests {
     #[test]
     fn transform_under_summary_agg_is_legal_but_not_at_root() {
         let transform = Rc::new(SummaryNode {
-            expr: SummaryExpr::ExactTransform {
+            expr: SummaryExpr::UpdateTransform {
                 child: keep(),
-                op: max_op(),
+                op: ValueOperator::Exact(max_op()),
             },
             schema: plain(&["max"]),
             guarantee: None,
@@ -731,9 +771,9 @@ mod tests {
     fn transform_over_readout_is_rejected() {
         let inner = estimate(agg(keep(), kll()));
         let transform = Rc::new(SummaryNode {
-            expr: SummaryExpr::ExactTransform {
+            expr: SummaryExpr::UpdateTransform {
                 child: inner,
-                op: max_op(),
+                op: ValueOperator::Exact(max_op()),
             },
             schema: plain(&["max"]),
             guarantee: None,
@@ -742,7 +782,7 @@ mod tests {
         assert!(matches!(
             validate_execution_phases(&root),
             Err(PhaseError::IllegalChildPhase {
-                edge: "ExactTransform.child",
+                edge: "UpdateTransform.child",
                 child: ExecutionAvailability::ReadoutValue
             })
         ));
@@ -756,9 +796,9 @@ mod tests {
         let shared = keep();
         let maintained = estimate(agg(Rc::clone(&shared), kll()));
         let post_over_raw = Rc::new(SummaryNode {
-            expr: SummaryExpr::ExactPostProcess {
+            expr: SummaryExpr::ReadoutPostProcess {
                 child: Rc::clone(&shared),
-                op: max_op(),
+                op: ValueOperator::Exact(max_op()),
             },
             schema: plain(&["max"]),
             guarantee: None,
@@ -767,9 +807,9 @@ mod tests {
             expr: SummaryExpr::SummaryMerge {
                 children: vec![
                     Rc::new(SummaryNode {
-                        expr: SummaryExpr::ExactPostProcess {
+                        expr: SummaryExpr::ReadoutPostProcess {
                             child: maintained,
-                            op: max_op(),
+                            op: ValueOperator::Exact(max_op()),
                         },
                         schema: plain(&["max"]),
                         guarantee: None,

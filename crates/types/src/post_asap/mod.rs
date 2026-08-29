@@ -35,7 +35,7 @@ pub mod query_time;
 pub mod schema;
 pub mod sketch;
 
-pub use expr::{ExactOperator, SummaryExpr, SummaryNode};
+pub use expr::{ExactOperator, SummaryExpr, SummaryNode, ValueOperator};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
