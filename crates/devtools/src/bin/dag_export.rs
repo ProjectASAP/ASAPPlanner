@@ -527,7 +527,7 @@ fn run_post_asap_with_progress(
                     return Some(Winner {
                         target: group.target,
                         candidate: chosen,
-                        cost: decision.cost_rate.units_per_second,
+                        cost: decision.cost_rate.0,
                         cost_unit: Some(decision.inputs.unit.as_str()),
                         materialized: Some(materialized),
                         child_target: Some(decision.child_target),
