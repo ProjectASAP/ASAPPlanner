@@ -5,11 +5,12 @@
 //! supplied query and data workloads. Unknown evidence stays unknown and
 //! therefore cannot make a long-lived summary maintenance lifecycle win.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    validate_execution_phases, SummaryExpr, SummaryMaintenanceLifecycle, SummaryNode,
+    produced_availability, validate_execution_phases, ExecutionAvailability, SummaryExpr,
+    SummaryMaintenanceLifecycle, SummaryNode,
 };
 use asap_types::post_asap::{
     EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycleGuarantee,
@@ -240,7 +241,8 @@ fn plan_summary_maintenance_lifecycles_with_profile(
     }
     let mut summaries = Vec::new();
     collect_summary_aggs(&root, &mut HashSet::new(), &mut summaries);
-    let deployments: Vec<SummaryMaintenanceDeployment> = summaries
+    let components = summary_state_components(&summaries);
+    let mut deployments: Vec<SummaryMaintenanceDeployment> = summaries
         .into_iter()
         .enumerate()
         .map(|(summary_index, summary)| {
@@ -251,45 +253,15 @@ fn plan_summary_maintenance_lifecycles_with_profile(
                 cost_model.summary_maintenance_capabilities(&summary),
                 cost_model.summary_maintenance_lifecycle_cost_inputs(&summary),
             );
-            let selected = alternatives
-                .iter()
-                .filter(|candidate| candidate.selectable())
-                .min_by(|a, b| a.total_cost.unwrap().0.total_cmp(&b.total_cost.unwrap().0))
-                .map(|candidate| candidate.summary_maintenance_lifecycle.clone());
-            let evaluation_schedule = selected.as_ref().map(|lifecycle| match lifecycle {
-                SummaryMaintenanceLifecycle::Ephemeral => EvaluationSchedule::OneShot,
-                SummaryMaintenanceLifecycle::Prepared { .. }
-                | SummaryMaintenanceLifecycle::Shared { .. }
-                    if matches!(
-                        facts.arrival,
-                        DataArrival::ContinuouslyIngesting | DataArrival::Mixed
-                    ) =>
-                {
-                    EvaluationSchedule::PerUpdate
-                }
-                SummaryMaintenanceLifecycle::Prepared { .. } => EvaluationSchedule::OneShot,
-                SummaryMaintenanceLifecycle::Shared { .. } => EvaluationSchedule::OnRead,
-                SummaryMaintenanceLifecycle::ContinuouslyMaintained => {
-                    EvaluationSchedule::PerUpdate
-                }
-            });
-            let summary_maintenance_lifecycle_guarantee =
-                selected.map(|summary_maintenance_lifecycle| {
-                    SummaryMaintenanceLifecycleGuarantee {
-                        summary_maintenance_lifecycle,
-                        evaluation_schedule: evaluation_schedule
-                            .expect("a selected lifecycle always has an evaluation schedule"),
-                        output_representation: OutputRepresentation::SummaryState,
-                    }
-                });
             SummaryMaintenanceDeployment {
                 summary_index,
                 summary,
-                summary_maintenance_lifecycle_guarantee,
+                summary_maintenance_lifecycle_guarantee: None,
                 alternatives,
             }
         })
         .collect();
+    select_compatible_lifecycles(&mut deployments, &components, facts.arrival);
     let summary_total_cost = deployments.iter().try_fold(Cost::ZERO, |sum, deployment| {
         let selected = &deployment
             .summary_maintenance_lifecycle_guarantee
@@ -858,6 +830,129 @@ fn collect_summary_aggs(
     }
 }
 
+fn evaluation_schedule(
+    lifecycle: &SummaryMaintenanceLifecycle,
+    arrival: DataArrival,
+) -> EvaluationSchedule {
+    match lifecycle {
+        SummaryMaintenanceLifecycle::Ephemeral => EvaluationSchedule::OneShot,
+        SummaryMaintenanceLifecycle::Prepared { .. }
+        | SummaryMaintenanceLifecycle::Shared { .. }
+            if matches!(
+                arrival,
+                DataArrival::ContinuouslyIngesting | DataArrival::Mixed
+            ) =>
+        {
+            EvaluationSchedule::PerUpdate
+        }
+        SummaryMaintenanceLifecycle::Prepared { .. } => EvaluationSchedule::OneShot,
+        SummaryMaintenanceLifecycle::Shared { .. } => EvaluationSchedule::OnRead,
+        SummaryMaintenanceLifecycle::ContinuouslyMaintained => EvaluationSchedule::PerUpdate,
+    }
+}
+
+/// Summary states composed on one maintenance path must be produced on the
+/// same schedule. Return a component id for each collected `SummaryAgg`.
+fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
+    let indices: HashMap<_, _> = summaries
+        .iter()
+        .enumerate()
+        .map(|(index, summary)| (Rc::as_ptr(summary), index))
+        .collect();
+    let mut parents: Vec<_> = (0..summaries.len()).collect();
+
+    fn find(parents: &mut [usize], index: usize) -> usize {
+        if parents[index] != index {
+            parents[index] = find(parents, parents[index]);
+        }
+        parents[index]
+    }
+
+    for (parent_index, summary) in summaries.iter().enumerate() {
+        let SummaryExpr::SummaryAgg { child, .. } = &summary.expr else {
+            continue;
+        };
+        if produced_availability(&child.expr) != Some(ExecutionAvailability::SummaryState) {
+            continue;
+        }
+        let mut descendants = Vec::new();
+        collect_summary_aggs(child, &mut HashSet::new(), &mut descendants);
+        for descendant in descendants {
+            let child_index = indices[&Rc::as_ptr(&descendant)];
+            let parent_root = find(&mut parents, parent_index);
+            let child_root = find(&mut parents, child_index);
+            parents[child_root] = parent_root;
+        }
+    }
+    (0..parents.len())
+        .map(|index| find(&mut parents, index))
+        .collect()
+}
+
+fn select_compatible_lifecycles(
+    deployments: &mut [SummaryMaintenanceDeployment],
+    components: &[usize],
+    arrival: DataArrival,
+) {
+    let component_ids: HashSet<_> = components.iter().copied().collect();
+    for component in component_ids {
+        let members: Vec<_> = components
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &id)| (id == component).then_some(index))
+            .collect();
+        let selected_schedule = [
+            EvaluationSchedule::OneShot,
+            EvaluationSchedule::PerUpdate,
+            EvaluationSchedule::OnRead,
+        ]
+        .into_iter()
+        .filter_map(|schedule| {
+            members
+                .iter()
+                .try_fold(0.0, |sum, &index| {
+                    deployments[index]
+                        .alternatives
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.selectable()
+                                && evaluation_schedule(
+                                    &candidate.summary_maintenance_lifecycle,
+                                    arrival,
+                                ) == schedule
+                        })
+                        .map(|candidate| candidate.total_cost.unwrap().0)
+                        .min_by(f64::total_cmp)
+                        .map(|cost| sum + cost)
+                })
+                .map(|cost| (schedule, cost))
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(schedule, _)| schedule);
+
+        let Some(schedule) = selected_schedule else {
+            continue;
+        };
+        for index in members {
+            let selected = deployments[index]
+                .alternatives
+                .iter()
+                .filter(|candidate| {
+                    candidate.selectable()
+                        && evaluation_schedule(&candidate.summary_maintenance_lifecycle, arrival)
+                            == schedule
+                })
+                .min_by(|a, b| a.total_cost.unwrap().0.total_cmp(&b.total_cost.unwrap().0));
+            deployments[index].summary_maintenance_lifecycle_guarantee =
+                selected.map(|candidate| SummaryMaintenanceLifecycleGuarantee {
+                    summary_maintenance_lifecycle: candidate.summary_maintenance_lifecycle.clone(),
+                    evaluation_schedule: schedule,
+                    output_representation: OutputRepresentation::SummaryState,
+                });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1001,6 +1096,47 @@ mod tests {
         }
     }
 
+    struct IncompatibleNestedCosts;
+
+    impl CostModel for IncompatibleNestedCosts {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            candidates.to_vec()
+        }
+
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            summary: &SummaryNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            let is_leaf = matches!(
+                summary.expr,
+                SummaryExpr::SummaryAgg { ref child, .. }
+                    if matches!(child.expr, SummaryExpr::KeepPreAsap(_))
+            );
+            SummaryMaintenanceLifecycleCostInputs {
+                build_cost: Some(Cost(if is_leaf { 1.0 } else { 100.0 })),
+                maintenance_cost_per_update: Some(Cost(if is_leaf { 100.0 } else { 0.0 })),
+                summary_read_cost: Some(Cost::ZERO),
+                retention_cost_rate: Some(CostRate(0.0)),
+                retirement_cost: Some(Cost::ZERO),
+            }
+        }
+
+        fn summary_maintenance_capabilities(
+            &self,
+            _summary: &SummaryNode,
+        ) -> SummaryMaintenanceCapabilities {
+            SummaryMaintenanceCapabilities {
+                incremental_update: true,
+                merge: true,
+                delete: true,
+            }
+        }
+    }
+
     fn sketch_algorithm(node: &SummaryNode) -> Option<SketchAlgorithm> {
         match &node.expr {
             SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_algorithm(summary_input),
@@ -1084,6 +1220,29 @@ mod tests {
                 time_index: None,
             },
             guarantee: Some(ResultGuarantee::exact("sum")),
+        })
+    }
+
+    fn nested_summary() -> Rc<SummaryNode> {
+        let child = summary();
+        let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryAgg {
+                child,
+                family: family.clone(),
+                col: ColumnRef::Named("state".into()),
+                reduction: Reduction::by(vec![]),
+                grouping: GroupingStrategy::default(),
+            },
+            schema: SummarySchema {
+                fields: vec![SummaryField {
+                    name: "state".into(),
+                    dtype: family,
+                    nullable: false,
+                }],
+                time_index: None,
+            },
+            guarantee: Some(ResultGuarantee::exact("nested sum")),
         })
     }
 
@@ -1202,6 +1361,34 @@ mod tests {
         let prepared = &plan.deployments[0].alternatives[1];
         assert!(prepared.rejection.is_none());
         assert_eq!(prepared.total_cost, Some(Cost(13.0)));
+    }
+
+    #[test]
+    fn nested_summary_lifecycles_have_compatible_evaluation_schedules() {
+        let workload = workload(vec![], vec![repeating()], continuous(1_000, 20_000));
+        let plan = plan_summary_maintenance_lifecycles(
+            nested_summary(),
+            WorkloadDemand::new(&workload, &[0]),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &IncompatibleNestedCosts,
+        )
+        .unwrap();
+
+        assert_eq!(plan.deployments.len(), 2);
+        let schedules: HashSet<_> = plan
+            .deployments
+            .iter()
+            .map(|deployment| {
+                deployment
+                    .summary_maintenance_lifecycle_guarantee
+                    .as_ref()
+                    .unwrap()
+                    .evaluation_schedule
+            })
+            .collect();
+        assert_eq!(schedules.len(), 1);
     }
 
     #[test]
