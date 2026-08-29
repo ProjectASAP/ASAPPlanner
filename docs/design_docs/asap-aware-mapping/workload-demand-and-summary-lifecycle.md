@@ -3,9 +3,10 @@
 ## Audience and context
 
 This document is for ASAPPlanner designers, architects, researchers, and
-developers working on workload-aware plan selection. It defines how the planner
-should describe query demand, data workload, and the lifecycle of summary state.
-It is a design contract, not a description of the current public Rust API.
+developers working on workload-aware plan selection. It defines how the
+planner should describe query workload, data workload, and the lifecycle of
+summary state. It is a design contract, not a description of the current
+public Rust API.
 
 The terminology follows the ProjectASAP
 [glossary](https://github.com/ProjectASAP/internal-docs/blob/03e1c70f5af3ae9221471898541067eee7f86338/glossary.md).
@@ -66,7 +67,7 @@ the demand and data evidence used in the decision.
 
 ```text
 logical queries + requirements
-             query demand -----+
+           query workload -----+
               data workload ---+--> candidate plans
         available summaries ---+       -> semantic and accuracy legality
                                          -> lifecycle alternatives
@@ -108,7 +109,7 @@ an explicit horizon.
 ## Heilmeier questions
 
 - **What are we trying to do?** Choose whether summary state should be built,
-  maintained, shared, reused, or avoided for different kinds of query demand
+  maintained, shared, reused, or avoided for different query workloads
   and data workload.
 - **How is it done today, and what are the limits?** The planner distinguishes
   one-shot counts, fixed repeating intervals, and an ingest-rate proxy. It
@@ -136,8 +137,8 @@ an explicit horizon.
 | --- | --- | --- |
 | Query meaning | Pre-ASAP query IR | Workload metadata must not change semantics |
 | Accuracy and latency requirement | Per-query requirements | Requirements belong to the requested result |
-| Query demand | Workload input | Arrival and recurrence are not inferable from syntax |
-| Data workload | Workload input | Ingestion and distribution describe the data, not query demand |
+| Query workload | Workload input | Arrival and recurrence are not inferable from syntax |
+| Data workload | Workload input | Ingestion and distribution describe the data, not query workload |
 | Summary capability | Summary properties | Merge, delete, and update support constrain legal lifecycles |
 | State lifecycle | Physical planning decision | Lifecycle is selected, not declared by `SummaryAgg` |
 | Cost | Cost model and explanation | Cost consumes all inputs but does not define their meaning |

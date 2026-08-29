@@ -91,8 +91,8 @@ The design is split into focused documents:
 - [End-to-end accuracy guarantees](end-to-end-accuracy-guarantees.md) specifies the typed
   guarantee IR, sketch contracts, composition rules, target checking, and fail-closed boundaries.
 - [Query workloads, data workloads, and summary lifecycle maintenance](workload-demand-and-summary-lifecycle.md) separates
-  query demand from data workload and defines ephemeral, prepared, shared, and continuously
-  maintained summary-state alternatives.
+  query-workload properties from data-workload properties and defines ephemeral, prepared,
+  shared, and continuously maintained summary-state alternatives.
 - [Explainability](explainability.md) describes how the planner reports available replacements
   using the same candidate space it optimizes.
 
