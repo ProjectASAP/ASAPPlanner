@@ -30,7 +30,7 @@
 pub mod execution_data_state;
 pub mod expr;
 pub mod guarantee;
-pub mod lifecycle;
+pub mod summary_maintenance_lifecycle;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;
@@ -46,7 +46,10 @@ pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
 };
-pub use lifecycle::{EvaluationSchedule, OutputRepresentation, StateLifecycle};
+pub use summary_maintenance_lifecycle::{
+    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee,
+};
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,
     cu_sketch_posterior_error_bound, traditional_a_priori_bound,

@@ -1,15 +1,20 @@
-//! Workload-aware physical lifecycle planning for summary state.
+//! Workload-aware physical summary-maintenance lifecycle planning.
 //!
 //! Phase validation from PR #300 answers whether a post-ASAP DAG can execute.
 //! This module answers how each unique `SummaryAgg` state is deployed for the
 //! supplied query and data workloads. Unknown evidence stays unknown and
-//! therefore cannot make a long-lived lifecycle win.
+//! therefore cannot make a long-lived summary maintenance lifecycle win.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use asap_types::post_asap::{validate_execution_phases, StateLifecycle, SummaryExpr, SummaryNode};
-use asap_types::post_asap::{EvaluationSchedule, OutputRepresentation};
+use asap_types::post_asap::{
+    produced_availability, validate_execution_phases, ExecutionAvailability, SummaryExpr,
+    SummaryMaintenanceLifecycle, SummaryNode,
+};
+use asap_types::post_asap::{
+    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycleGuarantee,
+};
 use asap_types::pre_asap::QueryExpr;
 use asap_types::workload::{
     DataArrival, Predictability, QueryRecurrence, QueryWorkload, RepeatedDemand, TimestampMs,
@@ -17,12 +22,16 @@ use asap_types::workload::{
 };
 
 use crate::cost_model::{Cost, CostModel};
-use crate::recurrence::{CostRate, EvaluationRate, Horizon, UpdateRate};
-use crate::replacement::{GlobalSelection, ImplementError};
+use crate::recurrence::{
+    CostRate, EvaluationRate, Horizon, RecurrenceError, RecurrenceProfile, UpdateRate,
+};
+use crate::replacement::{
+    CandidateCostOverrides, GlobalSelection, ImplementError, PlanSpace, Replacement,
+};
 
-/// Runtime lifecycle shapes available to the planner.
+/// Summary maintenance lifecycle shapes available to the runtime planner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LifecycleCapabilities {
+pub struct SummaryMaintenanceLifecycleCapabilities {
     pub ephemeral: bool,
     pub prepared: bool,
     pub shared: bool,
@@ -31,13 +40,13 @@ pub struct LifecycleCapabilities {
 
 /// Capabilities of one concrete summary family/state representation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SummaryLifecycleCapabilities {
+pub struct SummaryMaintenanceCapabilities {
     pub incremental_update: bool,
     pub merge: bool,
     pub delete: bool,
 }
 
-impl LifecycleCapabilities {
+impl SummaryMaintenanceLifecycleCapabilities {
     pub const ALL: Self = Self {
         ephemeral: true,
         prepared: true,
@@ -46,7 +55,7 @@ impl LifecycleCapabilities {
     };
 }
 
-impl Default for LifecycleCapabilities {
+impl Default for SummaryMaintenanceLifecycleCapabilities {
     fn default() -> Self {
         Self::ALL
     }
@@ -55,7 +64,7 @@ impl Default for LifecycleCapabilities {
 /// Primitive costs for one concrete summary state. Every field is optional:
 /// missing statistics produce an uncosted alternative, never a zero.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct LifecycleCostInputs {
+pub struct SummaryMaintenanceLifecycleCostInputs {
     pub build_cost: Option<Cost>,
     pub maintenance_cost_per_update: Option<Cost>,
     pub summary_read_cost: Option<Cost>,
@@ -64,7 +73,7 @@ pub struct LifecycleCostInputs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LifecycleRejection {
+pub enum SummaryMaintenanceLifecycleRejection {
     UnsupportedByRuntime,
     RequiresPredictableOneTimeQuery,
     RequiresMultipleReads,
@@ -77,14 +86,14 @@ pub enum LifecycleRejection {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LifecycleAlternative {
-    pub lifecycle: StateLifecycle,
+pub struct SummaryMaintenanceLifecycleAlternative {
+    pub summary_maintenance_lifecycle: SummaryMaintenanceLifecycle,
     pub total_cost: Option<Cost>,
-    pub rejection: Option<LifecycleRejection>,
+    pub rejection: Option<SummaryMaintenanceLifecycleRejection>,
     pub assumptions: Vec<String>,
 }
 
-impl LifecycleAlternative {
+impl SummaryMaintenanceLifecycleAlternative {
     fn selectable(&self) -> bool {
         self.rejection.is_none() && self.total_cost.is_some()
     }
@@ -92,19 +101,17 @@ impl LifecycleAlternative {
 
 /// One unique summary-state deployment. Shared `Rc` nodes are emitted once.
 #[derive(Debug, Clone)]
-pub struct StateDeployment {
+pub struct SummaryMaintenanceDeployment {
     pub summary_index: usize,
     pub summary: Rc<SummaryNode>,
-    pub selected: Option<StateLifecycle>,
-    pub evaluation_schedule: Option<EvaluationSchedule>,
-    pub output_representation: OutputRepresentation,
-    pub alternatives: Vec<LifecycleAlternative>,
+    pub summary_maintenance_lifecycle_guarantee: Option<SummaryMaintenanceLifecycleGuarantee>,
+    pub alternatives: Vec<SummaryMaintenanceLifecycleAlternative>,
 }
 
 #[derive(Debug, Clone)]
-pub struct LifecyclePlan {
+pub struct SummaryMaintenanceLifecyclePlan {
     pub root: Rc<SummaryNode>,
-    pub deployments: Vec<StateDeployment>,
+    pub deployments: Vec<SummaryMaintenanceDeployment>,
     pub horizon: Option<Horizon>,
     pub evaluation_rate: Option<EvaluationRate>,
     pub update_rate: Option<UpdateRate>,
@@ -132,7 +139,7 @@ impl<'a> WorkloadDemand<'a> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum LifecyclePlanError {
+pub enum SummaryMaintenanceLifecyclePlanError {
     #[error(transparent)]
     InvalidWorkload(#[from] WorkloadError),
     #[error(transparent)]
@@ -148,11 +155,21 @@ pub enum LifecyclePlanError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum MaterializeLifecycleError {
+pub enum MaterializeSummaryMaintenanceLifecycleError {
     #[error(transparent)]
     Materialize(#[from] ImplementError),
     #[error(transparent)]
-    Lifecycle(#[from] LifecyclePlanError),
+    SummaryMaintenance(#[from] SummaryMaintenanceLifecyclePlanError),
+}
+
+/// Failure while deriving workload-aware candidate costs before global
+/// selection.
+#[derive(Debug, thiserror::Error)]
+pub enum SummaryMaintenanceLifecycleSelectionError {
+    #[error(transparent)]
+    Recurrence(#[from] RecurrenceError),
+    #[error(transparent)]
+    SummaryMaintenance(#[from] SummaryMaintenanceLifecyclePlanError),
 }
 
 #[derive(Debug)]
@@ -170,23 +187,62 @@ struct WorkloadFacts {
 /// Validate a materialized plan, enumerate lifecycle alternatives for each
 /// unique summary state, and select the cheapest legal alternative whose cost
 /// is fully known.
-pub fn plan_summary_lifecycles(
+pub fn plan_summary_maintenance_lifecycles(
     root: Rc<SummaryNode>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
-    capabilities: LifecycleCapabilities,
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
-) -> Result<LifecyclePlan, LifecyclePlanError> {
+) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError> {
+    plan_summary_maintenance_lifecycles_with_profile(
+        root,
+        demand,
+        now_ms,
+        horizon,
+        capabilities,
+        cost_model,
+        None,
+    )
+}
+
+/// Internal candidate-costing form. The workload binding supplies temporal
+/// eligibility and data-arrival facts; `profile` supplies effective uses after
+/// DAG path multiplicity has been propagated by `PlanSpace`.
+fn plan_summary_maintenance_lifecycles_with_profile(
+    root: Rc<SummaryNode>,
+    demand: WorkloadDemand<'_>,
+    now_ms: u64,
+    horizon: Option<Horizon>,
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    cost_model: &dyn CostModel,
+    profile: Option<RecurrenceProfile>,
+) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError> {
     demand.workload.validate()?;
     validate_execution_phases(&root)?;
     if horizon.is_some_and(|h| !h.0.is_finite() || h.0 <= 0.0) {
-        return Err(LifecyclePlanError::InvalidHorizon);
+        return Err(SummaryMaintenanceLifecyclePlanError::InvalidHorizon);
     }
-    let facts = workload_facts(demand.workload, demand.entry_indices, now_ms, horizon)?;
+    let mut facts = workload_facts(demand.workload, demand.entry_indices, now_ms, horizon)?;
+    if let Some(profile) = profile {
+        facts.one_time_invocations = u64::try_from(profile.one_shot_consumers).unwrap_or(u64::MAX);
+        facts.evaluation_rate = profile.evaluation_rate;
+        facts.update_rate = profile.update_rate;
+        facts.reads = match (profile.evaluation_rate, horizon) {
+            (Some(rate), Some(horizon)) => {
+                Some(profile.one_shot_consumers as f64 + rate.0 * horizon.0)
+            }
+            (Some(_), None) => None,
+            (None, _) if profile.one_shot_consumers > 0 => Some(profile.one_shot_consumers as f64),
+            // Preserve unknown recurrence from the normalized workload. An
+            // empty profile does not prove that the target is never read.
+            (None, _) => facts.reads,
+        };
+    }
     let mut summaries = Vec::new();
     collect_summary_aggs(&root, &mut HashSet::new(), &mut summaries);
-    let deployments: Vec<StateDeployment> = summaries
+    let components = summary_state_components(&summaries);
+    let mut deployments: Vec<SummaryMaintenanceDeployment> = summaries
         .into_iter()
         .enumerate()
         .map(|(summary_index, summary)| {
@@ -194,48 +250,31 @@ pub fn plan_summary_lifecycles(
                 &facts,
                 horizon,
                 capabilities,
-                cost_model.summary_lifecycle_capabilities(&summary),
-                cost_model.summary_lifecycle_cost_inputs(&summary),
+                cost_model.summary_maintenance_capabilities(&summary),
+                cost_model.summary_maintenance_lifecycle_cost_inputs(&summary),
             );
-            let selected = alternatives
-                .iter()
-                .filter(|candidate| candidate.selectable())
-                .min_by(|a, b| a.total_cost.unwrap().0.total_cmp(&b.total_cost.unwrap().0))
-                .map(|candidate| candidate.lifecycle.clone());
-            let evaluation_schedule = selected.as_ref().map(|lifecycle| match lifecycle {
-                StateLifecycle::Ephemeral => EvaluationSchedule::OneShot,
-                StateLifecycle::Prepared { .. } | StateLifecycle::Shared { .. }
-                    if matches!(
-                        facts.arrival,
-                        DataArrival::ContinuouslyIngesting | DataArrival::Mixed
-                    ) =>
-                {
-                    EvaluationSchedule::PerUpdate
-                }
-                StateLifecycle::Prepared { .. } => EvaluationSchedule::OneShot,
-                StateLifecycle::Shared { .. } => EvaluationSchedule::OnRead,
-                StateLifecycle::ContinuouslyMaintained => EvaluationSchedule::PerUpdate,
-            });
-            StateDeployment {
+            SummaryMaintenanceDeployment {
                 summary_index,
                 summary,
-                selected,
-                evaluation_schedule,
-                output_representation: OutputRepresentation::SummaryState,
+                summary_maintenance_lifecycle_guarantee: None,
                 alternatives,
             }
         })
         .collect();
+    select_compatible_lifecycles(&mut deployments, &components, facts.arrival);
     let summary_total_cost = deployments.iter().try_fold(Cost::ZERO, |sum, deployment| {
-        let selected = deployment.selected.as_ref()?;
+        let selected = &deployment
+            .summary_maintenance_lifecycle_guarantee
+            .as_ref()?
+            .summary_maintenance_lifecycle;
         let cost = deployment
             .alternatives
             .iter()
-            .find(|alternative| &alternative.lifecycle == selected)?
+            .find(|alternative| &alternative.summary_maintenance_lifecycle == selected)?
             .total_cost?;
         Some(Cost(sum.0 + cost.0))
     });
-    Ok(LifecyclePlan {
+    Ok(SummaryMaintenanceLifecyclePlan {
         root,
         deployments,
         horizon,
@@ -248,22 +287,77 @@ pub fn plan_summary_lifecycles(
     })
 }
 
-/// Materialize PR #300's globally selected phase-valid DAG and immediately
-/// attach workload-aware lifecycle deployments.
-pub fn materialize_with_lifecycles(
+/// Rank semantic summary siblings using the cheapest legal
+/// summary-maintenance lifecycle for each candidate before final global
+/// selection. The candidate space stays compact; only cost overrides are
+/// attached, so shared `Rc` identity and exact-composition commitments remain
+/// the responsibility of `GlobalSelection`.
+pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
+    space: &'a PlanSpace<Id>,
+    workload: &QueryWorkload,
+    root_workload_entries: &[usize],
+    now_ms: u64,
+    horizon: Option<Horizon>,
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    cost_model: &dyn CostModel,
+) -> Result<GlobalSelection<'a>, SummaryMaintenanceLifecycleSelectionError> {
+    let profiles = space.recurrence_profiles_from_workload(
+        workload,
+        root_workload_entries,
+        now_ms,
+        horizon,
+    )?;
+    let bindings = space.workload_entries_by_target(workload, root_workload_entries)?;
+    let mut costs = CandidateCostOverrides::default();
+    for group in space.groups() {
+        let Some(entry_indices) = bindings.get(&Rc::as_ptr(&group.target)) else {
+            continue;
+        };
+        for candidate in &group.candidates {
+            let Replacement::Summary(summary) = &candidate.replacement else {
+                continue;
+            };
+            let plan = plan_summary_maintenance_lifecycles_with_profile(
+                Rc::clone(summary),
+                WorkloadDemand::new(workload, entry_indices),
+                now_ms,
+                horizon,
+                capabilities,
+                cost_model,
+                Some(profiles.for_target(&group.target)),
+            )?;
+            if !plan.deployments.is_empty() {
+                if let Some(total) = plan.summary_total_cost {
+                    costs.insert(&group.target, candidate, total);
+                }
+            }
+        }
+    }
+    Ok(space.global_selection_with_candidate_costs(cost_model, &profiles, horizon, &costs)?)
+}
+
+/// Materialize a globally selected phase-valid DAG and immediately attach
+/// workload-aware summary maintenance deployments.
+pub fn materialize_with_summary_maintenance_lifecycles(
     selection: &GlobalSelection<'_>,
     target: &Rc<QueryExpr>,
     demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
-    capabilities: LifecycleCapabilities,
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
-) -> Result<Option<LifecyclePlan>, MaterializeLifecycleError> {
+) -> Result<Option<SummaryMaintenanceLifecyclePlan>, MaterializeSummaryMaintenanceLifecycleError> {
     selection
         .materialize(target)?
         .map(|root| {
-            let mut plan =
-                plan_summary_lifecycles(root, demand, now_ms, horizon, capabilities, cost_model)?;
+            let mut plan = plan_summary_maintenance_lifecycles(
+                root,
+                demand,
+                now_ms,
+                horizon,
+                capabilities,
+                cost_model,
+            )?;
             plan.raw_recompute_total_cost = cost_model
                 .raw_query_recompute_cost(target)
                 .zip(plan.expected_reads)
@@ -286,7 +380,7 @@ fn workload_facts(
     workload_entry_indices: &[usize],
     now_ms: u64,
     horizon: Option<Horizon>,
-) -> Result<WorkloadFacts, LifecyclePlanError> {
+) -> Result<WorkloadFacts, SummaryMaintenanceLifecyclePlanError> {
     let mut one_time_invocations = 0u64;
     let mut recurring_reads = 0.0;
     let mut recurring_known = true;
@@ -299,19 +393,19 @@ fn workload_facts(
 
     let entries: Vec<_> = workload.entries().collect();
     if workload_entry_indices.is_empty() {
-        return Err(LifecyclePlanError::EmptyWorkloadDemand);
+        return Err(SummaryMaintenanceLifecyclePlanError::EmptyWorkloadDemand);
     }
     let mut seen_indices = HashSet::new();
     for &index in workload_entry_indices {
         if !seen_indices.insert(index) {
-            return Err(LifecyclePlanError::DuplicateWorkloadEntry { index });
+            return Err(SummaryMaintenanceLifecyclePlanError::DuplicateWorkloadEntry { index });
         }
-        let entry = entries
-            .get(index)
-            .ok_or(LifecyclePlanError::InvalidWorkloadEntry {
+        let entry = entries.get(index).ok_or(
+            SummaryMaintenanceLifecyclePlanError::InvalidWorkloadEntry {
                 index,
                 entry_count: entries.len(),
-            })?;
+            },
+        )?;
         requires_deletion |= entry.time_selection.lookback.is_some()
             && entry.time_selection.as_of.is_none()
             && matches!(
@@ -427,10 +521,10 @@ fn workload_facts(
 fn alternatives_for(
     facts: &WorkloadFacts,
     horizon: Option<Horizon>,
-    capabilities: LifecycleCapabilities,
-    summary_capabilities: SummaryLifecycleCapabilities,
-    costs: LifecycleCostInputs,
-) -> Vec<LifecycleAlternative> {
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    summary_capabilities: SummaryMaintenanceCapabilities,
+    costs: SummaryMaintenanceLifecycleCostInputs,
+) -> Vec<SummaryMaintenanceLifecycleAlternative> {
     let alternatives = vec![
         ephemeral(facts, capabilities, &costs),
         prepared(facts, capabilities, summary_capabilities, &costs),
@@ -442,12 +536,15 @@ fn alternatives_for(
 
 fn ephemeral(
     facts: &WorkloadFacts,
-    capabilities: LifecycleCapabilities,
-    costs: &LifecycleCostInputs,
-) -> LifecycleAlternative {
-    let lifecycle = StateLifecycle::Ephemeral;
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
+) -> SummaryMaintenanceLifecycleAlternative {
+    let lifecycle = SummaryMaintenanceLifecycle::Ephemeral;
     if !capabilities.ephemeral {
-        return rejected(lifecycle, LifecycleRejection::UnsupportedByRuntime);
+        return rejected(
+            lifecycle,
+            SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime,
+        );
     }
     let total_cost = zip_costs(&[
         costs.build_cost,
@@ -465,34 +562,37 @@ fn ephemeral(
 
 fn prepared(
     facts: &WorkloadFacts,
-    capabilities: LifecycleCapabilities,
-    summary_capabilities: SummaryLifecycleCapabilities,
-    costs: &LifecycleCostInputs,
-) -> LifecycleAlternative {
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    summary_capabilities: SummaryMaintenanceCapabilities,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
+) -> SummaryMaintenanceLifecycleAlternative {
     if !facts.prepared_eligible {
         return rejected(
-            StateLifecycle::Prepared {
+            SummaryMaintenanceLifecycle::Prepared {
                 activate_at: TimestampMs(0),
                 retire_at: TimestampMs(0),
             },
-            LifecycleRejection::RequiresPredictableOneTimeQuery,
+            SummaryMaintenanceLifecycleRejection::RequiresPredictableOneTimeQuery,
         );
     }
     let Some((activate_at, retire_at)) = facts.prepared_window else {
         return rejected(
-            StateLifecycle::Prepared {
+            SummaryMaintenanceLifecycle::Prepared {
                 activate_at: TimestampMs(0),
                 retire_at: TimestampMs(0),
             },
-            LifecycleRejection::RequiresPredictableOneTimeQuery,
+            SummaryMaintenanceLifecycleRejection::RequiresPredictableOneTimeQuery,
         );
     };
-    let lifecycle = StateLifecycle::Prepared {
+    let lifecycle = SummaryMaintenanceLifecycle::Prepared {
         activate_at,
         retire_at,
     };
     if !capabilities.prepared {
-        return rejected(lifecycle, LifecycleRejection::UnsupportedByRuntime);
+        return rejected(
+            lifecycle,
+            SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime,
+        );
     }
     if let Some(rejection) = maintenance_capability_rejection(facts, summary_capabilities) {
         return rejected(lifecycle, rejection);
@@ -525,24 +625,33 @@ fn prepared(
 fn shared(
     facts: &WorkloadFacts,
     horizon: Option<Horizon>,
-    capabilities: LifecycleCapabilities,
-    summary_capabilities: SummaryLifecycleCapabilities,
-    costs: &LifecycleCostInputs,
-) -> LifecycleAlternative {
-    let lifecycle = StateLifecycle::Shared {
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    summary_capabilities: SummaryMaintenanceCapabilities,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
+) -> SummaryMaintenanceLifecycleAlternative {
+    let lifecycle = SummaryMaintenanceLifecycle::Shared {
         retention: asap_types::workload::DurationMs(horizon.map_or(0, |h| (h.0 * 1000.0) as u64)),
     };
     if !capabilities.shared {
-        return rejected(lifecycle, LifecycleRejection::UnsupportedByRuntime);
+        return rejected(
+            lifecycle,
+            SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime,
+        );
     }
     if let Some(rejection) = maintenance_capability_rejection(facts, summary_capabilities) {
         return rejected(lifecycle, rejection);
     }
     if facts.reads.is_none_or(|reads| reads <= 1.0) {
-        return rejected(lifecycle, LifecycleRejection::RequiresMultipleReads);
+        return rejected(
+            lifecycle,
+            SummaryMaintenanceLifecycleRejection::RequiresMultipleReads,
+        );
     }
     let Some(horizon) = horizon else {
-        return rejected(lifecycle, LifecycleRejection::RequiresHorizon);
+        return rejected(
+            lifecycle,
+            SummaryMaintenanceLifecycleRejection::RequiresHorizon,
+        );
     };
     let total_cost = retained_cost(facts, costs, horizon.0);
     costed_or_unknown(
@@ -555,28 +664,40 @@ fn shared(
 fn continuous(
     facts: &WorkloadFacts,
     horizon: Option<Horizon>,
-    capabilities: LifecycleCapabilities,
-    summary_capabilities: SummaryLifecycleCapabilities,
-    costs: &LifecycleCostInputs,
-) -> LifecycleAlternative {
-    let lifecycle = StateLifecycle::ContinuouslyMaintained;
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    summary_capabilities: SummaryMaintenanceCapabilities,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
+) -> SummaryMaintenanceLifecycleAlternative {
+    let lifecycle = SummaryMaintenanceLifecycle::ContinuouslyMaintained;
     if !capabilities.continuously_maintained {
-        return rejected(lifecycle, LifecycleRejection::UnsupportedByRuntime);
+        return rejected(
+            lifecycle,
+            SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime,
+        );
     }
     if !matches!(
         facts.arrival,
         DataArrival::ContinuouslyIngesting | DataArrival::Mixed
     ) {
-        return rejected(lifecycle, LifecycleRejection::RequiresContinuousData);
+        return rejected(
+            lifecycle,
+            SummaryMaintenanceLifecycleRejection::RequiresContinuousData,
+        );
     }
     if facts.update_rate.is_none() {
-        return rejected(lifecycle, LifecycleRejection::MissingOrStaleIngestionRate);
+        return rejected(
+            lifecycle,
+            SummaryMaintenanceLifecycleRejection::MissingOrStaleIngestionRate,
+        );
     }
     if let Some(rejection) = maintenance_capability_rejection(facts, summary_capabilities) {
         return rejected(lifecycle, rejection);
     }
     let Some(horizon) = horizon else {
-        return rejected(lifecycle, LifecycleRejection::RequiresHorizon);
+        return rejected(
+            lifecycle,
+            SummaryMaintenanceLifecycleRejection::RequiresHorizon,
+        );
     };
     let total_cost = retained_cost(facts, costs, horizon.0);
     costed_or_unknown(
@@ -588,27 +709,31 @@ fn continuous(
 
 fn maintenance_capability_rejection(
     facts: &WorkloadFacts,
-    capabilities: SummaryLifecycleCapabilities,
-) -> Option<LifecycleRejection> {
+    capabilities: SummaryMaintenanceCapabilities,
+) -> Option<SummaryMaintenanceLifecycleRejection> {
     if matches!(
         facts.arrival,
         DataArrival::ContinuouslyIngesting | DataArrival::Mixed
     ) && !capabilities.incremental_update
     {
-        Some(LifecycleRejection::SummaryDoesNotSupportIncrementalUpdates)
+        Some(SummaryMaintenanceLifecycleRejection::SummaryDoesNotSupportIncrementalUpdates)
     } else if matches!(
         facts.arrival,
         DataArrival::ContinuouslyIngesting | DataArrival::Mixed
     ) && facts.requires_deletion
         && !capabilities.delete
     {
-        Some(LifecycleRejection::SummaryDoesNotSupportDeletion)
+        Some(SummaryMaintenanceLifecycleRejection::SummaryDoesNotSupportDeletion)
     } else {
         None
     }
 }
 
-fn retained_cost(facts: &WorkloadFacts, costs: &LifecycleCostInputs, seconds: f64) -> Option<Cost> {
+fn retained_cost(
+    facts: &WorkloadFacts,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
+    seconds: f64,
+) -> Option<Cost> {
     let reads = facts.reads?;
     let maintenance = maintenance_cost(facts, costs, seconds)?;
     Some(Cost(
@@ -622,7 +747,7 @@ fn retained_cost(facts: &WorkloadFacts, costs: &LifecycleCostInputs, seconds: f6
 
 fn maintenance_cost(
     facts: &WorkloadFacts,
-    costs: &LifecycleCostInputs,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
     seconds: f64,
 ) -> Option<f64> {
     match facts.arrival {
@@ -641,23 +766,26 @@ fn zip_costs(costs: &[Option<Cost>]) -> Option<f64> {
 }
 
 fn costed_or_unknown(
-    lifecycle: StateLifecycle,
+    summary_maintenance_lifecycle: SummaryMaintenanceLifecycle,
     total_cost: Option<Cost>,
     assumptions: Vec<String>,
-) -> LifecycleAlternative {
-    LifecycleAlternative {
-        lifecycle,
+) -> SummaryMaintenanceLifecycleAlternative {
+    SummaryMaintenanceLifecycleAlternative {
+        summary_maintenance_lifecycle,
         total_cost,
         rejection: total_cost
             .is_none()
-            .then_some(LifecycleRejection::MissingCostEvidence),
+            .then_some(SummaryMaintenanceLifecycleRejection::MissingCostEvidence),
         assumptions,
     }
 }
 
-fn rejected(lifecycle: StateLifecycle, rejection: LifecycleRejection) -> LifecycleAlternative {
-    LifecycleAlternative {
-        lifecycle,
+fn rejected(
+    summary_maintenance_lifecycle: SummaryMaintenanceLifecycle,
+    rejection: SummaryMaintenanceLifecycleRejection,
+) -> SummaryMaintenanceLifecycleAlternative {
+    SummaryMaintenanceLifecycleAlternative {
+        summary_maintenance_lifecycle,
         total_cost: None,
         rejection: Some(rejection),
         assumptions: Vec::new(),
@@ -702,15 +830,139 @@ fn collect_summary_aggs(
     }
 }
 
+fn evaluation_schedule(
+    lifecycle: &SummaryMaintenanceLifecycle,
+    arrival: DataArrival,
+) -> EvaluationSchedule {
+    match lifecycle {
+        SummaryMaintenanceLifecycle::Ephemeral => EvaluationSchedule::OneShot,
+        SummaryMaintenanceLifecycle::Prepared { .. }
+        | SummaryMaintenanceLifecycle::Shared { .. }
+            if matches!(
+                arrival,
+                DataArrival::ContinuouslyIngesting | DataArrival::Mixed
+            ) =>
+        {
+            EvaluationSchedule::PerUpdate
+        }
+        SummaryMaintenanceLifecycle::Prepared { .. } => EvaluationSchedule::OneShot,
+        SummaryMaintenanceLifecycle::Shared { .. } => EvaluationSchedule::OnRead,
+        SummaryMaintenanceLifecycle::ContinuouslyMaintained => EvaluationSchedule::PerUpdate,
+    }
+}
+
+/// Summary states composed on one maintenance path must be produced on the
+/// same schedule. Return a component id for each collected `SummaryAgg`.
+fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
+    let indices: HashMap<_, _> = summaries
+        .iter()
+        .enumerate()
+        .map(|(index, summary)| (Rc::as_ptr(summary), index))
+        .collect();
+    let mut parents: Vec<_> = (0..summaries.len()).collect();
+
+    fn find(parents: &mut [usize], index: usize) -> usize {
+        if parents[index] != index {
+            parents[index] = find(parents, parents[index]);
+        }
+        parents[index]
+    }
+
+    for (parent_index, summary) in summaries.iter().enumerate() {
+        let SummaryExpr::SummaryAgg { child, .. } = &summary.expr else {
+            continue;
+        };
+        if produced_availability(&child.expr) != Some(ExecutionAvailability::SummaryState) {
+            continue;
+        }
+        let mut descendants = Vec::new();
+        collect_summary_aggs(child, &mut HashSet::new(), &mut descendants);
+        for descendant in descendants {
+            let child_index = indices[&Rc::as_ptr(&descendant)];
+            let parent_root = find(&mut parents, parent_index);
+            let child_root = find(&mut parents, child_index);
+            parents[child_root] = parent_root;
+        }
+    }
+    (0..parents.len())
+        .map(|index| find(&mut parents, index))
+        .collect()
+}
+
+fn select_compatible_lifecycles(
+    deployments: &mut [SummaryMaintenanceDeployment],
+    components: &[usize],
+    arrival: DataArrival,
+) {
+    let component_ids: HashSet<_> = components.iter().copied().collect();
+    for component in component_ids {
+        let members: Vec<_> = components
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &id)| (id == component).then_some(index))
+            .collect();
+        let selected_schedule = [
+            EvaluationSchedule::OneShot,
+            EvaluationSchedule::PerUpdate,
+            EvaluationSchedule::OnRead,
+        ]
+        .into_iter()
+        .filter_map(|schedule| {
+            members
+                .iter()
+                .try_fold(0.0, |sum, &index| {
+                    deployments[index]
+                        .alternatives
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.selectable()
+                                && evaluation_schedule(
+                                    &candidate.summary_maintenance_lifecycle,
+                                    arrival,
+                                ) == schedule
+                        })
+                        .map(|candidate| candidate.total_cost.unwrap().0)
+                        .min_by(f64::total_cmp)
+                        .map(|cost| sum + cost)
+                })
+                .map(|cost| (schedule, cost))
+        })
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(schedule, _)| schedule);
+
+        let Some(schedule) = selected_schedule else {
+            continue;
+        };
+        for index in members {
+            let selected = deployments[index]
+                .alternatives
+                .iter()
+                .filter(|candidate| {
+                    candidate.selectable()
+                        && evaluation_schedule(&candidate.summary_maintenance_lifecycle, arrival)
+                            == schedule
+                })
+                .min_by(|a, b| a.total_cost.unwrap().0.total_cmp(&b.total_cost.unwrap().0));
+            deployments[index].summary_maintenance_lifecycle_guarantee =
+                selected.map(|candidate| SummaryMaintenanceLifecycleGuarantee {
+                    summary_maintenance_lifecycle: candidate.summary_maintenance_lifecycle.clone(),
+                    evaluation_schedule: schedule,
+                    output_representation: OutputRepresentation::SummaryState,
+                });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use asap_types::post_asap::{
-        ExactKind, ExactParams, GroupingStrategy, ResultGuarantee, SummaryFamilyType, SummaryField,
-        SummarySchema,
+        ExactKind, ExactParams, GroupingStrategy, ResultGuarantee, SketchAlgorithm,
+        SummaryFamilyType, SummaryField, SummarySchema,
     };
     use asap_types::pre_asap::AggIntent;
     use asap_types::pre_asap::{Column, ColumnRef, DataType, QueryExpr, Reduction, Schema, Source};
+    use asap_types::types::AccuracyTarget;
     use asap_types::workload::{
         BatchEntry, DataWorkload, DurationMs, Evidence, EvidenceSource, Predictability, Query,
         QueryLanguage, QueryRequirements, Rate, RepeatingEntry, RepetitionInterval, TimeSelection,
@@ -727,8 +979,11 @@ mod tests {
             candidates.to_vec()
         }
 
-        fn summary_lifecycle_cost_inputs(&self, _summary: &SummaryNode) -> LifecycleCostInputs {
-            LifecycleCostInputs {
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            _summary: &SummaryNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            SummaryMaintenanceLifecycleCostInputs {
                 build_cost: Some(Cost(10.0)),
                 maintenance_cost_per_update: Some(Cost(1.0)),
                 summary_read_cost: Some(Cost(1.0)),
@@ -737,11 +992,11 @@ mod tests {
             }
         }
 
-        fn summary_lifecycle_capabilities(
+        fn summary_maintenance_capabilities(
             &self,
             _summary: &SummaryNode,
-        ) -> SummaryLifecycleCapabilities {
-            SummaryLifecycleCapabilities {
+        ) -> SummaryMaintenanceCapabilities {
+            SummaryMaintenanceCapabilities {
                 incremental_update: true,
                 merge: true,
                 delete: true,
@@ -760,15 +1015,18 @@ mod tests {
             candidates.to_vec()
         }
 
-        fn summary_lifecycle_cost_inputs(&self, summary: &SummaryNode) -> LifecycleCostInputs {
-            UnitCosts.summary_lifecycle_cost_inputs(summary)
-        }
-
-        fn summary_lifecycle_capabilities(
+        fn summary_maintenance_lifecycle_cost_inputs(
             &self,
             summary: &SummaryNode,
-        ) -> SummaryLifecycleCapabilities {
-            UnitCosts.summary_lifecycle_capabilities(summary)
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            UnitCosts.summary_maintenance_lifecycle_cost_inputs(summary)
+        }
+
+        fn summary_maintenance_capabilities(
+            &self,
+            summary: &SummaryNode,
+        ) -> SummaryMaintenanceCapabilities {
+            UnitCosts.summary_maintenance_capabilities(summary)
         }
 
         fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
@@ -787,19 +1045,106 @@ mod tests {
             candidates.to_vec()
         }
 
-        fn summary_lifecycle_cost_inputs(&self, summary: &SummaryNode) -> LifecycleCostInputs {
-            UnitCosts.summary_lifecycle_cost_inputs(summary)
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            summary: &SummaryNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            UnitCosts.summary_maintenance_lifecycle_cost_inputs(summary)
         }
 
-        fn summary_lifecycle_capabilities(
+        fn summary_maintenance_capabilities(
             &self,
             _summary: &SummaryNode,
-        ) -> SummaryLifecycleCapabilities {
-            SummaryLifecycleCapabilities {
+        ) -> SummaryMaintenanceCapabilities {
+            SummaryMaintenanceCapabilities {
                 incremental_update: true,
                 merge: true,
                 delete: false,
             }
+        }
+    }
+
+    struct SummaryMaintenancePrefersDdSketch;
+
+    impl CostModel for SummaryMaintenancePrefersDdSketch {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            // Preserve semantic mapping's KLL-first order. The lifecycle
+            // total below must be what changes the final choice.
+            candidates.to_vec()
+        }
+
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            summary: &SummaryNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            let build = match sketch_algorithm(summary) {
+                Some(SketchAlgorithm::Kll) => 100.0,
+                Some(SketchAlgorithm::DDSketch) => 1.0,
+                _ => 10.0,
+            };
+            SummaryMaintenanceLifecycleCostInputs {
+                build_cost: Some(Cost(build)),
+                maintenance_cost_per_update: Some(Cost(1.0)),
+                summary_read_cost: Some(Cost(1.0)),
+                retention_cost_rate: Some(CostRate(0.1)),
+                retirement_cost: Some(Cost(1.0)),
+            }
+        }
+    }
+
+    struct IncompatibleNestedCosts;
+
+    impl CostModel for IncompatibleNestedCosts {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            candidates.to_vec()
+        }
+
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            summary: &SummaryNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            let is_leaf = matches!(
+                summary.expr,
+                SummaryExpr::SummaryAgg { ref child, .. }
+                    if matches!(child.expr, SummaryExpr::KeepPreAsap(_))
+            );
+            SummaryMaintenanceLifecycleCostInputs {
+                build_cost: Some(Cost(if is_leaf { 1.0 } else { 100.0 })),
+                maintenance_cost_per_update: Some(Cost(if is_leaf { 100.0 } else { 0.0 })),
+                summary_read_cost: Some(Cost::ZERO),
+                retention_cost_rate: Some(CostRate(0.0)),
+                retirement_cost: Some(Cost::ZERO),
+            }
+        }
+
+        fn summary_maintenance_capabilities(
+            &self,
+            _summary: &SummaryNode,
+        ) -> SummaryMaintenanceCapabilities {
+            SummaryMaintenanceCapabilities {
+                incremental_update: true,
+                merge: true,
+                delete: true,
+            }
+        }
+    }
+
+    fn sketch_algorithm(node: &SummaryNode) -> Option<SketchAlgorithm> {
+        match &node.expr {
+            SummaryExpr::SummaryEstimate { summary_input, .. } => sketch_algorithm(summary_input),
+            SummaryExpr::SummaryAgg {
+                family: SummaryFamilyType::Sketch(kind, _),
+                ..
+            } => Some(kind.algorithm().clone()),
+            _ => None,
         }
     }
 
@@ -834,6 +1179,20 @@ mod tests {
         })
     }
 
+    fn quantile_query() -> Rc<QueryExpr> {
+        Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::by(vec![]),
+            measures: vec![AggIntent::Quantile {
+                col: None,
+                q: 0.99,
+                accuracy: AccuracyTarget::Epsilon(0.1),
+            }],
+            output_names: vec![],
+            having: None,
+            child: query_root(),
+        })
+    }
+
     fn summary() -> Rc<SummaryNode> {
         let child = Rc::new(SummaryNode {
             expr: SummaryExpr::KeepPreAsap(query_root()),
@@ -861,6 +1220,29 @@ mod tests {
                 time_index: None,
             },
             guarantee: Some(ResultGuarantee::exact("sum")),
+        })
+    }
+
+    fn nested_summary() -> Rc<SummaryNode> {
+        let child = summary();
+        let family = SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+        Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryAgg {
+                child,
+                family: family.clone(),
+                col: ColumnRef::Named("state".into()),
+                reduction: Reduction::by(vec![]),
+                grouping: GroupingStrategy::default(),
+            },
+            schema: SummarySchema {
+                fields: vec![SummaryField {
+                    name: "state".into(),
+                    dtype: family,
+                    nullable: false,
+                }],
+                time_index: None,
+            },
+            guarantee: Some(ResultGuarantee::exact("nested sum")),
         })
     }
 
@@ -918,9 +1300,18 @@ mod tests {
         }
     }
 
+    fn selected_summary_maintenance_lifecycle(
+        deployment: &SummaryMaintenanceDeployment,
+    ) -> Option<&SummaryMaintenanceLifecycle> {
+        deployment
+            .summary_maintenance_lifecycle_guarantee
+            .as_ref()
+            .map(|guarantee| &guarantee.summary_maintenance_lifecycle)
+    }
+
     #[test]
     fn unpredictable_one_time_at_rest_selects_ephemeral() {
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             WorkloadDemand::new(
                 &workload(vec![batch(Predictability::AdHoc)], vec![], at_rest()),
@@ -928,14 +1319,23 @@ mod tests {
             ),
             1_000,
             None,
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
         assert_eq!(plan.deployments.len(), 1);
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::Ephemeral)
+            selected_summary_maintenance_lifecycle(&plan.deployments[0]),
+            Some(&SummaryMaintenanceLifecycle::Ephemeral)
+        );
+        let guarantee = plan.deployments[0]
+            .summary_maintenance_lifecycle_guarantee
+            .as_ref()
+            .unwrap();
+        assert_eq!(guarantee.evaluation_schedule, EvaluationSchedule::OneShot);
+        assert_eq!(
+            guarantee.output_representation,
+            OutputRepresentation::SummaryState
         );
         assert_eq!(
             plan.deployments[0].alternatives[0].total_cost,
@@ -949,12 +1349,12 @@ mod tests {
             known_at: Some(TimestampMs(1_000)),
         });
         entry.execute_at = Some(TimestampMs(11_000));
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             WorkloadDemand::new(&workload(vec![entry], vec![], at_rest()), &[0]),
             1_000,
             None,
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
@@ -964,36 +1364,64 @@ mod tests {
     }
 
     #[test]
+    fn nested_summary_lifecycles_have_compatible_evaluation_schedules() {
+        let workload = workload(vec![], vec![repeating()], continuous(1_000, 20_000));
+        let plan = plan_summary_maintenance_lifecycles(
+            nested_summary(),
+            WorkloadDemand::new(&workload, &[0]),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &IncompatibleNestedCosts,
+        )
+        .unwrap();
+
+        assert_eq!(plan.deployments.len(), 2);
+        let schedules: HashSet<_> = plan
+            .deployments
+            .iter()
+            .map(|deployment| {
+                deployment
+                    .summary_maintenance_lifecycle_guarantee
+                    .as_ref()
+                    .unwrap()
+                    .evaluation_schedule
+            })
+            .collect();
+        assert_eq!(schedules.len(), 1);
+    }
+
+    #[test]
     fn repeated_at_rest_selects_shared_without_inventing_updates() {
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             WorkloadDemand::new(&workload(vec![], vec![repeating()], at_rest()), &[0]),
             1_000,
             Some(Horizon(10.0)),
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::Shared {
+            selected_summary_maintenance_lifecycle(&plan.deployments[0]),
+            Some(&SummaryMaintenanceLifecycle::Shared {
                 retention: DurationMs(10_000)
             })
         );
         assert_eq!(
             plan.deployments[0].alternatives[3].rejection,
-            Some(LifecycleRejection::RequiresContinuousData)
+            Some(SummaryMaintenanceLifecycleRejection::RequiresContinuousData)
         );
         assert_eq!(plan.update_rate, None);
     }
 
     #[test]
     fn repeated_continuous_workload_can_select_continuous_maintenance() {
-        let capabilities = LifecycleCapabilities {
+        let capabilities = SummaryMaintenanceLifecycleCapabilities {
             shared: false,
-            ..LifecycleCapabilities::ALL
+            ..SummaryMaintenanceLifecycleCapabilities::ALL
         };
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             WorkloadDemand::new(
                 &workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
@@ -1006,8 +1434,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::ContinuouslyMaintained)
+            selected_summary_maintenance_lifecycle(&plan.deployments[0]),
+            Some(&SummaryMaintenanceLifecycle::ContinuouslyMaintained)
         );
         assert_eq!(plan.evaluation_rate, Some(EvaluationRate(1.0)));
         assert_eq!(plan.update_rate, Some(UpdateRate(1.0)));
@@ -1015,7 +1443,7 @@ mod tests {
 
     #[test]
     fn stale_ingestion_evidence_cannot_enable_continuous_maintenance() {
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             WorkloadDemand::new(
                 &workload(vec![], vec![repeating()], continuous(1_000, 1_000)),
@@ -1023,20 +1451,20 @@ mod tests {
             ),
             3_000,
             Some(Horizon(10.0)),
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
         assert_eq!(
             plan.deployments[0].alternatives[3].rejection,
-            Some(LifecycleRejection::MissingOrStaleIngestionRate)
+            Some(SummaryMaintenanceLifecycleRejection::MissingOrStaleIngestionRate)
         );
         assert_eq!(plan.update_rate, None);
     }
 
     #[test]
     fn unknown_costs_do_not_make_a_long_lived_lifecycle_win() {
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             WorkloadDemand::new(
                 &workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
@@ -1044,11 +1472,14 @@ mod tests {
             ),
             1_000,
             Some(Horizon(10.0)),
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &crate::cost_model::DefaultCostModel,
         )
         .unwrap();
-        assert_eq!(plan.deployments[0].selected, None);
+        assert_eq!(
+            selected_summary_maintenance_lifecycle(&plan.deployments[0]),
+            None
+        );
         assert!(plan.deployments[0]
             .alternatives
             .iter()
@@ -1057,7 +1488,7 @@ mod tests {
 
     #[test]
     fn unrelated_workload_entries_do_not_create_reuse_for_a_target() {
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             WorkloadDemand::new(
                 &workload(
@@ -1069,17 +1500,17 @@ mod tests {
             ),
             1_000,
             Some(Horizon(10.0)),
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::Ephemeral)
+            selected_summary_maintenance_lifecycle(&plan.deployments[0]),
+            Some(&SummaryMaintenanceLifecycle::Ephemeral)
         );
         assert_eq!(
             plan.deployments[0].alternatives[2].rejection,
-            Some(LifecycleRejection::RequiresMultipleReads)
+            Some(SummaryMaintenanceLifecycleRejection::RequiresMultipleReads)
         );
     }
 
@@ -1091,12 +1522,12 @@ mod tests {
             TimestampMs(5_000),
             TimestampMs(20_000),
         ]);
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             WorkloadDemand::new(&workload(vec![], vec![entry], at_rest()), &[0]),
             1_000,
             Some(Horizon(10.0)),
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
@@ -1107,26 +1538,26 @@ mod tests {
     fn demand_binding_rejects_empty_and_duplicate_entries() {
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
         assert!(matches!(
-            plan_summary_lifecycles(
+            plan_summary_maintenance_lifecycles(
                 summary(),
                 WorkloadDemand::new(&workload, &[]),
                 1_000,
                 None,
-                LifecycleCapabilities::ALL,
+                SummaryMaintenanceLifecycleCapabilities::ALL,
                 &UnitCosts,
             ),
-            Err(LifecyclePlanError::EmptyWorkloadDemand)
+            Err(SummaryMaintenanceLifecyclePlanError::EmptyWorkloadDemand)
         ));
         assert!(matches!(
-            plan_summary_lifecycles(
+            plan_summary_maintenance_lifecycles(
                 summary(),
                 WorkloadDemand::new(&workload, &[0, 0]),
                 1_000,
                 None,
-                LifecycleCapabilities::ALL,
+                SummaryMaintenanceLifecycleCapabilities::ALL,
                 &UnitCosts,
             ),
-            Err(LifecyclePlanError::DuplicateWorkloadEntry { index: 0 })
+            Err(SummaryMaintenanceLifecyclePlanError::DuplicateWorkloadEntry { index: 0 })
         ));
     }
 
@@ -1141,18 +1572,18 @@ mod tests {
             vec![],
             at_rest(),
         );
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             WorkloadDemand::new(&workload, &[0, 1]),
             1_000,
             Some(Horizon(10.0)),
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
         assert_eq!(
             plan.deployments[0].alternatives[1].rejection,
-            Some(LifecycleRejection::RequiresPredictableOneTimeQuery)
+            Some(SummaryMaintenanceLifecycleRejection::RequiresPredictableOneTimeQuery)
         );
     }
 
@@ -1164,7 +1595,7 @@ mod tests {
             lookback: Some(DurationMs(60_000)),
             as_of: None,
         };
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             WorkloadDemand::new(
                 &workload(vec![], vec![entry], continuous(1_000, 60_000)),
@@ -1172,13 +1603,13 @@ mod tests {
             ),
             1_000,
             Some(Horizon(10.0)),
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &NoDelete,
         )
         .unwrap();
         assert_eq!(
             plan.deployments[0].alternatives[3].rejection,
-            Some(LifecycleRejection::SummaryDoesNotSupportDeletion)
+            Some(SummaryMaintenanceLifecycleRejection::SummaryDoesNotSupportDeletion)
         );
     }
 
@@ -1188,13 +1619,13 @@ mod tests {
         let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
         let selection = space.global_selection(&RawCheaper);
         let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let plan = materialize_with_lifecycles(
+        let plan = materialize_with_summary_maintenance_lifecycles(
             &selection,
             &space.roots[0].1,
             WorkloadDemand::new(&workload, &[0]),
             1_000,
             None,
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &RawCheaper,
         )
         .unwrap()
@@ -1203,6 +1634,62 @@ mod tests {
         assert_eq!(plan.raw_recompute_total_cost, Some(Cost(1.0)));
         assert!(plan.deployments.is_empty());
         assert!(matches!(plan.root.expr, SummaryExpr::KeepPreAsap(_)));
+    }
+
+    #[test]
+    fn lifecycle_cost_reorders_semantic_summary_candidates_before_materialization() {
+        let target = quantile_query();
+        let space = crate::replacement::search_workload(vec![("q", target)]);
+        let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
+
+        let selection = global_selection_with_summary_maintenance_lifecycles(
+            &space,
+            &workload,
+            &[0],
+            1_000,
+            None,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &SummaryMaintenancePrefersDdSketch,
+        )
+        .unwrap();
+        let materialized = selection.materialize(&space.roots[0].1).unwrap().unwrap();
+
+        assert_eq!(
+            sketch_algorithm(&materialized),
+            Some(SketchAlgorithm::DDSketch)
+        );
+    }
+
+    #[test]
+    fn lifecycle_cost_counts_one_shared_summary_node_once() {
+        let shared = summary();
+        let root = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryMerge {
+                children: vec![Rc::clone(&shared), Rc::clone(&shared)],
+            },
+            schema: shared.schema.clone(),
+            guarantee: None,
+        });
+        let workload = workload(
+            vec![batch(Predictability::AdHoc), batch(Predictability::AdHoc)],
+            vec![],
+            at_rest(),
+        );
+        let horizon = Some(Horizon(10.0));
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0, 1]),
+            1_000,
+            horizon,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        assert_eq!(plan.deployments.len(), 1);
+        assert!(matches!(
+            selected_summary_maintenance_lifecycle(&plan.deployments[0]),
+            Some(SummaryMaintenanceLifecycle::Shared { .. })
+        ));
     }
 
     #[test]

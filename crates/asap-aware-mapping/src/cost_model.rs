@@ -35,11 +35,14 @@
 //! ## CSE sharing (issue #237, #223 stage 4)
 //!
 //! [`CseCandidate`]/[`ShareDecision`]/[`CostModel::cse_share_decision`] below
-//! decide whether a CSE-detected shared subtree
+//! provide the context-free fallback for whether a CSE-detected shared subtree
 //! ([`asap_types::pre_asap::cse::share_common_subtrees`], issue #223 stages
 //! 1-2, PR #235) is actually worth sharing, via a real Volcano/Cascades-style
-//! cost comparison rather than a fixed rule. See
-//! `docs/design_docs/cse-cost-model-decision.md` for the full design discussion (why
+//! cost comparison rather than a fixed rule. Workload-aware selection uses
+//! [`CostModel::cse_share_decision_with_recurrence`]; the target design also
+//! expands each share candidate with its legal summary-maintenance lifecycles
+//! before whole-plan ranking. See
+//! `docs/design_docs/cost-model.md` for the full design discussion (why
 //! cost-based, why not a full plan-search engine, the layering constraint
 //! that forces detection to stay cost-agnostic).
 //! [`PlanSpace::cost_sorted`](crate::replacement::PlanSpace::cost_sorted)
@@ -57,7 +60,6 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::exact_composition::{CompositionPlacement, ExactComposition};
-use crate::lifecycle::{LifecycleCostInputs, SummaryLifecycleCapabilities};
 use crate::recurrence::{
     self, CostRate, EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError,
     RecurrenceProfile,
@@ -65,6 +67,9 @@ use crate::recurrence::{
 use crate::replacement::{
     realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
     TargetSubDAG,
+};
+use crate::summary_maintenance_lifecycle::{
+    SummaryMaintenanceCapabilities, SummaryMaintenanceLifecycleCostInputs,
 };
 
 // ── Recurring-cost vocabulary for mixed exact/summary plans (issue #171) ──
@@ -277,7 +282,7 @@ fn finite_rate(units_per_second: f64) -> Option<CostRate> {
 /// needs a representative bound node for a subtree that
 /// [`asap_types::pre_asap::cse::share_common_subtrees`] already collapsed
 /// onto one `Rc` for two or more workload roots. See
-/// `docs/design_docs/cse-cost-model-decision.md`.
+/// `docs/design_docs/cost-model.md`.
 pub struct CseCandidate<'a> {
     /// The shared pre-ASAP subtree itself.
     pub subtree: &'a QueryExpr,
@@ -358,12 +363,12 @@ pub fn default_cse_recompute_cost(subtree: &QueryExpr) -> Cost {
     Cost(asap_types::pre_asap::cse::dag_node_count(subtree) as f64)
 }
 
-/// Default [`CostModel::cse_shared_maintenance_cost`]: a small
+/// Default context-free [`CostModel::cse_shared_maintenance_cost`]: a small
 /// per-[`SummaryFamilyType`] weight, scaled to the same order of magnitude
 /// as [`default_cse_recompute_cost`]'s typical output (a small node
 /// count, not a byte length), reflecting that families differ in how
-/// expensive they are to keep *continuously updated* for the life of a
-/// workload — an exact accumulator is the cheapest (an O(1) merge),
+/// expensive they are to maintain as shared state — an exact accumulator is
+/// the cheapest (an O(1) merge),
 /// sketches/samples cost more (a whole data structure to update per new
 /// row), wavelets/fitted models cost the most (coefficient/parameter
 /// maintenance). These weights are illustrative, not measured — a
@@ -511,19 +516,22 @@ pub trait CostModel {
     /// Estimate the one-time cost of recomputing `candidate.subtree`
     /// independently at a single use site. Default:
     /// [`default_cse_recompute_cost`] (a structural-size proxy). See
-    /// `docs/design_docs/cse-cost-model-decision.md`.
+    /// `docs/design_docs/cost-model.md`.
     fn cse_recompute_cost(&self, candidate: &CseCandidate) -> Cost {
         default_cse_recompute_cost(candidate.subtree)
     }
 
-    /// Estimate the cost of maintaining `candidate.bound_summary` as one
-    /// continuously-updated shared summary for the life of the workload.
+    /// Estimate a context-free proxy for maintaining `candidate.bound_summary`
+    /// as shared state. This fallback has no query recurrence, data arrival,
+    /// or horizon; workload-aware selection uses
+    /// [`Self::cse_share_decision_with_recurrence`], and full physical
+    /// selection additionally uses [`Self::summary_maintenance_lifecycle_cost_inputs`].
     /// Default: [`default_cse_shared_maintenance_cost`] (a per-family
     /// weight table), applied to whichever field of
     /// `candidate.bound_summary`'s output schema actually carries summary
     /// state (falls back to the cheapest, `Plain`, weight if none does —
     /// e.g. `bound_summary` is a passthrough `KeepPreAsap` node with nothing
-    /// summary-shaped to maintain). See `docs/design_docs/cse-cost-model-decision.md`.
+    /// summary-shaped to maintain). See `docs/design_docs/cost-model.md`.
     fn cse_shared_maintenance_cost(&self, candidate: &CseCandidate) -> Cost {
         let family = candidate
             .bound_summary
@@ -542,7 +550,7 @@ pub trait CostModel {
     /// Decide whether to reuse one shared `SummaryNode` across every
     /// consumer of `candidate`, or bind each occurrence independently — a
     /// Volcano/Cascades-style cost comparison (issue #237, #223 stage 4; see
-    /// `docs/design_docs/cse-cost-model-decision.md`): share iff the estimated cost of
+    /// `docs/design_docs/cost-model.md`): share iff the estimated cost of
     /// maintaining one shared summary is no greater than the estimated total
     /// cost of recomputing it independently everywhere it's used.
     ///
@@ -754,27 +762,30 @@ pub trait CostModel {
 
     /// Primitive build, update, read, retention, and retirement costs used to
     /// compare physical summary-state lifecycles. This is part of the same
-    /// cost model as candidate ranking and recurrence; lifecycle planning does
-    /// not introduce a second optimizer.
+    /// cost model as candidate ranking and recurrence; summary maintenance
+    /// lifecycle planning does not introduce a second optimizer.
     ///
     /// The default leaves every value unknown, which prevents a long-lived
     /// deployment from winning through optimistic zeroes.
-    fn summary_lifecycle_cost_inputs(&self, _summary: &SummaryNode) -> LifecycleCostInputs {
-        LifecycleCostInputs::default()
+    fn summary_maintenance_lifecycle_cost_inputs(
+        &self,
+        _summary: &SummaryNode,
+    ) -> SummaryMaintenanceLifecycleCostInputs {
+        SummaryMaintenanceLifecycleCostInputs::default()
     }
 
     /// Physical update/merge/delete support for one concrete summary. The
     /// conservative default advertises no long-lived maintenance capability.
-    fn summary_lifecycle_capabilities(
+    fn summary_maintenance_capabilities(
         &self,
         _summary: &SummaryNode,
-    ) -> SummaryLifecycleCapabilities {
-        SummaryLifecycleCapabilities::default()
+    ) -> SummaryMaintenanceCapabilities {
+        SummaryMaintenanceCapabilities::default()
     }
 
     /// Cost of evaluating `target` directly from its logical/raw inputs once.
-    /// When known, lifecycle-aware materialization compares this fallback with
-    /// the aggregate cost of the selected summary deployments.
+    /// When known, summary-maintenance-aware materialization compares this
+    /// fallback with the aggregate cost of the selected summary deployments.
     fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
         None
     }

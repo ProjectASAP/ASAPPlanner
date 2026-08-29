@@ -241,7 +241,7 @@
 //!
 //! [`PlanSpace::cost_sorted`] is the `sorted_by(cost_model)` step, and it
 //! reuses this crate's existing [`CostModel`] trait rather than inventing a
-//! second cost interface (`docs/design_docs/cse-cost-model-decision.md`,
+//! second cost interface (`docs/design_docs/cost-model.md`,
 //! issue #237, explicitly reasoned about *why* a narrow, direct cost
 //! comparison was enough for the CSE share/recompute decision alone, and
 //! flagged that a real search engine — this module — is where that stops
@@ -375,8 +375,8 @@ use crate::accuracy::{
 };
 use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{
-    raw_recompute_cost_rate, CostModel, CseCandidate, DefaultCostModel, ExactCompositionCostInputs,
-    ExactCompositionCostRequest, ShareDecision,
+    raw_recompute_cost_rate, Cost, CostModel, CseCandidate, DefaultCostModel,
+    ExactCompositionCostInputs, ExactCompositionCostRequest, ShareDecision,
 };
 use crate::exact_composition::{CompositionPlacement, ExactComposition, ExactCompositionStrategy};
 use crate::grouping::HydraGroupingStrategy;
@@ -2240,6 +2240,34 @@ pub struct PlanSpace<Id> {
     order: Vec<*const QueryExpr>,
 }
 
+/// Lifecycle-aware whole-subplan costs keyed by target and candidate pointer.
+/// Built by `lifecycle` before final selection; kept internal so pointer keys
+/// never become part of the public planner API.
+#[derive(Default)]
+pub(crate) struct CandidateCostOverrides {
+    costs: HashMap<(*const QueryExpr, *const ReplacementSubDAG), Cost>,
+}
+
+impl CandidateCostOverrides {
+    pub(crate) fn insert(
+        &mut self,
+        target: &Rc<QueryExpr>,
+        candidate: &ReplacementSubDAG,
+        cost: Cost,
+    ) {
+        self.costs.insert(
+            (Rc::as_ptr(target), candidate as *const ReplacementSubDAG),
+            cost,
+        );
+    }
+
+    fn get(&self, target: &Rc<QueryExpr>, candidate: &ReplacementSubDAG) -> Option<Cost> {
+        self.costs
+            .get(&(Rc::as_ptr(target), candidate as *const ReplacementSubDAG))
+            .copied()
+    }
+}
+
 impl<Id> PlanSpace<Id> {
     /// Every discovered group, in discovery order.
     pub fn groups(&self) -> impl Iterator<Item = &MemoGroup> {
@@ -2658,6 +2686,56 @@ impl<Id> PlanSpace<Id> {
             .map(|rate| UpdateRate(rate.0));
         self.recurrence_profiles(&recurrences, update_rate)
     }
+
+    /// Map every discovered target to the normalized workload entries whose
+    /// roots can reach it. Each entry appears at most once per target even
+    /// when a root has several paths to that target; path multiplicity is a
+    /// separate recurrence/effective-use concern.
+    pub(crate) fn workload_entries_by_target(
+        &self,
+        workload: &QueryWorkload,
+        root_workload_entries: &[usize],
+    ) -> Result<HashMap<*const QueryExpr, Vec<usize>>, RecurrenceError> {
+        let entry_count = workload.entries().count();
+        if root_workload_entries.len() != self.roots.len() {
+            return Err(RecurrenceError::RootCountMismatch {
+                expected: self.roots.len(),
+                got: root_workload_entries.len(),
+            });
+        }
+        let mut bindings: HashMap<*const QueryExpr, HashSet<usize>> = HashMap::new();
+        for ((_, root), &entry_index) in self.roots.iter().zip(root_workload_entries) {
+            if entry_index >= entry_count {
+                return Err(RecurrenceError::InvalidWorkloadEntry {
+                    index: entry_index,
+                    entry_count,
+                });
+            }
+            let mut seen = HashSet::new();
+            let mut queue = VecDeque::from([Rc::as_ptr(root)]);
+            while let Some(ptr) = queue.pop_front() {
+                if !seen.insert(ptr) {
+                    continue;
+                }
+                bindings.entry(ptr).or_default().insert(entry_index);
+                if let Some(group) = self.groups.get(&ptr) {
+                    queue.extend(
+                        direct_child_counts(&group.target)
+                            .into_iter()
+                            .map(|(child, _)| child),
+                    );
+                }
+            }
+        }
+        Ok(bindings
+            .into_iter()
+            .map(|(ptr, entries)| {
+                let mut entries: Vec<_> = entries.into_iter().collect();
+                entries.sort_unstable();
+                (ptr, entries)
+            })
+            .collect())
+    }
 }
 
 /// Record `times` occurrences of `recurrence` against `ptr` — `times > 1`
@@ -2818,6 +2896,59 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
             .total_cmp(&cost_model.estimate_cost(b, &target))
     });
     ranked
+}
+
+/// Apply lifecycle-aware costs to summary siblings after the ordinary
+/// strategy-specific ordering. Known lifecycle totals sort before unknown
+/// totals; non-summary alternatives keep their existing relative order and
+/// continue through their dedicated CSE/composition selection paths.
+fn rank_group_with_candidate_costs<'a>(
+    group: &'a MemoGroup,
+    cost_model: &dyn CostModel,
+    overrides: Option<&CandidateCostOverrides>,
+) -> Vec<&'a ReplacementSubDAG> {
+    let mut ranked = rank_group(group, cost_model);
+    let Some(overrides) = overrides else {
+        return ranked;
+    };
+    let positions: Vec<usize> = ranked
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            matches!(candidate.replacement, Replacement::Summary(_)).then_some(index)
+        })
+        .collect();
+    let mut summaries: Vec<_> = positions.iter().map(|&index| ranked[index]).collect();
+    summaries.sort_by(|a, b| {
+        match (
+            overrides.get(&group.target, a),
+            overrides.get(&group.target, b),
+        ) {
+            (Some(a), Some(b)) => a.0.total_cmp(&b.0),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+    for (index, candidate) in positions.into_iter().zip(summaries) {
+        ranked[index] = candidate;
+    }
+    ranked
+}
+
+fn estimated_candidate_cost(
+    group: &MemoGroup,
+    candidate: &ReplacementSubDAG,
+    target: &TargetSubDAG<'_>,
+    cost_model: &dyn CostModel,
+    overrides: Option<&CandidateCostOverrides>,
+) -> f64 {
+    overrides
+        .and_then(|costs| costs.get(&group.target, candidate))
+        .map_or_else(
+            || cost_model.estimate_cost(candidate, target),
+            |cost| cost.0,
+        )
 }
 
 /// For a group whose candidates are all [`Replacement::Rewrite`] (the
@@ -3255,7 +3386,7 @@ impl<Id> PlanSpace<Id> {
     /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
     /// group's own raw [`MemoGroup::consumer_count`].
     pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
-        self.global_selection_impl(cost_model, None, None)
+        self.global_selection_impl(cost_model, None, None, None)
             .expect("structural global selection cannot produce a recurrence error")
     }
 
@@ -3269,7 +3400,20 @@ impl<Id> PlanSpace<Id> {
         profiles: &RecurrenceProfileMap,
         horizon: Option<Horizon>,
     ) -> Result<GlobalSelection<'_>, RecurrenceError> {
-        self.global_selection_impl(cost_model, Some(profiles), horizon)
+        self.global_selection_impl(cost_model, Some(profiles), horizon, None)
+    }
+
+    /// Final selection with lifecycle-aware whole-subplan cost overrides.
+    /// `lifecycle` builds the overrides from normalized workload evidence and
+    /// calls this only after candidate legality and accuracy validation.
+    pub(crate) fn global_selection_with_candidate_costs(
+        &self,
+        cost_model: &dyn CostModel,
+        profiles: &RecurrenceProfileMap,
+        horizon: Option<Horizon>,
+        candidate_costs: &CandidateCostOverrides,
+    ) -> Result<GlobalSelection<'_>, RecurrenceError> {
+        self.global_selection_impl(cost_model, Some(profiles), horizon, Some(candidate_costs))
     }
 
     fn global_selection_impl(
@@ -3277,6 +3421,7 @@ impl<Id> PlanSpace<Id> {
         cost_model: &dyn CostModel,
         profiles: Option<&RecurrenceProfileMap>,
         horizon: Option<Horizon>,
+        candidate_costs: Option<&CandidateCostOverrides>,
     ) -> Result<GlobalSelection<'_>, RecurrenceError> {
         let graph = reference_graph(self);
         let topo = topological_order(&self.order, &graph);
@@ -3359,16 +3504,40 @@ impl<Id> PlanSpace<Id> {
                                 !is_cse_candidate(candidate) && !is_composition_candidate(candidate)
                             })
                             .min_by(|a, b| {
-                                cost_model
-                                    .estimate_cost(a, &effective_target)
-                                    .total_cmp(&cost_model.estimate_cost(b, &effective_target))
+                                estimated_candidate_cost(
+                                    group,
+                                    a,
+                                    &effective_target,
+                                    cost_model,
+                                    candidate_costs,
+                                )
+                                .total_cmp(
+                                    &estimated_candidate_cost(
+                                        group,
+                                        b,
+                                        &effective_target,
+                                        cost_model,
+                                        candidate_costs,
+                                    ),
+                                )
                             });
                         match (cse, logical) {
                             (Some(cse), Some(logical))
-                                if cost_model
-                                    .estimate_cost(logical, &effective_target)
-                                    .total_cmp(&cost_model.estimate_cost(cse, &effective_target))
-                                    .is_lt() =>
+                                if estimated_candidate_cost(
+                                    group,
+                                    logical,
+                                    &effective_target,
+                                    cost_model,
+                                    candidate_costs,
+                                )
+                                .total_cmp(&estimated_candidate_cost(
+                                    group,
+                                    cse,
+                                    &effective_target,
+                                    cost_model,
+                                    candidate_costs,
+                                ))
+                                .is_lt() =>
                             {
                                 Some(logical)
                             }
@@ -3388,12 +3557,12 @@ impl<Id> PlanSpace<Id> {
                     // valid answer, just not a cross-group-aware one; this
                     // group also contributes no Share collapse to its own
                     // children (see `multiplier`'s `_ => effective` arm).
-                    None => rank_group(group, cost_model)
+                    None => rank_group_with_candidate_costs(group, cost_model, candidate_costs)
                         .into_iter()
                         .find(|candidate| !is_composition_candidate(candidate)),
                 }
             } else {
-                rank_group(group, cost_model)
+                rank_group_with_candidate_costs(group, cost_model, candidate_costs)
                     .into_iter()
                     .find(|candidate| {
                         !is_cse_candidate(candidate) && !is_composition_candidate(candidate)
