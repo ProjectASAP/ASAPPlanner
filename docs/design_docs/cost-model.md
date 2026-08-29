@@ -1,6 +1,24 @@
-# CSE Sharing and Summary-Maintenance Lifecycle Costing
+# Cost Model
 
-## Context
+## Scope
+
+ASAPPlanner's cost model assigns comparable estimates to legal planning
+alternatives. It supports several decisions, including:
+
+- summary family and parameter selection;
+- grouping and shared-summary organization;
+- exact, summary-derived, and approximate phase composition;
+- common-subexpression sharing versus independent recomputation;
+- summary-maintenance lifecycle selection;
+- reuse of existing state versus building new state;
+- raw recomputation fallback.
+
+The cost model estimates these alternatives; semantic mapping, phase and
+schema validation, the accuracy model, and summary capabilities decide which
+alternatives are legal. The global optimizer selects compatible alternatives
+using cost estimates over the same workload evidence and planning horizon.
+
+## CSE as one costed decision
 
 Common-subexpression elimination (CSE) discovers when several consumers can
 reuse one semantically equivalent computation. In ASAPPlanner, reuse may

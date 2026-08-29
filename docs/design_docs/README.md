@@ -174,7 +174,7 @@ not a separate decision made after semantic ranking.
 
 Detailed designs:
 
-- [CSE cost-model decisions](cse-cost-model-decision.md)
+- [Cost model](cost-model.md)
 
 ### Materialization and explanation
 
