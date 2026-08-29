@@ -29,19 +29,16 @@
 
 pub mod expr;
 pub mod guarantee;
-pub mod lifecycle;
 pub mod phase;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;
+pub mod summary_maintenance_lifecycle;
 
 pub use expr::{ExactOperator, SummaryExpr, SummaryNode, ValueOperator};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
-};
-pub use lifecycle::{
-    EvaluationSchedule, OutputRepresentation, StateLifecycle, SummaryMaintenanceLifecycleGuarantee,
 };
 pub use phase::{
     assigned_child_stage, exact_operator_output_schema, produced_availability,
@@ -57,4 +54,8 @@ pub use sketch::{
     default_hydra_params, hydra_kind_for, ExactKind, ExactParams, GroupingStrategy, HydraKind,
     HydraParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory, SketchKind,
     SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
+};
+pub use summary_maintenance_lifecycle::{
+    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee,
 };

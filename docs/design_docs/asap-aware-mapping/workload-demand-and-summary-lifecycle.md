@@ -76,12 +76,17 @@ repeating query therefore never implies streaming data.
   treating missing evidence as zero or relying on container order.
 - `WorkloadAccuracyEvidence` supplies fresh cardinality and distribution to
   accuracy models.
-- `plan_summary_lifecycles` enumerates legal ephemeral, prepared, shared, and
+- `plan_summary_maintenance_lifecycles` enumerates legal ephemeral, prepared, shared, and
   continuously maintained alternatives for the entries explicitly associated
   with the target, and compares their costs over the caller's explicit horizon.
-- `materialize_with_lifecycles` attaches those state deployments to PR #300's
-  phase-validated global selection. Each deployment retains assumptions and
-  rejected alternatives for explanation.
+- `global_selection_with_summary_maintenance_lifecycles` prices each semantic
+  summary candidate using its cheapest legal summary maintenance lifecycle
+  before global selection. Its recurrence profile includes repeated DAG paths,
+  while the workload binding separately preserves time-selection and
+  predictability facts.
+- `materialize_with_summary_maintenance_lifecycles` materializes that phase-valid selection and
+  attaches the selected state deployments. Each deployment retains assumptions
+  and rejected alternatives for explanation.
 - `UpdateTransform` and `ReadoutPostProcess` express availability boundaries
   for any value operator. Exact, summary-derived, and approximate producers use
   the same phase validation rather than defining accuracy-specific phase nodes.
@@ -477,10 +482,10 @@ not imply long-lived incremental maintenance. A stateless transform can run
 `PerUpdate` before a downstream maintained summary. These types describe an
 execution contract; they do not replace semantic operators in the post-ASAP IR.
 
-### State lifecycle is a plan alternative
+### Summary maintenance lifecycle is a plan alternative
 
 ```rust
-enum StateLifecycle {
+enum SummaryMaintenanceLifecycle {
     Ephemeral,
     Prepared {
         activate_at: Timestamp,
@@ -504,7 +509,7 @@ The summary family and its properties constrain which lifecycles are legal.
 For example, an append-only sketch may support continuous inserts but not a
 sliding-window lifecycle requiring deletion. Lifecycle legality is checked
 before cost ranking, like accuracy legality. Deployments provide these
-per-summary properties through `summary_lifecycle_capabilities`; moving
+per-summary properties through `summary_maintenance_capabilities`; moving
 real-time windows require deletion support as well as incremental updates.
 
 ### Existing summaries are planning input
@@ -553,11 +558,13 @@ For repeated raw recomputation:
 total(H) = reads(H) * raw_recompute_cost
 ```
 
-The current lifecycle-aware materialization sums the selected summary
-deployments and can replace that plan with raw recomputation when the raw cost
-is lower or the summary lifecycle is uncostable. Jointly reconsidering every
-sibling semantic candidate under lifecycle costs remains a later optimizer
-integration; this document does not claim that broader search is implemented.
+Before materialization, lifecycle-aware global selection computes the cheapest
+legal summary maintenance lifecycle total for every semantic summary sibling
+whose cost evidence is complete. Those totals can reorder summary families;
+unknown totals remain conservative and cannot win as invented zeroes. After
+selection, materialization sums each unique selected summary deployment once
+and can replace the selected summary plan with raw recomputation when the raw
+cost is lower or the summary maintenance lifecycle is uncostable.
 
 For an ephemeral summary:
 

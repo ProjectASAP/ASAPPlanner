@@ -187,11 +187,11 @@ pub mod cost_model;
 pub mod exact_composition;
 pub mod explanation;
 pub mod grouping;
-pub mod lifecycle;
 pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
+pub mod summary_maintenance_lifecycle;
 pub mod topk_reuse;
 
 pub use accuracy::{
@@ -210,12 +210,6 @@ pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
-pub use lifecycle::{
-    materialize_with_lifecycles, plan_summary_lifecycles, LifecycleAlternative,
-    LifecycleCapabilities, LifecycleCostInputs, LifecyclePlan, LifecyclePlanError,
-    LifecycleRejection, MaterializeLifecycleError, StateDeployment, SummaryLifecycleCapabilities,
-    WorkloadDemand,
-};
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
     Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
@@ -230,4 +224,14 @@ pub use replacement::{
     SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;
+pub use summary_maintenance_lifecycle::{
+    global_selection_with_summary_maintenance_lifecycles,
+    materialize_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
+    MaterializeSummaryMaintenanceLifecycleError, SummaryMaintenanceCapabilities,
+    SummaryMaintenanceDeployment, SummaryMaintenanceLifecycleAlternative,
+    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleCostInputs,
+    SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError,
+    SummaryMaintenanceLifecycleRejection, SummaryMaintenanceLifecycleSelectionError,
+    WorkloadDemand,
+};
 pub use topk_reuse::TopKLimitReuseStrategy;
