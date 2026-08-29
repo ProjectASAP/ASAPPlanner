@@ -281,11 +281,26 @@ impl<T> Evidence<T> {
     pub fn value_at(&self, now_ms: u64) -> Option<&T> {
         let value = self.value.as_ref()?;
         match (self.observed_at_ms, self.valid_for_ms) {
+            (Some(observed), _) if observed > now_ms => None,
             (Some(observed), Some(valid_for)) if now_ms > observed.saturating_add(valid_for) => {
                 None
             }
             (None, Some(_)) => None,
             _ => Some(value),
+        }
+    }
+}
+
+impl DemandEstimate {
+    /// Whether this estimate was already observed and has not expired at
+    /// `now_ms`. A validity duration without an observation time is not a
+    /// usable freshness contract.
+    pub fn is_fresh_at(&self, now_ms: u64) -> bool {
+        match (self.observed_at, self.valid_for) {
+            (Some(observed), _) if observed.0 > now_ms => false,
+            (Some(observed), Some(valid_for)) => now_ms <= observed.0.saturating_add(valid_for.0),
+            (None, Some(_)) => false,
+            _ => true,
         }
     }
 }
@@ -493,6 +508,34 @@ mod tests {
         };
         assert_eq!(evidence.value_at(1_500), Some(&Rate(10.0)));
         assert_eq!(evidence.value_at(1_501), None);
+    }
+
+    #[test]
+    fn future_evidence_and_demand_estimates_are_not_fresh() {
+        let evidence = Evidence {
+            value: Some(Rate(2.0)),
+            source: EvidenceSource::Observed,
+            observed_at_ms: Some(2_000),
+            valid_for_ms: Some(1_000),
+        };
+        assert_eq!(evidence.value_at(1_999), None);
+        assert_eq!(evidence.value_at(2_000), Some(&Rate(2.0)));
+
+        let estimate = DemandEstimate {
+            observation_window: ObservationWindow {
+                start: TimestampMs(0),
+                end: TimestampMs(1_000),
+            },
+            expected: ExpectedDemand::AverageRate(Rate(1.0)),
+            peak_rate: None,
+            max_concurrency: None,
+            confidence: Confidence(1.0),
+            source: EvidenceSource::Observed,
+            observed_at: Some(TimestampMs(2_000)),
+            valid_for: Some(DurationMs(1_000)),
+        };
+        assert!(!estimate.is_fresh_at(1_999));
+        assert!(estimate.is_fresh_at(2_000));
     }
 
     #[test]

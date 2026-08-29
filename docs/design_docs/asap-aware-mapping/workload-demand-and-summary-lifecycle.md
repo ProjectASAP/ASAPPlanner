@@ -53,12 +53,13 @@ repeating query therefore never implies streaming data.
 - `asap_types::workload` defines the normalized query/data workload and
   evidence freshness contract.
 - `PlanSpace::recurrence_profiles_from_workload` derives per-target read and
-  update recurrence without treating missing evidence as zero.
+  update recurrence from an explicit root-to-workload-entry binding, without
+  treating missing evidence as zero or relying on container order.
 - `WorkloadAccuracyEvidence` supplies fresh cardinality and distribution to
   accuracy models.
 - `plan_summary_lifecycles` enumerates legal ephemeral, prepared, shared, and
-  continuously maintained alternatives and compares their costs over the
-  caller's explicit horizon.
+  continuously maintained alternatives for the entries explicitly associated
+  with the target, and compares their costs over the caller's explicit horizon.
 - `materialize_with_lifecycles` attaches those state deployments to PR #300's
   phase-validated global selection. Each deployment retains assumptions and
   rejected alternatives for explanation.
