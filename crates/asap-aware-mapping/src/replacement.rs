@@ -241,7 +241,7 @@
 //!
 //! [`PlanSpace::cost_sorted`] is the `sorted_by(cost_model)` step, and it
 //! reuses this crate's existing [`CostModel`] trait rather than inventing a
-//! second cost interface (`docs/design_docs/cse-cost-model-decision.md`,
+//! second cost interface (`docs/design_docs/cost-model.md`,
 //! issue #237, explicitly reasoned about *why* a narrow, direct cost
 //! comparison was enough for the CSE share/recompute decision alone, and
 //! flagged that a real search engine — this module — is where that stops
