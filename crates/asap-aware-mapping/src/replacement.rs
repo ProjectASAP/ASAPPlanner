@@ -360,7 +360,9 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
 use asap_types::pre_asap::schema::Schema;
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::RepetitionInterval;
+use asap_types::workload::{
+    ExpectedDemand, QueryRecurrence, QueryWorkload, RepeatedDemand, RepetitionInterval,
+};
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -373,7 +375,8 @@ use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
 use crate::recurrence::{
-    evaluation_rate_of, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
+    evaluation_rate_of, CostRate, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence,
+    UpdateRate,
 };
 use crate::rollup::RollupStrategy;
 use crate::topk_reuse::TopKLimitReuseStrategy;
@@ -2310,7 +2313,7 @@ impl<Id> PlanSpace<Id> {
 // ── Recurrence-aware cost context (issue #287) ──────────────────────────
 
 /// One [`RecurrenceProfile`] per discovered [`MemoGroup`] target, built by
-/// [`PlanSpace::recurrence_profiles`] — the "carry `RepeatingEntry.interval`
+/// [`PlanSpace::recurrence_profiles`] — the "carry `RepeatingEntry.demand`
 /// and relevant `DataWorkload` into ASAP-aware search/cost context"
 /// half of issue #287. Looked up by `Rc` pointer identity, the same
 /// currency [`PlanSpace::group_for`]/[`GlobalSelection::for_target`] already
@@ -2421,8 +2424,18 @@ impl<Id> PlanSpace<Id> {
         if let Some(rate) = update_rate {
             crate::recurrence::validate_update_rate(rate)?;
         }
+        for recurrence in root_recurrence {
+            if let RootRecurrence::RepeatingRate(rate) = recurrence {
+                if !rate.0.is_finite() || rate.0 < 0.0 {
+                    return Err(crate::recurrence::RecurrenceError::InvalidEvaluationRate(
+                        *rate,
+                    ));
+                }
+            }
+        }
 
         let mut intervals: HashMap<*const QueryExpr, Vec<RepetitionInterval>> = HashMap::new();
+        let mut rates: HashMap<*const QueryExpr, f64> = HashMap::new();
         let mut one_shot_counts: HashMap<*const QueryExpr, usize> = HashMap::new();
         // Sites actually reached by at least one root's own recurrence tag
         // during the walk below — see this method's own "Unreachable
@@ -2446,6 +2459,7 @@ impl<Id> PlanSpace<Id> {
                     path_count,
                     recurrence,
                     &mut intervals,
+                    &mut rates,
                     &mut one_shot_counts,
                     &mut reached,
                 );
@@ -2470,7 +2484,12 @@ impl<Id> PlanSpace<Id> {
         let mut profiles = HashMap::with_capacity(self.order.len());
         for ptr in &self.order {
             let site_intervals = intervals.get(ptr).unwrap_or(&empty_intervals);
-            let evaluation_rate = evaluation_rate_of(site_intervals.iter().copied())?;
+            let interval_rate =
+                evaluation_rate_of(site_intervals.iter().copied())?.map_or(0.0, |rate| rate.0);
+            let direct_rate = rates.get(ptr).copied().unwrap_or(0.0);
+            let evaluation_rate = ((interval_rate + direct_rate) > 0.0).then_some(
+                crate::recurrence::EvaluationRate(interval_rate + direct_rate),
+            );
             let one_shot_consumers = one_shot_counts.get(ptr).copied().unwrap_or(0);
             // Bug 2 fix (see "Unreachable sites" above): only a reached
             // site carries the caller-supplied `update_rate`.
@@ -2495,6 +2514,92 @@ impl<Id> PlanSpace<Id> {
 
         Ok(RecurrenceProfileMap { profiles })
     }
+
+    /// Derive per-target recurrence profiles directly from the normalized
+    /// query and data workloads. This is the authoritative bridge from the
+    /// public workload model into recurrence-aware candidate costing.
+    /// `root_workload_entries[i]` explicitly identifies the normalized
+    /// workload entry for `self.roots[i]`; callers need not arrange roots in
+    /// the batch-then-repeating storage order.
+    pub fn recurrence_profiles_from_workload(
+        &self,
+        workload: &QueryWorkload,
+        // For each `PlanSpace::roots[i]`, the explicit index of its
+        // corresponding normalized workload entry.
+        root_workload_entries: &[usize],
+        now_ms: u64,
+        horizon: Option<Horizon>,
+    ) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
+        workload.validate()?;
+        if let Some(horizon) = horizon {
+            if !horizon.0.is_finite() || horizon.0 <= 0.0 {
+                return Err(crate::recurrence::RecurrenceError::InvalidHorizon(horizon));
+            }
+        }
+        if root_workload_entries.len() != self.roots.len() {
+            return Err(crate::recurrence::RecurrenceError::RootCountMismatch {
+                expected: self.roots.len(),
+                got: root_workload_entries.len(),
+            });
+        }
+        let entries: Vec<_> = workload.entries().collect();
+        let mut recurrences = Vec::with_capacity(root_workload_entries.len());
+        for &index in root_workload_entries {
+            let entry = entries.get(index).ok_or(
+                crate::recurrence::RecurrenceError::InvalidWorkloadEntry {
+                    index,
+                    entry_count: entries.len(),
+                },
+            )?;
+            let recurrence = match &entry.recurrence {
+                QueryRecurrence::OneTime { invocations, .. } => RootRecurrence::OneShotCount(
+                    usize::try_from(*invocations).unwrap_or(usize::MAX),
+                ),
+                QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
+                    RootRecurrence::Repeating(*interval)
+                }
+                QueryRecurrence::Repeated(RepeatedDemand::Scheduled(schedule)) => {
+                    let Some(horizon) = horizon else {
+                        return Err(crate::recurrence::RecurrenceError::MissingHorizon);
+                    };
+                    let end_ms = now_ms.saturating_add((horizon.0 * 1000.0) as u64);
+                    let count = schedule
+                        .iter()
+                        .filter(|at| at.0 >= now_ms && at.0 <= end_ms)
+                        .count();
+                    RootRecurrence::RepeatingRate(crate::recurrence::EvaluationRate(
+                        count as f64 / horizon.0,
+                    ))
+                }
+                QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
+                    if !estimate.is_fresh_at(now_ms) {
+                        RootRecurrence::Unknown
+                    } else {
+                        let rate = match estimate.expected {
+                            ExpectedDemand::AverageRate(rate) => rate.0,
+                            ExpectedDemand::InvocationCount(count) => {
+                                let millis = estimate
+                                    .observation_window
+                                    .end
+                                    .0
+                                    .saturating_sub(estimate.observation_window.start.0);
+                                count as f64 / (millis as f64 / 1000.0)
+                            }
+                        };
+                        RootRecurrence::RepeatingRate(crate::recurrence::EvaluationRate(rate))
+                    }
+                }
+                QueryRecurrence::Unknown => RootRecurrence::Unknown,
+            };
+            recurrences.push(recurrence);
+        }
+        let update_rate = workload
+            .data_workload
+            .as_ref()
+            .and_then(|data| data.ingestion_rate.value_at(now_ms))
+            .map(|rate| UpdateRate(rate.0));
+        self.recurrence_profiles(&recurrences, update_rate)
+    }
 }
 
 /// Record `times` occurrences of `recurrence` against `ptr` — `times > 1`
@@ -2508,6 +2613,7 @@ fn contribute(
     times: usize,
     recurrence: RootRecurrence,
     intervals: &mut HashMap<*const QueryExpr, Vec<RepetitionInterval>>,
+    rates: &mut HashMap<*const QueryExpr, f64>,
     one_shot_counts: &mut HashMap<*const QueryExpr, usize>,
     reached: &mut HashSet<*const QueryExpr>,
 ) {
@@ -2522,9 +2628,16 @@ fn contribute(
                 .or_default()
                 .extend(std::iter::repeat_n(interval, times));
         }
+        RootRecurrence::RepeatingRate(rate) => {
+            *rates.entry(ptr).or_insert(0.0) += rate.0 * times as f64;
+        }
         RootRecurrence::OneShot => {
             *one_shot_counts.entry(ptr).or_insert(0) += times;
         }
+        RootRecurrence::OneShotCount(count) => {
+            *one_shot_counts.entry(ptr).or_insert(0) += count.saturating_mul(times);
+        }
+        RootRecurrence::Unknown => {}
     }
 }
 
@@ -6437,7 +6550,7 @@ mod tests {
 
     // ── Accuracy guarantees and fail-closed composition (issue #172) ─────
 
-    use asap_types::post_asap::{BoundExpr, ErrorMetric};
+    use asap_types::post_asap::ErrorMetric;
 
     /// A test-only `AccuracyModel` that *registers* a rule the default
     /// deliberately lacks — a sketch over rank-bounded inputs composes
@@ -6489,21 +6602,6 @@ mod tests {
             col: None,
             q,
             accuracy: AccuracyTarget::Epsilon(eps),
-        }
-    }
-
-    /// The `SketchParams::Kll { k }` of the top `SummaryAgg` under `node`.
-    fn kll_k_of(node: &SummaryNode) -> u32 {
-        match &node.expr {
-            SummaryExpr::SummaryEstimate { summary_input, .. } => kll_k_of(summary_input),
-            SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(kind, _),
-                ..
-            } => match kind.params() {
-                SketchParams::Kll { k } => *k,
-                other => panic!("expected KLL params, got {other:?}"),
-            },
-            other => panic!("expected a sketch SummaryAgg, got {other:?}"),
         }
     }
 
@@ -6603,25 +6701,19 @@ mod tests {
     }
 
     #[test]
-    fn exact_sum_over_approximate_child_keeps_the_row_count_unknown() {
-        // sum(count_distinct by (job) (m)): an exact sum over HLL estimates
-        // is representable (Σ B_i) but its bound depends on the group count
-        // and the true cardinalities — unknown at planning time, so the
-        // guarantee exists, says what it needs, and satisfies nothing.
+    fn exact_sum_over_approximate_readout_falls_back_to_the_logical_plan() {
+        // sum(count_distinct by (job) (m)) cannot be maintained over the
+        // inner HLL's query-time readout. The phase contract therefore keeps
+        // the whole expression logical instead of manufacturing an accuracy
+        // guarantee for an execution shape the runtime cannot schedule.
         let inner = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let outer = agg(vec![], AggIntent::Sum { col: None }, inner);
         let root = realize(&outer).unwrap();
-        let guarantee = root
+        assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
+        assert!(root
             .guarantee
             .as_ref()
-            .expect("an exact sum carries a guarantee");
-        assert_eq!(guarantee.metric, ErrorMetric::AbsoluteValue);
-        assert_eq!(guarantee.bound.evaluate(), None);
-        assert!(guarantee.provenance.iter().any(|s| matches!(
-            s,
-            GuaranteeSource::UnavailableStatistic { statistic } if statistic == "input_row_count"
-        )));
-        assert!(!DefaultAccuracyModel.satisfies(guarantee, &AccuracyTarget::Epsilon(1e9)));
+            .is_some_and(ResultGuarantee::is_exact));
 
         // count(...) over the same child is exact: a row count does not
         // depend on the rows' values.
@@ -6641,11 +6733,11 @@ mod tests {
     }
 
     #[test]
-    fn equal_split_allocation_makes_a_legal_tighter_candidate_and_rejects_the_declared_one() {
-        // With a registered rank-additive rule: outer ε=0.1 over inner ε=0.1
-        // composes above 0.1 as declared (cheap: k=26 each) — illegal.
-        // The equal split re-sizes both layers to k=52 —
-        // pricier, and the only legal way to meet the outer target.
+    fn equal_split_allocation_does_not_override_phase_legality() {
+        // Even a registered rank-additive rule and a valid budget split do
+        // not make a maintained sketch over another sketch's query-time
+        // readout schedulable. Accuracy legality cannot override phase
+        // legality, so the conservative logical fallback is the only plan.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
         let strategy = SketchAlgorithmStrategy::with_models(
@@ -6655,75 +6747,18 @@ mod tests {
         );
         let proposals = strategy.propose(&TargetSubDAG::new(&outer));
 
-        let declared = proposals
-            .rejected
-            .iter()
-            .filter(|r| {
-                matches!(
-                    &r.error,
-                    AccuracyError::TargetNotSatisfied {
-                        metric: ErrorMetric::Rank,
-                        bound: Some(b),
-                        target: AccuracyTarget::Epsilon(e),
-                        ..
-                    } if (b - 2.0 * crate::accuracy::kll_rank_error_99(26)).abs() < 1e-12
-                        && *e == 0.1
-                )
-            })
-            .count();
-        assert_eq!(
-            declared, 1,
-            "the as-declared KLL composition is rejected: {:?}",
-            proposals.rejected
-        );
-
-        let kll: Vec<_> = proposals
-            .candidates
-            .iter()
-            .filter_map(|c| match &c.replacement {
-                Replacement::Summary(node)
-                    if summary_family_algorithm(node) == SketchAlgorithm::Kll =>
-                {
-                    Some(node)
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            kll.len(),
-            1,
-            "exactly one legal KLL candidate (the allocated one)"
-        );
-        let node = kll[0];
-        assert_eq!(kll_k_of(node), 52, "outer re-sized to ε/2");
-        assert_eq!(kll_k_of(summary_child(node)), 52, "inner re-sized to ε/2");
-        let guarantee = node.guarantee.as_ref().unwrap();
-        assert_eq!(guarantee.metric, ErrorMetric::Rank);
-        let composed_bound = guarantee.bound.evaluate().unwrap();
-        assert!(composed_bound <= 0.1);
-        assert!((composed_bound - 2.0 * crate::accuracy::kll_rank_error_99(52)).abs() < 1e-12);
-        assert_eq!(guarantee.approximate_layer_count(), 2);
-        assert!(guarantee.provenance.iter().any(|s| matches!(
-            s,
-            GuaranteeSource::BudgetAllocation { allocator, layer_count: 2, .. }
-                if allocator == "EqualSplitAllocator"
-        )));
-        assert!(matches!(guarantee.bound, BoundExpr::Sum { .. }));
-        // No candidate with the cheaper illegal sizing exists anywhere.
-        assert!(proposals.candidates.iter().all(|c| match &c.replacement {
-            Replacement::Summary(node)
-                if summary_family_algorithm(node) == SketchAlgorithm::Kll =>
-                kll_k_of(node) != 20,
-            _ => true,
-        }));
+        assert_eq!(proposals.candidates.len(), 1);
+        let Replacement::Summary(node) = &proposals.candidates[0].replacement else {
+            panic!()
+        };
+        assert!(matches!(node.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
     #[test]
-    fn legality_precedes_cost_in_search_and_global_selection() {
-        // Same fixture through the workload search: the illegal cheaper
-        // candidate is absent from the group *before* any cost ranking, the
-        // rejection is recorded on the group, and global selection commits
-        // to the legal, more expensive one.
+    fn phase_legality_precedes_accuracy_and_cost_in_global_selection() {
+        // The same phase-illegal nesting through workload search remains a
+        // logical fallback before cost ranking. Neither a favorable cost nor
+        // a valid accuracy allocation can resurrect it.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
         let strategies: Vec<Box<dyn ReplacementStrategy>> =
@@ -6751,11 +6786,11 @@ mod tests {
             .for_target(root)
             .unwrap()
             .chosen
-            .expect("a legal candidate wins");
+            .expect("the conservative fallback wins");
         let Replacement::Summary(node) = &chosen.replacement else {
             panic!()
         };
-        assert_eq!(kll_k_of(node), 52);
+        assert!(matches!(node.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
     #[test]
