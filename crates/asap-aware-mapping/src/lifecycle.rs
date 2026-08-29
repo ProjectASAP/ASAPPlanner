@@ -332,11 +332,12 @@ fn alternatives_for(
     capabilities: LifecycleCapabilities,
     costs: LifecycleCostInputs,
 ) -> Vec<LifecycleAlternative> {
-    let mut alternatives = Vec::with_capacity(4);
-    alternatives.push(ephemeral(facts, capabilities, &costs));
-    alternatives.push(prepared(facts, capabilities, &costs));
-    alternatives.push(shared(facts, horizon, capabilities, &costs));
-    alternatives.push(continuous(facts, horizon, capabilities, &costs));
+    let alternatives = vec![
+        ephemeral(facts, capabilities, &costs),
+        prepared(facts, capabilities, &costs),
+        shared(facts, horizon, capabilities, &costs),
+        continuous(facts, horizon, capabilities, &costs),
+    ];
     alternatives
 }
 
