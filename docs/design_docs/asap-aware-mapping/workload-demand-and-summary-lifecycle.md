@@ -137,7 +137,7 @@ an explicit horizon.
 | --- | --- | --- |
 | Query meaning | Pre-ASAP query IR | Workload metadata must not change semantics |
 | Accuracy requirement | Query workload (per-query) | The required result fidelity may be explicit or supplied by the normalization default |
-| Latency requirement | Query workload (per-query) | The optional end-to-end latency bound belongs to one query execution |
+| Response-latency requirement | Query workload (per-query) | The optional end-to-end response-time bound belongs to one query execution |
 | Query workload | Workload input | Arrival and recurrence are not inferable from syntax |
 | Data workload | Workload input | Ingestion and distribution describe the data, not query workload |
 | Summary capability | Summary properties | Merge, delete, and update support constrain legal lifecycles |
@@ -167,7 +167,7 @@ enum LatencyRequirement {
 
 struct QueryRequirements {
     accuracy: AccuracyRequirement,
-    latency: LatencyRequirement,
+    response_latency: LatencyRequirement,
 }
 ```
 
@@ -175,10 +175,10 @@ An omitted accuracy field is not an unknown accuracy target and does not permit
 arbitrary approximation: the current normalization policy makes it
 `ImplicitExact`. Keeping that variant distinct from `Explicit(Exact)` preserves
 whether the caller chose exactness or inherited the default. An unspecified
-latency requirement imposes no latency constraint; it is not a zero-duration
-bound or evidence that every latency is acceptable. Accuracy is checked as a
-legality constraint, while latency is used to reject plans that cannot meet the
-bound.
+response-latency requirement imposes no response-time constraint; it is not a
+zero-duration bound or evidence that every latency is acceptable. Accuracy is
+checked as a legality constraint, while response latency is used to reject
+plans that cannot meet the bound.
 
 #### Classification axes
 
@@ -282,6 +282,12 @@ enum QueryTimeScope {
     Unknown,
 }
 ```
+
+`QueryTimeScope` is not a response-latency requirement. It classifies the event
+time of the data selected by the query; `LatencyRequirement` constrains the
+wall-clock time allowed to produce the result. They are independent: a
+longitudinal query over archived data may require a 100 ms response, while a
+real-time query over the latest data may permit a 30 second response.
 
 This classification is not derived only from a numeric lookback. A five-minute
 lookback over recent data is real-time; the same duration over archived data is
