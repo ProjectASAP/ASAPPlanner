@@ -373,11 +373,12 @@ use crate::accuracy::{
 };
 use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{
-    raw_recompute_cost_rate, CostModel, CostRate, CseCandidate, DefaultCostModel,
-    ExactCompositionCostInputs, ExactCompositionCostRequest, ShareDecision,
+    raw_recompute_cost_rate, CostModel, CseCandidate, DefaultCostModel, ExactCompositionCostInputs,
+    ExactCompositionCostRequest, ShareDecision,
 };
 use crate::exact_composition::{CompositionPhase, ExactComposition, ExactCompositionStrategy};
 use crate::grouping::HydraGroupingStrategy;
+use crate::recurrence::CostRate;
 use crate::recurrence::{
     evaluation_rate_of, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
 };
@@ -3193,12 +3194,7 @@ impl<Id> PlanSpace<Id> {
             } else {
                 composition_options(group, &self.groups, effective, cost_model, &context)
                     .into_iter()
-                    .min_by(|a, b| {
-                        a.decision
-                            .cost_rate
-                            .units_per_second
-                            .total_cmp(&b.decision.cost_rate.units_per_second)
-                    })
+                    .min_by(|a, b| a.decision.cost_rate.0.total_cmp(&b.decision.cost_rate.0))
             };
             if let Some(option) = &composed {
                 if let Some(child_candidate) = option.decision.child_candidate {

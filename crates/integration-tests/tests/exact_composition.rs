@@ -13,14 +13,16 @@
 use std::rc::Rc;
 
 use asap_aware_mapping::cost_model::{
-    CostProvenance, CostUnit, EvaluationRate, ExactCompositionCostInputs,
-    ExactCompositionCostRequest, MixedExecutionCapabilities,
+    CostProvenance, CostUnit, ExactCompositionCostInputs, ExactCompositionCostRequest,
+    MixedExecutionCapabilities,
 };
 use asap_aware_mapping::replacement::{
     default_strategies_with, search_workload_with, ImplementError, Replacement,
     ReplacementProvenance, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
 };
-use asap_aware_mapping::{CompositionPhase, CostModel, DefaultCostModel, ExplanationKind};
+use asap_aware_mapping::{
+    CompositionPhase, CostModel, DefaultCostModel, EvaluationRate, ExplanationKind,
+};
 use asap_frontend_promql::lower_promql;
 use asap_types::dag_export;
 use asap_types::post_asap::{
@@ -102,7 +104,7 @@ impl CostModel for StatsModel {
             summary_maintenance_cost_per_update: Some(0.01),
             summary_read_cost: Some(1.0),
             update_rate: Some(100.0),
-            evaluation_rate: EvaluationRate::from_intervals(&[std::time::Duration::from_secs(1)]),
+            evaluation_rate: Some(EvaluationRate(1.0)),
             raw_recompute_cost: Some(100.0),
             unit: CostUnit::CostUnitsPerSecond,
             provenance: CostProvenance {

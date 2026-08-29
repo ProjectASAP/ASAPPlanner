@@ -201,8 +201,8 @@ pub use accuracy::{
 pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
 pub use cost_model::{
     postprocess_plan_cost_rate, pretransform_plan_cost_rate, raw_recompute_cost_rate, CostModel,
-    CostProvenance, CostRate, CostUnit, DefaultCostModel, EvaluationRate,
-    ExactCompositionCostInputs, ExactCompositionCostRequest, MixedExecutionCapabilities,
+    CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
+    ExactCompositionCostRequest, MixedExecutionCapabilities,
 };
 pub use exact_composition::{CompositionPhase, ExactComposition, ExactCompositionStrategy};
 pub use explanation::{
