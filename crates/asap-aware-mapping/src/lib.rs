@@ -213,7 +213,8 @@ pub use grouping::{has_subpopulations, HydraGroupingStrategy};
 pub use lifecycle::{
     materialize_with_lifecycles, plan_summary_lifecycles, LifecycleAlternative,
     LifecycleCapabilities, LifecycleCostInputs, LifecyclePlan, LifecyclePlanError,
-    LifecycleRejection, MaterializeLifecycleError, StateDeployment, WorkloadDemand,
+    LifecycleRejection, MaterializeLifecycleError, StateDeployment, SummaryLifecycleCapabilities,
+    WorkloadDemand,
 };
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
