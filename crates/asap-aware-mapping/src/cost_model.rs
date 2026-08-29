@@ -57,7 +57,7 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::exact_composition::{CompositionPlacement, ExactComposition};
-use crate::lifecycle::LifecycleCostInputs;
+use crate::lifecycle::{LifecycleCostInputs, SummaryLifecycleCapabilities};
 use crate::recurrence::{
     self, CostRate, EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError,
     RecurrenceProfile,
@@ -761,6 +761,22 @@ pub trait CostModel {
     /// deployment from winning through optimistic zeroes.
     fn summary_lifecycle_cost_inputs(&self, _summary: &SummaryNode) -> LifecycleCostInputs {
         LifecycleCostInputs::default()
+    }
+
+    /// Physical update/merge/delete support for one concrete summary. The
+    /// conservative default advertises no long-lived maintenance capability.
+    fn summary_lifecycle_capabilities(
+        &self,
+        _summary: &SummaryNode,
+    ) -> SummaryLifecycleCapabilities {
+        SummaryLifecycleCapabilities::default()
+    }
+
+    /// Cost of evaluating `target` directly from its logical/raw inputs once.
+    /// When known, lifecycle-aware materialization compares this fallback with
+    /// the aggregate cost of the selected summary deployments.
+    fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
+        None
     }
 }
 
