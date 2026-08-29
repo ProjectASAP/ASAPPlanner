@@ -27,35 +27,67 @@ The design has one governing rule:
 
 ## Problem and why now
 
-A post-ASAP plan can contain more than one approximate layer:
+A query may be answered by one approximate summary or by several approximate
+operations connected together. For example, an inner summary may estimate a
+value for each group, and an outer approximate operation may combine those
+estimates:
 
 ```text
 raw input
     -> inner summary
     -> inner estimate
-    -> outer summary or transformation
-    -> caller-visible result
+    -> outer approximate operation
+    -> final query result
 ```
 
-Sizing every layer independently against the caller's full error target is not
-an end-to-end proof. The layers may use different error metrics, their bounds
-may compose, and their failure probabilities consume a shared budget. Some
-operations, such as TopK selection, need evidence that cannot be expressed by
-adding point-estimation epsilons.
+The query supplies an accuracy requirement for its final result. Choosing the
+parameters of each summary is called **parameter configuration**. Configuring
+each summary independently to meet the entire final-result requirement does not
+show that the combined result meets that requirement: both operations can add
+error.
 
-Without an end-to-end model, the planner can select a locally well-sized sketch
-whose caller-visible result violates the requested accuracy. Even a single
-summary must keep its parameter source and correctness evidence aligned.
-Nested summaries, shared grouping, and cross-query reuse add composition
-requirements, but do not define the scope of parameter configuration. This is
-a planning concern rather than an isolated sketch-implementation detail.
+For example, suppose the final absolute-error requirement is `0.10`. If the
+inner operation may add `0.08` and the outer operation may add another `0.08`,
+each operation is individually below `0.10`, but the supported additive rule
+only guarantees a combined error of `0.16`. The plan must be rejected or the
+two operations must be configured with smaller local error limits, such as
+`0.05` each.
+
+Probabilistic guarantees have the same issue. If the inner operation may exceed
+its bound with probability `0.01` and the outer operation may also exceed its
+bound with probability `0.01`, the planner's conservative union-bound rule says
+the combined failure probability may be as high as `0.02`. A final requirement
+of `delta = 0.01` therefore cannot assign `0.01` independently to both layers.
+The allowed final failure probability is a budget that must cover all failure
+events included in the result.
+
+Not every correctness requirement is a numeric error on an estimated value.
+For TopK, bounding every estimated frequency does not by itself prove that the
+returned set contains the correct keys. The planner also needs evidence that
+the confidence interval of the kth selected key is strictly above every
+excluded key's interval. Without that separation evidence, TopK membership is
+unknown even when individual frequency estimates have small error.
+
+The planner therefore needs one guarantee for the **final query result**: the
+value or key set returned after every summary readout and subsequent operation.
+For a single summary, that guarantee must be derived from the parameters stored
+in the selected plan, not from the parameters originally requested before
+rounding, clamping, or empirical adjustment. For a composed plan, the planner
+must combine the selected operations' guarantees using an explicit rule.
 
 ## Inputs, outputs, and end-to-end behavior
 
-The observable input is a pre-ASAP query plan whose aggregate intents carry an
-`AccuracyTarget`, plus optional statistics and runtime observations. The output
-is a candidate space of post-ASAP plans. Each caller-visible approximate value
-has a typed `ResultGuarantee`, while rejected candidates carry a reason.
+The design has these inputs:
+
+- a pre-ASAP query plan;
+- an accuracy requirement attached to an aggregate intent;
+- candidate summary implementations and their committed parameters; and
+- optional statistics or observations required by a guarantee rule.
+
+It produces post-ASAP candidates. A legal approximate candidate carries a
+typed guarantee for its final result. An illegal candidate records why its
+guarantee could not be derived or did not meet the requirement. The selected
+plan is chosen only from legal candidates.
 
 ASAPPlanner therefore uses this pipeline:
 
@@ -73,6 +105,27 @@ Rejected candidates remain available in explanatory output with a structured
 reason. The planner retains an exact or pre-ASAP fallback when no approximate
 candidate can be proved legal.
 
+### End-to-end example
+
+Consider two compatible approximate operations and a final requirement
+`EpsilonDelta { epsilon: 0.10, delta: 0.02 }`.
+
+1. The allocator proposes local requirements of `(0.05, 0.01)` for each
+   approximate operation.
+2. Candidate generation chooses concrete parameters for each operation.
+3. The accuracy model derives each local guarantee again from those concrete
+   parameters. Assume each guarantee evaluates to `(0.05, 0.01)`.
+4. The registered additive rule produces a final guarantee of at most
+   `(0.10, 0.02)` using addition for the error bounds and a union bound for the
+   failure probabilities.
+5. The final guarantee satisfies the query requirement, so the cost model may
+   rank the candidate.
+
+If either local guarantee is unknown, uses an incompatible metric, or combines
+to more than `(0.10, 0.02)`, the candidate is rejected before cost comparison.
+The accuracy requirement is the requested contract; the result guarantee is
+the planner's evidence that a particular candidate meets it.
+
 ## Goals and non-goals
 
 The minimum successful outcome is that no selected approximate result lacks a
@@ -85,33 +138,31 @@ statistical independence, or prove arbitrary nonlinear and cross-metric
 composition. It does not introduce another correctness policy alongside
 `AccuracyTarget`.
 
-## Heilmeier questions
+## Heilmeier questions used by this design
+
+The schedule-oriented Heilmeier questions are omitted because this document
+defines a standing planner contract rather than a time-bounded project.
 
 - **What are we trying to do?** Prevent the planner from selecting an
-  approximate plan unless it can prove the result meets the caller's accuracy
+  approximate plan unless its final result is shown to meet the query's accuracy
   requirement.
-- **How is it done without this design?** Sketches can be sized locally, but a
-  nested plan has no common representation or rule for its combined error.
+- **What is missing without this design?** Individual summaries can be
+  configured locally, but a composed plan has no common representation or rule
+  for its final error.
 - **What is new?** Typed guarantee expressions, explicit composition rules,
   budget allocation, and legality filtering before cost ranking.
-- **Who cares?** Query authors need accuracy requirements to be meaningful;
-  planner and runtime developers need an auditable contract between selected
-  parameters and observable results.
-- **What are the risks and costs?** Conservative rules can reject useful plans;
-  incorrect estimator assumptions can admit unsound plans; symbolic evidence
-  increases IR and explanation size.
-- **How long will it take?** The core algebra and built-in contracts are one
-  planner change. Supplying runtime-dependent TopK and Hydra evidence is a
-  separate integration increment.
+- **Who uses the result?** Query authors need accuracy requirements to be
+  meaningful; planner and runtime developers need an auditable contract between
+  selected parameters and final results.
 - **How is success checked?** Unit tests exercise every registered rule and
   rejection boundary; end-to-end tests confirm illegal candidates cannot reach
-  cost selection; exported plans expose the proof and rejection reason.
+  cost selection; exported plans expose the guarantee and rejection reason.
 
 ## Required behavior
 
 The design must:
 
-1. Represent each summary's caller-visible correctness requirement with an
+1. Represent each summary's final-result correctness requirement with an
    `AccuracyTarget`. The existing `Exact`, `Epsilon`, and `EpsilonDelta`
    variants remain valid where their semantics match, but they are not a
    closed set: add or refine target variants when a new summary requires a
@@ -133,9 +184,47 @@ The design must:
 
 ## Proposed design
 
+### Design overview
+
+The design separates a requested requirement from the evidence produced for a
+specific plan:
+
+```text
+AccuracyTarget
+    describes what the query requires
+
+committed summary parameters + optional evidence
+    determine each operation's local ResultGuarantee
+
+CompositionOperator + AccuracyModel
+    combine local and child guarantees into the final ResultGuarantee
+
+AccuracyModel::satisfies
+    accepts or rejects the candidate before CostModel ranking
+```
+
+Four components have distinct responsibilities:
+
+| Component | Responsibility | Does not do |
+| --- | --- | --- |
+| `AccuracyTarget` | State the required correctness of the final query result | Describe evidence or choose parameters |
+| `AccuracyBudgetAllocator` | Propose local requirements for approximate layers | Prove that the combined result is legal |
+| `AccuracyModel` | Derive, compose, and check guarantees | Rank candidates by cost |
+| `ResultGuarantee` | Record the bound, failure probability, metric, and evidence for one candidate result | Express what the query requested |
+
+Candidate generation first enumerates an implementation, commits its concrete
+parameters, and derives a local guarantee from those same parameters. If the
+candidate consumes an approximate child, the accuracy model applies the rule
+registered for that operator and the involved error metrics. The candidate is
+legal only if the resulting final guarantee satisfies the target. Cost ranking
+cannot recover a candidate rejected at this stage.
+
+The remaining sections define the guarantee representation, composition rules,
+parameter-configuration modes, planner/runtime boundary, and explanation data.
+
 ### Guarantee IR
 
-Caller-visible post-ASAP values may carry a `ResultGuarantee`:
+Finalized post-ASAP values may carry a `ResultGuarantee`:
 
 ```rust
 struct ResultGuarantee {
@@ -146,7 +235,7 @@ struct ResultGuarantee {
 }
 ```
 
-Summary state does not itself claim a caller-visible result guarantee. The
+Summary state does not itself claim a final-result guarantee. The
 guarantee is attached to a finalized value, such as a `SummaryEstimate`.
 
 #### Error metrics
@@ -190,13 +279,14 @@ comparison through floating-point behavior.
 - required statistics that are currently unavailable.
 
 This information is exported with candidate and rejection data so that a plan
-can be audited without reconstructing the proof from planner internals.
+can be audited without reconstructing the guarantee derivation from planner
+internals.
 
 ### Accuracy-model boundary
 
 Accuracy reasoning and budget allocation are separate from cost modeling.
 The accuracy model derives local guarantees, propagates compatible guarantees,
-and checks the caller-visible result against its target. The budget allocator
+and checks the final query result against its target. The budget allocator
 only proposes allocations; it does not prove them. `CostModel` may rank only
 candidates that survive the complete accuracy check.
 
@@ -248,12 +338,13 @@ typed input with provenance, freshness, and applicability semantics.
 
 This mode is not wired into the current end-to-end candidate-generation path.
 Existing symbolic statistics and posterior-related helpers do not constitute
-that integration. Until the planner can carry empirical input through sizing,
-guarantee derivation, target checking, and export, the built-in planner must
-not claim that an empirical configuration was considered or selected.
+that integration. Until the planner can carry empirical input through parameter
+configuration, guarantee derivation, target checking, and export, the built-in
+planner must not claim that an empirical configuration was considered or
+selected.
 
 Empirical input can recommend smaller or differently shaped parameters, but a
-recommendation is not automatically a correctness proof. If the empirical
+recommendation is not automatically correctness evidence. If the empirical
 method supplies only an expectation or heuristic, legality still requires an
 independent guarantee satisfying the target. If it supplies a statistical
 certificate, the model must state its population, confidence, validity window,
@@ -292,7 +383,7 @@ than epsilon and an evaluated failure probability no greater than delta.
 
 These variants are the currently supported target vocabulary, not a permanent
 restriction on summary semantics. A new summary may introduce or motivate a
-change to `AccuracyTarget` when its caller-visible requirement is not an
+change to `AccuracyTarget` when its final-result requirement is not an
 epsilon-style numeric error contract. Any new or revised target must define:
 
 - the result semantics being constrained, including its error metric;
@@ -313,9 +404,9 @@ epsilon_i = epsilon_total / approximate_layer_count
 delta_i = delta_total / approximate_layer_count
 ```
 
-Every allocated candidate is resized, propagated, and checked. Allocation does
-not constitute proof by itself, and recording a requested delta in metadata is
-not evidence that an algorithm achieves it.
+Every allocated candidate is reconfigured, propagated, and checked. Allocation
+is only a proposal, and recording a requested delta in metadata is not evidence
+that an algorithm achieves it.
 
 ### Planner and runtime boundary
 
@@ -351,13 +442,13 @@ uses the same candidate space and legality checks as optimization.
 
 Three concepts are necessary:
 
-- `ResultGuarantee` is the authoritative description of caller-visible error;
+- `ResultGuarantee` is the authoritative description of final-result error;
   reusing `AccuracyTarget` would conflate a request with evidence that the
   request was met.
 - `AccuracyModel` separates correctness rules from `CostModel`; embedding
   legality in cost values would let ranking accidentally override correctness.
 - `AccuracyBudgetAllocator` separates a proposed per-layer budget from the
-  propagated proof; assigning the full target to every layer is unsound.
+  propagated guarantee; assigning the full target to every layer is unsound.
 
 Symbolic expressions are used instead of a general theorem prover or free-form
 text. They are the smallest representation that can preserve unknown
@@ -402,7 +493,7 @@ a candidate was rejected.
 
 Tests must cover every registered local contract and composition rule, their
 invalid and unknown boundaries, target checking after parameter clamps,
-rejection before cost ranking, and exported proof or rejection data. The
+rejection before cost ranking, and exported guarantee or rejection data. The
 detailed test matrix and repository validation commands are maintained in the
 [developer guide](../../developer_docs/end-to-end-accuracy-guarantees.md#validation).
 
@@ -419,9 +510,9 @@ intended rollback behavior: removing or disabling a questionable rule reduces
 optimization opportunities without weakening correctness.
 
 Empirical-input parameterization remains a follow-up until typed empirical
-inputs are threaded through candidate sizing, guarantee derivation, target
-checking, provenance, and export. Combined parameterization remains future work
-until its evidence-composition rule is specified and tested.
+inputs are threaded through candidate parameter configuration, guarantee
+derivation, target checking, provenance, and export. Combined parameterization
+remains future work until its evidence-composition rule is specified and tested.
 
 The design is ready for use when all workspace tests and warnings-as-errors
 checks pass, every selected approximate result has an evaluable satisfying
