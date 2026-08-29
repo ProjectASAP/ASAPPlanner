@@ -6979,7 +6979,7 @@ mod tests {
 
     // ── Accuracy guarantees and fail-closed composition (issue #172) ─────
 
-    use asap_types::post_asap::{BoundExpr, ErrorMetric};
+    use asap_types::post_asap::ErrorMetric;
 
     /// A test-only `AccuracyModel` that *registers* a rule the default
     /// deliberately lacks — a sketch over rank-bounded inputs composes
@@ -7031,21 +7031,6 @@ mod tests {
             col: None,
             q,
             accuracy: AccuracyTarget::Epsilon(eps),
-        }
-    }
-
-    /// The `SketchParams::Kll { k }` of the top `SummaryAgg` under `node`.
-    fn kll_k_of(node: &SummaryNode) -> u32 {
-        match &node.expr {
-            SummaryExpr::SummaryEstimate { summary_input, .. } => kll_k_of(summary_input),
-            SummaryExpr::SummaryAgg {
-                family: SummaryFamilyType::Sketch(kind, _),
-                ..
-            } => match kind.params() {
-                SketchParams::Kll { k } => *k,
-                other => panic!("expected KLL params, got {other:?}"),
-            },
-            other => panic!("expected a sketch SummaryAgg, got {other:?}"),
         }
     }
 
@@ -7145,25 +7130,19 @@ mod tests {
     }
 
     #[test]
-    fn exact_sum_over_approximate_child_keeps_the_row_count_unknown() {
-        // sum(count_distinct by (job) (m)): an exact sum over HLL estimates
-        // is representable (Σ B_i) but its bound depends on the group count
-        // and the true cardinalities — unknown at planning time, so the
-        // guarantee exists, says what it needs, and satisfies nothing.
+    fn exact_sum_over_approximate_readout_falls_back_to_the_logical_plan() {
+        // sum(count_distinct by (job) (m)) cannot be maintained over the
+        // inner HLL's query-time readout. The phase contract therefore keeps
+        // the whole expression logical instead of manufacturing an accuracy
+        // guarantee for an execution shape the runtime cannot schedule.
         let inner = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let outer = agg(vec![], AggIntent::Sum { col: None }, inner);
         let root = realize(&outer).unwrap();
-        let guarantee = root
+        assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
+        assert!(root
             .guarantee
             .as_ref()
-            .expect("an exact sum carries a guarantee");
-        assert_eq!(guarantee.metric, ErrorMetric::AbsoluteValue);
-        assert_eq!(guarantee.bound.evaluate(), None);
-        assert!(guarantee.provenance.iter().any(|s| matches!(
-            s,
-            GuaranteeSource::UnavailableStatistic { statistic } if statistic == "input_row_count"
-        )));
-        assert!(!DefaultAccuracyModel.satisfies(guarantee, &AccuracyTarget::Epsilon(1e9)));
+            .is_some_and(ResultGuarantee::is_exact));
 
         // count(...) over the same child is exact: a row count does not
         // depend on the rows' values.
@@ -7183,11 +7162,11 @@ mod tests {
     }
 
     #[test]
-    fn equal_split_allocation_makes_a_legal_tighter_candidate_and_rejects_the_declared_one() {
-        // With a registered rank-additive rule: outer ε=0.1 over inner ε=0.1
-        // composes above 0.1 as declared (cheap: k=26 each) — illegal.
-        // The equal split re-sizes both layers to k=52 —
-        // pricier, and the only legal way to meet the outer target.
+    fn equal_split_allocation_does_not_override_phase_legality() {
+        // Even a registered rank-additive rule and a valid budget split do
+        // not make a maintained sketch over another sketch's query-time
+        // readout schedulable. Accuracy legality cannot override phase
+        // legality, so the conservative logical fallback is the only plan.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
         let strategy = SketchAlgorithmStrategy::with_models(
@@ -7197,75 +7176,18 @@ mod tests {
         );
         let proposals = strategy.propose(&TargetSubDAG::new(&outer));
 
-        let declared = proposals
-            .rejected
-            .iter()
-            .filter(|r| {
-                matches!(
-                    &r.error,
-                    AccuracyError::TargetNotSatisfied {
-                        metric: ErrorMetric::Rank,
-                        bound: Some(b),
-                        target: AccuracyTarget::Epsilon(e),
-                        ..
-                    } if (b - 2.0 * crate::accuracy::kll_rank_error_99(26)).abs() < 1e-12
-                        && *e == 0.1
-                )
-            })
-            .count();
-        assert_eq!(
-            declared, 1,
-            "the as-declared KLL composition is rejected: {:?}",
-            proposals.rejected
-        );
-
-        let kll: Vec<_> = proposals
-            .candidates
-            .iter()
-            .filter_map(|c| match &c.replacement {
-                Replacement::Summary(node)
-                    if summary_family_algorithm(node) == SketchAlgorithm::Kll =>
-                {
-                    Some(node)
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            kll.len(),
-            1,
-            "exactly one legal KLL candidate (the allocated one)"
-        );
-        let node = kll[0];
-        assert_eq!(kll_k_of(node), 52, "outer re-sized to ε/2");
-        assert_eq!(kll_k_of(summary_child(node)), 52, "inner re-sized to ε/2");
-        let guarantee = node.guarantee.as_ref().unwrap();
-        assert_eq!(guarantee.metric, ErrorMetric::Rank);
-        let composed_bound = guarantee.bound.evaluate().unwrap();
-        assert!(composed_bound <= 0.1);
-        assert!((composed_bound - 2.0 * crate::accuracy::kll_rank_error_99(52)).abs() < 1e-12);
-        assert_eq!(guarantee.approximate_layer_count(), 2);
-        assert!(guarantee.provenance.iter().any(|s| matches!(
-            s,
-            GuaranteeSource::BudgetAllocation { allocator, layer_count: 2, .. }
-                if allocator == "EqualSplitAllocator"
-        )));
-        assert!(matches!(guarantee.bound, BoundExpr::Sum { .. }));
-        // No candidate with the cheaper illegal sizing exists anywhere.
-        assert!(proposals.candidates.iter().all(|c| match &c.replacement {
-            Replacement::Summary(node)
-                if summary_family_algorithm(node) == SketchAlgorithm::Kll =>
-                kll_k_of(node) != 20,
-            _ => true,
-        }));
+        assert_eq!(proposals.candidates.len(), 1);
+        let Replacement::Summary(node) = &proposals.candidates[0].replacement else {
+            panic!()
+        };
+        assert!(matches!(node.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
     #[test]
-    fn legality_precedes_cost_in_search_and_global_selection() {
-        // Same fixture through the workload search: the illegal cheaper
-        // candidate is absent from the group *before* any cost ranking, the
-        // rejection is recorded on the group, and global selection commits
-        // to the legal, more expensive one.
+    fn phase_legality_precedes_accuracy_and_cost_in_global_selection() {
+        // The same phase-illegal nesting through workload search remains a
+        // logical fallback before cost ranking. Neither a favorable cost nor
+        // a valid accuracy allocation can resurrect it.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
         let strategies: Vec<Box<dyn ReplacementStrategy>> =
@@ -7277,14 +7199,7 @@ mod tests {
         let space = search_workload_with(vec![("q", Rc::clone(&outer))], &strategies);
         let root = &space.roots[0].1;
         let group = space.group_for(root).unwrap();
-        assert!(!group.rejected.is_empty());
-        assert!(group.candidates.iter().all(|c| match &c.replacement {
-            Replacement::Summary(node) => node.guarantee.as_ref().is_some_and(|g| {
-                DefaultAccuracyModel.satisfies(g, &AccuracyTarget::Epsilon(0.1))
-            }),
-            Replacement::Rewrite(_) => false,
-            Replacement::ExactComposition(_) => false,
-        }));
+        assert_eq!(group.candidates.len(), 1);
         let ranked = space.cost_sorted(&DefaultCostModel);
         let root_ranked = ranked.iter().find(|g| Rc::ptr_eq(g.target, root)).unwrap();
         assert_eq!(root_ranked.candidates.len(), group.candidates.len());
@@ -7294,11 +7209,11 @@ mod tests {
             .for_target(root)
             .unwrap()
             .chosen
-            .expect("a legal candidate wins");
+            .expect("the conservative fallback wins");
         let Replacement::Summary(node) = &chosen.replacement else {
             panic!()
         };
-        assert_eq!(kll_k_of(node), 52);
+        assert!(matches!(node.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
     #[test]
