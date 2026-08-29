@@ -57,6 +57,7 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
 use crate::exact_composition::{CompositionPlacement, ExactComposition};
+use crate::lifecycle::LifecycleCostInputs;
 use crate::recurrence::{
     self, CostRate, EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError,
     RecurrenceProfile,
@@ -130,7 +131,7 @@ impl MixedExecutionCapabilities {
     };
 
     pub fn supports(self, placement: CompositionPlacement) -> bool {
-        match placement {
+        match phase {
             CompositionPlacement::PostProcess => self.exact_post_process,
             CompositionPlacement::Transform => self.exact_update_transform,
         }
@@ -144,7 +145,7 @@ impl MixedExecutionCapabilities {
 pub struct ExactCompositionCostRequest<'a> {
     /// The pre-ASAP target the composed candidate replaces.
     pub target: &'a QueryExpr,
-    /// The composition itself — placement, operator, child target.
+    /// The composition itself — phase, operator, child target.
     pub composition: &'a ExactComposition,
     /// For [`CompositionPlacement::PostProcess`]: the child target's *selected*
     /// summary readout candidate the exact operator consumes. For
@@ -207,10 +208,10 @@ impl ExactCompositionCostInputs {
         }
     }
 
-    /// The rate for whichever composition placement is requested —
+    /// The rate for whichever phase `phase` names —
     /// [`postprocess_plan_cost_rate`] or [`pretransform_plan_cost_rate`].
     pub fn composed_plan_cost_rate(&self, placement: CompositionPlacement) -> Option<CostRate> {
-        match placement {
+        match phase {
             CompositionPlacement::PostProcess => postprocess_plan_cost_rate(self),
             CompositionPlacement::Transform => pretransform_plan_cost_rate(self),
         }
@@ -749,6 +750,17 @@ pub trait CostModel {
             model: "CostModel::exact_composition_cost_inputs (default)".into(),
             version: "unknown".into(),
         })
+    }
+
+    /// Primitive build, update, read, retention, and retirement costs used to
+    /// compare physical summary-state lifecycles. This is part of the same
+    /// cost model as candidate ranking and recurrence; lifecycle planning does
+    /// not introduce a second optimizer.
+    ///
+    /// The default leaves every value unknown, which prevents a long-lived
+    /// deployment from winning through optimistic zeroes.
+    fn summary_lifecycle_cost_inputs(&self, _summary: &SummaryNode) -> LifecycleCostInputs {
+        LifecycleCostInputs::default()
     }
 }
 

@@ -5,8 +5,9 @@
 This document is for ASAPPlanner designers, architects, researchers, and
 developers working on workload-aware plan selection. It defines how the
 planner should describe query workload, data workload, and the lifecycle of
-summary state. It is a design contract, not a description of the current
-public Rust API.
+summary state. It is the design contract for the public Rust model and the
+workload-to-lifecycle planning API; deployments still supply their own cost
+statistics and runtime capabilities.
 
 The terminology follows the ProjectASAP
 [glossary](https://github.com/ProjectASAP/internal-docs/blob/03e1c70f5af3ae9221471898541067eee7f86338/glossary.md).
@@ -41,13 +42,26 @@ may arrive unexpectedly during exploration, run once at a scheduled time, or
 repeat every ten seconds on a dashboard. Planning summary state from syntax
 alone either misses reuse or invents reuse that the workload does not justify.
 
-The current normalized workload distinguishes a one-shot `query_batch` from
-fixed-interval `repeating_queries`, and the recurrence cost model distinguishes
-one-shot consumers from evaluation and update rates. This is a useful base, but
-it does not represent predictability, uncertain demand, real-time versus
-longitudinal scope, at-rest versus continuously ingesting data, or summary-state
-lifecycle. It also risks treating "repeating query" and "streaming data" as the
-same fact even though the glossary defines them on different axes.
+The normalized workload preserves `query_batch` and `repeating_queries` as
+compatibility-shaped inputs, then exposes both through `QueryWorkload::entries`
+as recurrence, predictability, requirements, and time-selection axes. Data
+arrival and fresh ingestion evidence remain a separate `DataWorkload`; a
+repeating query therefore never implies streaming data.
+
+### Implementation map
+
+- `asap_types::workload` defines the normalized query/data workload and
+  evidence freshness contract.
+- `PlanSpace::recurrence_profiles_from_workload` derives per-target read and
+  update recurrence without treating missing evidence as zero.
+- `WorkloadAccuracyEvidence` supplies fresh cardinality and distribution to
+  accuracy models.
+- `plan_summary_lifecycles` enumerates legal ephemeral, prepared, shared, and
+  continuously maintained alternatives and compares their costs over the
+  caller's explicit horizon.
+- `materialize_with_lifecycles` attaches those state deployments to PR #300's
+  phase-validated global selection. Each deployment retains assumptions and
+  rejected alternatives for explanation.
 
 ## Inputs, outputs, and end-to-end behavior
 
