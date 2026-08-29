@@ -53,9 +53,9 @@ same fact even though the glossary defines them on different axes.
 
 The planner receives four logically distinct inputs:
 
-1. logical queries and their correctness and latency requirements;
-2. query-workload demand, including predictability, recurrence, and queried
-   time scope;
+1. logical queries, which define query semantics;
+2. query workload, including per-query accuracy and latency requirements,
+   predictability, recurrence, and queried time scope;
 3. data-workload characteristics, including arrival, volume, cardinality, and
    distribution;
 4. existing summaries and the lifecycle actions available to the deployment.
@@ -66,7 +66,7 @@ bounded period, or continuously maintained. Its cost explanation identifies
 the demand and data evidence used in the decision.
 
 ```text
-logical queries + requirements
+            logical queries ---+
            query workload -----+
               data workload ---+--> candidate plans
         available summaries ---+       -> semantic and accuracy legality
@@ -136,18 +136,55 @@ an explicit horizon.
 | Concept | Authoritative layer | Reason |
 | --- | --- | --- |
 | Query meaning | Pre-ASAP query IR | Workload metadata must not change semantics |
-| Accuracy and latency requirement | Per-query requirements | Requirements belong to the requested result |
+| Accuracy requirement | Query workload (per-query) | The required result fidelity may be explicit or supplied by the normalization default |
+| Latency requirement | Query workload (per-query) | The optional end-to-end latency bound belongs to one query execution |
 | Query workload | Workload input | Arrival and recurrence are not inferable from syntax |
 | Data workload | Workload input | Ingestion and distribution describe the data, not query workload |
 | Summary capability | Summary properties | Merge, delete, and update support constrain legal lifecycles |
 | State lifecycle | Physical planning decision | Lifecycle is selected, not declared by `SummaryAgg` |
 | Cost | Cost model and explanation | Cost consumes all inputs but does not define their meaning |
 
-### Query workload: three independent axes
+### Query workload
+
+Accuracy and latency are separate per-query requirements within the query
+workload. They constrain different planner decisions and must not be collapsed
+into one SLA value:
+
+```rust
+enum AccuracyRequirement {
+    /// The caller supplied the required result fidelity.
+    Explicit(AccuracyTarget),
+    /// The source omitted accuracy; normalization applies the exact default.
+    ImplicitExact,
+}
+
+enum LatencyRequirement {
+    /// Maximum permitted end-to-end latency for one query execution.
+    ExplicitMax(Duration),
+    /// The caller supplied no latency bound.
+    Unspecified,
+}
+
+struct QueryRequirements {
+    accuracy: AccuracyRequirement,
+    latency: LatencyRequirement,
+}
+```
+
+An omitted accuracy field is not an unknown accuracy target and does not permit
+arbitrary approximation: the current normalization policy makes it
+`ImplicitExact`. Keeping that variant distinct from `Explicit(Exact)` preserves
+whether the caller chose exactness or inherited the default. An unspecified
+latency requirement imposes no latency constraint; it is not a zero-duration
+bound or evidence that every latency is acceptable. Accuracy is checked as a
+legality constraint, while latency is used to reject plans that cannot meet the
+bound.
+
+#### Classification axes
 
 The glossary classifications must be modeled independently.
 
-#### Predictability
+##### Predictability
 
 ```rust
 enum Predictability {
@@ -167,7 +204,7 @@ known in advance. The glossary currently places exploratory/ad-hoc queries in
 the one-time category, so the MVP should accept `AdHoc + OneTime` and reserve
 other combinations until a concrete use case establishes their semantics.
 
-#### Recurrence
+##### Recurrence
 
 ```rust
 enum QueryRecurrence {
@@ -203,7 +240,7 @@ than estimates and do not need fabricated confidence. The MVP may cost only
 invocation count and evaluation rate, but it must preserve unsupported volume
 characteristics for explanation rather than silently discarding them.
 
-#### Queried time scope
+##### Queried time scope
 
 ```rust
 enum QueryTimeScope {
