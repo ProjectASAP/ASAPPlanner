@@ -2,7 +2,7 @@
 //!
 //! ASAPPlanner already models recurring-workload metadata
 //! ([`asap_types::workload::RepeatingEntry`]) and ingest-rate metadata
-//! ([`asap_types::workload::DataCharacteristics`]), but until this module
+//! ([`asap_types::workload::DataWorkload`]), but until this module
 //! neither reached [`CostModel`]'s CSE share-vs-recompute decision
 //! ([`CostModel::cse_share_decision`]): that decision only ever compared a
 //! *structural* consumer count (how many workload locations reference a
@@ -79,12 +79,10 @@
 //!   for a whole workload). A one-shot ([`asap_types::workload::BatchEntry`])
 //!   consumer contributes to [`RecurrenceProfile::one_shot_consumers`]
 //!   instead, never to this rate.
-//! - [`UpdateRate`]: derived from workload-level
-//!   [`asap_types::workload::DataCharacteristics`] via
-//!   [`update_rate_from_data_characteristics`] (`series_count *
-//!   samples_per_sec_per_series`) — a deployment with a more precise
-//!   per-target ingest measurement should compute its own `UpdateRate`
-//!   instead of relying on this proxy.
+//! - [`UpdateRate`]: read from workload-level
+//!   [`asap_types::workload::DataWorkload::ingestion_rate`] via
+//!   [`update_rate_from_data_workload`]. Missing evidence remains unknown;
+//!   data at rest is not assigned a fabricated update rate.
 //! - `maintenance_cost_per_update` / `summary_read_cost` /
 //!   `raw_recompute_cost`: [`CostModel`] hooks (defaults documented on the
 //!   trait itself, in `cost_model.rs`) — illustrative placeholders, like
@@ -95,7 +93,7 @@
 //!
 //! [`RecurrenceProfile::is_empty`] is `true` exactly when a caller supplied
 //! no [`RepeatingEntry`](asap_types::workload::RepeatingEntry)/
-//! [`DataCharacteristics`](asap_types::workload::DataCharacteristics)-derived
+//! [`DataWorkload`](asap_types::workload::DataWorkload)-derived
 //! information at all (no evaluation rate, no update rate, zero recorded
 //! one-shot consumers — [`RecurrenceProfile::EMPTY`], its `Default`).
 //! [`CostModel::cse_share_decision_with_recurrence`]'s default body checks
@@ -106,7 +104,7 @@
 
 use std::fmt;
 
-use asap_types::workload::{DataCharacteristics, RepetitionInterval};
+use asap_types::workload::{DataWorkload, RepetitionInterval};
 
 use crate::cost_model::{Cost, CostModel, CseCandidate, ShareDecision};
 
@@ -114,8 +112,8 @@ use crate::cost_model::{Cost, CostModel, CseCandidate, ShareDecision};
 
 /// How often the *raw* data underlying a maintained summary changes —
 /// ingest/update events per second (Hz). See the module docs' provenance
-/// table: normally derived from [`DataCharacteristics`] via
-/// [`update_rate_from_data_characteristics`].
+/// table: normally read from [`DataWorkload::ingestion_rate`] via
+/// [`update_rate_from_data_workload`].
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct UpdateRate(pub f64);
 
@@ -234,7 +232,7 @@ pub enum RecurrenceError {
 /// discipline [`evaluation_rate_of`] applies to each [`RepetitionInterval`],
 /// applied at every point an `UpdateRate` enters a [`RecurrenceProfile`]
 /// ([`RecurrenceProfile::with_update_rate`],
-/// [`update_rate_from_data_characteristics`],
+/// [`update_rate_from_data_workload`],
 /// [`crate::replacement::PlanSpace::recurrence_profiles`]'s own parameter)
 /// *and*, as a backstop that can't be bypassed by constructing a
 /// `RecurrenceProfile` via its public fields directly, inside [`decide`]
@@ -284,24 +282,17 @@ where
     Ok(any.then_some(EvaluationRate(total_hz)))
 }
 
-/// Derive an [`UpdateRate`] from workload-level [`DataCharacteristics`]:
-/// `series_count * samples_per_sec_per_series` — the total number of raw
-/// ingest samples per second across every series this characteristics
-/// value describes. A proxy, not a measurement: a deployment with a more
-/// precise per-target ingest rate should compute its own `UpdateRate`
-/// rather than rely on this conversion.
-///
-/// Validated via [`validate_update_rate`]: `samples_per_sec_per_series` is
-/// caller-supplied `f64` with no type-level guarantee of being finite or
-/// non-negative, so a garbage `DataCharacteristics` value (NaN, infinite,
-/// or negative) is rejected here rather than silently propagating into a
-/// [`RecurrenceProfile`].
-pub fn update_rate_from_data_characteristics(
-    dc: &DataCharacteristics,
-) -> Result<UpdateRate, RecurrenceError> {
-    validate_update_rate(UpdateRate(
-        dc.series_count as f64 * dc.samples_per_sec_per_series,
-    ))
+/// Read an [`UpdateRate`] from workload-level [`DataWorkload`] evidence.
+/// Missing evidence remains `None`; a present non-finite or negative rate is
+/// rejected rather than propagated into a [`RecurrenceProfile`].
+pub fn update_rate_from_data_workload(
+    workload: &DataWorkload,
+) -> Result<Option<UpdateRate>, RecurrenceError> {
+    workload
+        .ingestion_rate
+        .value
+        .map(|rate| validate_update_rate(UpdateRate(rate.0)))
+        .transpose()
 }
 
 // ── RecurrenceProfile ────────────────────────────────────────────────────
@@ -326,7 +317,7 @@ pub struct RecurrenceProfile {
     pub one_shot_consumers: usize,
     /// The ingest/update rate of the raw data this target (if maintained)
     /// would be kept up to date against. `None` when no
-    /// [`DataCharacteristics`] were available.
+    /// [`DataWorkload::ingestion_rate`] evidence was available.
     pub update_rate: Option<UpdateRate>,
 }
 
@@ -365,7 +356,7 @@ impl RecurrenceProfile {
         self
     }
 
-    /// Attach an ingest/update rate (from [`update_rate_from_data_characteristics`]
+    /// Attach an ingest/update rate (from [`update_rate_from_data_workload`]
     /// or a deployment-specific measurement). Validated via
     /// [`validate_update_rate`] — rejects a NaN, infinite, or negative rate
     /// rather than silently storing it.
@@ -670,32 +661,40 @@ mod tests {
         assert_eq!(err, RecurrenceError::InvalidInterval(interval(0)));
     }
 
-    // ── update_rate_from_data_characteristics ────────────────────────────
+    // ── update_rate_from_data_workload ───────────────────────────────────
 
     #[test]
-    fn update_rate_from_data_characteristics_multiplies_series_by_sample_rate() {
-        let dc = DataCharacteristics {
-            series_count: 1_000,
-            samples_per_sec_per_series: 0.1,
-            bytes_per_raw_sample: 80,
-            distinct_keys_per_window: None,
-            data_distribution: Default::default(),
+    fn update_rate_from_data_workload_reads_ingestion_rate_evidence() {
+        let workload = DataWorkload {
+            ingestion_rate: asap_types::workload::Evidence {
+                value: Some(asap_types::workload::Rate(100.0)),
+                ..Default::default()
+            },
+            ..Default::default()
         };
-        let rate = update_rate_from_data_characteristics(&dc).unwrap();
+        let rate = update_rate_from_data_workload(&workload).unwrap().unwrap();
         assert!((rate.0 - 100.0).abs() < 1e-9);
     }
 
     #[test]
-    fn update_rate_from_data_characteristics_rejects_a_negative_sample_rate() {
-        let dc = DataCharacteristics {
-            series_count: 1_000,
-            samples_per_sec_per_series: -0.1,
-            bytes_per_raw_sample: 80,
-            distinct_keys_per_window: None,
-            data_distribution: Default::default(),
+    fn update_rate_from_data_workload_rejects_a_negative_rate() {
+        let workload = DataWorkload {
+            ingestion_rate: asap_types::workload::Evidence {
+                value: Some(asap_types::workload::Rate(-0.1)),
+                ..Default::default()
+            },
+            ..Default::default()
         };
-        let err = update_rate_from_data_characteristics(&dc).unwrap_err();
+        let err = update_rate_from_data_workload(&workload).unwrap_err();
         assert!(matches!(err, RecurrenceError::InvalidUpdateRate(_)));
+    }
+
+    #[test]
+    fn update_rate_from_data_workload_preserves_missing_evidence() {
+        assert_eq!(
+            update_rate_from_data_workload(&DataWorkload::default()).unwrap(),
+            None
+        );
     }
 
     // ── RecurrenceProfile ─────────────────────────────────────────────────
@@ -1074,7 +1073,7 @@ mod tests {
         assert_eq!(explanation.recompute_total, Some(Cost(50.0)));
     }
 
-    /// A batch-only workload (no `DataCharacteristics`, only one-shot
+    /// A batch-only workload (no `DataWorkload`, only one-shot
     /// consumers) with the *default* `DefaultCostModel` must not
     /// unconditionally prefer `Share` regardless of how many one-shot
     /// consumers there are — issue #287 review bug 1's original repro,

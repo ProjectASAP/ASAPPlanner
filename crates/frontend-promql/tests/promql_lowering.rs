@@ -769,7 +769,7 @@ fn batch_lowers_each_entry_and_reads_per_query_accuracy() {
             },
         ]),
         repeating_queries: None,
-        data_characteristics: None,
+        data_workload: None,
     };
     let results = lower_promql_batch(&workload);
     assert_eq!(results.len(), 2);
@@ -787,7 +787,7 @@ fn batch_rejects_non_promql_language() {
             requirements: None,
         }]),
         repeating_queries: None,
-        data_characteristics: None,
+        data_workload: None,
     };
     let results = lower_promql_batch(&workload);
     assert_eq!(results.len(), 1);
