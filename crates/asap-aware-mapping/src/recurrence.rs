@@ -204,6 +204,8 @@ pub enum RecurrenceError {
     InvalidEvaluationRate(EvaluationRate),
     #[error(transparent)]
     InvalidWorkload(#[from] asap_types::workload::WorkloadError),
+    #[error("workload entry index {index} is out of bounds for {entry_count} entries")]
+    InvalidWorkloadEntry { index: usize, entry_count: usize },
     /// A [`Horizon`] that isn't finite and strictly positive (NaN,
     /// infinite, zero, or negative) was supplied — a non-positive or
     /// infinite horizon would silently drop or invert the recurring

@@ -2576,9 +2576,15 @@ impl<Id> PlanSpace<Id> {
     /// Derive per-target recurrence profiles directly from the normalized
     /// query and data workloads. This is the authoritative bridge from the
     /// public workload model into recurrence-aware candidate costing.
+    /// `root_workload_entries[i]` explicitly identifies the normalized
+    /// workload entry for `self.roots[i]`; callers need not arrange roots in
+    /// the batch-then-repeating storage order.
     pub fn recurrence_profiles_from_workload(
         &self,
         workload: &QueryWorkload,
+        // For each `PlanSpace::roots[i]`, the explicit index of its
+        // corresponding normalized workload entry.
+        root_workload_entries: &[usize],
         now_ms: u64,
         horizon: Option<Horizon>,
     ) -> Result<RecurrenceProfileMap, crate::recurrence::RecurrenceError> {
@@ -2588,14 +2594,27 @@ impl<Id> PlanSpace<Id> {
                 return Err(crate::recurrence::RecurrenceError::InvalidHorizon(horizon));
             }
         }
-        let mut recurrences = Vec::new();
-        for entry in workload.entries() {
-            let recurrence = match entry.recurrence {
-                QueryRecurrence::OneTime { invocations, .. } => {
-                    RootRecurrence::OneShotCount(usize::try_from(invocations).unwrap_or(usize::MAX))
-                }
+        if root_workload_entries.len() != self.roots.len() {
+            return Err(crate::recurrence::RecurrenceError::RootCountMismatch {
+                expected: self.roots.len(),
+                got: root_workload_entries.len(),
+            });
+        }
+        let entries: Vec<_> = workload.entries().collect();
+        let mut recurrences = Vec::with_capacity(root_workload_entries.len());
+        for &index in root_workload_entries {
+            let entry = entries.get(index).ok_or(
+                crate::recurrence::RecurrenceError::InvalidWorkloadEntry {
+                    index,
+                    entry_count: entries.len(),
+                },
+            )?;
+            let recurrence = match &entry.recurrence {
+                QueryRecurrence::OneTime { invocations, .. } => RootRecurrence::OneShotCount(
+                    usize::try_from(*invocations).unwrap_or(usize::MAX),
+                ),
                 QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
-                    RootRecurrence::Repeating(interval)
+                    RootRecurrence::Repeating(*interval)
                 }
                 QueryRecurrence::Repeated(RepeatedDemand::Scheduled(schedule)) => {
                     let Some(horizon) = horizon else {
@@ -2611,14 +2630,7 @@ impl<Id> PlanSpace<Id> {
                     ))
                 }
                 QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
-                    let fresh = match (estimate.observed_at, estimate.valid_for) {
-                        (Some(observed), Some(valid_for)) => {
-                            now_ms <= observed.0.saturating_add(valid_for.0)
-                        }
-                        (None, Some(_)) => false,
-                        _ => true,
-                    };
-                    if !fresh {
+                    if !estimate.is_fresh_at(now_ms) {
                         RootRecurrence::Unknown
                     } else {
                         let rate = match estimate.expected {
