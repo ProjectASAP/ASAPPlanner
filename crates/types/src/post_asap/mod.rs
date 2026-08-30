@@ -27,13 +27,18 @@
 //! alongside `reduction` and on sketch-valued edge types
 //! — see `asap_aware_mapping::grouping`'s module docs for why.
 
+pub mod execution_data_state;
 pub mod expr;
 pub mod guarantee;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;
-pub mod value_domain;
 
+pub use execution_data_state::{
+    assigned_child_domain, exact_operator_output_schema, produced_domain,
+    validate_execution_domains, validate_execution_domains_at, DataPrimitive, DomainAssignment,
+    DomainError, ExactOperatorSchemaError, ExecutionDataState, ExecutionTiming,
+};
 pub use expr::{ExactOperator, SummaryExpr, SummaryNode, ValueOperator};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
@@ -48,9 +53,4 @@ pub use sketch::{
     default_hydra_params, hydra_kind_for, ExactKind, ExactParams, GroupingStrategy, HydraKind,
     HydraParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory, SketchKind,
     SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
-};
-pub use value_domain::{
-    assigned_child_domain, exact_operator_output_schema, produced_domain,
-    validate_execution_domains, validate_execution_domains_at, DataPrimitive, DomainAssignment,
-    DomainError, ExactOperatorSchemaError, ExecutionDataState, ExecutionTiming,
 };

@@ -1,4 +1,4 @@
-//! Execution-domain contract for mixed exact/summary plans (issue #171).
+//! Execution-data-state contract for mixed exact/summary plans (issue #171).
 //!
 //! A post-ASAP DAG mixes two very different moments of execution: the
 //! **update/ingest path** (rows arrive, maintained summary state is updated)

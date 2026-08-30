@@ -192,7 +192,7 @@ pub enum SummaryExpr {
     /// produces plain update values, so its output may feed a downstream
     /// [`SummaryAgg`](SummaryExpr::SummaryAgg)'s maintenance — the "outer
     /// summary over an inner non-accumulator exact transform" direction.
-    /// See [`super::value_domain::ExecutionDataState`] for the edge contract.
+    /// See [`super::execution_data_state::ExecutionDataState`] for the edge contract.
     UpdateTransform {
         child: Rc<SummaryNode>,
         op: ValueOperator,
@@ -203,7 +203,7 @@ pub enum SummaryExpr {
     /// final plain query result — the "outer exact fold over an inner
     /// summary readout" direction. Can never feed maintained state: a
     /// `SummaryAgg` above one of these is a plan-time
-    /// [`super::value_domain::DomainError`], never a runtime failure.
+    /// [`super::execution_data_state::DomainError`], never a runtime failure.
     ReadoutPostProcess {
         child: Rc<SummaryNode>,
         op: ValueOperator,

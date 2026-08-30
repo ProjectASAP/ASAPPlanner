@@ -365,7 +365,7 @@ pub fn export_summary(node: &SummaryNode) -> SummaryDagGraph {
 
 /// The explicit execution domain of an exported plan's root — its own
 /// produced domain, or query-time readout for a bare `KeepPreAsap`
-/// (the same convention `post_asap::value_domain::validate_execution_domains`
+/// (the same convention `post_asap::execution_data_state::validate_execution_domains`
 /// uses for a root).
 fn root_domain(node: &SummaryNode) -> ExecutionDataState {
     produced_domain(&node.expr).unwrap_or(ExecutionDataState::READ_ROWS)
