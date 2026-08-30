@@ -47,8 +47,8 @@ use std::rc::Rc;
 use serde::Serialize;
 
 use crate::post_asap::{
-    assigned_child_domain, produced_domain, AccuracyError, ExactOperator, ResultGuarantee,
-    SummaryExpr, SummaryNode, ValueDomain, ValueOperator,
+    assigned_child_domain, produced_domain, AccuracyError, ExactOperator, ExecutionDataState,
+    ResultGuarantee, SummaryExpr, SummaryNode, ValueOperator,
 };
 use crate::pre_asap::cse::{structural_hash, HashCache};
 use crate::pre_asap::query_expr::{QueryExpr, Source};
@@ -367,8 +367,8 @@ pub fn export_summary(node: &SummaryNode) -> SummaryDagGraph {
 /// produced domain, or query-time readout for a bare `KeepPreAsap`
 /// (the same convention `post_asap::value_domain::validate_execution_domains`
 /// uses for a root).
-fn root_domain(node: &SummaryNode) -> ValueDomain {
-    produced_domain(&node.expr).unwrap_or(ValueDomain::READ_ROWS)
+fn root_domain(node: &SummaryNode) -> ExecutionDataState {
+    produced_domain(&node.expr).unwrap_or(ExecutionDataState::READ_ROWS)
 }
 
 /// `detail` for an [`ExactOperator`] payload — its own fields, rendered the
@@ -472,7 +472,7 @@ fn family_label(family: &crate::post_asap::SummaryFamilyType) -> String {
 /// reads it rather than inferring it from the node's kind.
 fn summary_shape(
     expr: &SummaryExpr,
-    domain: ValueDomain,
+    domain: ExecutionDataState,
 ) -> (&'static str, String, serde_json::Value) {
     let (kind, label, mut detail) = match expr {
         SummaryExpr::KeepPreAsap(_) => {
@@ -566,7 +566,11 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
 /// post-order (children pushed before their parent), and return the pushed
 /// root's id. Exhaustive over every [`SummaryExpr`] variant, matching this
 /// file's own exhaustive style for `QueryExpr` in [`build`].
-fn build_summary(node: &SummaryNode, nodes: &mut Vec<SummaryDagNode>, domain: ValueDomain) -> u32 {
+fn build_summary(
+    node: &SummaryNode,
+    nodes: &mut Vec<SummaryDagNode>,
+    domain: ExecutionDataState,
+) -> u32 {
     if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
         let pre_asap_subgraph = export(inner);
         let inner_kind = pre_asap_subgraph.nodes[pre_asap_subgraph.root as usize].kind;
@@ -869,7 +873,7 @@ fn build_summary_hybrid(
     nodes: &mut Vec<DagNode>,
     cache: &mut HashCache,
     find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
-    domain: ValueDomain,
+    domain: ExecutionDataState,
 ) -> u32 {
     if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
         return build(inner, nodes, cache, find_winner);

@@ -52,5 +52,5 @@ pub use sketch::{
 pub use value_domain::{
     assigned_child_domain, exact_operator_output_schema, produced_domain,
     validate_execution_domains, validate_execution_domains_at, DataPrimitive, DomainAssignment,
-    DomainError, ExactOperatorSchemaError, ExecutionTiming, ValueDomain,
+    DomainError, ExactOperatorSchemaError, ExecutionDataState, ExecutionTiming,
 };

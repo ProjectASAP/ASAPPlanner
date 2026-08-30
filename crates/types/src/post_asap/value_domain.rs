@@ -10,7 +10,7 @@
 //! why it and [`SummaryExpr::UpdateTransform`] are two separate variants
 //! rather than one domain-ambiguous value operation.
 //!
-//! [`ValueDomain`] is what a node's output *is*, at which domain;
+//! [`ExecutionDataState`] is what a node's output *is*, at which domain;
 //! [`validate_execution_domains`] checks every edge of a DAG against the
 //! rules below at plan construction, returning a typed [`DomainError`] rather
 //! than deferring to a runtime failure.
@@ -85,12 +85,12 @@ impl DataPrimitive {
 /// The two-dimensional edge contract: when a value exists and which data
 /// primitive it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ValueDomain {
+pub struct ExecutionDataState {
     pub timing: ExecutionTiming,
     pub primitive: DataPrimitive,
 }
 
-impl ValueDomain {
+impl ExecutionDataState {
     pub const MAINTENANCE_ROWS: Self = Self {
         timing: ExecutionTiming::MaintenanceTime,
         primitive: DataPrimitive::Rows,
@@ -105,7 +105,7 @@ impl ValueDomain {
     };
 }
 
-impl std::fmt::Display for ValueDomain {
+impl std::fmt::Display for ExecutionDataState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.timing.as_str(), self.primitive.as_str())
     }
@@ -155,7 +155,7 @@ pub enum DomainError {
     )]
     ReadoutUnderMaintenance {
         edge: &'static str,
-        child: ValueDomain,
+        child: ExecutionDataState,
     },
     /// Any other edge whose child domain the parent does not accept
     /// (e.g. plain update rows fed straight into a `SummaryEstimate`, or a
@@ -163,7 +163,7 @@ pub enum DomainError {
     #[error("{edge} does not accept a {child} input")]
     IllegalChildPhase {
         edge: &'static str,
-        child: ValueDomain,
+        child: ExecutionDataState,
     },
     /// A `SummaryAgg` whose child is summary state of a family other than an
     /// exact accumulator — re-accumulating opaque sketch/sample/… state on
@@ -180,8 +180,8 @@ pub enum DomainError {
          plan"
     )]
     AmbiguousKeepPreAsap {
-        first: ValueDomain,
-        second: ValueDomain,
+        first: ExecutionDataState,
+        second: ExecutionDataState,
     },
     /// An update-path-only node (`UpdateTransform`) at the root of a plan:
     /// nothing maintains state above it, so its output is never read.
@@ -200,18 +200,18 @@ pub enum DomainError {
 /// `KeepPreAsap` leaf it is the domain the reaching edge assigned.
 #[derive(Debug, Clone, Default)]
 pub struct DomainAssignment {
-    domains: HashMap<*const SummaryNode, ValueDomain>,
+    domains: HashMap<*const SummaryNode, ExecutionDataState>,
 }
 
 impl DomainAssignment {
     /// The domain assigned to `node`, if it was part of the validated plan.
-    pub fn domain_of(&self, node: &Rc<SummaryNode>) -> Option<ValueDomain> {
+    pub fn domain_of(&self, node: &Rc<SummaryNode>) -> Option<ExecutionDataState> {
         self.domains.get(&Rc::as_ptr(node)).copied()
     }
 
     /// The domain assigned to the node at `ptr` — for callers walking a plan
     /// by reference rather than by `Rc`.
-    pub fn domain_of_ptr(&self, ptr: *const SummaryNode) -> Option<ValueDomain> {
+    pub fn domain_of_ptr(&self, ptr: *const SummaryNode) -> Option<ExecutionDataState> {
         self.domains.get(&ptr).copied()
     }
 }
@@ -219,18 +219,18 @@ impl DomainAssignment {
 /// The domain `expr` *produces*, independent of context — `None` for
 /// [`SummaryExpr::KeepPreAsap`], whose domain is assigned by the edge reaching
 /// it (see the module docs).
-pub fn produced_domain(expr: &SummaryExpr) -> Option<ValueDomain> {
+pub fn produced_domain(expr: &SummaryExpr) -> Option<ExecutionDataState> {
     Some(match expr {
         SummaryExpr::KeepPreAsap(_) => return None,
         SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
         | SummaryExpr::SummarySubtract { .. }
         | SummaryExpr::SummaryDelete { .. }
-        | SummaryExpr::SummaryMerge { .. } => ValueDomain::MAINTENANCE_SUMMARY,
+        | SummaryExpr::SummaryMerge { .. } => ExecutionDataState::MAINTENANCE_SUMMARY,
         SummaryExpr::SummaryEstimate { .. } | SummaryExpr::ReadoutPostProcess { .. } => {
-            ValueDomain::READ_ROWS
+            ExecutionDataState::READ_ROWS
         }
-        SummaryExpr::UpdateTransform { .. } => ValueDomain::MAINTENANCE_ROWS,
+        SummaryExpr::UpdateTransform { .. } => ExecutionDataState::MAINTENANCE_ROWS,
     })
 }
 
@@ -260,8 +260,10 @@ pub fn validate_execution_domains(root: &Rc<SummaryNode>) -> Result<DomainAssign
     // deployment may hand an `ExactAggregate` accumulator straight to a
     // consumer) — only an update-path-only root is meaningless.
     let root_domain = match produced_domain(&root.expr) {
-        None => ValueDomain::READ_ROWS,
-        Some(ValueDomain::MAINTENANCE_ROWS) => return Err(DomainError::MaintenanceRowsAtRoot),
+        None => ExecutionDataState::READ_ROWS,
+        Some(ExecutionDataState::MAINTENANCE_ROWS) => {
+            return Err(DomainError::MaintenanceRowsAtRoot)
+        }
         Some(domain) => domain,
     };
     validate_execution_domains_at(root, root_domain)
@@ -274,7 +276,7 @@ pub fn validate_execution_domains(root: &Rc<SummaryNode>) -> Result<DomainAssign
 /// as the whole-plan entry point does.
 pub fn validate_execution_domains_at(
     root: &Rc<SummaryNode>,
-    domain: ValueDomain,
+    domain: ExecutionDataState,
 ) -> Result<DomainAssignment, DomainError> {
     let mut assignment = DomainAssignment::default();
     visit(root, domain, &mut assignment)?;
@@ -285,7 +287,7 @@ pub fn validate_execution_domains_at(
 /// for a `KeepPreAsap`), then check and recurse into every child edge.
 fn visit(
     node: &Rc<SummaryNode>,
-    domain: ValueDomain,
+    domain: ExecutionDataState,
     assignment: &mut DomainAssignment,
 ) -> Result<(), DomainError> {
     let ptr = Rc::as_ptr(node);
@@ -306,8 +308,10 @@ fn visit(
         SummaryExpr::SummaryAgg { child, .. } => {
             let child_domain =
                 child_domain(child, DomainEdge::SummaryAggChild, |avail| match avail {
-                    ValueDomain::MAINTENANCE_ROWS => Ok(()),
-                    ValueDomain::MAINTENANCE_SUMMARY => is_exact_accumulator_state(&child.schema),
+                    ExecutionDataState::MAINTENANCE_ROWS => Ok(()),
+                    ExecutionDataState::MAINTENANCE_SUMMARY => {
+                        is_exact_accumulator_state(&child.schema)
+                    }
                     other => Err(DomainError::ReadoutUnderMaintenance {
                         edge: DomainEdge::SummaryAggChild.describe(),
                         child: other,
@@ -318,7 +322,8 @@ fn visit(
         SummaryExpr::SummaryJoin { outer, inner, .. } => {
             for input in [outer, inner] {
                 let s = child_domain(input, DomainEdge::SummaryJoinInput, |avail| match avail {
-                    ValueDomain::MAINTENANCE_ROWS | ValueDomain::MAINTENANCE_SUMMARY => Ok(()),
+                    ExecutionDataState::MAINTENANCE_ROWS
+                    | ExecutionDataState::MAINTENANCE_SUMMARY => Ok(()),
                     other => Err(DomainError::ReadoutUnderMaintenance {
                         edge: DomainEdge::SummaryJoinInput.describe(),
                         child: other,
@@ -355,7 +360,7 @@ fn visit(
                 child,
                 DomainEdge::UpdateTransformChild,
                 |avail| match avail {
-                    ValueDomain::MAINTENANCE_ROWS => Ok(()),
+                    ExecutionDataState::MAINTENANCE_ROWS => Ok(()),
                     other => Err(DomainError::IllegalChildPhase {
                         edge: DomainEdge::UpdateTransformChild.describe(),
                         child: other,
@@ -370,7 +375,7 @@ fn visit(
                 child,
                 DomainEdge::ReadoutPostProcessChild,
                 |avail| match avail {
-                    ValueDomain::READ_ROWS => Ok(()),
+                    ExecutionDataState::READ_ROWS => Ok(()),
                     other => Err(DomainError::IllegalChildPhase {
                         edge: DomainEdge::ReadoutPostProcessChild.describe(),
                         child: other,
@@ -391,12 +396,12 @@ fn visit(
 /// under a state-only edge). For DAG export and other reporting that needs
 /// an explicit per-node domain even on a plan that
 /// [`validate_execution_domains`] would reject.
-pub fn assigned_child_domain(parent: &SummaryExpr, child: &SummaryNode) -> ValueDomain {
+pub fn assigned_child_domain(parent: &SummaryExpr, child: &SummaryNode) -> ExecutionDataState {
     if let Some(avail) = produced_domain(&child.expr) {
         return avail;
     }
     match parent {
-        SummaryExpr::ReadoutPostProcess { .. } => ValueDomain::READ_ROWS,
+        SummaryExpr::ReadoutPostProcess { .. } => ExecutionDataState::READ_ROWS,
         SummaryExpr::KeepPreAsap(_)
         | SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
@@ -404,7 +409,7 @@ pub fn assigned_child_domain(parent: &SummaryExpr, child: &SummaryNode) -> Value
         | SummaryExpr::SummaryDelete { .. }
         | SummaryExpr::SummaryEstimate { .. }
         | SummaryExpr::SummaryMerge { .. }
-        | SummaryExpr::UpdateTransform { .. } => ValueDomain::MAINTENANCE_ROWS,
+        | SummaryExpr::UpdateTransform { .. } => ExecutionDataState::MAINTENANCE_ROWS,
     }
 }
 
@@ -414,8 +419,8 @@ pub fn assigned_child_domain(parent: &SummaryExpr, child: &SummaryNode) -> Value
 fn child_domain(
     child: &Rc<SummaryNode>,
     edge: DomainEdge,
-    accept: impl Fn(ValueDomain) -> Result<(), DomainError>,
-) -> Result<ValueDomain, DomainError> {
+    accept: impl Fn(ExecutionDataState) -> Result<(), DomainError>,
+) -> Result<ExecutionDataState, DomainError> {
     match produced_domain(&child.expr) {
         Some(avail) => {
             accept(avail)?;
@@ -429,15 +434,15 @@ fn child_domain(
             let assigned = match edge {
                 DomainEdge::SummaryAggChild
                 | DomainEdge::SummaryJoinInput
-                | DomainEdge::UpdateTransformChild => ValueDomain::MAINTENANCE_ROWS,
-                DomainEdge::ReadoutPostProcessChild => ValueDomain::READ_ROWS,
+                | DomainEdge::UpdateTransformChild => ExecutionDataState::MAINTENANCE_ROWS,
+                DomainEdge::ReadoutPostProcessChild => ExecutionDataState::READ_ROWS,
                 DomainEdge::SummaryEstimateInput
                 | DomainEdge::SummarySubtractInput
                 | DomainEdge::SummaryDeleteInput
                 | DomainEdge::SummaryMergeInput => {
                     return Err(DomainError::IllegalChildPhase {
                         edge: edge.describe(),
-                        child: ValueDomain::MAINTENANCE_ROWS,
+                        child: ExecutionDataState::MAINTENANCE_ROWS,
                     })
                 }
             };
@@ -447,9 +452,12 @@ fn child_domain(
     }
 }
 
-fn state_only(child: &Rc<SummaryNode>, edge: DomainEdge) -> Result<ValueDomain, DomainError> {
+fn state_only(
+    child: &Rc<SummaryNode>,
+    edge: DomainEdge,
+) -> Result<ExecutionDataState, DomainError> {
     child_domain(child, edge, |avail| match avail {
-        ValueDomain::MAINTENANCE_SUMMARY => Ok(()),
+        ExecutionDataState::MAINTENANCE_SUMMARY => Ok(()),
         other => Err(DomainError::IllegalChildPhase {
             edge: edge.describe(),
             child: other,
@@ -676,11 +684,11 @@ mod tests {
         let assignment = validate_execution_domains(&root).unwrap();
         assert_eq!(
             assignment.domain_of(&leaf),
-            Some(ValueDomain::MAINTENANCE_ROWS)
+            Some(ExecutionDataState::MAINTENANCE_ROWS)
         );
         assert_eq!(
             assignment.domain_of(&root),
-            Some(ValueDomain::MAINTENANCE_SUMMARY)
+            Some(ExecutionDataState::MAINTENANCE_SUMMARY)
         );
     }
 
@@ -716,7 +724,10 @@ mod tests {
             guarantee: None,
         });
         let assignment = validate_execution_domains(&root).unwrap();
-        assert_eq!(assignment.domain_of(&root), Some(ValueDomain::READ_ROWS));
+        assert_eq!(
+            assignment.domain_of(&root),
+            Some(ExecutionDataState::READ_ROWS)
+        );
     }
 
     #[test]
@@ -734,7 +745,10 @@ mod tests {
         });
 
         let assignment = validate_execution_domains(&root).unwrap();
-        assert_eq!(assignment.domain_of(&root), Some(ValueDomain::READ_ROWS));
+        assert_eq!(
+            assignment.domain_of(&root),
+            Some(ExecutionDataState::READ_ROWS)
+        );
     }
 
     #[test]
@@ -753,7 +767,7 @@ mod tests {
             validate_execution_domains(&root).err(),
             Some(DomainError::ReadoutUnderMaintenance {
                 edge: "SummaryAgg.child",
-                child: ValueDomain::READ_ROWS,
+                child: ExecutionDataState::READ_ROWS,
             })
         );
     }
@@ -776,7 +790,7 @@ mod tests {
         let assignment = validate_execution_domains(&root).unwrap();
         assert_eq!(
             assignment.domain_of(&transform),
-            Some(ValueDomain::MAINTENANCE_ROWS)
+            Some(ExecutionDataState::MAINTENANCE_ROWS)
         );
     }
 
@@ -796,7 +810,7 @@ mod tests {
             validate_execution_domains(&root),
             Err(DomainError::IllegalChildPhase {
                 edge: "UpdateTransform.child",
-                child: ValueDomain::READ_ROWS
+                child: ExecutionDataState::READ_ROWS
             })
         ));
     }
@@ -836,12 +850,17 @@ mod tests {
         // SummaryMerge only accepts state, so this fails earlier for a
         // different reason; probe the ambiguity through a direct visit.
         let mut assignment = DomainAssignment::default();
-        visit(&shared, ValueDomain::MAINTENANCE_ROWS, &mut assignment).unwrap();
+        visit(
+            &shared,
+            ExecutionDataState::MAINTENANCE_ROWS,
+            &mut assignment,
+        )
+        .unwrap();
         assert_eq!(
-            visit(&shared, ValueDomain::READ_ROWS, &mut assignment),
+            visit(&shared, ExecutionDataState::READ_ROWS, &mut assignment),
             Err(DomainError::AmbiguousKeepPreAsap {
-                first: ValueDomain::MAINTENANCE_ROWS,
-                second: ValueDomain::READ_ROWS,
+                first: ExecutionDataState::MAINTENANCE_ROWS,
+                second: ExecutionDataState::READ_ROWS,
             })
         );
         assert!(validate_execution_domains(&root).is_err());

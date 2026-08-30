@@ -192,7 +192,7 @@ pub enum SummaryExpr {
     /// produces plain update values, so its output may feed a downstream
     /// [`SummaryAgg`](SummaryExpr::SummaryAgg)'s maintenance — the "outer
     /// summary over an inner non-accumulator exact transform" direction.
-    /// See [`super::value_domain::ValueDomain`] for the edge contract.
+    /// See [`super::value_domain::ExecutionDataState`] for the edge contract.
     UpdateTransform {
         child: Rc<SummaryNode>,
         op: ValueOperator,
