@@ -136,7 +136,7 @@ impl MixedExecutionCapabilities {
     };
 
     pub fn supports(self, placement: CompositionPlacement) -> bool {
-        match phase {
+        match placement {
             CompositionPlacement::PostProcess => self.exact_post_process,
             CompositionPlacement::Transform => self.exact_update_transform,
         }
@@ -216,7 +216,7 @@ impl ExactCompositionCostInputs {
     /// The rate for whichever phase `phase` names —
     /// [`postprocess_plan_cost_rate`] or [`pretransform_plan_cost_rate`].
     pub fn composed_plan_cost_rate(&self, placement: CompositionPlacement) -> Option<CostRate> {
-        match phase {
+        match placement {
             CompositionPlacement::PostProcess => postprocess_plan_cost_rate(self),
             CompositionPlacement::Transform => pretransform_plan_cost_rate(self),
         }
