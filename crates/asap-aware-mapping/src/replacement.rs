@@ -349,11 +349,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::post_asap::{
-    validate_execution_domains_at, DomainError, ExactKind, ExactOperatorSchemaError, ExactParams,
-    ExecutionDataState, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm,
-    SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams,
-    SummaryExpr, SummaryFamilyType, SummaryField, SummaryNode, SummarySchema, WaveletKind,
-    WaveletParams,
+    validate_execution_data_states_at, ExactKind, ExactOperatorSchemaError, ExactParams,
+    ExecutionDataState, ExecutionDataStateError, GroupingStrategy, SamplingKind, SamplingParams,
+    SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
+    StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryNode, SummarySchema,
+    WaveletKind, WaveletParams,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
@@ -406,8 +406,8 @@ pub enum ImplementError {
     /// A constructed plan violates the update/readout phase contract
     /// (issue #171) — e.g. a summary readout placed beneath a maintained
     /// `SummaryAgg`. Detected at construction, never at runtime.
-    #[error("execution-domain violation in post-ASAP plan: {0}")]
-    Domain(#[from] DomainError),
+    #[error("execution-data_state violation in post-ASAP plan: {0}")]
+    ExecutionDataState(#[from] ExecutionDataStateError),
     /// An `ExactOperator`'s output schema could not be derived over its
     /// child — the child carries summary state the operator can't read.
     #[error("exact operator schema derivation failed: {0}")]
@@ -552,7 +552,7 @@ pub struct RejectedCandidate {
 pub struct Proposals {
     pub candidates: Vec<ReplacementSubDAG>,
     pub rejected: Vec<RejectedCandidate>,
-    domain_error: Option<DomainError>,
+    domain_error: Option<ExecutionDataStateError>,
 }
 
 /// A replacement strategy: given a [`TargetSubDAG`], does this strategy have
@@ -1411,7 +1411,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                         provenance: ReplacementProvenance::SummaryImplementation,
                         rationale: format!(
                             "{} stays pre-ASAP because summary construction crosses an illegal \
-                             execution-domain boundary ({error})",
+                             execution-data_state boundary ({error})",
                             describe_intent(intent)
                         ),
                     });
@@ -1439,7 +1439,7 @@ impl Proposals {
                 description: rationale,
                 error,
             }),
-            Err(ImplementError::Domain(error)) => {
+            Err(ImplementError::ExecutionDataState(error)) => {
                 self.domain_error.get_or_insert(error);
             }
             Err(ImplementError::Schema(_) | ImplementError::ExactOperatorSchema(_)) => {}
@@ -1817,7 +1817,7 @@ fn construct_summary_agg(
     // Phase contract (issue #171): a maintained summary consumes update-path
     // values or exact accumulator state — never a query-time readout. A
     // typed error here, at construction; the caller decides the fallback.
-    validate_execution_domains_at(&agg, ExecutionDataState::MAINTENANCE_SUMMARY)?;
+    validate_execution_data_states_at(&agg, ExecutionDataState::MAINTENANCE_SUMMARY)?;
     match query {
         // The readout: downstream of the estimate the schema is the plain
         // pre-ASAP row shape again (the summary-state type does not
@@ -2867,7 +2867,7 @@ impl<'a> GlobalSelection<'a> {
         self.groups.get(&Rc::as_ptr(target))
     }
 
-    /// Link this selection's per-site decisions into one domain-validated
+    /// Link this selection's per-site decisions into one data_state-validated
     /// post-ASAP DAG rooted at `target` — the one place a committed
     /// composition's child *reference* becomes an actual `Rc<SummaryNode>`
     /// edge (issue #171). `None` if `target` is not a discovered site.
@@ -2983,7 +2983,10 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
                 schema: node.schema.clone(),
                 guarantee: node.guarantee.clone(),
             });
-            match validate_execution_domains_at(&rebuilt, ExecutionDataState::MAINTENANCE_SUMMARY) {
+            match validate_execution_data_states_at(
+                &rebuilt,
+                ExecutionDataState::MAINTENANCE_SUMMARY,
+            ) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
             }
@@ -4980,7 +4983,7 @@ mod tests {
         };
         assert!(
             matches!(node.expr, SummaryExpr::KeepPreAsap(ref e) if Rc::ptr_eq(e, &outer)),
-            "a sketch over a sketch readout is domain-illegal; expected the conservative \
+            "a sketch over a sketch readout is data_state-illegal; expected the conservative \
              fallback, got {:?}",
             node.expr
         );

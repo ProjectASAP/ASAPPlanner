@@ -11,7 +11,7 @@
 //!
 //! - `max by (zone) (quantile_over_time(0.99, latency[5m]))` — the outer
 //!   `max` is an exact fold over the inner summary's *readout*. A `MinMax`
-//!   accumulator over that readout is domain-illegal (a maintained summary
+//!   accumulator over that readout is data_state-illegal (a maintained summary
 //!   can't consume query-time values — see
 //!   `asap_types::post_asap::execution_data_state`),
 //!   and `avg` has no accumulator at all, so today either shape collapses
@@ -23,7 +23,7 @@
 //!   explicit "this row transform runs on the update path" node.
 //!
 //! [`SummaryExpr::ReadoutPostProcess`] and [`SummaryExpr::UpdateTransform`]
-//! are the two domain-explicit representations; this strategy is what
+//! are the two data_state-explicit representations; this strategy is what
 //! proposes them.
 //!
 //! ## Reference, don't select
@@ -54,7 +54,7 @@
 //!   target's grouping keys resolve in the child's output schema;
 //!   transform: the target is a per-entity exact transform with no
 //!   accumulator form (its only implementation is `PassThrough`);
-//! - the exact operator consumes only `Plain` values in its domain — checked
+//! - the exact operator consumes only `Plain` values in its data_state — checked
 //!   again, structurally, when the pair is composed;
 //! - the plugged-in [`CostModel`] advertises the matching
 //!   [`MixedExecutionCapabilities`](crate::cost_model::MixedExecutionCapabilities).
@@ -66,7 +66,7 @@
 //! ## What this strategy never does
 //!
 //! - Propose an `ExactPostProcess` for a position beneath a maintained
-//!   summary — domain validation at composition rejects it as a typed
+//!   summary — data_state validation at composition rejects it as a typed
 //!   `ImplementError` regardless.
 //! - Decide whether a composition is *worth it*: that is
 //!   `global_selection`'s job, using the issue's cost-units-per-second
@@ -75,10 +75,11 @@
 
 use std::rc::Rc;
 
-use asap_types::post_asap::execution_data_state::validate_execution_domains_at;
+use asap_types::post_asap::execution_data_state::validate_execution_data_states_at;
 use asap_types::post_asap::{
-    exact_operator_output_schema, produced_domain, CompositionOperator, DomainError, ExactOperator,
-    ExecutionDataState, SummaryExpr, SummaryNode, SummarySchema, ValueOperator,
+    exact_operator_output_schema, produced_data_state, CompositionOperator, ExactOperator,
+    ExecutionDataState, ExecutionDataStateError, SummaryExpr, SummaryNode, SummarySchema,
+    ValueOperator,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -105,7 +106,7 @@ pub enum CompositionPlacement {
 
 impl CompositionPlacement {
     /// The availability the composed operator consumes and produces.
-    pub fn domain(self) -> ExecutionDataState {
+    pub fn data_state(self) -> ExecutionDataState {
         match self {
             Self::PostProcess => ExecutionDataState::READ_ROWS,
             Self::Transform => ExecutionDataState::MAINTENANCE_ROWS,
@@ -139,21 +140,21 @@ pub struct ExactComposition {
 
 impl ExactComposition {
     /// Can `child` legally be this composition's input? Phase legality
-    /// (the child's produced domain — a `KeepPreAsap` leaf takes the
+    /// (the child's produced data_state — a `KeepPreAsap` leaf takes the
     /// phase this edge assigns) plus the plain-operand rule, checked
     /// through the same schema derivation [`Self::compose`] uses.
     pub fn accepts_child(&self, child: &SummaryNode) -> bool {
-        let phase_ok = match produced_domain(&child.expr) {
+        let phase_ok = match produced_data_state(&child.expr) {
             None => true,
-            Some(avail) => avail == self.placement.domain(),
+            Some(avail) => avail == self.placement.data_state(),
         };
         phase_ok && exact_operator_output_schema(&self.op, &child.schema).is_ok()
     }
 
-    /// Build the composed, domain-validated node over `child`. Every edge of
+    /// Build the composed, data_state-validated node over `child`. Every edge of
     /// the result (including everything beneath `child`) is checked by
-    /// `asap_types::post_asap::validate_execution_domains`; an illegal
-    /// placement is a typed [`ImplementError::Domain`], never deferred to a
+    /// `asap_types::post_asap::validate_execution_data_states`; an illegal
+    /// placement is a typed [`ImplementError::ExecutionDataState`], never deferred to a
     /// runtime.
     pub fn compose(&self, child: Rc<SummaryNode>) -> Result<Rc<SummaryNode>, ImplementError> {
         self.compose_with_accuracy(child, &DefaultAccuracyModel)
@@ -167,16 +168,18 @@ impl ExactComposition {
         child: Rc<SummaryNode>,
         accuracy_model: &dyn AccuracyModel,
     ) -> Result<Rc<SummaryNode>, ImplementError> {
-        if let Some(produced) = produced_domain(&child.expr) {
-            if produced != self.placement.domain() {
+        if let Some(produced) = produced_data_state(&child.expr) {
+            if produced != self.placement.data_state() {
                 let edge = match self.placement {
                     CompositionPlacement::Transform => "UpdateTransform.child",
                     CompositionPlacement::PostProcess => "ReadoutPostProcess.child",
                 };
-                return Err(ImplementError::Domain(DomainError::IllegalChildPhase {
-                    edge,
-                    child: produced,
-                }));
+                return Err(ImplementError::ExecutionDataState(
+                    ExecutionDataStateError::IllegalChildPhase {
+                        edge,
+                        child: produced,
+                    },
+                ));
             }
         }
         let schema = exact_operator_output_schema(&self.op, &child.schema)?;
@@ -219,7 +222,7 @@ impl ExactComposition {
             schema,
             guarantee,
         });
-        validate_execution_domains_at(&node, self.placement.domain())?;
+        validate_execution_data_states_at(&node, self.placement.data_state())?;
         Ok(node)
     }
 
@@ -455,7 +458,7 @@ mod tests {
     use super::*;
     use crate::cost_model::{DefaultCostModel, MixedExecutionCapabilities};
     use crate::replacement::keep_pre_asap;
-    use asap_types::post_asap::{DomainError, SketchAlgorithm, SummaryFamilyType};
+    use asap_types::post_asap::{ExecutionDataStateError, SketchAlgorithm, SummaryFamilyType};
     use asap_types::pre_asap::agg_intent::default_quantile;
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, DataType, Schema};
@@ -623,8 +626,8 @@ mod tests {
         assert!(!comp.accepts_child(summary_input));
         assert!(matches!(
             comp.compose(Rc::clone(summary_input)),
-            Err(ImplementError::Domain(
-                DomainError::IllegalChildPhase { .. }
+            Err(ImplementError::ExecutionDataState(
+                ExecutionDataStateError::IllegalChildPhase { .. }
             ))
         ));
         // The readout itself is accepted and composes to a plain schema.
@@ -655,8 +658,8 @@ mod tests {
         assert!(!comp.accepts_child(&readout));
         assert!(matches!(
             comp.compose(readout),
-            Err(ImplementError::Domain(
-                DomainError::IllegalChildPhase { .. }
+            Err(ImplementError::ExecutionDataState(
+                ExecutionDataStateError::IllegalChildPhase { .. }
             ))
         ));
         // Raw update input is fine.
