@@ -182,6 +182,10 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
         exported["deployments"][0]["selected"]["lifecycle"]["kind"],
         "continuously_maintained"
     );
+    assert_eq!(
+        exported["deployments"][0]["selected"]["maintenance_mode"],
+        "incremental"
+    );
     let alternatives = exported["deployments"][0]["alternatives"]
         .as_array()
         .expect("exported lifecycle alternatives");

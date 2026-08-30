@@ -9,7 +9,7 @@ use serde::Serialize;
 use asap_types::dag_export::{self, SummaryDagGraph};
 use asap_types::post_asap::{
     EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee,
+    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
 };
 
 use crate::summary_maintenance_lifecycle::{
@@ -49,8 +49,16 @@ pub struct SummaryMaintenanceLifecycleAlternativeExport {
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryMaintenanceLifecycleGuaranteeExport {
     pub lifecycle: SummaryMaintenanceLifecycleExport,
+    pub maintenance_mode: SummaryMaintenanceModeExport,
     pub evaluation_schedule: EvaluationScheduleExport,
     pub output_representation: OutputRepresentationExport,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryMaintenanceModeExport {
+    DirectBuild,
+    Incremental,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -138,6 +146,10 @@ fn export_guarantee(
 ) -> SummaryMaintenanceLifecycleGuaranteeExport {
     SummaryMaintenanceLifecycleGuaranteeExport {
         lifecycle: export_lifecycle(&guarantee.summary_maintenance_lifecycle),
+        maintenance_mode: match guarantee.summary_maintenance_mode {
+            SummaryMaintenanceMode::DirectBuild => SummaryMaintenanceModeExport::DirectBuild,
+            SummaryMaintenanceMode::Incremental => SummaryMaintenanceModeExport::Incremental,
+        },
         evaluation_schedule: match guarantee.evaluation_schedule {
             EvaluationSchedule::OneShot => EvaluationScheduleExport::OneShot,
             EvaluationSchedule::PerUpdate => EvaluationScheduleExport::PerUpdate,
