@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    produced_domain, validate_execution_domains, ExecutionDataState, SummaryExpr,
+    produced_data_state, validate_execution_data_states, ExecutionDataState, SummaryExpr,
     SummaryMaintenanceLifecycle, SummaryNode,
 };
 use asap_types::post_asap::{
@@ -143,7 +143,7 @@ pub enum SummaryMaintenanceLifecyclePlanError {
     #[error(transparent)]
     InvalidWorkload(#[from] WorkloadError),
     #[error(transparent)]
-    InvalidExecutionDataStates(#[from] asap_types::post_asap::DomainError),
+    InvalidExecutionDataStates(#[from] asap_types::post_asap::ExecutionDataStateError),
     #[error("optimization horizon must be finite and strictly positive")]
     InvalidHorizon,
     #[error("workload entry index {index} is out of bounds for {entry_count} entries")]
@@ -219,7 +219,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
     profile: Option<RecurrenceProfile>,
 ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError> {
     demand.workload.validate()?;
-    validate_execution_domains(&root)?;
+    validate_execution_data_states(&root)?;
     if horizon.is_some_and(|h| !h.0.is_finite() || h.0 <= 0.0) {
         return Err(SummaryMaintenanceLifecyclePlanError::InvalidHorizon);
     }
@@ -872,7 +872,7 @@ fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
         let SummaryExpr::SummaryAgg { child, .. } = &summary.expr else {
             continue;
         };
-        if produced_domain(&child.expr) != Some(ExecutionDataState::MAINTENANCE_SUMMARY) {
+        if produced_data_state(&child.expr) != Some(ExecutionDataState::MAINTENANCE_SUMMARY) {
             continue;
         }
         let mut descendants = Vec::new();
