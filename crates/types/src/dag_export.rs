@@ -14,7 +14,7 @@
 //!
 //! This is literally the same hashing
 //! [`share_common_subtrees`](crate::pre_asap::cse::share_common_subtrees)
-//! uses to bucket candidates in its `InternTable` (issue #223 domain 3) — not
+//! uses to bucket candidates in its `InternTable` (issue #223 data_state 3) — not
 //! a parallel reimplementation. `tools/dag-viewer`'s "shared subtree"
 //! highlighting is still a *proxy* for real CSE, though: a hash match here
 //! only means two nodes are legal `InternTable` bucket-mates (same coarse
@@ -47,8 +47,8 @@ use std::rc::Rc;
 use serde::Serialize;
 
 use crate::post_asap::{
-    assigned_child_domain, produced_domain, AccuracyError, ExactOperator, ExecutionDataState,
-    ResultGuarantee, SummaryExpr, SummaryNode, ValueOperator,
+    assigned_child_data_state, produced_data_state, AccuracyError, ExactOperator,
+    ExecutionDataState, ResultGuarantee, SummaryExpr, SummaryNode, ValueOperator,
 };
 use crate::pre_asap::cse::{structural_hash, HashCache};
 use crate::pre_asap::query_expr::{QueryExpr, Source};
@@ -363,12 +363,12 @@ pub fn export_summary(node: &SummaryNode) -> SummaryDagGraph {
     SummaryDagGraph { nodes, root }
 }
 
-/// The explicit execution domain of an exported plan's root — its own
-/// produced domain, or query-time readout for a bare `KeepPreAsap`
-/// (the same convention `post_asap::execution_data_state::validate_execution_domains`
+/// The explicit execution data_state of an exported plan's root — its own
+/// produced data_state, or query-time readout for a bare `KeepPreAsap`
+/// (the same convention `post_asap::execution_data_state::validate_execution_data_states`
 /// uses for a root).
 fn root_domain(node: &SummaryNode) -> ExecutionDataState {
-    produced_domain(&node.expr).unwrap_or(ExecutionDataState::READ_ROWS)
+    produced_data_state(&node.expr).unwrap_or(ExecutionDataState::READ_ROWS)
 }
 
 /// `detail` for an [`ExactOperator`] payload — its own fields, rendered the
@@ -466,13 +466,13 @@ fn family_label(family: &crate::post_asap::SummaryFamilyType) -> String {
 /// apart on how every *other* variant's own shape is described, since
 /// nothing about that description differs between the two.
 ///
-/// `domain` is the node's explicit execution domain (issue #171) — its own
-/// [`produced_domain`], or the edge-assigned domain for a `KeepPreAsap`
-/// — and is written into `detail.domain` on every post-ASAP node so a viewer
+/// `data_state` is the node's explicit execution data_state (issue #171) — its own
+/// [`produced_data_state`], or the edge-assigned data_state for a `KeepPreAsap`
+/// — and is written into `detail.execution_data_state` on every post-ASAP node so a viewer
 /// reads it rather than inferring it from the node's kind.
 fn summary_shape(
     expr: &SummaryExpr,
-    domain: ExecutionDataState,
+    data_state: ExecutionDataState,
 ) -> (&'static str, String, serde_json::Value) {
     let (kind, label, mut detail) = match expr {
         SummaryExpr::KeepPreAsap(_) => {
@@ -531,10 +531,10 @@ fn summary_shape(
     };
     if let serde_json::Value::Object(map) = &mut detail {
         map.insert(
-            "domain".into(),
+            "execution_data_state".into(),
             serde_json::json!({
-                "timing": domain.timing.as_str(),
-                "primitive": domain.primitive.as_str(),
+                "timing": data_state.timing.as_str(),
+                "primitive": data_state.primitive.as_str(),
             }),
         );
     }
@@ -569,7 +569,7 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
 fn build_summary(
     node: &SummaryNode,
     nodes: &mut Vec<SummaryDagNode>,
-    domain: ExecutionDataState,
+    data_state: ExecutionDataState,
 ) -> u32 {
     if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
         let pre_asap_subgraph = export(inner);
@@ -577,9 +577,9 @@ fn build_summary(
         let label = format!("KeepPreAsap({inner_kind})");
         let detail = serde_json::json!({
             "pre_asap_subgraph": pre_asap_subgraph,
-            "domain": {
-                "timing": domain.timing.as_str(),
-                "primitive": domain.primitive.as_str(),
+            "execution_data_state": {
+                "timing": data_state.timing.as_str(),
+                "primitive": data_state.primitive.as_str(),
             },
         });
         return push_summary_node(
@@ -593,9 +593,9 @@ fn build_summary(
     }
     let children: Vec<u32> = summary_children(&node.expr)
         .into_iter()
-        .map(|child| build_summary(child, nodes, assigned_child_domain(&node.expr, child)))
+        .map(|child| build_summary(child, nodes, assigned_child_data_state(&node.expr, child)))
         .collect();
-    let (kind, label, detail) = summary_shape(&node.expr, domain);
+    let (kind, label, detail) = summary_shape(&node.expr, data_state);
     push_summary_node(nodes, kind, label, detail, children, node.guarantee.clone())
 }
 
@@ -873,7 +873,7 @@ fn build_summary_hybrid(
     nodes: &mut Vec<DagNode>,
     cache: &mut HashCache,
     find_winner: &mut dyn FnMut(&QueryExpr) -> Option<PostAsapSubstitution>,
-    domain: ExecutionDataState,
+    data_state: ExecutionDataState,
 ) -> u32 {
     if let SummaryExpr::KeepPreAsap(inner) = &node.expr {
         return build(inner, nodes, cache, find_winner);
@@ -886,11 +886,11 @@ fn build_summary_hybrid(
                 nodes,
                 cache,
                 find_winner,
-                assigned_child_domain(&node.expr, child),
+                assigned_child_data_state(&node.expr, child),
             )
         })
         .collect();
-    let (kind, label, mut detail) = summary_shape(&node.expr, domain);
+    let (kind, label, mut detail) = summary_shape(&node.expr, data_state);
     // The merged graph's `DagNode` has no dedicated guarantee field (it is
     // the pre-ASAP node shape); the guarantee rides in `detail` under the
     // same key/shape `SummaryDagNode::guarantee` uses, additively.
@@ -1542,7 +1542,7 @@ mod tests {
         );
     }
 
-    // ── Issue #223 domain 3: dag_export's hash literally *is* cse's hash ────
+    // ── Issue #223 data_state 3: dag_export's hash literally *is* cse's hash ────
 
     #[test]
     fn root_hash_matches_cse_structural_hash_for_the_same_node() {

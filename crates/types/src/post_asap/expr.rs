@@ -10,8 +10,8 @@ use crate::pre_asap::{ColumnRef, QueryExpr, Reduction};
 // ── Exact operators composed with summary plans (issue #171) ────────────────
 
 /// An exact, plain-row operator that a mixed exact/summary plan executes at
-/// an explicit domain. Exact composition is one producer of the generic
-/// [`ValueOperator`] domain payload.
+/// an explicit data_state. Exact composition is one producer of the generic
+/// [`ValueOperator`] data_state payload.
 ///
 /// Deliberately **not** an intact pre-ASAP [`QueryExpr`] subtree: a
 /// `QueryExpr`'s children are always `Rc<QueryExpr>`, so embedding one here
@@ -41,7 +41,7 @@ pub enum ExactOperator {
     },
 }
 
-/// An operation over values at a declared execution domain.
+/// An operation over values at a declared execution data_state.
 ///
 /// Phase placement is independent of whether the operation is exact or
 /// approximate: [`SummaryExpr::UpdateTransform`] and
@@ -203,7 +203,7 @@ pub enum SummaryExpr {
     /// final plain query result — the "outer exact fold over an inner
     /// summary readout" direction. Can never feed maintained state: a
     /// `SummaryAgg` above one of these is a plan-time
-    /// [`super::execution_data_state::DomainError`], never a runtime failure.
+    /// [`super::execution_data_state::ExecutionDataStateError`], never a runtime failure.
     ReadoutPostProcess {
         child: Rc<SummaryNode>,
         op: ValueOperator,

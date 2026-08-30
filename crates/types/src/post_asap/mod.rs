@@ -35,9 +35,10 @@ pub mod schema;
 pub mod sketch;
 
 pub use execution_data_state::{
-    assigned_child_domain, exact_operator_output_schema, produced_domain,
-    validate_execution_domains, validate_execution_domains_at, DataPrimitive, DomainAssignment,
-    DomainError, ExactOperatorSchemaError, ExecutionDataState, ExecutionTiming,
+    assigned_child_data_state, exact_operator_output_schema, produced_data_state,
+    validate_execution_data_states, validate_execution_data_states_at, DataPrimitive,
+    ExactOperatorSchemaError, ExecutionDataState, ExecutionDataStateAssignment,
+    ExecutionDataStateError, ExecutionTiming,
 };
 pub use expr::{ExactOperator, SummaryExpr, SummaryNode, ValueOperator};
 pub use guarantee::{
