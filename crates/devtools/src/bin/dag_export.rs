@@ -514,6 +514,9 @@ fn run_post_asap_with_progress(
             rank: 0,
             cost: winner.cost,
             role: "replacement_region",
+            provenance: None,
+            cost_unit: None,
+            child_decisions: Vec::new(),
         };
         Some(match &winners[i].candidate.replacement {
             Replacement::Rewrite(rc) => PostAsapSubstitution::Rewrite {
