@@ -30,10 +30,10 @@
 pub mod execution_data_state;
 pub mod expr;
 pub mod guarantee;
-pub mod summary_maintenance_lifecycle;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;
+pub mod summary_maintenance_lifecycle;
 
 pub use execution_data_state::{
     assigned_child_data_state, exact_operator_output_schema, produced_data_state,
@@ -46,10 +46,6 @@ pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
 };
-pub use summary_maintenance_lifecycle::{
-    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee,
-};
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,
     cu_sketch_posterior_error_bound, traditional_a_priori_bound,
@@ -59,4 +55,8 @@ pub use sketch::{
     default_hydra_params, hydra_kind_for, ExactKind, ExactParams, GroupingStrategy, HydraKind,
     HydraParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory, SketchKind,
     SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
+};
+pub use summary_maintenance_lifecycle::{
+    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee,
 };
