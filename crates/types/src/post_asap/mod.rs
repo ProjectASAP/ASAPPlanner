@@ -29,20 +29,15 @@
 
 pub mod expr;
 pub mod guarantee;
-pub mod phase;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;
+pub mod value_domain;
 
 pub use expr::{ExactOperator, SummaryExpr, SummaryNode, ValueOperator};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
-};
-pub use phase::{
-    assigned_child_stage, exact_operator_output_schema, produced_availability,
-    validate_execution_phases, validate_execution_phases_at, ExactOperatorSchemaError,
-    ExecutionAvailability, PhaseAssignment, PhaseError,
 };
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,
@@ -53,4 +48,9 @@ pub use sketch::{
     default_hydra_params, hydra_kind_for, ExactKind, ExactParams, GroupingStrategy, HydraKind,
     HydraParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory, SketchKind,
     SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
+};
+pub use value_domain::{
+    assigned_child_domain, exact_operator_output_schema, produced_domain,
+    validate_execution_domains, validate_execution_domains_at, DataPrimitive, DomainAssignment,
+    DomainError, ExactOperatorSchemaError, ExecutionTiming, ValueDomain,
 };
