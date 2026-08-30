@@ -184,7 +184,6 @@
 pub mod accuracy;
 pub mod accuracy_reconciliation;
 pub mod cost_model;
-pub mod exact_composition;
 pub mod explanation;
 pub mod grouping;
 pub mod recurrence;
@@ -200,12 +199,7 @@ pub use accuracy::{
     PropagationStats, WorkloadAccuracyEvidence,
 };
 pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
-pub use cost_model::{
-    postprocess_plan_cost_rate, pretransform_plan_cost_rate, raw_recompute_cost_rate, CostModel,
-    CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
-    ExactCompositionCostRequest, MixedExecutionCapabilities,
-};
-pub use exact_composition::{CompositionPlacement, ExactComposition, ExactCompositionStrategy};
+pub use cost_model::{CostModel, DefaultCostModel};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
@@ -217,11 +211,11 @@ pub use recurrence::{
 };
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
-    search_workload_with_targets, summary_candidates, CompositionDecision, GlobalSelection,
-    ImplementError, Implementation, Matcher, MemoGroup, PlanSpace, Proposals, RankedGroup,
-    RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
-    ReplacementStrategy, ReplacementSubDAG, SelectedGroup, SharedSubtreeStrategy,
-    SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
+    search_workload_with_targets, summary_candidates, GlobalSelection, ImplementError,
+    Implementation, Matcher, MemoGroup, PlanSpace, Proposals, RankedGroup, RecurrenceProfileMap,
+    RejectedCandidate, Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG,
+    SelectedGroup, SharedSubtreeStrategy, SketchAlgorithmStrategy, TargetSubDAG,
+    MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;
 pub use summary_maintenance_lifecycle::{

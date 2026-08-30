@@ -20,11 +20,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    produced_availability, validate_execution_phases, ExecutionAvailability, SummaryExpr,
-    SummaryMaintenanceLifecycle, SummaryMaintenanceMode, SummaryNode,
-};
-use asap_types::post_asap::{
-    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycleGuarantee,
+    EvaluationSchedule, OutputRepresentation, SummaryExpr, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
 };
 use asap_types::pre_asap::QueryExpr;
 use asap_types::workload::{
@@ -197,8 +194,6 @@ impl<'a> WorkloadDemand<'a> {
 pub enum SummaryMaintenanceLifecyclePlanError {
     #[error(transparent)]
     InvalidWorkload(#[from] WorkloadError),
-    #[error(transparent)]
-    InvalidExecutionPhases(#[from] asap_types::post_asap::PhaseError),
     #[error("optimization horizon must be finite and strictly positive")]
     InvalidHorizon,
     #[error("workload entry index {index} is out of bounds for {entry_count} entries")]
@@ -296,7 +291,6 @@ fn plan_summary_maintenance_lifecycles_with_profile(
     profile: Option<RecurrenceProfile>,
 ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError> {
     demand.workload.validate()?;
-    validate_execution_phases(&root)?;
     if horizon.is_some_and(|h| !h.0.is_finite() || h.0 <= 0.0) {
         return Err(SummaryMaintenanceLifecyclePlanError::InvalidHorizon);
     }
@@ -901,10 +895,6 @@ fn collect_summary_aggs(
                 collect_summary_aggs(child, seen, output);
             }
         }
-        SummaryExpr::UpdateTransform { child, .. }
-        | SummaryExpr::ReadoutPostProcess { child, .. } => {
-            collect_summary_aggs(child, seen, output)
-        }
         SummaryExpr::KeepPreAsap(_) => {}
     }
 }
@@ -951,7 +941,14 @@ fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
         let SummaryExpr::SummaryAgg { child, .. } = &summary.expr else {
             continue;
         };
-        if produced_availability(&child.expr) != Some(ExecutionAvailability::SummaryState) {
+        if !matches!(
+            child.expr,
+            SummaryExpr::SummaryAgg { .. }
+                | SummaryExpr::SummaryJoin { .. }
+                | SummaryExpr::SummarySubtract { .. }
+                | SummaryExpr::SummaryDelete { .. }
+                | SummaryExpr::SummaryMerge { .. }
+        ) {
             continue;
         }
         let mut descendants = Vec::new();
@@ -1025,10 +1022,31 @@ fn select_compatible_lifecycles(
             deployments[index].summary_maintenance_lifecycle_guarantee =
                 selected.map(|candidate| SummaryMaintenanceLifecycleGuarantee {
                     summary_maintenance_lifecycle: candidate.summary_maintenance_lifecycle.clone(),
+                    summary_maintenance_mode: maintenance_mode(
+                        &candidate.summary_maintenance_lifecycle,
+                        arrival,
+                    ),
                     evaluation_schedule: schedule,
                     output_representation: OutputRepresentation::SummaryState,
                 });
         }
+    }
+}
+
+fn maintenance_mode(
+    lifecycle: &SummaryMaintenanceLifecycle,
+    arrival: DataArrival,
+) -> SummaryMaintenanceMode {
+    match lifecycle {
+        SummaryMaintenanceLifecycle::Ephemeral => SummaryMaintenanceMode::DirectBuild,
+        SummaryMaintenanceLifecycle::ContinuouslyMaintained => SummaryMaintenanceMode::Incremental,
+        SummaryMaintenanceLifecycle::Prepared { .. }
+        | SummaryMaintenanceLifecycle::Shared { .. } => match arrival {
+            DataArrival::ContinuouslyIngesting | DataArrival::Mixed => {
+                SummaryMaintenanceMode::Incremental
+            }
+            DataArrival::AtRest | DataArrival::Unknown => SummaryMaintenanceMode::DirectBuild,
+        },
     }
 }
 
@@ -1413,6 +1431,10 @@ mod tests {
             .unwrap();
         assert_eq!(guarantee.evaluation_schedule, EvaluationSchedule::OneShot);
         assert_eq!(
+            guarantee.summary_maintenance_mode,
+            SummaryMaintenanceMode::DirectBuild
+        );
+        assert_eq!(
             guarantee.output_representation,
             OutputRepresentation::SummaryState
         );
@@ -1533,6 +1555,14 @@ mod tests {
             })
         );
         assert_eq!(
+            plan.deployments[0]
+                .summary_maintenance_lifecycle_guarantee
+                .as_ref()
+                .unwrap()
+                .summary_maintenance_mode,
+            SummaryMaintenanceMode::DirectBuild
+        );
+        assert_eq!(
             plan.deployments[0].alternatives[3].rejection,
             Some(SummaryMaintenanceLifecycleRejection::RequiresContinuousData)
         );
@@ -1560,6 +1590,14 @@ mod tests {
         assert_eq!(
             selected_summary_maintenance_lifecycle(&plan.deployments[0]),
             Some(&SummaryMaintenanceLifecycle::ContinuouslyMaintained)
+        );
+        assert_eq!(
+            plan.deployments[0]
+                .summary_maintenance_lifecycle_guarantee
+                .as_ref()
+                .unwrap()
+                .summary_maintenance_mode,
+            SummaryMaintenanceMode::Incremental
         );
         assert_eq!(plan.evaluation_rate, Some(EvaluationRate(1.0)));
         assert_eq!(plan.update_rate, Some(UpdateRate(1.0)));

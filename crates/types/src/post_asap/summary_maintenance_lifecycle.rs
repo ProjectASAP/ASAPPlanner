@@ -7,6 +7,7 @@
 //! alternatives using the expected number and timing of reads, the source-data
 //! arrival/update rate, state-operation costs, and runtime capabilities.
 
+use super::SummaryMaintenanceMode;
 use crate::workload::{DurationMs, TimestampMs};
 
 /// When an operator is evaluated. This is independent of whether it owns
@@ -54,6 +55,7 @@ pub enum SummaryMaintenanceLifecycle {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SummaryMaintenanceLifecycleGuarantee {
     pub summary_maintenance_lifecycle: SummaryMaintenanceLifecycle,
+    pub summary_maintenance_mode: SummaryMaintenanceMode,
     pub evaluation_schedule: EvaluationSchedule,
     pub output_representation: OutputRepresentation,
 }
