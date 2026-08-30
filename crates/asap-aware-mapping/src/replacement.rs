@@ -375,8 +375,7 @@ use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
 use crate::recurrence::{
-    evaluation_rate_of, CostRate, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence,
-    UpdateRate,
+    evaluation_rate_of, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
 };
 use crate::rollup::RollupStrategy;
 use crate::topk_reuse::TopKLimitReuseStrategy;
