@@ -8,6 +8,45 @@ design document owns architectural decisions and correctness invariants; this
 guide owns concrete interfaces, formulas, evidence requirements, and developer
 workflow.
 
+## How one candidate moves through the implementation
+
+The implementation follows one candidate from a query requirement to either a
+legal post-ASAP node or a structured rejection:
+
+```text
+aggregate intent and AccuracyTarget
+    -> enumerate a summary implementation
+    -> choose and commit concrete summary parameters
+    -> derive the local guarantee from those committed parameters
+    -> realize the child and obtain its finalized guarantee
+    -> propagate guarantees through the registered composition rule
+    -> check the final guarantee against AccuracyTarget
+    -> keep legal candidate or record AccuracyError
+    -> rank only legal candidates with CostModel
+```
+
+For a single summary, the child is exact and propagation leaves the local
+summary guarantee as the final guarantee. For nested summaries, child and local
+guarantees are combined. `AccuracyTarget` is the requirement; `ResultGuarantee`
+is the evidence produced for one concrete candidate.
+
+The design document's
+[end-to-end example](../design_docs/asap-aware-mapping/end-to-end-accuracy-guarantees.md#end-to-end-example)
+is the canonical numeric walkthrough from allocation through legality
+checking.
+
+The main implementation locations are:
+
+| Concern | Location |
+| --- | --- |
+| Guarantee and error vocabulary | `asap_types::post_asap::guarantee` |
+| Accuracy model and built-in propagation | `asap_aware_mapping::accuracy` |
+| Candidate construction and legality filtering | `asap_aware_mapping::replacement` |
+| Parameter sizing hooks | `asap_aware_mapping::cost_model` |
+| Guarantee and rejection export | `asap_types::dag_export` and the `dag_export` devtool |
+
+Read the sections below when changing one of those contracts.
+
 ## Implementation model
 
 Accuracy reasoning and allocation are separate from cost modeling:
@@ -232,7 +271,7 @@ accuracy-targeted candidate. Never copy the inner guarantee onto Hydra alone.
 ## Adding or changing an accuracy target
 
 `Exact`, `Epsilon`, and `EpsilonDelta` are the current vocabulary, not a closed
-set. If a new summary has a caller-visible requirement they cannot express:
+set. If a new summary has a final-result requirement they cannot express:
 
 1. Define the target's result semantics and compatible `ErrorMetric`.
 2. Define the parameters and evidence needed to prove satisfaction.
@@ -242,7 +281,7 @@ set. If a new summary has a caller-visible requirement they cannot express:
    not invent allocation for non-divisible semantics.
 5. Add serialization, DAG explanation, and compatibility behavior.
 6. Add local and composition contracts for summaries that claim the target.
-7. Keep candidates fail-closed until the end-to-end proof path is implemented
+7. Keep candidates fail-closed until the end-to-end guarantee path is implemented
    and tested.
 
 Do not coerce membership, distributional, or another non-epsilon requirement
@@ -256,7 +295,7 @@ provenance. For a new composition, specify compatible input and output metrics,
 the bound rule, failure composition, required statistics, and unsupported
 cases. Missing evidence must stay symbolic or produce a structured rejection.
 
-Update DAG export whenever new proof or rejection data is introduced.
+Update DAG export whenever new guarantee or rejection data is introduced.
 
 ## Validation
 
@@ -273,7 +312,7 @@ Tests must cover:
 - rejection before cost ranking and global selection; and
 - DAG export and frontend-to-post-ASAP integration.
 
-For a new target or summary, add a positive proof case and boundary cases for
+For a new target or summary, add a positive guarantee case and boundary cases for
 missing evidence, invalid values, incompatible metrics, and insufficient
 parameters.
 
