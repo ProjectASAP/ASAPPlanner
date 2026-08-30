@@ -5,8 +5,9 @@
 This document is for ASAPPlanner designers, architects, researchers, and
 developers working on workload-aware plan selection. It defines how the
 planner should describe query workload, data workload, and the lifecycle of
-summary state. It is a design contract, not a description of the current
-public Rust API.
+summary state. It is the design contract for the public Rust model and the
+workload-to-lifecycle planning API; deployments still supply their own cost
+statistics and runtime capabilities.
 
 The terminology follows the ProjectASAP
 [glossary](https://github.com/ProjectASAP/internal-docs/blob/03e1c70f5af3ae9221471898541067eee7f86338/glossary.md).
@@ -22,6 +23,16 @@ decides whether a candidate is correct enough. Workload demand and state
 lifecycle decide whether building, maintaining, sharing, or recomputing that
 candidate is worthwhile. Neither decision may override the other.
 
+### Lifecycle terminology
+
+This document uses **summary maintenance lifecycle** for the lifetime of
+planner-selected summary state: build, prepare, share, incrementally maintain,
+read, and retire. The final plan's promises about those actions are its
+**summary maintenance lifecycle guarantees**. This term is intentionally
+distinct from the broader **data lifecycle**, which covers data collection,
+transmission, storage, and analytics. Unqualified "lifecycle guarantees" are
+avoided.
+
 ## Problem and why now
 
 A summary operator does not imply one execution lifecycle. The same exact or
@@ -36,18 +47,49 @@ Likewise, an exact stateless operator may run once over a batch, once per
 update in an incremental pipeline, or once per readout. Operator statefulness,
 execution schedule, and output representation are separate properties.
 
+The phase contract is also independent of accuracy semantics. A value
+operation may be exact, summary-derived, or approximate. The post-ASAP IR
+therefore uses the generic phase nodes `UpdateTransform` (`UpdateValue ->
+UpdateValue`) and `ReadoutPostProcess` (`ReadoutValue -> ReadoutValue`). Their
+`ValueOperator` payload identifies the computation; the enclosing node carries
+its output schema and accuracy guarantee. The exact-composition strategy emits
+`ValueOperator::Exact` today, but it is only the first producer of these phase
+nodes, not their definition.
+
 The query expression alone cannot determine those properties. The same query
 may arrive unexpectedly during exploration, run once at a scheduled time, or
 repeat every ten seconds on a dashboard. Planning summary state from syntax
 alone either misses reuse or invents reuse that the workload does not justify.
 
-The current normalized workload distinguishes a one-shot `query_batch` from
-fixed-interval `repeating_queries`, and the recurrence cost model distinguishes
-one-shot consumers from evaluation and update rates. This is a useful base, but
-it does not represent predictability, uncertain demand, real-time versus
-longitudinal scope, at-rest versus continuously ingesting data, or summary-state
-lifecycle. It also risks treating "repeating query" and "streaming data" as the
-same fact even though the glossary defines them on different axes.
+The normalized workload preserves `query_batch` and `repeating_queries` as
+compatibility-shaped inputs, then exposes both through `QueryWorkload::entries`
+as recurrence, predictability, requirements, and time-selection axes. Data
+arrival and fresh ingestion evidence remain a separate `DataWorkload`; a
+repeating query therefore never implies streaming data.
+
+### Implementation map
+
+- `asap_types::workload` defines the normalized query/data workload and
+  evidence freshness contract.
+- `PlanSpace::recurrence_profiles_from_workload` derives per-target read and
+  update recurrence from an explicit root-to-workload-entry binding, without
+  treating missing evidence as zero or relying on container order.
+- `WorkloadAccuracyEvidence` supplies fresh cardinality and distribution to
+  accuracy models.
+- `plan_summary_maintenance_lifecycles` enumerates legal ephemeral, prepared, shared, and
+  continuously maintained alternatives for the entries explicitly associated
+  with the target, and compares their costs over the caller's explicit horizon.
+- `global_selection_with_summary_maintenance_lifecycles` prices each semantic
+  summary candidate using its cheapest legal summary maintenance lifecycle
+  before global selection. Its recurrence profile includes repeated DAG paths,
+  while the workload binding separately preserves time-selection and
+  predictability facts.
+- `materialize_with_summary_maintenance_lifecycles` materializes that phase-valid selection and
+  attaches the selected state deployments. Each deployment retains assumptions
+  and rejected alternatives for explanation.
+- `UpdateTransform` and `ReadoutPostProcess` express availability boundaries
+  for any value operator. Exact, summary-derived, and approximate producers use
+  the same phase validation rather than defining accuracy-specific phase nodes.
 
 ## Inputs, outputs, and end-to-end behavior
 
@@ -84,19 +126,20 @@ preparing state in advance with building or recomputing at execution time. For
 repeated queries, it may amortize build and maintenance cost across reads over
 an explicit horizon.
 
-### End-to-end decision order
+### Target end-to-end decision order
 
 ```text
 normalize query and data workloads
     -> derive recurrence, time-scope, and data evidence
-    -> enumerate semantic plan alternatives
-    -> enumerate legal execution contracts and state lifecycles
-    -> validate summary capabilities and phase constraints
+    -> build a compact space of semantic plan alternatives
+    -> validate semantic, schema, summary-capability, and phase constraints
     -> derive and check accuracy guarantees
+    -> expand every legal candidate with summary-maintenance lifecycles
     -> normalize one-time and rate costs over an explicit horizon
-    -> rank legal alternatives and compare the selected summary deployment
-       with raw recomputation
-    -> emit plan, deployments, assumptions, and rejected alternatives
+    -> globally rank compatible plan-and-lifecycle combinations
+    -> emit plan, deployments, accuracy guarantees,
+       summary maintenance lifecycle guarantees, assumptions,
+       and rejected alternatives
 ```
 
 ## Goals and non-goals
@@ -439,10 +482,10 @@ not imply long-lived incremental maintenance. A stateless transform can run
 `PerUpdate` before a downstream maintained summary. These types describe an
 execution contract; they do not replace semantic operators in the post-ASAP IR.
 
-### State lifecycle is a plan alternative
+### Summary maintenance lifecycle is a plan alternative
 
 ```rust
-enum StateLifecycle {
+enum SummaryMaintenanceLifecycle {
     Ephemeral,
     Prepared {
         activate_at: Timestamp,
@@ -466,7 +509,7 @@ The summary family and its properties constrain which lifecycles are legal.
 For example, an append-only sketch may support continuous inserts but not a
 sliding-window lifecycle requiring deletion. Lifecycle legality is checked
 before cost ranking, like accuracy legality. Deployments provide these
-per-summary properties through `summary_lifecycle_capabilities`; moving
+per-summary properties through `summary_maintenance_capabilities`; moving
 real-time windows require deletion support as well as incremental updates.
 
 ### Existing summaries are planning input
@@ -515,11 +558,13 @@ For repeated raw recomputation:
 total(H) = reads(H) * raw_recompute_cost
 ```
 
-The current lifecycle-aware materialization sums the selected summary
-deployments and can replace that plan with raw recomputation when the raw cost
-is lower or the summary lifecycle is uncostable. Jointly reconsidering every
-sibling semantic candidate under lifecycle costs remains a later optimizer
-integration; this document does not claim that broader search is implemented.
+Before materialization, lifecycle-aware global selection computes the cheapest
+legal summary maintenance lifecycle total for every semantic summary sibling
+whose cost evidence is complete. Those totals can reorder summary families;
+unknown totals remain conservative and cannot win as invented zeroes. After
+selection, materialization sums each unique selected summary deployment once
+and can replace the selected summary plan with raw recomputation when the raw
+cost is lower or the summary maintenance lifecycle is uncostable.
 
 For an ephemeral summary:
 
