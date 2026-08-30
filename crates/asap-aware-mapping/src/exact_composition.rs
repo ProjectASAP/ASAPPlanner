@@ -12,7 +12,8 @@
 //! - `max by (zone) (quantile_over_time(0.99, latency[5m]))` — the outer
 //!   `max` is an exact fold over the inner summary's *readout*. A `MinMax`
 //!   accumulator over that readout is domain-illegal (a maintained summary
-//!   can't consume query-time values — see `asap_types::post_asap::value_domain`),
+//!   can't consume query-time values — see
+//!   `asap_types::post_asap::execution_data_state`),
 //!   and `avg` has no accumulator at all, so today either shape collapses
 //!   into one opaque `KeepPreAsap` that swallows the realizable inner
 //!   quantile.
@@ -74,7 +75,7 @@
 
 use std::rc::Rc;
 
-use asap_types::post_asap::value_domain::validate_execution_domains_at;
+use asap_types::post_asap::execution_data_state::validate_execution_domains_at;
 use asap_types::post_asap::{
     exact_operator_output_schema, produced_domain, CompositionOperator, DomainError, ExactOperator,
     ExecutionDataState, SummaryExpr, SummaryNode, SummarySchema, ValueOperator,
@@ -384,7 +385,7 @@ impl<'a> ExactCompositionStrategy<'a> {
         let Ok(schema) = target.root.output_schema() else {
             return Vec::new();
         };
-        let schema = asap_types::post_asap::value_domain::lift_plain(&schema);
+        let schema = asap_types::post_asap::execution_data_state::lift_plain(&schema);
         let mut out = Vec::new();
 
         if capabilities.supports(CompositionPlacement::PostProcess) {
