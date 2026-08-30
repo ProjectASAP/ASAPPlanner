@@ -13,7 +13,9 @@ use asap_aware_mapping::{
     SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecycleRejection, WorkloadDemand,
 };
 use asap_frontend_promql::lower_promql_batch;
-use asap_types::post_asap::{EvaluationSchedule, SummaryMaintenanceLifecycle, SummaryNode};
+use asap_types::post_asap::{
+    EvaluationSchedule, SummaryMaintenanceLifecycle, SummaryMaintenanceMode, SummaryNode,
+};
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
@@ -156,6 +158,10 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
         SummaryMaintenanceLifecycle::ContinuouslyMaintained
     );
     assert_eq!(guarantee.evaluation_schedule, EvaluationSchedule::PerUpdate);
+    assert_eq!(
+        guarantee.summary_maintenance_mode,
+        SummaryMaintenanceMode::Incremental
+    );
     assert!(deployment.alternatives.iter().any(|alternative| {
         matches!(
             alternative.summary_maintenance_lifecycle,
