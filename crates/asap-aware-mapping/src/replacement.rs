@@ -350,9 +350,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::post_asap::{
     validate_execution_domains_at, DomainError, ExactKind, ExactOperatorSchemaError, ExactParams,
-    GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
-    SummaryFamilyType, SummaryField, SummaryNode, SummarySchema, ValueDomain, WaveletKind,
+    ExecutionDataState, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm,
+    SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams,
+    SummaryExpr, SummaryFamilyType, SummaryField, SummaryNode, SummarySchema, WaveletKind,
     WaveletParams,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
@@ -1817,7 +1817,7 @@ fn construct_summary_agg(
     // Phase contract (issue #171): a maintained summary consumes update-path
     // values or exact accumulator state — never a query-time readout. A
     // typed error here, at construction; the caller decides the fallback.
-    validate_execution_domains_at(&agg, ValueDomain::MAINTENANCE_SUMMARY)?;
+    validate_execution_domains_at(&agg, ExecutionDataState::MAINTENANCE_SUMMARY)?;
     match query {
         // The readout: downstream of the estimate the schema is the plain
         // pre-ASAP row shape again (the summary-state type does not
@@ -2983,7 +2983,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
                 schema: node.schema.clone(),
                 guarantee: node.guarantee.clone(),
             });
-            match validate_execution_domains_at(&rebuilt, ValueDomain::MAINTENANCE_SUMMARY) {
+            match validate_execution_domains_at(&rebuilt, ExecutionDataState::MAINTENANCE_SUMMARY) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
             }

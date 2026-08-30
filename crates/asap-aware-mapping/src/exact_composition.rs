@@ -77,7 +77,7 @@ use std::rc::Rc;
 use asap_types::post_asap::value_domain::validate_execution_domains_at;
 use asap_types::post_asap::{
     exact_operator_output_schema, produced_domain, CompositionOperator, DomainError, ExactOperator,
-    SummaryExpr, SummaryNode, SummarySchema, ValueDomain, ValueOperator,
+    ExecutionDataState, SummaryExpr, SummaryNode, SummarySchema, ValueOperator,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -104,10 +104,10 @@ pub enum CompositionPlacement {
 
 impl CompositionPlacement {
     /// The availability the composed operator consumes and produces.
-    pub fn domain(self) -> ValueDomain {
+    pub fn domain(self) -> ExecutionDataState {
         match self {
-            Self::PostProcess => ValueDomain::READ_ROWS,
-            Self::Transform => ValueDomain::MAINTENANCE_ROWS,
+            Self::PostProcess => ExecutionDataState::READ_ROWS,
+            Self::Transform => ExecutionDataState::MAINTENANCE_ROWS,
         }
     }
 
