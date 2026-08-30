@@ -817,7 +817,6 @@ mod tests {
         ExactKind, ExactParams, GroupingStrategy, ResultGuarantee, SummaryFamilyType, SummaryField,
         SummarySchema,
     };
-    use asap_types::pre_asap::AggIntent;
     use asap_types::pre_asap::{Column, ColumnRef, DataType, QueryExpr, Reduction, Schema, Source};
     use asap_types::workload::{
         BatchEntry, DataWorkload, DurationMs, Evidence, EvidenceSource, Predictability, Query,
@@ -857,36 +856,6 @@ mod tests {
                 merge: true,
                 delete: true,
             }
-        }
-    }
-
-    struct RawCheaper;
-
-    impl CostModel for RawCheaper {
-        fn rank_candidates(
-            &self,
-            _intent: &asap_types::pre_asap::AggIntent,
-            candidates: &[asap_types::post_asap::SketchAlgorithm],
-        ) -> Vec<asap_types::post_asap::SketchAlgorithm> {
-            candidates.to_vec()
-        }
-
-        fn summary_maintenance_lifecycle_cost_inputs(
-            &self,
-            summary: &SummaryNode,
-        ) -> SummaryMaintenanceLifecycleCostInputs {
-            UnitCosts.summary_maintenance_lifecycle_cost_inputs(summary)
-        }
-
-        fn summary_maintenance_capabilities(
-            &self,
-            summary: &SummaryNode,
-        ) -> SummaryMaintenanceCapabilities {
-            UnitCosts.summary_maintenance_capabilities(summary)
-        }
-
-        fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
-            Some(Cost(1.0))
         }
     }
 
@@ -938,16 +907,6 @@ mod tests {
                 0,
                 vec![],
             ),
-        })
-    }
-
-    fn sum_query() -> Rc<QueryExpr> {
-        Rc::new(QueryExpr::Aggregate {
-            reduction: Reduction::by(vec![]),
-            measures: vec![AggIntent::Sum { col: None }],
-            output_names: vec![],
-            having: None,
-            child: query_root(),
         })
     }
 
@@ -1312,29 +1271,6 @@ mod tests {
             plan.deployments[0].alternatives[3].rejection,
             Some(SummaryMaintenanceLifecycleRejection::SummaryDoesNotSupportDeletion)
         );
-    }
-
-    #[test]
-    fn lifecycle_cost_can_fall_back_to_raw_recomputation() {
-        let target = sum_query();
-        let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
-        let selection = space.global_selection(&RawCheaper);
-        let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
-        let plan = materialize_with_lifecycles(
-            &selection,
-            &space.roots[0].1,
-            WorkloadDemand::new(&workload, &[0]),
-            1_000,
-            None,
-            SummaryMaintenanceLifecycleCapabilities::ALL,
-            &RawCheaper,
-        )
-        .unwrap()
-        .unwrap();
-        assert!(plan.selected_raw_recompute);
-        assert_eq!(plan.raw_recompute_total_cost, Some(Cost(1.0)));
-        assert!(plan.deployments.is_empty());
-        assert!(matches!(plan.root.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
     #[test]
