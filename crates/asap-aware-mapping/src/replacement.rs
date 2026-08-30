@@ -349,11 +349,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::post_asap::{
-    validate_execution_phases_at, ExactKind, ExactOperatorSchemaError, ExactParams,
-    ExecutionAvailability, GroupingStrategy, PhaseError, SamplingKind, SamplingParams,
-    SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
-    StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryNode, SummarySchema,
-    WaveletKind, WaveletParams,
+    validate_execution_domains_at, DomainError, ExactKind, ExactOperatorSchemaError, ExactParams,
+    GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm, SketchKind, SketchParams,
+    SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
+    SummaryFamilyType, SummaryField, SummaryNode, SummarySchema, ValueDomain, WaveletKind,
+    WaveletParams,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
@@ -376,7 +376,7 @@ use crate::cost_model::{
     raw_recompute_cost_rate, CostModel, CseCandidate, DefaultCostModel, ExactCompositionCostInputs,
     ExactCompositionCostRequest, ShareDecision,
 };
-use crate::exact_composition::{CompositionPhase, ExactComposition, ExactCompositionStrategy};
+use crate::exact_composition::{CompositionPlacement, ExactComposition, ExactCompositionStrategy};
 use crate::grouping::HydraGroupingStrategy;
 use crate::recurrence::CostRate;
 use crate::recurrence::{
@@ -406,8 +406,8 @@ pub enum ImplementError {
     /// A constructed plan violates the update/readout phase contract
     /// (issue #171) — e.g. a summary readout placed beneath a maintained
     /// `SummaryAgg`. Detected at construction, never at runtime.
-    #[error("execution-phase violation in post-ASAP plan: {0}")]
-    Phase(#[from] PhaseError),
+    #[error("execution-domain violation in post-ASAP plan: {0}")]
+    Domain(#[from] DomainError),
     /// An `ExactOperator`'s output schema could not be derived over its
     /// child — the child carries summary state the operator can't read.
     #[error("exact operator schema derivation failed: {0}")]
@@ -522,10 +522,10 @@ pub enum ReplacementProvenance {
     /// the wrong shape of cost, not just the wrong number.
     AccuracyReconciliation,
     /// [`Replacement::ExactComposition`] with
-    /// [`CompositionPhase::PostProcess`] (issue #171).
+    /// [`CompositionPlacement::PostProcess`] (issue #171).
     ExactPostProcess,
     /// [`Replacement::ExactComposition`] with
-    /// [`CompositionPhase::Transform`] (issue #171).
+    /// [`CompositionPlacement::Transform`] (issue #171).
     ExactTransform,
 }
 
@@ -552,7 +552,7 @@ pub struct RejectedCandidate {
 pub struct Proposals {
     pub candidates: Vec<ReplacementSubDAG>,
     pub rejected: Vec<RejectedCandidate>,
-    phase_error: Option<PhaseError>,
+    domain_error: Option<DomainError>,
 }
 
 /// A replacement strategy: given a [`TargetSubDAG`], does this strategy have
@@ -598,7 +598,7 @@ pub trait ReplacementStrategy {
         Proposals {
             candidates: self.replacements(target),
             rejected: Vec::new(),
-            phase_error: None,
+            domain_error: None,
         }
     }
 }
@@ -1403,7 +1403,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             }
         }
         if proposals.candidates.is_empty() {
-            if let Some(error) = &proposals.phase_error {
+            if let Some(error) = &proposals.domain_error {
                 if let Ok(node) = keep_pre_asap(root) {
                     proposals.candidates.push(ReplacementSubDAG {
                         strategy: "SketchAlgorithmStrategy",
@@ -1411,7 +1411,7 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                         provenance: ReplacementProvenance::SummaryImplementation,
                         rationale: format!(
                             "{} stays pre-ASAP because summary construction crosses an illegal \
-                             execution-phase boundary ({error})",
+                             execution-domain boundary ({error})",
                             describe_intent(intent)
                         ),
                     });
@@ -1439,8 +1439,8 @@ impl Proposals {
                 description: rationale,
                 error,
             }),
-            Err(ImplementError::Phase(error)) => {
-                self.phase_error.get_or_insert(error);
+            Err(ImplementError::Domain(error)) => {
+                self.domain_error.get_or_insert(error);
             }
             Err(ImplementError::Schema(_) | ImplementError::ExactOperatorSchema(_)) => {}
         }
@@ -1817,7 +1817,7 @@ fn construct_summary_agg(
     // Phase contract (issue #171): a maintained summary consumes update-path
     // values or exact accumulator state — never a query-time readout. A
     // typed error here, at construction; the caller decides the fallback.
-    validate_execution_phases_at(&agg, ExecutionAvailability::SummaryState)?;
+    validate_execution_domains_at(&agg, ValueDomain::MAINTENANCE_SUMMARY)?;
     match query {
         // The readout: downstream of the estimate the schema is the plain
         // pre-ASAP row shape again (the summary-state type does not
@@ -2867,7 +2867,7 @@ impl<'a> GlobalSelection<'a> {
         self.groups.get(&Rc::as_ptr(target))
     }
 
-    /// Link this selection's per-site decisions into one phase-validated
+    /// Link this selection's per-site decisions into one domain-validated
     /// post-ASAP DAG rooted at `target` — the one place a committed
     /// composition's child *reference* becomes an actual `Rc<SummaryNode>`
     /// edge (issue #171). `None` if `target` is not a discovered site.
@@ -2983,7 +2983,7 @@ fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<S
                 schema: node.schema.clone(),
                 guarantee: node.guarantee.clone(),
             });
-            match validate_execution_phases_at(&rebuilt, ExecutionAvailability::SummaryState) {
+            match validate_execution_domains_at(&rebuilt, ValueDomain::MAINTENANCE_SUMMARY) {
                 Ok(_) => rebuilt,
                 Err(_) => Rc::clone(node),
             }
@@ -3065,12 +3065,12 @@ fn composition_options<'a>(
                     *maintenance = 0.0;
                 }
             }
-            let rate = inputs.composed_plan_cost_rate(composition.phase)?;
+            let rate = inputs.composed_plan_cost_rate(composition.placement)?;
             let baseline = raw_recompute_cost_rate(&inputs)?;
             (rate < baseline).then_some((rate, baseline, inputs))
         };
-        match composition.phase {
-            CompositionPhase::PostProcess => {
+        match composition.placement {
+            CompositionPlacement::PostProcess => {
                 let child_candidates: Vec<&'a ReplacementSubDAG> = match already_committed {
                     // SAFETY-free: the pointer was taken from `groups`'s own
                     // candidate storage, which outlives this borrow.
@@ -3104,7 +3104,7 @@ fn composition_options<'a>(
                     });
                 }
             }
-            CompositionPhase::Transform => {
+            CompositionPlacement::Transform => {
                 // An update-path transform only pays off beneath a
                 // maintained summary; with nothing above it, its output is
                 // never read and the raw fallback is the same computation.
@@ -3204,7 +3204,7 @@ impl<Id> PlanSpace<Id> {
                     );
                 }
                 if let Replacement::ExactComposition(composition) = &option.candidate.replacement {
-                    if composition.phase == CompositionPhase::Transform {
+                    if composition.placement == CompositionPlacement::Transform {
                         // A chain of transforms feeds the same summary.
                         if let Some(parent) = context.maintaining_parent.get(ptr).cloned() {
                             context
@@ -4980,7 +4980,7 @@ mod tests {
         };
         assert!(
             matches!(node.expr, SummaryExpr::KeepPreAsap(ref e) if Rc::ptr_eq(e, &outer)),
-            "a sketch over a sketch readout is phase-illegal; expected the conservative \
+            "a sketch over a sketch readout is domain-illegal; expected the conservative \
              fallback, got {:?}",
             node.expr
         );

@@ -339,7 +339,7 @@ fn decision_rationale(winner: &Winner<'_>) -> String {
                 "Runs the exact row transform on the update path, feeding the maintained summary above it."
                     .to_string()
             }
-            _ => "Composes an exact operator with a summary plan across an explicit phase boundary."
+            _ => "Composes an exact operator with a summary plan across an explicit domain boundary."
                 .to_string(),
         },
         _ => {

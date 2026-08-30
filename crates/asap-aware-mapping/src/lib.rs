@@ -204,7 +204,7 @@ pub use cost_model::{
     CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
     ExactCompositionCostRequest, MixedExecutionCapabilities,
 };
-pub use exact_composition::{CompositionPhase, ExactComposition, ExactCompositionStrategy};
+pub use exact_composition::{CompositionPlacement, ExactComposition, ExactCompositionStrategy};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };

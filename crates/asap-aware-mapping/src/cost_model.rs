@@ -56,7 +56,7 @@ use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
-use crate::exact_composition::{CompositionPhase, ExactComposition};
+use crate::exact_composition::{CompositionPlacement, ExactComposition};
 use crate::recurrence::{
     self, CostRate, EvaluationRate, Horizon, RecurrenceCostExplanation, RecurrenceError,
     RecurrenceProfile,
@@ -129,10 +129,10 @@ impl MixedExecutionCapabilities {
         exact_update_transform: true,
     };
 
-    pub fn supports(self, phase: CompositionPhase) -> bool {
-        match phase {
-            CompositionPhase::PostProcess => self.exact_post_process,
-            CompositionPhase::Transform => self.exact_update_transform,
+    pub fn supports(self, placement: CompositionPlacement) -> bool {
+        match placement {
+            CompositionPlacement::PostProcess => self.exact_post_process,
+            CompositionPlacement::Transform => self.exact_update_transform,
         }
     }
 }
@@ -144,11 +144,11 @@ impl MixedExecutionCapabilities {
 pub struct ExactCompositionCostRequest<'a> {
     /// The pre-ASAP target the composed candidate replaces.
     pub target: &'a QueryExpr,
-    /// The composition itself — phase, operator, child target.
+    /// The composition itself — placement, operator, child target.
     pub composition: &'a ExactComposition,
-    /// For [`CompositionPhase::PostProcess`]: the child target's *selected*
+    /// For [`CompositionPlacement::PostProcess`]: the child target's *selected*
     /// summary readout candidate the exact operator consumes. For
-    /// [`CompositionPhase::Transform`]: the maintained summary *above* the
+    /// [`CompositionPlacement::Transform`]: the maintained summary *above* the
     /// transform that consumes its output (the `SummaryAgg` this transform
     /// feeds). Either way, the summary whose maintenance/read cost the
     /// formula charges.
@@ -207,12 +207,12 @@ impl ExactCompositionCostInputs {
         }
     }
 
-    /// The rate for whichever phase `phase` names —
+    /// The rate for whichever composition placement is requested —
     /// [`postprocess_plan_cost_rate`] or [`pretransform_plan_cost_rate`].
-    pub fn composed_plan_cost_rate(&self, phase: CompositionPhase) -> Option<CostRate> {
-        match phase {
-            CompositionPhase::PostProcess => postprocess_plan_cost_rate(self),
-            CompositionPhase::Transform => pretransform_plan_cost_rate(self),
+    pub fn composed_plan_cost_rate(&self, placement: CompositionPlacement) -> Option<CostRate> {
+        match placement {
+            CompositionPlacement::PostProcess => postprocess_plan_cost_rate(self),
+            CompositionPlacement::Transform => pretransform_plan_cost_rate(self),
         }
     }
 }
@@ -1111,7 +1111,7 @@ mod tests {
             MixedExecutionCapabilities::ALL
         );
         assert!(MixedExecutionCapabilities::NONE
-            .supports(CompositionPhase::PostProcess)
+            .supports(CompositionPlacement::PostProcess)
             .not());
     }
 
