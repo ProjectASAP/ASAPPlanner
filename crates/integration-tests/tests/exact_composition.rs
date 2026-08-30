@@ -26,8 +26,8 @@ use asap_aware_mapping::{
 use asap_frontend_promql::lower_promql;
 use asap_types::dag_export;
 use asap_types::post_asap::{
-    validate_execution_domains, DomainError, ExactKind, ExecutionDataState, SketchAlgorithm,
-    SummaryExpr, SummaryFamilyType, SummaryNode,
+    validate_execution_data_states, ExactKind, ExecutionDataState, ExecutionDataStateError,
+    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
@@ -237,7 +237,7 @@ fn every_exact_accumulator_nests_directly_under_an_outer_sketch() {
             "{kind:?}: expected the exact accumulator directly under the outer sketch, got {:?}",
             child.expr
         );
-        validate_execution_domains(root).expect("accumulator state composes under maintenance");
+        validate_execution_data_states(root).expect("accumulator state composes under maintenance");
     }
 }
 
@@ -327,7 +327,7 @@ fn max_and_avg_over_quantile_compose_as_post_process_with_statistics() {
                 .collect::<Vec<_>>(),
             "the composed plan's schema is the pre-ASAP target's own"
         );
-        validate_execution_domains(&composed).unwrap();
+        validate_execution_data_states(&composed).unwrap();
     }
 }
 
@@ -490,13 +490,13 @@ fn outer_summary_over_an_exact_transform_composes_on_the_update_path() {
         );
     };
     assert!(matches!(raw.expr, SummaryExpr::KeepPreAsap(_)));
-    let assignment = validate_execution_domains(&composed).unwrap();
+    let assignment = validate_execution_data_states(&composed).unwrap();
     assert_eq!(
-        assignment.domain_of(child),
+        assignment.data_state_of(child),
         Some(ExecutionDataState::MAINTENANCE_ROWS)
     );
     assert_eq!(
-        assignment.domain_of(raw),
+        assignment.data_state_of(raw),
         Some(ExecutionDataState::MAINTENANCE_ROWS)
     );
 }
@@ -544,11 +544,11 @@ fn readout_under_maintenance_is_rejected_at_construction() {
         guarantee: None,
     });
     assert!(matches!(
-        validate_execution_domains(&illegal),
-        Err(DomainError::ReadoutUnderMaintenance { .. })
+        validate_execution_data_states(&illegal),
+        Err(ExecutionDataStateError::ReadoutUnderMaintenance { .. })
     ));
-    let err: ImplementError = validate_execution_domains(&illegal).unwrap_err().into();
-    assert!(matches!(err, ImplementError::Domain(_)));
+    let err: ImplementError = validate_execution_data_states(&illegal).unwrap_err().into();
+    assert!(matches!(err, ImplementError::ExecutionDataState(_)));
 }
 
 #[test]
@@ -603,7 +603,7 @@ fn missing_cost_statistics_preserve_the_conservative_keep_pre_asap() {
         .any(|e| e.kind == ExplanationKind::ExactComposition));
 }
 
-// ── DAG export: explicit domain, schema, provenance ──────────────────────
+// ── DAG export: explicit data_state, schema, provenance ──────────────────────
 
 #[test]
 fn dag_export_carries_explicit_domain_and_plain_schema_for_a_composed_plan() {
@@ -618,8 +618,8 @@ fn dag_export_carries_explicit_domain_and_plain_schema_for_a_composed_plan() {
     let graph = dag_export::export_summary(&composed);
     let node = &graph.nodes[graph.root as usize];
     assert_eq!(node.kind, "ReadoutPostProcess");
-    assert_eq!(node.detail["domain"]["timing"], "read_time");
-    assert_eq!(node.detail["domain"]["primitive"], "rows");
+    assert_eq!(node.detail["execution_data_state"]["timing"], "read_time");
+    assert_eq!(node.detail["execution_data_state"]["primitive"], "rows");
     assert_eq!(node.detail["op"], "Aggregate");
     let domains: Vec<(&str, &str, &str)> = graph
         .nodes
@@ -627,8 +627,10 @@ fn dag_export_carries_explicit_domain_and_plain_schema_for_a_composed_plan() {
         .map(|n| {
             (
                 n.kind,
-                n.detail["domain"]["timing"].as_str().unwrap(),
-                n.detail["domain"]["primitive"].as_str().unwrap(),
+                n.detail["execution_data_state"]["timing"].as_str().unwrap(),
+                n.detail["execution_data_state"]["primitive"]
+                    .as_str()
+                    .unwrap(),
             )
         })
         .collect();
