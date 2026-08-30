@@ -26,8 +26,8 @@ use asap_aware_mapping::{
 use asap_frontend_promql::lower_promql;
 use asap_types::dag_export;
 use asap_types::post_asap::{
-    validate_execution_domains, DomainError, ExactKind, SketchAlgorithm, SummaryExpr,
-    SummaryFamilyType, SummaryNode, ValueDomain,
+    validate_execution_domains, DomainError, ExactKind, ExecutionDataState, SketchAlgorithm,
+    SummaryExpr, SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
@@ -493,11 +493,11 @@ fn outer_summary_over_an_exact_transform_composes_on_the_update_path() {
     let assignment = validate_execution_domains(&composed).unwrap();
     assert_eq!(
         assignment.domain_of(child),
-        Some(ValueDomain::MAINTENANCE_ROWS)
+        Some(ExecutionDataState::MAINTENANCE_ROWS)
     );
     assert_eq!(
         assignment.domain_of(raw),
-        Some(ValueDomain::MAINTENANCE_ROWS)
+        Some(ExecutionDataState::MAINTENANCE_ROWS)
     );
 }
 
