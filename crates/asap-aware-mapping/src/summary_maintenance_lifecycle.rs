@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    produced_domain, validate_execution_domains, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryNode, ValueDomain,
+    produced_domain, validate_execution_domains, ExecutionDataState, SummaryExpr,
+    SummaryMaintenanceLifecycle, SummaryNode,
 };
 use asap_types::post_asap::{
     EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycleGuarantee,
@@ -143,7 +143,7 @@ pub enum SummaryMaintenanceLifecyclePlanError {
     #[error(transparent)]
     InvalidWorkload(#[from] WorkloadError),
     #[error(transparent)]
-    InvalidValueDomains(#[from] asap_types::post_asap::DomainError),
+    InvalidExecutionDataStates(#[from] asap_types::post_asap::DomainError),
     #[error("optimization horizon must be finite and strictly positive")]
     InvalidHorizon,
     #[error("workload entry index {index} is out of bounds for {entry_count} entries")]
@@ -872,7 +872,7 @@ fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
         let SummaryExpr::SummaryAgg { child, .. } = &summary.expr else {
             continue;
         };
-        if produced_domain(&child.expr) != Some(ValueDomain::MAINTENANCE_SUMMARY) {
+        if produced_domain(&child.expr) != Some(ExecutionDataState::MAINTENANCE_SUMMARY) {
             continue;
         }
         let mut descendants = Vec::new();
