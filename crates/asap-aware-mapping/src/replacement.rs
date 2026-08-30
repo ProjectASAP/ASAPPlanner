@@ -6701,19 +6701,17 @@ mod tests {
     }
 
     #[test]
-    fn exact_sum_over_approximate_readout_falls_back_to_the_logical_plan() {
-        // sum(count_distinct by (job) (m)) cannot be maintained over the
-        // inner HLL's query-time readout. The phase contract therefore keeps
-        // the whole expression logical instead of manufacturing an accuracy
-        // guarantee for an execution shape the runtime cannot schedule.
+    fn exact_sum_can_consume_an_approximate_readout() {
+        // sum(count_distinct by (job) (m)) is an outer exact summary over
+        // the inner HLL readout. Both summary levels remain explicit.
         let inner = agg(vec![2], default_cardinality(), metric_scan(&["job"]));
         let outer = agg(vec![], AggIntent::Sum { col: None }, inner);
         let root = realize(&outer).unwrap();
-        assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
-        assert!(root
-            .guarantee
-            .as_ref()
-            .is_some_and(ResultGuarantee::is_exact));
+        let SummaryExpr::SummaryAgg { child, .. } = &root.expr else {
+            panic!("outer exact sum should remain a SummaryAgg")
+        };
+        assert!(matches!(child.expr, SummaryExpr::SummaryEstimate { .. }));
+        assert!(root.guarantee.is_some());
 
         // count(...) over the same child is exact: a row count does not
         // depend on the rows' values.
@@ -6733,11 +6731,9 @@ mod tests {
     }
 
     #[test]
-    fn equal_split_allocation_does_not_override_phase_legality() {
-        // Even a registered rank-additive rule and a valid budget split do
-        // not make a maintained sketch over another sketch's query-time
-        // readout schedulable. Accuracy legality cannot override phase
-        // legality, so the conservative logical fallback is the only plan.
+    fn equal_split_allocation_supports_nested_summary_readouts() {
+        // A registered rank-additive rule and valid budget split make both
+        // summary levels explicit while preserving the composed guarantee.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
         let strategy = SketchAlgorithmStrategy::with_models(
@@ -6747,18 +6743,22 @@ mod tests {
         );
         let proposals = strategy.propose(&TargetSubDAG::new(&outer));
 
-        assert_eq!(proposals.candidates.len(), 1);
-        let Replacement::Summary(node) = &proposals.candidates[0].replacement else {
-            panic!()
-        };
-        assert!(matches!(node.expr, SummaryExpr::KeepPreAsap(_)));
+        assert!(!proposals.candidates.is_empty());
+        assert!(proposals.candidates.iter().all(|candidate| {
+            let Replacement::Summary(node) = &candidate.replacement else {
+                return false;
+            };
+            matches!(node.expr, SummaryExpr::SummaryEstimate { .. })
+                && node.guarantee.as_ref().is_some_and(|guarantee| {
+                    DefaultAccuracyModel.satisfies(guarantee, &AccuracyTarget::Epsilon(0.1))
+                })
+        }));
     }
 
     #[test]
-    fn phase_legality_precedes_accuracy_and_cost_in_global_selection() {
-        // The same phase-illegal nesting through workload search remains a
-        // logical fallback before cost ranking. Neither a favorable cost nor
-        // a valid accuracy allocation can resurrect it.
+    fn global_selection_can_choose_nested_summaries() {
+        // The same nested summary remains available through workload search
+        // and global cost ranking.
         let inner = agg(vec![2], quantile_eps(0.5, 0.1), metric_scan(&["job"]));
         let outer = Rc::new(agg(vec![], quantile_eps(0.99, 0.1), inner));
         let strategies: Vec<Box<dyn ReplacementStrategy>> =
@@ -6786,11 +6786,11 @@ mod tests {
             .for_target(root)
             .unwrap()
             .chosen
-            .expect("the conservative fallback wins");
+            .expect("a nested summary candidate wins");
         let Replacement::Summary(node) = &chosen.replacement else {
             panic!()
         };
-        assert!(matches!(node.expr, SummaryExpr::KeepPreAsap(_)));
+        assert!(matches!(node.expr, SummaryExpr::SummaryEstimate { .. }));
     }
 
     #[test]
