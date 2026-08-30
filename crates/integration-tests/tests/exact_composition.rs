@@ -21,13 +21,13 @@ use asap_aware_mapping::replacement::{
     ReplacementProvenance, ReplacementStrategy, SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_aware_mapping::{
-    CompositionPhase, CostModel, DefaultCostModel, EvaluationRate, ExplanationKind,
+    CompositionPlacement, CostModel, DefaultCostModel, EvaluationRate, ExplanationKind,
 };
 use asap_frontend_promql::lower_promql;
 use asap_types::dag_export;
 use asap_types::post_asap::{
-    validate_execution_phases, ExactKind, ExecutionAvailability, PhaseError, SketchAlgorithm,
-    SummaryExpr, SummaryFamilyType, SummaryNode,
+    validate_execution_domains, DomainError, ExactKind, SketchAlgorithm, SummaryExpr,
+    SummaryFamilyType, SummaryNode, ValueDomain,
 };
 use asap_types::pre_asap::agg_intent::{default_quantile, AggIntent};
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
@@ -237,7 +237,7 @@ fn every_exact_accumulator_nests_directly_under_an_outer_sketch() {
             "{kind:?}: expected the exact accumulator directly under the outer sketch, got {:?}",
             child.expr
         );
-        validate_execution_phases(root).expect("accumulator state composes under maintenance");
+        validate_execution_domains(root).expect("accumulator state composes under maintenance");
     }
 }
 
@@ -327,7 +327,7 @@ fn max_and_avg_over_quantile_compose_as_post_process_with_statistics() {
                 .collect::<Vec<_>>(),
             "the composed plan's schema is the pre-ASAP target's own"
         );
-        validate_execution_phases(&composed).unwrap();
+        validate_execution_domains(&composed).unwrap();
     }
 }
 
@@ -490,14 +490,14 @@ fn outer_summary_over_an_exact_transform_composes_on_the_update_path() {
         );
     };
     assert!(matches!(raw.expr, SummaryExpr::KeepPreAsap(_)));
-    let assignment = validate_execution_phases(&composed).unwrap();
+    let assignment = validate_execution_domains(&composed).unwrap();
     assert_eq!(
-        assignment.stage_of(child),
-        Some(ExecutionAvailability::UpdateValue)
+        assignment.domain_of(child),
+        Some(ValueDomain::MAINTENANCE_ROWS)
     );
     assert_eq!(
-        assignment.stage_of(raw),
-        Some(ExecutionAvailability::UpdateValue)
+        assignment.domain_of(raw),
+        Some(ValueDomain::MAINTENANCE_ROWS)
     );
 }
 
@@ -544,11 +544,11 @@ fn readout_under_maintenance_is_rejected_at_construction() {
         guarantee: None,
     });
     assert!(matches!(
-        validate_execution_phases(&illegal),
-        Err(PhaseError::ReadoutUnderMaintenance { .. })
+        validate_execution_domains(&illegal),
+        Err(DomainError::ReadoutUnderMaintenance { .. })
     ));
-    let err: ImplementError = validate_execution_phases(&illegal).unwrap_err().into();
-    assert!(matches!(err, ImplementError::Phase(_)));
+    let err: ImplementError = validate_execution_domains(&illegal).unwrap_err().into();
+    assert!(matches!(err, ImplementError::Domain(_)));
 }
 
 #[test]
@@ -603,10 +603,10 @@ fn missing_cost_statistics_preserve_the_conservative_keep_pre_asap() {
         .any(|e| e.kind == ExplanationKind::ExactComposition));
 }
 
-// ── DAG export: explicit stage, schema, provenance ───────────────────────
+// ── DAG export: explicit domain, schema, provenance ──────────────────────
 
 #[test]
-fn dag_export_carries_explicit_stage_and_plain_schema_for_a_composed_plan() {
+fn dag_export_carries_explicit_domain_and_plain_schema_for_a_composed_plan() {
     let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
     let space = plan(vec![("q", root)], &StatsModel);
     let root = &space.roots[0].1;
@@ -618,16 +618,23 @@ fn dag_export_carries_explicit_stage_and_plain_schema_for_a_composed_plan() {
     let graph = dag_export::export_summary(&composed);
     let node = &graph.nodes[graph.root as usize];
     assert_eq!(node.kind, "ReadoutPostProcess");
-    assert_eq!(node.detail["stage"], "readout_value");
+    assert_eq!(node.detail["domain"]["timing"], "read_time");
+    assert_eq!(node.detail["domain"]["primitive"], "rows");
     assert_eq!(node.detail["op"], "Aggregate");
-    let stages: Vec<(&str, String)> = graph
+    let domains: Vec<(&str, &str, &str)> = graph
         .nodes
         .iter()
-        .map(|n| (n.kind, n.detail["stage"].as_str().unwrap().to_string()))
+        .map(|n| {
+            (
+                n.kind,
+                n.detail["domain"]["timing"].as_str().unwrap(),
+                n.detail["domain"]["primitive"].as_str().unwrap(),
+            )
+        })
         .collect();
-    assert!(stages.contains(&("SummaryEstimate", "readout_value".into())));
-    assert!(stages.contains(&("SummaryAgg", "summary_state".into())));
-    assert!(stages.contains(&("KeepPreAsap", "update_value".into())));
+    assert!(domains.contains(&("SummaryEstimate", "read_time", "rows")));
+    assert!(domains.contains(&("SummaryAgg", "maintenance_time", "summary_state")));
+    assert!(domains.contains(&("KeepPreAsap", "maintenance_time", "rows")));
 
     // Pre-ASAP export of the same target still describes the same columns.
     let pre = dag_export::export(root);
@@ -674,5 +681,5 @@ fn promql_max_by_zone_over_quantile_over_time_composes() {
         selected.composition.as_ref().map(|d| d.inputs.unit),
         Some(CostUnit::CostUnitsPerSecond)
     );
-    let _ = CompositionPhase::PostProcess;
+    let _ = CompositionPlacement::PostProcess;
 }
