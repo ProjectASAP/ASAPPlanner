@@ -18,9 +18,11 @@ pub enum EvaluationSchedule {
     OnRead,
 }
 
-/// The value a summary-maintenance deployment provides to its downstream
-/// query operator: ordinary rows, reusable summary state, or a finalized
-/// scalar/result value.
+/// The form in which this deployment exposes its result to its consumer. The
+/// consumer is the next operator in the execution plan that reads the
+/// summary's output; for example, `Estimate` is the consumer in
+/// `SummaryAgg -> Estimate`. The exposed result is ordinary rows, reusable
+/// summary state, or a finalized value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputRepresentation {
     PlainRows,
