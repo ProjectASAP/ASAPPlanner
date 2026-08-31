@@ -56,11 +56,21 @@ pub struct SummaryMaintenanceLifecycleCapabilities {
     pub continuously_maintained: bool,
 }
 
-/// Capabilities of one concrete summary family/state representation.
+/// State operations supported by one concrete summary family and
+/// representation.
+///
+/// This differs from [`SummaryMaintenanceLifecycleCapabilities`]: these flags
+/// describe what the summary algorithm itself can do, while lifecycle
+/// capabilities describe what deployment policies the target runtime can
+/// orchestrate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SummaryMaintenanceCapabilities {
+    /// Existing state can incorporate arriving input without a full rebuild.
     pub incremental_update: bool,
+    /// Two independently built states can be combined into one equivalent
+    /// state.
     pub merge: bool,
+    /// Expired or retracted input can be removed from existing state.
     pub delete: bool,
 }
 
@@ -167,17 +177,29 @@ pub struct SummaryMaintenanceLifecyclePlan {
     pub evaluation_rate: Option<EvaluationRate>,
     /// Fresh source-data ingestion rate, when supplied by the workload.
     pub update_rate: Option<UpdateRate>,
+    /// Total demand inside the horizon, when every recurrence is known.
     pub expected_reads: Option<f64>,
+    /// Whether global costing preferred rebuilding the raw expression over all
+    /// summary deployments.
     pub selected_raw_recompute: bool,
+    /// Cost of the selected set of summary deployments, when fully known.
     pub summary_total_cost: Option<Cost>,
+    /// Cost of evaluating the original expression for the same demand, when
+    /// fully known.
     pub raw_recompute_total_cost: Option<Cost>,
 }
 
 /// Explicit association between a materialized target and the normalized
 /// workload entries whose demand consumes it.
+///
+/// [`QueryWorkload`] remains the source-of-truth model. Indices avoid copying
+/// its normalized entry definitions while ensuring unrelated workload entries
+/// do not influence a target's lifecycle decision.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkloadDemand<'a> {
+    /// Original normalized workload and workload-level data evidence.
     pub workload: &'a QueryWorkload,
+    /// Indices from [`QueryWorkload::entries`] that consume this target.
     pub entry_indices: &'a [usize],
 }
 
