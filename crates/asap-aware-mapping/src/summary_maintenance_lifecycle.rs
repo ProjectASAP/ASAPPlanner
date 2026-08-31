@@ -31,29 +31,33 @@ use crate::recurrence::{CostRate, EvaluationRate, Horizon, UpdateRate};
 
 /// Summary-maintenance lifecycle shapes supported by the target runtime.
 ///
-/// These flags describe runtime implementation capabilities, not which
-/// alternative the planner prefers. A supported alternative may still be
-/// rejected because workload evidence is missing or its cost is unknown.
+/// These independent flags describe the set of lifecycle alternatives the
+/// runtime implements, not simultaneous states of one deployment. Multiple
+/// flags may be `true` (a runtime can support both ephemeral and prepared
+/// state, for example); the planner still selects exactly one mutually
+/// exclusive [`SummaryMaintenanceLifecycle`] for each deployment. A supported
+/// alternative may still be rejected because workload evidence is missing or
+/// its cost is unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryMaintenanceLifecycleCapabilities {
     /// The runtime can build a fresh state for each invocation and retire it
     /// after that invocation finishes.
-    pub ephemeral: bool,
+    pub supports_ephemeral: bool,
     /// The runtime can build state before a predictable execution and retain
     /// it until that scheduled execution window ends.
-    pub prepared: bool,
+    pub supports_prepared: bool,
     /// The runtime can retain one state and reuse it across multiple reads.
-    pub shared: bool,
+    pub supports_shared: bool,
     /// The runtime can keep state current by applying arriving data updates.
-    pub continuously_maintained: bool,
+    pub supports_continuously_maintained: bool,
 }
 
 impl SummaryMaintenanceLifecycleCapabilities {
     pub const ALL: Self = Self {
-        ephemeral: true,
-        prepared: true,
-        shared: true,
-        continuously_maintained: true,
+        supports_ephemeral: true,
+        supports_prepared: true,
+        supports_shared: true,
+        supports_continuously_maintained: true,
     };
 }
 
@@ -399,7 +403,7 @@ fn ephemeral(
     costs: &SummaryMaintenanceLifecycleCostInputs,
 ) -> SummaryMaintenanceLifecycleAlternative {
     let lifecycle = SummaryMaintenanceLifecycle::Ephemeral;
-    if !capabilities.ephemeral {
+    if !capabilities.supports_ephemeral {
         return rejected(
             lifecycle,
             SummaryMaintenanceMode::DirectBuild,
@@ -440,7 +444,7 @@ fn prepared(
         activate_at,
         retire_at,
     };
-    if !capabilities.prepared {
+    if !capabilities.supports_prepared {
         return rejected(
             lifecycle,
             retained_mode(facts),
@@ -482,7 +486,7 @@ fn shared(
     let lifecycle = SummaryMaintenanceLifecycle::Shared {
         retention: asap_types::workload::DurationMs(horizon.map_or(0, |h| (h.0 * 1000.0) as u64)),
     };
-    if !capabilities.shared {
+    if !capabilities.supports_shared {
         return rejected(
             lifecycle,
             retained_mode(facts),
@@ -519,7 +523,7 @@ fn continuous(
     costs: &SummaryMaintenanceLifecycleCostInputs,
 ) -> SummaryMaintenanceLifecycleAlternative {
     let lifecycle = SummaryMaintenanceLifecycle::ContinuouslyMaintained;
-    if !capabilities.continuously_maintained {
+    if !capabilities.supports_continuously_maintained {
         return rejected(
             lifecycle,
             SummaryMaintenanceMode::Incremental,
@@ -883,7 +887,7 @@ mod tests {
     #[test]
     fn repeated_continuous_workload_can_select_continuous_maintenance() {
         let capabilities = SummaryMaintenanceLifecycleCapabilities {
-            shared: false,
+            supports_shared: false,
             ..SummaryMaintenanceLifecycleCapabilities::ALL
         };
         let plan = plan_summary_maintenance_lifecycles(
