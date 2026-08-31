@@ -360,7 +360,7 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
 use asap_types::pre_asap::schema::Schema;
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{ExpectedDemand, QueryRecurrence, QueryWorkload, RepeatedDemand};
+use asap_types::workload::{QueryRecurrence, QueryWorkload, RepeatedDemand};
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -2564,18 +2564,9 @@ impl<Id> PlanSpace<Id> {
                     if !estimate.is_fresh_at(now_ms) {
                         RootRecurrence::Unknown
                     } else {
-                        let rate = match estimate.expected {
-                            ExpectedDemand::AverageRate(rate) => rate.0,
-                            ExpectedDemand::InvocationCount(count) => {
-                                let millis = estimate
-                                    .observation_window
-                                    .end
-                                    .0
-                                    .saturating_sub(estimate.observation_window.start.0);
-                                count as f64 / (millis as f64 / 1000.0)
-                            }
-                        };
-                        RootRecurrence::Repeating(crate::recurrence::EvaluationRate(rate))
+                        RootRecurrence::Repeating(crate::recurrence::EvaluationRate(
+                            estimate.expected_rate.0,
+                        ))
                     }
                 }
                 QueryRecurrence::Unknown => RootRecurrence::Unknown,

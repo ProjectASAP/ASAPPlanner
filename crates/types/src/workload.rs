@@ -181,21 +181,9 @@ pub struct ObservationWindow {
     pub end: TimestampMs,
 }
 
-/// Evidence as originally measured: either a count over the accompanying
-/// [`ObservationWindow`] or an average number of invocations per second.
-/// Consumers normalize the count to a rate using that window before costing;
-/// the variants retain whether the source supplied a count or a rate.
-///
-/// For example, `InvocationCount(600)` records 600 observed executions,
-/// whereas `AverageRate(Rate(10.0))` directly records ten per second.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ExpectedDemand {
-    InvocationCount(u64),
-    AverageRate(Rate),
-}
-
 /// Evidence-backed forecast used when recurrence is not a fixed interval or
-/// an explicit schedule.
+/// an explicit schedule. Demand is normalized to invocations per second at
+/// the input boundary, so this type never mixes counts and rates.
 ///
 /// # Example
 ///
@@ -205,8 +193,8 @@ pub enum ExpectedDemand {
 ///
 /// ```
 /// use asap_types::workload::{
-///     Confidence, DemandEstimate, DurationMs, EvidenceSource, ExpectedDemand,
-///     ObservationWindow, Rate, TimestampMs,
+///     Confidence, DemandEstimate, DurationMs, EvidenceSource, ObservationWindow,
+///     Rate, TimestampMs,
 /// };
 ///
 /// let estimate = DemandEstimate {
@@ -214,7 +202,7 @@ pub enum ExpectedDemand {
 ///         start: TimestampMs(0),
 ///         end: TimestampMs(60_000),
 ///     },
-///     expected: ExpectedDemand::AverageRate(Rate(10.0)),
+///     expected_rate: Rate(10.0),
 ///     peak_rate: Some(Rate(20.0)),
 ///     max_concurrency: Some(4),
 ///     confidence: Confidence(0.95),
@@ -226,7 +214,7 @@ pub enum ExpectedDemand {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemandEstimate {
     pub observation_window: ObservationWindow,
-    pub expected: ExpectedDemand,
+    pub expected_rate: Rate,
     pub peak_rate: Option<Rate>,
     pub max_concurrency: Option<u64>,
     pub confidence: Confidence,
@@ -587,9 +575,7 @@ fn validate_entry(entry: &QueryWorkloadEntry) -> Result<(), WorkloadError> {
             {
                 return Err(WorkloadError::InvalidConfidence(estimate.confidence.0));
             }
-            if let ExpectedDemand::AverageRate(rate) = estimate.expected {
-                validate_rate(rate)?;
-            }
+            validate_rate(estimate.expected_rate)?;
             validate_optional_rate(estimate.peak_rate)?;
         }
         _ => {}
@@ -715,7 +701,7 @@ mod tests {
                 start: TimestampMs(0),
                 end: TimestampMs(1_000),
             },
-            expected: ExpectedDemand::AverageRate(Rate(1.0)),
+            expected_rate: Rate(1.0),
             peak_rate: None,
             max_concurrency: None,
             confidence: Confidence(1.0),
@@ -754,7 +740,7 @@ mod tests {
                     start: TimestampMs(10),
                     end: TimestampMs(10),
                 },
-                expected: ExpectedDemand::AverageRate(Rate(1.0)),
+                expected_rate: Rate(1.0),
                 peak_rate: None,
                 max_concurrency: None,
                 confidence: Confidence(0.9),
