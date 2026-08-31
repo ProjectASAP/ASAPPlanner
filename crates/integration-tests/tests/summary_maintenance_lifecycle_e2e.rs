@@ -198,4 +198,14 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
             && alternative["rejection"] == "unsupported_by_runtime"
     }));
     assert!(exported["graph"]["nodes"].as_array().is_some());
+    let summary_node = exported["graph"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["kind"] == "SummaryAgg")
+        .expect("exported SummaryAgg node");
+    assert_eq!(
+        summary_node["detail"]["summary_maintenance"]["selected"]["lifecycle"]["kind"],
+        "continuously_maintained"
+    );
 }

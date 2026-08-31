@@ -55,6 +55,18 @@ def named_graph(name: str, source: str = "SELECT 1") -> dict:
 
 
 class LoadWorkloadTests(unittest.TestCase):
+    def test_loads_summary_maintenance_export_as_a_lifecycle_plan(self):
+        graph = named_graph("unused")["graph"]
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "lifecycle.json"
+            path.write_text(json.dumps({"graph": graph, "deployments": []}))
+            workload = load_workload([path])
+
+        query = workload["queries"][0]
+        self.assertEqual(query["name"], "lifecycle")
+        self.assertTrue(query["lifecycle_plan"])
+        self.assertEqual(query["post_graph"], graph)
+
     def test_merges_queries_across_files_in_order(self):
         with tempfile.TemporaryDirectory() as d:
             f1 = Path(d) / "a.json"

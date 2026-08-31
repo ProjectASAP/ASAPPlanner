@@ -260,7 +260,15 @@ def load_workload(paths: list[Path]) -> dict:
     seen_names = set()
     for path in paths:
         data = json.loads(path.read_text())
-        for q in data.get("queries", []):
+        incoming = data.get("queries", [])
+        if not incoming and isinstance(data.get("graph"), dict) and isinstance(data.get("deployments"), list):
+            incoming = [{
+                "name": path.stem or "Summary maintenance plan",
+                "graph": data["graph"],
+                "post_graph": data["graph"],
+                "lifecycle_plan": True,
+            }]
+        for q in incoming:
             name = q["name"]
             if name in seen_names:
                 name = f'{q["name"]} ({path.name})'

@@ -5,12 +5,15 @@
 //! alternatives and their typed rejection reasons are available, and emits
 //! both views together.
 
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use serde::Serialize;
 
 use asap_types::dag_export::{self, SummaryDagGraph};
 use asap_types::post_asap::{
-    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
+    EvaluationSchedule, OutputRepresentation, SummaryExpr, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
 };
 
 use crate::summary_maintenance_lifecycle::{
@@ -109,29 +112,45 @@ pub enum SummaryMaintenanceLifecycleRejectionExport {
 pub fn export_summary_maintenance_plan(
     plan: &SummaryMaintenanceLifecyclePlan,
 ) -> SummaryMaintenanceDagExport {
+    let deployments: Vec<_> = plan
+        .deployments
+        .iter()
+        .map(|deployment| SummaryMaintenanceDeploymentExport {
+            summary_index: deployment.summary_index,
+            selected: deployment
+                .summary_maintenance_lifecycle_guarantee
+                .as_ref()
+                .map(export_guarantee),
+            alternatives: deployment
+                .alternatives
+                .iter()
+                .map(|alternative| SummaryMaintenanceLifecycleAlternativeExport {
+                    lifecycle: export_lifecycle(&alternative.summary_maintenance_lifecycle),
+                    total_cost: alternative.total_cost.map(|cost| cost.0),
+                    rejection: alternative.rejection.as_ref().map(export_rejection),
+                    assumptions: alternative.assumptions.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    let mut graph = dag_export::export_summary(&plan.root);
+    let deployment_by_summary: HashMap<_, _> = plan
+        .deployments
+        .iter()
+        .zip(&deployments)
+        .map(|(deployment, export)| (Rc::as_ptr(&deployment.summary), export))
+        .collect();
+    let mut next_node_id = 0;
+    annotate_lifecycle_deployments(
+        &plan.root,
+        &mut graph,
+        &deployment_by_summary,
+        &mut next_node_id,
+    );
+
     SummaryMaintenanceDagExport {
-        graph: dag_export::export_summary(&plan.root),
-        deployments: plan
-            .deployments
-            .iter()
-            .map(|deployment| SummaryMaintenanceDeploymentExport {
-                summary_index: deployment.summary_index,
-                selected: deployment
-                    .summary_maintenance_lifecycle_guarantee
-                    .as_ref()
-                    .map(export_guarantee),
-                alternatives: deployment
-                    .alternatives
-                    .iter()
-                    .map(|alternative| SummaryMaintenanceLifecycleAlternativeExport {
-                        lifecycle: export_lifecycle(&alternative.summary_maintenance_lifecycle),
-                        total_cost: alternative.total_cost.map(|cost| cost.0),
-                        rejection: alternative.rejection.as_ref().map(export_rejection),
-                        assumptions: alternative.assumptions.clone(),
-                    })
-                    .collect(),
-            })
-            .collect(),
+        graph,
+        deployments,
         horizon_seconds: plan.horizon.map(|horizon| horizon.0),
         evaluation_rate_per_second: plan.evaluation_rate.map(|rate| rate.0),
         update_rate_per_second: plan.update_rate.map(|rate| rate.0),
@@ -139,6 +158,44 @@ pub fn export_summary_maintenance_plan(
         selected_raw_recompute: plan.selected_raw_recompute,
         summary_total_cost: plan.summary_total_cost.map(|cost| cost.0),
         raw_recompute_total_cost: plan.raw_recompute_total_cost.map(|cost| cost.0),
+    }
+}
+
+/// Walk in the same post-order as `dag_export::export_summary` and attach a
+/// deployment directly to every flattened occurrence of its `SummaryAgg`.
+/// This makes the decision visible to graph consumers without asking them to
+/// reconstruct pointer identity from `summary_index` or graph position.
+fn annotate_lifecycle_deployments(
+    node: &SummaryNode,
+    graph: &mut SummaryDagGraph,
+    deployments: &HashMap<*const SummaryNode, &SummaryMaintenanceDeploymentExport>,
+    next_node_id: &mut usize,
+) {
+    if !matches!(node.expr, SummaryExpr::KeepPreAsap(_)) {
+        for child in summary_children(&node.expr) {
+            annotate_lifecycle_deployments(child, graph, deployments, next_node_id);
+        }
+    }
+    let graph_node = &mut graph.nodes[*next_node_id];
+    if let Some(deployment) = deployments.get(&(node as *const SummaryNode)) {
+        graph_node.detail["summary_maintenance"] =
+            serde_json::to_value(deployment).expect("lifecycle export is serializable");
+    }
+    *next_node_id += 1;
+}
+
+fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
+    match expr {
+        SummaryExpr::KeepPreAsap(_) => vec![],
+        SummaryExpr::SummaryAgg { child, .. } => vec![child],
+        SummaryExpr::SummaryJoin { outer, inner, .. }
+        | SummaryExpr::SummarySubtract {
+            left: outer,
+            right: inner,
+        } => vec![outer, inner],
+        SummaryExpr::SummaryDelete { summary_input, .. }
+        | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
+        SummaryExpr::SummaryMerge { children } => children.iter().collect(),
     }
 }
 

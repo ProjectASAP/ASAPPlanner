@@ -93,13 +93,18 @@ function loadFiles(fileList) {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(reader.result);
-        const incoming = parsed.queries || [];
+        const incoming = parsed.queries || (parsed.graph && parsed.deployments ? [{
+          name: file.name.replace(/\.json$/i, '') || 'Summary maintenance plan',
+          graph: parsed.graph,
+          post_graph: parsed.graph,
+          lifecycle_plan: true,
+        }] : []);
         const existingNames = new Set(queries.map((q) => q.name));
         incoming.forEach((q) => {
           let name = q.name;
           if (existingNames.has(name)) name = `${q.name} (${file.name})`;
           existingNames.add(name);
-          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph });
+          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, lifecycle_plan: q.lifecycle_plan });
         });
       } catch (err) {
         alert(`Failed to parse ${file.name}: ${err.message}`);
@@ -388,6 +393,28 @@ function renderPrePostAsap() {
     return;
   }
   hideModeHint();
+  if (selected.length === 1 && selected[0].lifecycle_plan) {
+    viewTitleEl.textContent = `Summary maintenance: ${selected[0].name}`;
+    const elements = laneElements(
+      'summary-maintenance',
+      `${selected[0].name} · lifecycle plan`,
+      selected[0].post_graph,
+      selected[0],
+      'post',
+    );
+    buildCy(elements);
+    finalizeGraphInteractions();
+    applyHighlighting();
+    const initial = cy.nodes().filter((node) => !node.data('isLane') && node.data('root')).first();
+    if (initial && initial.length) {
+      initial.select();
+      showPrePostDetail(initial.data());
+    } else {
+      clearDetail();
+    }
+    fitAndSyncZoom();
+    return;
+  }
   viewTitleEl.textContent = selected.length === 1
     ? `Pre/Post-ASAP: ${selected[0].name}`
     : `Pre/Post-ASAP workload union: ${selected.length} queries`;
@@ -652,6 +679,20 @@ function showPrePostDetail(data) {
     : '';
 
   const decisions = data.translations || [];
+  const lifecycle = node.detail && node.detail.summary_maintenance;
+  let lifecycleHtml = '';
+  if (lifecycle) {
+    const selected = lifecycle.selected;
+    const selectedText = selected
+      ? `${selected.lifecycle.kind} · ${selected.maintenance_mode} · ${selected.evaluation_schedule} · ${selected.output_representation}`
+      : 'No lifecycle selected';
+    const alternatives = (lifecycle.alternatives || []).map((alternative) => {
+      const status = alternative.rejection ? `rejected: ${alternative.rejection}` : `cost: ${alternative.total_cost}`;
+      const assumptions = (alternative.assumptions || []).join('; ') || 'none';
+      return `<div class="translationCard"><div class="translationStrategy">${escapeHtml(alternative.lifecycle.kind)}</div><div class="translationMeta">${escapeHtml(status)}</div><div class="translationReason">assumptions: ${escapeHtml(assumptions)}</div></div>`;
+    }).join('');
+    lifecycleHtml = `<div class="translationBlock"><h3>Summary maintenance lifecycle</h3><div><strong>Selected:</strong> ${escapeHtml(selectedText)}</div>${alternatives}</div>`;
+  }
   let translationHtml = '';
   if (decisions.length > 0) {
     const cards = decisions.map((entry) => `
@@ -673,6 +714,7 @@ function showPrePostDetail(data) {
     <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
     ${rootHtml}
     ${translationHtml}
+    ${lifecycleHtml}
     <h3 class="detailSubhead">IR node content</h3>
     <pre>${escapeHtml(JSON.stringify(node.detail, null, 2))}</pre>
   `;
@@ -796,7 +838,7 @@ document.getElementById('resetBtn').addEventListener('click', () => { zoom = 1; 
 
 function loadWorkload(parsed) {
   const incoming = (parsed && parsed.queries) || [];
-  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph }));
+  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, lifecycle_plan: q.lifecycle_plan }));
   if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
   if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
 }

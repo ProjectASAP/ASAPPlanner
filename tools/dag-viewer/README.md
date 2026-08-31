@@ -59,6 +59,12 @@ cargo run -p asap-devtools --bin dag_export -- \
 Load the JSON with the page's file picker. A post-ASAP visualization requires
 `--post-asap`; ordinary exports intentionally omit `post_graph`.
 
+The viewer also accepts the JSON produced by
+`export_summary_maintenance_plan`. It renders the materialized summary DAG as
+a single lifecycle-plan lane. Selecting a `SummaryAgg` shows the chosen
+lifecycle and maintenance mode together with every alternative's cost,
+assumptions, and rejection reason.
+
 ## Standalone HTML
 
 ```sh
