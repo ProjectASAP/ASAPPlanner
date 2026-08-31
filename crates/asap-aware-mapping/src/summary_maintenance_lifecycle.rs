@@ -382,8 +382,10 @@ fn workload_facts(
                     Some(execute),
                 ) = (&entry.predictability, execute_at)
                 {
-                    if known < execute {
-                        prepared_start = Some(prepared_start.map_or(*known, |old| old.min(*known)));
+                    if known < execute && now_ms < execute.0 {
+                        let activate = TimestampMs(known.0.max(now_ms));
+                        prepared_start =
+                            Some(prepared_start.map_or(activate, |old| old.min(activate)));
                         prepared_end = Some(prepared_end.map_or(*execute, |old| old.max(*execute)));
                         true
                     } else {
@@ -1041,6 +1043,53 @@ mod tests {
         let prepared = &plan.deployments[0].alternatives[1];
         assert!(prepared.rejection.is_none());
         assert_eq!(prepared.total_cost, Some(Cost(13.0)));
+    }
+
+    #[test]
+    fn prepared_state_starts_no_earlier_than_planning_time() {
+        let mut entry = batch(Predictability::Predictable {
+            known_at: Some(TimestampMs(1_000)),
+        });
+        entry.execute_at = Some(TimestampMs(11_000));
+        let plan = plan_summary_maintenance_lifecycles(
+            summary(),
+            WorkloadDemand::new(&workload(vec![entry], vec![], at_rest()), &[0]),
+            6_000,
+            None,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        let prepared = &plan.deployments[0].alternatives[1];
+        assert_eq!(
+            prepared.summary_maintenance_lifecycle,
+            SummaryMaintenanceLifecycle::Prepared {
+                activate_at: TimestampMs(6_000),
+                retire_at: TimestampMs(11_000),
+            }
+        );
+        assert_eq!(prepared.total_cost, Some(Cost(12.5)));
+    }
+
+    #[test]
+    fn expired_one_time_execution_cannot_select_prepared_state() {
+        let mut entry = batch(Predictability::Predictable {
+            known_at: Some(TimestampMs(1_000)),
+        });
+        entry.execute_at = Some(TimestampMs(2_000));
+        let plan = plan_summary_maintenance_lifecycles(
+            summary(),
+            WorkloadDemand::new(&workload(vec![entry], vec![], at_rest()), &[0]),
+            3_000,
+            None,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.deployments[0].alternatives[1].rejection,
+            Some(SummaryMaintenanceLifecycleRejection::RequiresPredictableOneTimeQuery)
+        );
     }
 
     #[test]
