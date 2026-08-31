@@ -84,6 +84,22 @@ impl Default for QueryRequirements {
 
 // ── Workload entries ──────────────────────────────────────────────────────────
 
+/// How far in advance the planner knows that a query will be executed.
+/// This describes knowledge of the query, not how often it runs.
+///
+/// # Example
+///
+/// A report announced at `1_000` ms and executed later is predictable;
+/// an interactive query typed by a user is ad hoc.
+///
+/// ```
+/// use asap_types::workload::{Predictability, TimestampMs};
+///
+/// let report = Predictability::Predictable {
+///     known_at: Some(TimestampMs(1_000)),
+/// };
+/// let exploration = Predictability::AdHoc;
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Predictability {
     AdHoc,
@@ -94,6 +110,21 @@ pub enum Predictability {
     Unknown,
 }
 
+/// Semantic relationship between a query and event time.
+///
+/// `RealTime` follows the newest data, `Longitudinal` analyzes a fixed or
+/// historical interval, and `Mixed` combines both (for example, comparing
+/// the current hour with the same hour last week).
+///
+/// # Example
+///
+/// ```
+/// use asap_types::workload::QueryTimeScope;
+///
+/// let live_dashboard = QueryTimeScope::RealTime;
+/// let historical_report = QueryTimeScope::Longitudinal;
+/// let week_over_week_dashboard = QueryTimeScope::Mixed;
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum QueryTimeScope {
     RealTime,
@@ -105,6 +136,22 @@ pub enum QueryTimeScope {
 
 /// Concrete event-time interval selected by a query, kept separate from its
 /// semantic real-time/longitudinal classification.
+///
+/// # Example
+///
+/// A live dashboard evaluated at `200_000` ms with a five-minute lookback
+/// selects events from the preceding five minutes. `as_of: None` makes its
+/// upper bound the evaluation time rather than a fixed historical timestamp.
+///
+/// ```
+/// use asap_types::workload::{DurationMs, QueryTimeScope, TimeSelection};
+///
+/// let last_five_minutes = TimeSelection {
+///     scope: QueryTimeScope::RealTime,
+///     lookback: Some(DurationMs(5 * 60 * 1_000)),
+///     as_of: None,
+/// };
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TimeSelection {
     pub scope: QueryTimeScope,
@@ -113,21 +160,64 @@ pub struct TimeSelection {
     pub as_of: Option<TimestampMs>,
 }
 
+/// Confidence assigned to an estimated demand value, expressed in `[0, 1]`.
+/// Validation rejects values outside that range.
+///
+/// For example, `Confidence(0.95)` says the demand estimate is supplied with
+/// 95% confidence.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Confidence(pub f64);
 
+/// Event-time interval from which a demand estimate was learned.
+///
+/// For example, `{ start: TimestampMs(0), end: TimestampMs(60_000) }`
+/// describes an estimate based on the first minute of observations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservationWindow {
     pub start: TimestampMs,
     pub end: TimestampMs,
 }
 
+/// Expected demand expressed either as a count over an observation window or
+/// as an average number of invocations per second.
+///
+/// For example, `InvocationCount(600)` records 600 observed executions,
+/// whereas `AverageRate(Rate(10.0))` directly records ten per second.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ExpectedDemand {
     InvocationCount(u64),
     AverageRate(Rate),
 }
 
+/// Evidence-backed forecast used when recurrence is not a fixed interval or
+/// an explicit schedule.
+///
+/// # Example
+///
+/// This estimate predicts ten executions per second, with a possible peak of
+/// twenty, based on one minute of observed data. It is usable for five minutes
+/// after `observed_at`.
+///
+/// ```
+/// use asap_types::workload::{
+///     Confidence, DemandEstimate, DurationMs, EvidenceSource, ExpectedDemand,
+///     ObservationWindow, Rate, TimestampMs,
+/// };
+///
+/// let estimate = DemandEstimate {
+///     observation_window: ObservationWindow {
+///         start: TimestampMs(0),
+///         end: TimestampMs(60_000),
+///     },
+///     expected: ExpectedDemand::AverageRate(Rate(10.0)),
+///     peak_rate: Some(Rate(20.0)),
+///     max_concurrency: Some(4),
+///     confidence: Confidence(0.95),
+///     source: EvidenceSource::Observed,
+///     observed_at: Some(TimestampMs(60_000)),
+///     valid_for: Some(DurationMs(5 * 60 * 1_000)),
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct DemandEstimate {
     pub observation_window: ObservationWindow,
@@ -140,6 +230,19 @@ pub struct DemandEstimate {
     pub valid_for: Option<DurationMs>,
 }
 
+/// How a repeated query is expected to recur.
+///
+/// # Example
+///
+/// ```
+/// use asap_types::workload::{RepeatedDemand, RepetitionInterval, TimestampMs};
+///
+/// let dashboard = RepeatedDemand::FixedInterval(RepetitionInterval(10_000));
+/// let scheduled = RepeatedDemand::Scheduled(vec![
+///     TimestampMs(100_000),
+///     TimestampMs(200_000),
+/// ]);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum RepeatedDemand {
     FixedInterval(RepetitionInterval),
@@ -147,6 +250,23 @@ pub enum RepeatedDemand {
     EstimatedRate(DemandEstimate),
 }
 
+/// Normalized execution recurrence shared by batch and repeating workload
+/// entries. This is independent of [`Predictability`]: a one-time query may
+/// be known in advance or ad hoc, and a repeated query may still be uncertain.
+///
+/// # Example
+///
+/// ```
+/// use asap_types::workload::{QueryRecurrence, RepeatedDemand, RepetitionInterval, TimestampMs};
+///
+/// let scheduled_once = QueryRecurrence::OneTime {
+///     invocations: 1,
+///     execute_at: Some(TimestampMs(100_000)),
+/// };
+/// let every_minute = QueryRecurrence::Repeated(
+///     RepeatedDemand::FixedInterval(RepetitionInterval(60_000)),
+/// );
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryRecurrence {
     OneTime {
@@ -157,7 +277,29 @@ pub enum QueryRecurrence {
     Unknown,
 }
 
-/// One entry in a one-shot batch: a query plus its optional SLA constraints.
+/// One query submitted as part of a finite batch, including how many times it
+/// will run and, when known, its execution time.
+///
+/// # Example
+///
+/// ```
+/// use asap_types::workload::*;
+///
+/// let report = BatchEntry {
+///     query: Query("SELECT count(*) FROM events".into()),
+///     requirements: QueryRequirements::default(),
+///     predictability: Predictability::Predictable {
+///         known_at: Some(TimestampMs(1_000)),
+///     },
+///     invocations: 1,
+///     execute_at: Some(TimestampMs(10_000)),
+///     time_selection: TimeSelection {
+///         scope: QueryTimeScope::Longitudinal,
+///         lookback: Some(DurationMs(24 * 60 * 60 * 1_000)),
+///         as_of: Some(TimestampMs(10_000)),
+///     },
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct BatchEntry {
     pub query: Query,
@@ -168,8 +310,27 @@ pub struct BatchEntry {
     pub time_selection: TimeSelection,
 }
 
-/// One query that fires every `interval` milliseconds. Its recurrence does
-/// not imply that the queried data is continuously ingesting.
+/// One query with repeated demand. Its recurrence does not imply that the
+/// queried data is continuously ingesting; that is described separately by
+/// [`DataArrival`].
+///
+/// # Example
+///
+/// ```
+/// use asap_types::workload::*;
+///
+/// let dashboard = RepeatingEntry {
+///     query: Query("rate(requests[5m])".into()),
+///     demand: RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+///     requirements: QueryRequirements::default(),
+///     predictability: Predictability::Predictable { known_at: None },
+///     time_selection: TimeSelection {
+///         scope: QueryTimeScope::RealTime,
+///         lookback: Some(DurationMs(5 * 60 * 1_000)),
+///         as_of: None,
+///     },
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct RepeatingEntry {
     pub query: Query,
@@ -179,6 +340,29 @@ pub struct RepeatingEntry {
     pub time_selection: TimeSelection,
 }
 
+/// Planner-facing normalized form of either [`BatchEntry`] or
+/// [`RepeatingEntry`]. It keeps requirements, predictability, recurrence, and
+/// event-time selection as separate axes.
+///
+/// # Example
+///
+/// ```
+/// use asap_types::workload::*;
+///
+/// let entry = QueryWorkloadEntry {
+///     query: Query("rate(requests[5m])".into()),
+///     requirements: QueryRequirements::default(),
+///     predictability: Predictability::Predictable { known_at: None },
+///     recurrence: QueryRecurrence::Repeated(
+///         RepeatedDemand::FixedInterval(RepetitionInterval(10_000)),
+///     ),
+///     time_selection: TimeSelection {
+///         scope: QueryTimeScope::RealTime,
+///         lookback: Some(DurationMs(5 * 60 * 1_000)),
+///         as_of: None,
+///     },
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryWorkloadEntry {
     pub query: Query,
