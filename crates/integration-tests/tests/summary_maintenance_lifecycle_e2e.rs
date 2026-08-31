@@ -1,6 +1,6 @@
 //! End-to-end coverage for workload-aware summary-maintenance planning:
-//! source workload -> PromQL lowering -> candidate search -> lifecycle-aware
-//! global selection -> materialized deployment guarantees.
+//! source workload -> PromQL lowering -> candidate search ->
+//! summary-maintenance lifecycle selection -> materialized deployment guarantees.
 
 use std::rc::Rc;
 
