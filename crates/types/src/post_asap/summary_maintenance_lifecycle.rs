@@ -1,7 +1,10 @@
-//! Physical lifecycle vocabulary for summary state.
+//! Physical summary-maintenance lifecycle vocabulary.
 //!
-//! These choices are attached by physical planning; a `SummaryAgg` does not
-//! imply continuous maintenance by itself.
+//! A **summary-maintenance lifecycle** describes when one materialized summary
+//! state is created, retained or shared, updated, and retired. It does not
+//! describe the broader data lifecycle (collection, transport, and storage),
+//! and it is not implied by a logical `SummaryAgg`. Physical planning chooses
+//! it from workload evidence and runtime capabilities.
 
 use crate::workload::{DurationMs, TimestampMs};
 
@@ -22,9 +25,9 @@ pub enum OutputRepresentation {
     FinalizedValue,
 }
 
-/// How long one planned summary state deployment exists.
+/// Lifetime and reuse policy for one materialized summary-state deployment.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum StateLifecycle {
+pub enum SummaryMaintenanceLifecycle {
     Ephemeral,
     Prepared {
         activate_at: TimestampMs,

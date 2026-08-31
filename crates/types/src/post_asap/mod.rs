@@ -29,18 +29,17 @@
 
 pub mod expr;
 pub mod guarantee;
-pub mod lifecycle;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;
 pub mod summary_maintenance;
+pub mod summary_maintenance_lifecycle;
 
 pub use expr::{SummaryExpr, SummaryNode};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,
 };
-pub use lifecycle::{EvaluationSchedule, OutputRepresentation, StateLifecycle};
 pub use query_time::{
     classic_cms_sizing, cms_posterior_error_bound, count_sketch_posterior_error_bound,
     cu_sketch_posterior_error_bound, traditional_a_priori_bound,
@@ -52,3 +51,6 @@ pub use sketch::{
     SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
 };
 pub use summary_maintenance::SummaryMaintenanceMode;
+pub use summary_maintenance_lifecycle::{
+    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
+};

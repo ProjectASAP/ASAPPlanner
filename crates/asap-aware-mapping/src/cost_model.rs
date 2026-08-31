@@ -56,7 +56,6 @@ use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
 
-use crate::lifecycle::LifecycleCostInputs;
 use crate::recurrence::{
     self, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
 };
@@ -64,6 +63,7 @@ use crate::replacement::{
     realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
     TargetSubDAG,
 };
+use crate::summary_maintenance_lifecycle::SummaryMaintenanceLifecycleCostInputs;
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
@@ -510,8 +510,11 @@ pub trait CostModel {
     /// compare physical summary-state lifecycles. Unknown values stay
     /// unknown, preventing long-lived deployments from winning through
     /// optimistic zeroes.
-    fn summary_lifecycle_cost_inputs(&self, _summary: &SummaryNode) -> LifecycleCostInputs {
-        LifecycleCostInputs::default()
+    fn summary_maintenance_lifecycle_cost_inputs(
+        &self,
+        _summary: &SummaryNode,
+    ) -> SummaryMaintenanceLifecycleCostInputs {
+        SummaryMaintenanceLifecycleCostInputs::default()
     }
 }
 

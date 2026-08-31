@@ -1,14 +1,23 @@
-//! Workload-aware physical lifecycle planning for summary state.
+//! Workload-aware physical summary-maintenance lifecycle planning.
 //!
-//! This module answers how each unique `SummaryAgg` state is deployed for the
-//! supplied query and data workloads. Unknown evidence stays unknown and
-//! therefore cannot make a long-lived lifecycle win.
+//! A **summary-maintenance lifecycle** is the physical policy for when one
+//! materialized summary state is created, retained or shared, updated as data
+//! arrives, and retired. It is deliberately narrower than the end-to-end data
+//! lifecycle and independent of query recurrence: recurrence is workload
+//! evidence used to choose a lifecycle, not a lifecycle itself.
+//!
+//! This module enumerates and costs `Ephemeral`, `Prepared`, `Shared`, and
+//! `ContinuouslyMaintained` alternatives for every unique `SummaryAgg` in a
+//! materialized plan. [`SummaryMaintenanceMode`] is an orthogonal detail of
+//! the selected deployment: state is either built directly or updated
+//! incrementally. Unknown evidence stays unknown and therefore cannot make a
+//! long-lived alternative win.
 
 use std::collections::HashSet;
 use std::rc::Rc;
 
 use asap_types::post_asap::{EvaluationSchedule, OutputRepresentation, SummaryMaintenanceMode};
-use asap_types::post_asap::{StateLifecycle, SummaryExpr, SummaryNode};
+use asap_types::post_asap::{SummaryExpr, SummaryMaintenanceLifecycle, SummaryNode};
 use asap_types::workload::{
     DataArrival, Predictability, QueryRecurrence, QueryWorkload, RepeatedDemand, TimestampMs,
     WorkloadError,
@@ -17,16 +26,16 @@ use asap_types::workload::{
 use crate::cost_model::{Cost, CostModel};
 use crate::recurrence::{CostRate, EvaluationRate, Horizon, UpdateRate};
 
-/// Runtime lifecycle shapes available to the planner.
+/// Summary-maintenance lifecycle shapes supported by the target runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LifecycleCapabilities {
+pub struct SummaryMaintenanceLifecycleCapabilities {
     pub ephemeral: bool,
     pub prepared: bool,
     pub shared: bool,
     pub continuously_maintained: bool,
 }
 
-impl LifecycleCapabilities {
+impl SummaryMaintenanceLifecycleCapabilities {
     pub const ALL: Self = Self {
         ephemeral: true,
         prepared: true,
@@ -35,7 +44,7 @@ impl LifecycleCapabilities {
     };
 }
 
-impl Default for LifecycleCapabilities {
+impl Default for SummaryMaintenanceLifecycleCapabilities {
     fn default() -> Self {
         Self::ALL
     }
@@ -44,7 +53,7 @@ impl Default for LifecycleCapabilities {
 /// Primitive costs for one concrete summary state. Every field is optional:
 /// missing statistics produce an uncosted alternative, never a zero.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct LifecycleCostInputs {
+pub struct SummaryMaintenanceLifecycleCostInputs {
     pub build_cost: Option<Cost>,
     pub maintenance_cost_per_update: Option<Cost>,
     pub summary_read_cost: Option<Cost>,
@@ -53,7 +62,7 @@ pub struct LifecycleCostInputs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LifecycleRejection {
+pub enum SummaryMaintenanceLifecycleRejection {
     UnsupportedByRuntime,
     RequiresPredictableOneTimeQuery,
     RequiresMultipleReads,
@@ -64,16 +73,16 @@ pub enum LifecycleRejection {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LifecycleAlternative {
-    pub lifecycle: StateLifecycle,
+pub struct SummaryMaintenanceLifecycleAlternative {
+    pub summary_maintenance_lifecycle: SummaryMaintenanceLifecycle,
     /// How this lifecycle obtains and refreshes its summary state.
     pub maintenance_mode: SummaryMaintenanceMode,
     pub total_cost: Option<Cost>,
-    pub rejection: Option<LifecycleRejection>,
+    pub rejection: Option<SummaryMaintenanceLifecycleRejection>,
     pub assumptions: Vec<String>,
 }
 
-impl LifecycleAlternative {
+impl SummaryMaintenanceLifecycleAlternative {
     fn selectable(&self) -> bool {
         self.rejection.is_none() && self.total_cost.is_some()
     }
@@ -81,27 +90,27 @@ impl LifecycleAlternative {
 
 /// One unique summary-state deployment. Shared `Rc` nodes are emitted once.
 #[derive(Debug, Clone)]
-pub struct StateDeployment {
+pub struct SummaryMaintenanceDeployment {
     pub summary_index: usize,
     pub summary: Rc<SummaryNode>,
-    pub selected: Option<StateLifecycle>,
+    pub selected_summary_maintenance_lifecycle: Option<SummaryMaintenanceLifecycle>,
     pub selected_maintenance_mode: Option<SummaryMaintenanceMode>,
     pub evaluation_schedule: Option<EvaluationSchedule>,
     pub output_representation: OutputRepresentation,
-    pub alternatives: Vec<LifecycleAlternative>,
+    pub alternatives: Vec<SummaryMaintenanceLifecycleAlternative>,
 }
 
 #[derive(Debug, Clone)]
-pub struct LifecyclePlan {
+pub struct SummaryMaintenanceLifecyclePlan {
     pub root: Rc<SummaryNode>,
-    pub deployments: Vec<StateDeployment>,
+    pub deployments: Vec<SummaryMaintenanceDeployment>,
     pub horizon: Option<Horizon>,
     pub evaluation_rate: Option<EvaluationRate>,
     pub update_rate: Option<UpdateRate>,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum LifecyclePlanError {
+pub enum SummaryMaintenanceLifecyclePlanError {
     #[error(transparent)]
     InvalidWorkload(#[from] WorkloadError),
     #[error("optimization horizon must be finite and strictly positive")]
@@ -121,17 +130,17 @@ struct WorkloadFacts {
 /// Validate a materialized plan, enumerate lifecycle alternatives for each
 /// unique summary state, and select the cheapest legal alternative whose cost
 /// is fully known.
-pub fn plan_summary_lifecycles(
+pub fn plan_summary_maintenance_lifecycles(
     root: Rc<SummaryNode>,
     workload: &QueryWorkload,
     now_ms: u64,
     horizon: Option<Horizon>,
-    capabilities: LifecycleCapabilities,
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
-) -> Result<LifecyclePlan, LifecyclePlanError> {
+) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError> {
     workload.validate()?;
     if horizon.is_some_and(|h| !h.0.is_finite() || h.0 <= 0.0) {
-        return Err(LifecyclePlanError::InvalidHorizon);
+        return Err(SummaryMaintenanceLifecyclePlanError::InvalidHorizon);
     }
     let facts = workload_facts(workload, now_ms, horizon);
     let mut summaries = Vec::new();
@@ -144,16 +153,22 @@ pub fn plan_summary_lifecycles(
                 &facts,
                 horizon,
                 capabilities,
-                cost_model.summary_lifecycle_cost_inputs(&summary),
+                cost_model.summary_maintenance_lifecycle_cost_inputs(&summary),
             );
             let selected = alternatives
                 .iter()
                 .filter(|candidate| candidate.selectable())
                 .min_by(|a, b| a.total_cost.unwrap().0.total_cmp(&b.total_cost.unwrap().0))
-                .map(|candidate| (candidate.lifecycle.clone(), candidate.maintenance_mode));
+                .map(|candidate| {
+                    (
+                        candidate.summary_maintenance_lifecycle.clone(),
+                        candidate.maintenance_mode,
+                    )
+                });
             let evaluation_schedule = selected.as_ref().map(|(lifecycle, _)| match lifecycle {
-                StateLifecycle::Ephemeral => EvaluationSchedule::OneShot,
-                StateLifecycle::Prepared { .. } | StateLifecycle::Shared { .. }
+                SummaryMaintenanceLifecycle::Ephemeral => EvaluationSchedule::OneShot,
+                SummaryMaintenanceLifecycle::Prepared { .. }
+                | SummaryMaintenanceLifecycle::Shared { .. }
                     if matches!(
                         facts.arrival,
                         DataArrival::ContinuouslyIngesting | DataArrival::Mixed
@@ -161,14 +176,18 @@ pub fn plan_summary_lifecycles(
                 {
                     EvaluationSchedule::PerUpdate
                 }
-                StateLifecycle::Prepared { .. } => EvaluationSchedule::OneShot,
-                StateLifecycle::Shared { .. } => EvaluationSchedule::OnRead,
-                StateLifecycle::ContinuouslyMaintained => EvaluationSchedule::PerUpdate,
+                SummaryMaintenanceLifecycle::Prepared { .. } => EvaluationSchedule::OneShot,
+                SummaryMaintenanceLifecycle::Shared { .. } => EvaluationSchedule::OnRead,
+                SummaryMaintenanceLifecycle::ContinuouslyMaintained => {
+                    EvaluationSchedule::PerUpdate
+                }
             });
-            StateDeployment {
+            SummaryMaintenanceDeployment {
                 summary_index,
                 summary,
-                selected: selected.as_ref().map(|(lifecycle, _)| lifecycle.clone()),
+                selected_summary_maintenance_lifecycle: selected
+                    .as_ref()
+                    .map(|(lifecycle, _)| lifecycle.clone()),
                 selected_maintenance_mode: selected.map(|(_, mode)| mode),
                 evaluation_schedule,
                 output_representation: OutputRepresentation::SummaryState,
@@ -176,7 +195,7 @@ pub fn plan_summary_lifecycles(
             }
         })
         .collect();
-    Ok(LifecyclePlan {
+    Ok(SummaryMaintenanceLifecyclePlan {
         root,
         deployments,
         horizon,
@@ -299,9 +318,9 @@ fn workload_facts(
 fn alternatives_for(
     facts: &WorkloadFacts,
     horizon: Option<Horizon>,
-    capabilities: LifecycleCapabilities,
-    costs: LifecycleCostInputs,
-) -> Vec<LifecycleAlternative> {
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    costs: SummaryMaintenanceLifecycleCostInputs,
+) -> Vec<SummaryMaintenanceLifecycleAlternative> {
     let alternatives = vec![
         ephemeral(facts, capabilities, &costs),
         prepared(facts, capabilities, &costs),
@@ -313,15 +332,15 @@ fn alternatives_for(
 
 fn ephemeral(
     facts: &WorkloadFacts,
-    capabilities: LifecycleCapabilities,
-    costs: &LifecycleCostInputs,
-) -> LifecycleAlternative {
-    let lifecycle = StateLifecycle::Ephemeral;
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
+) -> SummaryMaintenanceLifecycleAlternative {
+    let lifecycle = SummaryMaintenanceLifecycle::Ephemeral;
     if !capabilities.ephemeral {
         return rejected(
             lifecycle,
             SummaryMaintenanceMode::DirectBuild,
-            LifecycleRejection::UnsupportedByRuntime,
+            SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime,
         );
     }
     let total_cost = zip_costs(&[
@@ -341,20 +360,20 @@ fn ephemeral(
 
 fn prepared(
     facts: &WorkloadFacts,
-    capabilities: LifecycleCapabilities,
-    costs: &LifecycleCostInputs,
-) -> LifecycleAlternative {
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
+) -> SummaryMaintenanceLifecycleAlternative {
     let Some((activate_at, retire_at)) = facts.prepared_window else {
         return rejected(
-            StateLifecycle::Prepared {
+            SummaryMaintenanceLifecycle::Prepared {
                 activate_at: TimestampMs(0),
                 retire_at: TimestampMs(0),
             },
             retained_mode(facts),
-            LifecycleRejection::RequiresPredictableOneTimeQuery,
+            SummaryMaintenanceLifecycleRejection::RequiresPredictableOneTimeQuery,
         );
     };
-    let lifecycle = StateLifecycle::Prepared {
+    let lifecycle = SummaryMaintenanceLifecycle::Prepared {
         activate_at,
         retire_at,
     };
@@ -362,7 +381,7 @@ fn prepared(
         return rejected(
             lifecycle,
             retained_mode(facts),
-            LifecycleRejection::UnsupportedByRuntime,
+            SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime,
         );
     }
     let seconds = retire_at.0.saturating_sub(activate_at.0) as f64 / 1000.0;
@@ -394,31 +413,31 @@ fn prepared(
 fn shared(
     facts: &WorkloadFacts,
     horizon: Option<Horizon>,
-    capabilities: LifecycleCapabilities,
-    costs: &LifecycleCostInputs,
-) -> LifecycleAlternative {
-    let lifecycle = StateLifecycle::Shared {
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
+) -> SummaryMaintenanceLifecycleAlternative {
+    let lifecycle = SummaryMaintenanceLifecycle::Shared {
         retention: asap_types::workload::DurationMs(horizon.map_or(0, |h| (h.0 * 1000.0) as u64)),
     };
     if !capabilities.shared {
         return rejected(
             lifecycle,
             retained_mode(facts),
-            LifecycleRejection::UnsupportedByRuntime,
+            SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime,
         );
     }
     if facts.reads.is_none_or(|reads| reads <= 1.0) {
         return rejected(
             lifecycle,
             retained_mode(facts),
-            LifecycleRejection::RequiresMultipleReads,
+            SummaryMaintenanceLifecycleRejection::RequiresMultipleReads,
         );
     }
     let Some(horizon) = horizon else {
         return rejected(
             lifecycle,
             retained_mode(facts),
-            LifecycleRejection::RequiresHorizon,
+            SummaryMaintenanceLifecycleRejection::RequiresHorizon,
         );
     };
     let total_cost = retained_cost(facts, costs, horizon.0);
@@ -433,15 +452,15 @@ fn shared(
 fn continuous(
     facts: &WorkloadFacts,
     horizon: Option<Horizon>,
-    capabilities: LifecycleCapabilities,
-    costs: &LifecycleCostInputs,
-) -> LifecycleAlternative {
-    let lifecycle = StateLifecycle::ContinuouslyMaintained;
+    capabilities: SummaryMaintenanceLifecycleCapabilities,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
+) -> SummaryMaintenanceLifecycleAlternative {
+    let lifecycle = SummaryMaintenanceLifecycle::ContinuouslyMaintained;
     if !capabilities.continuously_maintained {
         return rejected(
             lifecycle,
             SummaryMaintenanceMode::Incremental,
-            LifecycleRejection::UnsupportedByRuntime,
+            SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime,
         );
     }
     if !matches!(
@@ -451,21 +470,21 @@ fn continuous(
         return rejected(
             lifecycle,
             SummaryMaintenanceMode::Incremental,
-            LifecycleRejection::RequiresContinuousData,
+            SummaryMaintenanceLifecycleRejection::RequiresContinuousData,
         );
     }
     if facts.update_rate.is_none() {
         return rejected(
             lifecycle,
             SummaryMaintenanceMode::Incremental,
-            LifecycleRejection::MissingOrStaleIngestionRate,
+            SummaryMaintenanceLifecycleRejection::MissingOrStaleIngestionRate,
         );
     }
     let Some(horizon) = horizon else {
         return rejected(
             lifecycle,
             SummaryMaintenanceMode::Incremental,
-            LifecycleRejection::RequiresHorizon,
+            SummaryMaintenanceLifecycleRejection::RequiresHorizon,
         );
     };
     let total_cost = retained_cost(facts, costs, horizon.0);
@@ -477,7 +496,11 @@ fn continuous(
     )
 }
 
-fn retained_cost(facts: &WorkloadFacts, costs: &LifecycleCostInputs, seconds: f64) -> Option<Cost> {
+fn retained_cost(
+    facts: &WorkloadFacts,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
+    seconds: f64,
+) -> Option<Cost> {
     let reads = facts.reads?;
     let maintenance = maintenance_cost(facts, costs, seconds)?;
     Some(Cost(
@@ -491,7 +514,7 @@ fn retained_cost(facts: &WorkloadFacts, costs: &LifecycleCostInputs, seconds: f6
 
 fn maintenance_cost(
     facts: &WorkloadFacts,
-    costs: &LifecycleCostInputs,
+    costs: &SummaryMaintenanceLifecycleCostInputs,
     seconds: f64,
 ) -> Option<f64> {
     match facts.arrival {
@@ -510,29 +533,29 @@ fn zip_costs(costs: &[Option<Cost>]) -> Option<f64> {
 }
 
 fn costed_or_unknown(
-    lifecycle: StateLifecycle,
+    lifecycle: SummaryMaintenanceLifecycle,
     maintenance_mode: SummaryMaintenanceMode,
     total_cost: Option<Cost>,
     assumptions: Vec<String>,
-) -> LifecycleAlternative {
-    LifecycleAlternative {
-        lifecycle,
+) -> SummaryMaintenanceLifecycleAlternative {
+    SummaryMaintenanceLifecycleAlternative {
+        summary_maintenance_lifecycle: lifecycle,
         maintenance_mode,
         total_cost,
         rejection: total_cost
             .is_none()
-            .then_some(LifecycleRejection::MissingCostEvidence),
+            .then_some(SummaryMaintenanceLifecycleRejection::MissingCostEvidence),
         assumptions,
     }
 }
 
 fn rejected(
-    lifecycle: StateLifecycle,
+    lifecycle: SummaryMaintenanceLifecycle,
     maintenance_mode: SummaryMaintenanceMode,
-    rejection: LifecycleRejection,
-) -> LifecycleAlternative {
-    LifecycleAlternative {
-        lifecycle,
+    rejection: SummaryMaintenanceLifecycleRejection,
+) -> SummaryMaintenanceLifecycleAlternative {
+    SummaryMaintenanceLifecycleAlternative {
+        summary_maintenance_lifecycle: lifecycle,
         maintenance_mode,
         total_cost: None,
         rejection: Some(rejection),
@@ -607,8 +630,11 @@ mod tests {
             candidates.to_vec()
         }
 
-        fn summary_lifecycle_cost_inputs(&self, _summary: &SummaryNode) -> LifecycleCostInputs {
-            LifecycleCostInputs {
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            _summary: &SummaryNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            SummaryMaintenanceLifecycleCostInputs {
                 build_cost: Some(Cost(10.0)),
                 maintenance_cost_per_update: Some(Cost(1.0)),
                 summary_read_cost: Some(Cost(1.0)),
@@ -719,19 +745,19 @@ mod tests {
 
     #[test]
     fn unpredictable_one_time_at_rest_selects_ephemeral() {
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             &workload(vec![batch(Predictability::AdHoc)], vec![], at_rest()),
             1_000,
             None,
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
         assert_eq!(plan.deployments.len(), 1);
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::Ephemeral)
+            plan.deployments[0].selected_summary_maintenance_lifecycle,
+            Some(SummaryMaintenanceLifecycle::Ephemeral)
         );
         assert_eq!(
             plan.deployments[0].selected_maintenance_mode,
@@ -749,12 +775,12 @@ mod tests {
             known_at: Some(TimestampMs(1_000)),
         });
         entry.execute_at = Some(TimestampMs(11_000));
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             &workload(vec![entry], vec![], at_rest()),
             1_000,
             None,
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
@@ -765,18 +791,18 @@ mod tests {
 
     #[test]
     fn repeated_at_rest_selects_shared_without_inventing_updates() {
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             &workload(vec![], vec![repeating()], at_rest()),
             1_000,
             Some(Horizon(10.0)),
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::Shared {
+            plan.deployments[0].selected_summary_maintenance_lifecycle,
+            Some(SummaryMaintenanceLifecycle::Shared {
                 retention: DurationMs(10_000)
             })
         );
@@ -786,18 +812,18 @@ mod tests {
         );
         assert_eq!(
             plan.deployments[0].alternatives[3].rejection,
-            Some(LifecycleRejection::RequiresContinuousData)
+            Some(SummaryMaintenanceLifecycleRejection::RequiresContinuousData)
         );
         assert_eq!(plan.update_rate, None);
     }
 
     #[test]
     fn repeated_continuous_workload_can_select_continuous_maintenance() {
-        let capabilities = LifecycleCapabilities {
+        let capabilities = SummaryMaintenanceLifecycleCapabilities {
             shared: false,
-            ..LifecycleCapabilities::ALL
+            ..SummaryMaintenanceLifecycleCapabilities::ALL
         };
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             &workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
             1_000,
@@ -807,8 +833,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.deployments[0].selected,
-            Some(StateLifecycle::ContinuouslyMaintained)
+            plan.deployments[0].selected_summary_maintenance_lifecycle,
+            Some(SummaryMaintenanceLifecycle::ContinuouslyMaintained)
         );
         assert_eq!(
             plan.deployments[0].selected_maintenance_mode,
@@ -820,34 +846,37 @@ mod tests {
 
     #[test]
     fn stale_ingestion_evidence_cannot_enable_continuous_maintenance() {
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             &workload(vec![], vec![repeating()], continuous(1_000, 1_000)),
             3_000,
             Some(Horizon(10.0)),
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &UnitCosts,
         )
         .unwrap();
         assert_eq!(
             plan.deployments[0].alternatives[3].rejection,
-            Some(LifecycleRejection::MissingOrStaleIngestionRate)
+            Some(SummaryMaintenanceLifecycleRejection::MissingOrStaleIngestionRate)
         );
         assert_eq!(plan.update_rate, None);
     }
 
     #[test]
     fn unknown_costs_do_not_make_a_long_lived_lifecycle_win() {
-        let plan = plan_summary_lifecycles(
+        let plan = plan_summary_maintenance_lifecycles(
             summary(),
             &workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
             1_000,
             Some(Horizon(10.0)),
-            LifecycleCapabilities::ALL,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
             &crate::cost_model::DefaultCostModel,
         )
         .unwrap();
-        assert_eq!(plan.deployments[0].selected, None);
+        assert_eq!(
+            plan.deployments[0].selected_summary_maintenance_lifecycle,
+            None
+        );
         assert!(plan.deployments[0]
             .alternatives
             .iter()

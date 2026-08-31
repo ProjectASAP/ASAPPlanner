@@ -186,11 +186,11 @@ pub mod accuracy_reconciliation;
 pub mod cost_model;
 pub mod explanation;
 pub mod grouping;
-pub mod lifecycle;
 pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
+pub mod summary_maintenance_lifecycle;
 pub mod topk_reuse;
 
 pub use accuracy::{
@@ -204,10 +204,6 @@ pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
-pub use lifecycle::{
-    plan_summary_lifecycles, LifecycleAlternative, LifecycleCapabilities, LifecycleCostInputs,
-    LifecyclePlan, LifecyclePlanError, LifecycleRejection, StateDeployment,
-};
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
     Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
@@ -222,4 +218,10 @@ pub use replacement::{
     MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;
+pub use summary_maintenance_lifecycle::{
+    plan_summary_maintenance_lifecycles, SummaryMaintenanceDeployment,
+    SummaryMaintenanceLifecycleAlternative, SummaryMaintenanceLifecycleCapabilities,
+    SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecyclePlan,
+    SummaryMaintenanceLifecyclePlanError, SummaryMaintenanceLifecycleRejection,
+};
 pub use topk_reuse::TopKLimitReuseStrategy;
