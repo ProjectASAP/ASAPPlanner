@@ -360,9 +360,7 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
 use asap_types::pre_asap::schema::Schema;
 use asap_types::types::AccuracyTarget;
-use asap_types::workload::{
-    ExpectedDemand, QueryRecurrence, QueryWorkload, RepeatedDemand, RepetitionInterval,
-};
+use asap_types::workload::{ExpectedDemand, QueryRecurrence, QueryWorkload, RepeatedDemand};
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -2349,8 +2347,8 @@ impl<Id> PlanSpace<Id> {
     /// root's whole reachable sub-DAG (the same relational-skeleton
     /// traversal [`discover_targets`] itself used to discover those sites)
     /// and folding each root's own recurrence tag
-    /// ([`RootRecurrence::Repeating`]'s interval, a normalized repeating
-    /// rate, or a one-time invocation count) into every site reachable from it.
+    /// (a normalized repeating rate or a one-time invocation count) into every
+    /// site reachable from it.
     ///
     /// `root_recurrence` is positional: `root_recurrence[i]` describes
     /// `self.roots[i]` — the same order [`search_workload`]/
@@ -2364,8 +2362,8 @@ impl<Id> PlanSpace<Id> {
     /// equal `self.roots.len()`.
     ///
     /// A shared sub-DAG reachable from more than one root aggregates every
-    /// reaching root's contribution — repeating roots' intervals combine via
-    /// [`evaluation_rate_of`]'s `sum(1 / interval_i)`, one-shot roots
+    /// reaching root's contribution — repeating roots' rates are summed and
+    /// one-shot roots
     /// increment [`RecurrenceProfile::one_shot_consumers`] — so a summary
     /// consumed by queries with different intervals gets one profile
     /// reflecting all of them, per issue #287's "support a shared sub-DAG
@@ -2404,8 +2402,8 @@ impl<Id> PlanSpace<Id> {
     /// there unconditionally, regardless of the site's actual
     /// `consumer_count` (issue #287 review, bug 2).
     ///
-    /// Returns [`RecurrenceError::InvalidInterval`] if any
-    /// `RootRecurrence::Repeating` interval is zero,
+    /// Returns [`RecurrenceError::InvalidEvaluationRate`] if any repeating
+    /// rate is non-finite or negative,
     /// [`RecurrenceError::InvalidUpdateRate`] if `update_rate` is non-finite
     /// or negative, or [`RecurrenceError::RootCountMismatch`] if
     /// `root_recurrence.len() != self.roots.len()`.
@@ -2424,7 +2422,7 @@ impl<Id> PlanSpace<Id> {
             crate::recurrence::validate_update_rate(rate)?;
         }
         for recurrence in root_recurrence {
-            if let RootRecurrence::RepeatingRate(rate) = recurrence {
+            if let RootRecurrence::Repeating(rate) = recurrence {
                 if !rate.0.is_finite() || rate.0 < 0.0 {
                     return Err(crate::recurrence::RecurrenceError::InvalidEvaluationRate(
                         *rate,
@@ -2433,7 +2431,6 @@ impl<Id> PlanSpace<Id> {
             }
         }
 
-        let mut intervals: HashMap<*const QueryExpr, Vec<RepetitionInterval>> = HashMap::new();
         let mut rates: HashMap<*const QueryExpr, f64> = HashMap::new();
         let mut one_shot_counts: HashMap<*const QueryExpr, usize> = HashMap::new();
         // Sites actually reached by at least one root's own recurrence tag
@@ -2457,7 +2454,6 @@ impl<Id> PlanSpace<Id> {
                     ptr,
                     path_count,
                     recurrence,
-                    &mut intervals,
                     &mut rates,
                     &mut one_shot_counts,
                     &mut reached,
@@ -2479,16 +2475,10 @@ impl<Id> PlanSpace<Id> {
             }
         }
 
-        let empty_intervals: Vec<RepetitionInterval> = Vec::new();
         let mut profiles = HashMap::with_capacity(self.order.len());
         for ptr in &self.order {
-            let site_intervals = intervals.get(ptr).unwrap_or(&empty_intervals);
-            let interval_rate =
-                evaluation_rate_of(site_intervals.iter().copied())?.map_or(0.0, |rate| rate.0);
-            let direct_rate = rates.get(ptr).copied().unwrap_or(0.0);
-            let evaluation_rate = ((interval_rate + direct_rate) > 0.0).then_some(
-                crate::recurrence::EvaluationRate(interval_rate + direct_rate),
-            );
+            let rate = rates.get(ptr).copied().unwrap_or(0.0);
+            let evaluation_rate = (rate > 0.0).then_some(crate::recurrence::EvaluationRate(rate));
             let one_shot_consumers = one_shot_counts.get(ptr).copied().unwrap_or(0);
             // Bug 2 fix (see "Unreachable sites" above): only a reached
             // site carries the caller-supplied `update_rate`.
@@ -2555,7 +2545,7 @@ impl<Id> PlanSpace<Id> {
                     usize::try_from(*invocations).unwrap_or(usize::MAX),
                 ),
                 QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
-                    RootRecurrence::Repeating(*interval)
+                    RootRecurrence::Repeating(evaluation_rate_of([*interval])?.unwrap())
                 }
                 QueryRecurrence::Repeated(RepeatedDemand::Scheduled(schedule)) => {
                     let Some(horizon) = horizon else {
@@ -2566,7 +2556,7 @@ impl<Id> PlanSpace<Id> {
                         .iter()
                         .filter(|at| at.0 >= now_ms && at.0 <= end_ms)
                         .count();
-                    RootRecurrence::RepeatingRate(crate::recurrence::EvaluationRate(
+                    RootRecurrence::Repeating(crate::recurrence::EvaluationRate(
                         count as f64 / horizon.0,
                     ))
                 }
@@ -2585,7 +2575,7 @@ impl<Id> PlanSpace<Id> {
                                 count as f64 / (millis as f64 / 1000.0)
                             }
                         };
-                        RootRecurrence::RepeatingRate(crate::recurrence::EvaluationRate(rate))
+                        RootRecurrence::Repeating(crate::recurrence::EvaluationRate(rate))
                     }
                 }
                 QueryRecurrence::Unknown => RootRecurrence::Unknown,
@@ -2611,7 +2601,6 @@ fn contribute(
     ptr: *const QueryExpr,
     times: usize,
     recurrence: RootRecurrence,
-    intervals: &mut HashMap<*const QueryExpr, Vec<RepetitionInterval>>,
     rates: &mut HashMap<*const QueryExpr, f64>,
     one_shot_counts: &mut HashMap<*const QueryExpr, usize>,
     reached: &mut HashSet<*const QueryExpr>,
@@ -2621,13 +2610,7 @@ fn contribute(
     }
     reached.insert(ptr);
     match recurrence {
-        RootRecurrence::Repeating(interval) => {
-            intervals
-                .entry(ptr)
-                .or_default()
-                .extend(std::iter::repeat_n(interval, times));
-        }
-        RootRecurrence::RepeatingRate(rate) => {
+        RootRecurrence::Repeating(rate) => {
             *rates.entry(ptr).or_insert(0.0) += rate.0 * times as f64;
         }
         RootRecurrence::OneShotCount(count) => {

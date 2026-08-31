@@ -385,16 +385,8 @@ impl RecurrenceProfile {
 pub enum RootRecurrence {
     /// A declared number of one-time invocations for this root.
     OneShotCount(usize),
-    /// A repeating root firing every `RepetitionInterval` — contributes to
-    /// a reached target's `evaluation_rate` (`1 / interval`, aggregated via
-    /// [`evaluation_rate_of`]).
-    Repeating(RepetitionInterval),
-    /// A repeated root whose schedule or estimate has already been
-    /// normalized to evaluations per second. This is distinct from
-    /// [`Repeating`](Self::Repeating): fixed intervals retain their exact
-    /// validated schedule, while observations and finite schedules naturally
-    /// produce rates rather than synthetic intervals.
-    RepeatingRate(EvaluationRate),
+    /// A repeated root normalized to evaluations per second.
+    Repeating(EvaluationRate),
     /// No reliable recurrence evidence was supplied. It contributes no read
     /// count or evaluation rate, but remains distinct from zero demand.
     Unknown,
@@ -644,6 +636,10 @@ mod tests {
 
     fn interval(ms: u32) -> RepetitionInterval {
         RepetitionInterval(ms)
+    }
+
+    fn repeating(ms: u32) -> RootRecurrence {
+        RootRecurrence::Repeating(evaluation_rate_of([interval(ms)]).unwrap().unwrap())
     }
 
     // ── evaluation_rate_of ──────────────────────────────────────────────
@@ -1217,8 +1213,8 @@ mod tests {
         assert_eq!(shared_group.consumer_count, 3, "shared by all 3 roots");
 
         let root_recurrence = vec![
-            RootRecurrence::Repeating(interval(1_000)),  // 1 Hz
-            RootRecurrence::Repeating(interval(10_000)), // 0.1 Hz
+            repeating(1_000),  // 1 Hz
+            repeating(10_000), // 0.1 Hz
             RootRecurrence::OneShotCount(1),
         ];
         let profiles = space
@@ -1268,22 +1264,10 @@ mod tests {
         let update_rate = Some(UpdateRate(10.0));
 
         let frequent = space
-            .recurrence_profiles(
-                &[
-                    RootRecurrence::Repeating(interval(10)),
-                    RootRecurrence::Repeating(interval(10)),
-                ],
-                update_rate,
-            )
+            .recurrence_profiles(&[repeating(10), repeating(10)], update_rate)
             .unwrap();
         let infrequent = space
-            .recurrence_profiles(
-                &[
-                    RootRecurrence::Repeating(interval(100_000)),
-                    RootRecurrence::Repeating(interval(100_000)),
-                ],
-                update_rate,
-            )
+            .recurrence_profiles(&[repeating(100_000), repeating(100_000)], update_rate)
             .unwrap();
 
         let frequent_ranked = space
@@ -1331,14 +1315,14 @@ mod tests {
     }
 
     #[test]
-    fn recurrence_profiles_propagates_an_invalid_interval_error() {
+    fn recurrence_profiles_rejects_an_invalid_evaluation_rate() {
         let root = Rc::new(scan());
         let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
         let space = search_workload(roots);
         let err = space
-            .recurrence_profiles(&[RootRecurrence::Repeating(interval(0))], None)
+            .recurrence_profiles(&[RootRecurrence::Repeating(EvaluationRate(f64::NAN))], None)
             .unwrap_err();
-        assert_eq!(err, RecurrenceError::InvalidInterval(interval(0)));
+        assert!(matches!(err, RecurrenceError::InvalidEvaluationRate(_)));
     }
 
     /// Issue #287 review bug 6: a length mismatch is a recoverable
@@ -1414,7 +1398,7 @@ mod tests {
                  target, unreachable from the original avg root's own structural children",
             );
 
-        let root_recurrence = vec![RootRecurrence::Repeating(interval(1_000))];
+        let root_recurrence = vec![repeating(1_000)];
         let profiles = space
             .recurrence_profiles(&root_recurrence, Some(UpdateRate(5.0)))
             .unwrap();
@@ -1463,7 +1447,7 @@ mod tests {
             "fixture sanity: referenced twice from the same BinaryOp parent"
         );
 
-        let root_recurrence = vec![RootRecurrence::Repeating(interval(1_000))]; // 1 Hz
+        let root_recurrence = vec![repeating(1_000)]; // 1 Hz
         let profiles = space.recurrence_profiles(&root_recurrence, None).unwrap();
         let profile = profiles.for_target(&shared_group.target);
 
