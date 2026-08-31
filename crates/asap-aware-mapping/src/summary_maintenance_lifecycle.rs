@@ -355,18 +355,23 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         })
         .collect();
     select_compatible_lifecycles(&mut deployments, &components, facts.arrival);
-    let summary_total_cost = deployments.iter().try_fold(Cost::ZERO, |sum, deployment| {
-        let selected = &deployment
-            .summary_maintenance_lifecycle_guarantee
-            .as_ref()?
-            .summary_maintenance_lifecycle;
-        let cost = deployment
-            .alternatives
-            .iter()
-            .find(|alternative| &alternative.summary_maintenance_lifecycle == selected)?
-            .total_cost?;
-        Some(Cost(sum.0 + cost.0))
-    });
+    let summary_total_cost = (!deployments.is_empty())
+        .then(|| {
+            deployments.iter().try_fold(Cost::ZERO, |sum, deployment| {
+                let selected = &deployment
+                    .summary_maintenance_lifecycle_guarantee
+                    .as_ref()?
+                    .summary_maintenance_lifecycle;
+                let cost = deployment
+                    .alternatives
+                    .iter()
+                    .find(|alternative| &alternative.summary_maintenance_lifecycle == selected)?
+                    .total_cost?;
+                Some(Cost(sum.0 + cost.0))
+            })
+        })
+        .flatten();
+    let selected_raw_recompute = matches!(root.expr, SummaryExpr::KeepPreAsap(_));
     Ok(SummaryMaintenanceLifecyclePlan {
         root,
         deployments,
@@ -374,7 +379,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         evaluation_rate: facts.evaluation_rate,
         update_rate: facts.update_rate,
         expected_reads: facts.reads,
-        selected_raw_recompute: false,
+        selected_raw_recompute,
         summary_total_cost,
         raw_recompute_total_cost: None,
     })
@@ -455,13 +460,16 @@ pub fn materialize_with_summary_maintenance_lifecycles(
                 .raw_query_recompute_cost(target)
                 .zip(plan.expected_reads)
                 .map(|(per_read, reads)| Cost(per_read.0 * reads));
-            if plan.raw_recompute_total_cost.is_some_and(|raw| {
-                plan.summary_total_cost
-                    .is_none_or(|summary| raw.0 <= summary.0)
-            }) {
+            if !plan.selected_raw_recompute
+                && plan.raw_recompute_total_cost.is_some_and(|raw| {
+                    plan.summary_total_cost
+                        .is_none_or(|summary| raw.0 <= summary.0)
+                })
+            {
                 plan.root = crate::replacement::keep_pre_asap(target)?;
                 plan.deployments.clear();
                 plan.selected_raw_recompute = true;
+                plan.summary_total_cost = None;
             }
             Ok(plan)
         })
@@ -1531,6 +1539,8 @@ mod tests {
             plan.deployments[0].alternatives[1].rejection,
             Some(SummaryMaintenanceLifecycleRejection::RequiresPredictableOneTimeQuery)
         );
+    }
+
     #[test]
     fn nested_summary_lifecycles_have_compatible_evaluation_schedules() {
         let workload = workload(vec![], vec![repeating()], continuous(1_000, 20_000));
@@ -1816,6 +1826,32 @@ mod tests {
         .unwrap();
         assert!(plan.selected_raw_recompute);
         assert_eq!(plan.raw_recompute_total_cost, Some(Cost(1.0)));
+        assert_eq!(plan.summary_total_cost, None);
+        assert!(plan.deployments.is_empty());
+        assert!(matches!(plan.root.expr, SummaryExpr::KeepPreAsap(_)));
+    }
+
+    #[test]
+    fn unmatched_target_is_reported_as_raw_recomputation() {
+        let target = query_root();
+        let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
+        let selection = space.global_selection(&RawCheaper);
+        let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
+        let plan = materialize_with_summary_maintenance_lifecycles(
+            &selection,
+            &space.roots[0].1,
+            WorkloadDemand::new(&workload, &[0]),
+            1_000,
+            None,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &RawCheaper,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(plan.selected_raw_recompute);
+        assert_eq!(plan.raw_recompute_total_cost, Some(Cost(1.0)));
+        assert_eq!(plan.summary_total_cost, None);
         assert!(plan.deployments.is_empty());
         assert!(matches!(plan.root.expr, SummaryExpr::KeepPreAsap(_)));
     }
