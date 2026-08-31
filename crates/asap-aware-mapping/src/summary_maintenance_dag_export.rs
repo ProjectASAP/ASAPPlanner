@@ -1,8 +1,9 @@
 //! Serializable DAG export for a materialized summary-maintenance plan.
 //!
 //! `asap-types::dag_export` owns the crate-neutral post-ASAP graph shape. This
-//! adapter lives in the mapping layer, where lifecycle alternatives and their
-//! typed rejection reasons are available, and emits both views together.
+//! adapter lives in the mapping layer, where summary-maintenance lifecycle
+//! alternatives and their typed rejection reasons are available, and emits
+//! both views together.
 
 use serde::Serialize;
 

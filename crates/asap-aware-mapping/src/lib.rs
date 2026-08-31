@@ -186,11 +186,11 @@ pub mod accuracy_reconciliation;
 pub mod cost_model;
 pub mod explanation;
 pub mod grouping;
-pub mod lifecycle_dag_export;
 pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
+pub mod summary_maintenance_dag_export;
 pub mod summary_maintenance_lifecycle;
 pub mod topk_reuse;
 
@@ -205,10 +205,6 @@ pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
 pub use grouping::{has_subpopulations, HydraGroupingStrategy};
-pub use lifecycle_dag_export::{
-    export_summary_maintenance_plan, SummaryMaintenanceDagExport,
-    SummaryMaintenanceDeploymentExport, SummaryMaintenanceLifecycleAlternativeExport,
-};
 pub use recurrence::{
     evaluation_rate_of, total_cost, update_rate_from_data_workload, CostRate, EvaluationRate,
     Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile, RootRecurrence,
@@ -223,6 +219,10 @@ pub use replacement::{
     MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;
+pub use summary_maintenance_dag_export::{
+    export_summary_maintenance_plan, SummaryMaintenanceDagExport,
+    SummaryMaintenanceDeploymentExport, SummaryMaintenanceLifecycleAlternativeExport,
+};
 pub use summary_maintenance_lifecycle::{
     global_selection_with_summary_maintenance_lifecycles,
     materialize_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
