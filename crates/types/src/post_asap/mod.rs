@@ -32,6 +32,7 @@ pub mod guarantee;
 pub mod query_time;
 pub mod schema;
 pub mod sketch;
+pub mod summary_maintenance;
 
 pub use expr::{SummaryExpr, SummaryNode};
 pub use guarantee::{
@@ -48,3 +49,4 @@ pub use sketch::{
     HydraParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory, SketchKind,
     SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
 };
+pub use summary_maintenance::SummaryMaintenanceMode;
