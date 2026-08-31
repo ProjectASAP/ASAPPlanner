@@ -27,11 +27,21 @@ use crate::cost_model::{Cost, CostModel};
 use crate::recurrence::{CostRate, EvaluationRate, Horizon, UpdateRate};
 
 /// Summary-maintenance lifecycle shapes supported by the target runtime.
+///
+/// These flags describe runtime implementation capabilities, not which
+/// alternative the planner prefers. A supported alternative may still be
+/// rejected because workload evidence is missing or its cost is unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryMaintenanceLifecycleCapabilities {
+    /// The runtime can build a fresh state for each invocation and retire it
+    /// after that invocation finishes.
     pub ephemeral: bool,
+    /// The runtime can build state before a predictable execution and retain
+    /// it until that scheduled execution window ends.
     pub prepared: bool,
+    /// The runtime can retain one state and reuse it across multiple reads.
     pub shared: bool,
+    /// The runtime can keep state current by applying arriving data updates.
     pub continuously_maintained: bool,
 }
 
@@ -52,12 +62,21 @@ impl Default for SummaryMaintenanceLifecycleCapabilities {
 
 /// Primitive costs for one concrete summary state. Every field is optional:
 /// missing statistics produce an uncosted alternative, never a zero.
+///
+/// The lifecycle planner combines these state-specific inputs with workload
+/// rates, invocation counts, and the optimization horizon. All `Cost` fields
+/// are one-time costs unless their name explicitly says otherwise.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SummaryMaintenanceLifecycleCostInputs {
+    /// One-time cost to construct the state from its input.
     pub build_cost: Option<Cost>,
+    /// Cost to incorporate one arriving input update into existing state.
     pub maintenance_cost_per_update: Option<Cost>,
+    /// Cost of one read or finalization from already-built summary state.
     pub summary_read_cost: Option<Cost>,
+    /// Cost per second for retaining the state over a lifecycle window.
     pub retention_cost_rate: Option<CostRate>,
+    /// One-time cost to release or retire the state.
     pub retirement_cost: Option<Cost>,
 }
 
@@ -72,13 +91,23 @@ pub enum SummaryMaintenanceLifecycleRejection {
     MissingCostEvidence,
 }
 
+/// One candidate physical policy for a particular summary deployment.
+///
+/// `total_cost: None` never means zero: it means the planner lacks enough
+/// evidence to cost the candidate. Such a candidate is not selectable and its
+/// `rejection` explains why.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SummaryMaintenanceLifecycleAlternative {
+    /// State creation, retention, sharing, update, and retirement policy.
     pub summary_maintenance_lifecycle: SummaryMaintenanceLifecycle,
     /// How this lifecycle obtains and refreshes its summary state.
     pub maintenance_mode: SummaryMaintenanceMode,
+    /// Complete cost over the requested horizon, when every input is known.
     pub total_cost: Option<Cost>,
+    /// Why this alternative cannot be selected; `None` means it is legal and
+    /// fully costed.
     pub rejection: Option<SummaryMaintenanceLifecycleRejection>,
+    /// Human-readable premises used when deriving and costing the alternative.
     pub assumptions: Vec<String>,
 }
 
@@ -91,21 +120,41 @@ impl SummaryMaintenanceLifecycleAlternative {
 /// One unique summary-state deployment. Shared `Rc` nodes are emitted once.
 #[derive(Debug, Clone)]
 pub struct SummaryMaintenanceDeployment {
+    /// Traversal-local ordinal used to associate this deployment with exports;
+    /// it is not a persistent identity across independently planned DAGs.
     pub summary_index: usize,
+    /// The unique materialized `SummaryAgg` represented by this deployment.
     pub summary: Rc<SummaryNode>,
+    /// Cheapest legal, fully costed lifecycle, or `None` when none is
+    /// selectable.
     pub selected_summary_maintenance_lifecycle: Option<SummaryMaintenanceLifecycle>,
+    /// Maintenance mechanism paired with the selected lifecycle. It is `None`
+    /// exactly when no lifecycle was selected.
     pub selected_maintenance_mode: Option<SummaryMaintenanceMode>,
+    /// When the selected deployment is evaluated. It is `None` when no
+    /// lifecycle was selected.
     pub evaluation_schedule: Option<EvaluationSchedule>,
+    /// Physical value exposed by this deployment to its downstream consumer.
     pub output_representation: OutputRepresentation,
+    /// Every lifecycle shape considered, including rejected and uncosted ones.
     pub alternatives: Vec<SummaryMaintenanceLifecycleAlternative>,
 }
 
+/// Workload-aware physical deployment decisions for every unique summary
+/// state reachable from one materialized post-ASAP root.
 #[derive(Debug, Clone)]
 pub struct SummaryMaintenanceLifecyclePlan {
+    /// Root of the materialized post-ASAP DAG being deployed.
     pub root: Rc<SummaryNode>,
+    /// One entry per unique reachable `SummaryAgg`; shared `Rc` nodes appear
+    /// only once.
     pub deployments: Vec<SummaryMaintenanceDeployment>,
+    /// Caller-supplied optimization horizon used to turn rates into total
+    /// costs. `None` keeps horizon-dependent alternatives unselectable.
     pub horizon: Option<Horizon>,
+    /// Aggregate recurring query-evaluation rate derived from the workload.
     pub evaluation_rate: Option<EvaluationRate>,
+    /// Fresh source-data ingestion rate, when supplied by the workload.
     pub update_rate: Option<UpdateRate>,
 }
 
@@ -117,13 +166,31 @@ pub enum SummaryMaintenanceLifecyclePlanError {
     InvalidHorizon,
 }
 
+/// Workload-wide evidence derived specifically for summary-maintenance
+/// lifecycle enumeration and costing.
+///
+/// This is not another workload input model. [`QueryWorkload`] and its
+/// normalized entries remain the source of truth. Unlike one
+/// [`asap_types::workload::QueryWorkloadEntry`], these values aggregate all
+/// entries at a particular planning time and optional horizon. It also cannot
+/// reuse [`crate::recurrence::RecurrenceProfile`], which describes recurrence
+/// for one candidate target and counts consumers rather than invocations.
 #[derive(Debug)]
-struct WorkloadFacts {
+struct SummaryMaintenanceWorkloadFacts {
+    /// Total one-time and recurring reads inside the horizon. `None` means a
+    /// recurrence or horizon was unknown, not zero reads.
     reads: Option<f64>,
+    /// Sum of declared invocations across all one-time workload entries.
     one_time_invocations: u64,
+    /// Sum of usable recurring query rates in evaluations per second.
     evaluation_rate: Option<EvaluationRate>,
+    /// Fresh workload-level ingestion rate in updates per second.
     update_rate: Option<UpdateRate>,
+    /// Whether the workload's source data is static, arriving, mixed, or
+    /// unknown.
     arrival: DataArrival,
+    /// Earliest known activation and latest scheduled execution across
+    /// predictable one-time entries. `None` means no valid preparation window.
     prepared_window: Option<(TimestampMs, TimestampMs)>,
 }
 
@@ -208,7 +275,7 @@ fn workload_facts(
     workload: &QueryWorkload,
     now_ms: u64,
     horizon: Option<Horizon>,
-) -> WorkloadFacts {
+) -> SummaryMaintenanceWorkloadFacts {
     let mut one_time_invocations = 0u64;
     let mut recurring_reads = 0.0;
     let mut recurring_known = true;
@@ -261,14 +328,7 @@ fn workload_facts(
                 }
             }
             QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
-                let fresh = match (estimate.observed_at, estimate.valid_for) {
-                    (Some(observed), Some(valid_for)) => {
-                        now_ms <= observed.0.saturating_add(valid_for.0)
-                    }
-                    (None, Some(_)) => false,
-                    _ => true,
-                };
-                if !fresh {
+                if !estimate.is_fresh_at(now_ms) {
                     recurring_known = false;
                     continue;
                 }
@@ -305,7 +365,7 @@ fn workload_facts(
         .and_then(|data| data.ingestion_rate.value_at(now_ms))
         .map(|rate| UpdateRate(rate.0));
     let reads = recurring_known.then_some(one_time_invocations as f64 + recurring_reads);
-    WorkloadFacts {
+    SummaryMaintenanceWorkloadFacts {
         reads,
         one_time_invocations,
         evaluation_rate: has_evaluation_rate.then_some(EvaluationRate(evaluation_rate)),
@@ -316,7 +376,7 @@ fn workload_facts(
 }
 
 fn alternatives_for(
-    facts: &WorkloadFacts,
+    facts: &SummaryMaintenanceWorkloadFacts,
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     costs: SummaryMaintenanceLifecycleCostInputs,
@@ -331,7 +391,7 @@ fn alternatives_for(
 }
 
 fn ephemeral(
-    facts: &WorkloadFacts,
+    facts: &SummaryMaintenanceWorkloadFacts,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     costs: &SummaryMaintenanceLifecycleCostInputs,
 ) -> SummaryMaintenanceLifecycleAlternative {
@@ -359,7 +419,7 @@ fn ephemeral(
 }
 
 fn prepared(
-    facts: &WorkloadFacts,
+    facts: &SummaryMaintenanceWorkloadFacts,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     costs: &SummaryMaintenanceLifecycleCostInputs,
 ) -> SummaryMaintenanceLifecycleAlternative {
@@ -411,7 +471,7 @@ fn prepared(
 }
 
 fn shared(
-    facts: &WorkloadFacts,
+    facts: &SummaryMaintenanceWorkloadFacts,
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     costs: &SummaryMaintenanceLifecycleCostInputs,
@@ -450,7 +510,7 @@ fn shared(
 }
 
 fn continuous(
-    facts: &WorkloadFacts,
+    facts: &SummaryMaintenanceWorkloadFacts,
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     costs: &SummaryMaintenanceLifecycleCostInputs,
@@ -497,7 +557,7 @@ fn continuous(
 }
 
 fn retained_cost(
-    facts: &WorkloadFacts,
+    facts: &SummaryMaintenanceWorkloadFacts,
     costs: &SummaryMaintenanceLifecycleCostInputs,
     seconds: f64,
 ) -> Option<Cost> {
@@ -513,7 +573,7 @@ fn retained_cost(
 }
 
 fn maintenance_cost(
-    facts: &WorkloadFacts,
+    facts: &SummaryMaintenanceWorkloadFacts,
     costs: &SummaryMaintenanceLifecycleCostInputs,
     seconds: f64,
 ) -> Option<f64> {
@@ -563,7 +623,7 @@ fn rejected(
     }
 }
 
-fn retained_mode(facts: &WorkloadFacts) -> SummaryMaintenanceMode {
+fn retained_mode(facts: &SummaryMaintenanceWorkloadFacts) -> SummaryMaintenanceMode {
     match facts.arrival {
         DataArrival::ContinuouslyIngesting | DataArrival::Mixed => {
             SummaryMaintenanceMode::Incremental
