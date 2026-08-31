@@ -3,8 +3,9 @@
 //! A **summary-maintenance lifecycle** describes when one materialized summary
 //! state is created, retained or shared, updated, and retired. It does not
 //! describe the broader data lifecycle (collection, transport, and storage),
-//! and it is not implied by a logical `SummaryAgg`. Physical planning chooses
-//! it from workload evidence and runtime capabilities.
+//! and it is not implied by a logical `SummaryAgg`. Physical planning compares
+//! alternatives using the expected number and timing of reads, the source-data
+//! arrival/update rate, state-operation costs, and runtime capabilities.
 
 use crate::workload::{DurationMs, TimestampMs};
 

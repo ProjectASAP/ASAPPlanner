@@ -3,8 +3,11 @@
 //! A **summary-maintenance lifecycle** is the physical policy for when one
 //! materialized summary state is created, retained or shared, updated as data
 //! arrives, and retired. It is deliberately narrower than the end-to-end data
-//! lifecycle and independent of query recurrence: recurrence is workload
-//! evidence used to choose a lifecycle, not a lifecycle itself.
+//! lifecycle and independent of query recurrence. Recurrence says when and how
+//! often queries will read the result. The planner converts that demand into
+//! expected reads and an evaluation rate, then uses those quantities to compare
+//! rebuilding per query with retaining or continuously maintaining state.
+//! Recurrence does not itself prescribe a state-maintenance policy.
 //!
 //! This module enumerates and costs `Ephemeral`, `Prepared`, `Shared`, and
 //! `ContinuouslyMaintained` alternatives for every unique `SummaryAgg` in a
