@@ -379,13 +379,10 @@ impl RecurrenceProfile {
 /// vs. `repeating_queries` (an interval each) split, but at the
 /// already-opaque `Id` granularity `search_workload`'s callers already use
 /// — this crate needs no more of a caller's own query identity than "which
-/// of these two recurrence kinds is this root".
+/// of these two recurrence kinds is this root". One-time roots always use a
+/// count, so there is no second spelling for the common count-of-one case.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RootRecurrence {
-    /// A one-shot (batch) root — contributes to a reached target's
-    /// [`RecurrenceProfile::one_shot_consumers`], never to its
-    /// `evaluation_rate`.
-    OneShot,
     /// A declared number of one-time invocations for this root.
     OneShotCount(usize),
     /// A repeating root firing every `RepetitionInterval` — contributes to
@@ -393,7 +390,10 @@ pub enum RootRecurrence {
     /// [`evaluation_rate_of`]).
     Repeating(RepetitionInterval),
     /// A repeated root whose schedule or estimate has already been
-    /// normalized to evaluations per second.
+    /// normalized to evaluations per second. This is distinct from
+    /// [`Repeating`](Self::Repeating): fixed intervals retain their exact
+    /// validated schedule, while observations and finite schedules naturally
+    /// produce rates rather than synthetic intervals.
     RepeatingRate(EvaluationRate),
     /// No reliable recurrence evidence was supplied. It contributes no read
     /// count or evaluation rate, but remains distinct from zero demand.
@@ -1219,7 +1219,7 @@ mod tests {
         let root_recurrence = vec![
             RootRecurrence::Repeating(interval(1_000)),  // 1 Hz
             RootRecurrence::Repeating(interval(10_000)), // 0.1 Hz
-            RootRecurrence::OneShot,
+            RootRecurrence::OneShotCount(1),
         ];
         let profiles = space
             .recurrence_profiles(&root_recurrence, Some(UpdateRate(5.0)))
@@ -1365,7 +1365,10 @@ mod tests {
         let roots: Vec<(&str, Rc<QueryExpr>)> = vec![("only", root)];
         let space = search_workload(roots);
         let err = space
-            .recurrence_profiles(&[RootRecurrence::OneShot], Some(UpdateRate(f64::NAN)))
+            .recurrence_profiles(
+                &[RootRecurrence::OneShotCount(1)],
+                Some(UpdateRate(f64::NAN)),
+            )
             .unwrap_err();
         assert!(matches!(err, RecurrenceError::InvalidUpdateRate(_)));
     }

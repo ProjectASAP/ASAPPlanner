@@ -375,8 +375,7 @@ use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
 use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
 use crate::recurrence::{
-    evaluation_rate_of, CostRate, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence,
-    UpdateRate,
+    evaluation_rate_of, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
 };
 use crate::rollup::RollupStrategy;
 use crate::topk_reuse::TopKLimitReuseStrategy;
@@ -2350,8 +2349,8 @@ impl<Id> PlanSpace<Id> {
     /// root's whole reachable sub-DAG (the same relational-skeleton
     /// traversal [`discover_targets`] itself used to discover those sites)
     /// and folding each root's own recurrence tag
-    /// ([`RootRecurrence::Repeating`]'s interval, or
-    /// [`RootRecurrence::OneShot`]) into every site reachable from it.
+    /// ([`RootRecurrence::Repeating`]'s interval, a normalized repeating
+    /// rate, or a one-time invocation count) into every site reachable from it.
     ///
     /// `root_recurrence` is positional: `root_recurrence[i]` describes
     /// `self.roots[i]` — the same order [`search_workload`]/
@@ -2630,9 +2629,6 @@ fn contribute(
         }
         RootRecurrence::RepeatingRate(rate) => {
             *rates.entry(ptr).or_insert(0.0) += rate.0 * times as f64;
-        }
-        RootRecurrence::OneShot => {
-            *one_shot_counts.entry(ptr).or_insert(0) += times;
         }
         RootRecurrence::OneShotCount(count) => {
             *one_shot_counts.entry(ptr).or_insert(0) += count.saturating_mul(times);

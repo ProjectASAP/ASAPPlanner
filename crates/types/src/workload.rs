@@ -110,7 +110,10 @@ pub enum Predictability {
     Unknown,
 }
 
-/// Semantic relationship between a query and event time.
+/// Semantic relationship between a query and event time. This is supplied by
+/// the workload author rather than inferred from issue time or range bounds:
+/// those values do not distinguish, for example, a historical replay from a
+/// live query with the same lookback.
 ///
 /// `RealTime` follows the newest data, `Longitudinal` analyzes a fixed or
 /// historical interval, and `Mixed` combines both (for example, comparing
@@ -178,8 +181,10 @@ pub struct ObservationWindow {
     pub end: TimestampMs,
 }
 
-/// Expected demand expressed either as a count over an observation window or
-/// as an average number of invocations per second.
+/// Evidence as originally measured: either a count over the accompanying
+/// [`ObservationWindow`] or an average number of invocations per second.
+/// Consumers normalize the count to a rate using that window before costing;
+/// the variants retain whether the source supplied a count or a rate.
 ///
 /// For example, `InvocationCount(600)` records 600 observed executions,
 /// whereas `AverageRate(Rate(10.0))` directly records ten per second.
@@ -638,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_batch_and_repeated_entries_normalize_without_conflating_axes() {
+    fn entries_preserve_recurrence_and_time_scope_as_independent_axes() {
         let mut workload = base_workload();
         workload.query_batch = Some(vec![BatchEntry {
             query: Query("historical".into()),
