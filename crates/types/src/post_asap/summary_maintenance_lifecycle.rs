@@ -18,7 +18,9 @@ pub enum EvaluationSchedule {
     OnRead,
 }
 
-/// The physical value crossing an execution boundary.
+/// The value a summary-maintenance deployment provides to its downstream
+/// query operator: ordinary rows, reusable summary state, or a finalized
+/// scalar/result value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputRepresentation {
     PlainRows,
