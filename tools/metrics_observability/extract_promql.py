@@ -71,7 +71,13 @@ def from_yaml(path: Path) -> list[str]:
                 index += 1
             nonempty = [line for line in block if line.strip()]
             indent = min((len(line) - len(line.lstrip()) for line in nonempty), default=0)
-            values.append(" ".join(line[indent:].strip() for line in block).strip())
+            values.append(
+                " ".join(
+                    line[indent:].strip()
+                    for line in block
+                    if line.strip() and not line[indent:].lstrip().startswith("#")
+                ).strip()
+            )
             continue
         index += 1
     return values
