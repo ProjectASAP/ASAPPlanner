@@ -30,3 +30,7 @@ path = "tests/observability/promql_corpus.rs"
 [[test]]
 name = "o11y_bench_promql"
 path = "tests/observability/o11y_bench_promql.rs"
+
+[[test]]
+name = "metrics_observability"
+path = "tests/observability/metrics_observability.rs"
