@@ -136,6 +136,11 @@ counts, releases transient output after its last consumer, and keeps retained
 state live. Consequently a shared scan is charged once per execution and a
 fan-out's memory includes the outputs that really coexist.
 
+Logical `output_bytes` feeds parent cardinality estimates; it is not an
+allocation. Each physical node separately supplies `output_buffer_bytes` for
+its live batch/edge buffer and `retained_bytes` for state that survives the
+operator. A streaming scan therefore retains a batch, not the complete source.
+
 Every node declares `ExecutionMultiplicity::Once` or `PerEvaluation`.
 Build/maintenance nodes can therefore be charged once while query-side nodes
 are multiplied by the horizon's evaluation count; retention does not silently
@@ -160,11 +165,11 @@ the DAG rules above.
 | Scan | `input_rows` | one input row/batch | `input_bytes` |
 | Filter | `input_rows` | one output row/batch | `0` |
 | Project or scalar pass-through | `input_rows` | one output row/batch | `0` |
-| Hash aggregate | `input_rows` | `groups × (key + value + hash metadata)` | `0` |
+| Hash aggregate | `input_rows` | `groups × (key + aggregate_value_bytes + hash metadata)` | `0` |
 | Deduplicate | `input_rows` | keyed hash state | `0` |
 | In-memory sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
 | Heap Top-K | `rows × ceil(log2(max(k, 2)))` | `min(k, rows) × row_bytes` | `0` |
-| Hash join | `left_rows + right_rows + output_rows` | selected build-side bytes | `0` beyond children |
+| Hash join | `left_rows + right_rows + output_rows` | explicitly selected build-side bytes | `0` beyond children |
 | Concat | `output_rows` | one output row/batch | `0` |
 | Ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
 | Limit | `output_rows` | one output row/batch | `0` |
@@ -174,12 +179,18 @@ spill writes and reads; a nested-loop join must not use the hash-join formula.
 If the physical choice or its required statistics are unknown, the estimate
 is unavailable.
 
+In particular, hash aggregation requires the concrete accumulator width, and
+hash join requires an explicit left/right build-side choice. The estimator
+does not assume one 8-byte aggregate value or silently choose the smaller join
+input.
+
 ## Summary operator formulas
 
 A retained sketch performs one build and serves later reads from state:
 
 ```text
-cpu_ops = input_rows × update_ops(params)
+cpu_ops = input_rows                         // build scan
+        + input_rows × update_ops(params)
         + evaluation_count × physical_sketch_count × read_ops(params)
 
 scan_bytes = source_scan_bytes for the build
@@ -215,6 +226,14 @@ children. Repeated `Rc<SummaryNode>` identities are deduplicated, and multiple
 sketch states are sent through the physical-DAG estimator; the compact
 single-summary adapter rejects them because it has no source-edge identities
 with which to decide whether their reads are shared.
+
+The compact planner bridge accepts only complete shapes it can cost from its
+resolved inputs: an unfiltered source scan followed by one aggregate, and the
+canonical count-grouped Top-K fusion over such a scan. A filter, projection,
+join, window, nested aggregate, or predicate-bearing scan is unavailable until
+a caller supplies its per-node physical DAG. Final selection excludes every
+unavailable replacement; when none remain, `chosen = None` preserves the raw
+pre-ASAP target.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
@@ -289,8 +308,9 @@ For an 8-byte aggregate value and 16 bytes of hash metadata:
 
 ```text
 entry_bytes = group_key_bytes + 8 + 16
-memory      = group_count × entry_bytes
-cpu/read    = input_rows
+memory          = group_count × entry_bytes
+scan CPU/read   = input_rows
+aggregate CPU   = input_rows
 ```
 
 Every raw evaluation rebuilds this state and rereads the source.

@@ -2306,8 +2306,15 @@ impl<Id> PlanSpace<Id> {
             .iter()
             .map(|ptr| {
                 let group = &self.groups[ptr];
-                let candidates = rank_group(group, cost_model);
                 let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
+                let mut candidates = rank_group(group, cost_model);
+                // Availability is candidate-specific and cannot be expressed
+                // by `rank_candidates`' exhaustive permutation contract.
+                // Keep unavailable alternatives for explanation, but place
+                // them after every selectable candidate.
+                candidates.sort_by_key(|candidate| {
+                    cost_model.candidate_cost(candidate, &target).is_none()
+                });
                 let costs = candidates
                     .iter()
                     .map(|c| {
@@ -3097,17 +3104,28 @@ impl<Id> PlanSpace<Id> {
                             .candidates
                             .iter()
                             .filter(|candidate| !is_cse_candidate(candidate))
-                            .min_by(|a, b| {
+                            .filter_map(|candidate| {
                                 cost_model
-                                    .estimate_cost(a, &effective_target)
-                                    .total_cmp(&cost_model.estimate_cost(b, &effective_target))
-                            });
+                                    .candidate_cost(candidate, &effective_target)
+                                    .map(|cost| (candidate, cost))
+                            })
+                            .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0))
+                            .map(|(candidate, _)| candidate);
+                        let cse = cse.filter(|candidate| {
+                            cost_model
+                                .candidate_cost(candidate, &effective_target)
+                                .is_some()
+                        });
                         match (cse, logical) {
                             (Some(cse), Some(logical))
                                 if cost_model
-                                    .estimate_cost(logical, &effective_target)
-                                    .total_cmp(&cost_model.estimate_cost(cse, &effective_target))
-                                    .is_lt() =>
+                                    .candidate_cost(logical, &effective_target)
+                                    .unwrap()
+                                    .0
+                                    < cost_model
+                                        .candidate_cost(cse, &effective_target)
+                                        .unwrap()
+                                        .0 =>
                             {
                                 Some(logical)
                             }
@@ -3127,13 +3145,34 @@ impl<Id> PlanSpace<Id> {
                     // valid answer, just not a cross-group-aware one; this
                     // group also contributes no Share collapse to its own
                     // children (see `multiplier`'s `_ => effective` arm).
-                    None => rank_group(group, cost_model).into_iter().next(),
+                    None => rank_group(group, cost_model).into_iter().find(|candidate| {
+                        cost_model
+                            .candidate_cost(
+                                candidate,
+                                &TargetSubDAG::with_consumer_count(&group.target, effective),
+                            )
+                            .is_some()
+                    }),
                 }
             } else {
+                let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
                 rank_group(group, cost_model)
                     .into_iter()
-                    .find(|candidate| !is_cse_candidate(candidate))
-                    .or_else(|| cse_candidate_pair(group).map(|(share, _)| share))
+                    .find(|candidate| {
+                        !is_cse_candidate(candidate)
+                            && cost_model
+                                .candidate_cost(candidate, &effective_target)
+                                .is_some()
+                    })
+                    .or_else(|| {
+                        cse_candidate_pair(group)
+                            .map(|(share, _)| share)
+                            .filter(|candidate| {
+                                cost_model
+                                    .candidate_cost(candidate, &effective_target)
+                                    .is_some()
+                            })
+                    })
             };
 
             let outgoing_multiplier = multiplier(*ptr, &effective_uses, &chosen_share);
