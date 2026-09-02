@@ -69,19 +69,11 @@ The missing facts have explicit ownership:
 | Join-side and join-output cardinality | Join-key/operator statistics. |
 | Memory budget, spill I/O, cache behavior, and network bytes | Deployment/execution-profile evidence. |
 
-`AnalyticalInputs` and `OperatorInputs` are flattened arguments after this
-evidence has been resolved. They are estimator adapters, not planner domain
-objects. `dag_export --analytical-cost-json` is a development/reproducibility
-adapter, not a replacement for `QueryWorkload` or `DataWorkload`.
-
-The available canonical workload adapter is `AnalyticalCostModel::from_workload`. It
-reads fresh source cardinality from `DataWorkload`, derives the finite
-evaluation count from `QueryWorkloadEntry.recurrence` plus the planning
-horizon, and combines those values with `PhysicalInputEvidence`. An unknown
-recurrence, a zero horizon, no invocation inside the horizon, or stale source
-cardinality makes the estimate unavailable. Query-shape constants such as
-Top-K `k` are read from the lowered target rather than copied out of the
-workload.
+`OperatorInputs` contains the resolved statistics for one physical operator.
+It is an estimator input, not another planner workload object. The component
+that lowers a query into a physical DAG owns resolving these fields from the
+canonical workload, catalog, and operator-statistics sources. It must leave a
+plan unavailable when required evidence cannot be resolved.
 
 ## Workload horizon and lifecycle
 
@@ -98,9 +90,8 @@ updates after build     = 0
 It is not an independent workload axis. A repeated rate without a horizon
 cannot produce a finite total cost.
 
-`AnalyticalInputs.data_arrival` must be `at_rest`. The workload adapter copies
-that value from the canonical `DataWorkload::arrival`; `unknown`, `mixed`, and
-`continuously_ingesting` fail closed. They must not be costed by pretending
+An at-rest estimate must not be reused for `unknown`, `mixed`, or
+`continuously_ingesting` data. Callers must fail closed instead of pretending
 that incremental updates are a one-time snapshot build.
 
 The sketch alternative scans the selected source snapshot once and retains
@@ -235,24 +226,17 @@ Their CPU and memory use the concrete summary state size and number of input
 states. A plan using one of these operations is unavailable until the
 corresponding formula and required lifecycle evidence are present.
 
-The summary-candidate bridge currently has formulas for sketch build and
-readout only. It therefore rejects summary join, merge, subtract, and delete
-explicitly. It never walks through one of those nodes and charges only its
-children. Repeated `Rc<SummaryNode>` identities are deduplicated, and multiple
-sketch states are sent through the physical-DAG estimator; the compact
-single-summary adapter rejects them because it has no source-edge identities
-with which to decide whether their reads are shared.
+Summary build, merge, subtract, delete, and readout require their own physical
+operators and resolved statistics. Until an operation has such a formula, a
+complete candidate containing it is unavailable; costing only its modeled
+children would undercount the plan.
 
-The compact planner bridge accepts only complete shapes it can currently lower
-from its resolved inputs: an unfiltered source scan followed by one aggregate,
-and the canonical count-grouped Top-K fusion over such a scan. It rejects a
-filter, projection, join, window, nested aggregate, or predicate-bearing scan.
-Although the standalone physical-DAG estimator can cost several of those
-operators when given complete `OperatorInputs`, the planner does not yet have
-an input path that lowers arbitrary candidate DAGs into it. Adding that lowering
-and its statistics provider is future integration work. Final selection
-excludes every unavailable replacement; when none remain, `chosen = None`
-preserves the raw pre-ASAP target.
+`estimate_physical_dag` is deliberately independent of query shape. A caller
+supplies the complete physical DAG and one `OperatorInputs` record per node.
+Filters, projections, joins, windows, nested aggregates, Top-K, and shared
+sub-DAGs therefore use the same estimation path. Query lowering and planner
+selection are separate integration responsibilities and must not introduce a
+shape-specific shortcut or structural-node-count fallback.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
@@ -303,10 +287,9 @@ The intended end-to-end selection pipeline is:
 5. estimates the complete candidate DAG;
 6. applies calibration and ranks candidates by ascending cost.
 
-The current planner bridge executes this pipeline only for the compact shapes
-listed above. Other supported physical operators are currently usable through
-`estimate_physical_dag`, but are not automatically reached by replacement
-selection.
+This module implements the physical estimation step. Lowering, evidence
+resolution, legality checks, and planner integration remain separate layers;
+each must preserve the complete-plan and fail-closed requirements above.
 
 The raw baseline and selected alternative use the same source snapshot,
 horizon, and calibration:
