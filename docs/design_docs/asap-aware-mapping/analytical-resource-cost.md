@@ -13,14 +13,20 @@ and guarantee composition run first; costing ranks only the candidates that
 survive. Missing evidence produces an unavailable estimate, never an assumed
 zero or a structural-cost fallback.
 
-This document distinguishes three implementation layers:
+This document distinguishes four implementation layers:
 
 - the physical-DAG estimator, which can compose any DAG whose nodes have
   supported physical operators and complete `OperatorStatistics`; and
 - query-DAG lowering, which recursively maps supported resolved `QueryExpr`
   operators to that physical representation; and
-- replacement lowering and ranking, which must compare complete alternatives.
+- the deployment summary binder, which maps a selected `SummaryExpr` DAG to
+  physical summary operators and snapshots their evidence; and
+- the planner-ranking adapter, which compares the complete raw and replacement
+  DAGs before making a candidate available to global selection.
 
+Support in the estimator does not imply that a deployment has selected and
+bound that physical algorithm. Unknown query lowering or summary binding makes
+the entire alternative unavailable.
 No layer may substitute a shape-specific shortcut or structural node count.
 
 An estimate has physical dimensions:
@@ -469,8 +475,32 @@ children would undercount the plan.
 complete physical DAG and per-node evidence. Filters, projections, joins,
 windows, nested aggregates, Top-K, and shared sub-DAGs therefore use the same
 estimation path. The generic query lowerer recursively maps the supported raw
-query operators into that representation. Replacement lowering remains a
-separate layer and must include all summary-maintenance work.
+query operators into that representation.
+
+`AnalyticalPlannerCostModel` is the final-selection adapter. For every
+candidate it obtains one canonical `ComparisonScope`, recursively lowers the
+actual raw target, and then lowers a logical rewrite or requests the fully
+bound physical DAG for a `SummaryExpr` candidate. The deployment implements
+`PlannerPhysicalPlanProvider`: query-node evidence is consumed atomically by
+the generic query lowerer, while summary binding returns a complete
+`PhysicalDag`, including embedded raw work, build/read operators, retained
+state, execution multiplicity, and source coverage. The adapter calls
+`estimate_physical_dag_comparison`; it never calls `DefaultCostModel` or a
+structural-node-count fallback for final cost.
+
+A candidate is exposed to global selection only when both complete DAGs are
+valid and its calibrated cost is strictly below the raw baseline. Missing or
+stale evidence, an unknown physical algorithm, invalid edges, incomplete
+source coverage, or a candidate that is not cheaper yields `None`. When no
+candidate remains, `chosen = None` preserves the raw pre-ASAP target.
+
+Complete-plan costing also changes CSE selection order. Global selection sends
+all share and recompute alternatives through `candidate_cost`; it does not use
+the legacy structural CSE hook to discard one arm first. Once an arm is chosen,
+the existing consumer-count propagation records whether that physical
+alternative shares or recomputes. Within each returned physical DAG, stable
+provider-owned physical IDs deduplicate shared scans, builds, and retained
+states. Logical `Rc` identity is never substituted for physical identity.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
@@ -522,9 +552,11 @@ The intended end-to-end selection pipeline is:
 6. applies calibration and ranks candidates by ascending cost.
 
 The query lowerer and physical estimator cover the supported raw-query shapes
-listed above. Replacement evidence resolution, legality checks, and planner
-integration remain separate layers; each preserves the complete-plan and
-fail-closed requirements above.
+listed above. `AnalyticalPlannerCostModel` executes this pipeline for every
+candidate supplied to `PlanSpace::global_selection`. Logical rewrites are
+lowered recursively. Summary candidates participate only after the deployment
+has bound their complete `SummaryExpr` DAG; there is no optimistic generic
+summary fallback.
 
 Before applying the following arithmetic, callers validate exact equality of
 the raw and selected alternative's `ComparisonScope`, and use the same
