@@ -156,6 +156,7 @@ pub fn lower_query_physical_dag(
                     if predicates.is_empty() {
                         let statistics = self.stats(&id)?;
                         require_statistics_shape(&id, &statistics, 1)?;
+                        require_scan_edges_equal(&statistics)?;
                         return Ok(self.push(
                             id,
                             PhysicalOperator::Scan,
@@ -167,6 +168,7 @@ pub fn lower_query_physical_dag(
                     let scan_id = format!("{id}-scan");
                     let scan_statistics = self.stats(&scan_id)?;
                     require_statistics_shape(&scan_id, &scan_statistics, 1)?;
+                    require_scan_edges_equal(&scan_statistics)?;
                     self.push(
                         scan_id.clone(),
                         PhysicalOperator::Scan,
@@ -191,7 +193,16 @@ pub fn lower_query_physical_dag(
                 QueryExpr::Project { child, .. } => {
                     self.lower_unary(query, id, PhysicalOperator::Project, child)
                 }
-                QueryExpr::Aggregate { child, .. } => {
+                QueryExpr::Aggregate {
+                    reduction,
+                    measures,
+                    having,
+                    child,
+                    ..
+                } => {
+                    if having.is_some() || !supports_hash_aggregate(reduction, measures) {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    }
                     self.lower_unary(query, id, PhysicalOperator::HashAggregate, child)
                 }
                 QueryExpr::Dedup { child, .. } => {
@@ -278,7 +289,7 @@ pub fn lower_query_physical_dag(
                     right,
                 } => {
                     if matches!(kind, asap_types::pre_asap::JoinKind::Cross)
-                        || !is_hash_join_predicate(&pred.0)
+                        || !is_hash_join_predicate(&pred.0, left, right)
                     {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
@@ -388,6 +399,15 @@ fn require_statistics_shape(
             node: node.into(),
             reason: "edge rows and logical bytes are inconsistent",
         });
+    }
+    Ok(())
+}
+
+fn require_scan_edges_equal(statistics: &OperatorStatistics) -> Result<(), AnalyticalCostError> {
+    if statistics.inputs[0] != statistics.output {
+        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "Scan external input edge does not match its output edge",
+        ));
     }
     Ok(())
 }
@@ -514,21 +534,80 @@ fn bind_scan_coverage(
     Ok(coverage)
 }
 
-fn is_hash_join_predicate(expr: &asap_types::pre_asap::QueryExpr) -> bool {
+fn is_hash_join_predicate(
+    expr: &asap_types::pre_asap::QueryExpr,
+    left: &asap_types::pre_asap::QueryExpr,
+    right: &asap_types::pre_asap::QueryExpr,
+) -> bool {
     use asap_types::pre_asap::{CompareOpKind, QueryExpr};
 
-    match expr {
-        QueryExpr::Compare {
-            left,
-            op: CompareOpKind::Eq,
-            right,
-        } => {
-            matches!(left.as_ref(), QueryExpr::Column(_))
-                && matches!(right.as_ref(), QueryExpr::Column(_))
+    let (Ok(left_schema), Ok(right_schema)) = (left.output_schema(), right.output_schema()) else {
+        return false;
+    };
+    let left_width = left_schema.columns.len();
+    let total_width = left_width.saturating_add(right_schema.columns.len());
+
+    fn column_side(column: usize, left_width: usize, total_width: usize) -> Option<bool> {
+        if column < left_width {
+            Some(false)
+        } else if column < total_width {
+            Some(true)
+        } else {
+            None
         }
-        QueryExpr::BoolAnd(parts) => !parts.is_empty() && parts.iter().all(is_hash_join_predicate),
-        _ => false,
     }
+
+    fn predicate(expr: &QueryExpr, left_width: usize, total_width: usize) -> bool {
+        match expr {
+            QueryExpr::Compare {
+                left,
+                op: CompareOpKind::Eq,
+                right,
+            } => match (left.as_ref(), right.as_ref()) {
+                (QueryExpr::Column(left), QueryExpr::Column(right)) => matches!(
+                    (
+                        column_side(*left, left_width, total_width),
+                        column_side(*right, left_width, total_width)
+                    ),
+                    (Some(false), Some(true)) | (Some(true), Some(false))
+                ),
+                _ => false,
+            },
+            QueryExpr::BoolAnd(parts) => {
+                !parts.is_empty()
+                    && parts
+                        .iter()
+                        .all(|part| predicate(part, left_width, total_width))
+            }
+            _ => false,
+        }
+    }
+
+    predicate(expr, left_width, total_width)
+}
+
+fn supports_hash_aggregate(
+    reduction: &asap_types::pre_asap::Reduction,
+    measures: &[asap_types::pre_asap::AggIntent],
+) -> bool {
+    use asap_types::pre_asap::{AggIntent, Reduction};
+
+    matches!(reduction, Reduction::Reduce(_))
+        && !measures.is_empty()
+        && measures.iter().all(|intent| {
+            matches!(
+                intent,
+                AggIntent::Count { .. }
+                    | AggIntent::Sum { .. }
+                    | AggIntent::Min { .. }
+                    | AggIntent::Max { .. }
+                    | AggIntent::Avg { .. }
+                    | AggIntent::StdDev { .. }
+                    | AggIntent::Variance { .. }
+                    | AggIntent::Group
+                    | AggIntent::CountValues { .. }
+            )
+        })
 }
 
 #[cfg(test)]
@@ -595,9 +674,7 @@ mod tests {
 
     #[test]
     fn query_lowering_recurses_and_fuses_global_sort_limit() {
-        use asap_types::pre_asap::{
-            agg_intent::default_cardinality, GroupKeys, QueryExpr, Reduction, Source,
-        };
+        use asap_types::pre_asap::{AggIntent, GroupKeys, QueryExpr, Reduction, Source};
         use asap_types::pre_asap::{Column, DataType, Schema};
         use std::rc::Rc;
 
@@ -615,7 +692,7 @@ mod tests {
         });
         let aggregate = Rc::new(QueryExpr::Aggregate {
             reduction: Reduction::by(vec![0]),
-            measures: vec![default_cardinality()],
+            measures: vec![AggIntent::Sum { col: Some(1) }],
             output_names: vec![],
             having: None,
             child: Rc::clone(&scan),
@@ -686,6 +763,19 @@ mod tests {
             provided[&physical_scan.id].statistics.output.bytes
         );
         assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).is_ok());
+
+        let mut inconsistent_scan = provided.clone();
+        inconsistent_scan
+            .get_mut("query-2-scan")
+            .unwrap()
+            .statistics
+            .output = edge(999, 63_936);
+        assert_eq!(
+            lower_query_physical_dag(&root, &scope, &inconsistent_scan),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "Scan external input edge does not match its output edge"
+            ))
+        );
     }
 
     #[test]
@@ -732,6 +822,21 @@ mod tests {
         assert_eq!(dag.nodes[1].children, vec![dag.nodes[0].id.clone(); 2]);
         let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).unwrap();
         assert_eq!(estimate.scan_bytes, 800);
+
+        let invalid = Rc::new(QueryExpr::Join {
+            kind: JoinKind::Inner,
+            pred: Predicate(Rc::new(QueryExpr::Compare {
+                left: Rc::new(QueryExpr::Column(0)),
+                op: CompareOpKind::Eq,
+                right: Rc::new(QueryExpr::Column(0)),
+            })),
+            left: Rc::clone(&shared),
+            right: Rc::clone(&shared),
+        });
+        assert_eq!(
+            lower_query_physical_dag(&invalid, &scope, &provided),
+            Err(AnalyticalCostError::UnsupportedQueryOperator)
+        );
     }
 
     #[test]
@@ -1046,5 +1151,54 @@ mod tests {
         let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).unwrap();
         assert_eq!(estimate.cpu_ops, 200.0);
         assert_eq!(estimate.scan_bytes, 800);
+    }
+
+    #[test]
+    fn query_lowering_rejects_aggregates_without_a_hash_implementation() {
+        use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
+        use asap_types::pre_asap::{Column, DataType, Schema};
+        use asap_types::types::AccuracyTarget;
+        use std::rc::Rc;
+
+        let scan = || {
+            Rc::new(QueryExpr::Scan {
+                source: Source::Table {
+                    table_ref: "events".into(),
+                },
+                predicates: vec![],
+                schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+            })
+        };
+        let exact_quantile = Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::by(vec![]),
+            measures: vec![AggIntent::Quantile {
+                col: Some(0),
+                q: 0.99,
+                accuracy: AccuracyTarget::Exact,
+            }],
+            output_names: vec![],
+            having: None,
+            child: scan(),
+        });
+        let per_entity = Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Rate],
+            output_names: vec![],
+            having: None,
+            child: scan(),
+        });
+        let scope = scope(vec![coverage(
+            Source::Table {
+                table_ref: "events".into(),
+            },
+            vec![],
+        )]);
+        let unavailable = HashMap::<String, PhysicalNodeEvidence>::new();
+        for query in [&exact_quantile, &per_entity] {
+            assert_eq!(
+                lower_query_physical_dag(query, &scope, &unavailable),
+                Err(AnalyticalCostError::UnsupportedQueryOperator)
+            );
+        }
     }
 }

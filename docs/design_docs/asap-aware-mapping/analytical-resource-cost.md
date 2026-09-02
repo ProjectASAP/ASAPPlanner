@@ -354,6 +354,8 @@ The lowering validates every physical edge before costing:
 - `(rows = 0, bytes = 0)` is a valid empty edge, while positive rows still
   require byte-width evidence and zero rows cannot carry non-zero bytes;
 - a unary operator's `input_rows` and `input_bytes` equal its child's output;
+- a Scan's external logical input edge equals its output edge, including the
+  synthetic raw Scan created for a predicate-bearing logical Scan;
 - a hash join's left and right inputs equal the corresponding child outputs;
 - Concat and `UNION ALL` input/output totals equal the checked sum of all
   child outputs; and
@@ -368,7 +370,7 @@ The supported mappings are:
 | Scan with pushed predicates | Scan → Filter |
 | Filter | Filter |
 | Project | Project |
-| Aggregate, including a fused HAVING predicate | HashAggregate |
+| Reducing Count/Sum/Min/Max/Avg/StdDev/Variance/Group/CountValues without HAVING | HashAggregate |
 | Dedup | Deduplicate |
 | Equi-Join | HashJoin with an evidence-selected build side |
 | Concat or `UNION ALL` | Concat |
@@ -377,6 +379,13 @@ The supported mappings are:
 | partitioned Sort followed by Limit | Sort → Limit |
 | SQLWindowFunc | Window |
 | TimeShift | PassThrough |
+
+Per-entity reductions, HAVING, ordered/distribution-dependent intents such as
+exact quantile or cardinality, Top-K aggregate intents, and extensions remain
+unavailable until they have an explicit physical algorithm. Hash-join lowering
+also uses the bound left and right output schemas to prove that every equality
+compares one column from each side; same-side or out-of-range `ColumnId`s fail
+closed.
 
 Logical identity is the address of the existing `Rc<QueryExpr>` allocation.
 Repeated references therefore lower once and every parent points to the same
