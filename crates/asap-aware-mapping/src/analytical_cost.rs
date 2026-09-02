@@ -9,13 +9,16 @@ use asap_types::post_asap::{
     GroupingStrategy, SketchAlgorithm, SketchParams, SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
+use serde::{Deserialize, Serialize};
 
 use crate::cost_model::{CostModel, DefaultCostModel};
-use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
+use crate::replacement::{
+    accuracy_budget, accuracy_target, Replacement, ReplacementSubDAG, TargetSubDAG,
+};
 
 pub const ANALYTICAL_MODEL_VERSION: &str = "analytical-resource-v1";
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AnalyticalInputs {
     pub input_rows: u64,
     pub input_bytes: u64,
@@ -45,16 +48,16 @@ impl AnalyticalInputs {
 /// Conversion from physical dimensions to one deployment-specific objective.
 /// Memory's coefficient means cost units per retained byte over this model's
 /// explicit comparison scope; it is not mixed with a rate implicitly.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceCalibration {
     pub cost_per_cpu_op: f64,
     pub cost_per_scan_byte: f64,
     pub cost_per_retained_byte: f64,
-    pub version: &'static str,
+    pub version: String,
 }
 
 impl ResourceCalibration {
-    pub fn validate(self) -> Result<Self, AnalyticalCostError> {
+    pub fn validate(&self) -> Result<(), AnalyticalCostError> {
         for (name, value) in [
             ("cost_per_cpu_op", self.cost_per_cpu_op),
             ("cost_per_scan_byte", self.cost_per_scan_byte),
@@ -70,11 +73,11 @@ impl ResourceCalibration {
         {
             return Err(AnalyticalCostError::ZeroCalibration);
         }
-        Ok(self)
+        Ok(())
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ResourceEstimate {
     pub cpu_ops: f64,
     pub peak_memory_bytes: u64,
@@ -84,9 +87,9 @@ pub struct ResourceEstimate {
 impl ResourceEstimate {
     pub fn calibrated_cost(
         self,
-        calibration: ResourceCalibration,
+        calibration: &ResourceCalibration,
     ) -> Result<f64, AnalyticalCostError> {
-        let calibration = calibration.validate()?;
+        calibration.validate()?;
         let value = self.cpu_ops * calibration.cost_per_cpu_op
             + self.scan_bytes as f64 * calibration.cost_per_scan_byte
             + self.peak_memory_bytes as f64 * calibration.cost_per_retained_byte;
@@ -221,8 +224,10 @@ pub fn estimate_sketch_aggregation(
     })
 }
 
-/// Public cost-model adapter. It preserves candidate legality/ranking order,
-/// but supplies resource-derived numeric estimates to plan costing/export.
+/// Public cost-model adapter. It preserves candidate legality, sizes every
+/// candidate against the declared accuracy target, then ranks supported
+/// algorithms by their calibrated resource estimate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyticalCostModel {
     pub inputs: AnalyticalInputs,
     pub calibration: ResourceCalibration,
@@ -230,7 +235,7 @@ pub struct AnalyticalCostModel {
 
 impl AnalyticalCostModel {
     pub fn raw_cost(&self) -> Result<f64, AnalyticalCostError> {
-        estimate_raw_aggregation(self.inputs)?.calibrated_cost(self.calibration)
+        estimate_raw_aggregation(self.inputs)?.calibrated_cost(&self.calibration)
     }
 
     pub fn candidate_resources(
@@ -253,13 +258,37 @@ impl AnalyticalCostModel {
 fn sketch_from(
     node: &SummaryNode,
 ) -> Option<(&asap_types::post_asap::SketchKind, &GroupingStrategy)> {
-    node.schema
-        .fields
-        .iter()
-        .find_map(|field| match &field.dtype {
+    // A caller-visible candidate is normally rooted at `SummaryEstimate`,
+    // whose output schema is deliberately plain.  The physical sketch and
+    // its sized parameters live on the nested `SummaryAgg`, so inspecting
+    // only the root schema silently loses precisely the information this
+    // model needs.
+    match &node.expr {
+        asap_types::post_asap::SummaryExpr::SummaryAgg { family, child, .. } => match family {
             SummaryFamilyType::Sketch(kind, grouping) => Some((kind, grouping)),
-            _ => None,
-        })
+            _ => sketch_from(child),
+        },
+        asap_types::post_asap::SummaryExpr::SummaryJoin {
+            family,
+            outer,
+            inner,
+            ..
+        } => match family {
+            SummaryFamilyType::Sketch(kind, grouping) => Some((kind, grouping)),
+            _ => sketch_from(outer).or_else(|| sketch_from(inner)),
+        },
+        asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. }
+        | asap_types::post_asap::SummaryExpr::SummaryDelete { summary_input, .. } => {
+            sketch_from(summary_input)
+        }
+        asap_types::post_asap::SummaryExpr::SummarySubtract { left, right } => {
+            sketch_from(left).or_else(|| sketch_from(right))
+        }
+        asap_types::post_asap::SummaryExpr::SummaryMerge { children } => {
+            children.iter().find_map(|child| sketch_from(child))
+        }
+        asap_types::post_asap::SummaryExpr::KeepPreAsap(_) => None,
+    }
 }
 
 impl CostModel for AnalyticalCostModel {
@@ -268,7 +297,21 @@ impl CostModel for AnalyticalCostModel {
         intent: &AggIntent,
         candidates: &[SketchAlgorithm],
     ) -> Vec<SketchAlgorithm> {
-        DefaultCostModel.rank_candidates(intent, candidates)
+        let Some(accuracy) = accuracy_target(intent) else {
+            return DefaultCostModel.rank_candidates(intent, candidates);
+        };
+        let (epsilon, delta) = accuracy_budget(accuracy);
+        let mut ranked = DefaultCostModel.rank_candidates(intent, candidates);
+        ranked.sort_by(|left, right| {
+            let cost = |algorithm: &SketchAlgorithm| {
+                let params = self.size_params(algorithm.clone(), intent, epsilon, delta);
+                estimate_sketch_aggregation(algorithm.clone(), &params, self.inputs)
+                    .and_then(|resources| resources.calibrated_cost(&self.calibration))
+                    .unwrap_or(f64::INFINITY)
+            };
+            cost(left).total_cmp(&cost(right))
+        });
+        ranked
     }
 
     fn estimated_subpopulation_count(
@@ -280,7 +323,7 @@ impl CostModel for AnalyticalCostModel {
 
     fn estimate_cost(&self, candidate: &ReplacementSubDAG, _target: &TargetSubDAG<'_>) -> f64 {
         self.candidate_resources(candidate)
-            .and_then(|estimate| estimate.calibrated_cost(self.calibration))
+            .and_then(|estimate| estimate.calibrated_cost(&self.calibration))
             .unwrap_or(f64::NAN)
     }
 }
@@ -303,7 +346,7 @@ mod tests {
             cost_per_cpu_op: 1e-6,
             cost_per_scan_byte: 1e-8,
             cost_per_retained_byte: 1e-9,
-            version: "test-calibration-v1",
+            version: "test-calibration-v1".to_string(),
         }
     }
 
@@ -332,7 +375,7 @@ mod tests {
     fn repeated_raw_scans_make_a_more_complex_sketch_plan_cheaper() {
         let raw = estimate_raw_aggregation(inputs(100))
             .unwrap()
-            .calibrated_cost(calibration())
+            .calibrated_cost(&calibration())
             .unwrap();
         let sketch = estimate_sketch_aggregation(
             SketchAlgorithm::Cms,
@@ -343,7 +386,7 @@ mod tests {
             inputs(100),
         )
         .unwrap()
-        .calibrated_cost(calibration())
+        .calibrated_cost(&calibration())
         .unwrap();
         assert!(sketch < raw, "sketch={sketch}, raw={raw}");
     }
@@ -411,5 +454,40 @@ mod tests {
                 "DDSketch"
             ))
         );
+    }
+
+    #[test]
+    fn planner_ranks_supported_candidates_by_the_same_calibrated_formula() {
+        let model = AnalyticalCostModel {
+            inputs: inputs(100),
+            calibration: calibration(),
+        };
+        let intent = AggIntent::Count {
+            accuracy: asap_types::types::AccuracyTarget::EpsilonDelta {
+                epsilon: 0.01,
+                delta: 0.01,
+            },
+        };
+        let ranked = model.rank_candidates(
+            &intent,
+            &[SketchAlgorithm::CountSketch, SketchAlgorithm::Cms],
+        );
+        assert_eq!(
+            ranked,
+            vec![SketchAlgorithm::Cms, SketchAlgorithm::CountSketch]
+        );
+
+        let (epsilon, delta) = accuracy_budget(accuracy_target(&intent).unwrap());
+        let costs: Vec<f64> = ranked
+            .iter()
+            .map(|algorithm| {
+                let params = model.size_params(algorithm.clone(), &intent, epsilon, delta);
+                estimate_sketch_aggregation(algorithm.clone(), &params, model.inputs)
+                    .unwrap()
+                    .calibrated_cost(&model.calibration)
+                    .unwrap()
+            })
+            .collect();
+        assert!(costs[0] < costs[1], "ranked costs were {costs:?}");
     }
 }
