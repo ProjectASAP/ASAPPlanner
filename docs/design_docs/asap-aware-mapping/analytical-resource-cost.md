@@ -130,6 +130,10 @@ not disagree. Zero bootstrap work is not a fabricated at-rest backlog.
 
 The streaming raw baseline is rooted at the same planning-time rows, logical
 bytes, source scan, and source-coverage identity as the summary bootstrap.
+Each raw baseline and candidate root is explicitly bound to its target query;
+the estimator never selects an arbitrary aggregation from a process-wide
+evidence map. All aggregation states bound to that target must agree on the
+single-source ingestion evolution used by the current raw evidence shape.
 Each evaluation adds rows and bytes that arrived since planning time, using
 the recurrence's evaluation offsets. A baseline whose bootstrap facts do not
 match every state attached to that source is unavailable. Multi-source raw
@@ -372,13 +376,24 @@ state, execution multiplicity, and source coverage. The adapter calls
 `estimate_physical_dag_comparison`; it never calls `DefaultCostModel` or a
 structural-node-count fallback for final cost.
 
+`SummaryAgg` is not a traversal leaf: its child is recursively costed. Every
+`KeepPreAsap` child requires horizon preprocessing CPU and workspace evidence
+for that exact `Rc` identity, including an apparently simple scan. This CPU
+explicitly excludes summary insertion. Bootstrap/source I/O is owned only by
+the enclosing aggregation evidence, so recursion cannot charge the same read
+twice. Missing evidence makes the whole candidate unavailable. The scan source and leaf
+predicates discovered in each aggregation child must equal the indexed
+`SourceCoverage`; an index cannot relabel source B as source A. The current
+streaming evidence assigns one source to each aggregation input, so an
+aggregation child with multiple source scans fails closed.
+
 For bootstrap rows `B`, arriving rows `U`, active windows `A`, query
 evaluations `Q`, physical instances `P`, and unique `SummaryAgg` states `S`:
 
 ```text
 insert calls   = sum_per_state(B * bootstrap_window_count + U * A)
-merge calls    = Q * P * SummaryMerge pairwise operations in the DAG
-subtract calls = Q * P * SummarySubtract nodes in the DAG
+merge calls    = Q * P for each physical SummaryMerge operator
+subtract calls = Q * P for each physical SummarySubtract operator
 delete calls   = expiration_rate * active_seconds * delete_routing_fanout
 readout calls  = Q * P * SummaryEstimate nodes in the DAG
 ```
@@ -387,8 +402,11 @@ Here `P` is the provider-declared execution multiplicity of each physical
 operator, not a structural node count. Bootstrap scans are de-duplicated only
 when their provider-owned physical-read identities match. Sharing the same
 logical `SourceCoverage` is insufficient because two builds may independently
-read that source. Persistent state is summed, while transient operator
-workspace uses the DAG liveness peak rather than a structural sum.
+read that source. Persistent state is summed. Transient liveness recursively
+adds a parent operator's workspace to the child outputs/workspaces it consumes;
+binary and n-ary consumers conservatively keep their input workspaces live
+together. This avoids undercounting a join or readout while its children are
+still live.
 
 `B` comes from fresh `DataWorkload.input_cardinality`. For `Shared` and
 `ContinuouslyMaintained`, `U` is the conservative ceiling of
@@ -519,11 +537,15 @@ node-to-guarantee bindings plus the horizon and expected reads. Every
 `SummaryAgg` and `SummaryJoin` is bound to physical evidence by exact `Rc`
 identity, so heterogeneous states are costed independently and shared states
 once. Merge, subtract, delete, readout, and join participate in automatic
-candidate ranking. If the root
-needs unavailable operation evidence, the
+candidate ranking. Exhaustive whole-root scoring is capped at 4,096 lifecycle
+combinations because an arbitrary whole-candidate hook cannot be soundly
+pruned by primitive costs; a larger space is unavailable rather than consuming
+exponential planner time. If the root needs unavailable operation evidence, the
 hook returns unavailable. Global selection then excludes that summary and
-materialization retains the raw expression; it never falls back to the partial
-`SummaryAgg` sum.
+materialization retains the raw expression. A missing raw estimate also forces
+raw fallback, because no public selection/materialization path may publish an
+uncompared summary. The planner never falls back to the partial `SummaryAgg`
+sum.
 
 Before applying the following arithmetic, callers validate exact equality of
 the raw and selected alternative's `ComparisonScope`, and use the same
