@@ -315,6 +315,13 @@ aggregate CPU   = input_rows
 
 Every raw evaluation rebuilds this state and rereads the source.
 
+An exact quantile does not use that formula. Its current in-memory baseline
+charges the source scan plus `input_rows × ceil(log2(input_rows))` sort work
+per evaluation and retains `input_bytes` as a conservative value-buffer upper
+bound. Exact cardinality is unavailable until distinct-count evidence for the
+measured value exists; `group_count` describes GROUP BY tuples and must not be
+substituted for it.
+
 ### Count-ranked Top-K
 
 The logical form `TopK(Count GROUP BY key)` can be implemented by one global
