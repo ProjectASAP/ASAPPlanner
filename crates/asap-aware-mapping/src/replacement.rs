@@ -2238,9 +2238,21 @@ pub struct PlanSpace<Id> {
 #[derive(Default)]
 pub(crate) struct CandidateCostOverrides {
     costs: HashMap<(*const QueryExpr, *const ReplacementSubDAG), Cost>,
+    raw_costs: HashMap<*const QueryExpr, Cost>,
+    /// Targets for which the caller requested an atomic raw-vs-summary
+    /// decision. Other memo groups continue through ordinary CSE selection.
+    finalized_targets: HashSet<*const QueryExpr>,
 }
 
 impl CandidateCostOverrides {
+    pub(crate) fn finalize_target(&mut self, target: &Rc<QueryExpr>) {
+        self.finalized_targets.insert(Rc::as_ptr(target));
+    }
+
+    fn finalizes(&self, target: &Rc<QueryExpr>) -> bool {
+        self.finalized_targets.contains(&Rc::as_ptr(target))
+    }
+
     pub(crate) fn insert(
         &mut self,
         target: &Rc<QueryExpr>,
@@ -2255,6 +2267,14 @@ impl CandidateCostOverrides {
         self.costs
             .get(&(Rc::as_ptr(target), candidate as *const _))
             .copied()
+    }
+
+    pub(crate) fn insert_raw(&mut self, target: &Rc<QueryExpr>, cost: Cost) {
+        self.raw_costs.insert(Rc::as_ptr(target), cost);
+    }
+
+    fn raw(&self, target: &Rc<QueryExpr>) -> Option<Cost> {
+        self.raw_costs.get(&Rc::as_ptr(target)).copied()
     }
 }
 
@@ -3069,19 +3089,26 @@ impl<Id> PlanSpace<Id> {
             let effective = effective_uses.get(ptr).copied().unwrap_or(0);
             effective_uses.insert(*ptr, effective);
 
-            let lifecycle_choice = candidate_costs.and_then(|costs| {
-                group
-                    .candidates
-                    .iter()
-                    .filter_map(|candidate| {
-                        costs
-                            .get(&group.target, candidate)
-                            .map(|cost| (candidate, cost))
-                    })
-                    .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0))
-                    .map(|(candidate, _)| candidate)
-            });
-            let chosen = if lifecycle_choice.is_some() {
+            let lifecycle_choice = candidate_costs
+                .filter(|costs| costs.finalizes(&group.target))
+                .map(|costs| {
+                    let summary = group
+                        .candidates
+                        .iter()
+                        .filter_map(|candidate| {
+                            costs
+                                .get(&group.target, candidate)
+                                .map(|cost| (candidate, cost))
+                        })
+                        .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0));
+                    match (summary, costs.raw(&group.target)) {
+                        (Some((_, summary_cost)), Some(raw)) if raw.0 <= summary_cost.0 => None,
+                        (Some((candidate, _)), _) => Some(candidate),
+                        (None, Some(_)) => None,
+                        (None, None) => None,
+                    }
+                });
+            let chosen = if let Some(lifecycle_choice) = lifecycle_choice {
                 lifecycle_choice
             } else if cost_model.candidate_cost_covers_complete_plan() {
                 let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
