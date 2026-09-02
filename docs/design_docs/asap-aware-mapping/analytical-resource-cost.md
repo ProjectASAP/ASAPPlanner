@@ -334,11 +334,16 @@ deduplicated by physical identity.
 `lower_query_physical_dag` recursively lowers a resolved `Rc<QueryExpr>` and
 returns a `PhysicalDag` containing both its nodes and root ID. It consumes the
 existing query and physical-operator enums; it does not introduce a parallel
-logical operator vocabulary. A `PhysicalNodeEvidenceProvider` resolves one
-atomic `PhysicalNodeEvidence` for each deterministic physical node ID. That
-value reuses the authoritative `OperatorStatistics` contract and adds only
-`output_buffer_bytes`, because logical edge bytes are not an allocation.
-Missing evidence makes the entire query unavailable.
+logical operator vocabulary. For every occurrence, the lowerer sends a
+`PhysicalNodeRequest` containing the logical node, selected existing
+`PhysicalOperator`, occurrence and synthetic-role metadata, already-lowered
+child physical IDs, and any source coverage to a
+`PhysicalNodeEvidenceProvider`. The provider atomically returns its own stable
+`physical_id`, the authoritative `OperatorStatistics`, and explicit
+`output_buffer_bytes`; logical edge bytes are never substituted for an
+allocation. Missing evidence makes the entire query unavailable. The returned
+`PhysicalDag` snapshots this evidence so costing does not re-read a live
+catalog after lowering.
 
 Each lowered Scan is bound to exactly one `SourceCoverage` in the comparison
 scope by the existing source and canonical predicate values. The bound value
@@ -348,6 +353,10 @@ choosing an arbitrary snapshot. When a predicate-bearing logical Scan expands
 to Scan → Filter, the synthetic Scan has its own physical ID, statistics, and
 buffer evidence and carries that exact coverage; the Filter has separate
 evidence and no source coverage.
+After lowering, the multiset of distinct physical Scan coverages must consume
+the comparison scope's source coverages exactly. Thus a candidate cannot omit
+a source that exists in the comparison boundary, while a provider-declared
+shared physical Scan is counted once.
 
 The lowering validates every physical edge before costing:
 
@@ -374,10 +383,10 @@ The supported mappings are:
 | Dedup | Deduplicate |
 | Equi-Join | HashJoin with an evidence-selected build side |
 | Concat or `UNION ALL` | Concat |
-| Sort | in-memory Sort |
-| global Sort followed by Limit | heap TopK, with `k = offset + n` from the query IR |
+| Sort with at least one ordering key | in-memory Sort |
+| global non-empty-key Sort followed by Limit | heap TopK, with `k = offset + n` from the query IR |
 | partitioned Sort followed by Limit | Sort → Limit |
-| SQLWindowFunc | Window |
+| RowNumber/Rank/DenseRank SQLWindowFunc with non-empty order_by | ordered in-memory Window |
 | TimeShift | PassThrough |
 
 Per-entity reductions, HAVING, ordered/distribution-dependent intents such as
@@ -387,15 +396,13 @@ also uses the bound left and right output schemas to prove that every equality
 compares one column from each side; same-side or out-of-range `ColumnId`s fail
 closed.
 
-Logical identity is the address of the existing `Rc<QueryExpr>` allocation.
-Repeated references therefore lower once and every parent points to the same
-physical ID. The resulting node IDs are deterministic within a lowering run;
-they are not persistent query identifiers.
-
-This generic lowering currently creates raw-query operators, all with
-`ExecutionMultiplicity::PerEvaluation`, zero retained state, and a conservative
-full-output edge buffer. A deployment with verified batching may construct
-`PhysicalDagNode` values with smaller `output_buffer_bytes` directly.
+An `Rc<QueryExpr>` address is not physical identity. Every logical occurrence
+is independent unless the provider returns the same non-empty `physical_id`.
+Repeated IDs deduplicate only when operator, children, coverage, statistics,
+and buffer evidence are identical; conflicting reuse fails closed. This
+generic lowering creates raw-query operators with
+`ExecutionMultiplicity::PerEvaluation` and zero retained state. Buffer sizes
+are always provider-owned physical evidence.
 
 Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, PromQL
 range/subquery execution, vector matching, and PromQL-specific enrichment/
