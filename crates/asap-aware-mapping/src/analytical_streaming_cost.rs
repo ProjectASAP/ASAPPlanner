@@ -18,7 +18,7 @@ use crate::analytical_cost::{AnalyticalCostError, ResourceCalibration, ResourceE
 use crate::analytical_statistics::evaluations_in_horizon;
 use crate::cost_model::{Cost, CostModel, DefaultCostModel};
 use crate::recurrence::CostRate;
-use crate::replacement::{ReplacementSubDAG, TargetSubDAG};
+use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
 use crate::summary_maintenance_lifecycle::{
     evaluation_schedule, maintenance_mode, SummaryMaintenanceCapabilities,
     SummaryMaintenanceLifecycleCostInputs,
@@ -192,6 +192,7 @@ pub struct StreamingAnalyticalCostModel {
     pub summary_inputs: StreamingSummaryInputs,
     pub raw: StreamingRawInputEvidence,
     pub cpu: SummaryOperationCpuEvidence,
+    pub join: Option<SummaryJoinEvidence>,
     pub calibration: ResourceCalibration,
     pub capabilities: SummaryMaintenanceCapabilities,
 }
@@ -245,6 +246,20 @@ impl StreamingAnalyticalCostModel {
 }
 
 impl CostModel for StreamingAnalyticalCostModel {
+    fn candidate_cost(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &TargetSubDAG<'_>,
+    ) -> Option<Cost> {
+        match &candidate.replacement {
+            // Lifecycle selection supplies a complete override. If it cannot,
+            // the candidate remains unavailable rather than receiving this
+            // trait's structural fallback.
+            Replacement::Summary(_) => None,
+            Replacement::Rewrite(_) => DefaultCostModel.candidate_cost(candidate, target),
+        }
+    }
+
     fn rank_candidates(
         &self,
         intent: &AggIntent,
@@ -269,6 +284,28 @@ impl CostModel for StreamingAnalyticalCostModel {
         _summary: &SummaryNode,
     ) -> SummaryMaintenanceCapabilities {
         self.capabilities
+    }
+
+    fn complete_summary_candidate_cost(
+        &self,
+        root: &SummaryNode,
+        guarantees: &[SummaryMaintenanceLifecycleGuarantee],
+        _deployment_sum: Option<Cost>,
+    ) -> Option<Cost> {
+        let guarantee = guarantees.first()?;
+        if !guarantees.iter().all(|candidate| candidate == guarantee) {
+            return None;
+        }
+        self.calibrated(
+            estimate_incremental_summary_maintenance_with_join(
+                root,
+                guarantee,
+                self.summary_inputs,
+                self.cpu,
+                self.join,
+            )
+            .ok()?,
+        )
     }
 
     fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
@@ -789,6 +826,7 @@ mod tests {
                 readout_cpu_ops: Some(3.0),
                 ..SummaryOperationCpuEvidence::default()
             },
+            join: None,
             calibration: ResourceCalibration {
                 cost_per_cpu_op: 1.0,
                 cost_per_scan_byte: 1.0,
@@ -913,6 +951,40 @@ mod tests {
         .unwrap();
         assert!(cheap_plan.selected_raw_recompute);
         assert_eq!(cheap_plan.raw_recompute_total_cost, Some(Cost(5.0)));
+    }
+
+    #[test]
+    fn lifecycle_plan_does_not_fall_back_to_partial_agg_cost_for_a_join_root() {
+        let workload = streaming_workload();
+        let model = streaming_model();
+        let plan = plan_summary_maintenance_lifecycles(
+            summary_join(),
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(plan.deployments.len(), 2);
+        assert_eq!(plan.summary_total_cost, None);
+
+        let mut costed = model;
+        costed.join = Some(SummaryJoinEvidence {
+            matched_state_pairs_per_evaluation: 2,
+            cpu_ops_per_matched_pair: 3.0,
+            working_memory_bytes: 64,
+        });
+        let costed_plan = plan_summary_maintenance_lifecycles(
+            summary_join(),
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &costed,
+        )
+        .unwrap();
+        assert!(costed_plan.summary_total_cost.is_some());
     }
 
     #[test]
@@ -1418,6 +1490,7 @@ mod tests {
                 readout_cpu_ops: Some(3.0),
                 ..SummaryOperationCpuEvidence::default()
             },
+            join: None,
             calibration: ResourceCalibration {
                 cost_per_cpu_op: 1.0,
                 cost_per_scan_byte: 1.0,

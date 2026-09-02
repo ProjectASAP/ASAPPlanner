@@ -500,12 +500,15 @@ The intended end-to-end selection pipeline is:
 The at-rest planner bridge executes this pipeline only for the compact shapes
 listed above. The streaming adapter connects raw recomputation and primitive
 summary lifecycle costs to the existing global lifecycle-selection hooks.
-Whole-DAG streaming estimates cover selected merge/subtract/delete/readout/join
-roots, but automatic lifecycle ranking currently sums the unique
-`SummaryAgg` deployments; it does not yet replace that sum with the whole-root
-operator estimate. Consequently a downstream selector must use the whole-DAG
-estimate when these root operators affect the comparison, and must fail closed
-if it cannot do so.
+After the lifecycle planner has selected compatible guarantees for the unique
+`SummaryAgg` deployments, `complete_summary_candidate_cost` replaces their
+primitive sum with one whole-root estimate. Merge, subtract, delete, readout,
+and join therefore participate in automatic candidate ranking. If the root
+needs unavailable operation evidence, or its state deployments do not share a
+lifecycle guarantee that the current whole-root estimator can represent, the
+hook returns unavailable. Global selection then excludes that summary and
+materialization retains the raw expression; it never falls back to the partial
+`SummaryAgg` sum.
 
 Before applying the following arithmetic, callers validate exact equality of
 the raw and selected alternative's `ComparisonScope`, and use the same
