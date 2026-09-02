@@ -65,8 +65,10 @@ use asap_aware_mapping::analytical_statistics::ComparisonScope;
 #[cfg(test)]
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::cost_model::{Cost, CostModel};
+#[cfg(test)]
+use asap_aware_mapping::replacement::search_workload;
 use asap_aware_mapping::replacement::{
-    default_strategies_with_evidence, search_workload, search_workload_with, Replacement,
+    default_strategies_with, default_strategies_with_evidence, search_workload_with, Replacement,
     ReplacementSubDAG,
 };
 use asap_aware_mapping::{AccuracyEvidenceProvider, PropagationStats};
@@ -84,6 +86,7 @@ use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PlannerCostDocument {
     calibration: ResourceCalibration,
     targets: Vec<TargetPhysicalEvidence>,
@@ -126,6 +129,7 @@ fn normalize_replacement_identity(value: &mut serde_json::Value) {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TargetPhysicalEvidence {
     target: QueryExpr,
     scope: ComparisonScopeEvidence,
@@ -134,6 +138,7 @@ struct TargetPhysicalEvidence {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ComparisonScopeEvidence {
     data_arrival: asap_types::workload::DataArrival,
     planning_time_ms: u64,
@@ -178,6 +183,7 @@ impl ComparisonScopeEvidence {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct QueryNodePhysicalEvidence {
     logical_node: QueryExpr,
     operator: asap_aware_mapping::analytical_cost::PhysicalOperator,
@@ -302,9 +308,19 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
 
 struct ExportPlannerCostModel<'a> {
     document: &'a PlannerCostDocument,
+    used_targets: RefCell<std::collections::HashSet<usize>>,
+    used_candidates: RefCell<std::collections::HashSet<(usize, usize)>>,
 }
 
 impl ExportPlannerCostModel<'_> {
+    fn new(document: &PlannerCostDocument) -> ExportPlannerCostModel<'_> {
+        ExportPlannerCostModel {
+            document,
+            used_targets: RefCell::new(std::collections::HashSet::new()),
+            used_candidates: RefCell::new(std::collections::HashSet::new()),
+        }
+    }
+
     fn bound<'a>(
         &'a self,
         candidate: &ReplacementSubDAG,
@@ -314,19 +330,25 @@ impl ExportPlannerCostModel<'_> {
             .document
             .targets
             .iter()
-            .filter(|entry| entry.target == **target.root);
-        let target_evidence = targets.next()?;
+            .enumerate()
+            .filter(|(_, entry)| entry.target == **target.root);
+        let (target_index, target_evidence) = targets.next()?;
         if targets.next().is_some() {
             return None;
         }
         let mut candidates = target_evidence
             .candidates
             .iter()
-            .filter(|entry| entry.matches(candidate));
-        let candidate_evidence = candidates.next()?;
+            .enumerate()
+            .filter(|(_, entry)| entry.matches(candidate));
+        let (candidate_index, candidate_evidence) = candidates.next()?;
         if candidates.next().is_some() {
             return None;
         }
+        self.used_targets.borrow_mut().insert(target_index);
+        self.used_candidates
+            .borrow_mut()
+            .insert((target_index, candidate_index));
         Some((
             ExportPhysicalProvider {
                 target: target_evidence,
@@ -335,6 +357,25 @@ impl ExportPlannerCostModel<'_> {
             },
             &self.document.calibration,
         ))
+    }
+
+    fn all_document_evidence_used(&self) -> bool {
+        let used_targets = self.used_targets.borrow();
+        let used_candidates = self.used_candidates.borrow();
+        self.document
+            .targets
+            .iter()
+            .enumerate()
+            .all(|(target_index, target)| {
+                used_targets.contains(&target_index)
+                    && target
+                        .candidates
+                        .iter()
+                        .enumerate()
+                        .all(|(candidate_index, _)| {
+                            used_candidates.contains(&(target_index, candidate_index))
+                        })
+            })
     }
 
     fn annotations(
@@ -918,14 +959,11 @@ fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
     }
 }
 
-/// Run `asap_aware_mapping::replacement::search_workload` (its own
-/// `default_strategies()` — which includes `AvgToSumOverCountStrategy` as of
-/// #282 — is exactly the strategy set this binary wants; no custom list
-/// needed) over every lowered query, rank each discovered `MemoGroup` via
-/// `PlanSpace::global_selection`, and build both `--post-asap` outputs from the
-/// exact same set of winning candidates (see [`Winner`]), so the flat
-/// `replacements` list and the merged `post_graph` can never disagree about
-/// which candidate won for a given target.
+/// Search every lowered query with strategies bound to the supplied cost
+/// model, rank each discovered `MemoGroup` via `PlanSpace::global_selection`,
+/// and build both `--post-asap` outputs from the exact same set of winning
+/// candidates (see [`Winner`]). The flat `replacements` list and merged
+/// `post_graph` therefore cannot disagree about which candidate won.
 #[allow(dead_code)]
 fn run_post_asap_with_progress(
     lowered_queries: &[(String, String, QueryExpr)],
@@ -947,9 +985,13 @@ fn run_post_asap_with_progress(
         strategies = default_strategies_with_evidence(cost_model, evidence);
         search_workload_with(roots, &strategies)
     } else {
-        search_workload(roots)
+        strategies = default_strategies_with(cost_model);
+        search_workload_with(roots, &strategies)
     };
     let selection = space.global_selection(cost_model);
+    if export_model.is_some_and(|model| !model.all_document_evidence_used()) {
+        return raw_only_post_asap_results();
+    }
 
     // A group's top candidate can be `keep_pre_asap`'s own conservative
     // fallback — `Replacement::Summary(SummaryNode { expr:
@@ -1265,7 +1307,7 @@ async fn main() {
 
     if post_asap {
         let results = if let Some(document) = planner_cost.as_ref() {
-            let model = ExportPlannerCostModel { document };
+            let model = ExportPlannerCostModel::new(document);
             run_post_asap_with_progress(
                 &lowered_queries,
                 progress,
@@ -1519,10 +1561,10 @@ mod tests {
     fn candidate_plan(candidate: &ReplacementSubDAG) -> serde_json::Value {
         match &candidate.replacement {
             Replacement::Summary(summary) => {
-                serde_json::to_value(dag_export::export_summary(summary)).unwrap()
+                serde_json::to_value(dag_export::export_summary(summary.as_ref())).unwrap()
             }
             Replacement::Rewrite(rewrite) => {
-                serde_json::to_value(dag_export::export(rewrite)).unwrap()
+                serde_json::to_value(dag_export::export(rewrite.as_ref())).unwrap()
             }
         }
     }
@@ -1585,7 +1627,7 @@ mod tests {
         let parsed = parse_planner_cost_document(&json).unwrap();
         assert_eq!(parsed.targets[0].target, query);
         assert!(parsed.targets[0].candidates[0].matches(&candidate));
-        let model = ExportPlannerCostModel { document: &parsed };
+        let model = ExportPlannerCostModel::new(&parsed);
         let target_rc = Rc::new(query.clone());
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
         let (provider, calibration) = model.bound(&candidate, &target).expect("exact binding");
@@ -1615,31 +1657,25 @@ mod tests {
         duplicate_target
             .targets
             .push(duplicate_target.targets[0].clone());
-        assert!(ExportPlannerCostModel {
-            document: &duplicate_target
-        }
-        .candidate_cost(&candidate, &target)
-        .is_none());
+        assert!(ExportPlannerCostModel::new(&duplicate_target)
+            .candidate_cost(&candidate, &target)
+            .is_none());
 
         let mut duplicate_candidate = document.clone();
         let candidate_entry = duplicate_candidate.targets[0].candidates[0].clone();
         duplicate_candidate.targets[0]
             .candidates
             .push(candidate_entry);
-        assert!(ExportPlannerCostModel {
-            document: &duplicate_candidate
-        }
-        .candidate_cost(&candidate, &target)
-        .is_none());
+        assert!(ExportPlannerCostModel::new(&duplicate_candidate)
+            .candidate_cost(&candidate, &target)
+            .is_none());
 
         let mut duplicate_query = document;
         let query_entry = duplicate_query.targets[0].query_nodes[0].clone();
         duplicate_query.targets[0].query_nodes.push(query_entry);
-        assert!(ExportPlannerCostModel {
-            document: &duplicate_query
-        }
-        .candidate_cost(&candidate, &target)
-        .is_none());
+        assert!(ExportPlannerCostModel::new(&duplicate_query)
+            .candidate_cost(&candidate, &target)
+            .is_none());
     }
 
     #[test]
@@ -1652,7 +1688,7 @@ mod tests {
         missing.targets[0].query_nodes.pop();
         let missing = parse_planner_cost_document(&serde_json::to_string(&missing).unwrap())
             .expect("well-formed but incomplete evidence document");
-        assert!(ExportPlannerCostModel { document: &missing }
+        assert!(ExportPlannerCostModel::new(&missing)
             .candidate_cost(&candidate, &target)
             .is_none());
 
@@ -1662,7 +1698,7 @@ mod tests {
         unused.targets[0].query_nodes.push(extra);
         let unused = parse_planner_cost_document(&serde_json::to_string(&unused).unwrap())
             .expect("well-formed document with unused evidence");
-        assert!(ExportPlannerCostModel { document: &unused }
+        assert!(ExportPlannerCostModel::new(&unused)
             .candidate_cost(&candidate, &target)
             .is_none());
     }
@@ -1680,11 +1716,9 @@ mod tests {
             .expect("invalid physical semantics are checked by the estimator");
         let target_rc = Rc::new(query);
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
-        assert!(ExportPlannerCostModel {
-            document: &document
-        }
-        .candidate_cost(&candidate, &target)
-        .is_none());
+        assert!(ExportPlannerCostModel::new(&document)
+            .candidate_cost(&candidate, &target)
+            .is_none());
     }
 
     #[test]
@@ -1744,9 +1778,7 @@ mod tests {
         };
         let document = parse_planner_cost_document(&serde_json::to_string(&document).unwrap())
             .expect("complete physical evidence");
-        let model = ExportPlannerCostModel {
-            document: &document,
-        };
+        let model = ExportPlannerCostModel::new(&document);
         let selection = space.global_selection(&model);
         let chosen = selection
             .groups()
@@ -1779,6 +1811,51 @@ mod tests {
         let error = parse_planner_cost_document(r#"{"inputs":{"group_count":10}}"#)
             .expect_err("legacy payload must fail");
         assert!(error.contains("compact analytical-cost payload"));
+    }
+
+    #[test]
+    fn planner_cost_json_rejects_unknown_fields() {
+        let (_, _, document) = cost_fixture();
+        let mut value = serde_json::to_value(document).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".into(), serde_json::Value::Bool(true));
+        let error = parse_planner_cost_document(&value.to_string())
+            .expect_err("unknown evidence fields must not be ignored");
+        assert!(error.contains("unknown field"));
+    }
+
+    #[test]
+    fn unused_target_or_candidate_evidence_keeps_export_raw_only() {
+        let (query, _, document) = cost_fixture();
+        let lowered = vec![("q".into(), "fixture".into(), query.clone())];
+
+        let mut extra_candidate = document.clone();
+        let mut unused = extra_candidate.targets[0].candidates[0].clone();
+        *unused.plan_mut() = serde_json::json!({"unmatched": true});
+        extra_candidate.targets[0].candidates.push(unused);
+        let extra_candidate =
+            parse_planner_cost_document(&serde_json::to_string(&extra_candidate).unwrap()).unwrap();
+        let model = ExportPlannerCostModel::new(&extra_candidate);
+        let results = run_post_asap_with_progress(&lowered, false, &model, Some(&model), None);
+        assert!(results.replacements.is_empty());
+
+        let mut extra_target = document;
+        let mut unused = extra_target.targets[0].clone();
+        unused.target = QueryExpr::Scan {
+            source: asap_types::pre_asap::Source::Table {
+                table_ref: "unused".into(),
+            },
+            predicates: vec![],
+            schema: Schema::new(vec![Column::new("v", DataType::Int64, false)]),
+        };
+        extra_target.targets.push(unused);
+        let extra_target =
+            parse_planner_cost_document(&serde_json::to_string(&extra_target).unwrap()).unwrap();
+        let model = ExportPlannerCostModel::new(&extra_target);
+        let results = run_post_asap_with_progress(&lowered, false, &model, Some(&model), None);
+        assert!(results.replacements.is_empty());
     }
 
     #[test]
