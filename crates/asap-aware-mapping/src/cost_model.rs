@@ -99,6 +99,15 @@ pub struct CseCandidate<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Cost(pub f64);
 
+/// One physical summary state and the lifecycle selected for that exact DAG
+/// node. Node identity is preserved so whole-DAG models can bind per-state
+/// evidence without relying on traversal order.
+pub struct CostedSummaryDeployment<'a> {
+    pub summary: &'a SummaryNode,
+    pub guarantee: &'a SummaryMaintenanceLifecycleGuarantee,
+    pub selected_cost: Cost,
+}
+
 impl Cost {
     /// The cost of an operation that costs nothing at all.
     pub const ZERO: Cost = Cost(0.0);
@@ -559,10 +568,16 @@ pub trait CostModel {
     fn complete_summary_candidate_cost(
         &self,
         _root: &SummaryNode,
-        _guarantees: &[SummaryMaintenanceLifecycleGuarantee],
-        deployment_sum: Option<Cost>,
+        deployments: &[CostedSummaryDeployment<'_>],
+        _horizon: Option<Horizon>,
+        _expected_reads: Option<f64>,
     ) -> Option<Cost> {
-        deployment_sum
+        Some(Cost(
+            deployments
+                .iter()
+                .map(|deployment| deployment.selected_cost.0)
+                .sum(),
+        ))
     }
 
     /// Cost of evaluating `target` directly from its logical/raw inputs once.
@@ -570,6 +585,18 @@ pub trait CostModel {
     /// the aggregate cost of the selected summary deployments.
     fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
         None
+    }
+
+    /// Complete raw cost over the comparison context. The default preserves
+    /// per-read models; context-aware models override this when raw input
+    /// cardinality changes between evaluations.
+    fn raw_query_recompute_total_cost(
+        &self,
+        target: &QueryExpr,
+        expected_reads: f64,
+    ) -> Option<Cost> {
+        self.raw_query_recompute_cost(target)
+            .map(|per_read| Cost(per_read.0 * expected_reads))
     }
 }
 
