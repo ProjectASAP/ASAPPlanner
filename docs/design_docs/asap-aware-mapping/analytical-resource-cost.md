@@ -155,6 +155,10 @@ OperatorStatistics {
     aggregate_value_bytes,
     k,
     hash_join_build_side,
+    promql: PromqlOperatorStatistics {
+        input_series, output_series, evaluation_steps,
+        window_samples_per_series, subquery_steps, scalar_ops_per_row,
+    },
 }
 ```
 
@@ -291,11 +295,22 @@ The supported mappings are:
 | global non-empty-key Sort followed by Limit | heap TopK, with `k = offset + n` from the query IR |
 | partitioned Sort followed by Limit | Sort → Limit |
 | RowNumber/Rank/DenseRank SQLWindowFunc with non-empty order_by | ordered in-memory Window |
+| TimeRange | PromqlRange sliding window |
+| PromqlSubquery | materialized PromqlSubquery |
+| BinaryOp | two-input PromqlVectorBinary; vector/vector uses explicit label-match state |
+| PromqlRelabel | PromqlRelabel |
+| PromqlInfoEnrich | left input plus an explicit scoped info-metric Scan |
+| PromqlSeriesSample | PromqlSeriesSample using the existing SampleKind |
+| PromqlVectorFromScalar / PromqlScalarFromVector | unary PromqlBridge |
+| PromqlScalarBridge(float) / EvalTimestamp | zero-input PromqlScalarLeaf |
+| supported fixed-state per-entity reduction | PromqlPerSeries |
+| Absent / AbsentOverTime | PromqlPresence |
 | TimeShift | PassThrough |
 
-Per-entity reductions, HAVING, ordered/distribution-dependent intents such as
-exact quantile or cardinality, Top-K aggregate intents, and extensions remain
-unavailable until they have an explicit physical algorithm. Hash-join lowering
+HAVING, ordered/distribution-dependent intents such as exact quantile or
+cardinality, Top-K aggregate intents, non-fixed-state per-entity algorithms,
+and extensions remain unavailable until they have an explicit physical
+algorithm. Hash-join lowering
 also uses the bound left and right output schemas to prove that every equality
 compares one column from each side; same-side or out-of-range `ColumnId`s fail
 closed.
@@ -314,11 +329,27 @@ embedded physical identity and that every node's buffer equals the provider
 snapshot before returning statistics, preventing the public node and evidence
 views from silently drifting apart.
 
-Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, PromQL
-range/subquery execution, vector matching, and PromQL-specific enrichment/
-relabel/sample operators stay unavailable. Their cost requires a physical
-implementation or multiplicity/state facts that the current physical-operator
-vocabulary cannot represent; they are not treated as free pass-through work.
+PromQL rows and logical bytes are totals for one workload query evaluation;
+range and subquery values therefore include their internal evaluation steps.
+`evaluation_steps` and `subquery_steps` validate and cost that internal shape,
+while `ComparisonScope` alone multiplies the completed query over the workload
+horizon. They are never multiplied into the horizon a second time. Series
+cardinality is carried in child order and must agree across every physical
+edge. Missing window, step, series, expression-work, label-key, or accumulator
+evidence makes the entire candidate unavailable.
+
+`info()` resolves its default `target_info` metric, or one exact `__name__`
+matcher, to a concrete existing `Source::TimeSeries` coverage. Its right side
+is an ordinary physical Scan with its own statistics, buffer, snapshot, and
+source bytes; the enrichment operator itself performs no source I/O. Other
+label matchers remain local enrichment/filter work. Non-exact metric-name
+selection stays unavailable until a catalog resolver can return the complete
+concrete source set.
+
+Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, opaque PromQL
+extensions, non-exact `info()` metric selection, and SQL `CurrentTimestamp` as
+a PromQL scalar stay unavailable. They are not modeled as free pass-through
+work.
 
 ## Physical operator formulas
 
@@ -337,7 +368,17 @@ the DAG rules above.
 | Hash join | `left_rows + right_rows + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
 | Concat | `output_rows` | one output row/batch | `0` |
 | Ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
-| Limit | `limit_rows_consumed` (including `OFFSET`) | one output row/batch | `0` |
+| Limit | `output_rows` | one output row/batch | `0` |
+| PromQL range | `input_rows` | `input_series × window_samples_per_series × decoded_sample_bytes` | `0` beyond child |
+| PromQL subquery | `input_rows + output_rows` | materialized inner-step logical bytes | `0` beyond child |
+| PromQL vector binary | left + right + output rows | selected-side label-match hash state; one output row for scalar/vector | `0` beyond children |
+| PromQL relabel | `input_rows × scalar_ops_per_row` | one output row/batch | `0` |
+| PromQL info enrichment | left + info + output rows | info-side label-match hash state | `0` beyond its explicit Scan child |
+| PromQL series sample | input rows + input series | selected-series key/hash state | `0` |
+| PromQL scalar/vector bridge | input + output rows | one output row/batch | `0` |
+| PromQL scalar leaf | output rows | one output row/batch | `0` |
+| PromQL per-series intent | `input_rows × scalar_ops_per_row` | `input_series × accumulator_bytes` | `0` |
+| PromQL absence | input work + synthesized output | one output row/batch | `0` |
 
 These formulas name physical implementations. An external sort must add
 spill writes and reads; a nested-loop join must not use the hash-join formula.
