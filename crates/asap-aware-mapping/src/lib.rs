@@ -219,9 +219,10 @@ pub use replacement::{
 };
 pub use rewrite::AvgToSumOverCountStrategy;
 pub use summary_maintenance_lifecycle::{
-    plan_summary_maintenance_lifecycles, SummaryMaintenanceDeployment,
-    SummaryMaintenanceLifecycleAlternative, SummaryMaintenanceLifecycleCapabilities,
-    SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecyclePlan,
-    SummaryMaintenanceLifecyclePlanError, SummaryMaintenanceLifecycleRejection,
+    plan_summary_maintenance_lifecycles, SummaryMaintenanceCapabilities,
+    SummaryMaintenanceDeployment, SummaryMaintenanceLifecycleAlternative,
+    SummaryMaintenanceLifecycleCapabilities, SummaryMaintenanceLifecycleCostInputs,
+    SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError,
+    SummaryMaintenanceLifecycleRejection, WorkloadDemand,
 };
 pub use topk_reuse::TopKLimitReuseStrategy;

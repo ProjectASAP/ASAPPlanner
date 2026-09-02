@@ -52,6 +52,14 @@ pub struct SummaryMaintenanceLifecycleCapabilities {
     pub supports_continuously_maintained: bool,
 }
 
+/// Capabilities of one concrete summary family/state representation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SummaryMaintenanceCapabilities {
+    pub incremental_update: bool,
+    pub merge: bool,
+    pub delete: bool,
+}
+
 impl SummaryMaintenanceLifecycleCapabilities {
     pub const ALL: Self = Self {
         supports_ephemeral: true,
@@ -95,6 +103,8 @@ pub enum SummaryMaintenanceLifecycleRejection {
     RequiresHorizon,
     RequiresContinuousData,
     MissingOrStaleIngestionRate,
+    SummaryDoesNotSupportIncrementalUpdates,
+    SummaryDoesNotSupportDeletion,
     MissingCostEvidence,
 }
 
@@ -163,6 +173,27 @@ pub struct SummaryMaintenanceLifecyclePlan {
     pub evaluation_rate: Option<EvaluationRate>,
     /// Fresh source-data ingestion rate, when supplied by the workload.
     pub update_rate: Option<UpdateRate>,
+    pub expected_reads: Option<f64>,
+    pub selected_raw_recompute: bool,
+    pub summary_total_cost: Option<Cost>,
+    pub raw_recompute_total_cost: Option<Cost>,
+}
+
+/// Explicit association between a materialized target and the normalized
+/// workload entries whose demand consumes it.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkloadDemand<'a> {
+    pub workload: &'a QueryWorkload,
+    pub entry_indices: &'a [usize],
+}
+
+impl<'a> WorkloadDemand<'a> {
+    pub const fn new(workload: &'a QueryWorkload, entry_indices: &'a [usize]) -> Self {
+        Self {
+            workload,
+            entry_indices,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -171,6 +202,12 @@ pub enum SummaryMaintenanceLifecyclePlanError {
     InvalidWorkload(#[from] WorkloadError),
     #[error("optimization horizon must be finite and strictly positive")]
     InvalidHorizon,
+    #[error("workload entry index {index} is out of bounds for {entry_count} entries")]
+    InvalidWorkloadEntry { index: usize, entry_count: usize },
+    #[error("a workload-demand binding must contain at least one entry")]
+    EmptyWorkloadDemand,
+    #[error("workload entry index {index} appears more than once in one demand binding")]
+    DuplicateWorkloadEntry { index: usize },
 }
 
 /// Workload-wide evidence derived specifically for summary-maintenance
@@ -199,6 +236,12 @@ struct SummaryMaintenanceWorkloadFacts {
     /// Earliest known activation and latest scheduled execution across
     /// predictable one-time entries. `None` means no valid preparation window.
     prepared_window: Option<(TimestampMs, TimestampMs)>,
+    /// Whether every bound consumer is a predictable one-time query suitable
+    /// for prepared state.
+    prepared_eligible: bool,
+    /// Whether maintaining the selected moving time scope requires deleting
+    /// expired input from summary state.
+    requires_deletion: bool,
 }
 
 /// Validate a materialized plan, enumerate lifecycle alternatives for each
@@ -206,20 +249,20 @@ struct SummaryMaintenanceWorkloadFacts {
 /// is fully known.
 pub fn plan_summary_maintenance_lifecycles(
     root: Rc<SummaryNode>,
-    workload: &QueryWorkload,
+    demand: WorkloadDemand<'_>,
     now_ms: u64,
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
 ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError> {
-    workload.validate()?;
+    demand.workload.validate()?;
     if horizon.is_some_and(|h| !h.0.is_finite() || h.0 <= 0.0) {
         return Err(SummaryMaintenanceLifecyclePlanError::InvalidHorizon);
     }
-    let facts = workload_facts(workload, now_ms, horizon);
+    let facts = workload_facts(demand.workload, demand.entry_indices, now_ms, horizon)?;
     let mut summaries = Vec::new();
     collect_summary_aggs(&root, &mut HashSet::new(), &mut summaries);
-    let deployments = summaries
+    let deployments: Vec<SummaryMaintenanceDeployment> = summaries
         .into_iter()
         .enumerate()
         .map(|(summary_index, summary)| {
@@ -227,6 +270,7 @@ pub fn plan_summary_maintenance_lifecycles(
                 &facts,
                 horizon,
                 capabilities,
+                cost_model.summary_maintenance_capabilities(&summary),
                 cost_model.summary_maintenance_lifecycle_cost_inputs(&summary),
             );
             let selected = alternatives
@@ -269,20 +313,34 @@ pub fn plan_summary_maintenance_lifecycles(
             }
         })
         .collect();
+    let summary_total_cost = deployments.iter().try_fold(Cost::ZERO, |sum, deployment| {
+        let selected = deployment.selected_summary_maintenance_lifecycle.as_ref()?;
+        let cost = deployment
+            .alternatives
+            .iter()
+            .find(|alternative| &alternative.summary_maintenance_lifecycle == selected)?
+            .total_cost?;
+        Some(Cost(sum.0 + cost.0))
+    });
     Ok(SummaryMaintenanceLifecyclePlan {
         root,
         deployments,
         horizon,
         evaluation_rate: facts.evaluation_rate,
         update_rate: facts.update_rate,
+        expected_reads: facts.reads,
+        selected_raw_recompute: false,
+        summary_total_cost,
+        raw_recompute_total_cost: None,
     })
 }
 
 fn workload_facts(
     workload: &QueryWorkload,
+    workload_entry_indices: &[usize],
     now_ms: u64,
     horizon: Option<Horizon>,
-) -> SummaryMaintenanceWorkloadFacts {
+) -> Result<SummaryMaintenanceWorkloadFacts, SummaryMaintenanceLifecyclePlanError> {
     let mut one_time_invocations = 0u64;
     let mut recurring_reads = 0.0;
     let mut recurring_known = true;
@@ -290,28 +348,60 @@ fn workload_facts(
     let mut has_evaluation_rate = false;
     let mut prepared_start: Option<TimestampMs> = None;
     let mut prepared_end: Option<TimestampMs> = None;
+    let mut prepared_eligible = true;
+    let mut requires_deletion = false;
 
-    for entry in workload.entries() {
+    let entries: Vec<_> = workload.entries().collect();
+    if workload_entry_indices.is_empty() {
+        return Err(SummaryMaintenanceLifecyclePlanError::EmptyWorkloadDemand);
+    }
+    let mut seen_indices = HashSet::new();
+    for &index in workload_entry_indices {
+        if !seen_indices.insert(index) {
+            return Err(SummaryMaintenanceLifecyclePlanError::DuplicateWorkloadEntry { index });
+        }
+        let entry = entries.get(index).ok_or(
+            SummaryMaintenanceLifecyclePlanError::InvalidWorkloadEntry {
+                index,
+                entry_count: entries.len(),
+            },
+        )?;
+        requires_deletion |= entry.time_selection.lookback.is_some()
+            && entry.time_selection.as_of.is_none()
+            && matches!(
+                entry.time_selection.scope,
+                asap_types::workload::QueryTimeScope::RealTime
+                    | asap_types::workload::QueryTimeScope::Mixed
+            );
         match &entry.recurrence {
             QueryRecurrence::OneTime {
                 invocations,
                 execute_at,
             } => {
                 one_time_invocations = one_time_invocations.saturating_add(*invocations);
-                if let (
+                let covered = if let (
                     Predictability::Predictable {
                         known_at: Some(known),
                     },
                     Some(execute),
                 ) = (&entry.predictability, execute_at)
                 {
-                    if known < execute {
-                        prepared_start = Some(prepared_start.map_or(*known, |old| old.min(*known)));
+                    if known < execute && now_ms < execute.0 {
+                        let activate = TimestampMs(known.0.max(now_ms));
+                        prepared_start =
+                            Some(prepared_start.map_or(activate, |old| old.min(activate)));
                         prepared_end = Some(prepared_end.map_or(*execute, |old| old.max(*execute)));
+                        true
+                    } else {
+                        false
                     }
-                }
+                } else {
+                    false
+                };
+                prepared_eligible &= covered;
             }
             QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
+                prepared_eligible = false;
                 let rate = 1000.0 / f64::from(interval.0);
                 evaluation_rate += rate;
                 has_evaluation_rate = true;
@@ -322,19 +412,22 @@ fn workload_facts(
                 }
             }
             QueryRecurrence::Repeated(RepeatedDemand::Scheduled(schedule)) => {
+                prepared_eligible = false;
                 if let Some(h) = horizon {
                     let end_ms = now_ms.saturating_add((h.0 * 1000.0) as u64);
-                    recurring_reads += schedule
+                    let reads_in_horizon = schedule
                         .iter()
                         .filter(|at| at.0 >= now_ms && at.0 <= end_ms)
                         .count() as f64;
-                    evaluation_rate += schedule.len() as f64 / h.0;
+                    recurring_reads += reads_in_horizon;
+                    evaluation_rate += reads_in_horizon / h.0;
                     has_evaluation_rate = true;
                 } else {
                     recurring_known = false;
                 }
             }
             QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
+                prepared_eligible = false;
                 if !estimate.is_fresh_at(now_ms) {
                     recurring_known = false;
                     continue;
@@ -362,7 +455,10 @@ fn workload_facts(
                     recurring_known = false;
                 }
             }
-            QueryRecurrence::Unknown => recurring_known = false,
+            QueryRecurrence::Unknown => {
+                prepared_eligible = false;
+                recurring_known = false;
+            }
         }
     }
 
@@ -372,27 +468,30 @@ fn workload_facts(
         .and_then(|data| data.ingestion_rate.value_at(now_ms))
         .map(|rate| UpdateRate(rate.0));
     let reads = recurring_known.then_some(one_time_invocations as f64 + recurring_reads);
-    SummaryMaintenanceWorkloadFacts {
+    Ok(SummaryMaintenanceWorkloadFacts {
         reads,
         one_time_invocations,
         evaluation_rate: has_evaluation_rate.then_some(EvaluationRate(evaluation_rate)),
         update_rate,
         arrival,
         prepared_window: prepared_start.zip(prepared_end),
-    }
+        prepared_eligible,
+        requires_deletion,
+    })
 }
 
 fn alternatives_for(
     facts: &SummaryMaintenanceWorkloadFacts,
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
+    summary_capabilities: SummaryMaintenanceCapabilities,
     costs: SummaryMaintenanceLifecycleCostInputs,
 ) -> Vec<SummaryMaintenanceLifecycleAlternative> {
     let alternatives = vec![
         ephemeral(facts, capabilities, &costs),
-        prepared(facts, capabilities, &costs),
-        shared(facts, horizon, capabilities, &costs),
-        continuous(facts, horizon, capabilities, &costs),
+        prepared(facts, capabilities, summary_capabilities, &costs),
+        shared(facts, horizon, capabilities, summary_capabilities, &costs),
+        continuous(facts, horizon, capabilities, summary_capabilities, &costs),
     ];
     alternatives
 }
@@ -428,8 +527,19 @@ fn ephemeral(
 fn prepared(
     facts: &SummaryMaintenanceWorkloadFacts,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
+    summary_capabilities: SummaryMaintenanceCapabilities,
     costs: &SummaryMaintenanceLifecycleCostInputs,
 ) -> SummaryMaintenanceLifecycleAlternative {
+    if !facts.prepared_eligible {
+        return rejected(
+            SummaryMaintenanceLifecycle::Prepared {
+                activate_at: TimestampMs(0),
+                retire_at: TimestampMs(0),
+            },
+            retained_mode(facts),
+            SummaryMaintenanceLifecycleRejection::RequiresPredictableOneTimeQuery,
+        );
+    }
     let Some((activate_at, retire_at)) = facts.prepared_window else {
         return rejected(
             SummaryMaintenanceLifecycle::Prepared {
@@ -450,6 +560,9 @@ fn prepared(
             retained_mode(facts),
             SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime,
         );
+    }
+    if let Some(rejection) = maintenance_capability_rejection(facts, summary_capabilities) {
+        return rejected(lifecycle, retained_mode(facts), rejection);
     }
     let seconds = retire_at.0.saturating_sub(activate_at.0) as f64 / 1000.0;
     let maintenance = maintenance_cost(facts, costs, seconds);
@@ -481,6 +594,7 @@ fn shared(
     facts: &SummaryMaintenanceWorkloadFacts,
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
+    summary_capabilities: SummaryMaintenanceCapabilities,
     costs: &SummaryMaintenanceLifecycleCostInputs,
 ) -> SummaryMaintenanceLifecycleAlternative {
     let lifecycle = SummaryMaintenanceLifecycle::Shared {
@@ -492,6 +606,9 @@ fn shared(
             retained_mode(facts),
             SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime,
         );
+    }
+    if let Some(rejection) = maintenance_capability_rejection(facts, summary_capabilities) {
+        return rejected(lifecycle, retained_mode(facts), rejection);
     }
     if facts.reads.is_none_or(|reads| reads <= 1.0) {
         return rejected(
@@ -520,6 +637,7 @@ fn continuous(
     facts: &SummaryMaintenanceWorkloadFacts,
     horizon: Option<Horizon>,
     capabilities: SummaryMaintenanceLifecycleCapabilities,
+    summary_capabilities: SummaryMaintenanceCapabilities,
     costs: &SummaryMaintenanceLifecycleCostInputs,
 ) -> SummaryMaintenanceLifecycleAlternative {
     let lifecycle = SummaryMaintenanceLifecycle::ContinuouslyMaintained;
@@ -547,6 +665,9 @@ fn continuous(
             SummaryMaintenanceLifecycleRejection::MissingOrStaleIngestionRate,
         );
     }
+    if let Some(rejection) = maintenance_capability_rejection(facts, summary_capabilities) {
+        return rejected(lifecycle, SummaryMaintenanceMode::Incremental, rejection);
+    }
     let Some(horizon) = horizon else {
         return rejected(
             lifecycle,
@@ -561,6 +682,28 @@ fn continuous(
         total_cost,
         vec!["updates are applied for the optimization horizon".into()],
     )
+}
+
+fn maintenance_capability_rejection(
+    facts: &SummaryMaintenanceWorkloadFacts,
+    capabilities: SummaryMaintenanceCapabilities,
+) -> Option<SummaryMaintenanceLifecycleRejection> {
+    if matches!(
+        facts.arrival,
+        DataArrival::ContinuouslyIngesting | DataArrival::Mixed
+    ) && !capabilities.incremental_update
+    {
+        Some(SummaryMaintenanceLifecycleRejection::SummaryDoesNotSupportIncrementalUpdates)
+    } else if matches!(
+        facts.arrival,
+        DataArrival::ContinuouslyIngesting | DataArrival::Mixed
+    ) && facts.requires_deletion
+        && !capabilities.delete
+    {
+        Some(SummaryMaintenanceLifecycleRejection::SummaryDoesNotSupportDeletion)
+    } else {
+        None
+    }
 }
 
 fn retained_cost(
@@ -709,11 +852,58 @@ mod tests {
                 retirement_cost: Some(Cost(1.0)),
             }
         }
+
+        fn summary_maintenance_capabilities(
+            &self,
+            _summary: &SummaryNode,
+        ) -> SummaryMaintenanceCapabilities {
+            SummaryMaintenanceCapabilities {
+                incremental_update: true,
+                merge: true,
+                delete: true,
+            }
+        }
+    }
+
+    struct NoDelete;
+
+    impl CostModel for NoDelete {
+        fn rank_candidates(
+            &self,
+            _intent: &asap_types::pre_asap::AggIntent,
+            candidates: &[asap_types::post_asap::SketchAlgorithm],
+        ) -> Vec<asap_types::post_asap::SketchAlgorithm> {
+            candidates.to_vec()
+        }
+
+        fn summary_maintenance_lifecycle_cost_inputs(
+            &self,
+            summary: &SummaryNode,
+        ) -> SummaryMaintenanceLifecycleCostInputs {
+            UnitCosts.summary_maintenance_lifecycle_cost_inputs(summary)
+        }
+
+        fn summary_maintenance_capabilities(
+            &self,
+            _summary: &SummaryNode,
+        ) -> SummaryMaintenanceCapabilities {
+            SummaryMaintenanceCapabilities {
+                incremental_update: true,
+                merge: true,
+                delete: false,
+            }
+        }
     }
 
     fn query_root() -> Rc<QueryExpr> {
+        query_root_for("m")
+    }
+
+    fn query_root_for(metric: &str) -> Rc<QueryExpr> {
         Rc::new(QueryExpr::Scan {
-            source: Source::TimeSeries { metric: "m".into() },
+            source: Source::TimeSeries {
+                metric: metric.into(),
+            },
             predicates: vec![],
             schema: Schema::with_time_index(
                 vec![
@@ -814,7 +1004,10 @@ mod tests {
     fn unpredictable_one_time_at_rest_selects_ephemeral() {
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            &workload(vec![batch(Predictability::AdHoc)], vec![], at_rest()),
+            WorkloadDemand::new(
+                &workload(vec![batch(Predictability::AdHoc)], vec![], at_rest()),
+                &[0],
+            ),
             1_000,
             None,
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -844,7 +1037,7 @@ mod tests {
         entry.execute_at = Some(TimestampMs(11_000));
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            &workload(vec![entry], vec![], at_rest()),
+            WorkloadDemand::new(&workload(vec![entry], vec![], at_rest()), &[0]),
             1_000,
             None,
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -857,10 +1050,57 @@ mod tests {
     }
 
     #[test]
+    fn prepared_state_starts_no_earlier_than_planning_time() {
+        let mut entry = batch(Predictability::Predictable {
+            known_at: Some(TimestampMs(1_000)),
+        });
+        entry.execute_at = Some(TimestampMs(11_000));
+        let plan = plan_summary_maintenance_lifecycles(
+            summary(),
+            WorkloadDemand::new(&workload(vec![entry], vec![], at_rest()), &[0]),
+            6_000,
+            None,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        let prepared = &plan.deployments[0].alternatives[1];
+        assert_eq!(
+            prepared.summary_maintenance_lifecycle,
+            SummaryMaintenanceLifecycle::Prepared {
+                activate_at: TimestampMs(6_000),
+                retire_at: TimestampMs(11_000),
+            }
+        );
+        assert_eq!(prepared.total_cost, Some(Cost(12.5)));
+    }
+
+    #[test]
+    fn expired_one_time_execution_cannot_select_prepared_state() {
+        let mut entry = batch(Predictability::Predictable {
+            known_at: Some(TimestampMs(1_000)),
+        });
+        entry.execute_at = Some(TimestampMs(2_000));
+        let plan = plan_summary_maintenance_lifecycles(
+            summary(),
+            WorkloadDemand::new(&workload(vec![entry], vec![], at_rest()), &[0]),
+            3_000,
+            None,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.deployments[0].alternatives[1].rejection,
+            Some(SummaryMaintenanceLifecycleRejection::RequiresPredictableOneTimeQuery)
+        );
+    }
+
+    #[test]
     fn repeated_at_rest_selects_shared_without_inventing_updates() {
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            &workload(vec![], vec![repeating()], at_rest()),
+            WorkloadDemand::new(&workload(vec![], vec![repeating()], at_rest()), &[0]),
             1_000,
             Some(Horizon(10.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -892,7 +1132,10 @@ mod tests {
         };
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            &workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
+            WorkloadDemand::new(
+                &workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
+                &[0],
+            ),
             1_000,
             Some(Horizon(10.0)),
             capabilities,
@@ -915,7 +1158,10 @@ mod tests {
     fn stale_ingestion_evidence_cannot_enable_continuous_maintenance() {
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            &workload(vec![], vec![repeating()], continuous(1_000, 1_000)),
+            WorkloadDemand::new(
+                &workload(vec![], vec![repeating()], continuous(1_000, 1_000)),
+                &[0],
+            ),
             3_000,
             Some(Horizon(10.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -933,7 +1179,10 @@ mod tests {
     fn unknown_costs_do_not_make_a_long_lived_lifecycle_win() {
         let plan = plan_summary_maintenance_lifecycles(
             summary(),
-            &workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
+            WorkloadDemand::new(
+                &workload(vec![], vec![repeating()], continuous(1_000, 60_000)),
+                &[0],
+            ),
             1_000,
             Some(Horizon(10.0)),
             SummaryMaintenanceLifecycleCapabilities::ALL,
@@ -951,6 +1200,133 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_workload_entries_do_not_create_reuse_for_a_target() {
+        let plan = plan_summary_maintenance_lifecycles(
+            summary(),
+            WorkloadDemand::new(
+                &workload(
+                    vec![batch(Predictability::AdHoc), batch(Predictability::AdHoc)],
+                    vec![],
+                    at_rest(),
+                ),
+                &[0],
+            ),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.deployments[0].selected_summary_maintenance_lifecycle,
+            Some(SummaryMaintenanceLifecycle::Ephemeral)
+        );
+        assert_eq!(
+            plan.deployments[0].alternatives[2].rejection,
+            Some(SummaryMaintenanceLifecycleRejection::RequiresMultipleReads)
+        );
+    }
+
+    #[test]
+    fn scheduled_rate_counts_only_executions_inside_the_horizon() {
+        let mut entry = repeating();
+        entry.demand = RepeatedDemand::Scheduled(vec![
+            TimestampMs(999),
+            TimestampMs(5_000),
+            TimestampMs(20_000),
+        ]);
+        let plan = plan_summary_maintenance_lifecycles(
+            summary(),
+            WorkloadDemand::new(&workload(vec![], vec![entry], at_rest()), &[0]),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        assert_eq!(plan.evaluation_rate, Some(EvaluationRate(0.1)));
+    }
+
+    #[test]
+    fn demand_binding_rejects_empty_and_duplicate_entries() {
+        let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
+        assert!(matches!(
+            plan_summary_maintenance_lifecycles(
+                summary(),
+                WorkloadDemand::new(&workload, &[]),
+                1_000,
+                None,
+                SummaryMaintenanceLifecycleCapabilities::ALL,
+                &UnitCosts,
+            ),
+            Err(SummaryMaintenanceLifecyclePlanError::EmptyWorkloadDemand)
+        ));
+        assert!(matches!(
+            plan_summary_maintenance_lifecycles(
+                summary(),
+                WorkloadDemand::new(&workload, &[0, 0]),
+                1_000,
+                None,
+                SummaryMaintenanceLifecycleCapabilities::ALL,
+                &UnitCosts,
+            ),
+            Err(SummaryMaintenanceLifecyclePlanError::DuplicateWorkloadEntry { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn prepared_requires_every_bound_consumer_to_be_scheduled_and_predictable() {
+        let mut predictable = batch(Predictability::Predictable {
+            known_at: Some(TimestampMs(1_000)),
+        });
+        predictable.execute_at = Some(TimestampMs(2_000));
+        let workload = workload(
+            vec![predictable, batch(Predictability::AdHoc)],
+            vec![],
+            at_rest(),
+        );
+        let plan = plan_summary_maintenance_lifecycles(
+            summary(),
+            WorkloadDemand::new(&workload, &[0, 1]),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.deployments[0].alternatives[1].rejection,
+            Some(SummaryMaintenanceLifecycleRejection::RequiresPredictableOneTimeQuery)
+        );
+    }
+
+    #[test]
+    fn moving_realtime_maintenance_requires_summary_deletion_support() {
+        let mut entry = repeating();
+        entry.time_selection = TimeSelection {
+            scope: asap_types::workload::QueryTimeScope::RealTime,
+            lookback: Some(DurationMs(60_000)),
+            as_of: None,
+        };
+        let plan = plan_summary_maintenance_lifecycles(
+            summary(),
+            WorkloadDemand::new(
+                &workload(vec![], vec![entry], continuous(1_000, 60_000)),
+                &[0],
+            ),
+            1_000,
+            Some(Horizon(10.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &NoDelete,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.deployments[0].alternatives[3].rejection,
+            Some(SummaryMaintenanceLifecycleRejection::SummaryDoesNotSupportDeletion)
+        );
+    }
+
+    #[test]
     fn normalized_workload_drives_plan_space_recurrence_profiles() {
         let root = query_root();
         let space = crate::replacement::search_workload(vec![("dashboard", Rc::clone(&root))]);
@@ -964,5 +1340,29 @@ mod tests {
         assert_eq!(profile.evaluation_rate, Some(EvaluationRate(1.0)));
         assert_eq!(profile.update_rate, Some(UpdateRate(1.0)));
         assert_eq!(profile.one_shot_consumers, 0);
+    }
+
+    #[test]
+    fn recurrence_binding_is_explicit_when_root_order_differs_from_workload_order() {
+        let repeating_root = query_root_for("dashboard");
+        let batch_root = query_root_for("batch");
+        let space = crate::replacement::search_workload(vec![
+            ("dashboard", repeating_root),
+            ("batch", batch_root),
+        ]);
+        let workload = workload(
+            vec![batch(Predictability::AdHoc)],
+            vec![repeating()],
+            at_rest(),
+        );
+        let profiles = space
+            .recurrence_profiles_from_workload(&workload, &[1, 0], 1_000, Some(Horizon(10.0)))
+            .unwrap();
+        let dashboard = profiles.for_target(&space.roots[0].1);
+        let batch = profiles.for_target(&space.roots[1].1);
+        assert_eq!(dashboard.evaluation_rate, Some(EvaluationRate(1.0)));
+        assert_eq!(dashboard.one_shot_consumers, 0);
+        assert_eq!(batch.evaluation_rate, None);
+        assert_eq!(batch.one_shot_consumers, 1);
     }
 }
