@@ -456,6 +456,11 @@ impl AnalyticalCostModel {
             if states.is_empty() {
                 return Err(AnalyticalCostError::UnsupportedCandidate);
             }
+            let fused_topk = states.len() == 1
+                && matches!(
+                    states[0].0.algorithm(),
+                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                );
             let mut total = ResourceEstimate {
                 cpu_ops: 0.0,
                 peak_memory_bytes: 0,
@@ -466,7 +471,12 @@ impl AnalyticalCostModel {
                     kind.algorithm(),
                     SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
                 );
-                let inputs = if is_topk {
+                let inputs = if is_topk && fused_topk {
+                    let mut base = self.inputs.validate()?;
+                    base.group_count = 1;
+                    base.topk_k = None;
+                    base
+                } else if is_topk {
                     self.inputs_for_target(target.root)?
                 } else {
                     let mut base = self.inputs.validate()?;
@@ -479,12 +489,27 @@ impl AnalyticalCostModel {
                     } else {
                         inputs.group_count
                     };
-                let estimate = estimate_sketch_aggregation_with_instances(
+                let mut estimate = estimate_sketch_aggregation_with_instances(
                     kind.algorithm().clone(),
                     kind.params(),
                     inputs,
                     instances,
                 )?;
+                if fused_topk {
+                    // One global keyed sketch has no outer hash map from
+                    // group -> sketch instance. Its keys live in the heap;
+                    // remove the generic one-entry registry charged by the
+                    // per-subpopulation estimator.
+                    estimate.peak_memory_bytes = estimate
+                        .peak_memory_bytes
+                        .checked_sub(
+                            inputs
+                                .group_key_bytes
+                                .checked_add(16)
+                                .ok_or(AnalyticalCostError::Overflow)?,
+                        )
+                        .ok_or(AnalyticalCostError::Overflow)?;
+                }
                 total = add_resources(total, estimate)?;
             }
             return Ok(total);
