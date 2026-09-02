@@ -917,7 +917,16 @@ impl AnalyticalCostModel {
                 },
             );
         }
-        estimate_raw_aggregation(scoped)
+        match single_intent(target) {
+            Some(AggIntent::Quantile { .. }) => estimate_raw_quantile(scoped),
+            Some(AggIntent::Count { .. }) => estimate_raw_aggregation(scoped),
+            // Exact distinct state needs the measure's distinct cardinality,
+            // which is not the number of GROUP BY tuples.
+            Some(AggIntent::Cardinality { .. }) => Err(AnalyticalCostError::MissingOrStale(
+                "measure_distinct_count",
+            )),
+            _ => Err(AnalyticalCostError::UnsupportedCandidate),
+        }
     }
 
     pub fn raw_cost_for_target(
@@ -990,12 +999,53 @@ fn topk_intent(target: &asap_types::pre_asap::QueryExpr) -> Option<u64> {
     })
 }
 
+fn single_intent(target: &asap_types::pre_asap::QueryExpr) -> Option<&AggIntent> {
+    let asap_types::pre_asap::QueryExpr::Aggregate { measures, .. } = target else {
+        return None;
+    };
+    match measures.as_slice() {
+        [intent] => Some(intent),
+        _ => None,
+    }
+}
+
+fn estimate_raw_quantile(
+    inputs: AnalyticalInputs,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    let inputs = inputs.validate()?;
+    let rows = inputs.input_rows.max(2);
+    let sort_ops = inputs.input_rows as f64 * (rows as f64).log2().ceil();
+    let cpu_ops = inputs.evaluation_count as f64 * (inputs.input_rows as f64 + sort_ops);
+    if !cpu_ops.is_finite() {
+        return Err(AnalyticalCostError::Overflow);
+    }
+    Ok(ResourceEstimate {
+        cpu_ops,
+        // Without a projected-value width, logical input bytes are the safe
+        // upper bound for the in-memory exact sort.
+        peak_memory_bytes: inputs.input_bytes,
+        scan_bytes: inputs
+            .source_scan_bytes
+            .checked_mul(inputs.evaluation_count)
+            .ok_or(AnalyticalCostError::Overflow)?,
+    })
+}
+
 fn require_supported_target(
     target: &asap_types::pre_asap::QueryExpr,
 ) -> Result<(), AnalyticalCostError> {
     let asap_types::pre_asap::QueryExpr::Aggregate { child, .. } = target else {
         return Err(AnalyticalCostError::UnsupportedCandidate);
     };
+    match single_intent(target) {
+        Some(AggIntent::Count { .. } | AggIntent::Quantile { .. } | AggIntent::TopK { .. }) => {}
+        Some(AggIntent::Cardinality { .. }) => {
+            return Err(AnalyticalCostError::MissingOrStale(
+                "measure_distinct_count",
+            ));
+        }
+        _ => return Err(AnalyticalCostError::UnsupportedCandidate),
+    }
     match child.as_ref() {
         asap_types::pre_asap::QueryExpr::Scan { predicates, .. } if predicates.is_empty() => Ok(()),
         asap_types::pre_asap::QueryExpr::Aggregate {
@@ -1196,6 +1246,18 @@ mod tests {
         assert!(many.cpu_ops > one.cpu_ops);
         assert!(many.scan_bytes > one.scan_bytes);
         assert_eq!(many.peak_memory_bytes, one.peak_memory_bytes);
+    }
+
+    #[test]
+    fn exact_quantile_baseline_costs_sort_not_hash_counting() {
+        let mut quantile_inputs = inputs(3);
+        quantile_inputs.input_rows = 1_000;
+        quantile_inputs.input_bytes = 8_000;
+        quantile_inputs.source_scan_bytes = 8_000;
+        let estimate = estimate_raw_quantile(quantile_inputs).unwrap();
+        assert_eq!(estimate.cpu_ops, 33_000.0); // 3 * (scan 1K + sort 10K)
+        assert_eq!(estimate.peak_memory_bytes, 8_000);
+        assert_eq!(estimate.scan_bytes, 24_000);
     }
 
     #[test]
