@@ -46,8 +46,8 @@ use std::rc::Rc;
 
 use serde::Serialize;
 
-use crate::post_asap::{AccuracyError, ResultGuarantee, SummaryExpr, SummaryNode};
 use crate::cost::{CostAnnotation, CostInput, CostUnit};
+use crate::post_asap::{AccuracyError, ResultGuarantee, SummaryExpr, SummaryNode};
 use crate::pre_asap::cse::{dag_node_count, structural_hash, HashCache};
 use crate::pre_asap::query_expr::{QueryExpr, Source};
 
@@ -242,12 +242,6 @@ pub struct NamedGraph {
     /// `NamedGraph` is unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_graph: Option<DagGraph>,
-    /// Accuracy-illegal candidates a higher layer's search refused for
-    /// targets in this query (issue #172) — see [`TargetRejection`]. Always
-    /// empty coming out of this module; omitted from the JSON when empty,
-    /// same additive rule as `replacements`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rejections: Vec<TargetRejection>,
     /// This query's own selected-workload cost/benefit — one of issue
     /// #286's granularity items. Built by summing *this query's own*
     /// `post_graph` decision-node cost annotations, deduplicated by
@@ -266,6 +260,12 @@ pub struct NamedGraph {
     /// specifically to cover every query in one pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_cost: Option<crate::cost::WorkloadCostSummary>,
+    /// Accuracy-illegal candidates a higher layer's search refused for
+    /// targets in this query (issue #172) — see [`TargetRejection`]. Always
+    /// empty coming out of this module; omitted from the JSON when empty,
+    /// same additive rule as `replacements`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejections: Vec<TargetRejection>,
 }
 
 /// A batch of named queries — the shape the viewer's multi-query / compare
@@ -1859,6 +1859,7 @@ mod tests {
             graph: export(&leaf),
             replacements: vec![],
             post_graph: None,
+            workload_cost: None,
             rejections: vec![TargetRejection {
                 target_pre_id: 0,
                 strategy: "SketchAlgorithmStrategy".into(),
