@@ -1324,6 +1324,29 @@ mod tests {
     }
 
     #[test]
+    fn exact_candidate_selector_does_not_confuse_the_same_strategy() {
+        let selected_query = lower_promql("up", AccuracyTarget::Exact).unwrap();
+        let other_query = lower_promql("process_cpu_seconds_total", AccuracyTarget::Exact).unwrap();
+        let selected = ReplacementSubDAG {
+            replacement: Replacement::Rewrite(Rc::new(selected_query.clone())),
+            strategy: "same-strategy",
+            provenance: asap_aware_mapping::replacement::ReplacementProvenance::LogicalRewrite,
+            rationale: String::new(),
+        };
+        let other = ReplacementSubDAG {
+            replacement: Replacement::Rewrite(Rc::new(other_query)),
+            strategy: "same-strategy",
+            provenance: asap_aware_mapping::replacement::ReplacementProvenance::LogicalRewrite,
+            rationale: String::new(),
+        };
+        let selector = CandidateReplacementSelector {
+            plan: serde_json::to_value(dag_export::export(&selected_query)).unwrap(),
+        };
+        assert!(selector.matches(&selected));
+        assert!(!selector.matches(&other));
+    }
+
+    #[test]
     fn workload_wide_explanations_annotate_cross_query_reuse() {
         let query = "sum by (job) (rate(http_requests_total[5m]))";
         let a = lower_promql(query, AccuracyTarget::Exact).unwrap();
