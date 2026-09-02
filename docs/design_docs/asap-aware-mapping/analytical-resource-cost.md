@@ -194,9 +194,10 @@ For a selected DAG:
 4. Add source/disk reads only at nodes that actually read source or spilled
    data; an in-memory edge contributes zero source reads.
 5. Count a shared node once even when several parents consume it.
-6. Compute peak memory from liveness: add states that coexist, but do not add
-   disjoint transient buffers merely because both appear somewhere in the
-   DAG.
+6. Compute peak memory from liveness. During one node's execution, all live
+   child outputs, the operator's local workspace, and its new output buffer
+   coexist. Do not add disjoint transient buffers merely because both appear
+   somewhere in the DAG.
 7. Retained summaries remain live across reads. Streaming buffers may be
    released after their last consumer.
 
@@ -210,6 +211,12 @@ are rejected. A child-before-parent schedule maintains remaining-consumer
 counts, releases transient output after its last consumer, and keeps retained
 state live. Consequently a shared scan is charged once per execution and a
 fan-out's memory includes the outputs that really coexist.
+
+Each estimate independently requires the semantic set of source coverages on
+its reachable Scan nodes to equal `ComparisonScope.sources`. Multiple physical
+Scans may repeat one coverage, but no scope source may be omitted and no Scan
+may add another coverage. This invariant is enforced by the estimator itself,
+including for callers that construct a physical DAG without the query lowerer.
 
 Logical edge `bytes` feeds parent cardinality estimates; it is not an
 allocation. Each physical node separately supplies `output_buffer_bytes` for
@@ -270,7 +277,8 @@ Multiple independent physical Scans may use the same coverage, while a
 provider-declared shared Scan uses it once, so those physical alternatives can
 still be compared under the same semantic scope.
 
-The lowering validates every physical edge before costing:
+The estimator validates every physical edge before costing; the query lowerer
+reuses the same operator-semantic validator for earlier diagnostics:
 
 - `(rows = 0, bytes = 0)` is a valid empty edge, while positive rows still
   require byte-width evidence and zero rows cannot carry non-zero bytes;
