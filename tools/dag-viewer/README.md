@@ -57,13 +57,20 @@ shell command.
 ```sh
 cargo run -p asap-devtools --bin dag_export -- \
   --post-asap --epsilon 0.01 \
-  --analytical-cost-json '{"inputs":{"data_arrival":"at_rest","input_rows":1000000,"input_bytes":64000000,"source_scan_bytes":64000000,"group_count":1,"group_key_bytes":16,"topk_k":null,"evaluation_count":100},"calibration":{"cost_per_cpu_op":0.000001,"cost_per_scan_byte":0.00000001,"cost_per_retained_byte":0.000000001,"version":"demo-calibration-v1"}}' \
+  --planner-cost-json "$PLANNER_PHYSICAL_EVIDENCE" \
   --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
   > /tmp/dag.json
 ```
 
-Load the JSON with the page's file picker. A post-ASAP visualization requires
-`--post-asap`; ordinary exports intentionally omit `post_graph`.
+Load the JSON with the page's file picker. `--planner-cost-json` is a complete
+physical-evidence document: calibration plus target records containing the
+exact target `QueryExpr`, comparison scope, exact logical query nodes with
+`PhysicalNodeEvidence`, and exact exported replacement DAGs with their bound
+`PhysicalDag`. Matching uses full structural equality, never a hash or strategy
+name. Duplicate, conflicting, or missing records fail closed. Without this
+document, `--post-asap` exports the raw graph only. The old
+`--analytical-cost-json` spelling accepts the new document as an alias; its old
+compact aggregation payload is rejected with a migration error.
 
 The viewer also accepts the JSON produced by
 `export_summary_maintenance_plan`. It renders the materialized summary DAG as
@@ -122,11 +129,10 @@ with IR text.
 `source` (`Modeled` / `Measured` / `Unavailable`), optionally `baseline` +
 `delta` + `benefit_ratio`, and `model_version`/`benchmark_id`/`inputs` for
 provenance. A missing `value` (`source: "Unavailable"`) always renders as
-**Not estimated** — the viewer never fabricates a number. With
-`--analytical-cost-json`, `dag_export` emits calibrated `CostUnits` and keeps
-the CPU operations, peak memory, scan bytes, coefficients, and workload
-statistics in `inputs`. Without those inputs, or for an unsupported candidate,
-the annotation is `Unavailable`; structural node counts are never substituted.
+**Not estimated** — the viewer never fabricates a number. A complete physical
+planner export keeps CPU operations, peak memory, scan bytes, coefficients,
+and workload statistics in `inputs`. Without complete physical evidence, the
+annotation is `Unavailable`; structural node counts are never substituted.
 See the [analytical model design](../../docs/design_docs/asap-aware-mapping/analytical-resource-cost.md).
 
 The same three fields also appear on `TargetReplacement`

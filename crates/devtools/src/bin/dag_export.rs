@@ -53,10 +53,16 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-use asap_aware_mapping::analytical_cost::{
-    query_topk_k, AnalyticalCostModel, ResourceEstimate, ANALYTICAL_MODEL_VERSION,
+use asap_aware_mapping::analytical_cost::{AnalyticalCostError, ResourceCalibration};
+use asap_aware_mapping::analytical_lowering::{
+    PhysicalDag, PhysicalNodeEvidence, PhysicalNodeRequest,
 };
-use asap_aware_mapping::cost_model::{CostModel, DefaultCostModel};
+use asap_aware_mapping::analytical_planner::{
+    AnalyticalPlannerCostModel, PlannerPhysicalPlanProvider,
+};
+use asap_aware_mapping::analytical_statistics::ComparisonScope;
+use asap_aware_mapping::cost_model::DefaultCostModel;
+use asap_aware_mapping::cost_model::{Cost, CostModel};
 use asap_aware_mapping::replacement::{
     default_strategies_with_evidence, search_workload, search_workload_with, Replacement,
     ReplacementSubDAG,
@@ -68,11 +74,294 @@ use asap_types::dag_export::{
     TargetReplacement, TargetReplacementAfter, WorkloadGraph,
 };
 use asap_types::post_asap::SummaryExpr;
+use asap_types::post_asap::SummaryNode;
 use asap_types::post_asap::{CompositionOperator, SketchQuery, SummaryFamilyType};
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PlannerCostDocument {
+    calibration: ResourceCalibration,
+    targets: Vec<TargetPhysicalEvidence>,
+}
+
+fn parse_planner_cost_document(raw: &str) -> Result<PlannerCostDocument, String> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| format!("planner cost evidence is invalid JSON: {error}"))?;
+    if value.get("targets").is_none() {
+        return Err("the compact analytical-cost payload is no longer supported; migrate to complete per-operator physical DAG evidence".into());
+    }
+    serde_json::from_value(value)
+        .map_err(|error| format!("planner cost evidence is invalid: {error}"))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TargetPhysicalEvidence {
+    target: QueryExpr,
+    scope: ComparisonScopeEvidence,
+    query_nodes: Vec<QueryNodePhysicalEvidence>,
+    candidates: Vec<CandidatePhysicalEvidence>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ComparisonScopeEvidence {
+    data_arrival: asap_types::workload::DataArrival,
+    planning_time_ms: u64,
+    horizon_ms: u64,
+    evaluation_count: u64,
+    time_scope: String,
+    lookback_ms: Option<u64>,
+    as_of_ms: Option<u64>,
+    sources: Vec<asap_aware_mapping::analytical_statistics::SourceCoverage>,
+}
+
+impl ComparisonScopeEvidence {
+    fn resolve(&self) -> Result<ComparisonScope, AnalyticalCostError> {
+        use asap_types::workload::{
+            DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
+        };
+        let scope = match self.time_scope.as_str() {
+            "real_time" => QueryTimeScope::RealTime,
+            "longitudinal" => QueryTimeScope::Longitudinal,
+            "mixed" => QueryTimeScope::Mixed,
+            "unknown" => QueryTimeScope::Unknown,
+            _ => return Err(AnalyticalCostError::MissingComparisonScope("time_scope")),
+        };
+        let comparison = ComparisonScope {
+            data_arrival: self.data_arrival,
+            planning_time: TimestampMs(self.planning_time_ms),
+            horizon: DurationMs(self.horizon_ms),
+            recurrence: QueryRecurrence::OneTime {
+                invocations: self.evaluation_count,
+                execute_at: None,
+            },
+            time_selection: TimeSelection {
+                scope,
+                lookback: self.lookback_ms.map(DurationMs),
+                as_of: self.as_of_ms.map(TimestampMs),
+            },
+            sources: self.sources.clone(),
+        };
+        comparison.validate()?;
+        Ok(comparison)
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct QueryNodePhysicalEvidence {
+    logical_node: QueryExpr,
+    operator: asap_aware_mapping::analytical_cost::PhysicalOperator,
+    occurrence: usize,
+    synthetic: bool,
+    evidence: PhysicalNodeEvidence,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CandidatePhysicalEvidence {
+    replacement: CandidateReplacementSelector,
+    dag: PhysicalDag,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CandidateReplacementSelector {
+    /// Exact canonical exported replacement DAG. This is compared in full;
+    /// hashes and strategy labels are never treated as identity.
+    plan: serde_json::Value,
+}
+
+impl CandidateReplacementSelector {
+    fn matches(&self, candidate: &ReplacementSubDAG) -> bool {
+        let actual = match &candidate.replacement {
+            Replacement::Summary(summary) => {
+                serde_json::to_value(dag_export::export_summary(summary))
+            }
+            Replacement::Rewrite(query) => serde_json::to_value(dag_export::export(query)),
+        };
+        actual.is_ok_and(|actual| actual == self.plan)
+    }
+}
+
+struct ExportPhysicalProvider<'a> {
+    target: &'a TargetPhysicalEvidence,
+    candidate: &'a CandidatePhysicalEvidence,
+}
+
+impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
+    fn comparison_scope(
+        &self,
+        _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+    ) -> Result<ComparisonScope, AnalyticalCostError> {
+        self.target.scope.resolve()
+    }
+
+    fn query_node_evidence(
+        &self,
+        request: PhysicalNodeRequest<'_>,
+    ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
+        let mut matches = self.target.query_nodes.iter().filter(|entry| {
+            entry.logical_node == *request.logical_node
+                && entry.operator == request.operator
+                && entry.occurrence == request.occurrence
+                && entry.synthetic == request.synthetic
+        });
+        let evidence = matches.next().ok_or_else(|| {
+            AnalyticalCostError::MissingOperatorStatistics(format!(
+                "logical occurrence {}",
+                request.occurrence
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(AnalyticalCostError::InvalidPhysicalDag(
+                "duplicate query-node evidence key",
+            ));
+        }
+        Ok(evidence.evidence.clone())
+    }
+
+    fn summary_physical_dag(
+        &self,
+        _summary: &Rc<SummaryNode>,
+        _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+        _scope: &ComparisonScope,
+    ) -> Result<PhysicalDag, AnalyticalCostError> {
+        Ok(self.candidate.dag.clone())
+    }
+}
+
+struct ExportPlannerCostModel<'a> {
+    document: &'a PlannerCostDocument,
+}
+
+impl ExportPlannerCostModel<'_> {
+    fn bound<'a>(
+        &'a self,
+        candidate: &ReplacementSubDAG,
+        target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+    ) -> Option<(ExportPhysicalProvider<'a>, &'a ResourceCalibration)> {
+        let mut targets = self
+            .document
+            .targets
+            .iter()
+            .filter(|entry| entry.target == **target.root);
+        let target_evidence = targets.next()?;
+        if targets.next().is_some() {
+            return None;
+        }
+        let mut candidates = target_evidence
+            .candidates
+            .iter()
+            .filter(|entry| entry.replacement.matches(candidate));
+        let candidate_evidence = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        Some((
+            ExportPhysicalProvider {
+                target: target_evidence,
+                candidate: candidate_evidence,
+            },
+            &self.document.calibration,
+        ))
+    }
+
+    fn annotations(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &Rc<QueryExpr>,
+    ) -> (CostAnnotation, CostAnnotation, CostAnnotation) {
+        let target = asap_aware_mapping::replacement::TargetSubDAG::new(target);
+        let Some((provider, calibration)) = self.bound(candidate, &target) else {
+            return winner_cost_annotations();
+        };
+        let Ok(model) = AnalyticalPlannerCostModel::new(&provider, calibration.clone()) else {
+            return winner_cost_annotations();
+        };
+        let Ok(estimate) = model.estimate_candidate(candidate, &target) else {
+            return winner_cost_annotations();
+        };
+        let version = format!("physical-dag+{}", calibration.version);
+        let inputs = |resources: asap_aware_mapping::analytical_cost::ResourceEstimate| {
+            vec![
+                CostInput {
+                    name: "estimated_cpu_ops".into(),
+                    value: resources.cpu_ops,
+                    unit: Some("operations".into()),
+                },
+                CostInput {
+                    name: "estimated_peak_memory".into(),
+                    value: resources.peak_memory_bytes as f64,
+                    unit: Some("bytes".into()),
+                },
+                CostInput {
+                    name: "estimated_scan".into(),
+                    value: resources.scan_bytes as f64,
+                    unit: Some("bytes".into()),
+                },
+            ]
+        };
+        let baseline = CostAnnotation::modeled(
+            estimate.raw_cost.0,
+            CostUnit::CostUnits,
+            &version,
+            inputs(estimate.resources.raw),
+        );
+        let selected = CostAnnotation::modeled(
+            estimate.candidate_cost.0,
+            CostUnit::CostUnits,
+            &version,
+            inputs(estimate.resources.candidate),
+        )
+        .with_baseline(BaselineRef::PreAsapRecomputation, estimate.raw_cost.0);
+        let benefit = CostAnnotation {
+            value: selected.delta,
+            unit: CostUnit::CostUnits,
+            source: CostSource::Modeled,
+            baseline: Some(BaselineRef::PreAsapRecomputation),
+            delta: None,
+            benefit_ratio: selected.benefit_ratio,
+            model_version: Some(version),
+            benchmark_id: None,
+            inputs: Vec::new(),
+        };
+        (baseline, selected, benefit)
+    }
+}
+
+impl CostModel for ExportPlannerCostModel<'_> {
+    fn candidate_cost_covers_complete_plan(&self) -> bool {
+        true
+    }
+
+    fn candidate_cost(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+    ) -> Option<Cost> {
+        let (provider, calibration) = self.bound(candidate, target)?;
+        AnalyticalPlannerCostModel::new(&provider, calibration.clone())
+            .ok()?
+            .candidate_cost(candidate, target)
+    }
+
+    fn rank_candidates(
+        &self,
+        intent: &asap_types::pre_asap::AggIntent,
+        candidates: &[asap_types::post_asap::SketchAlgorithm],
+    ) -> Vec<asap_types::post_asap::SketchAlgorithm> {
+        DefaultCostModel.rank_candidates(intent, candidates)
+    }
+
+    fn estimate_cost(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+    ) -> f64 {
+        self.candidate_cost(candidate, target)
+            .map_or(f64::NAN, |cost| cost.0)
+    }
+}
 
 /// Baseline/selected/benefit [`CostAnnotation`]s for one [`Winner`] — issue
 /// #286's "replacement-region baseline cost, selected cost, and benefit"
@@ -80,123 +369,18 @@ use asap_types::types::AccuracyTarget;
 /// [`DagDecision`] carried by every node the winning candidate produced or
 /// carried.
 ///
-/// With valid workload inputs and calibration, the baseline is exact raw
-/// aggregation and the selected value is the candidate's analytical
-/// CPU/memory/scan estimate. Missing evidence fails closed as `Unavailable`;
-/// structural node counts are intentionally never used as a fallback.
-fn winner_cost_annotations(
-    analytical: Option<&AnalyticalCostModel>,
-    candidate: &ReplacementSubDAG,
-    target: &Rc<QueryExpr>,
-) -> (CostAnnotation, CostAnnotation, CostAnnotation) {
-    if let Some(model) = analytical {
-        if let (Ok(baseline_resources), Ok(resources)) = (
-            model.raw_resources_for_target(target.as_ref()),
-            model.candidate_resources_for_target(
-                candidate,
-                &asap_aware_mapping::replacement::TargetSubDAG::new(target),
-            ),
-        ) {
-            if let (Ok(baseline_value), Ok(selected_value)) = (
-                baseline_resources.calibrated_cost(&model.calibration),
-                resources.calibrated_cost(&model.calibration),
-            ) {
-                let version = format!("{}+{}", ANALYTICAL_MODEL_VERSION, model.calibration.version);
-                let baseline = CostAnnotation::modeled(
-                    baseline_value,
-                    CostUnit::CostUnits,
-                    &version,
-                    analytical_inputs(model, target, baseline_resources),
-                );
-                let selected = CostAnnotation::modeled(
-                    selected_value,
-                    CostUnit::CostUnits,
-                    &version,
-                    analytical_inputs(model, target, resources),
-                )
-                .with_baseline(BaselineRef::PreAsapRecomputation, baseline_value);
-                let benefit = CostAnnotation {
-                    value: selected.delta,
-                    unit: CostUnit::CostUnits,
-                    source: CostSource::Modeled,
-                    baseline: Some(BaselineRef::PreAsapRecomputation),
-                    delta: None,
-                    benefit_ratio: selected.benefit_ratio,
-                    model_version: Some(version),
-                    benchmark_id: None,
-                    inputs: Vec::new(),
-                };
-                return (baseline, selected, benefit);
-            }
-        }
-    }
-    // Structural node counts are deliberately not a fallback: they have no
-    // physical unit and can reverse the conclusion of the resource model.
-    // Missing inputs and unsupported candidates fail closed instead.
+/// `dag_export` has no deployment-owned physical evidence provider. It must
+/// therefore expose costs as unavailable instead of guessing operator
+/// statistics or falling back to structural node counts. Callers that have
+/// complete evidence use `AnalyticalPlannerCostModel` before export and may
+/// attach its dimensional comparison to these fields.
+#[allow(dead_code)]
+fn winner_cost_annotations() -> (CostAnnotation, CostAnnotation, CostAnnotation) {
     (
         CostAnnotation::unavailable(CostUnit::CostUnits),
         CostAnnotation::unavailable(CostUnit::CostUnits),
         CostAnnotation::unavailable(CostUnit::CostUnits),
     )
-}
-
-fn analytical_inputs(
-    model: &AnalyticalCostModel,
-    target: &QueryExpr,
-    resources: ResourceEstimate,
-) -> Vec<CostInput> {
-    let input = |name: &str, value: f64, unit: &str| CostInput {
-        name: name.to_string(),
-        value,
-        unit: Some(unit.to_string()),
-    };
-    vec![
-        input("input_rows", model.inputs.input_rows as f64, "rows"),
-        input("input_bytes", model.inputs.input_bytes as f64, "bytes"),
-        input(
-            "source_scan_bytes",
-            model.inputs.source_scan_bytes as f64,
-            "bytes",
-        ),
-        input("group_count", model.inputs.group_count as f64, "groups"),
-        input(
-            "group_key_bytes",
-            model.inputs.group_key_bytes as f64,
-            "bytes/group key",
-        ),
-        input(
-            "topk_k",
-            query_topk_k(target).unwrap_or(0) as f64,
-            "rows; 0 means no Top-K",
-        ),
-        input(
-            "evaluation_count",
-            model.inputs.evaluation_count as f64,
-            "evaluations",
-        ),
-        input("estimated_cpu_ops", resources.cpu_ops, "operations"),
-        input(
-            "estimated_peak_memory",
-            resources.peak_memory_bytes as f64,
-            "bytes",
-        ),
-        input("estimated_scan", resources.scan_bytes as f64, "bytes"),
-        input(
-            "cost_per_cpu_op",
-            model.calibration.cost_per_cpu_op,
-            "cost units/operation",
-        ),
-        input(
-            "cost_per_scan_byte",
-            model.calibration.cost_per_scan_byte,
-            "cost units/byte",
-        ),
-        input(
-            "cost_per_retained_byte",
-            model.calibration.cost_per_retained_byte,
-            "cost units/byte/scope",
-        ),
-    ]
 }
 
 use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
@@ -286,7 +470,7 @@ struct ParsedArgs {
     post_asap: bool,
     progress: bool,
     table_schemas: Vec<String>,
-    analytical_cost: Option<AnalyticalCostModel>,
+    planner_cost: Option<PlannerCostDocument>,
     topk_margin: Option<TopKMarginEvidence>,
 }
 
@@ -342,7 +526,7 @@ fn parse_args() -> ParsedArgs {
     let mut post_asap = false;
     let mut progress = false;
     let mut table_schemas = Vec::new();
-    let mut analytical_cost_json = None;
+    let mut planner_cost_json = None;
     let mut topk_margin_json = None;
     let mut args = std::env::args().skip(1);
 
@@ -387,10 +571,10 @@ fn parse_args() -> ParsedArgs {
             "--table-schema" => {
                 table_schemas.push(args.next().expect("--table-schema requires JSON"));
             }
-            "--analytical-cost-json" => {
-                analytical_cost_json = Some(
+            "--planner-cost-json" | "--analytical-cost-json" => {
+                planner_cost_json = Some(
                     args.next()
-                        .expect("--analytical-cost-json requires a JSON object"),
+                        .expect("planner cost evidence requires a JSON document"),
                 );
             }
             "--topk-margin-json" => {
@@ -403,19 +587,8 @@ fn parse_args() -> ParsedArgs {
         }
     }
     flush(&mut entries, &mut pending);
-    let analytical_cost = analytical_cost_json.map(|raw| {
-        let model: AnalyticalCostModel = serde_json::from_str(&raw)
-            .unwrap_or_else(|error| panic!("--analytical-cost-json is invalid: {error}"));
-        model
-            .inputs
-            .validate()
-            .unwrap_or_else(|error| panic!("invalid analytical inputs: {error}"));
-        model
-            .calibration
-            .validate()
-            .unwrap_or_else(|error| panic!("invalid analytical calibration: {error}"));
-        model
-    });
+    let planner_cost = planner_cost_json
+        .map(|raw| parse_planner_cost_document(&raw).unwrap_or_else(|error| panic!("{error}")));
     let topk_margin = topk_margin_json.map(|raw| {
         let evidence: TopKMarginEvidence = serde_json::from_str(&raw)
             .unwrap_or_else(|error| panic!("--topk-margin-json is invalid: {error}"));
@@ -430,7 +603,7 @@ fn parse_args() -> ParsedArgs {
         post_asap,
         progress,
         table_schemas,
-        analytical_cost,
+        planner_cost,
         topk_margin,
     }
 }
@@ -465,15 +638,18 @@ fn annotate_with_explanations(
 /// — the unit both [`PostAsapResults::replacements`] and
 /// [`PostAsapResults::post_graphs`] are built from, so the two outputs can
 /// never disagree about which candidate won for a given target.
+#[allow(dead_code)]
 struct Winner<'a> {
     target: &'a Rc<QueryExpr>,
     candidate: &'a ReplacementSubDAG,
+    costs: (CostAnnotation, CostAnnotation, CostAnnotation),
 }
 
 /// Short explanation intended for a selected winner in node-level UI. The
 /// candidate's full rationale remains available in pre-ASAP applicability
 /// notes; repeating that exhaustive prose on every post-ASAP region node
 /// obscures the actual decision.
+#[allow(dead_code)]
 fn decision_rationale(winner: &Winner<'_>) -> String {
     match winner.candidate.strategy {
         "AvgToSumOverCountStrategy" => {
@@ -519,6 +695,7 @@ fn decision_rationale(winner: &Winner<'_>) -> String {
 /// index rather than a `&Winner` directly so a caller can both use the
 /// match and record it (e.g. `matched[i] = true`) without juggling a second
 /// way to name the same winner.
+#[allow(dead_code)]
 fn lookup_winner(
     by_hash: &HashMap<u64, Vec<usize>>,
     winners: &[Winner<'_>],
@@ -560,11 +737,11 @@ fn decision_cost_entries(graph: &DagGraph) -> Vec<(u32, CostAnnotation, CostAnno
 
 /// Build a [`TargetReplacement`] for `winner`, matching this file's own
 /// per-target `before`/`after` construction.
+#[allow(dead_code)]
 fn target_replacement(
     decision_id: u32,
     target_pre_id: u32,
     winner: &Winner<'_>,
-    analytical: Option<&AnalyticalCostModel>,
 ) -> TargetReplacement {
     let strategy = winner.candidate.strategy.to_string();
     let before = dag_export::export(winner.target);
@@ -576,8 +753,7 @@ fn target_replacement(
             TargetReplacementAfter::Rewrite(dag_export::export(rewritten))
         }
     };
-    let (baseline_cost, selected_cost, benefit) =
-        winner_cost_annotations(analytical, winner.candidate, winner.target);
+    let (baseline_cost, selected_cost, benefit) = winner.costs.clone();
     // Derived from `selected_cost` so the legacy scalar field and the
     // structured annotation can never drift apart.
     let cost = selected_cost.value.unwrap_or(f64::NAN);
@@ -665,10 +841,12 @@ fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
 /// exact same set of winning candidates (see [`Winner`]), so the flat
 /// `replacements` list and the merged `post_graph` can never disagree about
 /// which candidate won for a given target.
+#[allow(dead_code)]
 fn run_post_asap_with_progress(
     lowered_queries: &[(String, String, QueryExpr)],
     progress: bool,
-    analytical: Option<&AnalyticalCostModel>,
+    cost_model: &dyn CostModel,
+    export_model: Option<&ExportPlannerCostModel<'_>>,
     evidence: Option<&dyn AccuracyEvidenceProvider>,
 ) -> PostAsapResults {
     let mapping_started = Instant::now();
@@ -679,8 +857,6 @@ fn run_post_asap_with_progress(
         .iter()
         .map(|(name, _, qe)| (name.clone(), Rc::new(qe.clone())))
         .collect();
-    let default_model = DefaultCostModel;
-    let cost_model: &dyn CostModel = analytical.map_or(&default_model, |model| model);
     let strategies;
     let space = if let Some(evidence) = evidence {
         strategies = default_strategies_with_evidence(cost_model, evidence);
@@ -733,6 +909,9 @@ fn run_post_asap_with_progress(
             Some(Winner {
                 target: group.target,
                 candidate,
+                costs: export_model.map_or_else(winner_cost_annotations, |model| {
+                    model.annotations(candidate, group.target)
+                }),
             })
         })
         .collect();
@@ -775,8 +954,7 @@ fn run_post_asap_with_progress(
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
         let winner = &winners[i];
-        let (baseline_cost, selected_cost, benefit) =
-            winner_cost_annotations(analytical, winner.candidate, winner.target);
+        let (baseline_cost, selected_cost, benefit) = winner.costs.clone();
         // Derived from `selected_cost`; see `target_replacement`'s identical
         // derivation.
         let cost = selected_cost.value.unwrap_or(f64::NAN);
@@ -847,7 +1025,7 @@ fn run_post_asap_with_progress(
             if let Some(i) = lookup_winner(&by_hash, &winners, &mut lookup_cache, source_expr) {
                 replacements.push((
                     name.clone(),
-                    target_replacement(i as u32, node.id, &winners[i], analytical),
+                    target_replacement(i as u32, node.id, &winners[i]),
                 ));
                 matched[i] = true;
             }
@@ -918,7 +1096,7 @@ fn run_post_asap_with_progress(
 
 #[cfg(test)]
 fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapResults {
-    run_post_asap_with_progress(lowered_queries, false, None, None)
+    run_post_asap_with_progress(lowered_queries, false, &DefaultCostModel, None, None)
 }
 
 #[tokio::main]
@@ -929,7 +1107,7 @@ async fn main() {
         post_asap,
         progress,
         table_schemas,
-        analytical_cost,
+        planner_cost,
         topk_margin,
     } = parse_args();
     let sql_catalog = catalog(&table_schemas);
@@ -1008,14 +1186,27 @@ async fn main() {
     }
 
     if post_asap {
-        let results = run_post_asap_with_progress(
-            &lowered_queries,
-            progress,
-            analytical_cost.as_ref(),
-            topk_margin
-                .as_ref()
-                .map(|evidence| evidence as &dyn AccuracyEvidenceProvider),
-        );
+        let results = if let Some(document) = planner_cost.as_ref() {
+            let model = ExportPlannerCostModel { document };
+            run_post_asap_with_progress(
+                &lowered_queries,
+                progress,
+                &model,
+                Some(&model),
+                topk_margin
+                    .as_ref()
+                    .map(|evidence| evidence as &dyn AccuracyEvidenceProvider),
+            )
+        } else {
+            eprintln!(
+                "dag_export: --post-asap requires complete deployment-owned physical-plan evidence; exporting the raw plan only"
+            );
+            PostAsapResults {
+                replacements: Vec::new(),
+                post_graphs: Vec::new(),
+                rejections: Vec::new(),
+            }
+        };
         for (query_name, replacement) in results.replacements {
             if let Some(named) = queries.iter_mut().find(|q| q.name == query_name) {
                 named.replacements.push(replacement);
@@ -1110,6 +1301,23 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cost_annotations_fail_closed_without_physical_evidence() {
+        let (baseline, selected, benefit) = winner_cost_annotations();
+        for annotation in [baseline, selected, benefit] {
+            assert!(annotation.value.is_none());
+            assert_eq!(annotation.source, asap_types::cost::CostSource::Unavailable);
+            assert_eq!(annotation.unit, CostUnit::CostUnits);
+        }
+    }
+
+    #[test]
+    fn compact_analytical_payload_has_an_explicit_migration_error() {
+        let error = parse_planner_cost_document(r#"{"inputs":{"group_count":10}}"#)
+            .expect_err("legacy payload must fail");
+        assert!(error.contains("compact analytical-cost payload"));
+    }
 
     #[test]
     fn workload_wide_explanations_annotate_cross_query_reuse() {
@@ -1262,99 +1470,6 @@ mod tests {
             assert!(!decision.strategy.is_empty());
             assert!(!decision.rationale.is_empty());
         }
-    }
-
-    #[tokio::test]
-    async fn unavailable_analytical_candidate_is_not_exported_as_selected() {
-        use asap_aware_mapping::analytical_cost::{AnalyticalInputs, ResourceCalibration};
-
-        let cat = default_catalog();
-        let sql = "SELECT approx_percentile_cont(latency, 0.95) \
-                   FROM metrics WHERE latency > 0";
-        let query = lower_sql(sql, &cat, AccuracyTarget::Epsilon(0.01))
-            .await
-            .unwrap();
-        let model = AnalyticalCostModel {
-            inputs: AnalyticalInputs {
-                data_arrival: asap_types::workload::DataArrival::AtRest,
-                input_rows: 1_000,
-                input_bytes: 64_000,
-                source_scan_bytes: 64_000,
-                group_count: 1,
-                group_key_bytes: 8,
-                topk_k: None,
-                evaluation_count: 10,
-            },
-            calibration: ResourceCalibration {
-                cost_per_cpu_op: 1.0,
-                cost_per_scan_byte: 1.0,
-                cost_per_retained_byte: 1.0,
-                version: "test".into(),
-            },
-        };
-        let results = run_post_asap_with_progress(
-            &[("filtered".into(), sql.into(), query)],
-            false,
-            Some(&model),
-            None,
-        );
-        assert!(
-            results.replacements.is_empty(),
-            "a partially costed filtered aggregate must remain pre-ASAP"
-        );
-    }
-
-    #[tokio::test]
-    async fn exported_topk_k_comes_from_the_lowered_query() {
-        use asap_aware_mapping::analytical_cost::{AnalyticalInputs, ResourceCalibration};
-
-        let cat = default_catalog();
-        let sql = "SELECT service, COUNT(*) AS frequency FROM metrics \
-                   GROUP BY service ORDER BY frequency DESC LIMIT 10";
-        let query = lower_sql(sql, &cat, AccuracyTarget::Epsilon(0.01))
-            .await
-            .unwrap();
-        let model = AnalyticalCostModel {
-            inputs: AnalyticalInputs {
-                data_arrival: asap_types::workload::DataArrival::AtRest,
-                input_rows: 100_000,
-                input_bytes: 6_400_000,
-                source_scan_bytes: 6_400_000,
-                group_count: 1_000,
-                group_key_bytes: 32,
-                // Deliberately wrong legacy adapter value: export must ignore
-                // it and report the target's canonical k.
-                topk_k: Some(99),
-                evaluation_count: 10,
-            },
-            calibration: ResourceCalibration {
-                cost_per_cpu_op: 1.0,
-                cost_per_scan_byte: 1.0,
-                cost_per_retained_byte: 1.0,
-                version: "test".into(),
-            },
-        };
-        let evidence = TopKMarginEvidence {
-            selected_lower_bound: 1_200.0,
-            excluded_upper_bound: 1_000.0,
-            interval_failure_probability: 0.001,
-        };
-        let results = run_post_asap_with_progress(
-            &[("topk".into(), sql.into(), query)],
-            false,
-            Some(&model),
-            Some(&evidence),
-        );
-        let exported_k: Vec<f64> = results
-            .replacements
-            .iter()
-            .filter_map(|(_, replacement)| replacement.selected_cost.as_ref())
-            .flat_map(|cost| cost.inputs.iter())
-            .filter(|input| input.name == "topk_k")
-            .map(|input| input.value)
-            .collect();
-        assert!(exported_k.contains(&10.0), "missing canonical Top-K k");
-        assert!(!exported_k.contains(&99.0), "export leaked adapter Top-K k");
     }
 
     #[test]
