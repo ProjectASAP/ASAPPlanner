@@ -7,10 +7,9 @@ work, peak memory, and source/disk I/O. It replaces dimensionless plan-node
 counts with estimates derived from operator complexity, cardinality, row
 width, concrete summary parameters, and the selected deployment lifecycle.
 
-There are three adapters. `AnalyticalCostModel` is the legacy compact-report
-adapter for `DataArrival::AtRest`. `AnalyticalPlannerCostModel` compares
-complete raw and replacement physical DAGs during automatic planner ranking.
-`StreamingAnalyticalCostModel` supplies the existing lifecycle planner with a
+There are two planner adapters. `AnalyticalPlannerCostModel` compares complete
+raw and replacement physical DAGs during automatic planner ranking.
+`StreamingAnalyticalCostModel` supplies the lifecycle planner with a
 raw recomputation baseline plus build, update, read, retention, and retirement
 costs for `DataArrival::ContinuouslyIngesting`. The same module also exposes a
 whole-selected-summary estimator for merge, subtract, delete, readout, and
@@ -143,6 +142,11 @@ Each evaluation adds rows and bytes that arrived since planning time, using
 the recurrence's evaluation offsets. Multi-source raw comparison requires
 per-source raw evidence and currently fails closed.
 
+The streaming raw evidence stores per-evaluation bootstrap dimensions, then
+binds them into one horizon-total physical DAG. Because those node statistics
+already sum every evaluation, all reachable raw DAG nodes execute with `Once`
+multiplicity; accepting `PerEvaluation` would multiply the horizon twice.
+
 Periodic rebuild and implicit expiration-policy CPU remain unavailable. The
 authoritative lifecycle types express direct versus incremental maintenance,
 activation/retirement intervals, retention, and evaluation schedule, but no
@@ -164,7 +168,7 @@ canonical workload and query terms rather than defining parallel strings:
 
 | Scope field | Authoritative type and meaning |
 |---|---|
-| Arrival mode | `DataArrival`; this model accepts only `AtRest`. |
+| Arrival mode | `DataArrival`; complete-DAG comparison supports `AtRest` and `ContinuouslyIngesting`, while each adapter rejects modes outside its contract. |
 | Planning instant and finite horizon | `TimestampMs` and `DurationMs`. |
 | Invocation schedule | `QueryRecurrence`; the evaluation count is derived, not copied. |
 | Event-time coverage | `TimeSelection`. |
@@ -447,9 +451,7 @@ retained-memory charge by the comparison horizon before returning the
 lifecycle primitive. Integrating that rate over the same horizon produces
 exactly one peak-memory charge and agrees with complete-DAG costing.
 
-The legacy compact-report path still has formulas for sketch build and
-readout only. It rejects summary join, merge, subtract, and delete explicitly
-rather than charging only their children. The incremental estimator supports
+The incremental estimator supports
 merge, subtract, delete, and readout when their operation evidence is present.
 `SummaryJoin` additionally requires `SummaryJoinEvidence`: matched state pairs
 per evaluation, CPU operations per matched pair, and peak join working memory.
@@ -464,8 +466,8 @@ bound physical DAG for a `SummaryExpr` candidate. The deployment implements
 the generic query lowerer, while summary binding returns a complete
 `PhysicalDag`, including embedded raw work, build/read operators, retained
 state, execution multiplicity, and source coverage. The adapter calls
-`estimate_physical_dag_comparison`; it never calls `DefaultCostModel`, the
-compact estimator, or a structural-node-count fallback for final cost.
+`estimate_physical_dag_comparison`; it never calls `DefaultCostModel` or a
+structural-node-count fallback for final cost.
 
 A candidate is exposed to global selection only when both complete DAGs are
 valid and its calibrated cost is strictly below the raw baseline. Missing or

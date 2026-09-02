@@ -17,11 +17,9 @@ use asap_types::pre_asap::{
 use asap_types::workload::{DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use crate::analytical_cost::ExecutionMultiplicity;
 use crate::analytical_cost::{
-    estimate_physical_dag, AnalyticalCostError, PhysicalDagNode, PhysicalOperator,
-    ResourceCalibration, ResourceEstimate,
+    estimate_physical_dag, AnalyticalCostError, ExecutionMultiplicity, PhysicalDagNode,
+    PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
 use crate::analytical_statistics::{ComparisonScope, EdgeStatistics, OperatorStatistics};
 use crate::cost_model::CostedSummaryDeployment;
@@ -289,9 +287,11 @@ impl StreamingNodeEvidence {
     }
 }
 
-/// Complete physical work for one raw evaluation. It is deliberately
-/// per-evaluation so the same normalized query recurrence/horizon can multiply
-/// both raw and summary alternatives.
+/// Raw evolution inputs plus the complete horizon-total physical DAG.
+///
+/// The scalar row/byte fields describe one evaluation and are expanded over
+/// the recurrence by the binder. The resulting DAG already contains those
+/// totals, so every reachable physical node must use `Once` multiplicity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamingRawInputEvidence {
     pub input_rows_per_evaluation: u64,
@@ -404,20 +404,21 @@ fn validate_query_scope(
 ) -> Result<(), AnalyticalCostError> {
     let mut actual = Vec::new();
     query_scan_selections(target, &mut actual);
-    let mut declared: Vec<_> = scope
+    let declared: Vec<_> = scope
         .sources
         .iter()
         .map(|coverage| (coverage.source.clone(), coverage.predicates.clone()))
         .collect();
+    let mut covered = vec![false; declared.len()];
     for selection in actual {
         let Some(index) = declared.iter().position(|value| value == &selection) else {
             return Err(AnalyticalCostError::ComparisonScopeMismatch(
                 "raw target source lineage",
             ));
         };
-        declared.swap_remove(index);
+        covered[index] = true;
     }
-    if !declared.is_empty() {
+    if covered.iter().any(|covered| !covered) {
         return Err(AnalyticalCostError::ComparisonScopeMismatch(
             "raw target source lineage",
         ));
@@ -429,7 +430,7 @@ fn validate_physical_scope_coverage(
     physical: &StreamingPhysicalDagEvidence,
     scope: &ComparisonScope,
 ) -> Result<(), AnalyticalCostError> {
-    let mut declared = scope.sources.clone();
+    let mut covered = vec![false; scope.sources.len()];
     for node in physical
         .nodes
         .iter()
@@ -439,14 +440,14 @@ fn validate_physical_scope_coverage(
             .source_coverage
             .as_ref()
             .ok_or_else(|| AnalyticalCostError::MissingScanSourceCoverage(node.id.clone()))?;
-        let Some(index) = declared.iter().position(|value| value == coverage) else {
+        let Some(index) = scope.sources.iter().position(|value| value == coverage) else {
             return Err(AnalyticalCostError::ComparisonScopeMismatch(
                 "physical source coverage",
             ));
         };
-        declared.swap_remove(index);
+        covered[index] = true;
     }
-    if !declared.is_empty() {
+    if covered.iter().any(|covered| !covered) {
         return Err(AnalyticalCostError::ComparisonScopeMismatch(
             "physical source coverage",
         ));
@@ -462,6 +463,28 @@ fn validate_raw_snapshot_dimensions(
         return Err(AnalyticalCostError::MissingComparisonScope(
             "single-source raw evolution",
         ));
+    }
+    let nodes: HashMap<_, _> = raw
+        .physical_dag
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    let mut stack = vec![raw.physical_dag.root.as_str()];
+    let mut visited = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        let node = nodes
+            .get(id)
+            .ok_or(AnalyticalCostError::InvalidPhysicalDag("missing raw node"))?;
+        if node.execution != ExecutionMultiplicity::Once {
+            return Err(AnalyticalCostError::InvalidPhysicalDag(
+                "horizon-total raw nodes must execute once",
+            ));
+        }
+        stack.extend(node.children.iter().map(String::as_str));
     }
     let mut rows = 0_u64;
     let mut bytes = 0_u64;
@@ -2023,6 +2046,29 @@ mod tests {
                 metric: "service_info".into()
             }
         );
+    }
+
+    #[test]
+    fn horizon_total_raw_dag_rejects_per_evaluation_multiplicity() {
+        let mut raw = streaming_raw();
+        raw.physical_dag.nodes[0].execution = ExecutionMultiplicity::PerEvaluation;
+
+        assert!(matches!(
+            validate_raw_snapshot_dimensions(&raw, &streaming_scope()),
+            Err(AnalyticalCostError::InvalidPhysicalDag(
+                "horizon-total raw nodes must execute once"
+            ))
+        ));
+    }
+
+    #[test]
+    fn repeated_physical_scans_may_cover_one_semantic_source() {
+        let mut physical = streaming_raw().physical_dag;
+        let mut repeated = physical.nodes[0].clone();
+        repeated.id = "raw-scan-again".into();
+        physical.nodes.push(repeated);
+
+        validate_physical_scope_coverage(&physical, &streaming_scope()).unwrap();
     }
 
     fn estimate_test(
