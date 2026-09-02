@@ -552,6 +552,17 @@ pub trait CostModel {
         SummaryMaintenanceLifecycleCostInputs::default()
     }
 
+    /// Horizon-aware form used by lifecycle planning. Models whose retention
+    /// objective is capacity rather than byte-seconds can normalize their
+    /// rate so the horizon integral equals one peak-capacity charge.
+    fn summary_maintenance_lifecycle_cost_inputs_for_horizon(
+        &self,
+        summary: &SummaryNode,
+        _horizon: Option<Horizon>,
+    ) -> SummaryMaintenanceLifecycleCostInputs {
+        self.summary_maintenance_lifecycle_cost_inputs(summary)
+    }
+
     /// Physical update/merge/delete support for one concrete summary. The
     /// conservative default advertises no long-lived maintenance capability.
     fn summary_maintenance_capabilities(
@@ -568,6 +579,7 @@ pub trait CostModel {
     fn complete_summary_candidate_cost(
         &self,
         _root: &SummaryNode,
+        _target: Option<&QueryExpr>,
         deployments: &[CostedSummaryDeployment<'_>],
         _horizon: Option<Horizon>,
         _expected_reads: Option<f64>,

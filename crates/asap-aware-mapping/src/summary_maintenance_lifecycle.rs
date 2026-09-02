@@ -301,12 +301,14 @@ pub fn plan_summary_maintenance_lifecycles(
         capabilities,
         cost_model,
         None,
+        None,
     )
 }
 
 /// Internal candidate-costing form. The workload binding supplies temporal
 /// eligibility and data-arrival facts; `profile` supplies effective uses after
 /// DAG path multiplicity has been propagated by `PlanSpace`.
+#[expect(clippy::too_many_arguments, reason = "internal bound planning context")]
 fn plan_summary_maintenance_lifecycles_with_profile(
     root: Rc<SummaryNode>,
     demand: WorkloadDemand<'_>,
@@ -315,6 +317,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
     capabilities: SummaryMaintenanceLifecycleCapabilities,
     cost_model: &dyn CostModel,
     profile: Option<RecurrenceProfile>,
+    comparison_target: Option<&QueryExpr>,
 ) -> Result<SummaryMaintenanceLifecyclePlan, SummaryMaintenanceLifecyclePlanError> {
     demand.workload.validate()?;
     if horizon.is_some_and(|h| !h.0.is_finite() || h.0 <= 0.0) {
@@ -348,7 +351,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
                 horizon,
                 capabilities,
                 cost_model.summary_maintenance_capabilities(&summary),
-                cost_model.summary_maintenance_lifecycle_cost_inputs(&summary),
+                cost_model.summary_maintenance_lifecycle_cost_inputs_for_horizon(&summary, horizon),
             );
             SummaryMaintenanceDeployment {
                 summary_index,
@@ -364,6 +367,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         &components,
         facts.arrival,
         cost_model,
+        comparison_target,
         horizon,
         facts.reads,
     );
@@ -420,6 +424,7 @@ pub fn global_selection_with_summary_maintenance_lifecycles<'a, Id>(
                 capabilities,
                 cost_model,
                 Some(profiles.for_target(&group.target)),
+                Some(&group.target),
             )?;
             let raw = plan
                 .expected_reads
@@ -453,13 +458,15 @@ pub fn materialize_with_summary_maintenance_lifecycles(
     selection
         .materialize(target)?
         .map(|root| {
-            let mut plan = plan_summary_maintenance_lifecycles(
+            let mut plan = plan_summary_maintenance_lifecycles_with_profile(
                 root,
                 demand,
                 now_ms,
                 horizon,
                 capabilities,
                 cost_model,
+                None,
+                Some(target),
             )?;
             plan.raw_recompute_total_cost = plan
                 .expected_reads
@@ -985,12 +992,14 @@ fn summary_state_components(summaries: &[Rc<SummaryNode>]) -> Vec<usize> {
         .collect()
 }
 
+#[expect(clippy::too_many_arguments, reason = "complete combination context")]
 fn select_complete_lifecycle_combination(
     root: &SummaryNode,
     deployments: &mut [SummaryMaintenanceDeployment],
     components: &[usize],
     arrival: DataArrival,
     cost_model: &dyn CostModel,
+    comparison_target: Option<&QueryExpr>,
     horizon: Option<Horizon>,
     expected_reads: Option<f64>,
 ) -> Option<Cost> {
@@ -1026,6 +1035,7 @@ fn select_complete_lifecycle_combination(
         components: &[usize],
         arrival: DataArrival,
         cost_model: &dyn CostModel,
+        comparison_target: Option<&QueryExpr>,
         horizon: Option<Horizon>,
         expected_reads: Option<f64>,
         selected: &mut Vec<(usize, SummaryMaintenanceLifecycleGuarantee, Cost)>,
@@ -1048,9 +1058,13 @@ fn select_complete_lifecycle_combination(
                     selected_cost: *cost,
                 })
                 .collect();
-            let Some(cost) =
-                cost_model.complete_summary_candidate_cost(root, &costed, horizon, expected_reads)
-            else {
+            let Some(cost) = cost_model.complete_summary_candidate_cost(
+                root,
+                comparison_target,
+                &costed,
+                horizon,
+                expected_reads,
+            ) else {
                 return;
             };
             if best
@@ -1087,6 +1101,7 @@ fn select_complete_lifecycle_combination(
                 components,
                 arrival,
                 cost_model,
+                comparison_target,
                 horizon,
                 expected_reads,
                 selected,
@@ -1104,6 +1119,7 @@ fn select_complete_lifecycle_combination(
         components,
         arrival,
         cost_model,
+        comparison_target,
         horizon,
         expected_reads,
         &mut Vec::new(),
@@ -1300,6 +1316,7 @@ mod tests {
         fn complete_summary_candidate_cost(
             &self,
             _root: &SummaryNode,
+            _target: Option<&QueryExpr>,
             deployments: &[CostedSummaryDeployment<'_>],
             _horizon: Option<Horizon>,
             _expected_reads: Option<f64>,
@@ -1962,6 +1979,7 @@ mod tests {
             &[0],
             DataArrival::ContinuouslyIngesting,
             &WholeCandidatePrefersContinuous,
+            None,
             Some(Horizon(10.0)),
             Some(2.0),
         );
@@ -2009,6 +2027,7 @@ mod tests {
                 &(0..13).collect::<Vec<_>>(),
                 DataArrival::ContinuouslyIngesting,
                 &WholeCandidatePrefersContinuous,
+                None,
                 Some(Horizon(10.0)),
                 Some(2.0),
             ),
