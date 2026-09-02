@@ -5,10 +5,10 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-# --epsilon asks for an approximate accuracy target instead of the default
-# Exact, so SketchAlgorithmStrategy actually has a sketch alternative to
-# report — without it, no query below would ever pick up a `notes` badge
-# (see crates/devtools/src/bin/dag_export.rs's own `--epsilon` doc comment).
+# This checked-in sample intentionally omits deployment-owned physical
+# evidence. The exporter therefore emits the raw DAG only; costed post-ASAP
+# examples must pass a complete --planner-cost-json document and never fall
+# back to structural node counts.
 cargo run -p asap-devtools --bin dag_export -- \
   --post-asap --progress \
   --epsilon 0.01 \
