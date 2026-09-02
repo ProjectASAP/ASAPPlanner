@@ -635,10 +635,18 @@ pub fn lower_query_physical_dag(
                         None,
                     )
                 }
-                QueryExpr::PromqlVectorFromScalar(child)
-                | QueryExpr::PromqlScalarFromVector(child) => {
-                    self.lower_unary(query, occurrence, PhysicalOperator::PromqlBridge, child)
-                }
+                QueryExpr::PromqlVectorFromScalar(child) => self.lower_unary(
+                    query,
+                    occurrence,
+                    PhysicalOperator::PromqlScalarToVector,
+                    child,
+                ),
+                QueryExpr::PromqlScalarFromVector(child) => self.lower_unary(
+                    query,
+                    occurrence,
+                    PhysicalOperator::PromqlVectorToScalar,
+                    child,
+                ),
                 QueryExpr::PromqlScalarBridge(inner)
                     if matches!(
                         inner.as_ref(),
@@ -953,8 +961,26 @@ fn require_operator_statistics(
                 ));
             }
         }
-        PhysicalOperator::PromqlSubquery | PhysicalOperator::PromqlBridge => {
+        PhysicalOperator::PromqlSubquery => {
             require_promql_statistics(statistics, 1)?;
+        }
+        PhysicalOperator::PromqlScalarToVector => {
+            let promql = require_promql_statistics(statistics, 1)?;
+            if promql.input_series != [0]
+                || promql.output_series != 1
+                || input.rows != promql.evaluation_steps
+                || output.rows != promql.evaluation_steps
+            {
+                return invalid(
+                    "scalar-to-vector must consume one scalar and emit one series per evaluation step",
+                );
+            }
+        }
+        PhysicalOperator::PromqlVectorToScalar => {
+            let promql = require_promql_statistics(statistics, 1)?;
+            if promql.output_series != 0 || output.rows != promql.evaluation_steps {
+                return invalid("vector-to-scalar must emit one scalar per evaluation step");
+            }
         }
         PhysicalOperator::PromqlVectorBinary => {
             require_promql_statistics(statistics, 2)?;
@@ -2353,14 +2379,73 @@ mod tests {
         )));
         let scalar_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
         let vector_statistics =
-            with_promql(statistics(vec![edge(10, 80)], edge(10, 80)), vec![0], 0, 10);
-        let provided = HashMap::from([
+            with_promql(statistics(vec![edge(10, 80)], edge(10, 80)), vec![0], 1, 10);
+        let mut provided = HashMap::from([
             ("query-1".into(), evidence(scalar_statistics)),
             ("query-0".into(), evidence(vector_statistics)),
         ]);
         let dag = lower_query_physical_dag(&vector, &empty_scope, &scripted(&provided)).unwrap();
         assert_eq!(dag.nodes[0].operator, PhysicalOperator::PromqlScalarLeaf);
-        assert_eq!(dag.nodes[1].operator, PhysicalOperator::PromqlBridge);
+        assert_eq!(
+            dag.nodes[1].operator,
+            PhysicalOperator::PromqlScalarToVector
+        );
+
+        provided
+            .get_mut("query-0")
+            .unwrap()
+            .statistics
+            .promql
+            .as_mut()
+            .unwrap()
+            .output_series = 0;
+        assert!(matches!(
+            lower_query_physical_dag(&vector, &empty_scope, &scripted(&provided)),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+
+        let scalar_from_vector = Rc::new(QueryExpr::PromqlScalarFromVector(vector));
+        let scalar_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
+        let vector_statistics =
+            with_promql(statistics(vec![edge(10, 80)], edge(10, 80)), vec![0], 1, 10);
+        let scalar_from_vector_statistics =
+            with_promql(statistics(vec![edge(10, 80)], edge(10, 80)), vec![1], 0, 10);
+        let mut provided = HashMap::from([
+            ("query-2".into(), evidence(scalar_statistics)),
+            ("query-1".into(), evidence(vector_statistics)),
+            ("query-0".into(), evidence(scalar_from_vector_statistics)),
+        ]);
+        let dag = lower_query_physical_dag(&scalar_from_vector, &empty_scope, &scripted(&provided))
+            .unwrap();
+        assert_eq!(
+            dag.nodes[2].operator,
+            PhysicalOperator::PromqlVectorToScalar
+        );
+        provided
+            .get_mut("query-0")
+            .unwrap()
+            .statistics
+            .promql
+            .as_mut()
+            .unwrap()
+            .output_series = 1;
+        assert!(matches!(
+            lower_query_physical_dag(&scalar_from_vector, &empty_scope, &scripted(&provided)),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+        let promql = provided
+            .get_mut("query-0")
+            .unwrap()
+            .statistics
+            .promql
+            .as_mut()
+            .unwrap();
+        promql.output_series = 0;
+        promql.input_series = vec![2];
+        assert!(matches!(
+            lower_query_physical_dag(&scalar_from_vector, &empty_scope, &scripted(&provided)),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
 
         let scan = Rc::new(QueryExpr::Scan {
             source: Source::TimeSeries { metric: "m".into() },

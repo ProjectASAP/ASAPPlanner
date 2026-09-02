@@ -304,7 +304,8 @@ The supported mappings are:
 | PromqlRelabel | PromqlRelabel |
 | PromqlInfoEnrich | left input plus an explicit scoped info-metric Scan |
 | PromqlSeriesSample | PromqlSeriesSample using the existing SampleKind |
-| PromqlVectorFromScalar / PromqlScalarFromVector | unary PromqlBridge |
+| PromqlVectorFromScalar | unary PromqlScalarToVector |
+| PromqlScalarFromVector | unary PromqlVectorToScalar |
 | PromqlScalarBridge(float) / EvalTimestamp | zero-input PromqlScalarLeaf |
 | Count/Sum/Min/Max/Avg/StdDev/Variance with PerEntity (`*_over_time`) | PromqlPerSeries |
 | native histogram count/sum/avg/stddev/stdvar/fraction accessor | PromqlPerSeries |
@@ -340,11 +341,17 @@ range and subquery values therefore include their internal evaluation steps.
 For every subquery, `child.evaluation_steps` must equal checked
 `parent.evaluation_steps × subquery_steps`; nested subqueries apply the same
 equation recursively. Overflow or disagreement makes the candidate
-unavailable. `ComparisonScope` alone multiplies the completed query over the workload
-horizon. They are never multiplied into the horizon a second time. Series
+unavailable. `ComparisonScope` alone multiplies the completed query over the
+workload horizon. They are never multiplied into the horizon a second time. Series
 cardinality is carried in child order and must agree across every physical
 edge. Missing window, step, series, expression-work, label-key, or accumulator
 evidence makes the entire candidate unavailable.
+
+Scalar/vector bridges retain their direction in the physical operator. A
+scalar-to-vector bridge consumes zero input series and emits exactly one series;
+both input and output contain one row per evaluation step. A vector-to-scalar
+bridge emits zero series and exactly one scalar row per evaluation step; its
+input-series count must equal the vector child's output-series count.
 
 `info()` resolves its default `target_info` metric, or one exact `__name__`
 matcher, to a concrete existing `Source::TimeSeries` coverage. Its right side
@@ -386,7 +393,7 @@ the DAG rules above.
 | PromQL relabel | `input_rows × scalar_ops_per_row` | one output row/batch | `0` |
 | PromQL info enrichment | left + info + output rows + `info_rows × matcher_ops_per_row` | right-side label-match hash state | `0` beyond its explicit Scan child |
 | PromQL series sample | input rows + input series | selected-series key/hash state | `0` |
-| PromQL scalar/vector bridge | input + output rows | one output row/batch | `0` |
+| PromQL scalar-to-vector / vector-to-scalar bridge | input + output rows | one output row/batch | `0` |
 | PromQL scalar leaf | output rows | one output row/batch | `0` |
 | PromQL per-series intent | `input_rows × scalar_ops_per_row` | `input_series × accumulator_bytes` | `0` |
 | PromQL absence | input work + synthesized output | one output row/batch | `0` |
