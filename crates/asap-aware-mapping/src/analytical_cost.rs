@@ -1946,6 +1946,8 @@ pub enum AnalyticalCostError {
     InvalidIngestionRate(f64),
     #[error("summary lifecycle, maintenance mode, and evaluation schedule are inconsistent")]
     IncompatibleLifecycleGuarantee,
+    #[error("bootstrap row and byte evidence must either both be zero or both be non-zero")]
+    InconsistentBootstrapEvidence,
     #[error("summary operation cost {0} must be finite and non-negative, got {1}")]
     InvalidOperationCost(&'static str, f64),
     #[error("required analytical input {0} is missing or zero")]
