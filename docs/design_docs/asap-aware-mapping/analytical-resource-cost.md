@@ -12,6 +12,16 @@ and guarantee composition run first; costing ranks only the candidates that
 survive. Missing evidence produces an unavailable estimate, never an assumed
 zero or a structural-cost fallback.
 
+This document distinguishes two implementation layers:
+
+- the physical-DAG estimator, which can compose any DAG whose nodes have
+  supported physical operators and complete `OperatorInputs`; and
+- the planner bridge, which lowers a deliberately small set of replacement
+  shapes into that estimator and participates in automatic candidate ranking.
+
+Support in the first layer does not imply that the planner can yet lower and
+rank the same shape. The current bridge boundary is stated explicitly below.
+
 An estimate has physical dimensions:
 
 ```text
@@ -63,7 +73,7 @@ evidence has been resolved. They are estimator adapters, not planner domain
 objects. `dag_export --analytical-cost-json` is a development/reproducibility
 adapter, not a replacement for `QueryWorkload` or `DataWorkload`.
 
-The canonical workload adapter is `AnalyticalCostModel::from_workload`. It
+The available canonical workload adapter is `AnalyticalCostModel::from_workload`. It
 reads fresh source cardinality from `DataWorkload`, derives the finite
 evaluation count from `QueryWorkloadEntry.recurrence` plus the planning
 horizon, and combines those values with `PhysicalInputEvidence`. An unknown
@@ -227,13 +237,16 @@ sketch states are sent through the physical-DAG estimator; the compact
 single-summary adapter rejects them because it has no source-edge identities
 with which to decide whether their reads are shared.
 
-The compact planner bridge accepts only complete shapes it can cost from its
-resolved inputs: an unfiltered source scan followed by one aggregate, and the
-canonical count-grouped Top-K fusion over such a scan. A filter, projection,
-join, window, nested aggregate, or predicate-bearing scan is unavailable until
-a caller supplies its per-node physical DAG. Final selection excludes every
-unavailable replacement; when none remain, `chosen = None` preserves the raw
-pre-ASAP target.
+The compact planner bridge accepts only complete shapes it can currently lower
+from its resolved inputs: an unfiltered source scan followed by one aggregate,
+and the canonical count-grouped Top-K fusion over such a scan. It rejects a
+filter, projection, join, window, nested aggregate, or predicate-bearing scan.
+Although the standalone physical-DAG estimator can cost several of those
+operators when given complete `OperatorInputs`, the planner does not yet have
+an input path that lowers arbitrary candidate DAGs into it. Adding that lowering
+and its statistics provider is future integration work. Final selection
+excludes every unavailable replacement; when none remain, `chosen = None`
+preserves the raw pre-ASAP target.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
@@ -275,7 +288,7 @@ candidate.
 
 ## Candidate selection and provenance
 
-For each decision point, the planner:
+The intended end-to-end selection pipeline is:
 
 1. enumerates semantically valid alternatives;
 2. checks end-to-end accuracy and lifecycle legality;
@@ -283,6 +296,11 @@ For each decision point, the planner:
 4. sizes physical summary parameters;
 5. estimates the complete candidate DAG;
 6. applies calibration and ranks candidates by ascending cost.
+
+The current planner bridge executes this pipeline only for the compact shapes
+listed above. Other supported physical operators are currently usable through
+`estimate_physical_dag`, but are not automatically reached by replacement
+selection.
 
 The raw baseline and selected alternative use the same source snapshot,
 horizon, and calibration:
