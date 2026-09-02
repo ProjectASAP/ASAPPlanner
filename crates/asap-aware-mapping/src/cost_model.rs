@@ -190,6 +190,18 @@ pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
 /// `replacement::implementations_for_with` constructs every candidate in the
 /// resulting order.
 pub trait CostModel {
+    /// Whether [`Self::candidate_cost`] prices a complete physical
+    /// alternative, including its raw baseline, rather than a local
+    /// heuristic for one memo-group node.
+    ///
+    /// Complete-plan models make every CSE alternative available to final
+    /// ranking. Choosing a share/recompute arm first through the legacy
+    /// structural hooks would discard a physical alternative before its
+    /// evidence-backed cost was compared.
+    fn candidate_cost_covers_complete_plan(&self) -> bool {
+        false
+    }
+
     /// Candidate-level availability for final selection. The default keeps
     /// every candidate, including legacy models whose numeric estimate is a
     /// display-only placeholder. Models that require evidence override this
