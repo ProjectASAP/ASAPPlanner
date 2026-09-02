@@ -233,6 +233,17 @@ pub struct PromqlOperatorStatistics {
     pub window_samples_per_series: Option<u64>,
     pub subquery_steps: Option<u64>,
     pub scalar_ops_per_row: Option<u64>,
+    /// Physical operand shape for a PromQL binary operator. Series cardinality
+    /// cannot encode this because a vector may legitimately contain zero series.
+    #[serde(default)]
+    pub binary_operand_mode: Option<PromqlBinaryOperandMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlBinaryOperandMode {
+    VectorVector,
+    VectorScalar,
+    ScalarVector,
 }
 
 /// Resolves physical statistics and owns their catalog/observation freshness.
