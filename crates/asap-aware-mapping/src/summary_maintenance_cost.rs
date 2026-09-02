@@ -11,7 +11,7 @@ use asap_types::post_asap::{
     SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
 };
-use asap_types::pre_asap::{agg_intent::AggIntent, QueryExpr};
+use asap_types::pre_asap::{agg_intent::AggIntent, Predicate, QueryExpr, Source};
 use asap_types::workload::{DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand};
 use serde::{Deserialize, Serialize};
 
@@ -183,6 +183,15 @@ pub struct StreamingSummaryOperatorEvidence {
     pub routing_fanout: Option<u64>,
 }
 
+/// Non-aggregation work for a retained pre-ASAP subtree over the comparison
+/// horizon. Bootstrap/source I/O belongs exclusively to the owning aggregate,
+/// and summary insertion belongs exclusively to its insert evidence.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StreamingRetainedQueryEvidence {
+    pub preprocessing_cpu_ops_over_horizon: f64,
+    pub peak_memory_bytes: u64,
+}
+
 /// Physical evidence bound to the selected DAG's `Rc` identity. A copied,
 /// structurally equal node is not silently treated as the same deployment.
 #[derive(Debug, Clone, Default)]
@@ -191,6 +200,7 @@ pub struct StreamingNodeEvidence {
     joins: HashMap<*const SummaryNode, SummaryJoinEvidence>,
     operations: HashMap<*const SummaryNode, StreamingSummaryOperatorEvidence>,
     operation_state_owners: HashMap<*const SummaryNode, *const SummaryNode>,
+    retained_queries: HashMap<*const SummaryNode, StreamingRetainedQueryEvidence>,
 }
 
 impl StreamingNodeEvidence {
@@ -227,6 +237,14 @@ impl StreamingNodeEvidence {
             .insert(Rc::as_ptr(node), Rc::as_ptr(state));
     }
 
+    pub fn insert_retained_query(
+        &mut self,
+        node: &Rc<SummaryNode>,
+        evidence: StreamingRetainedQueryEvidence,
+    ) {
+        self.retained_queries.insert(Rc::as_ptr(node), evidence);
+    }
+
     fn aggregation(&self, node: &SummaryNode) -> Option<StreamingAggregateEvidence> {
         self.aggregations.get(&(node as *const _)).cloned()
     }
@@ -251,19 +269,130 @@ pub struct StreamingRawInputEvidence {
 /// existing enums and legality checks remain authoritative.
 #[derive(Debug, Clone)]
 pub struct SummaryMaintenanceCostModel {
-    pub comparison_scope: ComparisonScope,
-    pub raw: StreamingRawInputEvidence,
     pub node_evidence: StreamingNodeEvidence,
     pub calibration: ResourceCalibration,
     pub capabilities: SummaryMaintenanceCapabilities,
+    target_comparisons: HashMap<*const QueryExpr, StreamingTargetComparison>,
+    node_targets: HashMap<*const SummaryNode, *const QueryExpr>,
+    target_aggregations: HashMap<*const QueryExpr, HashSet<*const SummaryNode>>,
+}
+
+#[derive(Debug, Clone)]
+struct StreamingTargetComparison {
+    scope: ComparisonScope,
+    raw: StreamingRawInputEvidence,
 }
 
 impl SummaryMaintenanceCostModel {
+    pub fn new(
+        calibration: ResourceCalibration,
+        capabilities: SummaryMaintenanceCapabilities,
+    ) -> Self {
+        Self {
+            node_evidence: StreamingNodeEvidence::default(),
+            calibration,
+            capabilities,
+            target_comparisons: HashMap::new(),
+            node_targets: HashMap::new(),
+            target_aggregations: HashMap::new(),
+        }
+    }
+
+    /// Bind one candidate and its raw baseline to the same target-specific
+    /// comparison context. Rebinding a target to different evidence is
+    /// rejected rather than silently replacing the canonical context.
+    pub fn bind_candidate_comparison(
+        &mut self,
+        target: &Rc<QueryExpr>,
+        root: &Rc<SummaryNode>,
+        scope: ComparisonScope,
+        raw: StreamingRawInputEvidence,
+    ) -> Result<(), AnalyticalCostError> {
+        scope.validate()?;
+        let target_ptr = Rc::as_ptr(target);
+        if let Some(existing) = self.target_comparisons.get(&target_ptr) {
+            if existing.scope != scope || existing.raw != raw {
+                return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                    "target comparison",
+                ));
+            }
+        } else {
+            self.target_comparisons
+                .insert(target_ptr, StreamingTargetComparison { scope, raw });
+        }
+        fn bind(
+            node: &Rc<SummaryNode>,
+            target: *const QueryExpr,
+            node_targets: &mut HashMap<*const SummaryNode, *const QueryExpr>,
+            aggregations: &mut HashSet<*const SummaryNode>,
+            seen: &mut HashSet<*const SummaryNode>,
+        ) -> Result<(), AnalyticalCostError> {
+            let node_ptr = Rc::as_ptr(node);
+            if !seen.insert(node_ptr) {
+                return Ok(());
+            }
+            if node_targets
+                .insert(node_ptr, target)
+                .is_some_and(|old| old != target)
+            {
+                return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                    "summary target binding",
+                ));
+            }
+            match &node.expr {
+                SummaryExpr::KeepPreAsap(_) => {}
+                SummaryExpr::SummaryAgg { child, .. } => {
+                    aggregations.insert(node_ptr);
+                    bind(child, target, node_targets, aggregations, seen)?;
+                }
+                SummaryExpr::SummaryMerge { children } => {
+                    for child in children {
+                        bind(child, target, node_targets, aggregations, seen)?;
+                    }
+                }
+                SummaryExpr::SummarySubtract { left, right }
+                | SummaryExpr::SummaryJoin {
+                    outer: left,
+                    inner: right,
+                    ..
+                } => {
+                    bind(left, target, node_targets, aggregations, seen)?;
+                    bind(right, target, node_targets, aggregations, seen)?;
+                }
+                SummaryExpr::SummaryDelete { summary_input, .. }
+                | SummaryExpr::SummaryEstimate { summary_input, .. } => {
+                    bind(summary_input, target, node_targets, aggregations, seen)?;
+                }
+            }
+            Ok(())
+        }
+        let mut aggregations = self
+            .target_aggregations
+            .remove(&target_ptr)
+            .unwrap_or_default();
+        bind(
+            root,
+            target_ptr,
+            &mut self.node_targets,
+            &mut aggregations,
+            &mut HashSet::new(),
+        )?;
+        self.target_aggregations.insert(target_ptr, aggregations);
+        Ok(())
+    }
+
+    fn comparison_for_node(&self, summary: &SummaryNode) -> Option<&StreamingTargetComparison> {
+        self.node_targets
+            .get(&(summary as *const _))
+            .and_then(|target| self.target_comparisons.get(target))
+    }
+
     fn canonical_inputs(&self, summary: &SummaryNode) -> Option<StreamingAggregateEvidence> {
-        if self.comparison_scope.data_arrival != DataArrival::ContinuouslyIngesting {
+        let comparison = self.comparison_for_node(summary)?;
+        if comparison.scope.data_arrival != DataArrival::ContinuouslyIngesting {
             return None;
         }
-        self.comparison_scope.validate().ok()?;
+        comparison.scope.validate().ok()?;
         let evidence = self.node_evidence.aggregation(summary)?;
         evidence.inputs.validate().ok()?;
         Some(evidence)
@@ -280,7 +409,6 @@ impl SummaryMaintenanceCostModel {
         let evidence = self.canonical_inputs(summary)?;
         let inputs = evidence.inputs;
         let insert = required_cpu("insert_cpu_ops", evidence.cpu.insert_cpu_ops).ok()?;
-        let readout = required_cpu("readout_cpu_ops", evidence.cpu.readout_cpu_ops).ok()?;
         let build = self.calibrated(ResourceEstimate {
             cpu_ops: inputs.initial_input_rows as f64 * insert,
             peak_memory_bytes: 0,
@@ -291,17 +419,12 @@ impl SummaryMaintenanceCostModel {
             peak_memory_bytes: 0,
             scan_bytes: 0,
         })?;
-        let read = self.calibrated(ResourceEstimate {
-            cpu_ops: inputs.physical_sketch_count as f64 * readout,
-            peak_memory_bytes: 0,
-            scan_bytes: 0,
-        })?;
         let retained = inputs
             .active_window_count
             .checked_add(inputs.retained_window_count)?
             .checked_mul(inputs.physical_sketch_count)?
             .checked_mul(inputs.state_bytes_per_sketch)?;
-        let horizon_seconds = self.comparison_scope.horizon.0 as f64 / 1_000.0;
+        let horizon_seconds = self.comparison_for_node(summary)?.scope.horizon.0 as f64 / 1_000.0;
         let retention_total = self.calibrated(ResourceEstimate {
             cpu_ops: 0.0,
             peak_memory_bytes: retained,
@@ -310,7 +433,10 @@ impl SummaryMaintenanceCostModel {
         Some(SummaryMaintenanceLifecycleCostInputs {
             build_cost: Some(build),
             maintenance_cost_per_update: Some(maintenance),
-            summary_read_cost: Some(read),
+            // Readout is a separate physical operator in the complete DAG.
+            // A state-only candidate therefore does not fabricate readout
+            // evidence merely to keep a lifecycle alternative selectable.
+            summary_read_cost: Some(Cost::ZERO),
             retention_cost_rate: Some(CostRate(retention_total.0 / horizon_seconds)),
             // Releasing memory has no modeled CPU or I/O. This is not an
             // implicit expiration/rebuild policy; those require an explicit
@@ -368,8 +494,9 @@ impl CostModel for SummaryMaintenanceCostModel {
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
     ) -> Option<Cost> {
-        if horizon.map(|value| value.0 * 1_000.0) != Some(self.comparison_scope.horizon.0 as f64)
-            || expected_reads != Some(self.comparison_scope.validate().ok()? as f64)
+        let comparison = self.comparison_for_node(root)?;
+        if horizon.map(|value| value.0 * 1_000.0) != Some(comparison.scope.horizon.0 as f64)
+            || expected_reads != Some(comparison.scope.validate().ok()? as f64)
         {
             return None;
         }
@@ -378,50 +505,59 @@ impl CostModel for SummaryMaintenanceCostModel {
                 root,
                 deployments,
                 &self.node_evidence,
-                &self.comparison_scope,
+                &comparison.scope,
             )
             .ok()?,
         )
     }
 
-    fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
-        self.calibrated(estimate_streaming_raw_recompute(self.raw, 1).ok()?)
+    fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
+        let comparison = self.target_comparisons.get(&(target as *const _))?;
+        self.calibrated(estimate_streaming_raw_recompute(comparison.raw, 1).ok()?)
     }
 
     fn raw_query_recompute_total_cost(
         &self,
-        _target: &QueryExpr,
+        target: &QueryExpr,
         expected_reads: f64,
     ) -> Option<Cost> {
-        let evaluations = self.comparison_scope.validate().ok()?;
+        let target_ptr = target as *const _;
+        let comparison = self.target_comparisons.get(&target_ptr)?;
+        let evaluations = comparison.scope.validate().ok()?;
         if expected_reads != evaluations as f64 {
             return None;
         }
-        let aggregate = self.node_evidence.aggregations.values().next().cloned()?;
-        let sources: HashSet<_> = self
-            .node_evidence
-            .aggregations
-            .values()
+        let aggregation_nodes = self.target_aggregations.get(&target_ptr)?;
+        let aggregate_evidence: Vec<_> = aggregation_nodes
+            .iter()
+            .map(|node| self.node_evidence.aggregations.get(node))
+            .collect::<Option<_>>()?;
+        let aggregate = *aggregate_evidence.first()?;
+        let sources: HashSet<_> = aggregate_evidence
+            .iter()
             .map(|evidence| evidence.source_coverage_index)
             .collect();
         if sources.len() != 1
             || sources
                 .iter()
-                .any(|index| *index >= self.comparison_scope.sources.len())
-            || self.node_evidence.aggregations.values().any(|evidence| {
-                evidence.inputs.initial_input_rows != self.raw.input_rows_per_evaluation
-                    || evidence.inputs.initial_input_bytes != self.raw.input_bytes_per_evaluation
+                .any(|index| *index >= comparison.scope.sources.len())
+            || aggregate_evidence.iter().any(|evidence| {
+                evidence.inputs.initial_input_rows != comparison.raw.input_rows_per_evaluation
+                    || evidence.inputs.initial_input_bytes
+                        != comparison.raw.input_bytes_per_evaluation
                     || evidence.inputs.initial_source_scan_bytes
-                        != self.raw.source_scan_bytes_per_evaluation
+                        != comparison.raw.source_scan_bytes_per_evaluation
+                    || evidence.inputs.ingestion_rate_per_second
+                        != aggregate.inputs.ingestion_rate_per_second
             })
         {
             return None;
         }
         self.calibrated(
             estimate_evolving_streaming_raw(
-                self.raw,
+                comparison.raw,
                 aggregate.inputs.ingestion_rate_per_second,
-                &self.comparison_scope,
+                &comparison.scope,
             )
             .ok()?,
         )
@@ -434,6 +570,93 @@ fn estimate_heterogeneous_summary(
     evidence: &StreamingNodeEvidence,
     scope: &ComparisonScope,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
+    fn query_scan_selections<'a>(
+        query: &'a QueryExpr,
+        out: &mut Vec<(&'a Source, &'a [Predicate])>,
+    ) {
+        use QueryExpr::*;
+        match query {
+            Scan {
+                source, predicates, ..
+            } => out.push((source, predicates)),
+            PromqlVectorFromScalar(child) | PromqlScalarFromVector(child) => {
+                query_scan_selections(child, out)
+            }
+            PromqlRelabel { child, .. }
+            | Filter { child, .. }
+            | Project { child, .. }
+            | Aggregate { child, .. }
+            | Dedup { child, .. }
+            | PromqlSubquery { child, .. }
+            | TimeRange { child, .. }
+            | TimeShift { child, .. }
+            | SQLWindowFunc { child, .. }
+            | PromqlSeriesSample { child, .. }
+            | PromqlInfoEnrich { child, .. }
+            | Sort { child, .. }
+            | Limit { child, .. } => query_scan_selections(child, out),
+            Concat { children } => {
+                for child in children {
+                    query_scan_selections(child, out);
+                }
+            }
+            Join { left, right, .. } | SetOp { left, right, .. } => {
+                query_scan_selections(left, out);
+                query_scan_selections(right, out);
+            }
+            BinaryOp { lhs, rhs, .. } => {
+                query_scan_selections(lhs, out);
+                query_scan_selections(rhs, out);
+            }
+            PromqlScalarBridge(_)
+            | EvalTimestamp
+            | CurrentTimestamp
+            | Column(_)
+            | Literal(_)
+            | Compare { .. }
+            | BoolAnd(_)
+            | BoolOr(_)
+            | Not(_)
+            | IsNull(_)
+            | IsNotNull(_)
+            | Cast { .. }
+            | InList { .. }
+            | FunctionCall { .. }
+            | Arithmetic { .. }
+            | Case { .. } => {}
+        }
+    }
+    fn summary_scan_selections<'a>(
+        node: &'a SummaryNode,
+        seen: &mut HashSet<*const SummaryNode>,
+        out: &mut Vec<(&'a Source, &'a [Predicate])>,
+    ) {
+        if !seen.insert(node as *const _) {
+            return;
+        }
+        match &node.expr {
+            SummaryExpr::KeepPreAsap(query) => query_scan_selections(query, out),
+            SummaryExpr::SummaryAgg { child, .. } => summary_scan_selections(child, seen, out),
+            SummaryExpr::SummaryMerge { children } => {
+                for child in children {
+                    summary_scan_selections(child, seen, out);
+                }
+            }
+            SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::SummaryJoin {
+                outer: left,
+                inner: right,
+                ..
+            } => {
+                summary_scan_selections(left, seen, out);
+                summary_scan_selections(right, seen, out);
+            }
+            SummaryExpr::SummaryDelete { summary_input, .. }
+            | SummaryExpr::SummaryEstimate { summary_input, .. } => {
+                summary_scan_selections(summary_input, seen, out)
+            }
+        }
+    }
     let evaluations = scope.validate()? as f64;
     let by_node: HashMap<_, _> = deployments
         .iter()
@@ -449,6 +672,20 @@ fn estimate_heterogeneous_summary(
         if node_evidence.source_coverage_index >= scope.sources.len() {
             return Err(AnalyticalCostError::MissingComparisonScope(
                 "summary source coverage",
+            ));
+        }
+        let SummaryExpr::SummaryAgg { child, .. } = &deployment.summary.expr else {
+            return Err(AnalyticalCostError::UnsupportedCandidate);
+        };
+        let mut actual_selections = Vec::new();
+        summary_scan_selections(child, &mut HashSet::new(), &mut actual_selections);
+        let declared = &scope.sources[node_evidence.source_coverage_index];
+        if actual_selections.len() != 1
+            || actual_selections[0].0 != &declared.source
+            || actual_selections[0].1 != declared.predicates.as_slice()
+        {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "summary source lineage",
             ));
         }
         let inputs = node_evidence.inputs.validate()?;
@@ -506,7 +743,6 @@ fn estimate_heterogeneous_summary(
         return Err(AnalyticalCostError::ComparisonScopeMismatch("sources"));
     }
 
-    #[expect(clippy::too_many_arguments, reason = "recursive DAG traversal state")]
     fn visit_ops(
         node: &SummaryNode,
         seen: &mut HashSet<*const SummaryNode>,
@@ -515,13 +751,31 @@ fn estimate_heterogeneous_summary(
         scope: &ComparisonScope,
         evaluations: f64,
         cpu_ops: &mut f64,
-        transient_bytes: &mut u64,
-    ) -> Result<(), AnalyticalCostError> {
+    ) -> Result<u64, AnalyticalCostError> {
         if !seen.insert(node as *const _) {
-            return Ok(());
+            return Ok(0);
         }
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) | SummaryExpr::SummaryAgg { .. } => {}
+        let (own_workspace, children_workspace) = match &node.expr {
+            SummaryExpr::KeepPreAsap(_) => {
+                let retained = evidence
+                    .retained_queries
+                    .get(&(node as *const _))
+                    .ok_or(AnalyticalCostError::MissingOrStale("keep_pre_asap"))?;
+                if !retained.preprocessing_cpu_ops_over_horizon.is_finite()
+                    || retained.preprocessing_cpu_ops_over_horizon < 0.0
+                {
+                    return Err(AnalyticalCostError::InvalidOperationCost(
+                        "keep_pre_asap",
+                        retained.preprocessing_cpu_ops_over_horizon,
+                    ));
+                }
+                *cpu_ops += retained.preprocessing_cpu_ops_over_horizon;
+                (retained.peak_memory_bytes, 0)
+            }
+            SummaryExpr::SummaryAgg { child, .. } => (
+                0,
+                visit_ops(child, seen, by_node, evidence, scope, evaluations, cpu_ops)?,
+            ),
             SummaryExpr::SummaryMerge { children } => {
                 let operation = evidence
                     .operations
@@ -531,19 +785,21 @@ fn estimate_heterogeneous_summary(
                 *cpu_ops += evaluations
                     * validated_operator_executions("summary_merge", operation)? as f64
                     * merge;
-                *transient_bytes = (*transient_bytes).max(operation.working_memory_bytes);
+                let mut child_workspaces = 0_u64;
                 for child in children {
-                    visit_ops(
-                        child,
-                        seen,
-                        by_node,
-                        evidence,
-                        scope,
-                        evaluations,
-                        cpu_ops,
-                        transient_bytes,
-                    )?;
+                    child_workspaces = child_workspaces
+                        .checked_add(visit_ops(
+                            child,
+                            seen,
+                            by_node,
+                            evidence,
+                            scope,
+                            evaluations,
+                            cpu_ops,
+                        )?)
+                        .ok_or(AnalyticalCostError::Overflow)?;
                 }
+                (operation.working_memory_bytes, child_workspaces)
             }
             SummaryExpr::SummarySubtract { left, right } => {
                 let operation = evidence
@@ -553,27 +809,16 @@ fn estimate_heterogeneous_summary(
                 *cpu_ops += evaluations
                     * validated_operator_executions("summary_subtract", operation)? as f64
                     * validated_operator_cpu("summary_subtract", operation.cpu_ops)?;
-                *transient_bytes = (*transient_bytes).max(operation.working_memory_bytes);
-                visit_ops(
-                    left,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluations,
-                    cpu_ops,
-                    transient_bytes,
-                )?;
-                visit_ops(
-                    right,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluations,
-                    cpu_ops,
-                    transient_bytes,
-                )?;
+                let left_workspace =
+                    visit_ops(left, seen, by_node, evidence, scope, evaluations, cpu_ops)?;
+                let right_workspace =
+                    visit_ops(right, seen, by_node, evidence, scope, evaluations, cpu_ops)?;
+                (
+                    operation.working_memory_bytes,
+                    left_workspace
+                        .checked_add(right_workspace)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                )
             }
             SummaryExpr::SummaryDelete { summary_input, .. } => {
                 let operation = evidence
@@ -606,17 +851,18 @@ fn estimate_heterogeneous_summary(
                 *cpu_ops += (rate * active_ms as f64 / 1_000.0).ceil()
                     * fanout as f64
                     * validated_operator_cpu("summary_delete", operation.cpu_ops)?;
-                *transient_bytes = (*transient_bytes).max(operation.working_memory_bytes);
-                visit_ops(
-                    summary_input,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluations,
-                    cpu_ops,
-                    transient_bytes,
-                )?;
+                (
+                    operation.working_memory_bytes,
+                    visit_ops(
+                        summary_input,
+                        seen,
+                        by_node,
+                        evidence,
+                        scope,
+                        evaluations,
+                        cpu_ops,
+                    )?,
+                )
             }
             SummaryExpr::SummaryEstimate { summary_input, .. } => {
                 let operation = evidence
@@ -626,17 +872,18 @@ fn estimate_heterogeneous_summary(
                 *cpu_ops += evaluations
                     * validated_operator_executions("summary_readout", operation)? as f64
                     * validated_operator_cpu("summary_readout", operation.cpu_ops)?;
-                *transient_bytes = (*transient_bytes).max(operation.working_memory_bytes);
-                visit_ops(
-                    summary_input,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluations,
-                    cpu_ops,
-                    transient_bytes,
-                )?;
+                (
+                    operation.working_memory_bytes,
+                    visit_ops(
+                        summary_input,
+                        seen,
+                        by_node,
+                        evidence,
+                        scope,
+                        evaluations,
+                        cpu_ops,
+                    )?,
+                )
             }
             SummaryExpr::SummaryJoin { outer, inner, .. } => {
                 let join = evidence
@@ -653,34 +900,24 @@ fn estimate_heterogeneous_summary(
                 *cpu_ops += evaluations
                     * join.matched_state_pairs_per_evaluation as f64
                     * join.cpu_ops_per_matched_pair;
-                *transient_bytes = (*transient_bytes).max(join.working_memory_bytes);
-                visit_ops(
-                    outer,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluations,
-                    cpu_ops,
-                    transient_bytes,
-                )?;
-                visit_ops(
-                    inner,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluations,
-                    cpu_ops,
-                    transient_bytes,
-                )?;
+                let outer_workspace =
+                    visit_ops(outer, seen, by_node, evidence, scope, evaluations, cpu_ops)?;
+                let inner_workspace =
+                    visit_ops(inner, seen, by_node, evidence, scope, evaluations, cpu_ops)?;
+                (
+                    join.working_memory_bytes,
+                    outer_workspace
+                        .checked_add(inner_workspace)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                )
             }
-        }
-        Ok(())
+        };
+        own_workspace
+            .checked_add(children_workspace)
+            .ok_or(AnalyticalCostError::Overflow)
     }
 
-    let mut transient_bytes = 0;
-    visit_ops(
+    let transient_bytes = visit_ops(
         root,
         &mut HashSet::new(),
         &by_node,
@@ -688,7 +925,6 @@ fn estimate_heterogeneous_summary(
         scope,
         evaluations,
         &mut cpu_ops,
-        &mut transient_bytes,
     )?;
     if !cpu_ops.is_finite() {
         return Err(AnalyticalCostError::Overflow);
@@ -1493,7 +1729,8 @@ mod tests {
             }),
         };
         let root = summary_with_operations(false, false, false);
-        bind_aggregations(&mut model, &root, inputs, streaming_cpu());
+        let target = streaming_sum_query();
+        bind_aggregations(&mut model, &target, &root, inputs, streaming_cpu());
         let plan = plan_summary_maintenance_lifecycles(
             root,
             WorkloadDemand::new(&workload, &[0]),
@@ -1517,10 +1754,7 @@ mod tests {
                 | SummaryMaintenanceLifecycle::ContinuouslyMaintained
         ));
         assert!(plan.summary_total_cost.is_some());
-        assert_eq!(
-            model.raw_query_recompute_cost(&QueryExpr::promql_scalar(1.0)),
-            Some(Cost(980.0))
-        );
+        assert_eq!(model.raw_query_recompute_cost(&target), Some(Cost(980.0)));
     }
 
     #[test]
@@ -1532,7 +1766,13 @@ mod tests {
         for group in space.groups() {
             for candidate in &group.candidates {
                 if let Replacement::Summary(root) = &candidate.replacement {
-                    bind_aggregations(&mut model, root, streaming_inputs(), streaming_cpu());
+                    bind_aggregations(
+                        &mut model,
+                        &group.target,
+                        root,
+                        streaming_inputs(),
+                        streaming_cpu(),
+                    );
                 }
             }
         }
@@ -1561,7 +1801,12 @@ mod tests {
         assert_eq!(plan.raw_recompute_total_cost, Some(Cost(5_600.0)));
 
         let mut missing_baseline = model.clone();
-        missing_baseline.raw.input_rows_per_evaluation = 9;
+        missing_baseline
+            .target_comparisons
+            .get_mut(&Rc::as_ptr(&space.roots[0].1))
+            .unwrap()
+            .raw
+            .input_rows_per_evaluation = 9;
         let unavailable = global_selection_with_summary_maintenance_lifecycles(
             &space,
             &workload,
@@ -1613,11 +1858,43 @@ mod tests {
     }
 
     #[test]
+    fn raw_evolution_is_bound_to_the_requested_target() {
+        let target_a = streaming_sum_query();
+        let target_b = streaming_sum_query();
+        let root_a = summary_with_operations(false, false, false);
+        let root_b = summary_with_operations(false, false, false);
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target_a,
+            &root_a,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+        let mut faster = streaming_inputs();
+        faster.ingestion_rate_per_second = 4.0;
+        bind_aggregations(&mut model, &target_b, &root_b, faster, streaming_cpu());
+
+        let a = model.raw_query_recompute_total_cost(&target_a, 5.0);
+        let b = model.raw_query_recompute_total_cost(&target_b, 5.0);
+        assert_eq!(a, Some(Cost(5_600.0)));
+        assert!(b.unwrap().0 > a.unwrap().0);
+        assert_eq!(model.raw_query_recompute_total_cost(&target_a, 5.0), a);
+    }
+
+    #[test]
     fn lifecycle_plan_does_not_fall_back_to_partial_agg_cost_for_a_join_root() {
         let workload = streaming_workload();
         let root = summary_join();
+        let target = streaming_sum_query();
         let mut model = streaming_model();
-        bind_aggregations(&mut model, &root, streaming_inputs(), streaming_cpu());
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
         let plan = plan_summary_maintenance_lifecycles(
             Rc::clone(&root),
             WorkloadDemand::new(&workload, &[0]),
@@ -1656,8 +1933,10 @@ mod tests {
     fn whole_dag_cost_requires_and_uses_each_rc_bound_state_evidence() {
         let workload = streaming_workload();
         let root = summary_join();
+        let target = streaming_sum_query();
         let (aggregations, joins) = evidence_nodes(&root);
         let mut model = streaming_model();
+        bind_comparison(&mut model, &target, &root);
         model.node_evidence.aggregations.insert(
             aggregations[0] as *const _,
             StreamingAggregateEvidence {
@@ -1735,11 +2014,11 @@ mod tests {
             &model,
         )
         .unwrap();
-        // The join's 64-byte workspace and the readout's 128-byte workspace
-        // are not live together, so peak rises by 64 rather than their sum.
+        // Parent and child workspaces coexist while the readout consumes the
+        // join output, so increasing the parent by 128 raises the peak by 128.
         assert_eq!(
             larger_workspace.summary_total_cost.unwrap().0 - complete.summary_total_cost.unwrap().0,
-            64.0
+            128.0
         );
 
         // Equal SourceCoverage does not imply that two independent state
@@ -1762,6 +2041,121 @@ mod tests {
             larger_workspace.summary_total_cost.unwrap().0 - shared.summary_total_cost.unwrap().0,
             640.0
         );
+    }
+
+    #[test]
+    fn whole_dag_fails_closed_for_missing_retained_work_or_false_source_lineage() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+        model.node_evidence.retained_queries.clear();
+        let missing_retained = plan_summary_maintenance_lifecycles(
+            Rc::clone(&root),
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(missing_retained.summary_total_cost, None);
+
+        bind_comparison(&mut model, &target, &root);
+        model
+            .target_comparisons
+            .get_mut(&Rc::as_ptr(&target))
+            .unwrap()
+            .scope
+            .sources[0]
+            .source = Source::TimeSeries {
+            metric: "other_metric".into(),
+        };
+        let false_lineage = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(false_lineage.summary_total_cost, None);
+    }
+
+    #[test]
+    fn aggregate_recurses_into_child_operations_and_state_only_needs_no_readout() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let estimated = summary_with_operations(false, false, false);
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &estimated.expr else {
+            unreachable!();
+        };
+        let state_only = Rc::clone(summary_input);
+        let mut no_readout_cpu = streaming_cpu();
+        no_readout_cpu.readout_cpu_ops = None;
+        let mut state_model = streaming_model();
+        bind_aggregations(
+            &mut state_model,
+            &target,
+            &state_only,
+            streaming_inputs(),
+            no_readout_cpu,
+        );
+        let state_plan = plan_summary_maintenance_lifecycles(
+            state_only,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &state_model,
+        )
+        .unwrap();
+        assert!(state_plan.summary_total_cost.is_some());
+
+        let child = summary_with_operations(true, false, false);
+        let nested = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryAgg {
+                child,
+                family: SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+                col: ColumnRef::Wildcard,
+                reduction: Reduction::by(vec![]),
+                grouping: GroupingStrategy::PerSubpopulationInstance,
+            },
+            schema: estimated.schema.clone(),
+            guarantee: None,
+        });
+        let mut nested_cpu = streaming_cpu();
+        nested_cpu.merge_cpu_ops = Some(1.0);
+        let mut nested_model = streaming_model();
+        bind_aggregations(
+            &mut nested_model,
+            &target,
+            &nested,
+            streaming_inputs(),
+            nested_cpu,
+        );
+        nested_model
+            .node_evidence
+            .operations
+            .retain(|_, operation| operation.cpu_ops != 1.0 || operation.working_memory_bytes == 0);
+        let nested_plan = plan_summary_maintenance_lifecycles(
+            nested,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &nested_model,
+        )
+        .unwrap();
+        assert_eq!(nested_plan.summary_total_cost, None);
     }
 
     #[test]
@@ -2069,7 +2463,20 @@ mod tests {
             time_index: None,
         };
         let leaf = Rc::new(SummaryNode {
-            expr: SummaryExpr::KeepPreAsap(Rc::new(QueryExpr::promql_scalar(1.0))),
+            expr: SummaryExpr::KeepPreAsap(Rc::new(QueryExpr::Scan {
+                source: Source::TimeSeries {
+                    metric: "metrics".into(),
+                },
+                predicates: vec![],
+                schema: Schema::with_time_index(
+                    vec![
+                        Column::new("ts", DataType::Timestamp, false),
+                        Column::new("value", DataType::Float64, false),
+                    ],
+                    0,
+                    vec![],
+                ),
+            })),
             schema: schema.clone(),
             guarantee: None,
         });
@@ -2217,29 +2624,80 @@ mod tests {
     }
 
     fn streaming_model() -> SummaryMaintenanceCostModel {
-        SummaryMaintenanceCostModel {
-            comparison_scope: streaming_scope(),
-            raw: StreamingRawInputEvidence {
-                input_rows_per_evaluation: 10,
-                input_bytes_per_evaluation: 640,
-                source_scan_bytes_per_evaluation: 640,
-                arriving_row_bytes: 64,
-                cpu_ops_per_row: 2.0,
-                peak_memory_bytes: 320,
-            },
-            node_evidence: StreamingNodeEvidence::default(),
-            calibration: ResourceCalibration {
+        SummaryMaintenanceCostModel::new(
+            ResourceCalibration {
                 cost_per_cpu_op: 1.0,
                 cost_per_scan_byte: 1.0,
                 cost_per_retained_byte: 1.0,
                 version: "test".into(),
             },
-            capabilities: SummaryMaintenanceCapabilities {
+            SummaryMaintenanceCapabilities {
                 incremental_update: true,
                 merge: false,
                 delete: false,
             },
+        )
+    }
+
+    fn streaming_raw() -> StreamingRawInputEvidence {
+        StreamingRawInputEvidence {
+            input_rows_per_evaluation: 10,
+            input_bytes_per_evaluation: 640,
+            source_scan_bytes_per_evaluation: 640,
+            arriving_row_bytes: 64,
+            cpu_ops_per_row: 2.0,
+            peak_memory_bytes: 320,
         }
+    }
+
+    fn bind_comparison(
+        model: &mut SummaryMaintenanceCostModel,
+        target: &Rc<QueryExpr>,
+        root: &Rc<SummaryNode>,
+    ) {
+        model
+            .bind_candidate_comparison(target, root, streaming_scope(), streaming_raw())
+            .unwrap();
+        fn retained(
+            model: &mut SummaryMaintenanceCostModel,
+            node: &Rc<SummaryNode>,
+            seen: &mut HashSet<*const SummaryNode>,
+        ) {
+            if !seen.insert(Rc::as_ptr(node)) {
+                return;
+            }
+            match &node.expr {
+                SummaryExpr::KeepPreAsap(_) => {
+                    model.node_evidence.insert_retained_query(
+                        node,
+                        StreamingRetainedQueryEvidence {
+                            preprocessing_cpu_ops_over_horizon: 0.0,
+                            peak_memory_bytes: 0,
+                        },
+                    );
+                }
+                SummaryExpr::SummaryAgg { child, .. } => retained(model, child, seen),
+                SummaryExpr::SummaryMerge { children } => {
+                    for child in children {
+                        retained(model, child, seen);
+                    }
+                }
+                SummaryExpr::SummarySubtract { left, right }
+                | SummaryExpr::SummaryJoin {
+                    outer: left,
+                    inner: right,
+                    ..
+                } => {
+                    retained(model, left, seen);
+                    retained(model, right, seen);
+                }
+                SummaryExpr::SummaryDelete { summary_input, .. }
+                | SummaryExpr::SummaryEstimate { summary_input, .. } => {
+                    retained(model, summary_input, seen)
+                }
+            }
+        }
+        retained(model, root, &mut HashSet::new());
     }
 
     fn streaming_inputs() -> StreamingSummaryInputs {
@@ -2265,11 +2723,13 @@ mod tests {
     }
 
     fn bind_aggregations(
-        model: &mut StreamingAnalyticalCostModel,
+        model: &mut SummaryMaintenanceCostModel,
+        target: &Rc<QueryExpr>,
         root: &Rc<SummaryNode>,
         inputs: StreamingSummaryInputs,
         cpu: SummaryOperationCpuEvidence,
     ) {
+        bind_comparison(model, target, root);
         for node in evidence_nodes(root).0 {
             model.node_evidence.aggregations.insert(
                 node as *const _,
@@ -2282,7 +2742,7 @@ mod tests {
             );
         }
         fn bind_ops(
-            model: &mut StreamingAnalyticalCostModel,
+            model: &mut SummaryMaintenanceCostModel,
             node: &SummaryNode,
             seen: &mut HashSet<*const SummaryNode>,
             inputs: StreamingSummaryInputs,
