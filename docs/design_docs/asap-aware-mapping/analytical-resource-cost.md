@@ -353,10 +353,12 @@ choosing an arbitrary snapshot. When a predicate-bearing logical Scan expands
 to Scan → Filter, the synthetic Scan has its own physical ID, statistics, and
 buffer evidence and carries that exact coverage; the Filter has separate
 evidence and no source coverage.
-After lowering, the multiset of distinct physical Scan coverages must consume
-the comparison scope's source coverages exactly. Thus a candidate cannot omit
-a source that exists in the comparison boundary, while a provider-declared
-shared physical Scan is counted once.
+`ComparisonScope.sources` is an order-independent set of semantic coverages;
+duplicates are invalid. After lowering, every reachable physical Scan must use
+a member of that set and every member must be used by at least one Scan.
+Multiple independent physical Scans may use the same coverage, while a
+provider-declared shared Scan uses it once, so those physical alternatives can
+still be compared under the same semantic scope.
 
 The lowering validates every physical edge before costing:
 
@@ -403,6 +405,12 @@ and buffer evidence are identical; conflicting reuse fails closed. This
 generic lowering creates raw-query operators with
 `ExecutionMultiplicity::PerEvaluation` and zero retained state. Buffer sizes
 are always provider-owned physical evidence.
+
+The DAG itself implements `OperatorStatisticsProvider` over its evidence
+snapshot. That boundary verifies that each map key equals the evidence's
+embedded physical identity and that every node's buffer equals the provider
+snapshot before returning statistics, preventing the public node and evidence
+views from silently drifting apart.
 
 Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, PromQL
 range/subquery execution, vector matching, and PromQL-specific enrichment/

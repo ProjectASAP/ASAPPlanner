@@ -76,6 +76,13 @@ impl ComparisonScope {
         if self.sources.is_empty() {
             return Err(AnalyticalCostError::MissingComparisonScope("sources"));
         }
+        if self.sources.iter().enumerate()
+            .any(|(index, source)| self.sources[..index].contains(source))
+        {
+            return Err(AnalyticalCostError::MissingComparisonScope(
+                "duplicate source coverage",
+            ));
+        }
         if self
             .sources
             .iter()
@@ -110,7 +117,14 @@ pub fn validate_comparison_scopes(
             "time_selection",
             raw.time_selection == candidate.time_selection,
         ),
-        ("sources", raw.sources == candidate.sources),
+        (
+            "sources",
+            raw.sources.len() == candidate.sources.len()
+                && raw
+                    .sources
+                    .iter()
+                    .all(|source| candidate.sources.contains(source)),
+        ),
     ] {
         if !matches {
             return Err(AnalyticalCostError::ComparisonScopeMismatch(name));

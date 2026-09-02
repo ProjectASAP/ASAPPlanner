@@ -61,9 +61,38 @@ where
 
 impl OperatorStatisticsProvider for std::collections::HashMap<String, PhysicalNodeEvidence> {
     fn statistics(&self, node_id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
-        self.get(node_id)
-            .map(|evidence| evidence.statistics.clone())
-            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))
+        let evidence = self
+            .get(node_id)
+            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))?;
+        if evidence.physical_id != node_id {
+            return Err(AnalyticalCostError::InvalidPhysicalDag(
+                "evidence map key differs from embedded physical identity",
+            ));
+        }
+        Ok(evidence.statistics.clone())
+    }
+}
+
+impl OperatorStatisticsProvider for PhysicalDag {
+    fn statistics(&self, node_id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
+        let evidence = self
+            .evidence
+            .get(node_id)
+            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))?;
+        let node = self.nodes.iter().find(|node| node.id == node_id).ok_or(
+            AnalyticalCostError::InvalidPhysicalDag("evidence has no matching physical node"),
+        )?;
+        if evidence.physical_id != node_id {
+            return Err(AnalyticalCostError::InvalidPhysicalDag(
+                "evidence map key differs from embedded physical identity",
+            ));
+        }
+        if node.output_buffer_bytes != evidence.output_buffer_bytes {
+            return Err(AnalyticalCostError::InvalidPhysicalDag(
+                "physical node buffer differs from evidence snapshot",
+            ));
+        }
+        Ok(evidence.statistics.clone())
     }
 }
 
@@ -495,22 +524,25 @@ fn validate_source_consumption(
     nodes: &[PhysicalDagNode],
     scope: &ComparisonScope,
 ) -> Result<(), AnalyticalCostError> {
-    let mut remaining = scope.sources.clone();
-    for coverage in nodes
+    let consumed = nodes
         .iter()
         .filter(|node| matches!(node.operator, PhysicalOperator::Scan))
         .filter_map(|node| node.source_coverage.as_ref())
-    {
-        let Some(index) = remaining.iter().position(|expected| expected == coverage) else {
+        .collect::<Vec<_>>();
+    for coverage in &consumed {
+        if !scope.sources.contains(coverage) {
             return Err(AnalyticalCostError::InvalidPhysicalDag(
-                "physical scans do not consume comparison sources exactly",
+                "physical scan consumes a source outside the comparison scope",
             ));
-        };
-        remaining.swap_remove(index);
+        }
     }
-    if !remaining.is_empty() {
+    if scope
+        .sources
+        .iter()
+        .any(|expected| !consumed.contains(&expected))
+    {
         return Err(AnalyticalCostError::InvalidPhysicalDag(
-            "physical scans do not consume comparison sources exactly",
+            "physical scans omit a comparison-scope source",
         ));
     }
     Ok(())
@@ -751,7 +783,11 @@ fn supports_hash_aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analytical_cost::{estimate_physical_dag, HashJoinBuildSide};
+    use crate::analytical_cost::{
+        estimate_physical_dag, estimate_physical_dag_comparison, HashJoinBuildSide,
+        PhysicalDagEstimateRequest,
+    };
+    use crate::analytical_statistics::validate_comparison_scopes;
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
     };
@@ -969,7 +1005,7 @@ mod tests {
             },
             vec![],
         );
-        let independent_scope = scope(vec![source_coverage.clone(), source_coverage.clone()]);
+        let independent_scope = scope(vec![source_coverage.clone()]);
         let mut scan_statistics = statistics(vec![edge(100, 800)], edge(100, 800));
         scan_statistics.source_scan_bytes = 800;
         let mut join_statistics = statistics(vec![edge(100, 800), edge(100, 800)], edge(25, 400));
@@ -1007,6 +1043,54 @@ mod tests {
         assert_eq!(
             shared_dag.nodes[1].children,
             vec!["shared-scan".to_owned(); 2]
+        );
+        let comparison = estimate_physical_dag_comparison(
+            PhysicalDagEstimateRequest {
+                nodes: &dag.nodes,
+                root: &dag.root,
+                scope: &independent_scope,
+                statistics: &dag,
+            },
+            PhysicalDagEstimateRequest {
+                nodes: &shared_dag.nodes,
+                root: &shared_dag.root,
+                scope: &shared_scope,
+                statistics: &shared_dag,
+            },
+        )
+        .unwrap();
+        assert_eq!(comparison.raw.scan_bytes, 1_600);
+        assert_eq!(comparison.candidate.scan_bytes, 800);
+
+        let mut drifted_buffer = shared_dag.clone();
+        drifted_buffer.nodes[0].output_buffer_bytes += 1;
+        assert_eq!(
+            estimate_physical_dag(
+                &drifted_buffer.nodes,
+                &drifted_buffer.root,
+                &shared_scope,
+                &drifted_buffer,
+            ),
+            Err(AnalyticalCostError::InvalidPhysicalDag(
+                "physical node buffer differs from evidence snapshot"
+            ))
+        );
+        let mut drifted_identity = shared_dag.clone();
+        drifted_identity
+            .evidence
+            .get_mut("shared-scan")
+            .unwrap()
+            .physical_id = "different".into();
+        assert_eq!(
+            estimate_physical_dag(
+                &drifted_identity.nodes,
+                &drifted_identity.root,
+                &shared_scope,
+                &drifted_identity,
+            ),
+            Err(AnalyticalCostError::InvalidPhysicalDag(
+                "evidence map key differs from embedded physical identity"
+            ))
         );
 
         let conflicting_identity = |request: PhysicalNodeRequest<'_>| {
@@ -1216,6 +1300,18 @@ mod tests {
         let dag = lower_query_physical_dag(&union, &scope, &scripted(&provided)).unwrap();
         assert_eq!(dag.nodes.last().unwrap().operator, PhysicalOperator::Concat);
 
+        let mut reversed_scope = scope.clone();
+        reversed_scope.sources.reverse();
+        assert_eq!(validate_comparison_scopes(&scope, &reversed_scope), Ok(1));
+        let mut duplicate_scope = scope.clone();
+        duplicate_scope.sources.push(scope.sources[0].clone());
+        assert_eq!(
+            duplicate_scope.validate(),
+            Err(AnalyticalCostError::MissingComparisonScope(
+                "duplicate source coverage"
+            ))
+        );
+
         let concat = Rc::new(QueryExpr::Concat {
             children: vec![scan("a"), scan("b")],
         });
@@ -1335,7 +1431,7 @@ mod tests {
         assert_eq!(
             lower_query_physical_dag(&root, &extra_scope, &scripted(&complete)),
             Err(AnalyticalCostError::InvalidPhysicalDag(
-                "physical scans do not consume comparison sources exactly"
+                "physical scans omit a comparison-scope source"
             ))
         );
     }
