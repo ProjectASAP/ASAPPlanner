@@ -3513,6 +3513,32 @@ pub fn default_strategies_with<'a>(
     ]
 }
 
+/// Default context-free strategies with both deployment costing and typed
+/// planning-time accuracy evidence. This is the production counterpart of
+/// constructing [`SketchAlgorithmStrategy::with_models_and_evidence`] and
+/// [`HydraGroupingStrategy::with_models_and_evidence`] separately.
+pub fn default_strategies_with_evidence<'a>(
+    cost_model: &'a dyn CostModel,
+    evidence: &'a dyn AccuracyEvidenceProvider,
+) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
+    vec![
+        Box::new(SketchAlgorithmStrategy::with_models_and_evidence(
+            cost_model,
+            &DEFAULT_ACCURACY_MODEL,
+            &DEFAULT_ALLOCATOR,
+            evidence,
+        )),
+        Box::new(HydraGroupingStrategy::with_models_and_evidence(
+            cost_model,
+            &DEFAULT_ACCURACY_MODEL,
+            &DEFAULT_ALLOCATOR,
+            evidence,
+        )),
+        Box::new(SharedSubtreeStrategy),
+        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
+    ]
+}
+
 // ── search_workload ──────────────────────────────────────────────────────
 
 /// Search a whole workload's pre-ASAP roots for every candidate replacement

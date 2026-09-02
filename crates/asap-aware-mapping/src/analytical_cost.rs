@@ -21,7 +21,11 @@ pub const ANALYTICAL_MODEL_VERSION: &str = "analytical-resource-v1";
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AnalyticalInputs {
     pub input_rows: u64,
+    /// Logical bytes consumed by the operator. Intermediate input may have
+    /// bytes here while reading zero source/disk bytes.
     pub input_bytes: u64,
+    /// Source/disk bytes read once to produce this operator's input.
+    pub source_scan_bytes: u64,
     pub group_count: u64,
     /// Average encoded bytes of one distinct grouping-key tuple.
     pub group_key_bytes: u64,
@@ -94,6 +98,127 @@ pub struct ResourceEstimate {
     pub scan_bytes: u64,
 }
 
+/// Physical operator classes used to expose CPU, memory, and disk formulas
+/// independently of a particular front-end IR spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhysicalOperator {
+    Scan,
+    Filter,
+    Project,
+    HashAggregate,
+    Sort,
+    TopK,
+    HashJoin,
+    Deduplicate,
+    Concat,
+    Window,
+    Limit,
+    PassThrough,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OperatorInputs {
+    pub input_rows: u64,
+    pub input_bytes: u64,
+    pub output_rows: u64,
+    pub output_bytes: u64,
+    pub group_count: Option<u64>,
+    pub key_bytes: Option<u64>,
+    pub k: Option<u64>,
+    pub right_rows: Option<u64>,
+    pub right_bytes: Option<u64>,
+}
+
+/// Estimate one physical operator. Child costs are deliberately excluded;
+/// a DAG walker sums CPU/disk once per node and combines simultaneously
+/// retained state separately.
+pub fn estimate_operator(
+    operator: PhysicalOperator,
+    input: OperatorInputs,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    let per_row_width = |rows: u64, bytes: u64| -> Result<u64, AnalyticalCostError> {
+        if rows == 0 || bytes == 0 {
+            return Err(AnalyticalCostError::MissingOrZero("operator rows/bytes"));
+        }
+        Ok(bytes.div_ceil(rows))
+    };
+    let estimate = match operator {
+        PhysicalOperator::Scan => ResourceEstimate {
+            cpu_ops: input.input_rows as f64,
+            peak_memory_bytes: per_row_width(input.input_rows, input.input_bytes)?,
+            scan_bytes: input.input_bytes,
+        },
+        PhysicalOperator::Filter | PhysicalOperator::Project | PhysicalOperator::PassThrough => {
+            ResourceEstimate {
+                cpu_ops: input.input_rows as f64,
+                peak_memory_bytes: per_row_width(input.output_rows, input.output_bytes)?,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::HashAggregate | PhysicalOperator::Deduplicate => {
+            let groups = input
+                .group_count
+                .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
+            let key = input
+                .key_bytes
+                .ok_or(AnalyticalCostError::MissingOrZero("key_bytes"))?;
+            ResourceEstimate {
+                cpu_ops: input.input_rows as f64,
+                peak_memory_bytes: checked_bytes(&[
+                    groups,
+                    key.checked_add(8 + 16)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                ])?,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::Sort | PhysicalOperator::Window => ResourceEstimate {
+            cpu_ops: input.input_rows as f64 * (input.input_rows.max(2) as f64).log2().ceil(),
+            peak_memory_bytes: input.input_bytes,
+            scan_bytes: 0,
+        },
+        PhysicalOperator::TopK => {
+            let k = input.k.ok_or(AnalyticalCostError::MissingOrZero("k"))?;
+            ResourceEstimate {
+                cpu_ops: input.input_rows as f64 * (k.max(2) as f64).log2().ceil(),
+                peak_memory_bytes: checked_bytes(&[
+                    k.min(input.input_rows),
+                    per_row_width(input.input_rows, input.input_bytes)?,
+                ])?,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::HashJoin => {
+            let right_rows = input
+                .right_rows
+                .ok_or(AnalyticalCostError::MissingOrZero("right_rows"))?;
+            let right_bytes = input
+                .right_bytes
+                .ok_or(AnalyticalCostError::MissingOrZero("right_bytes"))?;
+            ResourceEstimate {
+                cpu_ops: input.input_rows as f64 + right_rows as f64 + input.output_rows as f64,
+                peak_memory_bytes: input.input_bytes.min(right_bytes),
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::Concat => ResourceEstimate {
+            cpu_ops: input.output_rows as f64,
+            peak_memory_bytes: per_row_width(input.output_rows, input.output_bytes)?,
+            scan_bytes: 0,
+        },
+        PhysicalOperator::Limit => ResourceEstimate {
+            cpu_ops: input.output_rows as f64,
+            peak_memory_bytes: per_row_width(input.output_rows, input.output_bytes)?,
+            scan_bytes: 0,
+        },
+    };
+    if estimate.cpu_ops.is_finite() {
+        Ok(estimate)
+    } else {
+        Err(AnalyticalCostError::Overflow)
+    }
+}
+
 impl ResourceEstimate {
     pub fn calibrated_cost(
         self,
@@ -157,7 +282,7 @@ pub fn estimate_raw_aggregation(
             .checked_add(topk_memory)
             .ok_or(AnalyticalCostError::Overflow)?,
         scan_bytes: inputs
-            .input_bytes
+            .source_scan_bytes
             .checked_mul(inputs.evaluation_count)
             .ok_or(AnalyticalCostError::Overflow)?,
     })
@@ -256,7 +381,7 @@ fn estimate_sketch_aggregation_with_instances(
             .and_then(|bytes| bytes.checked_add(topk_heap_bytes(inputs).ok()?))
             .ok_or(AnalyticalCostError::Overflow)?,
         // One initial build scan; subsequent evaluations read the sketch.
-        scan_bytes: inputs.input_bytes,
+        scan_bytes: inputs.source_scan_bytes,
     })
 }
 
@@ -313,6 +438,161 @@ impl AnalyticalCostModel {
             physical_sketch_count,
         )
     }
+
+    /// Target-local estimate used for nested plans. An outer Top-K consumes
+    /// the grouped child's rows, not the original source rows, and its
+    /// intermediate input performs no second source/disk scan.
+    pub fn candidate_resources_for_target(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &TargetSubDAG<'_>,
+    ) -> Result<ResourceEstimate, AnalyticalCostError> {
+        if topk_intent(target.root).is_some() {
+            let Replacement::Summary(node) = &candidate.replacement else {
+                return Err(AnalyticalCostError::UnsupportedCandidate);
+            };
+            let mut states = Vec::new();
+            collect_sketches(node, &mut states);
+            if states.is_empty() {
+                return Err(AnalyticalCostError::UnsupportedCandidate);
+            }
+            let mut total = ResourceEstimate {
+                cpu_ops: 0.0,
+                peak_memory_bytes: 0,
+                scan_bytes: 0,
+            };
+            for (kind, grouping) in states {
+                let is_topk = matches!(
+                    kind.algorithm(),
+                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                );
+                let inputs = if is_topk {
+                    self.inputs_for_target(target.root)?
+                } else {
+                    let mut base = self.inputs.validate()?;
+                    base.topk_k = None;
+                    base
+                };
+                let instances =
+                    if matches!(grouping, GroupingStrategy::SharedMultiSubpopulation { .. }) {
+                        1
+                    } else {
+                        inputs.group_count
+                    };
+                let estimate = estimate_sketch_aggregation_with_instances(
+                    kind.algorithm().clone(),
+                    kind.params(),
+                    inputs,
+                    instances,
+                )?;
+                total = add_resources(total, estimate)?;
+            }
+            return Ok(total);
+        }
+        let scoped = self.inputs_for_target(target.root)?;
+        let model = Self {
+            inputs: scoped,
+            calibration: self.calibration.clone(),
+        };
+        model.candidate_resources(candidate)
+    }
+
+    pub fn raw_resources_for_target(
+        &self,
+        target: &asap_types::pre_asap::QueryExpr,
+    ) -> Result<ResourceEstimate, AnalyticalCostError> {
+        let scoped = self.inputs_for_target(target)?;
+        if let Some(k) = topk_intent(target) {
+            let mut base = self.inputs.validate()?;
+            base.topk_k = None;
+            let grouped = estimate_raw_aggregation(base)?;
+            let cpu_ops = scoped.evaluation_count as f64
+                * scoped.input_rows as f64
+                * (k.max(2) as f64).log2().ceil();
+            let row_bytes = scoped
+                .group_key_bytes
+                .checked_add(8)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            return add_resources(
+                grouped,
+                ResourceEstimate {
+                    cpu_ops,
+                    peak_memory_bytes: checked_bytes(&[k.min(scoped.input_rows), row_bytes])?,
+                    scan_bytes: 0,
+                },
+            );
+        }
+        estimate_raw_aggregation(scoped)
+    }
+
+    pub fn raw_cost_for_target(
+        &self,
+        target: &asap_types::pre_asap::QueryExpr,
+    ) -> Result<f64, AnalyticalCostError> {
+        self.raw_resources_for_target(target)?
+            .calibrated_cost(&self.calibration)
+    }
+
+    pub fn inputs_for_target(
+        &self,
+        target: &asap_types::pre_asap::QueryExpr,
+    ) -> Result<AnalyticalInputs, AnalyticalCostError> {
+        let mut scoped = self.inputs.validate()?;
+        if topk_intent(target).is_some() {
+            scoped.input_rows = self.inputs.group_count;
+            scoped.input_bytes = checked_bytes(&[
+                self.inputs.group_count,
+                self.inputs
+                    .group_key_bytes
+                    .checked_add(8)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            ])?;
+            scoped.source_scan_bytes = 0;
+            scoped.group_count = 1;
+            // CMSWithHeap owns its heap. Do not add an exact Top-K heap on
+            // top of the selected sketch implementation.
+            scoped.topk_k = None;
+        } else {
+            // A nested grouped aggregate is one decision region. Its parent
+            // Top-K is costed by the parent region, not charged here too.
+            scoped.topk_k = None;
+        }
+        Ok(scoped)
+    }
+}
+
+fn add_resources(
+    left: ResourceEstimate,
+    right: ResourceEstimate,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    let cpu_ops = left.cpu_ops + right.cpu_ops;
+    if !cpu_ops.is_finite() {
+        return Err(AnalyticalCostError::Overflow);
+    }
+    Ok(ResourceEstimate {
+        cpu_ops,
+        // Nested summary states coexist for the retained plan. This is an
+        // additive retained-state bound; transient pipelined buffers are not
+        // assumed to disappear without execution evidence.
+        peak_memory_bytes: left
+            .peak_memory_bytes
+            .checked_add(right.peak_memory_bytes)
+            .ok_or(AnalyticalCostError::Overflow)?,
+        scan_bytes: left
+            .scan_bytes
+            .checked_add(right.scan_bytes)
+            .ok_or(AnalyticalCostError::Overflow)?,
+    })
+}
+
+fn topk_intent(target: &asap_types::pre_asap::QueryExpr) -> Option<u64> {
+    let asap_types::pre_asap::QueryExpr::Aggregate { measures, .. } = target else {
+        return None;
+    };
+    measures.iter().find_map(|intent| match intent {
+        AggIntent::TopK { k, .. } => Some(*k as u64),
+        _ => None,
+    })
 }
 
 fn sketch_from(
@@ -351,6 +631,46 @@ fn sketch_from(
     }
 }
 
+fn collect_sketches<'a>(
+    node: &'a SummaryNode,
+    out: &mut Vec<(&'a asap_types::post_asap::SketchKind, &'a GroupingStrategy)>,
+) {
+    match &node.expr {
+        asap_types::post_asap::SummaryExpr::SummaryAgg { family, child, .. } => {
+            collect_sketches(child, out);
+            if let SummaryFamilyType::Sketch(kind, grouping) = family {
+                out.push((kind, grouping));
+            }
+        }
+        asap_types::post_asap::SummaryExpr::SummaryJoin {
+            family,
+            outer,
+            inner,
+            ..
+        } => {
+            collect_sketches(outer, out);
+            collect_sketches(inner, out);
+            if let SummaryFamilyType::Sketch(kind, grouping) = family {
+                out.push((kind, grouping));
+            }
+        }
+        asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. }
+        | asap_types::post_asap::SummaryExpr::SummaryDelete { summary_input, .. } => {
+            collect_sketches(summary_input, out);
+        }
+        asap_types::post_asap::SummaryExpr::SummarySubtract { left, right } => {
+            collect_sketches(left, out);
+            collect_sketches(right, out);
+        }
+        asap_types::post_asap::SummaryExpr::SummaryMerge { children } => {
+            for child in children {
+                collect_sketches(child, out);
+            }
+        }
+        asap_types::post_asap::SummaryExpr::KeepPreAsap(_) => {}
+    }
+}
+
 impl CostModel for AnalyticalCostModel {
     fn rank_candidates(
         &self,
@@ -381,8 +701,8 @@ impl CostModel for AnalyticalCostModel {
         usize::try_from(self.inputs.group_count).ok()
     }
 
-    fn estimate_cost(&self, candidate: &ReplacementSubDAG, _target: &TargetSubDAG<'_>) -> f64 {
-        self.candidate_resources(candidate)
+    fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
+        self.candidate_resources_for_target(candidate, target)
             .and_then(|estimate| estimate.calibrated_cost(&self.calibration))
             .unwrap_or(f64::NAN)
     }
@@ -396,6 +716,7 @@ mod tests {
         AnalyticalInputs {
             input_rows: 1_000_000,
             input_bytes: 64_000_000,
+            source_scan_bytes: 64_000_000,
             group_count: 1,
             group_key_bytes: 16,
             topk_k: None,
@@ -423,6 +744,7 @@ mod tests {
             AnalyticalInputs {
                 input_rows: 1_000,
                 input_bytes: 8_000,
+                source_scan_bytes: 8_000,
                 group_count: 2,
                 group_key_bytes: 16,
                 topk_k: None,
@@ -576,5 +898,63 @@ mod tests {
             })
             .collect();
         assert!(costs[0] < costs[1], "ranked costs were {costs:?}");
+    }
+
+    #[test]
+    fn physical_operator_formulas_keep_disk_at_scan_and_require_join_stats() {
+        let scan = estimate_operator(
+            PhysicalOperator::Scan,
+            OperatorInputs {
+                input_rows: 1_000,
+                input_bytes: 64_000,
+                output_rows: 1_000,
+                output_bytes: 64_000,
+                group_count: None,
+                key_bytes: None,
+                k: None,
+                right_rows: None,
+                right_bytes: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(scan.scan_bytes, 64_000);
+
+        let topk = estimate_operator(
+            PhysicalOperator::TopK,
+            OperatorInputs {
+                input_rows: 1_000,
+                input_bytes: 40_000,
+                output_rows: 10,
+                output_bytes: 400,
+                group_count: None,
+                key_bytes: None,
+                k: Some(10),
+                right_rows: None,
+                right_bytes: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(topk.scan_bytes, 0);
+        assert_eq!(topk.cpu_ops, 4_000.0);
+        assert_eq!(topk.peak_memory_bytes, 400);
+
+        let missing_join_stats = estimate_operator(
+            PhysicalOperator::HashJoin,
+            OperatorInputs {
+                input_rows: 1_000,
+                input_bytes: 64_000,
+                output_rows: 100,
+                output_bytes: 12_800,
+                group_count: None,
+                key_bytes: None,
+                k: None,
+                right_rows: None,
+                right_bytes: None,
+            },
+        );
+        assert_eq!(
+            missing_join_stats,
+            Err(AnalyticalCostError::MissingOrZero("right_rows"))
+        );
     }
 }
