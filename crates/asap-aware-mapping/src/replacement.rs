@@ -3495,7 +3495,7 @@ pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
         Box::new(SketchAlgorithmStrategy::default_cost_model()),
         Box::new(HydraGroupingStrategy::default_cost_model()),
         Box::new(SharedSubtreeStrategy),
-        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
+        Box::new(crate::rewrite::SemanticEquivalentRewriteStrategy),
     ]
 }
 
@@ -3509,7 +3509,7 @@ pub fn default_strategies_with<'a>(
         Box::new(SketchAlgorithmStrategy::new(cost_model)),
         Box::new(HydraGroupingStrategy::new(cost_model)),
         Box::new(SharedSubtreeStrategy),
-        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
+        Box::new(crate::rewrite::SemanticEquivalentRewriteStrategy),
     ]
 }
 

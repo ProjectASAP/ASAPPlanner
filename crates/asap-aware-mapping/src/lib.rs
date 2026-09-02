@@ -218,7 +218,7 @@ pub use replacement::{
     SelectedGroup, SharedSubtreeStrategy, SketchAlgorithmStrategy, TargetSubDAG,
     MAX_SEARCH_ITERATIONS,
 };
-pub use rewrite::AvgToSumOverCountStrategy;
+pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use summary_maintenance_dag_export::{
     export_summary_maintenance_plan, SummaryMaintenanceDagExport,
     SummaryMaintenanceDeploymentExport, SummaryMaintenanceLifecycleAlternativeExport,

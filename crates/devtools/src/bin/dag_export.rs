@@ -263,6 +263,10 @@ fn decision_rationale(winner: &Winner<'_>) -> String {
             "Rewrites AVG into SUM and COUNT under the same grouping, then divides SUM by COUNT."
                 .to_string()
         }
+        "SemanticEquivalentRewriteStrategy" => {
+            "Composes compatible nested aggregates using their declared algebraic intent while preserving the output schema."
+                .to_string()
+        }
         "SharedSubtreeStrategy" => match winner.candidate.provenance {
             asap_aware_mapping::replacement::ReplacementProvenance::CseShare => {
                 "Builds the repeated subtree once and shares it across consumers.".to_string()
@@ -882,12 +886,15 @@ mod tests {
                 .map(|(name, r)| (name.clone(), r.strategy.clone()))
                 .collect::<Vec<_>>()
         );
-        // The avg rewrite's own strategy label must disambiguate correctly
+        // A logical rewrite must retain the semantic rewrite owner's label
         // (not fall through to "Rollup", the other LogicalRewrite shape).
-        assert!(results
-            .replacements
-            .iter()
-            .any(|(_, r)| r.strategy == "AvgToSumOverCountStrategy"));
+        // Depending on which equivalent memo candidate wins, the selected
+        // rewrite may be the original AVG decomposition or a subsequently
+        // exposed nested-aggregate composition.
+        assert!(results.replacements.iter().any(|(_, r)| matches!(
+            r.strategy.as_str(),
+            "AvgToSumOverCountStrategy" | "SemanticEquivalentRewriteStrategy"
+        )));
 
         assert_eq!(results.post_graphs.len(), 2, "one post_graph per query");
         for (name, graph) in &results.post_graphs {
