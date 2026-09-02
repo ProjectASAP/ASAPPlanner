@@ -7,8 +7,9 @@ work, peak memory, and source/disk I/O. It replaces dimensionless plan-node
 counts with estimates derived from operator complexity, cardinality, row
 width, concrete summary parameters, and the selected deployment lifecycle.
 
-There are two workload adapters. `AnalyticalCostModel` is the automatic
-planner-ranking adapter for `DataArrival::AtRest`.
+There are three adapters. `AnalyticalCostModel` is the legacy compact-report
+adapter for `DataArrival::AtRest`. `AnalyticalPlannerCostModel` compares
+complete raw and replacement physical DAGs during automatic planner ranking.
 `StreamingAnalyticalCostModel` supplies the existing lifecycle planner with a
 raw recomputation baseline plus build, update, read, retention, and retirement
 costs for `DataArrival::ContinuouslyIngesting`. The same module also exposes a
@@ -24,11 +25,12 @@ This document distinguishes four implementation layers:
 
 - the physical-DAG estimator, which can compose any DAG whose nodes have
   supported physical operators and complete `OperatorStatistics`; and
-- query-DAG lowering, which maps supported `QueryExpr` operators to physical
-  nodes;
-- deployment summary binding, which maps a selected `SummaryExpr` DAG and its
-  lifecycle evidence to physical nodes; and
-- planner ranking, which compares complete raw and replacement DAGs.
+- query-DAG lowering, which recursively maps supported resolved `QueryExpr`
+  operators to that physical representation;
+- the deployment summary binder, which maps a selected `SummaryExpr` DAG to
+  physical summary operators and snapshots their evidence; and
+- the planner-ranking adapter, which compares the complete raw and replacement
+  DAGs before making a candidate available to global selection.
 
 Support in the estimator does not imply that a deployment has selected and
 bound that physical algorithm. Unknown query lowering or summary binding makes
@@ -445,7 +447,7 @@ retained-memory charge by the comparison horizon before returning the
 lifecycle primitive. Integrating that rate over the same horizon produces
 exactly one peak-memory charge and agrees with complete-DAG costing.
 
-The at-rest summary-candidate bridge still has formulas for sketch build and
+The legacy compact-report path still has formulas for sketch build and
 readout only. It rejects summary join, merge, subtract, and delete explicitly
 rather than charging only their children. The incremental estimator supports
 merge, subtract, delete, and readout when their operation evidence is present.
@@ -454,16 +456,30 @@ per evaluation, CPU operations per matched pair, and peak join working memory.
 Those physical facts cannot be inferred from the logical join key; absence or
 invalid evidence makes the whole estimate unavailable.
 
-The compact planner bridge accepts only complete shapes it can currently lower
-from its resolved inputs: an unfiltered source scan followed by one aggregate,
-and the canonical count-grouped Top-K fusion over such a scan. It rejects a
-filter, projection, join, window, nested aggregate, or predicate-bearing scan.
-Although the standalone physical-DAG estimator can cost several of those
-operators when given complete `OperatorStatistics`, the planner does not yet have
-an input path that lowers arbitrary candidate DAGs into it. Adding that lowering
-and its statistics provider is future integration work. Final selection
-excludes every unavailable replacement; when none remain, `chosen = None`
-preserves the raw pre-ASAP target.
+`AnalyticalPlannerCostModel` is the final-selection adapter. For every
+candidate it obtains one canonical `ComparisonScope`, recursively lowers the
+actual raw target, and then lowers a logical rewrite or requests the fully
+bound physical DAG for a `SummaryExpr` candidate. The deployment implements
+`PlannerPhysicalPlanProvider`: query-node evidence is consumed atomically by
+the generic query lowerer, while summary binding returns a complete
+`PhysicalDag`, including embedded raw work, build/read operators, retained
+state, execution multiplicity, and source coverage. The adapter calls
+`estimate_physical_dag_comparison`; it never calls `DefaultCostModel`, the
+compact estimator, or a structural-node-count fallback for final cost.
+
+A candidate is exposed to global selection only when both complete DAGs are
+valid and its calibrated cost is strictly below the raw baseline. Missing or
+stale evidence, an unknown physical algorithm, invalid edges, incomplete
+source coverage, or a candidate that is not cheaper yields `None`. When no
+candidate remains, `chosen = None` preserves the raw pre-ASAP target.
+
+Complete-plan costing also changes CSE selection order. Global selection sends
+all share and recompute alternatives through `candidate_cost`; it does not use
+the legacy structural CSE hook to discard one arm first. Once an arm is chosen,
+the existing consumer-count propagation records whether that physical
+alternative shares or recomputes. Within each returned physical DAG, stable
+provider-owned physical IDs deduplicate shared scans, builds, and retained
+states. Logical `Rc` identity is never substituted for physical identity.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
@@ -541,14 +557,19 @@ The intended end-to-end selection pipeline is:
 5. estimates the complete candidate DAG;
 6. applies calibration and ranks candidates by ascending cost.
 
-The at-rest planner bridge executes this pipeline only for the compact shapes
-listed above. The streaming adapter connects raw recomputation and primitive
-summary lifecycle costs to the existing global lifecycle-selection hooks.
+The query lowerer and physical estimator cover the supported raw-query shapes
+listed above. `AnalyticalPlannerCostModel` executes this pipeline for every
+candidate supplied to `PlanSpace::global_selection`. Logical rewrites are
+lowered recursively. Summary candidates participate only after the deployment
+has bound their complete `SummaryExpr` DAG; there is no optimistic generic
+summary fallback. The streaming adapter connects raw recomputation and
+primitive summary lifecycle costs to the existing global lifecycle-selection
+hooks.
 The lifecycle planner enumerates compatible lifecycle combinations for the
 unique `SummaryAgg` deployments and invokes `complete_summary_candidate_cost`
 for each combination before selecting the minimum. The hook receives explicit
-node-to-guarantee bindings plus the horizon and expected reads. Every
-Each logical occurrence is looked up by exact `Rc` identity, while every
+node-to-guarantee bindings plus the horizon and expected reads. Each logical
+occurrence is looked up by exact `Rc` identity, while every
 evidence record also carries a provider-owned physical identity. Equal physical
 identities deduplicate work and retained state only when their operator facts,
 edge statistics, lifecycle guarantee, and physical child identities agree;

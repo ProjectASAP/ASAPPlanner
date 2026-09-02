@@ -11,7 +11,9 @@ use asap_types::post_asap::{
     SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
 };
-use asap_types::pre_asap::{agg_intent::AggIntent, Predicate, QueryExpr, Source};
+use asap_types::pre_asap::{
+    agg_intent::AggIntent, CompareOpKind, InfoMatcher, Predicate, QueryExpr, Source,
+};
 use asap_types::workload::{DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand};
 use serde::{Deserialize, Serialize};
 
@@ -319,6 +321,26 @@ struct StreamingTargetComparison {
     raw: StreamingRawInputEvidence,
 }
 
+fn promql_info_source(selector: &[InfoMatcher]) -> Option<Source> {
+    let mut metric = None;
+    for matcher in selector
+        .iter()
+        .filter(|matcher| matcher.label == "__name__")
+    {
+        if matcher.op != CompareOpKind::Eq
+            || metric
+                .as_ref()
+                .is_some_and(|current: &&String| *current != &matcher.value)
+        {
+            return None;
+        }
+        metric = Some(&matcher.value);
+    }
+    Some(Source::TimeSeries {
+        metric: metric.map_or("target_info", String::as_str).into(),
+    })
+}
+
 fn query_scan_selections(query: &QueryExpr, out: &mut Vec<(Source, Vec<Predicate>)>) {
     use QueryExpr::*;
     match query {
@@ -338,9 +360,14 @@ fn query_scan_selections(query: &QueryExpr, out: &mut Vec<(Source, Vec<Predicate
         | TimeShift { child, .. }
         | SQLWindowFunc { child, .. }
         | PromqlSeriesSample { child, .. }
-        | PromqlInfoEnrich { child, .. }
         | Sort { child, .. }
         | Limit { child, .. } => query_scan_selections(child, out),
+        PromqlInfoEnrich { selector, child } => {
+            query_scan_selections(child, out);
+            if let Some(source) = promql_info_source(selector) {
+                out.push((source, vec![]));
+            }
+        }
         Concat { children } => children
             .iter()
             .for_each(|child| query_scan_selections(child, out)),
@@ -389,6 +416,11 @@ fn validate_query_scope(
             ));
         };
         declared.swap_remove(index);
+    }
+    if !declared.is_empty() {
+        return Err(AnalyticalCostError::ComparisonScopeMismatch(
+            "raw target source lineage",
+        ));
     }
     Ok(())
 }
@@ -1964,6 +1996,34 @@ mod tests {
         materialize_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
         SummaryMaintenanceLifecycleCapabilities, WorkloadDemand,
     };
+
+    #[test]
+    fn promql_info_source_is_part_of_streaming_lineage() {
+        let query = QueryExpr::PromqlInfoEnrich {
+            selector: vec![InfoMatcher {
+                label: "__name__".into(),
+                op: CompareOpKind::Eq,
+                value: "service_info".into(),
+            }],
+            child: Rc::new(QueryExpr::Scan {
+                source: Source::TimeSeries {
+                    metric: "metrics".into(),
+                },
+                predicates: vec![],
+                schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+            }),
+        };
+        let mut selections = Vec::new();
+        query_scan_selections(&query, &mut selections);
+
+        assert_eq!(selections.len(), 2);
+        assert_eq!(
+            selections[1].0,
+            Source::TimeSeries {
+                metric: "service_info".into()
+            }
+        );
+    }
 
     fn estimate_test(
         root: &SummaryNode,
