@@ -200,6 +200,7 @@ pub fn lower_query_physical_dag(
                 &child_id,
                 child_statistics,
             )?;
+            require_promql_unary_edge(operator, statistics, child_statistics)?;
             require_operator_statistics(operator, statistics)?;
             self.push(evidence, operator, children, None)
         }
@@ -339,6 +340,11 @@ pub fn lower_query_physical_dag(
                                 &child_id,
                                 child_statistics,
                             )?;
+                            require_promql_unary_edge(
+                                PhysicalOperator::TopK,
+                                statistics,
+                                child_statistics,
+                            )?;
                             let bound = n
                                 .checked_add(*offset)
                                 .and_then(|value| u64::try_from(value).ok())
@@ -373,6 +379,11 @@ pub fn lower_query_physical_dag(
                         &child_id,
                         child_statistics,
                     )?;
+                    require_promql_unary_edge(
+                        PhysicalOperator::Limit,
+                        statistics,
+                        child_statistics,
+                    )?;
                     require_operator_statistics(PhysicalOperator::Limit, statistics)?;
                     require_limit_cardinality(*n, *offset, statistics)?;
                     require_limit_consumption(*n, *offset, statistics)?;
@@ -402,11 +413,20 @@ pub fn lower_query_physical_dag(
                     }
                     self.lower_unary(query, id, PhysicalOperator::PromqlRange, child)
                 }
-                QueryExpr::PromqlSubquery { range, resolution, child } => {
+                QueryExpr::PromqlSubquery {
+                    range,
+                    resolution,
+                    child,
+                } => {
                     let child_id = self.lower(child)?;
                     let statistics = self.stats(&id)?;
                     let child_statistics = self.node_statistics(&child_id)?;
                     require_unary_edge(&id, &statistics, &child_id, child_statistics)?;
+                    require_promql_unary_edge(
+                        PhysicalOperator::PromqlSubquery,
+                        &statistics,
+                        child_statistics,
+                    )?;
                     require_operator_statistics(PhysicalOperator::PromqlSubquery, &statistics)?;
                     let supplied = require_promql_statistics(&statistics, 1)?
                         .subquery_steps
@@ -418,7 +438,13 @@ pub fn lower_query_physical_dag(
                             ));
                         }
                     }
-                    Ok(self.push(id, PhysicalOperator::PromqlSubquery, &statistics, vec![child_id], None))
+                    Ok(self.push(
+                        id,
+                        PhysicalOperator::PromqlSubquery,
+                        &statistics,
+                        vec![child_id],
+                        None,
+                    ))
                 }
                 QueryExpr::TimeShift { child, .. } => {
                     self.lower_unary(query, occurrence, PhysicalOperator::PassThrough, child)
@@ -426,14 +452,27 @@ pub fn lower_query_physical_dag(
                 QueryExpr::PromqlRelabel { child, .. } => {
                     self.lower_unary(query, id, PhysicalOperator::PromqlRelabel, child)
                 }
-                QueryExpr::PromqlSeriesSample { by, kind, child, .. } => {
+                QueryExpr::PromqlSeriesSample {
+                    by, kind, child, ..
+                } => {
                     let child_id = self.lower(child)?;
                     let statistics = self.stats(&id)?;
                     let child_statistics = self.node_statistics(&child_id)?;
                     require_unary_edge(&id, &statistics, &child_id, child_statistics)?;
+                    require_promql_unary_edge(
+                        PhysicalOperator::PromqlSeriesSample,
+                        &statistics,
+                        child_statistics,
+                    )?;
                     validate_series_sample(by, *kind, &statistics)?;
                     require_operator_statistics(PhysicalOperator::PromqlSeriesSample, &statistics)?;
-                    Ok(self.push(id, PhysicalOperator::PromqlSeriesSample, &statistics, vec![child_id], None))
+                    Ok(self.push(
+                        id,
+                        PhysicalOperator::PromqlSeriesSample,
+                        &statistics,
+                        vec![child_id],
+                        None,
+                    ))
                 }
                 QueryExpr::PromqlInfoEnrich { selector, child } => {
                     let left_id = self.lower(child)?;
@@ -441,7 +480,14 @@ pub fn lower_query_physical_dag(
                     let coverage = bind_info_coverage(&info_id, selector, self.scope)?;
                     let info_statistics = self.stats(&info_id)?;
                     require_statistics_shape(&info_id, &info_statistics, 1)?;
-                    self.push(info_id.clone(), PhysicalOperator::Scan, &info_statistics, vec![], Some(coverage));
+                    require_scan_edges_equal(&info_statistics)?;
+                    self.push(
+                        info_id.clone(),
+                        PhysicalOperator::Scan,
+                        &info_statistics,
+                        vec![],
+                        Some(coverage),
+                    );
                     let statistics = self.stats(&id)?;
                     require_statistics_shape(&id, &statistics, 2)?;
                     if statistics.inputs[0] != self.node_statistics(&left_id)?.output
@@ -451,10 +497,26 @@ pub fn lower_query_physical_dag(
                             "info enrichment inputs do not match child outputs",
                         ));
                     }
+                    require_promql_binary_edges(
+                        &statistics,
+                        self.node_statistics(&left_id)?,
+                        &info_statistics,
+                    )?;
                     require_operator_statistics(PhysicalOperator::PromqlInfoEnrich, &statistics)?;
-                    Ok(self.push(id, PhysicalOperator::PromqlInfoEnrich, &statistics, vec![left_id, info_id], None))
+                    Ok(self.push(
+                        id,
+                        PhysicalOperator::PromqlInfoEnrich,
+                        &statistics,
+                        vec![left_id, info_id],
+                        None,
+                    ))
                 }
-                QueryExpr::BinaryOp { lhs, rhs, vector_match, .. } => {
+                QueryExpr::BinaryOp {
+                    lhs,
+                    rhs,
+                    vector_match,
+                    ..
+                } => {
                     let left_scalar = is_promql_scalar(lhs);
                     let right_scalar = is_promql_scalar(rhs);
                     if left_scalar && right_scalar {
@@ -480,33 +542,59 @@ pub fn lower_query_physical_dag(
                                 "scalar/vector binary operation cannot have label-match state",
                             ));
                         }
-                    } else if statistics.hash_join_build_side.is_none() || statistics.key_bytes.is_none() {
+                    } else if statistics.hash_join_build_side.is_none()
+                        || statistics.key_bytes.is_none()
+                    {
                         return Err(AnalyticalCostError::MissingOrStale(
                             "vector_binary_label_match_statistics",
                         ));
                     }
-                    require_promql_binary_edges(&statistics,
-                        self.node_statistics(&left_id)?, self.node_statistics(&right_id)?)?;
+                    require_promql_binary_edges(
+                        &statistics,
+                        self.node_statistics(&left_id)?,
+                        self.node_statistics(&right_id)?,
+                    )?;
                     require_operator_statistics(PhysicalOperator::PromqlVectorBinary, &statistics)?;
-                    Ok(self.push(id, PhysicalOperator::PromqlVectorBinary, &statistics, vec![left_id, right_id], None))
+                    Ok(self.push(
+                        id,
+                        PhysicalOperator::PromqlVectorBinary,
+                        &statistics,
+                        vec![left_id, right_id],
+                        None,
+                    ))
                 }
                 QueryExpr::PromqlVectorFromScalar(child)
                 | QueryExpr::PromqlScalarFromVector(child) => {
                     self.lower_unary(query, id, PhysicalOperator::PromqlBridge, child)
                 }
                 QueryExpr::PromqlScalarBridge(inner)
-                    if matches!(inner.as_ref(), QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(_))) =>
+                    if matches!(
+                        inner.as_ref(),
+                        QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(_))
+                    ) =>
                 {
                     let statistics = self.stats(&id)?;
                     require_statistics_shape(&id, &statistics, 0)?;
                     require_operator_statistics(PhysicalOperator::PromqlScalarLeaf, &statistics)?;
-                    Ok(self.push(id, PhysicalOperator::PromqlScalarLeaf, &statistics, vec![], None))
+                    Ok(self.push(
+                        id,
+                        PhysicalOperator::PromqlScalarLeaf,
+                        &statistics,
+                        vec![],
+                        None,
+                    ))
                 }
                 QueryExpr::EvalTimestamp => {
                     let statistics = self.stats(&id)?;
                     require_statistics_shape(&id, &statistics, 0)?;
                     require_operator_statistics(PhysicalOperator::PromqlScalarLeaf, &statistics)?;
-                    Ok(self.push(id, PhysicalOperator::PromqlScalarLeaf, &statistics, vec![], None))
+                    Ok(self.push(
+                        id,
+                        PhysicalOperator::PromqlScalarLeaf,
+                        &statistics,
+                        vec![],
+                        None,
+                    ))
                 }
                 QueryExpr::Concat { children } => {
                     let child_ids = children
@@ -719,6 +807,10 @@ fn require_operator_statistics(
     if !matches!(operator, PhysicalOperator::Scan) && statistics.source_scan_bytes != 0 {
         return invalid("only Scan may charge source bytes");
     }
+    if matches!(operator, PhysicalOperator::PromqlScalarLeaf) {
+        require_promql_statistics(statistics, 0)?;
+        return Ok(());
+    }
     let input = statistics.inputs.first().copied().ok_or(
         AnalyticalCostError::InconsistentOperatorStatistics("operator input is missing"),
     )?;
@@ -773,7 +865,198 @@ fn require_operator_statistics(
                 return invalid("pass-through wrapper changes its edge statistics");
             }
         }
-        PhysicalOperator::Scan | PhysicalOperator::HashJoin | PhysicalOperator::Concat => {}
+        PhysicalOperator::PromqlRange => {
+            let promql = require_promql_statistics(statistics, 1)?;
+            if !matches!(promql.window_samples_per_series, Some(value) if value > 0) {
+                return Err(AnalyticalCostError::MissingOrZero(
+                    "window_samples_per_series",
+                ));
+            }
+        }
+        PhysicalOperator::PromqlSubquery | PhysicalOperator::PromqlBridge => {
+            require_promql_statistics(statistics, 1)?;
+        }
+        PhysicalOperator::PromqlVectorBinary => {
+            require_promql_statistics(statistics, 2)?;
+        }
+        PhysicalOperator::PromqlInfoEnrich => {
+            let promql = require_promql_statistics(statistics, 2)?;
+            if output.rows != input.rows || promql.output_series != promql.input_series[0] {
+                return invalid("info enrichment changes left sample or series cardinality");
+            }
+        }
+        PhysicalOperator::PromqlRelabel => {
+            let promql = require_promql_statistics(statistics, 1)?;
+            if output.rows != input.rows || promql.output_series > promql.input_series[0] {
+                return invalid("relabel changes rows or expands series cardinality");
+            }
+        }
+        PhysicalOperator::PromqlSeriesSample => {
+            let promql = require_promql_statistics(statistics, 1)?;
+            if output.rows > input.rows || promql.output_series > promql.input_series[0] {
+                return invalid("series sampling expands its input");
+            }
+        }
+        PhysicalOperator::PromqlPerSeries => {
+            let promql = require_promql_statistics(statistics, 1)?;
+            if promql.output_series > promql.input_series[0] {
+                return invalid("per-series operator expands series cardinality");
+            }
+        }
+        PhysicalOperator::PromqlPresence => {
+            let promql = require_promql_statistics(statistics, 1)?;
+            if promql.output_series > 1 {
+                return invalid("PromQL absence operator emits more than one series");
+            }
+        }
+        PhysicalOperator::Scan
+        | PhysicalOperator::HashJoin
+        | PhysicalOperator::Concat
+        | PhysicalOperator::PromqlScalarLeaf => {}
+    }
+    Ok(())
+}
+
+fn require_promql_statistics(
+    statistics: &OperatorStatistics,
+    arity: usize,
+) -> Result<&crate::analytical_statistics::PromqlOperatorStatistics, AnalyticalCostError> {
+    let promql = statistics
+        .promql
+        .as_ref()
+        .ok_or(AnalyticalCostError::MissingOrStale(
+            "promql_operator_statistics",
+        ))?;
+    if promql.evaluation_steps == 0 {
+        return Err(AnalyticalCostError::MissingOrZero("evaluation_steps"));
+    }
+    if promql.input_series.len() != arity {
+        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "PromQL input-series arity does not match physical inputs",
+        ));
+    }
+    for (index, series) in promql.input_series.iter().enumerate() {
+        if *series > statistics.inputs[index].rows && statistics.inputs[index].rows > 0 {
+            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "input series exceed input rows",
+            ));
+        }
+    }
+    if promql.output_series > statistics.output.rows && statistics.output.rows > 0 {
+        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "output series exceed output rows",
+        ));
+    }
+    Ok(promql)
+}
+
+fn require_promql_binary_edges(
+    statistics: &OperatorStatistics,
+    left: &OperatorStatistics,
+    right: &OperatorStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let parent = require_promql_statistics(statistics, 2)?;
+    let left = left
+        .promql
+        .as_ref()
+        .ok_or(AnalyticalCostError::MissingOrStale(
+            "left_promql_operator_statistics",
+        ))?;
+    let right = right
+        .promql
+        .as_ref()
+        .ok_or(AnalyticalCostError::MissingOrStale(
+            "right_promql_operator_statistics",
+        ))?;
+    if parent.input_series != [left.output_series, right.output_series]
+        || parent.evaluation_steps != left.evaluation_steps
+        || parent.evaluation_steps != right.evaluation_steps
+    {
+        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "PromQL binary series or step statistics do not match its children",
+        ));
+    }
+    Ok(())
+}
+
+fn require_promql_unary_edge(
+    operator: PhysicalOperator,
+    statistics: &OperatorStatistics,
+    child: &OperatorStatistics,
+) -> Result<(), AnalyticalCostError> {
+    match (statistics.promql.as_ref(), child.promql.as_ref()) {
+        (None, None) => Ok(()),
+        (Some(parent), Some(child)) => {
+            require_promql_statistics(statistics, 1)?;
+            if parent.input_series[0] != child.output_series
+                || (!matches!(operator, PhysicalOperator::PromqlSubquery)
+                    && parent.evaluation_steps != child.evaluation_steps)
+            {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "PromQL unary series or step statistics do not match its child",
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "PromQL statistics are missing on one side of an edge",
+        )),
+    }
+}
+
+fn subquery_steps(
+    range: std::time::Duration,
+    resolution: Option<std::time::Duration>,
+) -> Result<Option<u64>, AnalyticalCostError> {
+    if range.is_zero() {
+        return Err(AnalyticalCostError::MissingOrZero("subquery range"));
+    }
+    let Some(resolution) = resolution else {
+        return Ok(None);
+    };
+    if resolution.is_zero() {
+        return Err(AnalyticalCostError::MissingOrZero("subquery resolution"));
+    }
+    Ok(Some(
+        u64::try_from(range.as_nanos() / resolution.as_nanos() + 1)
+            .map_err(|_| AnalyticalCostError::Overflow)?,
+    ))
+}
+
+fn validate_series_sample(
+    by: &asap_types::pre_asap::GroupKeys,
+    kind: asap_types::pre_asap::SampleKind,
+    statistics: &OperatorStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let promql = require_promql_statistics(statistics, 1)?;
+    let groups = if !by.is_without() && by.keys().is_empty() {
+        1
+    } else {
+        statistics
+            .group_count
+            .ok_or(AnalyticalCostError::MissingOrStale("sample_group_count"))?
+    };
+    match kind {
+        asap_types::pre_asap::SampleKind::LimitK(k) => {
+            let k = u64::try_from(k).map_err(|_| AnalyticalCostError::Overflow)?;
+            if statistics.k != Some(k) {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "limitk statistics disagree with query k",
+                ));
+            }
+            let bound = groups.checked_mul(k).ok_or(AnalyticalCostError::Overflow)?;
+            if promql.output_series > promql.input_series[0].min(bound) {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "limitk output exceeds its cardinality bound",
+                ));
+            }
+        }
+        asap_types::pre_asap::SampleKind::LimitRatio(ratio)
+            if !ratio.is_finite() || !(-1.0..=1.0).contains(&ratio) =>
+        {
+            return Err(AnalyticalCostError::UnsupportedQueryOperator)
+        }
+        asap_types::pre_asap::SampleKind::LimitRatio(_) => {}
     }
     Ok(())
 }
@@ -836,6 +1119,32 @@ fn bind_scan_coverage(
         ));
     }
     Ok(coverage)
+}
+
+fn bind_info_coverage(
+    node_id: &str,
+    selector: &[asap_types::pre_asap::InfoMatcher],
+    scope: &ComparisonScope,
+) -> Result<SourceCoverage, AnalyticalCostError> {
+    use asap_types::pre_asap::{CompareOpKind, Source};
+
+    let mut metric: Option<&str> = None;
+    for matcher in selector
+        .iter()
+        .filter(|matcher| matcher.label == "__name__")
+    {
+        if matcher.op != CompareOpKind::Eq {
+            return Err(AnalyticalCostError::UnsupportedQueryOperator);
+        }
+        if metric.is_some_and(|current| current != matcher.value) {
+            return Err(AnalyticalCostError::UnsupportedQueryOperator);
+        }
+        metric = Some(&matcher.value);
+    }
+    let source = Source::TimeSeries {
+        metric: metric.unwrap_or("target_info").into(),
+    };
+    bind_scan_coverage(node_id, &source, &[], scope)
 }
 
 fn is_hash_join_predicate(
@@ -914,6 +1223,71 @@ fn supports_hash_aggregate(
         })
 }
 
+fn aggregate_operator(
+    reduction: &asap_types::pre_asap::Reduction,
+    measures: &[asap_types::pre_asap::AggIntent],
+) -> Option<PhysicalOperator> {
+    use asap_types::pre_asap::Reduction;
+
+    if supports_hash_aggregate(reduction, measures) {
+        Some(PhysicalOperator::HashAggregate)
+    } else if matches!(reduction, Reduction::PerEntity)
+        && !measures.is_empty()
+        && measures.iter().all(presence_intent)
+    {
+        Some(PhysicalOperator::PromqlPresence)
+    } else if matches!(reduction, Reduction::PerEntity)
+        && !measures.is_empty()
+        && measures.iter().all(fixed_state_per_series_intent)
+    {
+        Some(PhysicalOperator::PromqlPerSeries)
+    } else {
+        None
+    }
+}
+
+fn presence_intent(intent: &asap_types::pre_asap::AggIntent) -> bool {
+    matches!(
+        intent,
+        asap_types::pre_asap::AggIntent::Absent | asap_types::pre_asap::AggIntent::AbsentOverTime
+    )
+}
+
+fn fixed_state_per_series_intent(intent: &asap_types::pre_asap::AggIntent) -> bool {
+    use asap_types::pre_asap::AggIntent;
+    matches!(
+        intent,
+        AggIntent::Rate
+            | AggIntent::Increase
+            | AggIntent::Changes
+            | AggIntent::Delta
+            | AggIntent::IDelta
+            | AggIntent::Deriv
+            | AggIntent::Resets
+            | AggIntent::PredictLinear { .. }
+            | AggIntent::DoubleExpSmoothing { .. }
+            | AggIntent::Math(_)
+            | AggIntent::PresentOverTime
+            | AggIntent::TimeFn(_)
+            | AggIntent::LastOverTime
+            | AggIntent::FirstOverTime
+            | AggIntent::TsOfMinOverTime
+            | AggIntent::TsOfMaxOverTime
+            | AggIntent::TsOfFirstOverTime
+            | AggIntent::TsOfLastOverTime
+    )
+}
+
+fn is_promql_scalar(query: &asap_types::pre_asap::QueryExpr) -> bool {
+    use asap_types::pre_asap::QueryExpr;
+    matches!(
+        query,
+        QueryExpr::PromqlScalarBridge(_)
+            | QueryExpr::PromqlScalarFromVector(_)
+            | QueryExpr::EvalTimestamp
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,6 +1316,7 @@ mod tests {
             k: None,
             limit_rows_consumed: None,
             hash_join_build_side: None,
+            promql: None,
         }
     }
 
@@ -970,6 +1345,23 @@ mod tests {
             evidence.physical_id = key;
             Ok(evidence)
         }
+    }
+
+    fn with_promql(
+        mut statistics: OperatorStatistics,
+        input_series: Vec<u64>,
+        output_series: u64,
+        evaluation_steps: u64,
+    ) -> OperatorStatistics {
+        statistics.promql = Some(crate::analytical_statistics::PromqlOperatorStatistics {
+            input_series,
+            output_series,
+            evaluation_steps,
+            window_samples_per_series: None,
+            subquery_steps: None,
+            scalar_ops_per_row: None,
+        });
+        statistics
     }
 
     fn scope(sources: Vec<SourceCoverage>) -> ComparisonScope {
@@ -1654,13 +2046,6 @@ mod tests {
             having: None,
             child: scan(),
         });
-        let per_entity = Rc::new(QueryExpr::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures: vec![AggIntent::Rate],
-            output_names: vec![],
-            having: None,
-            child: scan(),
-        });
         let empty_sort_limit = Rc::new(QueryExpr::Limit {
             n: 10,
             offset: 0,
@@ -1686,16 +2071,294 @@ mod tests {
             vec![],
         )]);
         let unavailable = HashMap::<String, PhysicalNodeEvidence>::new();
-        for query in [
-            &exact_quantile,
-            &per_entity,
-            &empty_sort_limit,
-            &unsupported_window,
-        ] {
+        for query in [&exact_quantile, &empty_sort_limit, &unsupported_window] {
             assert_eq!(
                 lower_query_physical_dag(query, &scope, &scripted(&unavailable)),
                 Err(AnalyticalCostError::UnsupportedQueryOperator)
             );
         }
+    }
+
+    #[test]
+    fn promql_range_and_subquery_use_authoritative_edge_and_window_evidence() {
+        use asap_types::pre_asap::{Column, DataType, QueryExpr, Schema, Source};
+        use std::{rc::Rc, time::Duration};
+
+        let source = Source::TimeSeries { metric: "m".into() };
+        let scan = Rc::new(QueryExpr::Scan {
+            source: source.clone(),
+            predicates: vec![],
+            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+        });
+        let range = Rc::new(QueryExpr::TimeRange {
+            range: Duration::from_secs(300),
+            child: scan,
+        });
+        let root = Rc::new(QueryExpr::PromqlSubquery {
+            range: Duration::from_secs(300),
+            resolution: Some(Duration::from_secs(60)),
+            child: range,
+        });
+        let scope = scope(vec![coverage(source, vec![])]);
+        let mut scan = with_promql(
+            statistics(vec![edge(60_000, 960_000)], edge(60_000, 960_000)),
+            vec![100],
+            100,
+            6,
+        );
+        scan.source_scan_bytes = 120_000;
+        let mut range = with_promql(
+            statistics(vec![edge(60_000, 960_000)], edge(600, 9_600)),
+            vec![100],
+            100,
+            6,
+        );
+        range.promql.as_mut().unwrap().window_samples_per_series = Some(100);
+        let mut subquery = with_promql(
+            statistics(vec![edge(600, 9_600)], edge(100, 1_600)),
+            vec![100],
+            100,
+            1,
+        );
+        subquery.promql.as_mut().unwrap().subquery_steps = Some(6);
+        let provided = HashMap::from([
+            ("query-2".into(), evidence(scan)),
+            ("query-1".into(), evidence(range)),
+            ("query-0".into(), evidence(subquery)),
+        ]);
+
+        let dag = lower_query_physical_dag(&root, &scope, &provided).unwrap();
+        assert_eq!(
+            dag.nodes
+                .iter()
+                .map(|node| node.operator)
+                .collect::<Vec<_>>(),
+            vec![
+                PhysicalOperator::Scan,
+                PhysicalOperator::PromqlRange,
+                PhysicalOperator::PromqlSubquery,
+            ]
+        );
+        let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).unwrap();
+        assert_eq!(estimate.scan_bytes, 120_000);
+        assert!(estimate.peak_memory_bytes >= 160_000);
+    }
+
+    #[test]
+    fn promql_info_enrichment_lowers_its_source_as_a_scoped_scan() {
+        use asap_types::pre_asap::{Column, DataType, QueryExpr, Schema, Source};
+        use std::rc::Rc;
+
+        let primary = Source::TimeSeries { metric: "m".into() };
+        let info = Source::TimeSeries {
+            metric: "target_info".into(),
+        };
+        let child = Rc::new(QueryExpr::Scan {
+            source: primary.clone(),
+            predicates: vec![],
+            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+        });
+        let root = Rc::new(QueryExpr::PromqlInfoEnrich {
+            selector: vec![],
+            child,
+        });
+        let scope = scope(vec![coverage(primary, vec![]), coverage(info, vec![])]);
+        let mut left = with_promql(
+            statistics(vec![edge(100, 1_600)], edge(100, 1_600)),
+            vec![10],
+            10,
+            10,
+        );
+        left.source_scan_bytes = 800;
+        let mut right = with_promql(
+            statistics(vec![edge(20, 1_000)], edge(20, 1_000)),
+            vec![2],
+            2,
+            10,
+        );
+        right.source_scan_bytes = 400;
+        let mut enrich = with_promql(
+            statistics(vec![edge(100, 1_600), edge(20, 1_000)], edge(100, 2_400)),
+            vec![10, 2],
+            10,
+            10,
+        );
+        enrich.key_bytes = Some(16);
+        enrich.hash_join_build_side = Some(HashJoinBuildSide::Right);
+        let provided = HashMap::from([
+            ("query-1".into(), evidence(left)),
+            ("query-0-info-scan".into(), evidence(right)),
+            ("query-0".into(), evidence(enrich)),
+        ]);
+
+        let dag = lower_query_physical_dag(&root, &scope, &provided).unwrap();
+        assert_eq!(dag.nodes[1].operator, PhysicalOperator::Scan);
+        assert_eq!(dag.nodes[1].source_coverage, Some(scope.sources[1].clone()));
+        assert_eq!(dag.nodes[2].children.len(), 2);
+        let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).unwrap();
+        assert_eq!(estimate.scan_bytes, 1_200);
+    }
+
+    #[test]
+    fn promql_scalar_leaf_is_distinct_from_sql_current_timestamp() {
+        use asap_types::pre_asap::QueryExpr;
+        use std::rc::Rc;
+
+        let root = Rc::new(QueryExpr::promql_scalar(5.0));
+        let scope = scope(vec![coverage(
+            asap_types::pre_asap::Source::TimeSeries {
+                metric: "scope-anchor".into(),
+            },
+            vec![],
+        )]);
+        let scalar = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
+        let provided = HashMap::from([("query-0".into(), evidence(scalar))]);
+        let dag = lower_query_physical_dag(&root, &scope, &provided).unwrap();
+        assert_eq!(dag.nodes[0].operator, PhysicalOperator::PromqlScalarLeaf);
+        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).is_ok());
+
+        assert_eq!(
+            lower_query_physical_dag(&Rc::new(QueryExpr::CurrentTimestamp), &scope, &provided),
+            Err(AnalyticalCostError::UnsupportedQueryOperator)
+        );
+    }
+
+    #[test]
+    fn promql_vector_scalar_binary_keeps_two_edges_without_label_state() {
+        use asap_types::pre_asap::{
+            ArithmeticOpKind, BinaryOpKind, Column, DataType, QueryExpr, Schema, Source,
+        };
+        use std::rc::Rc;
+
+        let source = Source::TimeSeries { metric: "m".into() };
+        let vector = Rc::new(QueryExpr::Scan {
+            source: source.clone(),
+            predicates: vec![],
+            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+        });
+        let scalar = Rc::new(QueryExpr::promql_scalar(2.0));
+        let root = Rc::new(QueryExpr::BinaryOp {
+            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+            lhs: vector,
+            rhs: scalar,
+            vector_match: None,
+        });
+        let scope = scope(vec![coverage(source, vec![])]);
+        let mut vector = with_promql(
+            statistics(vec![edge(1_000, 16_000)], edge(1_000, 16_000)),
+            vec![100],
+            100,
+            10,
+        );
+        vector.source_scan_bytes = 8_000;
+        let scalar = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
+        let binary = with_promql(
+            statistics(vec![edge(1_000, 16_000), edge(10, 80)], edge(1_000, 16_000)),
+            vec![100, 0],
+            100,
+            10,
+        );
+        let provided = HashMap::from([
+            ("query-1".into(), evidence(vector)),
+            ("query-2".into(), evidence(scalar)),
+            ("query-0".into(), evidence(binary)),
+        ]);
+
+        let dag = lower_query_physical_dag(&root, &scope, &provided).unwrap();
+        assert_eq!(dag.nodes.last().unwrap().children.len(), 2);
+        assert_eq!(
+            dag.nodes.last().unwrap().operator,
+            PhysicalOperator::PromqlVectorBinary
+        );
+        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).is_ok());
+    }
+
+    #[test]
+    fn promql_relabel_sample_and_per_series_operators_are_costed() {
+        use asap_types::pre_asap::{
+            AggIntent, Column, DataType, GroupKeys, QueryExpr, Reduction, SampleKind, Schema,
+            Source,
+        };
+        use std::rc::Rc;
+
+        let source = Source::TimeSeries { metric: "m".into() };
+        let scan = Rc::new(QueryExpr::Scan {
+            source: source.clone(),
+            predicates: vec![],
+            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+        });
+        let relabel = Rc::new(QueryExpr::PromqlRelabel {
+            dst: "service".into(),
+            value: Rc::new(QueryExpr::FunctionCall {
+                name: "label_replace".into(),
+                args: vec![],
+            }),
+            child: scan,
+        });
+        let sample = Rc::new(QueryExpr::PromqlSeriesSample {
+            by: GroupKeys::none(),
+            kind: SampleKind::LimitK(10),
+            child: relabel,
+        });
+        let root = Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Rate],
+            output_names: vec![],
+            having: None,
+            child: sample,
+        });
+        let scope = scope(vec![coverage(source, vec![])]);
+        let mut scan = with_promql(
+            statistics(vec![edge(1_000, 16_000)], edge(1_000, 16_000)),
+            vec![100],
+            100,
+            10,
+        );
+        scan.source_scan_bytes = 8_000;
+        let mut relabel = with_promql(
+            statistics(vec![edge(1_000, 16_000)], edge(1_000, 20_000)),
+            vec![100],
+            95,
+            10,
+        );
+        relabel.promql.as_mut().unwrap().scalar_ops_per_row = Some(8);
+        let mut sample = with_promql(
+            statistics(vec![edge(1_000, 20_000)], edge(100, 2_000)),
+            vec![95],
+            10,
+            10,
+        );
+        sample.group_count = Some(1);
+        sample.key_bytes = Some(24);
+        sample.k = Some(10);
+        let mut aggregate = with_promql(
+            statistics(vec![edge(100, 2_000)], edge(10, 200)),
+            vec![10],
+            10,
+            10,
+        );
+        aggregate.aggregate_value_bytes = Some(16);
+        aggregate.promql.as_mut().unwrap().scalar_ops_per_row = Some(2);
+        let provided = HashMap::from([
+            ("query-3".into(), evidence(scan)),
+            ("query-2".into(), evidence(relabel)),
+            ("query-1".into(), evidence(sample)),
+            ("query-0".into(), evidence(aggregate)),
+        ]);
+
+        let dag = lower_query_physical_dag(&root, &scope, &provided).unwrap();
+        assert_eq!(
+            dag.nodes
+                .iter()
+                .map(|node| node.operator)
+                .collect::<Vec<_>>(),
+            vec![
+                PhysicalOperator::Scan,
+                PhysicalOperator::PromqlRelabel,
+                PhysicalOperator::PromqlSeriesSample,
+                PhysicalOperator::PromqlPerSeries,
+            ]
+        );
+        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).is_ok());
     }
 }
