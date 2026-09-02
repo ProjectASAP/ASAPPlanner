@@ -30,7 +30,7 @@ pub struct ComparisonScope {
 }
 
 /// Exact source selection covered by a physical plan.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceCoverage {
     pub source: Source,
     /// Catalog version, object generation, snapshot timestamp, or another
@@ -189,6 +189,10 @@ impl EdgeStatistics {
 /// parent's corresponding input, so conflicting provider evidence fails.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperatorStatistics {
+    /// Physical bytes read from storage by this operator. This is independent
+    /// of decoded logical bytes on `inputs`; it must be zero for non-scan
+    /// operators in the current in-memory physical model.
+    pub source_scan_bytes: u64,
     pub inputs: Vec<EdgeStatistics>,
     pub output: EdgeStatistics,
     pub group_count: Option<u64>,

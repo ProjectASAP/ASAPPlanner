@@ -108,7 +108,7 @@ canonical workload and query terms rather than defining parallel strings:
 | Planning instant and finite horizon | `TimestampMs` and `DurationMs`. |
 | Invocation schedule | `QueryRecurrence`; the evaluation count is derived, not copied. |
 | Event-time coverage | `TimeSelection`. |
-| Logical sources | one `Source` per scan. |
+| Logical sources | the existing query-IR `Source`, one per scan. |
 | Filters | canonical bound `Predicate` values copied from the query IR. |
 | Physical source contents | provider-owned `snapshot_id` per source. |
 
@@ -127,6 +127,13 @@ interval" is not guessed here; it requires a separate semantic coverage proof.
 Missing sources, empty snapshot identifiers, invalid recurrence, or a zero
 horizon fail closed.
 
+Every reachable physical `Scan` carries one exact `SourceCoverage` copied from
+this scope. That coverage includes the existing `Source`, its provider-owned
+snapshot ID, and canonical predicates. A scan with no coverage, or coverage
+not present in `ComparisonScope.sources`, makes the plan unavailable. Other
+operators cannot declare source coverage. This prevents a DAG over source B
+from being estimated under source A's comparison scope.
+
 ## General DAG costing
 
 Costing operates on the physical DAG, not on a list of logical operators.
@@ -135,6 +142,7 @@ each reachable physical node:
 
 ```text
 OperatorStatistics {
+    source_scan_bytes,
     inputs: [EdgeStatistics { rows, bytes }, ...],
     output: EdgeStatistics { rows, bytes },
     group_count,
@@ -157,6 +165,12 @@ positive logical bytes so width-dependent formulas do not invent a row width.
 A parent therefore cannot silently substitute the original source cardinality
 for an intermediate edge.
 
+`EdgeStatistics.bytes` is decoded logical data carried on an edge.
+`source_scan_bytes` is physical storage I/O and is charged only by `Scan`.
+Compression, column pruning, or encoded storage can therefore make these
+values different; neither is inferred from the other. Non-scan operators must
+report zero source bytes in the current in-memory operator model.
+
 ### Composition rules
 
 For a selected DAG:
@@ -174,7 +188,10 @@ For a selected DAG:
    released after their last consumer.
 
 `estimate_physical_dag` implements these rules for `PhysicalDagNode` values,
-one `ComparisonScope`, and an `OperatorStatisticsProvider`.
+one `ComparisonScope`, and an `OperatorStatisticsProvider`. It is a
+single-plan diagnostic API. Code that ranks a raw and candidate plan must use
+`estimate_physical_dag_comparison`, which validates exact scope equality before
+estimating either plan and returns both dimensional estimates together.
 Node IDs are physical identities: duplicate IDs, missing children, and cycles
 are rejected. A child-before-parent schedule maintains remaining-consumer
 counts, releases transient output after its last consumer, and keeps retained
@@ -190,6 +207,15 @@ Every node declares `ExecutionMultiplicity::Once` or `PerEvaluation`.
 Build/maintenance nodes can therefore be charged once while query-side nodes
 are multiplied by the horizon's evaluation count; retention does not silently
 imply either execution frequency.
+
+The parent/child compatibility rules are:
+
+| Parent | Child | Validity |
+|---|---|---|
+| `Once` | `Once` | valid |
+| `Once` | `PerEvaluation` | invalid; a build-once result cannot depend on repeated executions |
+| `PerEvaluation` | `PerEvaluation` | valid |
+| `PerEvaluation` | `Once` | valid only when the child exposes retained state |
 
 For a tree-shaped pipeline, peak memory is normally the maximum live pipeline
 state, not the sum of every node's memory. At a fan-out, join, merge, or nested
@@ -207,7 +233,7 @@ the DAG rules above.
 
 | Physical operator | CPU operations | Local memory | Source/disk reads |
 |---|---:|---:|---:|
-| Scan | `input_rows` | one input row/batch | `input_bytes` |
+| Scan | `input_rows` | one decoded input row/batch | `source_scan_bytes` |
 | Filter | `input_rows` | one output row/batch | `0` |
 | Project or scalar pass-through | `input_rows` | one output row/batch | `0` |
 | Hash aggregate | `input_rows` | `groups × (key + aggregate_value_bytes + hash metadata)` | `0` |
