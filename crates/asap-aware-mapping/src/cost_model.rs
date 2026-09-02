@@ -63,6 +63,7 @@ use crate::replacement::{
     realize_child, Implementation, Replacement, ReplacementProvenance, ReplacementSubDAG,
     TargetSubDAG,
 };
+use crate::summary_maintenance_lifecycle::SummaryMaintenanceLifecycleCostInputs;
 
 /// A CSE-detected, legality-gated shared subtree with two or more consumers
 /// — the unit [`CostModel::cse_share_decision`] decides over. Built by
@@ -503,6 +504,17 @@ pub trait CostModel {
     fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
         let _ = (candidate, target);
         f64::NAN
+    }
+
+    /// Primitive build, update, read, retention, and retirement costs used to
+    /// compare physical summary-state lifecycles. Unknown values stay
+    /// unknown, preventing long-lived deployments from winning through
+    /// optimistic zeroes.
+    fn summary_maintenance_lifecycle_cost_inputs(
+        &self,
+        _summary: &SummaryNode,
+    ) -> SummaryMaintenanceLifecycleCostInputs {
+        SummaryMaintenanceLifecycleCostInputs::default()
     }
 }
 

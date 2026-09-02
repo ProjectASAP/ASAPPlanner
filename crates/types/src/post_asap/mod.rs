@@ -33,6 +33,7 @@ pub mod query_time;
 pub mod schema;
 pub mod sketch;
 pub mod summary_maintenance;
+pub mod summary_maintenance_lifecycle;
 
 pub use expr::{SummaryExpr, SummaryNode};
 pub use guarantee::{
@@ -50,3 +51,6 @@ pub use sketch::{
     SketchParams, SketchQuery, StatModelKind, StatModelParams, WaveletKind, WaveletParams,
 };
 pub use summary_maintenance::SummaryMaintenanceMode;
+pub use summary_maintenance_lifecycle::{
+    EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
+};

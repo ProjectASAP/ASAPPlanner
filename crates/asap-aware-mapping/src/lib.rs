@@ -190,12 +190,13 @@ pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
+pub mod summary_maintenance_lifecycle;
 pub mod topk_reuse;
 
 pub use accuracy::{
     AccuracyAllocation, AccuracyBudgetAllocator, AccuracyEvidenceProvider, AccuracyModel,
     CompositionShape, DefaultAccuracyModel, EqualSplitAllocator, NoAccuracyEvidence,
-    PropagationStats,
+    PropagationStats, WorkloadAccuracyEvidence,
 };
 pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
 pub use cost_model::{CostModel, DefaultCostModel};
@@ -217,4 +218,10 @@ pub use replacement::{
     MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;
+pub use summary_maintenance_lifecycle::{
+    plan_summary_maintenance_lifecycles, SummaryMaintenanceDeployment,
+    SummaryMaintenanceLifecycleAlternative, SummaryMaintenanceLifecycleCapabilities,
+    SummaryMaintenanceLifecycleCostInputs, SummaryMaintenanceLifecyclePlan,
+    SummaryMaintenanceLifecyclePlanError, SummaryMaintenanceLifecycleRejection,
+};
 pub use topk_reuse::TopKLimitReuseStrategy;
