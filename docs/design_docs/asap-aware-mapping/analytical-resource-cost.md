@@ -334,9 +334,20 @@ deduplicated by physical identity.
 `lower_query_physical_dag` recursively lowers a resolved `Rc<QueryExpr>` and
 returns a `PhysicalDag` containing both its nodes and root ID. It consumes the
 existing query and physical-operator enums; it does not introduce a parallel
-logical operator vocabulary. A statistics callback resolves the existing
-`OperatorInputs` for each logical operator identity. Returning no statistics
-makes the entire query unavailable.
+logical operator vocabulary. A `PhysicalNodeEvidenceProvider` resolves one
+atomic `PhysicalNodeEvidence` for each deterministic physical node ID. That
+value reuses the authoritative `OperatorStatistics` contract and adds only
+`output_buffer_bytes`, because logical edge bytes are not an allocation.
+Missing evidence makes the entire query unavailable.
+
+Each lowered Scan is bound to exactly one `SourceCoverage` in the comparison
+scope by the existing source and canonical predicate values. The bound value
+therefore also supplies the provider-owned snapshot ID. Zero matches fail as
+outside scope; multiple matching coverages fail as ambiguous rather than
+choosing an arbitrary snapshot. When a predicate-bearing logical Scan expands
+to Scan → Filter, the synthetic Scan has its own physical ID, statistics, and
+buffer evidence and carries that exact coverage; the Filter has separate
+evidence and no source coverage.
 
 The lowering validates every physical edge before costing:
 
