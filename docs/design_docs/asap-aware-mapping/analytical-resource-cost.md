@@ -13,10 +13,15 @@ and guarantee composition run first; costing ranks only the candidates that
 survive. Missing evidence produces an unavailable estimate, never an assumed
 zero or a structural-cost fallback.
 
-The physical-DAG estimator composes any DAG whose nodes have supported
-physical operators and complete `OperatorStatistics`. Query lowering and
-planner selection are separate integration layers; neither may substitute a
-shape-specific shortcut or structural node count.
+This document distinguishes three implementation layers:
+
+- the physical-DAG estimator, which can compose any DAG whose nodes have
+  supported physical operators and complete `OperatorStatistics`; and
+- query-DAG lowering, which recursively maps supported resolved `QueryExpr`
+  operators to that physical representation; and
+- replacement lowering and ranking, which must compare complete alternatives.
+
+No layer may substitute a shape-specific shortcut or structural node count.
 
 An estimate has physical dimensions:
 
@@ -324,6 +329,58 @@ inherit the target's old node costs. A replacement candidate includes any
 newly embedded child summaries, while an independently shared child is
 deduplicated by physical identity.
 
+### Query-DAG lowering and statistics contract
+
+`lower_query_physical_dag` recursively lowers a resolved `Rc<QueryExpr>` and
+returns a `PhysicalDag` containing both its nodes and root ID. It consumes the
+existing query and physical-operator enums; it does not introduce a parallel
+logical operator vocabulary. A statistics callback resolves the existing
+`OperatorInputs` for each logical operator identity. Returning no statistics
+makes the entire query unavailable.
+
+The lowering validates every physical edge before costing:
+
+- a unary operator's `input_rows` and `input_bytes` equal its child's output;
+- a hash join's left and right inputs equal the corresponding child outputs;
+- Concat and `UNION ALL` input/output totals equal the checked sum of all
+  child outputs; and
+- row-preserving, reducing, and bounded operators obey their cardinality
+  invariants.
+
+The supported mappings are:
+
+| Existing `QueryExpr` shape | Physical DAG |
+|---|---|
+| Scan without predicates | Scan |
+| Scan with pushed predicates | Scan → Filter |
+| Filter | Filter |
+| Project | Project |
+| Aggregate, including a fused HAVING predicate | HashAggregate |
+| Dedup | Deduplicate |
+| Equi-Join | HashJoin with an evidence-selected build side |
+| Concat or `UNION ALL` | Concat |
+| Sort | in-memory Sort |
+| global Sort followed by Limit | heap TopK, with `k = offset + n` from the query IR |
+| partitioned Sort followed by Limit | Sort → Limit |
+| SQLWindowFunc | Window |
+| TimeShift | PassThrough |
+
+Logical identity is the address of the existing `Rc<QueryExpr>` allocation.
+Repeated references therefore lower once and every parent points to the same
+physical ID. The resulting node IDs are deterministic within a lowering run;
+they are not persistent query identifiers.
+
+This generic lowering currently creates raw-query operators, all with
+`ExecutionMultiplicity::PerEvaluation`, zero retained state, and a conservative
+full-output edge buffer. A deployment with verified batching may construct
+`PhysicalDagNode` values with smaller `output_buffer_bytes` directly.
+
+Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, PromQL
+range/subquery execution, vector matching, and PromQL-specific enrichment/
+relabel/sample operators stay unavailable. Their cost requires a physical
+implementation or multiplicity/state facts that the current physical-operator
+vocabulary cannot represent; they are not treated as free pass-through work.
+
 ## Physical operator formulas
 
 Operator estimates are local: child CPU and I/O are excluded and composed by
@@ -399,7 +456,9 @@ children would undercount the plan.
 `estimate_physical_dag` is independent of query shape. A caller supplies the
 complete physical DAG and per-node evidence. Filters, projections, joins,
 windows, nested aggregates, Top-K, and shared sub-DAGs therefore use the same
-estimation path.
+estimation path. The generic query lowerer recursively maps the supported raw
+query operators into that representation. Replacement lowering remains a
+separate layer and must include all summary-maintenance work.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
@@ -450,9 +509,10 @@ The intended end-to-end selection pipeline is:
 5. estimates the complete candidate DAG;
 6. applies calibration and ranks candidates by ascending cost.
 
-This module implements the physical estimation step. Lowering, evidence
-resolution, legality checks, and planner integration remain separate layers;
-each preserves the complete-plan and fail-closed requirements above.
+The query lowerer and physical estimator cover the supported raw-query shapes
+listed above. Replacement evidence resolution, legality checks, and planner
+integration remain separate layers; each preserves the complete-plan and
+fail-closed requirements above.
 
 Before applying the following arithmetic, callers validate exact equality of
 the raw and selected alternative's `ComparisonScope`, and use the same
