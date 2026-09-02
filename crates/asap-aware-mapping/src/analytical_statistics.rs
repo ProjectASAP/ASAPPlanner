@@ -72,9 +72,6 @@ impl ComparisonScope {
         if self.horizon.0 == 0 {
             return Err(AnalyticalCostError::MissingOrZero("horizon"));
         }
-        if self.sources.is_empty() {
-            return Err(AnalyticalCostError::MissingComparisonScope("sources"));
-        }
         if self
             .sources
             .iter()

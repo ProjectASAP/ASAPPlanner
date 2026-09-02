@@ -445,6 +445,22 @@ pub fn lower_query_physical_dag(
                     let supplied = require_promql_statistics(statistics, 1)?
                         .subquery_steps
                         .ok_or(AnalyticalCostError::MissingOrZero("subquery_steps"))?;
+                    let parent_steps = require_promql_statistics(statistics, 1)?.evaluation_steps;
+                    let expected_child_steps = parent_steps
+                        .checked_mul(supplied)
+                        .ok_or(AnalyticalCostError::Overflow)?;
+                    let child_steps = child_statistics
+                        .promql
+                        .as_ref()
+                        .ok_or(AnalyticalCostError::MissingOrStale(
+                            "child_promql_operator_statistics",
+                        ))?
+                        .evaluation_steps;
+                    if child_steps != expected_child_steps {
+                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                            "subquery child steps do not equal parent steps times subquery steps",
+                        ));
+                    }
                     if let Some(expected) = subquery_steps(*range, *resolution)? {
                         if supplied != expected {
                             return Err(AnalyticalCostError::InconsistentOperatorStatistics(
@@ -546,6 +562,16 @@ pub fn lower_query_physical_dag(
                         self.node_statistics(&left_id)?,
                         &info_statistics,
                     )?;
+                    if selector.iter().any(|matcher| matcher.label != "__name__")
+                        && !matches!(
+                            require_promql_statistics(statistics, 2)?.scalar_ops_per_row,
+                            Some(value) if value > 0
+                        )
+                    {
+                        return Err(AnalyticalCostError::MissingOrZero(
+                            "info_matcher_ops_per_row",
+                        ));
+                    }
                     require_operator_statistics(PhysicalOperator::PromqlInfoEnrich, statistics)?;
                     self.push(evidence, PhysicalOperator::PromqlInfoEnrich, children, None)
                 }
@@ -938,6 +964,11 @@ fn require_operator_statistics(
             if output.rows != input.rows || promql.output_series != promql.input_series[0] {
                 return invalid("info enrichment changes left sample or series cardinality");
             }
+            if statistics.hash_join_build_side
+                != Some(crate::analytical_cost::HashJoinBuildSide::Right)
+            {
+                return invalid("info enrichment must build its label index from the right side");
+            }
         }
         PhysicalOperator::PromqlRelabel => {
             let promql = require_promql_statistics(statistics, 1)?;
@@ -1312,6 +1343,13 @@ fn fixed_state_per_series_intent(intent: &asap_types::pre_asap::AggIntent) -> bo
     matches!(
         intent,
         AggIntent::Rate
+            | AggIntent::Count { .. }
+            | AggIntent::Sum { .. }
+            | AggIntent::Min { .. }
+            | AggIntent::Max { .. }
+            | AggIntent::Avg { .. }
+            | AggIntent::StdDev { .. }
+            | AggIntent::Variance { .. }
             | AggIntent::Increase
             | AggIntent::Changes
             | AggIntent::Delta
@@ -1320,6 +1358,12 @@ fn fixed_state_per_series_intent(intent: &asap_types::pre_asap::AggIntent) -> bo
             | AggIntent::Resets
             | AggIntent::PredictLinear { .. }
             | AggIntent::DoubleExpSmoothing { .. }
+            | AggIntent::HistogramCount
+            | AggIntent::HistogramSum
+            | AggIntent::HistogramAvg
+            | AggIntent::HistogramStdDev
+            | AggIntent::HistogramStdVar
+            | AggIntent::HistogramFraction { .. }
             | AggIntent::Math(_)
             | AggIntent::PresentOverTime
             | AggIntent::TimeFn(_)
@@ -2209,8 +2253,131 @@ mod tests {
     }
 
     #[test]
-    fn promql_info_enrichment_lowers_its_source_as_a_scoped_scan() {
+    fn nested_promql_subqueries_compose_internal_evaluation_steps() {
         use asap_types::pre_asap::{Column, DataType, QueryExpr, Schema, Source};
+        use std::{rc::Rc, time::Duration};
+
+        let source = Source::TimeSeries { metric: "m".into() };
+        let scan = Rc::new(QueryExpr::Scan {
+            source: source.clone(),
+            predicates: vec![],
+            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+        });
+        let range = Rc::new(QueryExpr::TimeRange {
+            range: Duration::from_secs(60),
+            child: scan,
+        });
+        let inner = Rc::new(QueryExpr::PromqlSubquery {
+            range: Duration::from_secs(60),
+            resolution: Some(Duration::from_secs(60)),
+            child: range,
+        });
+        let root = Rc::new(QueryExpr::PromqlSubquery {
+            range: Duration::from_secs(120),
+            resolution: Some(Duration::from_secs(60)),
+            child: inner,
+        });
+        let scope = scope(vec![coverage(source, vec![])]);
+        let mut scan = with_promql(
+            statistics(vec![edge(60, 960)], edge(60, 960)),
+            vec![10],
+            10,
+            6,
+        );
+        scan.source_scan_bytes = 480;
+        let mut range = with_promql(
+            statistics(vec![edge(60, 960)], edge(60, 960)),
+            vec![10],
+            10,
+            6,
+        );
+        range.promql.as_mut().unwrap().window_samples_per_series = Some(6);
+        let mut inner = with_promql(
+            statistics(vec![edge(60, 960)], edge(30, 480)),
+            vec![10],
+            10,
+            3,
+        );
+        inner.promql.as_mut().unwrap().subquery_steps = Some(2);
+        let mut outer = with_promql(
+            statistics(vec![edge(30, 480)], edge(10, 160)),
+            vec![10],
+            10,
+            1,
+        );
+        outer.promql.as_mut().unwrap().subquery_steps = Some(3);
+        let provided = HashMap::from([
+            ("query-3".into(), evidence(scan)),
+            ("query-2".into(), evidence(range)),
+            ("query-1".into(), evidence(inner)),
+            ("query-0".into(), evidence(outer)),
+        ]);
+        assert!(lower_query_physical_dag(&root, &scope, &scripted(&provided)).is_ok());
+
+        let mut overflow = provided;
+        overflow
+            .get_mut("query-0")
+            .unwrap()
+            .statistics
+            .promql
+            .as_mut()
+            .unwrap()
+            .evaluation_steps = u64::MAX;
+        assert_eq!(
+            lower_query_physical_dag(&root, &scope, &scripted(&overflow)),
+            Err(AnalyticalCostError::Overflow)
+        );
+    }
+
+    #[test]
+    fn scalar_only_promql_accepts_empty_scope_but_scan_queries_do_not() {
+        use asap_types::pre_asap::{Column, DataType, QueryExpr, Schema, Source};
+        use std::rc::Rc;
+
+        let empty_scope = scope(vec![]);
+        let scalar = Rc::new(QueryExpr::promql_scalar(5.0));
+        let scalar_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
+        let provided = HashMap::from([("query-0".into(), evidence(scalar_statistics))]);
+        let dag = lower_query_physical_dag(&scalar, &empty_scope, &scripted(&provided)).unwrap();
+        assert_eq!(dag.nodes[0].operator, PhysicalOperator::PromqlScalarLeaf);
+        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &empty_scope, &dag.evidence).is_ok());
+
+        let timestamp = Rc::new(QueryExpr::EvalTimestamp);
+        let timestamp_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
+        let provided = HashMap::from([("query-0".into(), evidence(timestamp_statistics))]);
+        let dag = lower_query_physical_dag(&timestamp, &empty_scope, &scripted(&provided)).unwrap();
+        assert_eq!(dag.nodes[0].operator, PhysicalOperator::PromqlScalarLeaf);
+
+        let vector = Rc::new(QueryExpr::PromqlVectorFromScalar(Rc::new(
+            QueryExpr::promql_scalar(1.0),
+        )));
+        let scalar_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
+        let vector_statistics =
+            with_promql(statistics(vec![edge(10, 80)], edge(10, 80)), vec![0], 0, 10);
+        let provided = HashMap::from([
+            ("query-1".into(), evidence(scalar_statistics)),
+            ("query-0".into(), evidence(vector_statistics)),
+        ]);
+        let dag = lower_query_physical_dag(&vector, &empty_scope, &scripted(&provided)).unwrap();
+        assert_eq!(dag.nodes[0].operator, PhysicalOperator::PromqlScalarLeaf);
+        assert_eq!(dag.nodes[1].operator, PhysicalOperator::PromqlBridge);
+
+        let scan = Rc::new(QueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+        });
+        assert!(matches!(
+            lower_query_physical_dag(&scan, &empty_scope, &scripted(&provided)),
+            Err(AnalyticalCostError::ScanOutsideComparisonScope(_))
+        ));
+    }
+
+    #[test]
+    fn promql_info_enrichment_lowers_its_source_as_a_scoped_scan() {
+        use asap_types::pre_asap::{
+            Column, CompareOpKind, DataType, InfoMatcher, QueryExpr, Schema, Source,
+        };
         use std::rc::Rc;
 
         let primary = Source::TimeSeries { metric: "m".into() };
@@ -2223,7 +2390,11 @@ mod tests {
             schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
         });
         let root = Rc::new(QueryExpr::PromqlInfoEnrich {
-            selector: vec![],
+            selector: vec![InfoMatcher {
+                label: "job".into(),
+                op: CompareOpKind::Eq,
+                value: "api".into(),
+            }],
             child,
         });
         let scope = scope(vec![coverage(primary, vec![]), coverage(info, vec![])]);
@@ -2249,6 +2420,7 @@ mod tests {
         );
         enrich.key_bytes = Some(16);
         enrich.hash_join_build_side = Some(HashJoinBuildSide::Right);
+        enrich.promql.as_mut().unwrap().scalar_ops_per_row = Some(3);
         let provided = HashMap::from([
             ("query-1".into(), evidence(left)),
             ("query-0-info-scan".into(), evidence(right)),
@@ -2261,6 +2433,36 @@ mod tests {
         assert_eq!(dag.nodes[2].children.len(), 2);
         let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).unwrap();
         assert_eq!(estimate.scan_bytes, 1_200);
+        assert_eq!(estimate.cpu_ops, 400.0);
+
+        let mut missing_matcher_work = provided.clone();
+        missing_matcher_work
+            .get_mut("query-0")
+            .unwrap()
+            .statistics
+            .promql
+            .as_mut()
+            .unwrap()
+            .scalar_ops_per_row = None;
+        assert_eq!(
+            lower_query_physical_dag(&root, &scope, &scripted(&missing_matcher_work)),
+            Err(AnalyticalCostError::MissingOrZero(
+                "info_matcher_ops_per_row"
+            ))
+        );
+
+        let mut wrong_build_side = provided;
+        wrong_build_side
+            .get_mut("query-0")
+            .unwrap()
+            .statistics
+            .hash_join_build_side = Some(HashJoinBuildSide::Left);
+        assert_eq!(
+            lower_query_physical_dag(&root, &scope, &scripted(&wrong_build_side)),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "info enrichment must build its label index from the right side"
+            ))
+        );
     }
 
     #[test]
@@ -2501,6 +2703,83 @@ mod tests {
                 PhysicalOperator::PromqlSeriesSample,
                 PhysicalOperator::PromqlPerSeries,
             ]
+        );
+        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).is_ok());
+    }
+
+    #[test]
+    fn promql_over_time_and_native_histogram_intents_use_per_series_work() {
+        use asap_types::pre_asap::AggIntent;
+        use asap_types::types::AccuracyTarget;
+
+        let intents = vec![
+            AggIntent::Count {
+                accuracy: AccuracyTarget::Exact,
+            },
+            AggIntent::Sum { col: None },
+            AggIntent::Min { col: None },
+            AggIntent::Max { col: None },
+            AggIntent::Avg { col: None },
+            AggIntent::StdDev {
+                col: None,
+                population: true,
+            },
+            AggIntent::Variance {
+                col: None,
+                population: true,
+            },
+            AggIntent::HistogramCount,
+            AggIntent::HistogramSum,
+            AggIntent::HistogramAvg,
+            AggIntent::HistogramStdDev,
+            AggIntent::HistogramStdVar,
+            AggIntent::HistogramFraction {
+                lower: 0.0,
+                upper: 1.0,
+            },
+        ];
+        for intent in intents {
+            assert_eq!(
+                aggregate_operator(&asap_types::pre_asap::Reduction::PerEntity, &[intent]),
+                Some(PhysicalOperator::PromqlPerSeries)
+            );
+        }
+    }
+
+    #[test]
+    fn promql_presence_can_synthesize_one_row_from_an_empty_scan() {
+        use asap_types::pre_asap::{
+            AggIntent, Column, DataType, QueryExpr, Reduction, Schema, Source,
+        };
+        use std::rc::Rc;
+
+        let source = Source::TimeSeries {
+            metric: "missing".into(),
+        };
+        let scan = Rc::new(QueryExpr::Scan {
+            source: source.clone(),
+            predicates: vec![],
+            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
+        });
+        let root = Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Absent],
+            output_names: vec![],
+            having: None,
+            child: scan,
+        });
+        let scope = scope(vec![coverage(source, vec![])]);
+        let scan = with_promql(statistics(vec![edge(0, 0)], edge(0, 0)), vec![0], 0, 1);
+        let mut presence = with_promql(statistics(vec![edge(0, 0)], edge(1, 8)), vec![0], 1, 1);
+        presence.promql.as_mut().unwrap().scalar_ops_per_row = Some(1);
+        let provided = HashMap::from([
+            ("query-1".into(), evidence(scan)),
+            ("query-0".into(), evidence(presence)),
+        ]);
+        let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
+        assert_eq!(
+            dag.nodes.last().unwrap().operator,
+            PhysicalOperator::PromqlPresence
         );
         assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).is_ok());
     }
