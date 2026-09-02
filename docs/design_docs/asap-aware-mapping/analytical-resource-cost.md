@@ -8,10 +8,12 @@ counts with estimates derived from operator complexity, cardinality, row
 width, concrete summary parameters, and the selected deployment lifecycle.
 
 There are two workload adapters. `AnalyticalCostModel` is the automatic
-planner-ranking adapter for `DataArrival::AtRest`. The standalone
-`analytical_streaming_cost` adapter costs an already-selected incremental
-summary deployment for `DataArrival::ContinuouslyIngesting`. Streaming
-estimates do not yet participate in automatic replacement ranking.
+planner-ranking adapter for `DataArrival::AtRest`.
+`StreamingAnalyticalCostModel` supplies the existing lifecycle planner with a
+raw recomputation baseline plus build, update, read, retention, and retirement
+costs for `DataArrival::ContinuouslyIngesting`. The same module also exposes a
+whole-selected-summary estimator for merge, subtract, delete, readout, and
+join shapes.
 
 The model does not decide semantic or accuracy legality. Candidate generation
 and guarantee composition run first; costing ranks only the candidates that
@@ -120,8 +122,23 @@ The at-rest sketch alternative scans the selected source snapshot once and
 retains state. The raw alternative recomputes from that snapshot for every
 query read. The incremental adapter charges the bootstrap scan, every arriving
 update over the horizon, active and retained window state, query-side summary
-operations, and update-side deletes. Periodic rebuild and expiration-policy
-CPU remain unavailable without explicit physical evidence.
+operations, and update-side deletes. A pure streaming deployment may bootstrap
+from `{ rows: 0, bytes: 0, source_scan_bytes: 0 }`; row and byte evidence may
+not disagree. Zero bootstrap work is not a fabricated at-rest backlog.
+
+The streaming raw baseline is specified per evaluation by
+`StreamingRawInputEvidence` and multiplied by the `evaluation_count` derived
+from the same query recurrence and horizon as the maintained candidate. It
+rescans and reprocesses the complete declared raw input once per evaluation,
+while the maintained candidate scans only its declared bootstrap source and
+processes subsequent arrivals incrementally.
+
+Periodic rebuild and implicit expiration-policy CPU remain unavailable. The
+authoritative lifecycle types express direct versus incremental maintenance,
+activation/retirement intervals, retention, and evaluation schedule, but no
+rebuild cadence or expiration algorithm. The model does not introduce a
+parallel enum or interpret retirement as expiration. Expiration work is
+charged only when lowering has selected an explicit `SummaryDelete` node.
 
 The incremental estimator accepts the existing
 `SummaryMaintenanceLifecycleGuarantee`; it does not define another deployment
@@ -386,10 +403,12 @@ scan bytes; only the optional bootstrap source scan is.
 
 The at-rest summary-candidate bridge still has formulas for sketch build and
 readout only. It rejects summary join, merge, subtract, and delete explicitly
-rather than charging only their children. The separate incremental estimator
-supports merge, subtract, delete, and readout when their operation evidence is
-present. Summary join remains unavailable because its join cardinality, state,
-and algorithm evidence are not represented by the streaming input adapter.
+rather than charging only their children. The incremental estimator supports
+merge, subtract, delete, and readout when their operation evidence is present.
+`SummaryJoin` additionally requires `SummaryJoinEvidence`: matched state pairs
+per evaluation, CPU operations per matched pair, and peak join working memory.
+Those physical facts cannot be inferred from the logical join key; absence or
+invalid evidence makes the whole estimate unavailable.
 
 The compact planner bridge accepts only complete shapes it can currently lower
 from its resolved inputs: an unfiltered source scan followed by one aggregate,
@@ -478,10 +497,15 @@ The intended end-to-end selection pipeline is:
 5. estimates the complete candidate DAG;
 6. applies calibration and ranks candidates by ascending cost.
 
-The current planner bridge executes this pipeline only for the compact shapes
-listed above. Other supported physical operators are currently usable through
-`estimate_physical_dag`, but are not automatically reached by replacement
-selection.
+The at-rest planner bridge executes this pipeline only for the compact shapes
+listed above. The streaming adapter connects raw recomputation and primitive
+summary lifecycle costs to the existing global lifecycle-selection hooks.
+Whole-DAG streaming estimates cover selected merge/subtract/delete/readout/join
+roots, but automatic lifecycle ranking currently sums the unique
+`SummaryAgg` deployments; it does not yet replace that sum with the whole-root
+operator estimate. Consequently a downstream selector must use the whole-DAG
+estimate when these root operators affect the comparison, and must fail closed
+if it cannot do so.
 
 Before applying the following arithmetic, callers validate exact equality of
 the raw and selected alternative's `ComparisonScope`, and use the same
