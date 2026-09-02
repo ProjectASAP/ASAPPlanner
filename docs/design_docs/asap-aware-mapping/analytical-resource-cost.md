@@ -161,6 +161,7 @@ OperatorStatistics {
     promql: PromqlOperatorStatistics {
         input_series, output_series, evaluation_steps,
         window_samples_per_series, subquery_steps, scalar_ops_per_row,
+        binary_operand_mode,
     },
 }
 ```
@@ -352,6 +353,14 @@ scalar-to-vector bridge consumes zero input series and emits exactly one series;
 both input and output contain one row per evaluation step. A vector-to-scalar
 bridge emits zero series and exactly one scalar row per evaluation step; its
 input-series count must equal the vector child's output-series count.
+
+PromQL binary evidence also records an explicit physical operand mode:
+vector/vector, vector/scalar, or scalar/vector. Cardinality does not determine
+the mode because a vector may legitimately contain zero series. Lowering
+checks the mode against the canonical logical operands. Vector/vector always
+requires label-match state, including for an empty vector; only the two
+scalar/vector modes omit it. A scalar leaf has no inputs or series and emits
+exactly one scalar row per evaluation step.
 
 `info()` resolves its default `target_info` metric, or one exact `__name__`
 matcher, to a concrete existing `Source::TimeSeries` coverage. Its right side

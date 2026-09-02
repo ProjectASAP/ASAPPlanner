@@ -8,7 +8,8 @@ use crate::analytical_cost::{
     AnalyticalCostError, ExecutionMultiplicity, PhysicalDagNode, PhysicalOperator,
 };
 use crate::analytical_statistics::{
-    ComparisonScope, EdgeStatistics, OperatorStatistics, OperatorStatisticsProvider, SourceCoverage,
+    ComparisonScope, EdgeStatistics, OperatorStatistics, OperatorStatisticsProvider,
+    PromqlBinaryOperandMode, SourceCoverage,
 };
 
 /// A lowered physical DAG and the node whose output is the query result.
@@ -606,6 +607,19 @@ pub fn lower_query_physical_dag(
                             "PromQL binary inputs do not match child outputs",
                         ));
                     }
+                    let operand_mode = match (left_scalar, right_scalar) {
+                        (false, false) => PromqlBinaryOperandMode::VectorVector,
+                        (false, true) => PromqlBinaryOperandMode::VectorScalar,
+                        (true, false) => PromqlBinaryOperandMode::ScalarVector,
+                        (true, true) => unreachable!("scalar/scalar was rejected above"),
+                    };
+                    if require_promql_statistics(statistics, 2)?.binary_operand_mode
+                        != Some(operand_mode)
+                    {
+                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                            "PromQL binary operand mode disagrees with its logical operands",
+                        ));
+                    }
                     if left_scalar || right_scalar {
                         if vector_match.is_some()
                             || statistics.hash_join_build_side.is_some()
@@ -896,7 +910,10 @@ fn require_operator_statistics(
         return invalid("only Scan may charge source bytes");
     }
     if matches!(operator, PhysicalOperator::PromqlScalarLeaf) {
-        require_promql_statistics(statistics, 0)?;
+        let promql = require_promql_statistics(statistics, 0)?;
+        if promql.output_series != 0 || statistics.output.rows != promql.evaluation_steps {
+            return invalid("PromQL scalar leaf must emit one scalar row per evaluation step");
+        }
         return Ok(());
     }
     let input = statistics.inputs.first().copied().ok_or(
@@ -983,7 +1000,43 @@ fn require_operator_statistics(
             }
         }
         PhysicalOperator::PromqlVectorBinary => {
-            require_promql_statistics(statistics, 2)?;
+            let promql = require_promql_statistics(statistics, 2)?;
+            let mode = promql
+                .binary_operand_mode
+                .ok_or(AnalyticalCostError::MissingOrStale(
+                    "promql_binary_operand_mode",
+                ))?;
+            match mode {
+                PromqlBinaryOperandMode::VectorVector => {
+                    if statistics.hash_join_build_side.is_none() || statistics.key_bytes.is_none() {
+                        return Err(AnalyticalCostError::MissingOrStale(
+                            "vector_binary_label_match_statistics",
+                        ));
+                    }
+                }
+                PromqlBinaryOperandMode::VectorScalar => {
+                    if promql.input_series[1] != 0
+                        || statistics.inputs[1].rows != promql.evaluation_steps
+                        || statistics.hash_join_build_side.is_some()
+                        || statistics.key_bytes.is_some()
+                    {
+                        return invalid(
+                            "vector/scalar binary evidence has an invalid scalar edge or label-match state",
+                        );
+                    }
+                }
+                PromqlBinaryOperandMode::ScalarVector => {
+                    if promql.input_series[0] != 0
+                        || statistics.inputs[0].rows != promql.evaluation_steps
+                        || statistics.hash_join_build_side.is_some()
+                        || statistics.key_bytes.is_some()
+                    {
+                        return invalid(
+                            "scalar/vector binary evidence has an invalid scalar edge or label-match state",
+                        );
+                    }
+                }
+            }
         }
         PhysicalOperator::PromqlInfoEnrich => {
             let promql = require_promql_statistics(statistics, 2)?;
@@ -1465,6 +1518,7 @@ mod tests {
             window_samples_per_series: None,
             subquery_steps: None,
             scalar_ops_per_row: None,
+            binary_operand_mode: None,
         });
         statistics
     }
@@ -2363,10 +2417,15 @@ mod tests {
         let empty_scope = scope(vec![]);
         let scalar = Rc::new(QueryExpr::promql_scalar(5.0));
         let scalar_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
-        let provided = HashMap::from([("query-0".into(), evidence(scalar_statistics))]);
+        let mut provided = HashMap::from([("query-0".into(), evidence(scalar_statistics))]);
         let dag = lower_query_physical_dag(&scalar, &empty_scope, &scripted(&provided)).unwrap();
         assert_eq!(dag.nodes[0].operator, PhysicalOperator::PromqlScalarLeaf);
         assert!(estimate_physical_dag(&dag.nodes, &dag.root, &empty_scope, &dag.evidence).is_ok());
+        provided.get_mut("query-0").unwrap().statistics.output = edge(9, 72);
+        assert!(matches!(
+            lower_query_physical_dag(&scalar, &empty_scope, &scripted(&provided)),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
 
         let timestamp = Rc::new(QueryExpr::EvalTimestamp);
         let timestamp_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
@@ -2579,12 +2638,14 @@ mod tests {
         );
         vector_statistics.source_scan_bytes = 8_000;
         let scalar = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
-        let binary = with_promql(
+        let mut binary = with_promql(
             statistics(vec![edge(1_000, 16_000), edge(10, 80)], edge(1_000, 16_000)),
             vec![100, 0],
             100,
             10,
         );
+        binary.promql.as_mut().unwrap().binary_operand_mode =
+            Some(PromqlBinaryOperandMode::VectorScalar);
         let provided = HashMap::from([
             ("query-1".into(), evidence(vector_statistics)),
             ("query-2".into(), evidence(scalar)),
@@ -2679,6 +2740,8 @@ mod tests {
         );
         binary.key_bytes = Some(32);
         binary.hash_join_build_side = Some(HashJoinBuildSide::Right);
+        binary.promql.as_mut().unwrap().binary_operand_mode =
+            Some(PromqlBinaryOperandMode::VectorVector);
         let provided = HashMap::from([
             ("query-1".into(), evidence(left)),
             ("query-2".into(), evidence(right)),
@@ -2688,6 +2751,32 @@ mod tests {
         let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).unwrap();
         assert_eq!(estimate.cpu_ops, 3_400.0);
         assert_eq!(estimate.scan_bytes, 12_000);
+
+        let mut empty = provided.clone();
+        for id in ["query-1", "query-2"] {
+            let evidence = empty.get_mut(id).unwrap();
+            evidence.statistics.inputs[0] = edge(0, 0);
+            evidence.statistics.output = edge(0, 0);
+            let promql = evidence.statistics.promql.as_mut().unwrap();
+            promql.input_series[0] = 0;
+            promql.output_series = 0;
+            evidence.output_buffer_bytes = 0;
+        }
+        let evidence = empty.get_mut("query-0").unwrap();
+        evidence.statistics.inputs = vec![edge(0, 0), edge(0, 0)];
+        evidence.statistics.output = edge(0, 0);
+        let promql = evidence.statistics.promql.as_mut().unwrap();
+        promql.input_series = vec![0, 0];
+        promql.output_series = 0;
+        evidence.output_buffer_bytes = 0;
+        let empty_dag = lower_query_physical_dag(&root, &scope, &scripted(&empty)).unwrap();
+        assert!(estimate_physical_dag(
+            &empty_dag.nodes,
+            &empty_dag.root,
+            &scope,
+            &empty_dag.evidence
+        )
+        .is_ok());
 
         let mut missing = provided;
         missing

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::analytical_statistics::{
     validate_comparison_scopes, ComparisonScope, EdgeStatistics, OperatorStatistics,
-    OperatorStatisticsProvider, SourceCoverage,
+    OperatorStatisticsProvider, PromqlBinaryOperandMode, SourceCoverage,
 };
 
 pub const ANALYTICAL_MODEL_VERSION: &str = "analytical-resource-at-rest-v1";
@@ -479,9 +479,9 @@ pub fn estimate_operator(
     let output = statistics.output;
     if matches!(operator, PhysicalOperator::PromqlScalarLeaf) {
         let promql = require_promql_statistics(&statistics, 0)?;
-        if promql.output_series > output.rows && output.rows > 0 {
+        if promql.output_series != 0 || output.rows != promql.evaluation_steps {
             return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                "output series exceed output rows",
+                "PromQL scalar leaf must emit one scalar row per evaluation step",
             ));
         }
         return Ok(ResourceEstimate {
@@ -623,27 +623,29 @@ pub fn estimate_operator(
         PhysicalOperator::PromqlVectorBinary => {
             let promql = require_promql_statistics(&statistics, 2)?;
             let right = input(1)?;
-            let scalar_vector = matches!(operator, PhysicalOperator::PromqlVectorBinary)
-                && promql.input_series.contains(&0);
-            let matching_bytes = if scalar_vector {
-                per_row_width(output.rows, output.bytes)?
-            } else {
-                let build_side = statistics
-                    .hash_join_build_side
-                    .ok_or(AnalyticalCostError::MissingOrZero("hash_join_build_side"))?;
-                let key_bytes = statistics
-                    .key_bytes
-                    .ok_or(AnalyticalCostError::MissingOrZero("key_bytes"))?;
-                let build_series = match build_side {
-                    HashJoinBuildSide::Left => promql.input_series[0],
-                    HashJoinBuildSide::Right => promql.input_series[1],
-                };
-                checked_bytes(&[
-                    build_series,
-                    key_bytes
-                        .checked_add(16)
-                        .ok_or(AnalyticalCostError::Overflow)?,
-                ])?
+            let mode = validate_promql_binary(&statistics)?;
+            let matching_bytes = match mode {
+                PromqlBinaryOperandMode::VectorScalar | PromqlBinaryOperandMode::ScalarVector => {
+                    per_row_width(output.rows, output.bytes)?
+                }
+                PromqlBinaryOperandMode::VectorVector => {
+                    let build_side = statistics
+                        .hash_join_build_side
+                        .ok_or(AnalyticalCostError::MissingOrZero("hash_join_build_side"))?;
+                    let key_bytes = statistics
+                        .key_bytes
+                        .ok_or(AnalyticalCostError::MissingOrZero("key_bytes"))?;
+                    let build_series = match build_side {
+                        HashJoinBuildSide::Left => promql.input_series[0],
+                        HashJoinBuildSide::Right => promql.input_series[1],
+                    };
+                    checked_bytes(&[
+                        build_series,
+                        key_bytes
+                            .checked_add(16)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                    ])?
+                }
             };
             ResourceEstimate {
                 cpu_ops: left.rows as f64 + right.rows as f64 + output.rows as f64,
@@ -873,6 +875,49 @@ fn validate_promql_bridge(
         _ => unreachable!("bridge validation requires a directional bridge operator"),
     }
     Ok(())
+}
+
+fn validate_promql_binary(
+    statistics: &OperatorStatistics,
+) -> Result<PromqlBinaryOperandMode, AnalyticalCostError> {
+    let promql = require_promql_statistics(statistics, 2)?;
+    let mode = promql
+        .binary_operand_mode
+        .ok_or(AnalyticalCostError::MissingOrStale(
+            "promql_binary_operand_mode",
+        ))?;
+    match mode {
+        PromqlBinaryOperandMode::VectorVector => {
+            if statistics.hash_join_build_side.is_none() || statistics.key_bytes.is_none() {
+                return Err(AnalyticalCostError::MissingOrStale(
+                    "vector_binary_label_match_statistics",
+                ));
+            }
+        }
+        PromqlBinaryOperandMode::VectorScalar => {
+            if promql.input_series[1] != 0
+                || statistics.inputs[1].rows != promql.evaluation_steps
+                || statistics.hash_join_build_side.is_some()
+                || statistics.key_bytes.is_some()
+            {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "vector/scalar binary evidence has an invalid scalar edge or label-match state",
+                ));
+            }
+        }
+        PromqlBinaryOperandMode::ScalarVector => {
+            if promql.input_series[0] != 0
+                || statistics.inputs[0].rows != promql.evaluation_steps
+                || statistics.hash_join_build_side.is_some()
+                || statistics.key_bytes.is_some()
+            {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "scalar/vector binary evidence has an invalid scalar edge or label-match state",
+                ));
+            }
+        }
+    }
+    Ok(mode)
 }
 
 fn require_promql_statistics(
@@ -1407,6 +1452,7 @@ mod tests {
                 window_samples_per_series: None,
                 subquery_steps: None,
                 scalar_ops_per_row: None,
+                binary_operand_mode: None,
             });
             statistics
         };
@@ -1447,6 +1493,58 @@ mod tests {
                 PhysicalOperator::PromqlVectorToScalar,
                 bridge_statistics(3, 0, 30, 9),
             ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+    }
+
+    #[test]
+    fn promql_binary_mode_distinguishes_empty_vectors_from_scalars() {
+        use crate::analytical_statistics::{PromqlBinaryOperandMode, PromqlOperatorStatistics};
+
+        let empty = EdgeStatistics { rows: 0, bytes: 0 };
+        let mut vector_vector = OperatorStatistics {
+            key_bytes: Some(16),
+            hash_join_build_side: Some(HashJoinBuildSide::Right),
+            promql: Some(PromqlOperatorStatistics {
+                input_series: vec![0, 0],
+                output_series: 0,
+                evaluation_steps: 10,
+                window_samples_per_series: None,
+                subquery_steps: None,
+                scalar_ops_per_row: None,
+                binary_operand_mode: Some(PromqlBinaryOperandMode::VectorVector),
+            }),
+            ..statistics(vec![empty, empty], empty)
+        };
+        assert!(
+            estimate_operator(PhysicalOperator::PromqlVectorBinary, vector_vector.clone()).is_ok()
+        );
+
+        vector_vector.hash_join_build_side = None;
+        assert_eq!(
+            estimate_operator(PhysicalOperator::PromqlVectorBinary, vector_vector),
+            Err(AnalyticalCostError::MissingOrStale(
+                "vector_binary_label_match_statistics"
+            ))
+        );
+    }
+
+    #[test]
+    fn promql_scalar_leaf_requires_one_row_per_evaluation_step() {
+        use crate::analytical_statistics::PromqlOperatorStatistics;
+
+        let mut scalar = statistics(vec![], EdgeStatistics { rows: 9, bytes: 72 });
+        scalar.promql = Some(PromqlOperatorStatistics {
+            input_series: vec![],
+            output_series: 0,
+            evaluation_steps: 10,
+            window_samples_per_series: None,
+            subquery_steps: None,
+            scalar_ops_per_row: None,
+            binary_operand_mode: None,
+        });
+        assert!(matches!(
+            estimate_operator(PhysicalOperator::PromqlScalarLeaf, scalar),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
         ));
     }
