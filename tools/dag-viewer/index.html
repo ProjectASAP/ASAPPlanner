@@ -175,6 +175,27 @@
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
   }
   .scopeRow .scopeMeta { color: var(--muted); font-size: 0.72rem; margin-left: auto; white-space: nowrap; }
+  .costComparisonGroup { min-width: min(760px, 100%); }
+  .costComparison { display: flex; align-items: stretch; gap: 0.45rem; flex-wrap: wrap; }
+  .costStage, .costSaving {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.15rem;
+    min-width: 180px;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+  }
+  .costStage span, .costSaving span { color: var(--muted); font-size: 0.68rem; text-transform: uppercase; letter-spacing: .03em; }
+  .costStage strong, .costSaving strong { font-size: 0.86rem; font-variant-numeric: tabular-nums; }
+  .costStage--pre { border-left: 4px solid #b45309; }
+  .costStage--post { border-left: 4px solid var(--accent); }
+  .costArrow { display: flex; align-items: center; color: var(--muted); font-size: 1.25rem; font-weight: 700; }
+  .costSaving { border-left: 4px solid #15803d; color: #15803d; }
+  .costSaving--regression { border-left-color: #b91c1c; color: #b91c1c; }
+  .costComparisonHint { color: var(--muted); font-size: 0.68rem; }
   .proxyNote {
     font-size: 0.72rem;
     color: var(--muted);
