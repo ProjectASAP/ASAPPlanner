@@ -655,6 +655,10 @@ pub enum AnalyticalCostError {
     Overflow,
     #[error("candidate has no supported exact or sketch state")]
     UnsupportedCandidate,
+    #[error("query operator has no physical implementation in the analytical model")]
+    UnsupportedQueryOperator,
+    #[error("inconsistent operator statistics: {0}")]
+    InconsistentOperatorStatistics(&'static str),
     #[error("summary operation {0} has no lifecycle-aware cost formula")]
     UnsupportedSummaryOperation(&'static str),
     #[error("required comparison-scope field {0} is missing")]
