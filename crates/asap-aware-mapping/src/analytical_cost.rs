@@ -79,7 +79,8 @@ pub enum PhysicalOperator {
     PromqlRelabel,
     PromqlInfoEnrich,
     PromqlSeriesSample,
-    PromqlBridge,
+    PromqlScalarToVector,
+    PromqlVectorToScalar,
     PromqlScalarLeaf,
     PromqlPerSeries,
     PromqlPresence,
@@ -704,8 +705,8 @@ pub fn estimate_operator(
                 scan_bytes: 0,
             }
         }
-        PhysicalOperator::PromqlBridge => {
-            require_promql_statistics(&statistics, 1)?;
+        PhysicalOperator::PromqlScalarToVector | PhysicalOperator::PromqlVectorToScalar => {
+            validate_promql_bridge(operator, &statistics)?;
             ResourceEstimate {
                 cpu_ops: left.rows as f64 + output.rows as f64,
                 peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
@@ -829,7 +830,47 @@ fn validate_operator_semantics(
                 return inconsistent("Limit output exceeds its input");
             }
         }
-        PhysicalOperator::HashJoin => {}
+        PhysicalOperator::HashJoin
+        | PhysicalOperator::PromqlRange
+        | PhysicalOperator::PromqlSubquery
+        | PhysicalOperator::PromqlVectorBinary
+        | PhysicalOperator::PromqlRelabel
+        | PhysicalOperator::PromqlInfoEnrich
+        | PhysicalOperator::PromqlSeriesSample
+        | PhysicalOperator::PromqlScalarToVector
+        | PhysicalOperator::PromqlVectorToScalar
+        | PhysicalOperator::PromqlScalarLeaf
+        | PhysicalOperator::PromqlPerSeries
+        | PhysicalOperator::PromqlPresence => {}
+    }
+    Ok(())
+}
+
+fn validate_promql_bridge(
+    operator: PhysicalOperator,
+    statistics: &OperatorStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let promql = require_promql_statistics(statistics, 1)?;
+    match operator {
+        PhysicalOperator::PromqlScalarToVector => {
+            if promql.input_series != [0]
+                || promql.output_series != 1
+                || statistics.inputs[0].rows != promql.evaluation_steps
+                || statistics.output.rows != promql.evaluation_steps
+            {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "scalar-to-vector must consume one scalar and emit one series per evaluation step",
+                ));
+            }
+        }
+        PhysicalOperator::PromqlVectorToScalar => {
+            if promql.output_series != 0 || statistics.output.rows != promql.evaluation_steps {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "vector-to-scalar must emit one scalar per evaluation step",
+                ));
+            }
+        }
+        _ => unreachable!("bridge validation requires a directional bridge operator"),
     }
     Ok(())
 }
@@ -1342,6 +1383,72 @@ mod tests {
             hash_join_build_side: None,
             promql: None,
         }
+    }
+
+    #[test]
+    fn directional_promql_bridges_fail_closed_on_wrong_cardinality() {
+        use crate::analytical_statistics::PromqlOperatorStatistics;
+
+        let bridge_statistics = |input_series, output_series, input_rows, output_rows| {
+            let mut statistics = statistics(
+                vec![EdgeStatistics {
+                    rows: input_rows,
+                    bytes: input_rows * 8,
+                }],
+                EdgeStatistics {
+                    rows: output_rows,
+                    bytes: output_rows * 8,
+                },
+            );
+            statistics.promql = Some(PromqlOperatorStatistics {
+                input_series: vec![input_series],
+                output_series,
+                evaluation_steps: 10,
+                window_samples_per_series: None,
+                subquery_steps: None,
+                scalar_ops_per_row: None,
+            });
+            statistics
+        };
+
+        assert!(estimate_operator(
+            PhysicalOperator::PromqlScalarToVector,
+            bridge_statistics(0, 1, 10, 10),
+        )
+        .is_ok());
+        assert!(estimate_operator(
+            PhysicalOperator::PromqlVectorToScalar,
+            bridge_statistics(3, 0, 30, 10),
+        )
+        .is_ok());
+        assert!(matches!(
+            estimate_operator(
+                PhysicalOperator::PromqlScalarToVector,
+                bridge_statistics(0, 0, 10, 10),
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+        assert!(matches!(
+            estimate_operator(
+                PhysicalOperator::PromqlVectorToScalar,
+                bridge_statistics(3, 1, 30, 10),
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+        assert!(matches!(
+            estimate_operator(
+                PhysicalOperator::PromqlScalarToVector,
+                bridge_statistics(0, 1, 9, 10),
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+        assert!(matches!(
+            estimate_operator(
+                PhysicalOperator::PromqlVectorToScalar,
+                bridge_statistics(3, 0, 30, 9),
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
     }
 
     #[test]
