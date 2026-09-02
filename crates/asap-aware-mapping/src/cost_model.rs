@@ -50,7 +50,7 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     GroupingStrategy, HydraParams, SketchAlgorithm, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryNode,
+    SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -550,6 +550,19 @@ pub trait CostModel {
         _summary: &SummaryNode,
     ) -> SummaryMaintenanceCapabilities {
         SummaryMaintenanceCapabilities::default()
+    }
+
+    /// Replace the sum of selected per-state lifecycle costs with a complete
+    /// root-DAG cost. The default preserves legacy models. Evidence-strict
+    /// models return `None` when any root operation is unavailable; callers
+    /// must not then reuse the partial per-state sum.
+    fn complete_summary_candidate_cost(
+        &self,
+        _root: &SummaryNode,
+        _guarantees: &[SummaryMaintenanceLifecycleGuarantee],
+        deployment_sum: Option<Cost>,
+    ) -> Option<Cost> {
+        deployment_sum
     }
 
     /// Cost of evaluating `target` directly from its logical/raw inputs once.

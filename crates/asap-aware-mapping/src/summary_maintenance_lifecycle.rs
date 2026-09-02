@@ -359,7 +359,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         })
         .collect();
     select_compatible_lifecycles(&mut deployments, &components, facts.arrival);
-    let summary_total_cost = (!deployments.is_empty())
+    let deployment_sum = (!deployments.is_empty())
         .then(|| {
             deployments.iter().try_fold(Cost::ZERO, |sum, deployment| {
                 let selected = &deployment
@@ -375,6 +375,17 @@ fn plan_summary_maintenance_lifecycles_with_profile(
             })
         })
         .flatten();
+    let guarantees = deployments
+        .iter()
+        .map(|deployment| deployment.summary_maintenance_lifecycle_guarantee.clone())
+        .collect::<Option<Vec<_>>>();
+    let summary_total_cost = if deployments.is_empty() {
+        None
+    } else {
+        guarantees.as_deref().and_then(|guarantees| {
+            cost_model.complete_summary_candidate_cost(&root, guarantees, deployment_sum)
+        })
+    };
     let selected_raw_recompute = matches!(root.expr, SummaryExpr::KeepPreAsap(_));
     Ok(SummaryMaintenanceLifecyclePlan {
         root,
