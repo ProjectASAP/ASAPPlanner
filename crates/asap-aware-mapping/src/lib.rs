@@ -187,6 +187,7 @@ pub mod analytical_cost;
 pub mod analytical_lowering;
 pub mod analytical_planner;
 pub mod analytical_statistics;
+pub mod analytical_streaming_cost;
 pub mod cost_model;
 pub mod explanation;
 pub mod grouping;
