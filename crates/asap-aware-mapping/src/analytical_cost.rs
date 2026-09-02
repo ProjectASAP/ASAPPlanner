@@ -397,6 +397,32 @@ fn validate_operator_statistics(
             });
         }
     }
+    if let Some(promql) = node_statistics.promql.as_ref() {
+        if promql.input_series.len() != expected_inputs {
+            return Err(AnalyticalCostError::InvalidOperatorStatistics {
+                node: node.id.clone(),
+                reason: "PromQL input-series arity does not match physical inputs",
+            });
+        }
+        for (index, child_id) in node.children.iter().enumerate() {
+            let child = &statistics[child_id.as_str()];
+            let child_promql = child.promql.as_ref().ok_or_else(|| {
+                AnalyticalCostError::InvalidOperatorStatistics {
+                    node: child_id.clone(),
+                    reason: "PromQL child is missing series statistics",
+                }
+            })?;
+            if promql.input_series[index] != child_promql.output_series
+                || (!matches!(node.operator, PhysicalOperator::PromqlSubquery)
+                    && promql.evaluation_steps != child_promql.evaluation_steps)
+            {
+                return Err(AnalyticalCostError::InvalidOperatorStatistics {
+                    node: node.id.clone(),
+                    reason: "PromQL edge series or evaluation steps conflict",
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -544,7 +570,9 @@ pub fn estimate_operator(
             let samples = promql
                 .window_samples_per_series
                 .filter(|value| *value > 0)
-                .ok_or(AnalyticalCostError::MissingOrZero("window_samples_per_series"))?;
+                .ok_or(AnalyticalCostError::MissingOrZero(
+                    "window_samples_per_series",
+                ))?;
             ResourceEstimate {
                 cpu_ops: left.rows as f64,
                 peak_memory_bytes: checked_bytes(&[
@@ -586,7 +614,9 @@ pub fn estimate_operator(
                 };
                 checked_bytes(&[
                     build_series,
-                    key_bytes.checked_add(16).ok_or(AnalyticalCostError::Overflow)?,
+                    key_bytes
+                        .checked_add(16)
+                        .ok_or(AnalyticalCostError::Overflow)?,
                 ])?
             };
             ResourceEstimate {
@@ -597,9 +627,10 @@ pub fn estimate_operator(
         }
         PhysicalOperator::PromqlRelabel => {
             let promql = require_promql_statistics(&statistics, 1)?;
-            let operations = promql.scalar_ops_per_row.filter(|value| *value > 0).ok_or(
-                AnalyticalCostError::MissingOrZero("scalar_ops_per_row"),
-            )?;
+            let operations = promql
+                .scalar_ops_per_row
+                .filter(|value| *value > 0)
+                .ok_or(AnalyticalCostError::MissingOrZero("scalar_ops_per_row"))?;
             ResourceEstimate {
                 cpu_ops: left.rows as f64 * operations as f64,
                 peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
@@ -615,7 +646,9 @@ pub fn estimate_operator(
                 cpu_ops: left.rows as f64 + promql.input_series[0] as f64,
                 peak_memory_bytes: checked_bytes(&[
                     promql.output_series,
-                    key_bytes.checked_add(16).ok_or(AnalyticalCostError::Overflow)?,
+                    key_bytes
+                        .checked_add(16)
+                        .ok_or(AnalyticalCostError::Overflow)?,
                 ])?,
                 scan_bytes: 0,
             }
@@ -630,12 +663,13 @@ pub fn estimate_operator(
         }
         PhysicalOperator::PromqlPerSeries => {
             let promql = require_promql_statistics(&statistics, 1)?;
-            let operations = promql.scalar_ops_per_row.filter(|value| *value > 0).ok_or(
-                AnalyticalCostError::MissingOrZero("scalar_ops_per_row"),
-            )?;
-            let accumulator = statistics.aggregate_value_bytes.ok_or(
-                AnalyticalCostError::MissingOrZero("aggregate_value_bytes"),
-            )?;
+            let operations = promql
+                .scalar_ops_per_row
+                .filter(|value| *value > 0)
+                .ok_or(AnalyticalCostError::MissingOrZero("scalar_ops_per_row"))?;
+            let accumulator = statistics
+                .aggregate_value_bytes
+                .ok_or(AnalyticalCostError::MissingOrZero("aggregate_value_bytes"))?;
             ResourceEstimate {
                 cpu_ops: left.rows as f64 * operations as f64,
                 peak_memory_bytes: checked_bytes(&[promql.input_series[0], accumulator])?,
@@ -644,9 +678,10 @@ pub fn estimate_operator(
         }
         PhysicalOperator::PromqlPresence => {
             let promql = require_promql_statistics(&statistics, 1)?;
-            let operations = promql.scalar_ops_per_row.filter(|value| *value > 0).ok_or(
-                AnalyticalCostError::MissingOrZero("scalar_ops_per_row"),
-            )?;
+            let operations = promql
+                .scalar_ops_per_row
+                .filter(|value| *value > 0)
+                .ok_or(AnalyticalCostError::MissingOrZero("scalar_ops_per_row"))?;
             ResourceEstimate {
                 cpu_ops: left.rows as f64 * operations as f64 + output.rows as f64,
                 peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
@@ -666,9 +701,12 @@ fn require_promql_statistics(
     statistics: &OperatorStatistics,
     inputs: usize,
 ) -> Result<&crate::analytical_statistics::PromqlOperatorStatistics, AnalyticalCostError> {
-    let promql = statistics.promql.as_ref().ok_or(
-        AnalyticalCostError::MissingOrStale("promql_operator_statistics"),
-    )?;
+    let promql = statistics
+        .promql
+        .as_ref()
+        .ok_or(AnalyticalCostError::MissingOrStale(
+            "promql_operator_statistics",
+        ))?;
     if promql.evaluation_steps == 0 {
         return Err(AnalyticalCostError::MissingOrZero("evaluation_steps"));
     }
@@ -1124,6 +1162,7 @@ mod tests {
             k: None,
             limit_rows_consumed: None,
             hash_join_build_side: None,
+            promql: None,
         }
     }
 
