@@ -292,6 +292,26 @@ function buildCyStyle() {
       },
     },
     {
+      selector: 'node.costImprovement',
+      style: {
+        'border-color': '#15803d',
+        'border-width': 2.5,
+        'underlay-color': '#15803d',
+        'underlay-opacity': 0.1,
+        'underlay-padding': 4,
+      },
+    },
+    {
+      selector: 'node.costRegression',
+      style: {
+        'border-color': '#b91c1c',
+        'border-width': 2.5,
+        'underlay-color': '#b91c1c',
+        'underlay-opacity': 0.1,
+        'underlay-padding': 4,
+      },
+    },
+    {
       // Pre/Post-ASAP lane container (a compound parent node).
       selector: 'node.laneParent',
       style: {
@@ -332,6 +352,16 @@ function buildCyStyle() {
         'transition-property': 'opacity',
         'transition-duration': '260ms',
         'transition-timing-function': 'ease-in-out',
+      },
+    },
+    {
+      selector: 'edge.costAnnotated',
+      style: {
+        'width': 3,
+        'line-color': ringColor,
+        'target-arrow-color': ringColor,
+        'label': 'data(edgeCostLabel)',
+        'font-weight': 700,
       },
     },
   ];
@@ -448,14 +478,15 @@ function renderPrePostAsap() {
     ? `Pre/Post-ASAP: ${selected[0].name}`
     : `Pre/Post-ASAP workload union: ${selected.length} queries`;
 
+  const costSummary = selected.length === 1 ? selected[0].workload_cost : computeSelectionWorkloadCost(selected);
   const elements = selected.length === 1
     ? [
-        ...laneElements('pre-asap', `${selected[0].name} · pre-ASAP`, selected[0].graph, selected[0], 'pre'),
-        ...laneElements('post-asap', `${selected[0].name} · post-ASAP`, selected[0].post_graph, selected[0], 'post'),
+        ...laneElements('pre-asap', `${selected[0].name} · pre-ASAP`, selected[0].graph, selected[0], 'pre', costSummary && costSummary.baseline_cost),
+        ...laneElements('post-asap', `${selected[0].name} · post-ASAP`, selected[0].post_graph, selected[0], 'post', costSummary && costSummary.selected_cost),
       ]
     : [
-        ...unionStageLaneElements('pre', chosen),
-        ...unionStageLaneElements('post', chosen),
+        ...unionStageLaneElements('pre', chosen, costSummary && costSummary.baseline_cost),
+        ...unionStageLaneElements('post', chosen, costSummary && costSummary.selected_cost),
       ];
 
   buildCy(elements);
@@ -473,7 +504,7 @@ function renderPrePostAsap() {
   fitAndSyncZoom();
 }
 
-function unionStageLaneElements(stage, chosen) {
+function unionStageLaneElements(stage, chosen, laneCost) {
   // Workload merging is an exporter decision. `workload_node_id` is the
   // explicit JSON mapping; do not reconstruct identity from node content.
   const laneId = `${stage}-asap-union`;
@@ -499,7 +530,7 @@ function unionStageLaneElements(stage, chosen) {
   const entries = new Map();
   const edges = new Map();
   const elements = [
-    { data: { id: laneId, label: `${stage === 'pre' ? 'pre-ASAP' : 'post-ASAP'} · workload union`, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
+    { data: { id: laneId, label: laneCostLabel(`${stage === 'pre' ? 'pre-ASAP' : 'post-ASAP'} · workload union`, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
   ];
 
   chosen.forEach((qIdx) => {
@@ -559,12 +590,12 @@ function unionStageLaneElements(stage, chosen) {
 // both shapes carry id/kind/label/detail/children, which is all a lane
 // needs; SummaryDagNode's missing `hash`/`notes` fields are simply never
 // read by this function or by showPrePostDetail below.
-function laneElements(laneId, laneLabel, graph, query, stage) {
+function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
   const nodes = graph.nodes;
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const edgeCostByPair = new Map((graph.edge_annotations || []).map((edge) => [`${edge.from} ${edge.to}`, edge.cost]));
   const elements = [
-    { data: { id: laneId, label: laneLabel, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
+    { data: { id: laneId, label: laneCostLabel(laneLabel, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
   ];
   for (const node of nodes) {
     elements.push({
@@ -591,6 +622,9 @@ function laneElements(laneId, laneLabel, graph, query, stage) {
         lifecycleSummary: query.lifecycle_summary,
         translations: translationsForNode(query, node, stage),
       },
+      classes: node.decision && typeof node.decision.benefit?.value === 'number'
+        ? (node.decision.benefit.value >= 0 ? 'costImprovement' : 'costRegression')
+        : '',
     });
   }
   for (const node of nodes) {
@@ -608,7 +642,11 @@ function laneElements(laneId, laneLabel, graph, query, stage) {
           // (a real DAG merge point); `undefined` otherwise, read by
           // showEdgeDetail.
           edgeCost: edgeCostByPair.get(`${childId}\u0000${node.id}`),
+          edgeCostLabel: edgeCostByPair.has(`${childId}\u0000${node.id}`)
+            ? `edge cost ${compactCost(edgeCostByPair.get(`${childId}\u0000${node.id}`))}`
+            : '',
         },
+        classes: edgeCostByPair.has(`${childId}\u0000${node.id}`) ? 'costAnnotated' : '',
       });
     }
   }
@@ -648,6 +686,16 @@ function formatCostNumber(value) {
   // structural-proxy magnitudes today (see cost.rs's module doc), not
   // precision-sensitive measurements.
   return Number(value.toFixed(3)).toString();
+}
+
+function compactCost(annotation) {
+  if (!annotation || annotation.value === null || annotation.value === undefined) return 'Not estimated';
+  return `${formatCostNumber(annotation.value)} ${formatCostUnit(annotation.unit)}`;
+}
+
+function laneCostLabel(label, annotation, stage) {
+  if (!annotation) return label;
+  return `${label}\n${stage === 'pre' ? 'Baseline' : 'Selected'} cost: ${compactCost(annotation)}`;
 }
 
 // One `<title, CostAnnotation>` block for the sidebar: value + unit +
@@ -856,8 +904,21 @@ function renderScopeSummary(selected) {
   // computeSelectionWorkloadCost's own doc for why this is aggregation, not
   // client-side cost estimation.
   const costSummary = selected.length === 1 ? selected[0].workload_cost : computeSelectionWorkloadCost(selected);
+  const benefitValue = costSummary && costSummary.benefit && costSummary.benefit.value;
+  const outcomeLabel = typeof benefitValue !== 'number'
+    ? 'difference'
+    : benefitValue > 0 ? 'saved' : benefitValue < 0 ? 'additional cost' : 'no change';
   const costHtml = costSummary
-    ? `<div class="scopeGroup"><div class="scopeGroupLabel">Workload cost</div><div class="costBlock">${renderCostAnnotation('Baseline', costSummary.baseline_cost)}${renderCostAnnotation('Selected', costSummary.selected_cost)}${renderCostAnnotation('Benefit', costSummary.benefit)}</div></div>`
+    ? `<div class="scopeGroup costComparisonGroup">
+        <div class="scopeGroupLabel">Pre/post cost comparison</div>
+        <div class="costComparison">
+          <div class="costStage costStage--pre"><span>pre-ASAP baseline</span><strong>${escapeHtml(compactCost(costSummary.baseline_cost))}</strong></div>
+          <div class="costArrow" aria-label="rewritten to">→</div>
+          <div class="costStage costStage--post"><span>post-ASAP selected</span><strong>${escapeHtml(compactCost(costSummary.selected_cost))}</strong></div>
+          <div class="costSaving ${typeof benefitValue === 'number' && benefitValue < 0 ? 'costSaving--regression' : ''}"><span>${escapeHtml(outcomeLabel)}</span><strong>${escapeHtml(compactCost(costSummary.benefit))}${typeof costSummary.benefit?.benefit_ratio === 'number' ? ` (${(costSummary.benefit.benefit_ratio * 100).toFixed(1)}%)` : ''}</strong></div>
+        </div>
+        <div class="costComparisonHint">The same values are attached to the lane headers below. Green/red nodes show lower/higher replacement cost; highlighted edges carry inspectable materialization cost.</div>
+      </div>`
     : '';
   scopePickerEl.innerHTML = `<div class="scopeGroup"><div class="scopeGroupLabel">View scope</div><div class="scopeRow active"><span>${escapeHtml(scope)}</span><span class="scopeMeta">${escapeHtml(strategyText)}</span></div></div>${costHtml}`;
 }
