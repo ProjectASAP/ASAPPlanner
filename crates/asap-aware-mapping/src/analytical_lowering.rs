@@ -5,7 +5,10 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use crate::analytical_cost::{
-    AnalyticalCostError, ExecutionMultiplicity, OperatorInputs, PhysicalDagNode, PhysicalOperator,
+    AnalyticalCostError, ExecutionMultiplicity, PhysicalDagNode, PhysicalOperator,
+};
+use crate::analytical_statistics::{
+    ComparisonScope, EdgeStatistics, OperatorStatistics, OperatorStatisticsProvider, SourceCoverage,
 };
 
 /// A lowered physical DAG and the node whose output is the query result.
@@ -17,32 +20,60 @@ pub struct PhysicalDag {
     pub root: String,
 }
 
+/// Atomic evidence for one lowered physical node. The statistics contract is
+/// reused unchanged; the separate buffer field is necessary because logical
+/// edge bytes cannot stand in for an allocation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalNodeEvidence {
+    pub statistics: OperatorStatistics,
+    pub output_buffer_bytes: u64,
+}
+
+pub trait PhysicalNodeEvidenceProvider {
+    fn evidence(&self, node_id: &str) -> Result<PhysicalNodeEvidence, AnalyticalCostError>;
+}
+
+impl PhysicalNodeEvidenceProvider for std::collections::HashMap<String, PhysicalNodeEvidence> {
+    fn evidence(&self, node_id: &str) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
+        self.get(node_id)
+            .cloned()
+            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))
+    }
+}
+
+impl OperatorStatisticsProvider for std::collections::HashMap<String, PhysicalNodeEvidence> {
+    fn statistics(&self, node_id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
+        self.evidence(node_id).map(|evidence| evidence.statistics)
+    }
+}
+
 /// Lower a resolved query operator DAG to the physical operators understood by
-/// this cost model. The callback supplies physical statistics for each logical
-/// operator identity; returning `None` makes the complete query unavailable.
-/// Scalar expressions remain part of their containing operator's local cost.
-pub fn lower_query_physical_dag<F>(
+/// this cost model. The authoritative provider supplies statistics by the
+/// deterministic physical IDs assigned here; missing evidence makes the
+/// complete query unavailable. Scalar expressions remain part of their
+/// containing operator's local cost.
+pub fn lower_query_physical_dag(
     root: &Rc<asap_types::pre_asap::QueryExpr>,
-    mut statistics: F,
-) -> Result<PhysicalDag, AnalyticalCostError>
-where
-    F: FnMut(&asap_types::pre_asap::QueryExpr) -> Option<OperatorInputs>,
-{
+    scope: &ComparisonScope,
+    evidence: &dyn PhysicalNodeEvidenceProvider,
+) -> Result<PhysicalDag, AnalyticalCostError> {
     use std::collections::HashMap;
 
     use asap_types::pre_asap::{GroupKeys, QueryExpr, SetOpKind};
 
-    struct Lowerer<'a, F> {
-        statistics: &'a mut F,
+    scope.validate()?;
+
+    struct Lowerer<'a> {
+        scope: &'a ComparisonScope,
+        provider: &'a dyn PhysicalNodeEvidenceProvider,
+        statistics: HashMap<String, OperatorStatistics>,
+        output_buffers: HashMap<String, u64>,
         logical_roots: HashMap<usize, String>,
         next_id: usize,
         nodes: Vec<PhysicalDagNode>,
     }
 
-    impl<F> Lowerer<'_, F>
-    where
-        F: FnMut(&QueryExpr) -> Option<OperatorInputs>,
-    {
+    impl Lowerer<'_> {
         fn lower(&mut self, query: &QueryExpr) -> Result<String, AnalyticalCostError> {
             let identity = std::ptr::from_ref(query) as usize;
             if let Some(id) = self.logical_roots.get(&identity) {
@@ -57,25 +88,32 @@ where
             Ok(root)
         }
 
-        fn stats(&mut self, query: &QueryExpr) -> Result<OperatorInputs, AnalyticalCostError> {
-            (self.statistics)(query)
-                .ok_or(AnalyticalCostError::MissingOrStale("operator_statistics"))
+        fn stats(&mut self, id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
+            if let Some(statistics) = self.statistics.get(id) {
+                return Ok(statistics.clone());
+            }
+            let evidence = self.provider.evidence(id)?;
+            let statistics = evidence.statistics;
+            self.statistics.insert(id.into(), statistics.clone());
+            self.output_buffers
+                .insert(id.into(), evidence.output_buffer_bytes);
+            Ok(statistics)
         }
 
         fn push(
             &mut self,
             id: String,
             operator: PhysicalOperator,
-            inputs: OperatorInputs,
+            _statistics: &OperatorStatistics,
             children: Vec<String>,
+            source_coverage: Option<SourceCoverage>,
         ) -> String {
-            let output_buffer_bytes = inputs.output_bytes;
             self.nodes.push(PhysicalDagNode {
                 id: id.clone(),
                 operator,
-                inputs,
                 children,
-                output_buffer_bytes,
+                source_coverage,
+                output_buffer_bytes: self.output_buffers[&id],
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             });
@@ -84,23 +122,25 @@ where
 
         fn lower_unary(
             &mut self,
-            query: &QueryExpr,
+            _query: &QueryExpr,
             id: String,
             operator: PhysicalOperator,
             child: &QueryExpr,
         ) -> Result<String, AnalyticalCostError> {
             let child_id = self.lower(child)?;
-            let inputs = self.stats(query)?;
-            let child_inputs = &self.node(&child_id)?.inputs;
-            require_unary_edge(inputs, *child_inputs)?;
-            require_operator_statistics(operator, inputs)?;
-            Ok(self.push(id, operator, inputs, vec![child_id]))
+            let statistics = self.stats(&id)?;
+            let child_statistics = self.node_statistics(&child_id)?;
+            require_unary_edge(&id, &statistics, &child_id, child_statistics)?;
+            require_operator_statistics(operator, &statistics)?;
+            Ok(self.push(id, operator, &statistics, vec![child_id], None))
         }
 
-        fn node(&self, id: &str) -> Result<&PhysicalDagNode, AnalyticalCostError> {
-            self.nodes.iter().find(|node| node.id == id).ok_or(
-                AnalyticalCostError::InvalidPhysicalDag("lowered child is missing"),
-            )
+        fn node_statistics(&self, id: &str) -> Result<&OperatorStatistics, AnalyticalCostError> {
+            self.statistics
+                .get(id)
+                .ok_or(AnalyticalCostError::InvalidPhysicalDag(
+                    "lowered child statistics are missing",
+                ))
         }
 
         fn lower_new(
@@ -109,34 +149,41 @@ where
             id: String,
         ) -> Result<String, AnalyticalCostError> {
             match query {
-                QueryExpr::Scan { predicates, .. } => {
-                    let inputs = self.stats(query)?;
-                    require_consistent_edge_statistics(inputs)?;
+                QueryExpr::Scan {
+                    source, predicates, ..
+                } => {
+                    let coverage = bind_scan_coverage(&id, source, predicates, self.scope)?;
                     if predicates.is_empty() {
-                        if inputs.input_rows != inputs.output_rows
-                            || inputs.input_bytes != inputs.output_bytes
-                        {
-                            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                                "unfiltered scan output does not match its input",
-                            ));
-                        }
-                        return Ok(self.push(id, PhysicalOperator::Scan, inputs, vec![]));
-                    }
-                    if inputs.output_rows > inputs.input_rows
-                        || inputs.output_bytes > inputs.input_bytes
-                    {
-                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                            "predicate-bearing scan expands its input",
+                        let statistics = self.stats(&id)?;
+                        require_statistics_shape(&id, &statistics, 1)?;
+                        return Ok(self.push(
+                            id,
+                            PhysicalOperator::Scan,
+                            &statistics,
+                            vec![],
+                            Some(coverage),
                         ));
                     }
                     let scan_id = format!("{id}-scan");
-                    let mut scan_inputs = inputs;
-                    scan_inputs.output_rows = inputs.input_rows;
-                    scan_inputs.output_bytes = inputs.input_bytes;
-                    clear_operator_specific_inputs(&mut scan_inputs);
-                    self.push(scan_id.clone(), PhysicalOperator::Scan, scan_inputs, vec![]);
-                    require_operator_statistics(PhysicalOperator::Filter, inputs)?;
-                    Ok(self.push(id, PhysicalOperator::Filter, inputs, vec![scan_id]))
+                    let scan_statistics = self.stats(&scan_id)?;
+                    require_statistics_shape(&scan_id, &scan_statistics, 1)?;
+                    self.push(
+                        scan_id.clone(),
+                        PhysicalOperator::Scan,
+                        &scan_statistics,
+                        vec![],
+                        Some(coverage),
+                    );
+                    let filter_statistics = self.stats(&id)?;
+                    require_unary_edge(&id, &filter_statistics, &scan_id, &scan_statistics)?;
+                    require_operator_statistics(PhysicalOperator::Filter, &filter_statistics)?;
+                    Ok(self.push(
+                        id,
+                        PhysicalOperator::Filter,
+                        &filter_statistics,
+                        vec![scan_id],
+                        None,
+                    ))
                 }
                 QueryExpr::Filter { child, .. } => {
                     self.lower_unary(query, id, PhysicalOperator::Filter, child)
@@ -162,8 +209,9 @@ where
                     {
                         if partition_by == &GroupKeys::none() {
                             let child_id = self.lower(sorted_child)?;
-                            let mut inputs = self.stats(query)?;
-                            require_unary_edge(inputs, self.node(&child_id)?.inputs)?;
+                            let statistics = self.stats(&id)?;
+                            let child_statistics = self.node_statistics(&child_id)?;
+                            require_unary_edge(&id, &statistics, &child_id, child_statistics)?;
                             let bound = n
                                 .checked_add(*offset)
                                 .and_then(|value| u64::try_from(value).ok())
@@ -171,22 +219,34 @@ where
                             if bound == 0 {
                                 return Err(AnalyticalCostError::MissingOrZero("topk_k"));
                             }
-                            inputs.k = Some(bound);
-                            require_limit_cardinality(*n, *offset, inputs)?;
+                            if statistics.k != Some(bound) {
+                                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                                    "Top-K statistics disagree with LIMIT n + offset",
+                                ));
+                            }
+                            require_limit_cardinality(*n, *offset, &statistics)?;
                             return Ok(self.push(
                                 id,
                                 PhysicalOperator::TopK,
-                                inputs,
+                                &statistics,
                                 vec![child_id],
+                                None,
                             ));
                         }
                     }
                     let child_id = self.lower(child)?;
-                    let inputs = self.stats(query)?;
-                    require_unary_edge(inputs, self.node(&child_id)?.inputs)?;
-                    require_operator_statistics(PhysicalOperator::Limit, inputs)?;
-                    require_limit_cardinality(*n, *offset, inputs)?;
-                    Ok(self.push(id, PhysicalOperator::Limit, inputs, vec![child_id]))
+                    let statistics = self.stats(&id)?;
+                    let child_statistics = self.node_statistics(&child_id)?;
+                    require_unary_edge(&id, &statistics, &child_id, child_statistics)?;
+                    require_operator_statistics(PhysicalOperator::Limit, &statistics)?;
+                    require_limit_cardinality(*n, *offset, &statistics)?;
+                    Ok(self.push(
+                        id,
+                        PhysicalOperator::Limit,
+                        &statistics,
+                        vec![child_id],
+                        None,
+                    ))
                 }
                 QueryExpr::SQLWindowFunc { child, .. } => {
                     self.lower_unary(query, id, PhysicalOperator::Window, child)
@@ -224,24 +284,24 @@ where
                     }
                     let left_id = self.lower(left)?;
                     let right_id = self.lower(right)?;
-                    let inputs = self.stats(query)?;
-                    require_consistent_edge_statistics(inputs)?;
-                    let left_inputs = self.node(&left_id)?.inputs;
-                    let right_inputs = self.node(&right_id)?.inputs;
-                    if inputs.input_rows != left_inputs.output_rows
-                        || inputs.input_bytes != left_inputs.output_bytes
-                        || inputs.right_rows != Some(right_inputs.output_rows)
-                        || inputs.right_bytes != Some(right_inputs.output_bytes)
+                    let statistics = self.stats(&id)?;
+                    require_statistics_shape(&id, &statistics, 2)?;
+                    let left_statistics = self.node_statistics(&left_id)?;
+                    let right_statistics = self.node_statistics(&right_id)?;
+                    if statistics.inputs[0] != left_statistics.output
+                        || statistics.inputs[1] != right_statistics.output
                     {
                         return Err(AnalyticalCostError::InconsistentOperatorStatistics(
                             "join inputs do not match child outputs",
                         ));
                     }
+                    require_operator_statistics(PhysicalOperator::HashJoin, &statistics)?;
                     Ok(self.push(
                         id,
                         PhysicalOperator::HashJoin,
-                        inputs,
+                        &statistics,
                         vec![left_id, right_id],
+                        None,
                     ))
                 }
                 _ => Err(AnalyticalCostError::UnsupportedQueryOperator),
@@ -250,7 +310,7 @@ where
 
         fn lower_concat(
             &mut self,
-            query: &QueryExpr,
+            _query: &QueryExpr,
             id: String,
             child_ids: Vec<String>,
         ) -> Result<String, AnalyticalCostError> {
@@ -259,36 +319,43 @@ where
                     "concat has no children",
                 ));
             }
-            let inputs = self.stats(query)?;
-            require_consistent_edge_statistics(inputs)?;
-            let (rows, bytes) =
-                child_ids
-                    .iter()
-                    .try_fold((0_u64, 0_u64), |(rows, bytes), child| {
-                        let child = self.node(child)?;
-                        Ok::<_, AnalyticalCostError>((
-                            rows.checked_add(child.inputs.output_rows)
-                                .ok_or(AnalyticalCostError::Overflow)?,
-                            bytes
-                                .checked_add(child.inputs.output_bytes)
-                                .ok_or(AnalyticalCostError::Overflow)?,
-                        ))
-                    })?;
-            if inputs.input_rows != rows
-                || inputs.input_bytes != bytes
-                || inputs.output_rows != rows
-                || inputs.output_bytes != bytes
-            {
+            let statistics = self.stats(&id)?;
+            require_statistics_shape(&id, &statistics, child_ids.len())?;
+            let (rows, bytes) = child_ids.iter().enumerate().try_fold(
+                (0_u64, 0_u64),
+                |(rows, bytes), (index, child)| {
+                    let child_statistics = self.node_statistics(child)?;
+                    if statistics.inputs[index] != child_statistics.output {
+                        return Err(AnalyticalCostError::ConflictingEdgeStatistics {
+                            parent: id.clone(),
+                            child: child.clone(),
+                            input_index: index,
+                        });
+                    }
+                    Ok::<_, AnalyticalCostError>((
+                        rows.checked_add(child_statistics.output.rows)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                        bytes
+                            .checked_add(child_statistics.output.bytes)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                    ))
+                },
+            )?;
+            if statistics.output != (EdgeStatistics { rows, bytes }) {
                 return Err(AnalyticalCostError::InconsistentOperatorStatistics(
                     "concat statistics do not equal the sum of child outputs",
                 ));
             }
-            Ok(self.push(id, PhysicalOperator::Concat, inputs, child_ids))
+            require_operator_statistics(PhysicalOperator::Concat, &statistics)?;
+            Ok(self.push(id, PhysicalOperator::Concat, &statistics, child_ids, None))
         }
     }
 
     let mut lowerer = Lowerer {
-        statistics: &mut statistics,
+        scope,
+        provider: evidence,
+        statistics: HashMap::new(),
+        output_buffers: HashMap::new(),
         logical_roots: HashMap::new(),
         next_id: 0,
         nodes: Vec::new(),
@@ -300,92 +367,107 @@ where
     })
 }
 
-fn require_consistent_edge_statistics(inputs: OperatorInputs) -> Result<(), AnalyticalCostError> {
-    require_cardinality_width("operator input", inputs.input_rows, inputs.input_bytes)?;
-    require_cardinality_width("operator output", inputs.output_rows, inputs.output_bytes)?;
+fn require_statistics_shape(
+    node: &str,
+    statistics: &OperatorStatistics,
+    input_count: usize,
+) -> Result<(), AnalyticalCostError> {
+    if statistics.inputs.len() != input_count {
+        return Err(AnalyticalCostError::InvalidOperatorStatistics {
+            node: node.into(),
+            reason: "wrong input-edge count",
+        });
+    }
+    if statistics
+        .inputs
+        .iter()
+        .chain(std::iter::once(&statistics.output))
+        .any(|edge| !edge.is_consistent())
+    {
+        return Err(AnalyticalCostError::InvalidOperatorStatistics {
+            node: node.into(),
+            reason: "edge rows and logical bytes are inconsistent",
+        });
+    }
     Ok(())
 }
 
-fn require_cardinality_width(
-    edge: &'static str,
-    rows: u64,
-    bytes: u64,
-) -> Result<(), AnalyticalCostError> {
-    match (rows, bytes) {
-        (0, 0) => Ok(()),
-        (0, _) => Err(AnalyticalCostError::InconsistentOperatorStatistics(edge)),
-        (_, 0) => Err(AnalyticalCostError::MissingOrZero(edge)),
-        _ => Ok(()),
-    }
-}
-
 fn require_unary_edge(
-    inputs: OperatorInputs,
-    child: OperatorInputs,
+    node: &str,
+    statistics: &OperatorStatistics,
+    child_id: &str,
+    child: &OperatorStatistics,
 ) -> Result<(), AnalyticalCostError> {
-    require_consistent_edge_statistics(inputs)?;
-    if inputs.input_rows != child.output_rows || inputs.input_bytes != child.output_bytes {
-        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-            "unary input does not match child output",
-        ));
+    require_statistics_shape(node, statistics, 1)?;
+    if statistics.inputs[0] != child.output {
+        return Err(AnalyticalCostError::ConflictingEdgeStatistics {
+            parent: node.into(),
+            child: child_id.into(),
+            input_index: 0,
+        });
     }
     Ok(())
 }
 
 fn require_operator_statistics(
     operator: PhysicalOperator,
-    inputs: OperatorInputs,
+    statistics: &OperatorStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let invalid = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
+    if !matches!(operator, PhysicalOperator::Scan) && statistics.source_scan_bytes != 0 {
+        return invalid("only Scan may charge source bytes");
+    }
+    let input = statistics.inputs.first().copied().ok_or(
+        AnalyticalCostError::InconsistentOperatorStatistics("operator input is missing"),
+    )?;
+    let output = statistics.output;
     match operator {
         PhysicalOperator::Filter => {
-            if inputs.output_rows > inputs.input_rows || inputs.output_bytes > inputs.input_bytes {
+            if output.rows > input.rows || output.bytes > input.bytes {
                 return invalid("filter output expands its input");
             }
         }
         PhysicalOperator::Project => {
-            if inputs.output_rows != inputs.input_rows {
+            if output.rows != input.rows {
                 return invalid("projection changes row cardinality");
             }
         }
         PhysicalOperator::HashAggregate => {
-            let groups = inputs
+            let groups = statistics
                 .group_count
                 .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
-            if groups == 0 && (inputs.input_rows != 0 || inputs.output_rows != 0) {
+            if groups == 0 && (input.rows != 0 || output.rows != 0) {
                 return invalid("zero groups require an empty grouped input and output");
             }
-            if inputs.output_rows > groups {
+            if output.rows > groups {
                 return invalid("aggregate output exceeds group cardinality");
             }
         }
         PhysicalOperator::Deduplicate => {
-            let groups = inputs
+            let groups = statistics
                 .group_count
                 .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
-            if inputs.output_rows != groups || inputs.output_rows > inputs.input_rows {
+            if output.rows != groups || output.rows > input.rows {
                 return invalid("deduplicate output does not equal distinct cardinality");
             }
         }
         PhysicalOperator::Sort => {
-            if inputs.output_rows != inputs.input_rows || inputs.output_bytes != inputs.input_bytes
-            {
+            if output != input {
                 return invalid("sort changes its input cardinality or width");
             }
         }
         PhysicalOperator::TopK | PhysicalOperator::Limit => {
-            if inputs.output_rows > inputs.input_rows {
+            if output.rows > input.rows {
                 return invalid("bounded output exceeds its input cardinality");
             }
         }
         PhysicalOperator::Window => {
-            if inputs.output_rows != inputs.input_rows {
+            if output.rows != input.rows {
                 return invalid("SQL window changes row cardinality");
             }
         }
         PhysicalOperator::PassThrough => {
-            if inputs.output_rows != inputs.input_rows || inputs.output_bytes != inputs.input_bytes
-            {
+            if output != input {
                 return invalid("pass-through wrapper changes its edge statistics");
             }
         }
@@ -397,12 +479,12 @@ fn require_operator_statistics(
 fn require_limit_cardinality(
     n: usize,
     offset: usize,
-    inputs: OperatorInputs,
+    statistics: &OperatorStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let n = u64::try_from(n).map_err(|_| AnalyticalCostError::Overflow)?;
     let offset = u64::try_from(offset).map_err(|_| AnalyticalCostError::Overflow)?;
-    let expected = inputs.input_rows.saturating_sub(offset).min(n);
-    if inputs.output_rows != expected {
+    let expected = statistics.inputs[0].rows.saturating_sub(offset).min(n);
+    if statistics.output.rows != expected {
         return Err(AnalyticalCostError::InconsistentOperatorStatistics(
             "limit output does not match n and offset",
         ));
@@ -410,14 +492,26 @@ fn require_limit_cardinality(
     Ok(())
 }
 
-fn clear_operator_specific_inputs(inputs: &mut OperatorInputs) {
-    inputs.group_count = None;
-    inputs.key_bytes = None;
-    inputs.aggregate_value_bytes = None;
-    inputs.k = None;
-    inputs.right_rows = None;
-    inputs.right_bytes = None;
-    inputs.hash_join_build_side = None;
+fn bind_scan_coverage(
+    node_id: &str,
+    source: &asap_types::pre_asap::Source,
+    predicates: &[asap_types::pre_asap::Predicate],
+    scope: &ComparisonScope,
+) -> Result<SourceCoverage, AnalyticalCostError> {
+    let mut matches = scope
+        .sources
+        .iter()
+        .filter(|coverage| coverage.source == *source && coverage.predicates == predicates);
+    let coverage = matches
+        .next()
+        .cloned()
+        .ok_or_else(|| AnalyticalCostError::ScanOutsideComparisonScope(node_id.into()))?;
+    if matches.next().is_some() {
+        return Err(AnalyticalCostError::InvalidPhysicalDag(
+            "scan source coverage is ambiguous",
+        ));
+    }
+    Ok(coverage)
 }
 
 fn is_hash_join_predicate(expr: &asap_types::pre_asap::QueryExpr) -> bool {
@@ -441,25 +535,61 @@ fn is_hash_join_predicate(expr: &asap_types::pre_asap::QueryExpr) -> bool {
 mod tests {
     use super::*;
     use crate::analytical_cost::{estimate_physical_dag, HashJoinBuildSide};
+    use asap_types::workload::{
+        DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
+    };
+    use std::collections::HashMap;
 
-    fn operator_inputs(
-        input_rows: u64,
-        input_bytes: u64,
-        output_rows: u64,
-        output_bytes: u64,
-    ) -> OperatorInputs {
-        OperatorInputs {
-            input_rows,
-            input_bytes,
-            output_rows,
-            output_bytes,
+    fn edge(rows: u64, bytes: u64) -> EdgeStatistics {
+        EdgeStatistics { rows, bytes }
+    }
+
+    fn statistics(inputs: Vec<EdgeStatistics>, output: EdgeStatistics) -> OperatorStatistics {
+        OperatorStatistics {
+            source_scan_bytes: 0,
+            inputs,
+            output,
             group_count: None,
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
-            right_rows: None,
-            right_bytes: None,
             hash_join_build_side: None,
+        }
+    }
+
+    fn evidence(statistics: OperatorStatistics) -> PhysicalNodeEvidence {
+        PhysicalNodeEvidence {
+            output_buffer_bytes: statistics.output.bytes.min(1_024),
+            statistics,
+        }
+    }
+
+    fn scope(sources: Vec<SourceCoverage>) -> ComparisonScope {
+        ComparisonScope {
+            data_arrival: DataArrival::AtRest,
+            planning_time: TimestampMs(1_000),
+            horizon: DurationMs(1_000),
+            recurrence: QueryRecurrence::OneTime {
+                invocations: 1,
+                execute_at: None,
+            },
+            time_selection: TimeSelection {
+                scope: QueryTimeScope::Longitudinal,
+                lookback: Some(DurationMs(1_000)),
+                as_of: Some(TimestampMs(1_000)),
+            },
+            sources,
+        }
+    }
+
+    fn coverage(
+        source: asap_types::pre_asap::Source,
+        predicates: Vec<asap_types::pre_asap::Predicate>,
+    ) -> SourceCoverage {
+        SourceCoverage {
+            source,
+            snapshot_id: "snapshot-1".into(),
+            predicates,
         }
     }
 
@@ -501,21 +631,33 @@ mod tests {
             child: sort,
         });
 
-        let dag = lower_query_physical_dag(&root, |node| {
-            let mut stats = match node {
-                QueryExpr::Scan { .. } => operator_inputs(1_000, 64_000, 400, 25_600),
-                QueryExpr::Aggregate { .. } => operator_inputs(400, 25_600, 100, 4_000),
-                QueryExpr::Limit { .. } => operator_inputs(100, 4_000, 10, 400),
-                _ => return None,
-            };
-            if matches!(node, QueryExpr::Aggregate { .. }) {
-                stats.group_count = Some(100);
-                stats.key_bytes = Some(16);
-                stats.aggregate_value_bytes = Some(8);
-            }
-            Some(stats)
-        })
-        .unwrap();
+        let scan_coverage = coverage(
+            Source::Table {
+                table_ref: "events".into(),
+            },
+            vec![asap_types::pre_asap::Predicate(Rc::new(
+                QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Boolean(true)),
+            ))],
+        );
+        let scope = scope(vec![scan_coverage]);
+        let mut aggregate_statistics = statistics(vec![edge(400, 25_600)], edge(100, 4_000));
+        aggregate_statistics.group_count = Some(100);
+        aggregate_statistics.key_bytes = Some(16);
+        aggregate_statistics.aggregate_value_bytes = Some(8);
+        let mut topk_statistics = statistics(vec![edge(100, 4_000)], edge(10, 400));
+        topk_statistics.k = Some(15);
+        let mut raw_scan = statistics(vec![edge(1_000, 64_000)], edge(1_000, 64_000));
+        raw_scan.source_scan_bytes = 64_000;
+        let provided = HashMap::from([
+            ("query-2-scan".into(), evidence(raw_scan)),
+            (
+                "query-2".into(),
+                evidence(statistics(vec![edge(1_000, 64_000)], edge(400, 25_600))),
+            ),
+            ("query-1".into(), evidence(aggregate_statistics)),
+            ("query-0".into(), evidence(topk_statistics)),
+        ]);
+        let dag = lower_query_physical_dag(&root, &scope, &provided).unwrap();
 
         assert_eq!(
             dag.nodes
@@ -530,9 +672,20 @@ mod tests {
             ]
         );
         let topk = dag.nodes.last().unwrap();
-        assert_eq!(topk.inputs.k, Some(15));
         assert_eq!(topk.children, vec![dag.nodes[2].id.clone()]);
-        assert!(estimate_physical_dag(&dag.nodes, &dag.root, 3).is_ok());
+        assert_eq!(provided[&topk.id].statistics.k, Some(15));
+        let physical_scan = &dag.nodes[0];
+        assert_eq!(physical_scan.id, "query-2-scan");
+        assert_eq!(
+            physical_scan.source_coverage,
+            Some(scope.sources[0].clone())
+        );
+        assert_eq!(physical_scan.output_buffer_bytes, 1_024);
+        assert_ne!(
+            physical_scan.output_buffer_bytes,
+            provided[&physical_scan.id].statistics.output.bytes
+        );
+        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).is_ok());
     }
 
     #[test]
@@ -558,22 +711,26 @@ mod tests {
             left: Rc::clone(&shared),
             right: Rc::clone(&shared),
         });
-        let dag = lower_query_physical_dag(&root, |node| match node {
-            QueryExpr::Scan { .. } => Some(operator_inputs(100, 800, 100, 800)),
-            QueryExpr::Join { .. } => {
-                let mut stats = operator_inputs(100, 800, 25, 400);
-                stats.right_rows = Some(100);
-                stats.right_bytes = Some(800);
-                stats.hash_join_build_side = Some(HashJoinBuildSide::Right);
-                Some(stats)
-            }
-            _ => None,
-        })
-        .unwrap();
+        let source_coverage = coverage(
+            Source::Table {
+                table_ref: "dimensions".into(),
+            },
+            vec![],
+        );
+        let scope = scope(vec![source_coverage]);
+        let mut scan_statistics = statistics(vec![edge(100, 800)], edge(100, 800));
+        scan_statistics.source_scan_bytes = 800;
+        let mut join_statistics = statistics(vec![edge(100, 800), edge(100, 800)], edge(25, 400));
+        join_statistics.hash_join_build_side = Some(HashJoinBuildSide::Right);
+        let provided = HashMap::from([
+            ("query-1".into(), evidence(scan_statistics)),
+            ("query-0".into(), evidence(join_statistics)),
+        ]);
+        let dag = lower_query_physical_dag(&root, &scope, &provided).unwrap();
 
         assert_eq!(dag.nodes.len(), 2);
         assert_eq!(dag.nodes[1].children, vec![dag.nodes[0].id.clone(); 2]);
-        let estimate = estimate_physical_dag(&dag.nodes, &dag.root, 1).unwrap();
+        let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).unwrap();
         assert_eq!(estimate.scan_bytes, 800);
     }
 
@@ -629,25 +786,47 @@ mod tests {
             child: limit,
         });
 
-        let dag = lower_query_physical_dag(&root, |node| {
-            let mut inputs = match node {
-                QueryExpr::Scan { .. } => operator_inputs(1_000, 8_000, 1_000, 8_000),
-                QueryExpr::Filter { .. } => operator_inputs(1_000, 8_000, 800, 6_400),
-                QueryExpr::Project { .. } => operator_inputs(800, 6_400, 800, 3_200),
-                QueryExpr::Dedup { .. } => operator_inputs(800, 3_200, 500, 2_000),
-                QueryExpr::SQLWindowFunc { .. } => operator_inputs(500, 2_000, 500, 6_000),
-                QueryExpr::Sort { .. } => operator_inputs(500, 6_000, 500, 6_000),
-                QueryExpr::Limit { .. } => operator_inputs(500, 6_000, 20, 240),
-                QueryExpr::TimeShift { .. } => operator_inputs(20, 240, 20, 240),
-                _ => return None,
-            };
-            if matches!(node, QueryExpr::Dedup { .. }) {
-                inputs.group_count = Some(500);
-                inputs.key_bytes = Some(8);
-            }
-            Some(inputs)
-        })
-        .unwrap();
+        let source_coverage = coverage(
+            Source::Table {
+                table_ref: "events".into(),
+            },
+            vec![],
+        );
+        let scope = scope(vec![source_coverage]);
+        let mut scan_statistics = statistics(vec![edge(1_000, 8_000)], edge(1_000, 8_000));
+        scan_statistics.source_scan_bytes = 8_000;
+        let mut dedup_statistics = statistics(vec![edge(800, 3_200)], edge(500, 2_000));
+        dedup_statistics.group_count = Some(500);
+        dedup_statistics.key_bytes = Some(8);
+        let provided = HashMap::from([
+            ("query-7".into(), evidence(scan_statistics)),
+            (
+                "query-6".into(),
+                evidence(statistics(vec![edge(1_000, 8_000)], edge(800, 6_400))),
+            ),
+            (
+                "query-5".into(),
+                evidence(statistics(vec![edge(800, 6_400)], edge(800, 3_200))),
+            ),
+            ("query-4".into(), evidence(dedup_statistics)),
+            (
+                "query-3".into(),
+                evidence(statistics(vec![edge(500, 2_000)], edge(500, 6_000))),
+            ),
+            (
+                "query-2".into(),
+                evidence(statistics(vec![edge(500, 6_000)], edge(500, 6_000))),
+            ),
+            (
+                "query-1".into(),
+                evidence(statistics(vec![edge(500, 6_000)], edge(20, 240))),
+            ),
+            (
+                "query-0".into(),
+                evidence(statistics(vec![edge(20, 240)], edge(20, 240))),
+            ),
+        ]);
+        let dag = lower_query_physical_dag(&root, &scope, &provided).unwrap();
 
         assert_eq!(
             dag.nodes
@@ -665,7 +844,7 @@ mod tests {
                 PhysicalOperator::PassThrough,
             ]
         );
-        assert!(estimate_physical_dag(&dag.nodes, &dag.root, 2).is_ok());
+        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).is_ok());
     }
 
     #[test]
@@ -687,31 +866,39 @@ mod tests {
             left: Rc::new(scan("a")),
             right: Rc::new(scan("b")),
         });
-        let dag = lower_query_physical_dag(&union, |node| match node {
-            QueryExpr::Scan {
-                source: Source::Table { table_ref },
-                ..
-            } if table_ref == "a" => Some(operator_inputs(10, 80, 10, 80)),
-            QueryExpr::Scan { .. } => Some(operator_inputs(20, 160, 20, 160)),
-            QueryExpr::SetOp { .. } => Some(operator_inputs(30, 240, 30, 240)),
-            _ => None,
-        })
-        .unwrap();
+        let scope = scope(vec![
+            coverage(
+                Source::Table {
+                    table_ref: "a".into(),
+                },
+                vec![],
+            ),
+            coverage(
+                Source::Table {
+                    table_ref: "b".into(),
+                },
+                vec![],
+            ),
+        ]);
+        let mut left_statistics = statistics(vec![edge(10, 80)], edge(10, 80));
+        left_statistics.source_scan_bytes = 80;
+        let mut right_statistics = statistics(vec![edge(20, 160)], edge(20, 160));
+        right_statistics.source_scan_bytes = 160;
+        let provided = HashMap::from([
+            ("query-1".into(), evidence(left_statistics)),
+            ("query-2".into(), evidence(right_statistics)),
+            (
+                "query-0".into(),
+                evidence(statistics(vec![edge(10, 80), edge(20, 160)], edge(30, 240))),
+            ),
+        ]);
+        let dag = lower_query_physical_dag(&union, &scope, &provided).unwrap();
         assert_eq!(dag.nodes.last().unwrap().operator, PhysicalOperator::Concat);
 
         let concat = Rc::new(QueryExpr::Concat {
             children: vec![scan("a"), scan("b")],
         });
-        let dag = lower_query_physical_dag(&concat, |node| match node {
-            QueryExpr::Scan {
-                source: Source::Table { table_ref },
-                ..
-            } if table_ref == "a" => Some(operator_inputs(10, 80, 10, 80)),
-            QueryExpr::Scan { .. } => Some(operator_inputs(20, 160, 20, 160)),
-            QueryExpr::Concat { .. } => Some(operator_inputs(30, 240, 30, 240)),
-            _ => None,
-        })
-        .unwrap();
+        let dag = lower_query_physical_dag(&concat, &scope, &provided).unwrap();
         assert_eq!(dag.nodes.last().unwrap().operator, PhysicalOperator::Concat);
 
         let distinct_union = Rc::new(QueryExpr::SetOp {
@@ -721,7 +908,7 @@ mod tests {
             right: Rc::new(scan("b")),
         });
         assert_eq!(
-            lower_query_physical_dag(&distinct_union, |_| None),
+            lower_query_physical_dag(&distinct_union, &scope, &provided),
             Err(AnalyticalCostError::UnsupportedQueryOperator)
         );
     }
@@ -745,18 +932,70 @@ mod tests {
             child: scan,
         });
 
+        let comparison_scope = scope(vec![coverage(
+            Source::Table {
+                table_ref: "events".into(),
+            },
+            vec![],
+        )]);
+        let missing = HashMap::<String, PhysicalNodeEvidence>::new();
         assert_eq!(
-            lower_query_physical_dag(&root, |_| None),
-            Err(AnalyticalCostError::MissingOrStale("operator_statistics"))
+            lower_query_physical_dag(&root, &comparison_scope, &missing),
+            Err(AnalyticalCostError::MissingOperatorStatistics(
+                "query-1".into()
+            ))
         );
+        struct MissingBuffer;
+        impl PhysicalNodeEvidenceProvider for MissingBuffer {
+            fn evidence(
+                &self,
+                _node_id: &str,
+            ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
+                Err(AnalyticalCostError::MissingOrStale("output_buffer_bytes"))
+            }
+        }
         assert_eq!(
-            lower_query_physical_dag(&root, |node| match node {
-                QueryExpr::Scan { .. } => Some(operator_inputs(100, 800, 100, 800)),
-                QueryExpr::Project { .. } => Some(operator_inputs(99, 792, 99, 396)),
-                _ => None,
-            }),
-            Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                "unary input does not match child output"
+            lower_query_physical_dag(&root, &comparison_scope, &MissingBuffer),
+            Err(AnalyticalCostError::MissingOrStale("output_buffer_bytes"))
+        );
+        let mut scan_statistics = statistics(vec![edge(100, 800)], edge(100, 800));
+        scan_statistics.source_scan_bytes = 800;
+        let conflicting = HashMap::from([
+            ("query-1".into(), evidence(scan_statistics)),
+            (
+                "query-0".into(),
+                evidence(statistics(vec![edge(99, 792)], edge(99, 396))),
+            ),
+        ]);
+        assert_eq!(
+            lower_query_physical_dag(&root, &comparison_scope, &conflicting),
+            Err(AnalyticalCostError::ConflictingEdgeStatistics {
+                parent: "query-0".into(),
+                child: "query-1".into(),
+                input_index: 0,
+            })
+        );
+
+        let outside_scope = scope(vec![coverage(
+            Source::Table {
+                table_ref: "other".into(),
+            },
+            vec![],
+        )]);
+        assert_eq!(
+            lower_query_physical_dag(&root, &outside_scope, &conflicting),
+            Err(AnalyticalCostError::ScanOutsideComparisonScope(
+                "query-1".into()
+            ))
+        );
+
+        let mut second_snapshot = comparison_scope.sources[0].clone();
+        second_snapshot.snapshot_id = "snapshot-2".into();
+        let ambiguous_scope = scope(vec![comparison_scope.sources[0].clone(), second_snapshot]);
+        assert_eq!(
+            lower_query_physical_dag(&root, &ambiguous_scope, &conflicting),
+            Err(AnalyticalCostError::InvalidPhysicalDag(
+                "scan source coverage is ambiguous"
             ))
         );
     }
@@ -784,14 +1023,27 @@ mod tests {
             child: filter,
         });
 
-        let dag = lower_query_physical_dag(&root, |node| match node {
-            QueryExpr::Scan { .. } => Some(operator_inputs(100, 800, 100, 800)),
-            QueryExpr::Filter { .. } => Some(operator_inputs(100, 800, 0, 0)),
-            QueryExpr::Limit { .. } => Some(operator_inputs(0, 0, 0, 0)),
-            _ => None,
-        })
-        .unwrap();
-        let estimate = estimate_physical_dag(&dag.nodes, &dag.root, 1).unwrap();
+        let scope = scope(vec![coverage(
+            Source::Table {
+                table_ref: "events".into(),
+            },
+            vec![],
+        )]);
+        let mut scan_statistics = statistics(vec![edge(100, 800)], edge(100, 800));
+        scan_statistics.source_scan_bytes = 800;
+        let provided = HashMap::from([
+            ("query-2".into(), evidence(scan_statistics)),
+            (
+                "query-1".into(),
+                evidence(statistics(vec![edge(100, 800)], edge(0, 0))),
+            ),
+            (
+                "query-0".into(),
+                evidence(statistics(vec![edge(0, 0)], edge(0, 0))),
+            ),
+        ]);
+        let dag = lower_query_physical_dag(&root, &scope, &provided).unwrap();
+        let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &provided).unwrap();
         assert_eq!(estimate.cpu_ops, 200.0);
         assert_eq!(estimate.scan_bytes, 800);
     }
