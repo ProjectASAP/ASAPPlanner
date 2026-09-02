@@ -2,10 +2,11 @@
 
 ## Purpose and boundaries
 
-The analytical resource cost model compares legal physical plans using CPU
-work, peak memory, and source/disk I/O. It replaces dimensionless plan-node
-counts with estimates derived from operator complexity, cardinality, row
-width, and concrete summary parameters.
+The analytical resource cost model version implemented here is explicitly for
+`DataArrival::AtRest`. It compares legal physical plans using CPU work, peak
+memory, and source/disk I/O. It replaces dimensionless plan-node counts with
+estimates derived from operator complexity, cardinality, row width, and
+concrete summary parameters.
 
 The model does not decide semantic or accuracy legality. Candidate generation
 and guarantee composition run first; costing ranks only the candidates that
@@ -85,7 +86,7 @@ workload.
 ## Workload horizon and lifecycle
 
 Every alternative must cover the same source data and query horizon. The
-implemented analytical comparison is build-once, read-many:
+implemented `DataArrival::AtRest` comparison is build-once, read-many:
 
 ```text
 retained-summary builds = 1
@@ -96,6 +97,11 @@ updates after build     = 0
 `evaluation_count` is derived from `QueryRecurrence` over a finite horizon.
 It is not an independent workload axis. A repeated rate without a horizon
 cannot produce a finite total cost.
+
+`AnalyticalInputs.data_arrival` must be `at_rest`. The workload adapter copies
+that value from the canonical `DataWorkload::arrival`; `unknown`, `mixed`, and
+`continuously_ingesting` fail closed. They must not be costed by pretending
+that incremental updates are a one-time snapshot build.
 
 The sketch alternative scans the selected source snapshot once and retains
 state. The raw alternative recomputes from that snapshot for every query

@@ -11,7 +11,9 @@ use asap_types::post_asap::{
     GroupingStrategy, SketchAlgorithm, SketchParams, SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
-use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand};
+use asap_types::workload::{
+    DataArrival, DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::cost_model::{Cost, CostModel, DefaultCostModel};
@@ -19,10 +21,14 @@ use crate::replacement::{
     accuracy_budget, accuracy_target, Replacement, ReplacementSubDAG, TargetSubDAG,
 };
 
-pub const ANALYTICAL_MODEL_VERSION: &str = "analytical-resource-v1";
+pub const ANALYTICAL_MODEL_VERSION: &str = "analytical-resource-at-rest-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AnalyticalInputs {
+    /// Source-data arrival mode for this comparison. Version 1 deliberately
+    /// supports only a fixed snapshot (`AtRest`); it does not silently treat
+    /// incremental maintenance as a one-time build.
+    pub data_arrival: DataArrival,
     pub input_rows: u64,
     /// Logical bytes consumed by the operator. Intermediate input may have
     /// bytes here while reading zero source/disk bytes.
@@ -40,6 +46,11 @@ pub struct AnalyticalInputs {
 
 impl AnalyticalInputs {
     pub fn validate(self) -> Result<Self, AnalyticalCostError> {
+        if self.data_arrival != DataArrival::AtRest {
+            return Err(AnalyticalCostError::UnsupportedDataArrival(
+                self.data_arrival,
+            ));
+        }
         if self.input_rows == 0 {
             return Err(AnalyticalCostError::MissingOrZero("input_rows"));
         }
@@ -79,6 +90,7 @@ impl AnalyticalInputs {
         let evaluation_count =
             evaluations_in_horizon(&query.recurrence, planning_time_ms, horizon_ms)?;
         Self {
+            data_arrival: data.arrival,
             input_rows,
             input_bytes: physical.input_bytes,
             source_scan_bytes: physical.source_scan_bytes,
@@ -532,6 +544,8 @@ impl ResourceEstimate {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AnalyticalCostError {
+    #[error("analytical resource model v1 supports only DataArrival::AtRest, got {0:?}")]
+    UnsupportedDataArrival(DataArrival),
     #[error("required analytical input {0} is missing or zero")]
     MissingOrZero(&'static str),
     #[error("required analytical evidence {0} is missing or stale")]
@@ -1176,6 +1190,7 @@ mod tests {
 
     fn inputs(evaluation_count: u64) -> AnalyticalInputs {
         AnalyticalInputs {
+            data_arrival: DataArrival::AtRest,
             input_rows: 1_000_000,
             input_bytes: 64_000_000,
             source_scan_bytes: 64_000_000,
@@ -1204,6 +1219,7 @@ mod tests {
                 depth: 4,
             },
             AnalyticalInputs {
+                data_arrival: DataArrival::AtRest,
                 input_rows: 1_000,
                 input_bytes: 8_000,
                 source_scan_bytes: 8_000,
@@ -1577,6 +1593,56 @@ mod tests {
                 1_000,
             ),
             Err(AnalyticalCostError::MissingOrStale("input_cardinality"))
+        );
+    }
+
+    #[test]
+    fn workload_adapter_rejects_continuously_ingesting_data() {
+        use asap_types::workload::{
+            DataWorkload, Evidence, EvidenceSource, Predictability, Query, QueryRequirements,
+            QueryTimeScope, TimeSelection,
+        };
+        let data = DataWorkload {
+            arrival: DataArrival::ContinuouslyIngesting,
+            input_cardinality: Evidence {
+                value: Some(1_000),
+                source: EvidenceSource::Observed,
+                observed_at_ms: Some(100),
+                valid_for_ms: Some(1_000),
+            },
+            ..DataWorkload::default()
+        };
+        let query = QueryWorkloadEntry {
+            query: Query("SELECT count(*) FROM t".into()),
+            requirements: QueryRequirements::default(),
+            predictability: Predictability::Unknown,
+            recurrence: QueryRecurrence::OneTime {
+                invocations: 1,
+                execute_at: None,
+            },
+            time_selection: TimeSelection {
+                scope: QueryTimeScope::Unknown,
+                lookback: None,
+                as_of: None,
+            },
+        };
+
+        assert_eq!(
+            AnalyticalInputs::from_workload(
+                PhysicalInputEvidence {
+                    input_bytes: 8_000,
+                    source_scan_bytes: 8_000,
+                    group_count: 1,
+                    group_key_bytes: 8,
+                },
+                &data,
+                &query,
+                100,
+                1_000,
+            ),
+            Err(AnalyticalCostError::UnsupportedDataArrival(
+                DataArrival::ContinuouslyIngesting
+            ))
         );
     }
 
