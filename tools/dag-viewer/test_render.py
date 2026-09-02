@@ -176,6 +176,11 @@ class RenderTests(unittest.TestCase):
         viewer_pos = html.index("cytoscape.use(window.cytoscapeDagre)")  # viewer.js's first line
         self.assertLess(embedded_pos, viewer_pos)
 
+    def test_inlined_edge_cost_key_contains_no_literal_nul(self):
+        html = render({"queries": [named_graph("q1")]})
+        self.assertNotIn("\x00", html)
+        self.assertIn(r"\u0000", html)
+
     def test_angle_bracket_in_query_source_does_not_break_out_of_script_tag(self):
         # A pathological (but legal JSON) query source containing a literal
         # "</script>" substring must not prematurely close the embedded
