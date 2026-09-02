@@ -33,18 +33,46 @@ intermediate does not create another source scan.
 
 ## Comparison scope
 
-Every alternative must be evaluated over the same workload horizon. The
-model accepts:
+Every alternative must cover the same source snapshot and workload horizon.
+The current analytical model is a **build-once, read-many** model:
 
-| Input | Definition |
+```text
+build_count = 1
+query reads = evaluation_count
+updates after build = 0
+```
+
+The sketch alternative scans the snapshot once to build retained state. The
+raw alternative scans the same snapshot for every evaluation. Incremental
+ingestion, rebuilds, expiration/deletion, and lifecycle duration require an
+update-aware model and are not inferred from `evaluation_count`.
+
+The top-level model inputs are:
+
+| Workload/source input | Definition |
 |---|---|
-| `input_rows` | Rows consumed by one build or one raw evaluation. |
-| `input_bytes` | Logical input bytes, including an intermediate when the operator does not read the source directly. |
-| `source_scan_bytes` | Source/disk bytes read once by this operator region. It is zero for an already-materialized intermediate. |
-| `group_count` | Estimated number of distinct `GROUP BY` key tuples. It is one for an ungrouped aggregation. |
-| `group_key_bytes` | Average encoded bytes in one grouping-key tuple. Hash-table metadata is modeled separately. |
-| `topk_k` | Optional `k` for a Top-K query shape. |
-| `evaluation_count` | Number of query evaluations in the comparison horizon. |
+| `input_rows` | Rows in the source snapshot consumed by one raw evaluation or retained-summary build. |
+| `input_bytes` | Logical bytes presented to the root costed region. An intermediate may have logical bytes without reading disk. |
+| `source_scan_bytes` | Source/disk bytes read once when building or evaluating this region. It is zero for an already-materialized in-memory intermediate. |
+| `evaluation_count` | Query reads in the comparison horizon; it is not a build or update count. |
+
+Cardinality and query-shape statistics are separate inputs because they
+describe operators, not the horizon:
+
+| Operator/query statistic | Definition |
+|---|---|
+| `group_count` | Estimated distinct `GROUP BY` key tuples. It is one for an ungrouped aggregation. |
+| `group_key_bytes` | Average encoded bytes in one grouping-key tuple; hash-table metadata is modeled separately. |
+| `topk_k` | Optional `k` for a Top-K operator. |
+| `output_rows`, `output_bytes` | Cardinality and logical width after an operator; needed to cost its parent. |
+| `right_rows`, `right_bytes` | Right/build-side statistics required by a binary join estimate. |
+
+`OperatorInputs` carries the latter output and join fields for the generic
+physical-operator formulas. The aggregation/Top-K adapter derives the
+intermediate cardinality it can prove: a grouped count produces
+`group_count` rows of approximately `group_key_bytes + 8` bytes each.
+Arbitrary filters, joins, and projections require supplied statistics; the
+model does not invent selectivity or output width.
 
 `group_count` and `input_rows` are different quantities. One hundred million
 rows may contain one hundred thousand distinct `service` values; that input
@@ -57,6 +85,21 @@ source scan more than once.
 
 Required counts and widths must be positive. `source_scan_bytes` may be zero
 for an intermediate.
+
+Some costs need evidence beyond cardinality:
+
+- CMSWithHeap/CountSketchWithHeap legality needs a Top-K margin certificate;
+- DDSketch memory needs value-range/distribution evidence;
+- shared sketch layouts need their physical sketch count or grouping model;
+- external operators need memory budget and spill read/write estimates;
+- distributed operators need network bytes and a network calibration axis.
+
+The current scalar objective includes CPU, retained memory, and source/disk
+reads. It does not yet include source writes, spill I/O, network transfer,
+parallelism, cache residency, allocator fragmentation, or wall-clock
+critical-path latency. A physical plan that depends on one of those effects
+must supply an extended model rather than treating the missing dimension as
+zero.
 
 ## Operator-local estimates
 
