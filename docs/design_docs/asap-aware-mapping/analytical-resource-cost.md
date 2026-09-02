@@ -2,11 +2,16 @@
 
 ## Purpose and boundaries
 
-The analytical resource cost model version implemented here is explicitly for
-`DataArrival::AtRest`. It compares legal physical plans using CPU work, peak
-memory, and source/disk I/O. It replaces dimensionless plan-node counts with
-estimates derived from operator complexity, cardinality, row width, and
-concrete summary parameters.
+The analytical resource cost model compares legal physical plans using CPU
+work, peak memory, and source/disk I/O. It replaces dimensionless plan-node
+counts with estimates derived from operator complexity, cardinality, row
+width, concrete summary parameters, and the selected deployment lifecycle.
+
+There are two workload adapters. `AnalyticalCostModel` is the automatic
+planner-ranking adapter for `DataArrival::AtRest`. The standalone
+`analytical_streaming_cost` adapter costs an already-selected incremental
+summary deployment for `DataArrival::ContinuouslyIngesting`. Streaming
+estimates do not yet participate in automatic replacement ranking.
 
 The model does not decide semantic or accuracy legality. Candidate generation
 and guarantee composition run first; costing ranks only the candidates that
@@ -17,12 +22,11 @@ This document distinguishes four implementation layers:
 
 - the physical-DAG estimator, which can compose any DAG whose nodes have
   supported physical operators and complete `OperatorStatistics`; and
-- query-DAG lowering, which recursively maps supported resolved `QueryExpr`
-  operators to that physical representation; and
-- the deployment summary binder, which maps a selected `SummaryExpr` DAG to
-  physical summary operators and snapshots their evidence; and
-- the planner-ranking adapter, which compares the complete raw and replacement
-  DAGs before making a candidate available to global selection.
+- query-DAG lowering, which maps supported `QueryExpr` operators to physical
+  nodes;
+- deployment summary binding, which maps a selected `SummaryExpr` DAG and its
+  lifecycle evidence to physical nodes; and
+- planner ranking, which compares complete raw and replacement DAGs.
 
 Support in the estimator does not imply that a deployment has selected and
 bound that physical algorithm. Unknown query lowering or summary binding makes
@@ -81,6 +85,14 @@ lowering provider owns resolving it from the canonical workload, catalog, and
 operator-statistics sources. Missing required evidence makes the entire plan
 unavailable.
 
+The incremental workload adapter is
+`StreamingSummaryInputs::from_workload`. It additionally requires a fresh
+`DataWorkload.ingestion_rate` and derives the number of arriving rows over the
+same horizon. An unknown recurrence, a zero horizon, no invocation inside the
+horizon, or stale evidence makes either estimate unavailable. Query-shape
+constants such as Top-K `k` are read from the lowered target rather than
+copied out of the workload.
+
 ## Workload horizon and lifecycle
 
 Every alternative must cover the same source data and query horizon. The
@@ -97,15 +109,25 @@ It is not an independent workload axis. A repeated rate without a horizon
 cannot produce a finite total cost.
 
 An at-rest estimate must not be reused for `unknown`, `mixed`, or
-`continuously_ingesting` data. Callers fail closed instead of pretending that
-incremental updates are a one-time snapshot build.
+`continuously_ingesting` data. The incremental adapter requires
+`DataArrival::ContinuouslyIngesting`; it never passes that
+workload through the at-rest formula. `Unknown` fails closed in both adapters.
+`Mixed` also fails closed because `DataWorkload` does not currently separate
+the at-rest backlog cardinality from the continuing stream cardinality. Using
+one ambiguous value for both would double-count or omit work.
 
-The sketch alternative scans the selected source snapshot once and retains
-state. The raw alternative recomputes from that snapshot for every query
-read. Continuously ingesting data, rebuilds, deletions, expiration, and
-retention duration belong to the summary-maintenance lifecycle model. They
-must contribute update/build/delete work before a continuously maintained
-plan is compared with raw execution.
+The at-rest sketch alternative scans the selected source snapshot once and
+retains state. The raw alternative recomputes from that snapshot for every
+query read. The incremental adapter charges the bootstrap scan, every arriving
+update over the horizon, active and retained window state, query-side summary
+operations, and update-side deletes. Periodic rebuild and expiration-policy
+CPU remain unavailable without explicit physical evidence.
+
+The incremental estimator accepts the existing
+`SummaryMaintenanceLifecycleGuarantee`; it does not define another deployment
+mode. `SummaryMaintenanceMode` and `EvaluationSchedule` must match the
+authoritative lifecycle planner derivation for the declared `DataArrival`.
+An inconsistent tuple fails closed rather than being reinterpreted.
 
 ### Comparable source and workload scope
 
@@ -135,11 +157,8 @@ the source, snapshot identifier, and canonical predicates. Raw and candidate
 scopes must match exactly in every field before their estimates are compared.
 Unknown subsumption such as "this wider retained summary covers the requested
 interval" is not guessed here; it requires a separate semantic coverage proof.
-An empty source set is valid only for a fully source-free logical DAG such as
-`time()`, a number literal, or `vector(1)`. After lowering, the reachable Scan
-coverage set must equal the scope source set: a Scan query with an empty scope,
-or a source-free query with a non-empty scope, fails closed. Empty snapshot
-identifiers, invalid recurrence, or a zero horizon also fail closed.
+Missing sources, empty snapshot identifiers, invalid recurrence, or a zero
+horizon fail closed.
 
 Every reachable physical `Scan` carries one exact `SourceCoverage` copied from
 this scope. That coverage includes the existing `Source`, its provider-owned
@@ -164,11 +183,6 @@ OperatorStatistics {
     aggregate_value_bytes,
     k,
     hash_join_build_side,
-    promql: PromqlOperatorStatistics {
-        input_series, output_series, evaluation_steps,
-        window_samples_per_series, subquery_steps, scalar_ops_per_row,
-        binary_operand_mode,
-    },
 }
 ```
 
@@ -200,10 +214,9 @@ For a selected DAG:
 4. Add source/disk reads only at nodes that actually read source or spilled
    data; an in-memory edge contributes zero source reads.
 5. Count a shared node once even when several parents consume it.
-6. Compute peak memory from liveness. During one node's execution, all live
-   child outputs, the operator's local workspace, and its new output buffer
-   coexist. Do not add disjoint transient buffers merely because both appear
-   somewhere in the DAG.
+6. Compute peak memory from liveness: add states that coexist, but do not add
+   disjoint transient buffers merely because both appear somewhere in the
+   DAG.
 7. Retained summaries remain live across reads. Streaming buffers may be
    released after their last consumer.
 
@@ -217,12 +230,6 @@ are rejected. A child-before-parent schedule maintains remaining-consumer
 counts, releases transient output after its last consumer, and keeps retained
 state live. Consequently a shared scan is charged once per execution and a
 fan-out's memory includes the outputs that really coexist.
-
-Each estimate independently requires the semantic set of source coverages on
-its reachable Scan nodes to equal `ComparisonScope.sources`. Multiple physical
-Scans may repeat one coverage, but no scope source may be omitted and no Scan
-may add another coverage. This invariant is enforced by the estimator itself,
-including for callers that construct a physical DAG without the query lowerer.
 
 Logical edge `bytes` feeds parent cardinality estimates; it is not an
 allocation. Each physical node separately supplies `output_buffer_bytes` for
@@ -252,146 +259,6 @@ inherit the target's old node costs. A replacement candidate includes any
 newly embedded child summaries, while an independently shared child is
 deduplicated by physical identity.
 
-### Query-DAG lowering and statistics contract
-
-`lower_query_physical_dag` recursively lowers a resolved `Rc<QueryExpr>` and
-returns a `PhysicalDag` containing both its nodes and root ID. It consumes the
-existing query and physical-operator enums; it does not introduce a parallel
-logical operator vocabulary. For every occurrence, the lowerer sends a
-`PhysicalNodeRequest` containing the logical node, selected existing
-`PhysicalOperator`, occurrence and synthetic-role metadata, already-lowered
-child physical IDs, and any source coverage to a
-`PhysicalNodeEvidenceProvider`. The provider atomically returns its own stable
-`physical_id`, the authoritative `OperatorStatistics`, and explicit
-`output_buffer_bytes`; logical edge bytes are never substituted for an
-allocation. Missing evidence makes the entire query unavailable. The returned
-`PhysicalDag` snapshots this evidence so costing does not re-read a live
-catalog after lowering.
-
-Each lowered Scan is bound to exactly one `SourceCoverage` in the comparison
-scope by the existing source and canonical predicate values. The bound value
-therefore also supplies the provider-owned snapshot ID. Zero matches fail as
-outside scope; multiple matching coverages fail as ambiguous rather than
-choosing an arbitrary snapshot. When a predicate-bearing logical Scan expands
-to Scan → Filter, the synthetic Scan has its own physical ID, statistics, and
-buffer evidence and carries that exact coverage; the Filter has separate
-evidence and no source coverage.
-`ComparisonScope.sources` is an order-independent set of semantic coverages;
-duplicates are invalid. After lowering, every reachable physical Scan must use
-a member of that set and every member must be used by at least one Scan.
-Multiple independent physical Scans may use the same coverage, while a
-provider-declared shared Scan uses it once, so those physical alternatives can
-still be compared under the same semantic scope.
-
-The estimator validates every physical edge before costing; the query lowerer
-reuses the same operator-semantic validator for earlier diagnostics:
-
-- `(rows = 0, bytes = 0)` is a valid empty edge, while positive rows still
-  require byte-width evidence and zero rows cannot carry non-zero bytes;
-- a unary operator's `input_rows` and `input_bytes` equal its child's output;
-- a Scan's external logical input edge equals its output edge, including the
-  synthetic raw Scan created for a predicate-bearing logical Scan;
-- a hash join's left and right inputs equal the corresponding child outputs;
-- Concat and `UNION ALL` input/output totals equal the checked sum of all
-  child outputs; and
-- row-preserving, reducing, and bounded operators obey their cardinality
-  invariants.
-
-The supported mappings are:
-
-| Existing `QueryExpr` shape | Physical DAG |
-|---|---|
-| Scan without predicates | Scan |
-| Scan with pushed predicates | Scan → Filter |
-| Filter | Filter |
-| Project | Project |
-| Reducing Count/Sum/Min/Max/Avg/StdDev/Variance/Group/CountValues without HAVING | HashAggregate |
-| Dedup | Deduplicate |
-| Equi-Join | HashJoin with an evidence-selected build side |
-| Concat or `UNION ALL` | Concat |
-| Sort with at least one ordering key | in-memory Sort |
-| global non-empty-key Sort followed by Limit | heap TopK, with `k = offset + n` from the query IR |
-| partitioned Sort followed by Limit | Sort → Limit |
-| RowNumber/Rank/DenseRank SQLWindowFunc with non-empty order_by | ordered in-memory Window |
-| TimeRange | PromqlRange sliding window |
-| PromqlSubquery | materialized PromqlSubquery |
-| BinaryOp | two-input PromqlVectorBinary; vector/vector uses explicit label-match state |
-| PromqlRelabel | PromqlRelabel |
-| PromqlInfoEnrich | left input plus an explicit scoped info-metric Scan |
-| PromqlSeriesSample | PromqlSeriesSample using the existing SampleKind |
-| PromqlVectorFromScalar | unary PromqlScalarToVector |
-| PromqlScalarFromVector | unary PromqlVectorToScalar |
-| PromqlScalarBridge(float) / EvalTimestamp | zero-input PromqlScalarLeaf |
-| Count/Sum/Min/Max/Avg/StdDev/Variance with PerEntity (`*_over_time`) | PromqlPerSeries |
-| native histogram count/sum/avg/stddev/stdvar/fraction accessor | PromqlPerSeries |
-| other supported fixed-state per-entity reduction | PromqlPerSeries |
-| Absent / AbsentOverTime | PromqlPresence |
-| TimeShift | PassThrough |
-
-HAVING, ordered/distribution-dependent intents such as exact quantile or
-cardinality, Top-K aggregate intents, non-fixed-state per-entity algorithms,
-and extensions remain unavailable until they have an explicit physical
-algorithm. Hash-join lowering
-also uses the bound left and right output schemas to prove that every equality
-compares one column from each side; same-side or out-of-range `ColumnId`s fail
-closed.
-
-An `Rc<QueryExpr>` address is not physical identity. Every logical occurrence
-is independent unless the provider returns the same non-empty `physical_id`.
-Repeated IDs deduplicate only when operator, children, coverage, statistics,
-and buffer evidence are identical; conflicting reuse fails closed. This
-generic lowering creates raw-query operators with
-`ExecutionMultiplicity::PerEvaluation` and zero retained state. Buffer sizes
-are always provider-owned physical evidence.
-
-The DAG itself implements `OperatorStatisticsProvider` over its evidence
-snapshot. That boundary verifies that each map key equals the evidence's
-embedded physical identity and that every node's buffer equals the provider
-snapshot before returning statistics, preventing the public node and evidence
-views from silently drifting apart.
-
-PromQL rows and logical bytes are totals for one workload query evaluation;
-range and subquery values therefore include their internal evaluation steps.
-`evaluation_steps` and `subquery_steps` validate and cost that internal shape.
-For every subquery, `child.evaluation_steps` must equal checked
-`parent.evaluation_steps × subquery_steps`; nested subqueries apply the same
-equation recursively. Overflow or disagreement makes the candidate
-unavailable. `ComparisonScope` alone multiplies the completed query over the
-workload horizon. They are never multiplied into the horizon a second time. Series
-cardinality is carried in child order and must agree across every physical
-edge. Missing window, step, series, expression-work, label-key, or accumulator
-evidence makes the entire candidate unavailable.
-
-Scalar/vector bridges retain their direction in the physical operator. A
-scalar-to-vector bridge consumes zero input series and emits exactly one series;
-both input and output contain one row per evaluation step. A vector-to-scalar
-bridge emits zero series and exactly one scalar row per evaluation step; its
-input-series count must equal the vector child's output-series count.
-
-PromQL binary evidence also records an explicit physical operand mode:
-vector/vector, vector/scalar, or scalar/vector. Cardinality does not determine
-the mode because a vector may legitimately contain zero series. Lowering
-checks the mode against the canonical logical operands. Vector/vector always
-requires label-match state, including for an empty vector; only the two
-scalar/vector modes omit it. A scalar leaf has no inputs or series and emits
-exactly one scalar row per evaluation step.
-
-`info()` resolves its default `target_info` metric, or one exact `__name__`
-matcher, to a concrete existing `Source::TimeSeries` coverage. Its right side
-is an ordinary physical Scan with its own statistics, buffer, snapshot, and
-source bytes; the enrichment operator itself performs no source I/O. The info
-operator must build its label index from this right side. Other label matchers
-remain local enrichment/filter work and require explicit positive
-`scalar_ops_per_row`; their CPU contribution is
-`info_rows × scalar_ops_per_row`. Non-exact metric-name
-selection stays unavailable until a catalog resolver can return the complete
-concrete source set.
-
-Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, opaque PromQL
-extensions, non-exact `info()` metric selection, and SQL `CurrentTimestamp` as
-a PromQL scalar stay unavailable. They are not modeled as free pass-through
-work.
-
 ## Physical operator formulas
 
 Operator estimates are local: child CPU and I/O are excluded and composed by
@@ -410,16 +277,6 @@ the DAG rules above.
 | Concat | `output_rows` | one output row/batch | `0` |
 | Ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
 | Limit | `output_rows` | one output row/batch | `0` |
-| PromQL range | `input_rows` | `input_series × window_samples_per_series × decoded_sample_bytes` | `0` beyond child |
-| PromQL subquery | `input_rows + output_rows` | materialized inner-step logical bytes | `0` beyond child |
-| PromQL vector binary | left + right + output rows | selected-side label-match hash state; one output row for scalar/vector | `0` beyond children |
-| PromQL relabel | `input_rows × scalar_ops_per_row` | one output row/batch | `0` |
-| PromQL info enrichment | left + info + output rows + `info_rows × matcher_ops_per_row` | right-side label-match hash state | `0` beyond its explicit Scan child |
-| PromQL series sample | input rows + input series | selected-series key/hash state | `0` |
-| PromQL scalar-to-vector / vector-to-scalar bridge | input + output rows | one output row/batch | `0` |
-| PromQL scalar leaf | output rows | one output row/batch | `0` |
-| PromQL per-series intent | `input_rows × scalar_ops_per_row` | `input_series × accumulator_bytes` | `0` |
-| PromQL absence | input work + synthesized output | one output row/batch | `0` |
 
 These formulas name physical implementations. An external sort must add
 spill writes and reads; a nested-loop join must not use the hash-join formula.
@@ -461,10 +318,15 @@ For a per-subpopulation layout,
 of physical structures described by that layout; the model must not infer it
 from logical group count alone.
 
-Summary merge, subtract, delete, and readout are separate physical operators.
-Their CPU and memory use the concrete summary state size and number of input
-states. A plan using one of these operations is unavailable until the
-corresponding formula and required lifecycle evidence are present.
+Summary merge, subtract, delete, and readout are separate physical operations.
+The incremental estimator discovers them from the selected `SummaryExpr` DAG
+and requires a per-instance `SummaryOperationCpuEvidence` value for every
+operation actually present. It does not define a duplicate query-method enum.
+Merge, subtract, and readout counts are multiplied by query evaluations;
+delete counts are multiplied by arriving updates. Insert work consists of the
+bootstrap rows plus each arriving row routed to every active window. All state
+operations scale by the resolved physical sketch-instance count where
+applicable.
 
 Summary build, merge, subtract, delete, and readout require their own physical
 operators and resolved statistics. Until an operation has such a formula, a
@@ -488,23 +350,88 @@ state, execution multiplicity, and source coverage. The adapter calls
 `estimate_physical_dag_comparison`; it never calls `DefaultCostModel` or a
 structural-node-count fallback for final cost.
 
-A candidate is exposed to global selection only when both complete DAGs are
-valid and its calibrated cost is strictly below the raw baseline. Missing or
-stale evidence, an unknown physical algorithm, invalid edges, incomplete
-source coverage, or a candidate that is not cheaper yields `None`. When no
-candidate remains, `chosen = None` preserves the raw pre-ASAP target.
+For bootstrap rows `B`, arriving rows `U`, active windows `A`, query
+evaluations `Q`, physical instances `P`, and unique `SummaryAgg` states `S`:
 
-Complete-plan costing also changes CSE selection order. Global selection sends
-all share and recompute alternatives through `candidate_cost`; it does not use
-the legacy structural CSE hook to discard one arm first. Once an arm is chosen,
-the existing consumer-count propagation records whether that physical
-alternative shares or recomputes. Within each returned physical DAG, stable
-provider-owned physical IDs deduplicate shared scans, builds, and retained
-states. Logical `Rc` identity is never substituted for physical identity.
+```text
+insert calls   = S * (B + U * A)
+merge calls    = Q * P * SummaryMerge pairwise operations in the DAG
+subtract calls = Q * P * SummarySubtract nodes in the DAG
+delete calls   = U * P * SummaryDelete nodes in the DAG
+readout calls  = Q * P * SummaryEstimate nodes in the DAG
+```
+
+`B` comes from fresh `DataWorkload.input_cardinality`. For `Shared` and
+`ContinuouslyMaintained`, `U` is the conservative ceiling of
+`DataWorkload.ingestion_rate * horizon`; for `Prepared`, it uses only the
+intersection of the activation/retirement interval with the comparison
+horizon. `Q` comes from `QueryRecurrence` over that same finite horizon. Atomic
+CPU values come from `SummaryOperationCpuEvidence`. They may be benchmark
+measurements or algorithmic operation estimates, but their provenance and
+units must be consistent within one comparison.
+
+Persistent memory is:
+
+```text
+(active_window_count + retained_window_count)
+  * physical_sketch_count
+  * unique_summary_state_count
+  * state_bytes_per_sketch
+```
+
+Merge or subtract additionally needs one transient result state per physical
+instance. Shared `Rc<SummaryNode>` identity is visited once, so shared state is
+not rebuilt or retained twice. Streaming input bytes are not reported as disk
+scan bytes; only the optional bootstrap source scan is.
+
+The at-rest summary-candidate bridge still has formulas for sketch build and
+readout only. It rejects summary join, merge, subtract, and delete explicitly
+rather than charging only their children. The separate incremental estimator
+supports merge, subtract, delete, and readout when their operation evidence is
+present. Summary join remains unavailable because its join cardinality, state,
+and algorithm evidence are not represented by the streaming input adapter.
+
+The compact planner bridge accepts only complete shapes it can currently lower
+from its resolved inputs: an unfiltered source scan followed by one aggregate,
+and the canonical count-grouped Top-K fusion over such a scan. It rejects a
+filter, projection, join, window, nested aggregate, or predicate-bearing scan.
+Although the standalone physical-DAG estimator can cost several of those
+operators when given complete `OperatorStatistics`, the planner does not yet have
+an input path that lowers arbitrary candidate DAGs into it. Adding that lowering
+and its statistics provider is future integration work. Final selection
+excludes every unavailable replacement; when none remain, `chosen = None`
+preserves the raw pre-ASAP target.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
 mismatches and arithmetic overflow also fail closed.
+
+### Relationship to the ASAPQuery formulations
+
+The ASAPQuery
+[configuration formulation](https://github.com/ProjectASAP/ASAPQuery/blob/8aa93f417ee662c188d65da5eb20ceefa01e5c12/.design_docs/sketch-config-optimization-formulation.md)
+and [MIP formulation](https://github.com/ProjectASAP/ASAPQuery/blob/8aa93f417ee662c188d65da5eb20ceefa01e5c12/.design_docs/optimizer-mip-formulation.md)
+at source revision `8aa93f4` are source material for physical streaming
+multipliers, not an additional ASAPPlanner domain model. Their
+shared principles used here are: ingestion cost scales with arrival rate;
+overlapping active windows multiply insert work and state; retained windows
+consume persistent memory; and merge/subtract/readout are charged at query
+recurrence.
+
+The documents disagree on important details. One limits subtract to
+non-overlapping/tumbling prefix states and charges all retained windows as
+steady-state memory; the other permits subtract over sliding configurations
+and omits retained-but-unused sliding storage from continuous memory. This
+implementation follows ASAPPlanner's selected `SummaryExpr` and lifecycle
+semantics instead of choosing a new window/query-method policy: subtraction is
+costed only when a `SummarySubtract` node already exists, and every physically
+retained window supplied by the deployment is charged. Window legality remains
+the responsibility of candidate generation and lifecycle planning.
+
+The global facility-location/MIP decisions from those documents—deploying a
+configuration once and assigning multiple atomic queries to it—are outside
+this estimator. It costs one already-selected deployment and does not introduce
+`x`/`y` assignment variables.
 
 ## Accuracy evidence remains separate from cost
 
@@ -551,12 +478,10 @@ The intended end-to-end selection pipeline is:
 5. estimates the complete candidate DAG;
 6. applies calibration and ranks candidates by ascending cost.
 
-The query lowerer and physical estimator cover the supported raw-query shapes
-listed above. `AnalyticalPlannerCostModel` executes this pipeline for every
-candidate supplied to `PlanSpace::global_selection`. Logical rewrites are
-lowered recursively. Summary candidates participate only after the deployment
-has bound their complete `SummaryExpr` DAG; there is no optimistic generic
-summary fallback.
+The current planner bridge executes this pipeline only for the compact shapes
+listed above. Other supported physical operators are currently usable through
+`estimate_physical_dag`, but are not automatically reached by replacement
+selection.
 
 Before applying the following arithmetic, callers validate exact equality of
 the raw and selected alternative's `ComparisonScope`, and use the same
