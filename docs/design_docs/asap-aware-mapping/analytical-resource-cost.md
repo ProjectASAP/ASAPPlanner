@@ -87,10 +87,12 @@ lowering provider owns resolving it from the canonical workload, catalog, and
 operator-statistics sources. Missing required evidence makes the entire plan
 unavailable.
 
-The incremental workload adapter is
-`StreamingSummaryInputs::from_workload`. It additionally requires a fresh
-`DataWorkload.ingestion_rate` and derives the number of arriving rows over the
-same horizon. An unknown recurrence, a zero horizon, no invocation inside the
+The incremental adapter is `StreamingSummaryInputs::from_workload`. Its public
+entry point requires the
+same `ComparisonScope` and `SourceCoverage` as the raw baseline; planning
+time, horizon, recurrence, evaluation count, and arrival mode are not copied
+into `StreamingSummaryInputs`. It additionally requires a fresh
+`DataWorkload.ingestion_rate`. An unknown recurrence, a zero horizon, no invocation inside the
 horizon, or stale evidence makes either estimate unavailable. Query-shape
 constants such as Top-K `k` are read from the lowered target rather than
 copied out of the workload.
@@ -126,12 +128,12 @@ operations, and update-side deletes. A pure streaming deployment may bootstrap
 from `{ rows: 0, bytes: 0, source_scan_bytes: 0 }`; row and byte evidence may
 not disagree. Zero bootstrap work is not a fabricated at-rest backlog.
 
-The streaming raw baseline is specified per evaluation by
-`StreamingRawInputEvidence` and multiplied by the `evaluation_count` derived
-from the same query recurrence and horizon as the maintained candidate. It
-rescans and reprocesses the complete declared raw input once per evaluation,
-while the maintained candidate scans only its declared bootstrap source and
-processes subsequent arrivals incrementally.
+The streaming raw baseline is rooted at the same planning-time rows, logical
+bytes, source scan, and source-coverage identity as the summary bootstrap.
+Each evaluation adds rows and bytes that arrived since planning time, using
+the recurrence's evaluation offsets. A baseline whose bootstrap facts do not
+match every state attached to that source is unavailable. Multi-source raw
+comparison requires per-source raw evidence and currently fails closed.
 
 Periodic rebuild and implicit expiration-policy CPU remain unavailable. The
 authoritative lifecycle types express direct versus incremental maintenance,
@@ -339,11 +341,14 @@ Summary merge, subtract, delete, and readout are separate physical operations.
 The incremental estimator discovers them from the selected `SummaryExpr` DAG
 and requires a per-instance `SummaryOperationCpuEvidence` value for every
 operation actually present. It does not define a duplicate query-method enum.
-Merge, subtract, and readout counts are multiplied by query evaluations;
-delete counts are multiplied by arriving updates. Insert work consists of the
-bootstrap rows plus each arriving row routed to every active window. All state
-operations scale by the resolved physical sketch-instance count where
-applicable.
+Merge, subtract, and readout counts are multiplied by query evaluations.
+Their execution multiplicity is evidence on that exact physical operator; it
+is not borrowed from the first aggregation below it. A delete is additionally
+bound to the exact state deployment whose active lifecycle bounds expiration.
+Delete work uses an explicit expiration/retraction event rate and routing
+fanout; it is not inferred from ingestion. Insert work consists of bootstrap
+rows routed to `bootstrap_window_count` plus each arriving row routed to every
+active window.
 
 Summary build, merge, subtract, delete, and readout require their own physical
 operators and resolved statistics. Until an operation has such a formula, a
@@ -371,12 +376,19 @@ For bootstrap rows `B`, arriving rows `U`, active windows `A`, query
 evaluations `Q`, physical instances `P`, and unique `SummaryAgg` states `S`:
 
 ```text
-insert calls   = S * (B + U * A)
+insert calls   = sum_per_state(B * bootstrap_window_count + U * A)
 merge calls    = Q * P * SummaryMerge pairwise operations in the DAG
 subtract calls = Q * P * SummarySubtract nodes in the DAG
-delete calls   = U * P * SummaryDelete nodes in the DAG
+delete calls   = expiration_rate * active_seconds * delete_routing_fanout
 readout calls  = Q * P * SummaryEstimate nodes in the DAG
 ```
+
+Here `P` is the provider-declared execution multiplicity of each physical
+operator, not a structural node count. Bootstrap scans are de-duplicated only
+when their provider-owned physical-read identities match. Sharing the same
+logical `SourceCoverage` is insufficient because two builds may independently
+read that source. Persistent state is summed, while transient operator
+workspace uses the DAG liveness peak rather than a structural sum.
 
 `B` comes from fresh `DataWorkload.input_cardinality`. For `Shared` and
 `ContinuouslyMaintained`, `U` is the conservative ceiling of
@@ -500,12 +512,15 @@ The intended end-to-end selection pipeline is:
 The at-rest planner bridge executes this pipeline only for the compact shapes
 listed above. The streaming adapter connects raw recomputation and primitive
 summary lifecycle costs to the existing global lifecycle-selection hooks.
-After the lifecycle planner has selected compatible guarantees for the unique
-`SummaryAgg` deployments, `complete_summary_candidate_cost` replaces their
-primitive sum with one whole-root estimate. Merge, subtract, delete, readout,
-and join therefore participate in automatic candidate ranking. If the root
-needs unavailable operation evidence, or its state deployments do not share a
-lifecycle guarantee that the current whole-root estimator can represent, the
+The lifecycle planner enumerates compatible lifecycle combinations for the
+unique `SummaryAgg` deployments and invokes `complete_summary_candidate_cost`
+for each combination before selecting the minimum. The hook receives explicit
+node-to-guarantee bindings plus the horizon and expected reads. Every
+`SummaryAgg` and `SummaryJoin` is bound to physical evidence by exact `Rc`
+identity, so heterogeneous states are costed independently and shared states
+once. Merge, subtract, delete, readout, and join participate in automatic
+candidate ranking. If the root
+needs unavailable operation evidence, the
 hook returns unavailable. Global selection then excludes that summary and
 materialization retains the raw expression; it never falls back to the partial
 `SummaryAgg` sum.
