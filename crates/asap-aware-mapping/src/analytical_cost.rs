@@ -422,6 +422,30 @@ fn validate_operator_statistics(
                 });
             }
         }
+        if matches!(node.operator, PhysicalOperator::PromqlSubquery) {
+            let subquery_steps = promql
+                .subquery_steps
+                .filter(|steps| *steps > 0)
+                .ok_or(AnalyticalCostError::MissingOrZero("subquery_steps"))?;
+            let child = &statistics[node.children[0].as_str()];
+            let child_steps = child
+                .promql
+                .as_ref()
+                .ok_or(AnalyticalCostError::MissingOrStale(
+                    "child_promql_operator_statistics",
+                ))?
+                .evaluation_steps;
+            let expected = promql
+                .evaluation_steps
+                .checked_mul(subquery_steps)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            if child_steps != expected {
+                return Err(AnalyticalCostError::InvalidOperatorStatistics {
+                    node: node.id.clone(),
+                    reason: "subquery child steps do not equal parent steps times subquery steps",
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -595,7 +619,7 @@ pub fn estimate_operator(
                 scan_bytes: 0,
             }
         }
-        PhysicalOperator::PromqlVectorBinary | PhysicalOperator::PromqlInfoEnrich => {
+        PhysicalOperator::PromqlVectorBinary => {
             let promql = require_promql_statistics(&statistics, 2)?;
             let right = input(1)?;
             let scalar_vector = matches!(operator, PhysicalOperator::PromqlVectorBinary)
@@ -623,6 +647,32 @@ pub fn estimate_operator(
             ResourceEstimate {
                 cpu_ops: left.rows as f64 + right.rows as f64 + output.rows as f64,
                 peak_memory_bytes: matching_bytes,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::PromqlInfoEnrich => {
+            let promql = require_promql_statistics(&statistics, 2)?;
+            let right = input(1)?;
+            if statistics.hash_join_build_side != Some(HashJoinBuildSide::Right) {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "info enrichment must build its label index from the right side",
+                ));
+            }
+            let key_bytes = statistics
+                .key_bytes
+                .ok_or(AnalyticalCostError::MissingOrZero("key_bytes"))?;
+            let predicate_ops = promql.scalar_ops_per_row.unwrap_or(0);
+            ResourceEstimate {
+                cpu_ops: left.rows as f64
+                    + right.rows as f64
+                    + output.rows as f64
+                    + right.rows as f64 * predicate_ops as f64,
+                peak_memory_bytes: checked_bytes(&[
+                    promql.input_series[1],
+                    key_bytes
+                        .checked_add(16)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                ])?,
                 scan_bytes: 0,
             }
         }

@@ -129,8 +129,11 @@ the source, snapshot identifier, and canonical predicates. Raw and candidate
 scopes must match exactly in every field before their estimates are compared.
 Unknown subsumption such as "this wider retained summary covers the requested
 interval" is not guessed here; it requires a separate semantic coverage proof.
-Missing sources, empty snapshot identifiers, invalid recurrence, or a zero
-horizon fail closed.
+An empty source set is valid only for a fully source-free logical DAG such as
+`time()`, a number literal, or `vector(1)`. After lowering, the reachable Scan
+coverage set must equal the scope source set: a Scan query with an empty scope,
+or a source-free query with a non-empty scope, fails closed. Empty snapshot
+identifiers, invalid recurrence, or a zero horizon also fail closed.
 
 Every reachable physical `Scan` carries one exact `SourceCoverage` copied from
 this scope. That coverage includes the existing `Source`, its provider-owned
@@ -303,7 +306,9 @@ The supported mappings are:
 | PromqlSeriesSample | PromqlSeriesSample using the existing SampleKind |
 | PromqlVectorFromScalar / PromqlScalarFromVector | unary PromqlBridge |
 | PromqlScalarBridge(float) / EvalTimestamp | zero-input PromqlScalarLeaf |
-| supported fixed-state per-entity reduction | PromqlPerSeries |
+| Count/Sum/Min/Max/Avg/StdDev/Variance with PerEntity (`*_over_time`) | PromqlPerSeries |
+| native histogram count/sum/avg/stddev/stdvar/fraction accessor | PromqlPerSeries |
+| other supported fixed-state per-entity reduction | PromqlPerSeries |
 | Absent / AbsentOverTime | PromqlPresence |
 | TimeShift | PassThrough |
 
@@ -331,8 +336,11 @@ views from silently drifting apart.
 
 PromQL rows and logical bytes are totals for one workload query evaluation;
 range and subquery values therefore include their internal evaluation steps.
-`evaluation_steps` and `subquery_steps` validate and cost that internal shape,
-while `ComparisonScope` alone multiplies the completed query over the workload
+`evaluation_steps` and `subquery_steps` validate and cost that internal shape.
+For every subquery, `child.evaluation_steps` must equal checked
+`parent.evaluation_steps × subquery_steps`; nested subqueries apply the same
+equation recursively. Overflow or disagreement makes the candidate
+unavailable. `ComparisonScope` alone multiplies the completed query over the workload
 horizon. They are never multiplied into the horizon a second time. Series
 cardinality is carried in child order and must agree across every physical
 edge. Missing window, step, series, expression-work, label-key, or accumulator
@@ -341,8 +349,11 @@ evidence makes the entire candidate unavailable.
 `info()` resolves its default `target_info` metric, or one exact `__name__`
 matcher, to a concrete existing `Source::TimeSeries` coverage. Its right side
 is an ordinary physical Scan with its own statistics, buffer, snapshot, and
-source bytes; the enrichment operator itself performs no source I/O. Other
-label matchers remain local enrichment/filter work. Non-exact metric-name
+source bytes; the enrichment operator itself performs no source I/O. The info
+operator must build its label index from this right side. Other label matchers
+remain local enrichment/filter work and require explicit positive
+`scalar_ops_per_row`; their CPU contribution is
+`info_rows × scalar_ops_per_row`. Non-exact metric-name
 selection stays unavailable until a catalog resolver can return the complete
 concrete source set.
 
@@ -373,7 +384,7 @@ the DAG rules above.
 | PromQL subquery | `input_rows + output_rows` | materialized inner-step logical bytes | `0` beyond child |
 | PromQL vector binary | left + right + output rows | selected-side label-match hash state; one output row for scalar/vector | `0` beyond children |
 | PromQL relabel | `input_rows × scalar_ops_per_row` | one output row/batch | `0` |
-| PromQL info enrichment | left + info + output rows | info-side label-match hash state | `0` beyond its explicit Scan child |
+| PromQL info enrichment | left + info + output rows + `info_rows × matcher_ops_per_row` | right-side label-match hash state | `0` beyond its explicit Scan child |
 | PromQL series sample | input rows + input series | selected-series key/hash state | `0` |
 | PromQL scalar/vector bridge | input + output rows | one output row/batch | `0` |
 | PromQL scalar leaf | output rows | one output row/batch | `0` |
