@@ -12,7 +12,8 @@ use asap_types::workload::DataArrival;
 use serde::{Deserialize, Serialize};
 
 use crate::analytical_statistics::{
-    ComparisonScope, OperatorStatistics, OperatorStatisticsProvider,
+    validate_comparison_scopes, ComparisonScope, OperatorStatistics, OperatorStatisticsProvider,
+    SourceCoverage,
 };
 
 pub const ANALYTICAL_MODEL_VERSION: &str = "analytical-resource-at-rest-v1";
@@ -88,6 +89,10 @@ pub struct PhysicalDagNode {
     pub id: String,
     pub operator: PhysicalOperator,
     pub children: Vec<String>,
+    /// Exact comparison-scope coverage consumed by a scan. Non-scan nodes
+    /// leave this empty. Reusing `SourceCoverage` prevents a physical plan
+    /// from naming a source independently of its snapshot and predicates.
+    pub source_coverage: Option<SourceCoverage>,
     /// Maximum transient edge buffer, distinct from logical `output_bytes`.
     pub output_buffer_bytes: u64,
     /// State that remains live after this node finishes (zero for ordinary
@@ -102,6 +107,40 @@ pub enum ExecutionMultiplicity {
     PerEvaluation,
 }
 
+/// Borrowed inputs for one physical-DAG estimate. This remains available
+/// independently for diagnostics; plan selection should use
+/// [`estimate_physical_dag_comparison`] so scope equality is mandatory.
+pub struct PhysicalDagEstimateRequest<'a> {
+    pub nodes: &'a [PhysicalDagNode],
+    pub root: &'a str,
+    pub scope: &'a ComparisonScope,
+    pub statistics: &'a dyn OperatorStatisticsProvider,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalDagComparisonEstimate {
+    pub raw: ResourceEstimate,
+    pub candidate: ResourceEstimate,
+}
+
+/// Estimate two plans only after proving that their source, snapshot,
+/// predicate, event-time, recurrence, and horizon scopes are identical.
+pub fn estimate_physical_dag_comparison(
+    raw: PhysicalDagEstimateRequest<'_>,
+    candidate: PhysicalDagEstimateRequest<'_>,
+) -> Result<PhysicalDagComparisonEstimate, AnalyticalCostError> {
+    validate_comparison_scopes(raw.scope, candidate.scope)?;
+    Ok(PhysicalDagComparisonEstimate {
+        raw: estimate_physical_dag(raw.nodes, raw.root, raw.scope, raw.statistics)?,
+        candidate: estimate_physical_dag(
+            candidate.nodes,
+            candidate.root,
+            candidate.scope,
+            candidate.statistics,
+        )?,
+    })
+}
+
 /// Compose local operator estimates once per physical identity. CPU and disk
 /// are additive; peak memory is simulated over a child-before-parent schedule
 /// and releases transient child outputs after their last consumer.
@@ -109,7 +148,7 @@ pub fn estimate_physical_dag(
     nodes: &[PhysicalDagNode],
     root: &str,
     scope: &ComparisonScope,
-    statistics: &impl OperatorStatisticsProvider,
+    statistics: &(impl OperatorStatisticsProvider + ?Sized),
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
     let evaluation_count = scope.validate()?;
     let by_id: HashMap<&str, &PhysicalDagNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
@@ -155,6 +194,24 @@ pub fn estimate_physical_dag(
     for id in &order {
         let node = by_id[id];
         let node_statistics = &resolved_statistics[id];
+        match node.operator {
+            PhysicalOperator::Scan => {
+                let coverage = node.source_coverage.as_ref().ok_or_else(|| {
+                    AnalyticalCostError::MissingScanSourceCoverage(node.id.clone())
+                })?;
+                if !scope.sources.contains(coverage) {
+                    return Err(AnalyticalCostError::ScanOutsideComparisonScope(
+                        node.id.clone(),
+                    ));
+                }
+            }
+            _ if node.source_coverage.is_some() => {
+                return Err(AnalyticalCostError::InvalidPhysicalDag(
+                    "only scan nodes may declare source coverage",
+                ));
+            }
+            _ => {}
+        }
         validate_operator_statistics(node, node_statistics, &by_id, &resolved_statistics)?;
         if node.retained_bytes > 0 && matches!(node.execution, ExecutionMultiplicity::PerEvaluation)
         {
@@ -164,6 +221,13 @@ pub fn estimate_physical_dag(
         }
         for child in &node.children {
             let child = by_id[child.as_str()];
+            if matches!(node.execution, ExecutionMultiplicity::Once)
+                && matches!(child.execution, ExecutionMultiplicity::PerEvaluation)
+            {
+                return Err(AnalyticalCostError::InvalidPhysicalDag(
+                    "build-once node cannot consume a per-evaluation child",
+                ));
+            }
             if matches!(node.execution, ExecutionMultiplicity::PerEvaluation)
                 && matches!(child.execution, ExecutionMultiplicity::Once)
                 && child.retained_bytes == 0
@@ -273,6 +337,16 @@ fn validate_operator_statistics(
             "operator child count does not match physical arity",
         ));
     }
+    match node.operator {
+        PhysicalOperator::Scan => {}
+        _ if node_statistics.source_scan_bytes != 0 => {
+            return Err(AnalyticalCostError::InvalidOperatorStatistics {
+                node: node.id.clone(),
+                reason: "only scan operators may read source bytes",
+            });
+        }
+        _ => {}
+    }
     for edge in node_statistics
         .inputs
         .iter()
@@ -331,7 +405,7 @@ pub fn estimate_operator(
         PhysicalOperator::Scan => ResourceEstimate {
             cpu_ops: left.rows as f64,
             peak_memory_bytes: per_row_width(left.rows, left.bytes)?,
-            scan_bytes: left.bytes,
+            scan_bytes: statistics.source_scan_bytes,
         },
         PhysicalOperator::Filter | PhysicalOperator::Project | PhysicalOperator::PassThrough => {
             ResourceEstimate {
@@ -472,6 +546,10 @@ pub enum AnalyticalCostError {
     UnsupportedSummaryOperation(&'static str),
     #[error("required comparison-scope field {0} is missing")]
     MissingComparisonScope(&'static str),
+    #[error("scan node {0} does not declare source coverage")]
+    MissingScanSourceCoverage(String),
+    #[error("scan node {0} reads source coverage outside the comparison scope")]
+    ScanOutsideComparisonScope(String),
     #[error("raw and candidate comparison scopes differ in {0}")]
     ComparisonScopeMismatch(&'static str),
     #[error("operator statistics are unavailable for physical node {0}")]
@@ -511,16 +589,19 @@ mod tests {
     fn physical_operator_formulas_keep_disk_at_scan_and_require_join_stats() {
         let scan = estimate_operator(
             PhysicalOperator::Scan,
-            statistics(
-                vec![EdgeStatistics {
-                    rows: 1_000,
-                    bytes: 64_000,
-                }],
-                EdgeStatistics {
-                    rows: 1_000,
-                    bytes: 64_000,
-                },
-            ),
+            OperatorStatistics {
+                source_scan_bytes: 64_000,
+                ..statistics(
+                    vec![EdgeStatistics {
+                        rows: 1_000,
+                        bytes: 64_000,
+                    }],
+                    EdgeStatistics {
+                        rows: 1_000,
+                        bytes: 64_000,
+                    },
+                )
+            },
         )
         .unwrap();
         assert_eq!(scan.scan_bytes, 64_000);
@@ -677,11 +758,13 @@ mod tests {
 
     #[test]
     fn physical_dag_counts_shared_scan_once_and_uses_live_memory() {
+        let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
             PhysicalDagNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
+                source_coverage: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -690,6 +773,7 @@ mod tests {
                 id: "left".into(),
                 operator: PhysicalOperator::Filter,
                 children: vec!["scan".into()],
+                source_coverage: None,
                 output_buffer_bytes: 4,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -698,6 +782,7 @@ mod tests {
                 id: "right".into(),
                 operator: PhysicalOperator::Filter,
                 children: vec!["scan".into()],
+                source_coverage: None,
                 output_buffer_bytes: 4,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -706,6 +791,7 @@ mod tests {
                 id: "root".into(),
                 operator: PhysicalOperator::Concat,
                 children: vec!["left".into(), "right".into()],
+                source_coverage: None,
                 output_buffer_bytes: 8,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -720,7 +806,13 @@ mod tests {
             bytes: 400,
         };
         let provided = HashMap::from([
-            ("scan".into(), statistics(vec![scan_edge], scan_edge)),
+            (
+                "scan".into(),
+                OperatorStatistics {
+                    source_scan_bytes: 1_000,
+                    ..statistics(vec![scan_edge], scan_edge)
+                },
+            ),
             ("left".into(), statistics(vec![scan_edge], branch_edge)),
             ("right".into(), statistics(vec![scan_edge], branch_edge)),
             (
@@ -746,11 +838,13 @@ mod tests {
 
     #[test]
     fn physical_dag_separates_build_once_from_per_evaluation_work() {
+        let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
             PhysicalDagNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
+                source_coverage: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::Once,
@@ -759,6 +853,7 @@ mod tests {
                 id: "state".into(),
                 operator: PhysicalOperator::HashAggregate,
                 children: vec!["scan".into()],
+                source_coverage: None,
                 output_buffer_bytes: 16,
                 retained_bytes: 32,
                 execution: ExecutionMultiplicity::Once,
@@ -767,6 +862,7 @@ mod tests {
                 id: "read".into(),
                 operator: PhysicalOperator::Limit,
                 children: vec!["state".into()],
+                source_coverage: None,
                 output_buffer_bytes: 16,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -778,7 +874,13 @@ mod tests {
         };
         let state_edge = EdgeStatistics { rows: 1, bytes: 16 };
         let provided = HashMap::from([
-            ("scan".into(), statistics(vec![scan_edge], scan_edge)),
+            (
+                "scan".into(),
+                OperatorStatistics {
+                    source_scan_bytes: 1_000,
+                    ..statistics(vec![scan_edge], scan_edge)
+                },
+            ),
             (
                 "state".into(),
                 OperatorStatistics {
@@ -828,6 +930,7 @@ mod tests {
 
     fn statistics(inputs: Vec<EdgeStatistics>, output: EdgeStatistics) -> OperatorStatistics {
         OperatorStatistics {
+            source_scan_bytes: 0,
             inputs,
             output,
             group_count: None,
@@ -885,11 +988,13 @@ mod tests {
     fn physical_dag_fails_closed_on_missing_or_conflicting_edge_statistics() {
         use std::collections::HashMap;
 
+        let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
             PhysicalDagNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
+                source_coverage: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -898,6 +1003,7 @@ mod tests {
                 id: "filter".into(),
                 operator: PhysicalOperator::Filter,
                 children: vec!["scan".into()],
+                source_coverage: None,
                 output_buffer_bytes: 4,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -906,16 +1012,19 @@ mod tests {
         let scope = comparison_scope();
         let mut provided = HashMap::from([(
             "scan".to_string(),
-            statistics(
-                vec![EdgeStatistics {
-                    rows: 100,
-                    bytes: 1_000,
-                }],
-                EdgeStatistics {
-                    rows: 100,
-                    bytes: 1_000,
-                },
-            ),
+            OperatorStatistics {
+                source_scan_bytes: 1_000,
+                ..statistics(
+                    vec![EdgeStatistics {
+                        rows: 100,
+                        bytes: 1_000,
+                    }],
+                    EdgeStatistics {
+                        rows: 100,
+                        bytes: 1_000,
+                    },
+                )
+            },
         )]);
 
         assert_eq!(
@@ -952,11 +1061,13 @@ mod tests {
     fn provider_statistics_drive_a_consistent_physical_dag_estimate() {
         use std::collections::HashMap;
 
+        let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
             PhysicalDagNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
+                source_coverage: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -965,6 +1076,7 @@ mod tests {
                 id: "filter".into(),
                 operator: PhysicalOperator::Filter,
                 children: vec!["scan".into()],
+                source_coverage: None,
                 output_buffer_bytes: 4,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -973,16 +1085,19 @@ mod tests {
         let provided = HashMap::from([
             (
                 "scan".to_string(),
-                statistics(
-                    vec![EdgeStatistics {
-                        rows: 100,
-                        bytes: 1_000,
-                    }],
-                    EdgeStatistics {
-                        rows: 100,
-                        bytes: 1_000,
-                    },
-                ),
+                OperatorStatistics {
+                    source_scan_bytes: 1_000,
+                    ..statistics(
+                        vec![EdgeStatistics {
+                            rows: 100,
+                            bytes: 1_000,
+                        }],
+                        EdgeStatistics {
+                            rows: 100,
+                            bytes: 1_000,
+                        },
+                    )
+                },
             ),
             (
                 "filter".to_string(),
@@ -1007,11 +1122,13 @@ mod tests {
 
     #[test]
     fn physical_dag_accepts_an_empty_operator_output() {
+        let coverage = comparison_scope().sources[0].clone();
         let nodes = vec![
             PhysicalDagNode {
                 id: "scan".into(),
                 operator: PhysicalOperator::Scan,
                 children: vec![],
+                source_coverage: Some(coverage),
                 output_buffer_bytes: 10,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -1020,6 +1137,7 @@ mod tests {
                 id: "filter".into(),
                 operator: PhysicalOperator::Filter,
                 children: vec!["scan".into()],
+                source_coverage: None,
                 output_buffer_bytes: 0,
                 retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
@@ -1030,7 +1148,13 @@ mod tests {
             bytes: 1_000,
         };
         let provided = HashMap::from([
-            ("scan".into(), statistics(vec![input], input)),
+            (
+                "scan".into(),
+                OperatorStatistics {
+                    source_scan_bytes: 1_000,
+                    ..statistics(vec![input], input)
+                },
+            ),
             (
                 "filter".into(),
                 statistics(vec![input], EdgeStatistics { rows: 0, bytes: 0 }),
@@ -1042,5 +1166,246 @@ mod tests {
         assert_eq!(estimate.cpu_ops, 1_200.0);
         assert_eq!(estimate.peak_memory_bytes, 10);
         assert_eq!(estimate.scan_bytes, 6_000);
+    }
+
+    #[test]
+    fn physical_dag_rejects_a_scan_not_covered_by_its_scope() {
+        let nodes = vec![PhysicalDagNode {
+            id: "scan".into(),
+            operator: PhysicalOperator::Scan,
+            children: vec![],
+            source_coverage: Some(SourceCoverage {
+                source: asap_types::pre_asap::query_expr::Source::Table {
+                    table_ref: "other_metrics".into(),
+                },
+                snapshot_id: "catalog-version-42".into(),
+                predicates: vec![],
+            }),
+            output_buffer_bytes: 10,
+            retained_bytes: 0,
+            execution: ExecutionMultiplicity::PerEvaluation,
+        }];
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let provided = HashMap::from([(
+            "scan".into(),
+            OperatorStatistics {
+                source_scan_bytes: 250,
+                ..statistics(vec![edge], edge)
+            },
+        )]);
+
+        assert_eq!(
+            estimate_physical_dag(&nodes, "scan", &comparison_scope(), &provided),
+            Err(AnalyticalCostError::ScanOutsideComparisonScope(
+                "scan".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn physical_dag_rejects_a_scan_without_explicit_coverage() {
+        let nodes = vec![PhysicalDagNode {
+            id: "scan".into(),
+            operator: PhysicalOperator::Scan,
+            children: vec![],
+            source_coverage: None,
+            output_buffer_bytes: 10,
+            retained_bytes: 0,
+            execution: ExecutionMultiplicity::PerEvaluation,
+        }];
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let provided = HashMap::from([(
+            "scan".into(),
+            OperatorStatistics {
+                source_scan_bytes: 250,
+                ..statistics(vec![edge], edge)
+            },
+        )]);
+
+        assert_eq!(
+            estimate_physical_dag(&nodes, "scan", &comparison_scope(), &provided),
+            Err(AnalyticalCostError::MissingScanSourceCoverage(
+                "scan".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn build_once_parent_cannot_consume_a_per_evaluation_child() {
+        let coverage = comparison_scope().sources[0].clone();
+        let nodes = vec![
+            PhysicalDagNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                source_coverage: Some(coverage),
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDagNode {
+                id: "aggregate".into(),
+                operator: PhysicalOperator::HashAggregate,
+                children: vec!["scan".into()],
+                source_coverage: None,
+                output_buffer_bytes: 16,
+                retained_bytes: 32,
+                execution: ExecutionMultiplicity::Once,
+            },
+        ];
+        let input = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let output = EdgeStatistics { rows: 1, bytes: 16 };
+        let provided = HashMap::from([
+            (
+                "scan".into(),
+                OperatorStatistics {
+                    source_scan_bytes: 250,
+                    ..statistics(vec![input], input)
+                },
+            ),
+            (
+                "aggregate".into(),
+                OperatorStatistics {
+                    group_count: Some(1),
+                    key_bytes: Some(8),
+                    aggregate_value_bytes: Some(8),
+                    ..statistics(vec![input], output)
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            estimate_physical_dag(&nodes, "aggregate", &comparison_scope(), &provided),
+            Err(AnalyticalCostError::InvalidPhysicalDag(
+                "build-once node cannot consume a per-evaluation child"
+            ))
+        );
+    }
+
+    #[test]
+    fn scoped_comparison_rejects_different_source_snapshots() {
+        let coverage = comparison_scope().sources[0].clone();
+        let nodes = vec![PhysicalDagNode {
+            id: "scan".into(),
+            operator: PhysicalOperator::Scan,
+            children: vec![],
+            source_coverage: Some(coverage),
+            output_buffer_bytes: 10,
+            retained_bytes: 0,
+            execution: ExecutionMultiplicity::PerEvaluation,
+        }];
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let provided = HashMap::from([(
+            "scan".into(),
+            OperatorStatistics {
+                source_scan_bytes: 250,
+                ..statistics(vec![edge], edge)
+            },
+        )]);
+        let raw_scope = comparison_scope();
+        let mut candidate_scope = raw_scope.clone();
+        candidate_scope.sources[0].snapshot_id = "catalog-version-43".into();
+
+        assert_eq!(
+            estimate_physical_dag_comparison(
+                PhysicalDagEstimateRequest {
+                    nodes: &nodes,
+                    root: "scan",
+                    scope: &raw_scope,
+                    statistics: &provided,
+                },
+                PhysicalDagEstimateRequest {
+                    nodes: &nodes,
+                    root: "scan",
+                    scope: &candidate_scope,
+                    statistics: &provided,
+                },
+            ),
+            Err(AnalyticalCostError::ComparisonScopeMismatch("sources"))
+        );
+    }
+
+    #[test]
+    fn scan_uses_physical_source_bytes_not_decoded_logical_bytes() {
+        let logical = EdgeStatistics {
+            rows: 100,
+            bytes: 10_000,
+        };
+        let estimate = estimate_operator(
+            PhysicalOperator::Scan,
+            OperatorStatistics {
+                source_scan_bytes: 2_500,
+                ..statistics(vec![logical], logical)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(estimate.scan_bytes, 2_500);
+        assert_eq!(estimate.peak_memory_bytes, 100);
+    }
+
+    #[test]
+    fn non_scan_operator_cannot_charge_source_bytes() {
+        let coverage = comparison_scope().sources[0].clone();
+        let nodes = vec![
+            PhysicalDagNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                source_coverage: Some(coverage),
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDagNode {
+                id: "filter".into(),
+                operator: PhysicalOperator::Filter,
+                children: vec!["scan".into()],
+                source_coverage: None,
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+        ];
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let provided = HashMap::from([
+            (
+                "scan".into(),
+                OperatorStatistics {
+                    source_scan_bytes: 250,
+                    ..statistics(vec![edge], edge)
+                },
+            ),
+            (
+                "filter".into(),
+                OperatorStatistics {
+                    source_scan_bytes: 250,
+                    ..statistics(vec![edge], edge)
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            estimate_physical_dag(&nodes, "filter", &comparison_scope(), &provided),
+            Err(AnalyticalCostError::InvalidOperatorStatistics {
+                node: "filter".into(),
+                reason: "only scan operators may read source bytes",
+            })
+        );
     }
 }
