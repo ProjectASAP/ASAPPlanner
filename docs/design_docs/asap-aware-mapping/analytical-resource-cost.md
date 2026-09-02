@@ -13,15 +13,10 @@ and guarantee composition run first; costing ranks only the candidates that
 survive. Missing evidence produces an unavailable estimate, never an assumed
 zero or a structural-cost fallback.
 
-This document distinguishes two implementation layers:
-
-- the physical-DAG estimator, which can compose any DAG whose nodes have
-  supported physical operators and complete `OperatorInputs`; and
-- the planner bridge, which lowers a deliberately small set of replacement
-  shapes into that estimator and participates in automatic candidate ranking.
-
-Support in the first layer does not imply that the planner can yet lower and
-rank the same shape. The current bridge boundary is stated explicitly below.
+The physical-DAG estimator composes any DAG whose nodes have supported
+physical operators and complete `OperatorStatistics`. Query lowering and
+planner selection are separate integration layers; neither may substitute a
+shape-specific shortcut or structural node count.
 
 An estimate has physical dimensions:
 
@@ -69,11 +64,11 @@ The missing facts have explicit ownership:
 | Join-side and join-output cardinality | Join-key/operator statistics. |
 | Memory budget, spill I/O, cache behavior, and network bytes | Deployment/execution-profile evidence. |
 
-`OperatorInputs` contains the resolved statistics for one physical operator.
-It is an estimator input, not another planner workload object. The component
-that lowers a query into a physical DAG owns resolving these fields from the
-canonical workload, catalog, and operator-statistics sources. It must leave a
-plan unavailable when required evidence cannot be resolved.
+`OperatorStatistics` contains the resolved statistics for one physical
+operator. It is estimator evidence, not another planner workload object. The
+lowering provider owns resolving it from the canonical workload, catalog, and
+operator-statistics sources. Missing required evidence makes the entire plan
+unavailable.
 
 ## Workload horizon and lifecycle
 
@@ -91,8 +86,8 @@ It is not an independent workload axis. A repeated rate without a horizon
 cannot produce a finite total cost.
 
 An at-rest estimate must not be reused for `unknown`, `mixed`, or
-`continuously_ingesting` data. Callers must fail closed instead of pretending
-that incremental updates are a one-time snapshot build.
+`continuously_ingesting` data. Callers fail closed instead of pretending that
+incremental updates are a one-time snapshot build.
 
 The sketch alternative scans the selected source snapshot once and retains
 state. The raw alternative recomputes from that snapshot for every query
@@ -101,24 +96,66 @@ retention duration belong to the summary-maintenance lifecycle model. They
 must contribute update/build/delete work before a continuously maintained
 plan is compared with raw execution.
 
+### Comparable source and workload scope
+
+A lower numerical cost is meaningful only when the two plans answer the same
+request over the same physical data. `ComparisonScope` therefore reuses the
+canonical workload and query terms rather than defining parallel strings:
+
+| Scope field | Authoritative type and meaning |
+|---|---|
+| Arrival mode | `DataArrival`; this model accepts only `AtRest`. |
+| Planning instant and finite horizon | `TimestampMs` and `DurationMs`. |
+| Invocation schedule | `QueryRecurrence`; the evaluation count is derived, not copied. |
+| Event-time coverage | `TimeSelection`. |
+| Logical sources | one `Source` per scan. |
+| Filters | canonical bound `Predicate` values copied from the query IR. |
+| Physical source contents | provider-owned `snapshot_id` per source. |
+
+The snapshot identifier is the only new scope concept. It is necessary because
+`Source` names a metric or table but neither the query IR nor workload schema
+identifies a catalog version, object generation, or storage snapshot. Reusing a
+query timestamp would be incorrect: query event time and storage version are
+independent facts.
+
+`ComparisonScope::from_workload` copies arrival, recurrence, and time selection
+from `DataWorkload` and `QueryWorkloadEntry`; the catalog/lowering boundary adds
+the source, snapshot identifier, and canonical predicates. Raw and candidate
+scopes must match exactly in every field before their estimates are compared.
+Unknown subsumption such as "this wider retained summary covers the requested
+interval" is not guessed here; it requires a separate semantic coverage proof.
+Missing sources, empty snapshot identifiers, invalid recurrence, or a zero
+horizon fail closed.
+
 ## General DAG costing
 
 Costing operates on the physical DAG, not on a list of logical operators.
-Each costed node produces:
+An `OperatorStatisticsProvider` resolves one `OperatorStatistics` value for
+each reachable physical node:
 
 ```text
-NodeEstimate {
-    output_rows,
-    output_bytes,
-    cpu_ops,
-    retained_bytes,
-    working_bytes,
-    source_read_bytes,
+OperatorStatistics {
+    inputs: [EdgeStatistics { rows, bytes }, ...],
+    output: EdgeStatistics { rows, bytes },
+    group_count,
+    key_bytes,
+    aggregate_value_bytes,
+    k,
+    hash_join_build_side,
 }
 ```
 
-The node's output statistics feed its parents. A parent never substitutes
-the original source cardinality for an intermediate edge.
+The provider owns provenance, freshness, and derivation. The estimator resolves
+each reachable node once, so one estimate cannot mix values across a live
+catalog refresh. A scan has one external source input; every other input is in
+the same order as `PhysicalDagNode.children`. Every parent input must equal the
+corresponding child's output in both rows and bytes. Missing node evidence,
+invalid arity, inconsistent edge dimensions, or a parent/child conflict makes
+the entire DAG unavailable. `{ rows: 0, bytes: 0 }` is a valid empty logical
+edge, including after a filter, join, limit, or aggregate; non-empty edges need
+positive logical bytes so width-dependent formulas do not invent a row width.
+A parent therefore cannot silently substitute the original source cardinality
+for an intermediate edge.
 
 ### Composition rules
 
@@ -136,14 +173,15 @@ For a selected DAG:
 7. Retained summaries remain live across reads. Streaming buffers may be
    released after their last consumer.
 
-`estimate_physical_dag` implements these rules for `PhysicalDagNode` values.
+`estimate_physical_dag` implements these rules for `PhysicalDagNode` values,
+one `ComparisonScope`, and an `OperatorStatisticsProvider`.
 Node IDs are physical identities: duplicate IDs, missing children, and cycles
 are rejected. A child-before-parent schedule maintains remaining-consumer
 counts, releases transient output after its last consumer, and keeps retained
 state live. Consequently a shared scan is charged once per execution and a
 fan-out's memory includes the outputs that really coexist.
 
-Logical `output_bytes` feeds parent cardinality estimates; it is not an
+Logical edge `bytes` feeds parent cardinality estimates; it is not an
 allocation. Each physical node separately supplies `output_buffer_bytes` for
 its live batch/edge buffer and `retained_bytes` for state that survives the
 operator. A streaming scan therefore retains a batch, not the complete source.
@@ -231,12 +269,10 @@ operators and resolved statistics. Until an operation has such a formula, a
 complete candidate containing it is unavailable; costing only its modeled
 children would undercount the plan.
 
-`estimate_physical_dag` is deliberately independent of query shape. A caller
-supplies the complete physical DAG and one `OperatorInputs` record per node.
-Filters, projections, joins, windows, nested aggregates, Top-K, and shared
-sub-DAGs therefore use the same estimation path. Query lowering and planner
-selection are separate integration responsibilities and must not introduce a
-shape-specific shortcut or structural-node-count fallback.
+`estimate_physical_dag` is independent of query shape. A caller supplies the
+complete physical DAG and per-node evidence. Filters, projections, joins,
+windows, nested aggregates, Top-K, and shared sub-DAGs therefore use the same
+estimation path.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
@@ -289,20 +325,21 @@ The intended end-to-end selection pipeline is:
 
 This module implements the physical estimation step. Lowering, evidence
 resolution, legality checks, and planner integration remain separate layers;
-each must preserve the complete-plan and fail-closed requirements above.
+each preserves the complete-plan and fail-closed requirements above.
 
-The raw baseline and selected alternative use the same source snapshot,
-horizon, and calibration:
+Before applying the following arithmetic, callers validate exact equality of
+the raw and selected alternative's `ComparisonScope`, and use the same
+calibration:
 
 ```text
 benefit       = baseline_cost - selected_cost
 benefit_ratio = benefit / baseline_cost
 ```
 
-Exported annotations contain resource totals, workload horizon, resolved
-operator inputs, calibration coefficients, evidence/model versions, and the
-baseline reference. This makes the scalar reproducible and identifies which
-resource dimension drove a decision.
+An export of a cost decision includes resource totals, calibration
+coefficients, evidence/model versions, the baseline reference, validated
+comparison scope, and per-node statistics provenance. These facts reproduce
+why two estimates were considered comparable.
 
 ## Worked patterns
 
