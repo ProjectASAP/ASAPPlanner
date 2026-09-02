@@ -1707,7 +1707,14 @@ fn construct_summary_agg(
     child_target: Option<&AccuracyTarget>,
     allocation: Option<GuaranteeSource>,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
-    let child_schema = child.output_schema()?;
+    // Canonical SQL heavy hitters are `TopK(Count GROUP BY key)`. A
+    // CMS-with-heap consumes the raw stream keyed by that grouping column;
+    // independently binding the inner Count would create one CMS per key and
+    // then sketch those results a second time. Fuse the two logical layers
+    // into the one physical summary they denote.
+    let fused = fused_count_topk_input(intent, &family, child);
+    let physical_child = fused.as_ref().map_or(child, |(raw_child, _)| raw_child);
+    let child_schema = physical_child.output_schema()?;
     // The single canonical pre-ASAP derivation (per-series vs cross-series,
     // name overrides) already computes the row shape; binding only retypes
     // the summary state column.
@@ -1719,7 +1726,10 @@ fn construct_summary_agg(
     let out_schema = node.output_schema()?;
     let state_idx = summary_col_index(&out_schema, &by, per_series);
 
-    let col = summarised_column(intent, &child_schema);
+    let col = fused
+        .as_ref()
+        .map(|(_, key)| key.clone())
+        .unwrap_or_else(|| summarised_column(intent, &child_schema));
     let query = estimate.then(|| readout(intent, &col, models.cost));
 
     let mut state_schema = lift(&out_schema);
@@ -1727,7 +1737,7 @@ fn construct_summary_agg(
         field.dtype = family.clone();
     }
 
-    let bound_child = realize_child_with(child, models, child_target)?;
+    let bound_child = realize_child_with(physical_child, models, child_target)?;
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────
     // Derived *before* the node exists, so an illegal composition is never
@@ -1776,6 +1786,51 @@ fn construct_summary_agg(
         })),
         None => Ok(agg),
     }
+}
+
+fn fused_count_topk_input(
+    intent: &AggIntent,
+    family: &SummaryFamilyType,
+    child: &Rc<QueryExpr>,
+) -> Option<(Rc<QueryExpr>, ColumnRef)> {
+    if !matches!(intent, AggIntent::TopK { .. })
+        || !matches!(
+            family,
+            SummaryFamilyType::Sketch(kind, _)
+                if matches!(
+                    kind.algorithm(),
+                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                )
+        )
+    {
+        return None;
+    }
+    let QueryExpr::Aggregate {
+        reduction: Reduction::Reduce(keys),
+        measures,
+        having: None,
+        child: raw_child,
+        ..
+    } = child.as_ref()
+    else {
+        return None;
+    };
+    if keys.is_without()
+        || keys.len() != 1
+        || !matches!(measures.as_slice(), [AggIntent::Count { .. }])
+    {
+        return None;
+    }
+    let schema = raw_child.output_schema().ok()?;
+    let column = schema.columns.get(keys[0])?;
+    let key = match &column.table {
+        Some(table) => ColumnRef::Qualified {
+            table: table.clone(),
+            name: column.name.clone(),
+        },
+        None => ColumnRef::Named(column.name.clone()),
+    };
+    Some((Rc::clone(raw_child), key))
 }
 
 /// The guarantee of the value a `family` node produces over `child` —
@@ -6629,6 +6684,57 @@ mod tests {
                     g.metric == ErrorMetric::TopKMembership
                         && g.failure_probability.evaluate() == Some(0.005))
         )));
+    }
+
+    #[test]
+    fn count_ranked_topk_fuses_to_one_global_heap_sketch() {
+        let inner = agg(
+            vec![2],
+            AggIntent::Count {
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            metric_scan(&["service"]),
+        );
+        let outer = Rc::new(agg(
+            vec![],
+            AggIntent::TopK {
+                k: 10,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            inner,
+        ));
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &SeparatedTopKEvidence,
+        );
+        let candidates = strategy.replacements(&TargetSubDAG::new(&outer));
+        let node = candidates
+            .iter()
+            .find_map(|candidate| match &candidate.replacement {
+                Replacement::Summary(node) if candidate.rationale.contains("CmsWithHeap") => {
+                    Some(node)
+                }
+                _ => None,
+            })
+            .expect("CMSWithHeap candidate");
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
+            panic!("expected Top-K readout")
+        };
+        let SummaryExpr::SummaryAgg {
+            child, family, col, ..
+        } = &summary_input.expr
+        else {
+            panic!("expected fused summary aggregation")
+        };
+        assert!(matches!(
+            family,
+            SummaryFamilyType::Sketch(kind, _)
+                if kind.algorithm() == &SketchAlgorithm::CmsWithHeap
+        ));
+        assert_eq!(col, &ColumnRef::Named("service".into()));
+        assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
     #[test]
