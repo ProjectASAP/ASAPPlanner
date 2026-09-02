@@ -2644,6 +2644,44 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_evidence_cannot_alias_one_provider_physical_identity() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_join();
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+        let aggregations = evidence_nodes(&root).0;
+        let first = aggregations[0] as *const _;
+        let second = aggregations[1] as *const _;
+        model
+            .node_evidence
+            .aggregations
+            .get_mut(&first)
+            .unwrap()
+            .physical_id = "aliased-state".into();
+        let second_evidence = model.node_evidence.aggregations.get_mut(&second).unwrap();
+        second_evidence.physical_id = "aliased-state".into();
+        second_evidence.cpu.insert_cpu_ops = Some(99.0);
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(plan.summary_total_cost, None);
+    }
+
+    #[test]
     fn lifecycle_plan_does_not_fall_back_to_partial_agg_cost_for_a_join_root() {
         let workload = streaming_workload();
         let root = summary_join();
