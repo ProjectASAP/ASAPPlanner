@@ -1,15 +1,132 @@
 # Analytical resource cost model
 
-Issue #323 replaces structural node counts with an explicit estimate of three
-physical resource dimensions:
+## Purpose
 
-- CPU work (`operations`)
-- peak retained state (`bytes`)
-- input scan I/O (`bytes`)
+The analytical resource cost model compares an exact aggregation over raw
+data with aggregation backed by a retained sketch. It estimates physical
+work instead of using the number of plan nodes as a proxy.
 
-The dimensions remain visible in exported provenance. A deployment supplies
-non-negative calibration coefficients to convert them to one comparable
-planner objective:
+The model has two layers:
+
+1. estimate CPU work, peak retained memory, and input scan I/O independently;
+2. apply a deployment-provided calibration to obtain one scalar used for
+   candidate ranking.
+
+Keeping the resource dimensions in the estimate and its exported provenance
+makes the result explainable and allows different deployments to apply
+different priorities without changing the underlying complexity formulas.
+
+The model compares alternatives that have already passed semantic, accuracy,
+and lifecycle legality checks. Cost estimation cannot make an illegal plan
+legal.
+
+## Inputs and comparison scope
+
+An `AnalyticalCostModel` contains workload inputs and a resource calibration.
+All workload inputs are positive integers:
+
+| Input | Meaning |
+|---|---|
+| `input_rows` | Number of rows processed when the source is scanned once. |
+| `input_bytes` | Number of source bytes read by one complete input scan. |
+| `group_count` | Estimated number of distinct aggregation groups. With no `GROUP BY`, this is `1`; for `GROUP BY service, region`, it is the estimated number of distinct `(service, region)` pairs. |
+| `evaluation_count` | Number of query evaluations in the comparison scope. |
+
+The comparison scope must be the same for every candidate. For example, if a
+workload evaluates a query 100 times during the chosen horizon, both the raw
+and sketch alternatives use `evaluation_count = 100`.
+
+`group_count` is not the input row count. One million input rows containing
+ten distinct grouping keys have `input_rows = 1_000_000` and
+`group_count = 10`. It may come from catalog distinct-count statistics,
+observed workload data, or another estimator. When a shared multi-subpopulation
+sketch represents all groups in one physical structure, the estimator counts
+one retained sketch rather than one independent sketch per group.
+
+Zero or missing inputs are invalid. Unknown information must not be replaced
+with an arbitrary default.
+
+## Resource estimate
+
+The uncalibrated result is:
+
+```text
+ResourceEstimate {
+    cpu_ops,
+    peak_memory_bytes,
+    scan_bytes,
+}
+```
+
+`cpu_ops` is an algorithmic operation count, not elapsed CPU time.
+`peak_memory_bytes` is the retained state needed in the comparison scope.
+`scan_bytes` counts source data read, not reads of the already retained
+sketch. These dimensions are intentionally not added together before
+calibration because their units differ.
+
+All arithmetic is checked. An estimate that overflows fails closed.
+
+## Exact raw aggregation baseline
+
+The baseline recomputes the aggregation from raw input for every evaluation.
+The current grouped-aggregation model assumes one unit of CPU work per input
+row and a 16-byte accumulator/key slot per group:
+
+```text
+cpu_ops           = input_rows * evaluation_count
+scan_bytes        = input_bytes * evaluation_count
+peak_memory_bytes = group_count * 16
+```
+
+The 16-byte value is a documented modeling assumption for the logical exact
+accumulator, not a claim about every execution engine's object overhead. A
+future engine-specific estimator can refine it without changing the input or
+provenance contract.
+
+## Sketch-backed aggregation
+
+The sketch alternative builds retained state during one complete input scan,
+then serves each evaluation by reading that state:
+
+```text
+cpu_ops = input_rows * update_ops(params)
+        + evaluation_count * read_ops(params)
+
+scan_bytes        = input_bytes
+peak_memory_bytes = physical_sketch_count * state_bytes(params)
+```
+
+For the ordinary per-subpopulation layout,
+`physical_sketch_count = group_count`. For a shared multi-subpopulation
+layout, `physical_sketch_count = 1`.
+
+The estimator uses the concrete sketch parameters produced for the query's
+accuracy target. The formulas are:
+
+| Sketch | Update operations per row | Read operations per evaluation | State bytes per physical sketch |
+|---|---:|---:|---:|
+| CMS | `depth` | `depth` | `width * depth * 8` |
+| CountSketch | `depth` | `depth` | `width * depth * 8` |
+| CMS with heap | `depth + ceil(log2(heap_size))` | `depth + heap_size` | `width * depth * 8 + heap_size * 16` |
+| CountSketch with heap | `depth + ceil(log2(heap_size))` | `depth + heap_size` | `width * depth * 8 + heap_size * 16` |
+| KLL | `1 + ceil(log2(k))` | `ceil(log2(k))` | `k * 8` |
+| HLL | `1` | `2^precision` | `2^precision` |
+| KMV | `ceil(log2(k))` | `k` | `k * 8` |
+| Theta | `ceil(log2(k))` | `k` | `k * 8` |
+
+Logarithms use an argument of at least two so zero operations are never
+introduced by a degenerate parameter. Parameter variants must match their
+algorithm; a mismatch is an unavailable estimate rather than an inferred
+conversion.
+
+DDSketch is not estimated because its retained bin count depends on the input
+value distribution and range. Until those statistics are part of the model,
+inventing a bin count would make both memory and read cost unsound.
+
+## Calibration and scalar objective
+
+A `ResourceCalibration` contains three finite, non-negative coefficients and
+a required version string:
 
 ```text
 cost = cpu_ops * cost_per_cpu_op
@@ -17,51 +134,71 @@ cost = cpu_ops * cost_per_cpu_op
      + peak_memory_bytes * cost_per_retained_byte
 ```
 
-The calibration has a required version string. These coefficients are a
-policy boundary, not benchmark constants baked into the planner.
+At least one coefficient must be positive. The scalar is reported in
+`CostUnits`; it is not implicitly money, latency, or cost per second. The
+deployment defines that meaning through its calibration procedure and
+version. For example, coefficients may be fitted from benchmark measurements
+or chosen to express a resource budget. They are never hard-coded as
+universal hardware constants.
 
-## Workload scope
+Changing any coefficient can change the selected candidate. This is expected:
+a memory-constrained deployment and a scan-constrained deployment need not
+prefer the same sketch. The calibration version is included in exported
+provenance so two estimates produced under different policies are not
+mistaken for directly comparable results.
 
-`AnalyticalInputs` requires input rows, input bytes, group count, and the
-number of evaluations in the comparison scope. Zero or missing inputs are an
-error. Exact pre-ASAP aggregation processes and scans the input once per
-evaluation, retaining 16 bytes per group:
+## Candidate selection
+
+For an aggregation with several legal sketch algorithms, the planner:
+
+1. resolves the declared accuracy target;
+2. sizes each algorithm for that target;
+3. computes its resource estimate using the same workload inputs;
+4. applies the calibration;
+5. orders supported candidates by ascending calibrated cost.
+
+Candidate enumeration remains exhaustive. An unavailable estimate is not a
+reason to claim a numerical cost, and cost ranking never bypasses accuracy or
+semantic validation.
+
+The raw baseline and selected sketch cost use the same workload scope and
+calibration. Their exported benefit is:
 
 ```text
-cpu_ops    = input_rows * evaluation_count
-scan_bytes = input_bytes * evaluation_count
-memory     = group_count * 16
+benefit       = baseline_cost - selected_cost
+benefit_ratio = benefit / baseline_cost
 ```
 
-A post-ASAP sketch is built once and read for every evaluation:
+A positive benefit means the selected post-ASAP alternative is cheaper than
+raw pre-ASAP recomputation under the stated inputs and calibration.
 
-```text
-cpu_ops    = input_rows * update_ops(params)
-             + evaluation_count * read_ops(params)
-scan_bytes = input_bytes
-memory     = group_count * state_bytes(params)
-```
+## Exported provenance
 
-CMS and CountSketch use depth updates/readout and `width * depth * 8` bytes.
-Their heap variants add logarithmic update work and `heap_size * 16` bytes.
-KLL, HLL, KMV, and Theta derive work and state directly from their sized
-parameters. The formulas use the concrete parameters already selected to
-satisfy the query's accuracy target.
+`dag_export` accepts a serialized model through
+`--analytical-cost-json`. Its baseline, selected, and benefit annotations use
+model version `analytical-resource-v1` together with the calibration version.
+The annotation inputs include:
 
-DDSketch is deliberately unavailable until a value-distribution/range input
-can determine occupied bins. The model never invents a bin count. Arithmetic
-overflow, parameter mismatches, invalid calibration, unsupported plans, and
-missing workload statistics also fail closed.
+- all four workload inputs;
+- estimated CPU operations, peak memory, and scan bytes;
+- all three calibration coefficients and their units.
 
-## Planning and export
+This is sufficient to reproduce the scalar from the exported annotation and
+to explain which resource dimension drove a decision.
 
-`AnalyticalCostModel` ranks legal sketch alternatives by calibrated cost and
-supplies the same estimates to plan costing. It does not alter accuracy or
-lifecycle legality. `dag_export --analytical-cost-json '<model>'` uses that
-model for selection and exports baseline, selected, and benefit annotations,
-including every input, resource estimate, coefficient, and model version.
+## Failure behavior
 
-If no analytical evidence is supplied, costs are `Unavailable`. Structural
-node counts are not used as a fallback because they have no physical unit and
-can reverse the result of a CPU/memory/scan comparison.
+The model returns an unavailable estimate when any of the following holds:
 
+- a workload input is missing or zero;
+- a calibration coefficient is negative, non-finite, or all coefficients are
+  zero;
+- sketch parameters do not match the sketch algorithm;
+- required distribution evidence is absent;
+- the candidate shape is unsupported;
+- checked arithmetic overflows.
+
+Structural node counts are never used as a fallback. They have no physical
+unit and can reverse the conclusion of a CPU, memory, and scan comparison.
+Consumers render unavailable estimates as `Not estimated` and must not infer
+a zero cost.
