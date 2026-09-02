@@ -23,6 +23,10 @@ pub struct AnalyticalInputs {
     pub input_rows: u64,
     pub input_bytes: u64,
     pub group_count: u64,
+    /// Average encoded bytes of one distinct grouping-key tuple.
+    pub group_key_bytes: u64,
+    /// `Some(k)` when the aggregation feeds an `ORDER BY value DESC LIMIT k`.
+    pub topk_k: Option<u64>,
     /// Number of effective reads/recomputations in the comparison scope.
     pub evaluation_count: u64,
 }
@@ -37,6 +41,12 @@ impl AnalyticalInputs {
         }
         if self.group_count == 0 {
             return Err(AnalyticalCostError::MissingOrZero("group_count"));
+        }
+        if self.group_key_bytes == 0 {
+            return Err(AnalyticalCostError::MissingOrZero("group_key_bytes"));
+        }
+        if matches!(self.topk_k, Some(0)) {
+            return Err(AnalyticalCostError::MissingOrZero("topk_k"));
         }
         if self.evaluation_count == 0 {
             return Err(AnalyticalCostError::MissingOrZero("evaluation_count"));
@@ -136,9 +146,16 @@ pub fn estimate_raw_aggregation(
     inputs: AnalyticalInputs,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
     let inputs = inputs.validate()?;
+    let group_entry_bytes = inputs
+        .group_key_bytes
+        .checked_add(8 + 16) // exact value plus hash-table metadata
+        .ok_or(AnalyticalCostError::Overflow)?;
+    let topk_memory = topk_heap_bytes(inputs)?;
     Ok(ResourceEstimate {
-        cpu_ops: inputs.input_rows as f64 * inputs.evaluation_count as f64,
-        peak_memory_bytes: checked_bytes(&[inputs.group_count, 16])?,
+        cpu_ops: inputs.input_rows as f64 * inputs.evaluation_count as f64 + topk_cpu_ops(inputs),
+        peak_memory_bytes: checked_bytes(&[inputs.group_count, group_entry_bytes])?
+            .checked_add(topk_memory)
+            .ok_or(AnalyticalCostError::Overflow)?,
         scan_bytes: inputs
             .input_bytes
             .checked_mul(inputs.evaluation_count)
@@ -153,6 +170,16 @@ pub fn estimate_sketch_aggregation(
     algorithm: SketchAlgorithm,
     params: &SketchParams,
     inputs: AnalyticalInputs,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    let instance_count = inputs.group_count;
+    estimate_sketch_aggregation_with_instances(algorithm, params, inputs, instance_count)
+}
+
+fn estimate_sketch_aggregation_with_instances(
+    algorithm: SketchAlgorithm,
+    params: &SketchParams,
+    inputs: AnalyticalInputs,
+    physical_sketch_count: u64,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
     let inputs = inputs.validate()?;
     let (update_ops, read_ops, bytes_per_group) = match (&algorithm, params) {
@@ -214,13 +241,38 @@ pub fn estimate_sketch_aggregation(
         }
     };
 
+    let keyed_state = inputs
+        .group_key_bytes
+        .checked_add(16) // hash-table metadata
+        .and_then(|bytes| bytes.checked_mul(inputs.group_count))
+        .ok_or(AnalyticalCostError::Overflow)?;
     Ok(ResourceEstimate {
-        cpu_ops: inputs.input_rows as f64 * update_ops + inputs.evaluation_count as f64 * read_ops,
+        cpu_ops: inputs.input_rows as f64 * update_ops
+            + inputs.evaluation_count as f64 * read_ops * physical_sketch_count as f64
+            + topk_cpu_ops(inputs),
         peak_memory_bytes: bytes_per_group
-            .checked_mul(inputs.group_count)
+            .checked_mul(physical_sketch_count)
+            .and_then(|bytes| bytes.checked_add(keyed_state))
+            .and_then(|bytes| bytes.checked_add(topk_heap_bytes(inputs).ok()?))
             .ok_or(AnalyticalCostError::Overflow)?,
         // One initial build scan; subsequent evaluations read the sketch.
         scan_bytes: inputs.input_bytes,
+    })
+}
+
+fn topk_cpu_ops(inputs: AnalyticalInputs) -> f64 {
+    inputs.topk_k.map_or(0.0, |k| {
+        inputs.evaluation_count as f64 * inputs.group_count as f64 * (k.max(2) as f64).log2().ceil()
+    })
+}
+
+fn topk_heap_bytes(inputs: AnalyticalInputs) -> Result<u64, AnalyticalCostError> {
+    inputs.topk_k.map_or(Ok(0), |k| {
+        let row_bytes = inputs
+            .group_key_bytes
+            .checked_add(8)
+            .ok_or(AnalyticalCostError::Overflow)?;
+        checked_bytes(&[k.min(inputs.group_count), row_bytes])
     })
 }
 
@@ -247,11 +299,19 @@ impl AnalyticalCostModel {
         };
         let (kind, grouping) =
             sketch_from(node).ok_or(AnalyticalCostError::UnsupportedCandidate)?;
-        let mut inputs = self.inputs.validate()?;
-        if matches!(grouping, GroupingStrategy::SharedMultiSubpopulation { .. }) {
-            inputs.group_count = 1;
-        }
-        estimate_sketch_aggregation(kind.algorithm().clone(), kind.params(), inputs)
+        let inputs = self.inputs.validate()?;
+        let physical_sketch_count =
+            if matches!(grouping, GroupingStrategy::SharedMultiSubpopulation { .. }) {
+                1
+            } else {
+                inputs.group_count
+            };
+        estimate_sketch_aggregation_with_instances(
+            kind.algorithm().clone(),
+            kind.params(),
+            inputs,
+            physical_sketch_count,
+        )
     }
 }
 
@@ -337,6 +397,8 @@ mod tests {
             input_rows: 1_000_000,
             input_bytes: 64_000_000,
             group_count: 1,
+            group_key_bytes: 16,
+            topk_k: None,
             evaluation_count,
         }
     }
@@ -362,12 +424,14 @@ mod tests {
                 input_rows: 1_000,
                 input_bytes: 8_000,
                 group_count: 2,
+                group_key_bytes: 16,
+                topk_k: None,
                 evaluation_count: 10,
             },
         )
         .unwrap();
-        assert_eq!(estimate.cpu_ops, 4_040.0);
-        assert_eq!(estimate.peak_memory_bytes, 6_400);
+        assert_eq!(estimate.cpu_ops, 4_080.0);
+        assert_eq!(estimate.peak_memory_bytes, 6_464);
         assert_eq!(estimate.scan_bytes, 8_000);
     }
 
@@ -398,6 +462,29 @@ mod tests {
         assert!(many.cpu_ops > one.cpu_ops);
         assert!(many.scan_bytes > one.scan_bytes);
         assert_eq!(many.peak_memory_bytes, one.peak_memory_bytes);
+    }
+
+    #[test]
+    fn grouped_topk_accounts_for_keys_hash_entries_and_selection() {
+        let mut topk = inputs(100);
+        topk.group_count = 100_000;
+        topk.group_key_bytes = 32;
+        topk.topk_k = Some(10);
+        let raw = estimate_raw_aggregation(topk).unwrap();
+        assert_eq!(raw.peak_memory_bytes, 5_600_400);
+        assert_eq!(raw.cpu_ops, 140_000_000.0);
+
+        let sketch = estimate_sketch_aggregation(
+            SketchAlgorithm::Cms,
+            &SketchParams::Cms {
+                width: 272,
+                depth: 5,
+            },
+            topk,
+        )
+        .unwrap();
+        assert_eq!(sketch.peak_memory_bytes, 1_092_800_400);
+        assert_eq!(sketch.cpu_ops, 95_000_000.0);
     }
 
     #[test]

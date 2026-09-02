@@ -22,14 +22,16 @@ legal.
 
 ## Inputs and comparison scope
 
-An `AnalyticalCostModel` contains workload inputs and a resource calibration.
-All workload inputs are positive integers:
+An `AnalyticalCostModel` contains workload/query-shape inputs and a resource
+calibration. Required numeric inputs are positive integers:
 
 | Input | Meaning |
 |---|---|
 | `input_rows` | Number of rows processed when the source is scanned once. |
 | `input_bytes` | Number of source bytes read by one complete input scan. |
 | `group_count` | Estimated number of distinct aggregation groups. With no `GROUP BY`, this is `1`; for `GROUP BY service, region`, it is the estimated number of distinct `(service, region)` pairs. |
+| `group_key_bytes` | Average encoded bytes of one distinct grouping-key tuple. This must include the key payload, but not the model's separately counted hash-table metadata. |
+| `topk_k` | Optional `k` for an outer `ORDER BY aggregate DESC LIMIT k`; absent when the comparison has no Top-K. |
 | `evaluation_count` | Number of query evaluations in the comparison scope. |
 
 The comparison scope must be the same for every candidate. For example, if a
@@ -74,14 +76,26 @@ row and a 16-byte accumulator/key slot per group:
 
 ```text
 cpu_ops           = input_rows * evaluation_count
+                  + topk_cpu_ops
 scan_bytes        = input_bytes * evaluation_count
-peak_memory_bytes = group_count * 16
+peak_memory_bytes = group_count * (group_key_bytes + 8 + 16)
+                  + topk_heap_bytes
 ```
 
-The 16-byte value is a documented modeling assumption for the logical exact
-accumulator, not a claim about every execution engine's object overhead. A
-future engine-specific estimator can refine it without changing the input or
-provenance contract.
+The per-group state includes the grouping key, an 8-byte exact value, and 16
+bytes of hash-table metadata. This is a documented logical-layout assumption,
+not a claim about every execution engine's allocator overhead.
+
+For `topk_k = k`, selection is modeled with a size-`k` heap over every
+materialized group on every evaluation:
+
+```text
+topk_cpu_ops  = evaluation_count * group_count * ceil(log2(max(k, 2)))
+topk_heap_bytes = min(k, group_count) * (group_key_bytes + 8)
+```
+
+This explicitly accounts for retaining all groups before Top-K selection;
+the heap is additional working memory, not a substitute for the group table.
 
 ## Sketch-backed aggregation
 
@@ -90,10 +104,13 @@ then serves each evaluation by reading that state:
 
 ```text
 cpu_ops = input_rows * update_ops(params)
-        + evaluation_count * read_ops(params)
+        + evaluation_count * physical_sketch_count * read_ops(params)
+        + topk_cpu_ops
 
 scan_bytes        = input_bytes
 peak_memory_bytes = physical_sketch_count * state_bytes(params)
+                  + group_count * (group_key_bytes + 16)
+                  + topk_heap_bytes
 ```
 
 For the ordinary per-subpopulation layout,
@@ -179,7 +196,7 @@ raw pre-ASAP recomputation under the stated inputs and calibration.
 model version `analytical-resource-v1` together with the calibration version.
 The annotation inputs include:
 
-- all four workload inputs;
+- all workload and query-shape inputs;
 - estimated CPU operations, peak memory, and scan bytes;
 - all three calibration coefficients and their units.
 
