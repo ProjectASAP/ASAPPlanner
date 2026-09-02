@@ -28,7 +28,8 @@ calibration. Required numeric inputs are positive integers:
 | Input | Meaning |
 |---|---|
 | `input_rows` | Number of rows processed when the source is scanned once. |
-| `input_bytes` | Number of source bytes read by one complete input scan. |
+| `input_bytes` | Logical bytes consumed by the operator region, including intermediate input. |
+| `source_scan_bytes` | Source/disk bytes read once for this operator region. This is zero when an operator consumes an already-materialized intermediate. |
 | `group_count` | Estimated number of distinct aggregation groups. With no `GROUP BY`, this is `1`; for `GROUP BY service, region`, it is the estimated number of distinct `(service, region)` pairs. |
 | `group_key_bytes` | Average encoded bytes of one distinct grouping-key tuple. This must include the key payload, but not the model's separately counted hash-table metadata. |
 | `topk_k` | Optional `k` for an outer `ORDER BY aggregate DESC LIMIT k`; absent when the comparison has no Top-K. |
@@ -68,6 +69,34 @@ calibration because their units differ.
 
 All arithmetic is checked. An estimate that overflows fails closed.
 
+## Physical operator formulas
+
+Plan costing separates a node's own work from its children. A DAG walk adds
+CPU and disk once per physical node; retained states that coexist are added,
+while a streaming operator contributes only its working row/buffer. The
+operator classes and local formulas are:
+
+| Physical operator | CPU operations | Peak working/retained memory | Disk/source scan |
+|---|---:|---:|---:|
+| Scan | `input_rows` | one input row | `input_bytes` |
+| Filter | `input_rows` | one output row | `0` |
+| Project / scalar pass-through | `input_rows` | one output row | `0` |
+| Hash aggregate | `input_rows` | `groups * (key_bytes + value_bytes + hash_metadata)` | `0` |
+| Deduplicate | `input_rows` | same keyed-state formula as hash aggregate | `0` |
+| Full sort | `rows * ceil(log2(rows))` | `input_bytes` | `0` unless an external-sort implementation is selected |
+| Top-K heap | `rows * ceil(log2(k))` | `min(k, rows) * row_bytes` | `0` |
+| Hash join | `left_rows + right_rows + output_rows` | bytes of the chosen build side | `0` beyond child scans |
+| Concat | `output_rows` | one output row | `0` |
+| Window | `rows * ceil(log2(rows))` when ordering is required | partition/input bytes | `0` |
+| Limit | `output_rows` | one output row | `0` |
+
+A logical operator does not determine every physical behavior. For example,
+an external sort would add spill reads/writes, and a nested-loop join would
+have a different CPU formula. Such a physical alternative must be represented
+explicitly; the model does not silently charge an in-memory sort while calling
+it disk-aware. Filter selectivity, output cardinality/width, join-side
+cardinality, and similar required statistics fail closed when absent.
+
 ## Exact raw aggregation baseline
 
 The baseline recomputes the aggregation from raw input for every evaluation.
@@ -77,7 +106,7 @@ row and a 16-byte accumulator/key slot per group:
 ```text
 cpu_ops           = input_rows * evaluation_count
                   + topk_cpu_ops
-scan_bytes        = input_bytes * evaluation_count
+scan_bytes        = source_scan_bytes * evaluation_count
 peak_memory_bytes = group_count * (group_key_bytes + 8 + 16)
                   + topk_heap_bytes
 ```
@@ -107,7 +136,7 @@ cpu_ops = input_rows * update_ops(params)
         + evaluation_count * physical_sketch_count * read_ops(params)
         + topk_cpu_ops
 
-scan_bytes        = input_bytes
+scan_bytes        = source_scan_bytes
 peak_memory_bytes = physical_sketch_count * state_bytes(params)
                   + group_count * (group_key_bytes + 16)
                   + topk_heap_bytes
@@ -177,6 +206,13 @@ For an aggregation with several legal sketch algorithms, the planner:
 Candidate enumeration remains exhaustive. An unavailable estimate is not a
 reason to claim a numerical cost, and cost ranking never bypasses accuracy or
 semantic validation.
+
+Approximate Top-K additionally requires a margin certificate: a lower bound
+for the kth selected item, an upper bound for every excluded item, and their
+union-bounded failure probability. The selected lower bound must exceed the
+excluded upper bound. `dag_export --topk-margin-json` supplies this evidence;
+without it, CMSWithHeap/CountSketchWithHeap remain illegal and the planner
+keeps an exact Top-K rather than using cost to override correctness.
 
 The raw baseline and selected sketch cost use the same workload scope and
 calibration. Their exported benefit is:
