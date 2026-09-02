@@ -1,55 +1,20 @@
 # Analytical resource cost model
 
-## Purpose
+## Overview
 
-The analytical resource cost model compares an exact aggregation over raw
-data with aggregation backed by a retained sketch. It estimates physical
-work instead of using the number of plan nodes as a proxy.
+The analytical cost model compares legal physical plans using estimated CPU
+work, peak retained memory, and source/disk I/O. It does not use plan-node
+count as a cost proxy.
 
-The model has two layers:
+Costing happens after semantic and accuracy validation. A low estimated cost
+cannot make an illegal sketch, grouping layout, or composition selectable.
+When a required statistic is unknown, the estimate is unavailable rather
+than filled with a favorable default.
 
-1. estimate CPU work, peak retained memory, and input scan I/O independently;
-2. apply a deployment-provided calibration to obtain one scalar used for
-   candidate ranking.
+The model separates two concerns:
 
-Keeping the resource dimensions in the estimate and its exported provenance
-makes the result explainable and allows different deployments to apply
-different priorities without changing the underlying complexity formulas.
-
-The model compares alternatives that have already passed semantic, accuracy,
-and lifecycle legality checks. Cost estimation cannot make an illegal plan
-legal.
-
-## Inputs and comparison scope
-
-An `AnalyticalCostModel` contains workload/query-shape inputs and a resource
-calibration. Required numeric inputs are positive integers:
-
-| Input | Meaning |
-|---|---|
-| `input_rows` | Number of rows processed when the source is scanned once. |
-| `input_bytes` | Logical bytes consumed by the operator region, including intermediate input. |
-| `source_scan_bytes` | Source/disk bytes read once for this operator region. This is zero when an operator consumes an already-materialized intermediate. |
-| `group_count` | Estimated number of distinct aggregation groups. With no `GROUP BY`, this is `1`; for `GROUP BY service, region`, it is the estimated number of distinct `(service, region)` pairs. |
-| `group_key_bytes` | Average encoded bytes of one distinct grouping-key tuple. This must include the key payload, but not the model's separately counted hash-table metadata. |
-| `topk_k` | Optional `k` for an outer `ORDER BY aggregate DESC LIMIT k`; absent when the comparison has no Top-K. |
-| `evaluation_count` | Number of query evaluations in the comparison scope. |
-
-The comparison scope must be the same for every candidate. For example, if a
-workload evaluates a query 100 times during the chosen horizon, both the raw
-and sketch alternatives use `evaluation_count = 100`.
-
-`group_count` is not the input row count. One million input rows containing
-ten distinct grouping keys have `input_rows = 1_000_000` and
-`group_count = 10`. It may come from catalog distinct-count statistics,
-observed workload data, or another estimator. When a shared multi-subpopulation
-sketch represents all groups in one physical structure, the estimator counts
-one retained sketch rather than one independent sketch per group.
-
-Zero or missing inputs are invalid. Unknown information must not be replaced
-with an arbitrary default.
-
-## Resource estimate
+1. operator formulas produce resource estimates with physical units;
+2. deployment calibration converts those dimensions into one ranking value.
 
 The uncalibrated result is:
 
@@ -61,197 +26,286 @@ ResourceEstimate {
 }
 ```
 
-`cpu_ops` is an algorithmic operation count, not elapsed CPU time.
-`peak_memory_bytes` is the retained state needed in the comparison scope.
-`scan_bytes` counts source data read, not reads of the already retained
-sketch. These dimensions are intentionally not added together before
-calibration because their units differ.
+`cpu_ops` is an algorithmic operation count, not elapsed time.
+`peak_memory_bytes` is the maximum retained/working state represented by the
+plan. `scan_bytes` counts source or disk data read; consuming an in-memory
+intermediate does not create another source scan.
 
-All arithmetic is checked. An estimate that overflows fails closed.
+## Comparison scope
 
-## Physical operator formulas
+Every alternative must be evaluated over the same workload horizon. The
+model accepts:
 
-Plan costing separates a node's own work from its children. A DAG walk adds
-CPU and disk once per physical node; retained states that coexist are added,
-while a streaming operator contributes only its working row/buffer. The
-operator classes and local formulas are:
+| Input | Definition |
+|---|---|
+| `input_rows` | Rows consumed by one build or one raw evaluation. |
+| `input_bytes` | Logical input bytes, including an intermediate when the operator does not read the source directly. |
+| `source_scan_bytes` | Source/disk bytes read once by this operator region. It is zero for an already-materialized intermediate. |
+| `group_count` | Estimated number of distinct `GROUP BY` key tuples. It is one for an ungrouped aggregation. |
+| `group_key_bytes` | Average encoded bytes in one grouping-key tuple. Hash-table metadata is modeled separately. |
+| `topk_k` | Optional `k` for a Top-K query shape. |
+| `evaluation_count` | Number of query evaluations in the comparison horizon. |
 
-| Physical operator | CPU operations | Peak working/retained memory | Disk/source scan |
+`group_count` and `input_rows` are different quantities. One hundred million
+rows may contain one hundred thousand distinct `service` values; that input
+has `input_rows = 100_000_000` and `group_count = 100_000`.
+
+`input_bytes` and `source_scan_bytes` are also different. An outer operator
+may consume a 4 MB intermediate while causing zero additional disk reads.
+Keeping them separate prevents nested operators from charging the original
+source scan more than once.
+
+Required counts and widths must be positive. `source_scan_bytes` may be zero
+for an intermediate.
+
+## Operator-local estimates
+
+An operator estimate excludes child work. Plan composition counts each DAG
+node once, adds cumulative CPU and disk work, and combines state that must
+coexist. Streaming operators contribute only their working buffer; retained
+summaries remain live across evaluations.
+
+The physical operator API defines these local formulas:
+
+| Operator | CPU operations | Peak memory | Source/disk scan |
 |---|---:|---:|---:|
 | Scan | `input_rows` | one input row | `input_bytes` |
 | Filter | `input_rows` | one output row | `0` |
-| Project / scalar pass-through | `input_rows` | one output row | `0` |
-| Hash aggregate | `input_rows` | `groups * (key_bytes + value_bytes + hash_metadata)` | `0` |
-| Deduplicate | `input_rows` | same keyed-state formula as hash aggregate | `0` |
-| Full sort | `rows * ceil(log2(rows))` | `input_bytes` | `0` unless an external-sort implementation is selected |
-| Top-K heap | `rows * ceil(log2(k))` | `min(k, rows) * row_bytes` | `0` |
-| Hash join | `left_rows + right_rows + output_rows` | bytes of the chosen build side | `0` beyond child scans |
+| Project/pass-through | `input_rows` | one output row | `0` |
+| Hash aggregate | `input_rows` | `groups × (key bytes + value bytes + hash metadata)` | `0` |
+| Deduplicate | `input_rows` | keyed state, as for hash aggregation | `0` |
+| Full in-memory sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
+| Heap Top-K | `rows × ceil(log2(max(k, 2)))` | `min(k, rows) × row_bytes` | `0` |
+| Hash join | `left rows + right rows + output rows` | chosen build-side bytes | `0` beyond child scans |
 | Concat | `output_rows` | one output row | `0` |
-| Window | `rows * ceil(log2(rows))` when ordering is required | partition/input bytes | `0` |
+| Ordered window | `rows × ceil(log2(rows))` | partition/input bytes | `0` |
 | Limit | `output_rows` | one output row | `0` |
 
-A logical operator does not determine every physical behavior. For example,
-an external sort would add spill reads/writes, and a nested-loop join would
-have a different CPU formula. Such a physical alternative must be represented
-explicitly; the model does not silently charge an in-memory sort while calling
-it disk-aware. Filter selectivity, output cardinality/width, join-side
-cardinality, and similar required statistics fail closed when absent.
+A logical operator is not automatically a complete physical specification.
+For example, an external sort must explicitly add spill writes and reads; it
+must not reuse the in-memory-sort formula and call the result disk-aware.
+Likewise, a nested-loop join needs a different CPU expression from a hash
+join. Missing output cardinality, selectivity, row width, or join-side
+statistics makes the affected estimate unavailable.
 
-## Exact raw aggregation baseline
+## Exact grouped aggregation and Top-K
 
-The baseline recomputes the aggregation from raw input for every evaluation.
-The current grouped-aggregation model assumes one unit of CPU work per input
-row and a 16-byte accumulator/key slot per group:
-
-```text
-cpu_ops           = input_rows * evaluation_count
-                  + topk_cpu_ops
-scan_bytes        = source_scan_bytes * evaluation_count
-peak_memory_bytes = group_count * (group_key_bytes + 8 + 16)
-                  + topk_heap_bytes
-```
-
-The per-group state includes the grouping key, an 8-byte exact value, and 16
-bytes of hash-table metadata. This is a documented logical-layout assumption,
-not a claim about every execution engine's allocator overhead.
-
-For `topk_k = k`, selection is modeled with a size-`k` heap over every
-materialized group on every evaluation:
+An exact grouped count materializes all groups in a hash table. The model
+uses an 8-byte count and 16 bytes of hash-table metadata per group:
 
 ```text
-topk_cpu_ops  = evaluation_count * group_count * ceil(log2(max(k, 2)))
-topk_heap_bytes = min(k, group_count) * (group_key_bytes + 8)
+group_entry_bytes = group_key_bytes + 8 + 16
+
+aggregation_cpu_per_evaluation = input_rows
+aggregation_memory             = group_count × group_entry_bytes
 ```
 
-This explicitly accounts for retaining all groups before Top-K selection;
-the heap is additional working memory, not a substitute for the group table.
-
-## Sketch-backed aggregation
-
-The sketch alternative builds retained state during one complete input scan,
-then serves each evaluation by reading that state:
+For exact Top-K over those groups:
 
 ```text
-cpu_ops = input_rows * update_ops(params)
-        + evaluation_count * physical_sketch_count * read_ops(params)
-        + topk_cpu_ops
-
-scan_bytes        = source_scan_bytes
-peak_memory_bytes = physical_sketch_count * state_bytes(params)
-                  + group_count * (group_key_bytes + 16)
-                  + topk_heap_bytes
+topk_cpu_per_evaluation = group_count × ceil(log2(max(k, 2)))
+topk_memory             = min(k, group_count) × (group_key_bytes + 8)
 ```
 
-For the ordinary per-subpopulation layout,
-`physical_sketch_count = group_count`. For a shared multi-subpopulation
-layout, `physical_sketch_count = 1`.
+The hash table remains present while Top-K selection runs, so the heap is
+additional memory rather than a replacement for the materialized groups.
+Across a horizon of `evaluation_count = E`:
 
-The estimator uses the concrete sketch parameters produced for the query's
-accuracy target. The formulas are:
+```text
+cpu_ops = E × (aggregation_cpu_per_evaluation + topk_cpu_per_evaluation)
+scan_bytes = E × source_scan_bytes
+peak_memory_bytes = aggregation_memory + topk_memory
+```
 
-| Sketch | Update operations per row | Read operations per evaluation | State bytes per physical sketch |
+The per-entry sizes are explicit logical-layout assumptions. They do not
+claim to include every allocator or execution-engine object overhead.
+
+## Sketch resource formulas
+
+A retained sketch scans its source once during construction. Later query
+evaluations read the sketch state:
+
+```text
+cpu_ops = input_rows × update_ops(params)
+        + evaluation_count × physical_sketch_count × read_ops(params)
+
+scan_bytes = source_scan_bytes
+```
+
+For a per-subpopulation layout, `physical_sketch_count = group_count`. A
+shared multi-subpopulation structure has one physical sketch. A global keyed
+heavy-hitter sketch also has one physical sketch; its keys live in the sketch
+heap and it does not allocate a map from group to sketch instance.
+
+Concrete accuracy-sized parameters determine work and state:
+
+| Sketch | Update operations per input row | Read operations per evaluation | State bytes per sketch |
 |---|---:|---:|---:|
-| CMS | `depth` | `depth` | `width * depth * 8` |
-| CountSketch | `depth` | `depth` | `width * depth * 8` |
-| CMS with heap | `depth + ceil(log2(heap_size))` | `depth + heap_size` | `width * depth * 8 + heap_size * 16` |
-| CountSketch with heap | `depth + ceil(log2(heap_size))` | `depth + heap_size` | `width * depth * 8 + heap_size * 16` |
-| KLL | `1 + ceil(log2(k))` | `ceil(log2(k))` | `k * 8` |
+| CMS | `depth` | `depth` | `width × depth × 8` |
+| CountSketch | `depth` | `depth` | `width × depth × 8` |
+| CMSWithHeap | `depth + ceil(log2(heap_size))` | `depth + heap_size` | `width × depth × 8 + heap_size × 16` |
+| CountSketchWithHeap | `depth + ceil(log2(heap_size))` | `depth + heap_size` | `width × depth × 8 + heap_size × 16` |
+| KLL | `1 + ceil(log2(k))` | `ceil(log2(k))` | `k × 8` |
 | HLL | `1` | `2^precision` | `2^precision` |
-| KMV | `ceil(log2(k))` | `k` | `k * 8` |
-| Theta | `ceil(log2(k))` | `k` | `k * 8` |
+| KMV | `ceil(log2(k))` | `k` | `k × 8` |
+| Theta | `ceil(log2(k))` | `k` | `k × 8` |
 
-Logarithms use an argument of at least two so zero operations are never
-introduced by a degenerate parameter. Parameter variants must match their
-algorithm; a mismatch is an unavailable estimate rather than an inferred
-conversion.
+Logarithms use an argument of at least two. An algorithm/parameter mismatch
+is an error, not permission to reinterpret the parameters.
 
-DDSketch is not estimated because its retained bin count depends on the input
-value distribution and range. Until those statistics are part of the model,
-inventing a bin count would make both memory and read cost unsound.
+DDSketch is unavailable because its occupied-bin count depends on the input
+value distribution and range. Estimating it requires that evidence; the model
+does not invent a bin count.
 
-## Calibration and scalar objective
+## Count-ranked Top-K fusion
 
-A `ResourceCalibration` contains three finite, non-negative coefficients and
-a required version string:
+SQL count-ranked Top-K is canonically represented as two logical aggregates:
 
-```text
-cost = cpu_ops * cost_per_cpu_op
-     + scan_bytes * cost_per_scan_byte
-     + peak_memory_bytes * cost_per_retained_byte
+```sql
+SELECT service, COUNT(*) AS frequency
+FROM metrics
+GROUP BY service
+ORDER BY frequency DESC
+LIMIT 10;
 ```
 
-At least one coefficient must be positive. The scalar is reported in
-`CostUnits`; it is not implicitly money, latency, or cost per second. The
-deployment defines that meaning through its calibration procedure and
-version. For example, coefficients may be fitted from benchmark measurements
-or chosen to express a resource budget. They are never hard-coded as
-universal hardware constants.
+```text
+TopK(Count GROUP BY service)
+```
 
-Changing any coefficient can change the selected candidate. This is expected:
-a memory-constrained deployment and a scan-constrained deployment need not
-prefer the same sketch. The calibration version is included in exported
-provenance so two estimates produced under different policies are not
-mistaken for directly comparable results.
+Those logical layers must not become one CMS per service followed by another
+sketch. A heavy-hitter sketch counts keys directly from the raw stream.
+Candidate construction therefore fuses the pattern into:
 
-## Candidate selection
+```text
+Scan(metrics)
+    -> CMSWithHeap(key=service, heap_size=10)
+    -> TopK readout
+```
 
-For an aggregation with several legal sketch algorithms, the planner:
+For `width = 272`, `depth = 5`, and `heap_size = 10`, retained state is:
 
-1. resolves the declared accuracy target;
-2. sizes each algorithm for that target;
-3. computes its resource estimate using the same workload inputs;
-4. applies the calibration;
-5. orders supported candidates by ascending calibrated cost.
+```text
+CMS counters = 272 × 5 × 8 = 10,880 bytes
+heap         = 10 × 16      =    160 bytes
+total                           11,040 bytes
+```
 
-Candidate enumeration remains exhaustive. An unavailable estimate is not a
-reason to claim a numerical cost, and cost ranking never bypasses accuracy or
-semantic validation.
+This is one global sketch, independent of `group_count`. `group_count` still
+matters to the exact baseline because it determines how many exact group
+entries must be materialized.
 
-Approximate Top-K additionally requires a margin certificate: a lower bound
-for the kth selected item, an upper bound for every excluded item, and their
-union-bounded failure probability. The selected lower bound must exceed the
-excluded upper bound. `dag_export --topk-margin-json` supplies this evidence;
-without it, CMSWithHeap/CountSketchWithHeap remain illegal and the planner
-keeps an exact Top-K rather than using cost to override correctness.
+## Top-K accuracy evidence
 
-The raw baseline and selected sketch cost use the same workload scope and
-calibration. Their exported benefit is:
+Approximate Top-K membership needs more than a point-count error bound. The
+planner requires a margin certificate containing:
+
+- a lower confidence bound for the kth selected item;
+- the greatest upper confidence bound among excluded items;
+- the union-bounded failure probability of those intervals.
+
+The selected lower bound must exceed the excluded upper bound. Without this
+separation, CMSWithHeap and CountSketchWithHeap remain illegal regardless of
+their estimated cost. `dag_export --topk-margin-json` supplies this evidence
+for an export run.
+
+## Workload-horizon example
+
+Assume:
+
+```text
+input rows       = 100,000,000
+source size      = 6.4 GB
+distinct service = 100,000
+service key      = 32 bytes
+evaluations      = 100
+k                = 10
+```
+
+The scan column is cumulative across the horizon:
+
+```text
+pre-ASAP scan  = 6.4 GB/evaluation × 100 evaluations = 640 GB
+post-ASAP scan = 6.4 GB/build × 1 retained build      = 6.4 GB
+```
+
+Pre-ASAP has no retained summary in this alternative, so it rebuilds the
+hash aggregation and exact Top-K for every evaluation. Post-ASAP builds one
+CMSWithHeap and subsequent evaluations read its 11,040-byte state. The model
+does not describe post-ASAP as having free construction: its initial scan and
+update CPU are included.
+
+With calibration coefficients:
+
+```text
+cost_per_cpu_op       = 0.000001
+cost_per_scan_byte    = 0.00000001
+cost_per_retained_byte = 0.000000001
+```
+
+the comparison is:
+
+| Complete plan | CPU ops | Peak memory | Source scan | Calibrated cost |
+|---|---:|---:|---:|---:|
+| Exact hash aggregation + heap Top-K | 10,040,000,000 | 5,600,400 B | 640,000,000,000 B | 16,440.0056004 |
+| One global CMSWithHeap | 900,001,500 | 11,040 B | 6,400,000,000 B | 964.00151104 |
+
+The result depends on both the stated horizon and calibration. With one
+evaluation, both alternatives scan the source once; the repeated-scan benefit
+does not exist. A different CPU/memory/I/O policy may also change the ranking.
+
+## Calibration
+
+Resource dimensions become one planner objective only through an explicit,
+versioned deployment calibration:
+
+```text
+cost = cpu_ops × cost_per_cpu_op
+     + scan_bytes × cost_per_scan_byte
+     + peak_memory_bytes × cost_per_retained_byte
+```
+
+Coefficients must be finite and non-negative, and at least one must be
+positive. The scalar is reported as `CostUnits`; it is not implicitly money,
+latency, or cost per second. Coefficients may come from benchmarks or an
+explicit resource policy. They are not universal hardware constants.
+
+The calibration version is exported with the model version. Estimates using
+different calibration versions must not be treated as directly comparable.
+
+## Selection and exported provenance
+
+For each legal sketch candidate, the planner:
+
+1. resolves the accuracy target;
+2. sizes the algorithm for that target;
+3. estimates operator resources using the candidate's concrete parameters;
+4. composes nested DAG resources without recharging shared scans;
+5. applies calibration and ranks candidates by ascending cost.
+
+The raw baseline and selected plan use the same workload scope and
+calibration:
 
 ```text
 benefit       = baseline_cost - selected_cost
 benefit_ratio = benefit / baseline_cost
 ```
 
-A positive benefit means the selected post-ASAP alternative is cheaper than
-raw pre-ASAP recomputation under the stated inputs and calibration.
-
-## Exported provenance
-
-`dag_export` accepts a serialized model through
-`--analytical-cost-json`. Its baseline, selected, and benefit annotations use
-model version `analytical-resource-v1` together with the calibration version.
-The annotation inputs include:
-
-- all workload and query-shape inputs;
-- estimated CPU operations, peak memory, and scan bytes;
-- all three calibration coefficients and their units.
-
-This is sufficient to reproduce the scalar from the exported annotation and
-to explain which resource dimension drove a decision.
+Exported annotations include workload/query inputs, CPU operations, peak
+memory, source-scan bytes, calibration coefficients, and model/calibration
+versions. This is enough to reproduce the scalar and explain which resource
+dimension drove the decision.
 
 ## Failure behavior
 
-The model returns an unavailable estimate when any of the following holds:
+An estimate is unavailable when:
 
-- a workload input is missing or zero;
-- a calibration coefficient is negative, non-finite, or all coefficients are
-  zero;
-- sketch parameters do not match the sketch algorithm;
-- required distribution evidence is absent;
-- the candidate shape is unsupported;
+- a required workload or operator statistic is missing or zero;
+- calibration is negative, non-finite, or entirely zero;
+- sketch parameters do not match the algorithm;
+- required distribution or Top-K margin evidence is absent;
+- a candidate or physical implementation is unsupported;
 - checked arithmetic overflows.
 
-Structural node counts are never used as a fallback. They have no physical
-unit and can reverse the conclusion of a CPU, memory, and scan comparison.
-Consumers render unavailable estimates as `Not estimated` and must not infer
-a zero cost.
+Structural node counts are never used as a fallback. Consumers render an
+unavailable estimate as `Not estimated`; unavailable never means zero cost.
