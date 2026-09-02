@@ -465,7 +465,7 @@ pub fn materialize_with_summary_maintenance_lifecycles(
                 .expected_reads
                 .and_then(|reads| cost_model.raw_query_recompute_total_cost(target, reads));
             if !plan.selected_raw_recompute
-                && plan.raw_recompute_total_cost.is_some_and(|raw| {
+                && plan.raw_recompute_total_cost.is_none_or(|raw| {
                     plan.summary_total_cost
                         .is_none_or(|summary| raw.0 <= summary.0)
                 })
@@ -994,7 +994,25 @@ fn select_complete_lifecycle_combination(
     horizon: Option<Horizon>,
     expected_reads: Option<f64>,
 ) -> Option<Cost> {
+    const MAX_COMPLETE_LIFECYCLE_COMBINATIONS: usize = 4_096;
     if deployments.is_empty() {
+        return None;
+    }
+    // The whole-candidate hook is intentionally arbitrary, so partial costs
+    // cannot soundly prune the search. Bound exhaustive enumeration and fail
+    // closed instead of allowing an adversarial DAG to consume exponential
+    // planner time.
+    let combinations = deployments
+        .iter()
+        .try_fold(1_usize, |product, deployment| {
+            let selectable = deployment
+                .alternatives
+                .iter()
+                .filter(|alternative| alternative.selectable())
+                .count();
+            product.checked_mul(selectable)
+        })?;
+    if combinations == 0 || combinations > MAX_COMPLETE_LIFECYCLE_COMBINATIONS {
         return None;
     }
     #[expect(
@@ -1957,6 +1975,70 @@ mod tests {
                 .summary_maintenance_lifecycle,
             SummaryMaintenanceLifecycle::ContinuouslyMaintained
         ));
+    }
+
+    #[test]
+    fn complete_lifecycle_enumeration_fails_closed_above_safe_bound() {
+        let root = summary();
+        let alternatives = vec![
+            SummaryMaintenanceLifecycleAlternative {
+                summary_maintenance_lifecycle: SummaryMaintenanceLifecycle::Ephemeral,
+                total_cost: Some(Cost(1.0)),
+                rejection: None,
+                assumptions: vec![],
+            },
+            SummaryMaintenanceLifecycleAlternative {
+                summary_maintenance_lifecycle: SummaryMaintenanceLifecycle::ContinuouslyMaintained,
+                total_cost: Some(Cost(2.0)),
+                rejection: None,
+                assumptions: vec![],
+            },
+        ];
+        let mut deployments: Vec<_> = (0..13)
+            .map(|summary_index| SummaryMaintenanceDeployment {
+                summary_index,
+                summary: Rc::clone(&root),
+                summary_maintenance_lifecycle_guarantee: None,
+                alternatives: alternatives.clone(),
+            })
+            .collect();
+        assert_eq!(
+            select_complete_lifecycle_combination(
+                &root,
+                &mut deployments,
+                &(0..13).collect::<Vec<_>>(),
+                DataArrival::ContinuouslyIngesting,
+                &WholeCandidatePrefersContinuous,
+                Some(Horizon(10.0)),
+                Some(2.0),
+            ),
+            None
+        );
+        assert!(deployments
+            .iter()
+            .all(|deployment| deployment.summary_maintenance_lifecycle_guarantee.is_none()));
+    }
+
+    #[test]
+    fn materialization_falls_back_to_raw_when_raw_cost_is_unavailable() {
+        let target = quantile_query();
+        let space = crate::replacement::search_workload(vec![("q", target)]);
+        let selection = space.global_selection(&UnitCosts);
+        let workload = workload(vec![batch(Predictability::AdHoc)], vec![], at_rest());
+        let plan = materialize_with_summary_maintenance_lifecycles(
+            &selection,
+            &space.roots[0].1,
+            WorkloadDemand::new(&workload, &[0]),
+            1_000,
+            None,
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &UnitCosts,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(plan.selected_raw_recompute);
+        assert!(plan.raw_recompute_total_cost.is_none());
+        assert!(matches!(plan.root.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
     #[test]
