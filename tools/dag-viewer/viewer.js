@@ -120,7 +120,7 @@ function loadFiles(fileList) {
           let name = q.name;
           if (existingNames.has(name)) name = `${q.name} (${file.name})`;
           existingNames.add(name);
-          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, workload_cost: q.workload_cost, sourceBatch, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary });
+          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, workload_cost: q.workload_cost, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary, sourceBatch });
         });
       } catch (err) {
         alert(`Failed to parse ${file.name}: ${err.message}`);
@@ -593,7 +593,10 @@ function unionStageLaneElements(stage, chosen, laneCost) {
 function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
   const nodes = graph.nodes;
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const edgeCostByPair = new Map((graph.edge_annotations || []).map((edge) => [`${edge.from} ${edge.to}`, edge.cost]));
+  // Keep the delimiter escaped in source. A literal NUL is replaced by the
+  // HTML tokenizer when viewer.js is embedded by render.py, which otherwise
+  // makes these keys differ from the lookup below.
+  const edgeCostByPair = new Map((graph.edge_annotations || []).map((edge) => [`${edge.from}\u0000${edge.to}`, edge.cost]));
   const elements = [
     { data: { id: laneId, label: laneCostLabel(laneLabel, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
   ];
@@ -785,6 +788,7 @@ function computeSelectionWorkloadCost(selected) {
   let baselineSum = 0;
   let selectedSum = 0;
   let any = false;
+  let unavailable = false;
   for (const query of selected) {
     const nodes = (query.post_graph && query.post_graph.nodes) || [];
     for (const node of nodes) {
@@ -796,15 +800,22 @@ function computeSelectionWorkloadCost(selected) {
       const baseline = decision.baseline_cost;
       const selectedCost = decision.selected_cost;
       if (!baseline || !selectedCost) continue;
-      if (baseline.value === null || baseline.value === undefined || selectedCost.value === null || selectedCost.value === undefined) continue;
       if (unit === null) unit = baseline.unit;
       if (baseline.unit !== unit || selectedCost.unit !== unit) return null; // unit-incompatible aggregation is rejected
+      any = true;
+      if (baseline.value === null || baseline.value === undefined || selectedCost.value === null || selectedCost.value === undefined) {
+        unavailable = true;
+        continue;
+      }
       baselineSum += baseline.value;
       selectedSum += selectedCost.value;
-      any = true;
     }
   }
   if (!any) return null;
+  if (unavailable) {
+    const missing = { value: null, unit, source: 'Unavailable' };
+    return { baseline_cost: missing, selected_cost: missing, benefit: missing };
+  }
   const delta = baselineSum - selectedSum;
   return {
     baseline_cost: { value: baselineSum, unit, source: 'Modeled' },
@@ -1127,7 +1138,7 @@ function loadWorkload(parsed) {
   const incoming = (parsed && parsed.queries) || [];
   // One batch id for this whole document — see `sourceBatch`'s own doc above.
   const sourceBatch = nextSourceBatch++;
-  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, workload_cost: q.workload_cost, sourceBatch, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary }));
+  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, workload_cost: q.workload_cost, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary, sourceBatch }));
   if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
   if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
 }

@@ -53,24 +53,26 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-use asap_aware_mapping::cost_model::{default_cse_recompute_cost, DefaultCostModel};
-use asap_aware_mapping::replacement::{search_workload, Replacement, ReplacementSubDAG};
+use asap_aware_mapping::analytical_cost::{
+    query_topk_k, AnalyticalCostModel, ResourceEstimate, ANALYTICAL_MODEL_VERSION,
+};
+use asap_aware_mapping::cost_model::{CostModel, DefaultCostModel};
+use asap_aware_mapping::replacement::{
+    default_strategies_with_evidence, search_workload, search_workload_with, Replacement,
+    ReplacementSubDAG,
+};
+use asap_aware_mapping::{AccuracyEvidenceProvider, PropagationStats};
 use asap_types::cost::{BaselineRef, CostAnnotation, CostInput, CostSource, CostUnit};
 use asap_types::dag_export::{
     self, DagDecision, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetRejection,
     TargetReplacement, TargetReplacementAfter, WorkloadGraph,
 };
 use asap_types::post_asap::SummaryExpr;
+use asap_types::post_asap::{CompositionOperator, SketchQuery, SummaryFamilyType};
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
-
-/// `model_version` tag for every [`CostAnnotation`] this binary computes —
-/// see [`winner_cost_annotations`]'s own doc for what it's a structural
-/// proxy for and why (issue #286, issue #287 is the real rate-modeling
-/// follow-up).
-const STRUCTURAL_COST_MODEL_VERSION: &str = "dag_export-structural-cost-v1";
 
 /// Baseline/selected/benefit [`CostAnnotation`]s for one [`Winner`] — issue
 /// #286's "replacement-region baseline cost, selected cost, and benefit"
@@ -78,76 +80,123 @@ const STRUCTURAL_COST_MODEL_VERSION: &str = "dag_export-structural-cost-v1";
 /// [`DagDecision`] carried by every node the winning candidate produced or
 /// carried.
 ///
-/// The baseline is always [`BaselineRef::PreAsapRecomputation`]: the cost of
-/// recomputing the winner's own target independently at every one of its
-/// `consumer_count` use sites. `per_consumer_recompute` is that one-site cost
-/// — [`default_cse_recompute_cost`] applied to the target, the exact
-/// structural-size proxy `asap_aware_mapping::cost_model`'s own
-/// `DefaultCostModel` already uses, not a second formula — passed in
-/// pre-computed rather than taking `target: &QueryExpr` and recomputing it
-/// here: this function is called once per matched *node position* a winner
-/// produced or carried (once per `target_replacement` flat entry, once per
-/// `find_winner` hit), and the same winner's target can be reached from more
-/// than one node position, so callers memoize `default_cse_recompute_cost`
-/// once per winner (see `run_post_asap_with_progress`'s
-/// `per_consumer_recompute_costs`) instead of this function re-walking the
-/// identical subtree on every call. This baseline is always computable
-/// (never `Unavailable`), unlike `selected`, which is `Unavailable` whenever
-/// `selected_cost` is `NaN` (the plugged-in cost model has no numeric
-/// estimate for that particular candidate shape — see
-/// [`RankedGroup::costs`](asap_aware_mapping::replacement::RankedGroup::costs)'s
-/// own doc).
-///
-/// Every value here is unit-tagged [`CostUnit::RelativeStructuralUnits`],
-/// not [`CostUnit::CostUnitsPerSecond`]: today's cost model has no
-/// `update_rate`/`evaluation_rate`/`query_interval` recurrence inputs at all
-/// (issue #287's job) — see `asap_types::cost`'s module doc for why this
-/// crate refuses to mislabel a structural proxy as a real rate.
+/// With valid workload inputs and calibration, the baseline is exact raw
+/// aggregation and the selected value is the candidate's analytical
+/// CPU/memory/scan estimate. Missing evidence fails closed as `Unavailable`;
+/// structural node counts are intentionally never used as a fallback.
 fn winner_cost_annotations(
-    per_consumer_recompute: f64,
-    consumer_count: usize,
-    selected_cost: f64,
+    analytical: Option<&AnalyticalCostModel>,
+    candidate: &ReplacementSubDAG,
+    target: &Rc<QueryExpr>,
 ) -> (CostAnnotation, CostAnnotation, CostAnnotation) {
-    let baseline_value = per_consumer_recompute * consumer_count.max(1) as f64;
-    let baseline = CostAnnotation::modeled(
-        baseline_value,
-        CostUnit::RelativeStructuralUnits,
-        STRUCTURAL_COST_MODEL_VERSION,
-        vec![
-            CostInput::new("per_consumer_recompute_cost", per_consumer_recompute),
-            CostInput::new("consumer_count", consumer_count.max(1) as f64),
-        ],
-    );
-
-    if !selected_cost.is_finite() {
-        return (
-            baseline,
-            CostAnnotation::unavailable(CostUnit::RelativeStructuralUnits),
-            CostAnnotation::unavailable(CostUnit::RelativeStructuralUnits),
-        );
+    if let Some(model) = analytical {
+        if let (Ok(baseline_resources), Ok(resources)) = (
+            model.raw_resources_for_target(target.as_ref()),
+            model.candidate_resources_for_target(
+                candidate,
+                &asap_aware_mapping::replacement::TargetSubDAG::new(target),
+            ),
+        ) {
+            if let (Ok(baseline_value), Ok(selected_value)) = (
+                baseline_resources.calibrated_cost(&model.calibration),
+                resources.calibrated_cost(&model.calibration),
+            ) {
+                let version = format!("{}+{}", ANALYTICAL_MODEL_VERSION, model.calibration.version);
+                let baseline = CostAnnotation::modeled(
+                    baseline_value,
+                    CostUnit::CostUnits,
+                    &version,
+                    analytical_inputs(model, target, baseline_resources),
+                );
+                let selected = CostAnnotation::modeled(
+                    selected_value,
+                    CostUnit::CostUnits,
+                    &version,
+                    analytical_inputs(model, target, resources),
+                )
+                .with_baseline(BaselineRef::PreAsapRecomputation, baseline_value);
+                let benefit = CostAnnotation {
+                    value: selected.delta,
+                    unit: CostUnit::CostUnits,
+                    source: CostSource::Modeled,
+                    baseline: Some(BaselineRef::PreAsapRecomputation),
+                    delta: None,
+                    benefit_ratio: selected.benefit_ratio,
+                    model_version: Some(version),
+                    benchmark_id: None,
+                    inputs: Vec::new(),
+                };
+                return (baseline, selected, benefit);
+            }
+        }
     }
-
-    let selected = CostAnnotation::modeled(
-        selected_cost,
-        CostUnit::RelativeStructuralUnits,
-        STRUCTURAL_COST_MODEL_VERSION,
-        vec![],
+    // Structural node counts are deliberately not a fallback: they have no
+    // physical unit and can reverse the conclusion of the resource model.
+    // Missing inputs and unsupported candidates fail closed instead.
+    (
+        CostAnnotation::unavailable(CostUnit::CostUnits),
+        CostAnnotation::unavailable(CostUnit::CostUnits),
+        CostAnnotation::unavailable(CostUnit::CostUnits),
     )
-    .with_baseline(BaselineRef::PreAsapRecomputation, baseline_value);
+}
 
-    let benefit = CostAnnotation {
-        value: selected.delta,
-        unit: CostUnit::RelativeStructuralUnits,
-        source: CostSource::Modeled,
-        baseline: Some(BaselineRef::PreAsapRecomputation),
-        delta: None,
-        benefit_ratio: selected.benefit_ratio,
-        model_version: Some(STRUCTURAL_COST_MODEL_VERSION.to_string()),
-        benchmark_id: None,
-        inputs: Vec::new(),
+fn analytical_inputs(
+    model: &AnalyticalCostModel,
+    target: &QueryExpr,
+    resources: ResourceEstimate,
+) -> Vec<CostInput> {
+    let input = |name: &str, value: f64, unit: &str| CostInput {
+        name: name.to_string(),
+        value,
+        unit: Some(unit.to_string()),
     };
-
-    (baseline, selected, benefit)
+    vec![
+        input("input_rows", model.inputs.input_rows as f64, "rows"),
+        input("input_bytes", model.inputs.input_bytes as f64, "bytes"),
+        input(
+            "source_scan_bytes",
+            model.inputs.source_scan_bytes as f64,
+            "bytes",
+        ),
+        input("group_count", model.inputs.group_count as f64, "groups"),
+        input(
+            "group_key_bytes",
+            model.inputs.group_key_bytes as f64,
+            "bytes/group key",
+        ),
+        input(
+            "topk_k",
+            query_topk_k(target).unwrap_or(0) as f64,
+            "rows; 0 means no Top-K",
+        ),
+        input(
+            "evaluation_count",
+            model.inputs.evaluation_count as f64,
+            "evaluations",
+        ),
+        input("estimated_cpu_ops", resources.cpu_ops, "operations"),
+        input(
+            "estimated_peak_memory",
+            resources.peak_memory_bytes as f64,
+            "bytes",
+        ),
+        input("estimated_scan", resources.scan_bytes as f64, "bytes"),
+        input(
+            "cost_per_cpu_op",
+            model.calibration.cost_per_cpu_op,
+            "cost units/operation",
+        ),
+        input(
+            "cost_per_scan_byte",
+            model.calibration.cost_per_scan_byte,
+            "cost units/byte",
+        ),
+        input(
+            "cost_per_retained_byte",
+            model.calibration.cost_per_retained_byte,
+            "cost units/byte/scope",
+        ),
+    ]
 }
 
 use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
@@ -237,6 +286,53 @@ struct ParsedArgs {
     post_asap: bool,
     progress: bool,
     table_schemas: Vec<String>,
+    analytical_cost: Option<AnalyticalCostModel>,
+    topk_margin: Option<TopKMarginEvidence>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TopKMarginEvidence {
+    selected_lower_bound: f64,
+    excluded_upper_bound: f64,
+    interval_failure_probability: f64,
+}
+
+impl TopKMarginEvidence {
+    fn validate(&self) -> Result<(), &'static str> {
+        if !self.selected_lower_bound.is_finite() || !self.excluded_upper_bound.is_finite() {
+            return Err("Top-K bounds must be finite");
+        }
+        if self.selected_lower_bound <= self.excluded_upper_bound {
+            return Err("selected_lower_bound must exceed excluded_upper_bound");
+        }
+        if !(self.interval_failure_probability.is_finite()
+            && self.interval_failure_probability >= 0.0
+            && self.interval_failure_probability < 1.0)
+        {
+            return Err("interval_failure_probability must be in [0, 1)");
+        }
+        Ok(())
+    }
+}
+
+impl AccuracyEvidenceProvider for TopKMarginEvidence {
+    fn propagation_stats(
+        &self,
+        op: &CompositionOperator,
+        _family: &SummaryFamilyType,
+        _query: Option<&SketchQuery>,
+    ) -> PropagationStats {
+        if matches!(op, CompositionOperator::TopKSelection) {
+            PropagationStats {
+                topk_selected_lower_bound: Some(self.selected_lower_bound),
+                topk_excluded_upper_bound: Some(self.excluded_upper_bound),
+                topk_interval_failure_probability: Some(self.interval_failure_probability),
+                ..Default::default()
+            }
+        } else {
+            PropagationStats::default()
+        }
+    }
 }
 
 fn parse_args() -> ParsedArgs {
@@ -246,6 +342,8 @@ fn parse_args() -> ParsedArgs {
     let mut post_asap = false;
     let mut progress = false;
     let mut table_schemas = Vec::new();
+    let mut analytical_cost_json = None;
+    let mut topk_margin_json = None;
     let mut args = std::env::args().skip(1);
 
     fn flush(entries: &mut Vec<(String, Lang, String)>, pending: &mut Option<(Lang, String)>) {
@@ -289,16 +387,51 @@ fn parse_args() -> ParsedArgs {
             "--table-schema" => {
                 table_schemas.push(args.next().expect("--table-schema requires JSON"));
             }
+            "--analytical-cost-json" => {
+                analytical_cost_json = Some(
+                    args.next()
+                        .expect("--analytical-cost-json requires a JSON object"),
+                );
+            }
+            "--topk-margin-json" => {
+                topk_margin_json = Some(
+                    args.next()
+                        .expect("--topk-margin-json requires a JSON object"),
+                );
+            }
             other => panic!("unrecognized argument: {other}"),
         }
     }
     flush(&mut entries, &mut pending);
+    let analytical_cost = analytical_cost_json.map(|raw| {
+        let model: AnalyticalCostModel = serde_json::from_str(&raw)
+            .unwrap_or_else(|error| panic!("--analytical-cost-json is invalid: {error}"));
+        model
+            .inputs
+            .validate()
+            .unwrap_or_else(|error| panic!("invalid analytical inputs: {error}"));
+        model
+            .calibration
+            .validate()
+            .unwrap_or_else(|error| panic!("invalid analytical calibration: {error}"));
+        model
+    });
+    let topk_margin = topk_margin_json.map(|raw| {
+        let evidence: TopKMarginEvidence = serde_json::from_str(&raw)
+            .unwrap_or_else(|error| panic!("--topk-margin-json is invalid: {error}"));
+        evidence
+            .validate()
+            .unwrap_or_else(|error| panic!("invalid Top-K margin evidence: {error}"));
+        evidence
+    });
     ParsedArgs {
         entries,
         accuracy,
         post_asap,
         progress,
         table_schemas,
+        analytical_cost,
+        topk_margin,
     }
 }
 
@@ -329,17 +462,12 @@ fn annotate_with_explanations(
 }
 
 /// One `MemoGroup`'s best-ranked candidate, kept alongside its own `target`
-/// and `cost` — the unit both [`PostAsapResults::replacements`] and
+/// — the unit both [`PostAsapResults::replacements`] and
 /// [`PostAsapResults::post_graphs`] are built from, so the two outputs can
 /// never disagree about which candidate won for a given target.
 struct Winner<'a> {
     target: &'a Rc<QueryExpr>,
     candidate: &'a ReplacementSubDAG,
-    cost: f64,
-    /// The target's own `MemoGroup::consumer_count` — threaded through so
-    /// [`winner_cost_annotations`] can compute a baseline without a second
-    /// lookup back into `PlanSpace`.
-    consumer_count: usize,
 }
 
 /// Short explanation intended for a selected winner in node-level UI. The
@@ -435,15 +563,12 @@ fn decision_cost_entries(graph: &DagGraph) -> Vec<(u32, CostAnnotation, CostAnno
 }
 
 /// Build a [`TargetReplacement`] for `winner`, matching this file's own
-/// per-target `before`/`after` construction. `per_consumer_recompute` is
-/// `winner`'s own memoized [`default_cse_recompute_cost`] — see
-/// `winner_cost_annotations`'s own doc for why callers pass this in instead
-/// of recomputing it here.
+/// per-target `before`/`after` construction.
 fn target_replacement(
     decision_id: u32,
     target_pre_id: u32,
     winner: &Winner<'_>,
-    per_consumer_recompute: f64,
+    analytical: Option<&AnalyticalCostModel>,
 ) -> TargetReplacement {
     let strategy = winner.candidate.strategy.to_string();
     let before = dag_export::export(winner.target);
@@ -456,12 +581,9 @@ fn target_replacement(
         }
     };
     let (baseline_cost, selected_cost, benefit) =
-        winner_cost_annotations(per_consumer_recompute, winner.consumer_count, winner.cost);
-    // Derived from `selected_cost` (not read from `winner.cost` a second
-    // time) so the legacy scalar field and the structured annotation can
-    // never drift apart at this call site — see `winner_cost_annotations`'s
-    // own doc for why `selected_cost.value` is `None` (and this is `NaN`)
-    // in exactly the same case `winner.cost` itself would already be `NaN`.
+        winner_cost_annotations(analytical, winner.candidate, winner.target);
+    // Derived from `selected_cost` so the legacy scalar field and the
+    // structured annotation can never drift apart.
     let cost = selected_cost.value.unwrap_or(f64::NAN);
     TargetReplacement {
         decision_id,
@@ -550,6 +672,8 @@ fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
 fn run_post_asap_with_progress(
     lowered_queries: &[(String, String, QueryExpr)],
     progress: bool,
+    analytical: Option<&AnalyticalCostModel>,
+    evidence: Option<&dyn AccuracyEvidenceProvider>,
 ) -> PostAsapResults {
     let mapping_started = Instant::now();
     if progress {
@@ -559,8 +683,16 @@ fn run_post_asap_with_progress(
         .iter()
         .map(|(name, _, qe)| (name.clone(), Rc::new(qe.clone())))
         .collect();
-    let space = search_workload(roots);
-    let ranked_groups = space.cost_sorted(&DefaultCostModel);
+    let default_model = DefaultCostModel;
+    let cost_model: &dyn CostModel = analytical.map_or(&default_model, |model| model);
+    let strategies;
+    let space = if let Some(evidence) = evidence {
+        strategies = default_strategies_with_evidence(cost_model, evidence);
+        search_workload_with(roots, &strategies)
+    } else {
+        search_workload(roots)
+    };
+    let ranked_groups = space.cost_sorted(cost_model);
 
     // A group's top candidate can be `keep_pre_asap`'s own conservative
     // fallback — `Replacement::Summary(SummaryNode { expr:
@@ -587,7 +719,15 @@ fn run_post_asap_with_progress(
     let winners: Vec<Winner<'_>> = ranked_groups
         .iter()
         .filter_map(|group| {
-            let candidate = group.candidates.first()?;
+            let target = asap_aware_mapping::replacement::TargetSubDAG::with_consumer_count(
+                group.target,
+                group.consumer_count,
+            );
+            let candidate = group
+                .candidates
+                .iter()
+                .copied()
+                .find(|candidate| cost_model.candidate_cost(candidate, &target).is_some())?;
             if matches!(
                 &candidate.replacement,
                 Replacement::Summary(node) if matches!(node.expr, SummaryExpr::KeepPreAsap(_))
@@ -597,24 +737,8 @@ fn run_post_asap_with_progress(
             Some(Winner {
                 target: group.target,
                 candidate,
-                cost: group.costs[0],
-                consumer_count: group.consumer_count,
             })
         })
-        .collect();
-
-    // One `default_cse_recompute_cost` walk per *winner*, not per node a
-    // winner's decision ends up cloned onto: `winner_cost_annotations` is
-    // called once per matched node position — once per `target_replacement`
-    // flat entry, and once per `find_winner` hit inside `export_post_asap`'s
-    // traversal — and a single target can be reached from more than one
-    // node position (an internally-shared subtree within one query, or the
-    // same CSE-shared target reached from several queries), so recomputing
-    // this per call would re-walk the identical subtree redundantly.
-    // Indexed in parallel with `winners`.
-    let per_consumer_recompute_costs: Vec<f64> = winners
-        .iter()
-        .map(|winner| default_cse_recompute_cost(winner.target).0)
         .collect();
 
     // `by_hash` only narrows the search; `lookup_winner`'s own structural
@@ -655,13 +779,10 @@ fn run_post_asap_with_progress(
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
         let winner = &winners[i];
-        let (baseline_cost, selected_cost, benefit) = winner_cost_annotations(
-            per_consumer_recompute_costs[i],
-            winner.consumer_count,
-            winner.cost,
-        );
-        // Derived from `selected_cost`, not `winner.cost` a second time —
-        // see `target_replacement`'s identical derivation for why.
+        let (baseline_cost, selected_cost, benefit) =
+            winner_cost_annotations(analytical, winner.candidate, winner.target);
+        // Derived from `selected_cost`; see `target_replacement`'s identical
+        // derivation.
         let cost = selected_cost.value.unwrap_or(f64::NAN);
         let decision = DagDecision {
             id: i as u32,
@@ -730,12 +851,7 @@ fn run_post_asap_with_progress(
             if let Some(i) = lookup_winner(&by_hash, &winners, &mut lookup_cache, source_expr) {
                 replacements.push((
                     name.clone(),
-                    target_replacement(
-                        i as u32,
-                        node.id,
-                        &winners[i],
-                        per_consumer_recompute_costs[i],
-                    ),
+                    target_replacement(i as u32, node.id, &winners[i], analytical),
                 ));
                 matched[i] = true;
             }
@@ -806,7 +922,7 @@ fn run_post_asap_with_progress(
 
 #[cfg(test)]
 fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapResults {
-    run_post_asap_with_progress(lowered_queries, false)
+    run_post_asap_with_progress(lowered_queries, false, None, None)
 }
 
 #[tokio::main]
@@ -817,6 +933,8 @@ async fn main() {
         post_asap,
         progress,
         table_schemas,
+        analytical_cost,
+        topk_margin,
     } = parse_args();
     let sql_catalog = catalog(&table_schemas);
     let planner_started = Instant::now();
@@ -874,8 +992,8 @@ async fn main() {
             graph,
             replacements: Vec::new(),
             post_graph: None,
-            rejections: Vec::new(),
             workload_cost: None,
+            rejections: Vec::new(),
         });
     }
     for (explanation, matched) in explanations.iter().zip(matched) {
@@ -894,7 +1012,14 @@ async fn main() {
     }
 
     if post_asap {
-        let results = run_post_asap_with_progress(&lowered_queries, progress);
+        let results = run_post_asap_with_progress(
+            &lowered_queries,
+            progress,
+            analytical_cost.as_ref(),
+            topk_margin
+                .as_ref()
+                .map(|evidence| evidence as &dyn AccuracyEvidenceProvider),
+        );
         for (query_name, replacement) in results.replacements {
             if let Some(named) = queries.iter_mut().find(|q| q.name == query_name) {
                 named.replacements.push(replacement);
@@ -1144,6 +1269,99 @@ mod tests {
             assert!(!decision.strategy.is_empty());
             assert!(!decision.rationale.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_analytical_candidate_is_not_exported_as_selected() {
+        use asap_aware_mapping::analytical_cost::{AnalyticalInputs, ResourceCalibration};
+
+        let cat = default_catalog();
+        let sql = "SELECT approx_percentile_cont(latency, 0.95) \
+                   FROM metrics WHERE latency > 0";
+        let query = lower_sql(sql, &cat, AccuracyTarget::Epsilon(0.01))
+            .await
+            .unwrap();
+        let model = AnalyticalCostModel {
+            inputs: AnalyticalInputs {
+                data_arrival: asap_types::workload::DataArrival::AtRest,
+                input_rows: 1_000,
+                input_bytes: 64_000,
+                source_scan_bytes: 64_000,
+                group_count: 1,
+                group_key_bytes: 8,
+                topk_k: None,
+                evaluation_count: 10,
+            },
+            calibration: ResourceCalibration {
+                cost_per_cpu_op: 1.0,
+                cost_per_scan_byte: 1.0,
+                cost_per_retained_byte: 1.0,
+                version: "test".into(),
+            },
+        };
+        let results = run_post_asap_with_progress(
+            &[("filtered".into(), sql.into(), query)],
+            false,
+            Some(&model),
+            None,
+        );
+        assert!(
+            results.replacements.is_empty(),
+            "a partially costed filtered aggregate must remain pre-ASAP"
+        );
+    }
+
+    #[tokio::test]
+    async fn exported_topk_k_comes_from_the_lowered_query() {
+        use asap_aware_mapping::analytical_cost::{AnalyticalInputs, ResourceCalibration};
+
+        let cat = default_catalog();
+        let sql = "SELECT service, COUNT(*) AS frequency FROM metrics \
+                   GROUP BY service ORDER BY frequency DESC LIMIT 10";
+        let query = lower_sql(sql, &cat, AccuracyTarget::Epsilon(0.01))
+            .await
+            .unwrap();
+        let model = AnalyticalCostModel {
+            inputs: AnalyticalInputs {
+                data_arrival: asap_types::workload::DataArrival::AtRest,
+                input_rows: 100_000,
+                input_bytes: 6_400_000,
+                source_scan_bytes: 6_400_000,
+                group_count: 1_000,
+                group_key_bytes: 32,
+                // Deliberately wrong legacy adapter value: export must ignore
+                // it and report the target's canonical k.
+                topk_k: Some(99),
+                evaluation_count: 10,
+            },
+            calibration: ResourceCalibration {
+                cost_per_cpu_op: 1.0,
+                cost_per_scan_byte: 1.0,
+                cost_per_retained_byte: 1.0,
+                version: "test".into(),
+            },
+        };
+        let evidence = TopKMarginEvidence {
+            selected_lower_bound: 1_200.0,
+            excluded_upper_bound: 1_000.0,
+            interval_failure_probability: 0.001,
+        };
+        let results = run_post_asap_with_progress(
+            &[("topk".into(), sql.into(), query)],
+            false,
+            Some(&model),
+            Some(&evidence),
+        );
+        let exported_k: Vec<f64> = results
+            .replacements
+            .iter()
+            .filter_map(|(_, replacement)| replacement.selected_cost.as_ref())
+            .flat_map(|cost| cost.inputs.iter())
+            .filter(|input| input.name == "topk_k")
+            .map(|input| input.value)
+            .collect();
+        assert!(exported_k.contains(&10.0), "missing canonical Top-K k");
+        assert!(!exported_k.contains(&99.0), "export leaked adapter Top-K k");
     }
 
     #[test]
