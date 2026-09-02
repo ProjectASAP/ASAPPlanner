@@ -47,32 +47,61 @@ raw alternative scans the same snapshot for every evaluation. Incremental
 ingestion, rebuilds, expiration/deletion, and lifecycle duration require an
 update-aware model and are not inferred from `evaluation_count`.
 
-The top-level model inputs are:
+### Canonical workload sources
 
-| Workload/source input | Definition |
+The cost model does not define a second workload schema. Planner inputs come
+from the normalized workload and the lowered query IR:
+
+| Cost concept | Canonical source |
 |---|---|
-| `input_rows` | Rows in the source snapshot consumed by one raw evaluation or retained-summary build. |
-| `input_bytes` | Logical bytes presented to the root costed region. An intermediate may have logical bytes without reading disk. |
-| `source_scan_bytes` | Source/disk bytes read once when building or evaluating this region. It is zero for an already-materialized in-memory intermediate. |
-| `evaluation_count` | Query reads in the comparison horizon; it is not a build or update count. |
+| Source row cardinality | Fresh `DataWorkload.input_cardinality: Evidence<u64>`. |
+| Data distribution | Fresh `DataWorkload.distribution: Evidence<DataDistribution>`. |
+| Data arrival and update rate | `DataWorkload.arrival`, `ingestion_volume`, and `ingestion_rate`. The build-once model accepts only the at-rest/no-update case. |
+| Query evaluations | `QueryWorkloadEntry.recurrence`, normalized over an explicit horizon. One-time invocations, schedules, fixed intervals, and demand estimates retain their existing semantics. |
+| Event-time scope | `QueryWorkloadEntry.time_selection`; lookback and `as_of` determine which snapshot/window is costed. |
+| Accuracy and latency constraints | `QueryWorkloadEntry.requirements`. |
+| Top-K `k`, grouping keys, and operator shape | The lowered `QueryExpr`/`AggIntent`; these are never independently re-declared as workload facts. |
 
-Cardinality and query-shape statistics are separate inputs because they
-describe operators, not the horizon:
+Every `Evidence<T>` value is read through its freshness contract at planning
+time. Stale, future, or provenance-free time-bounded evidence remains
+unknown. Costing must not bypass the same freshness rules used by accuracy
+and lifecycle planning.
 
-| Operator/query statistic | Definition |
-|---|---|
-| `group_count` | Estimated distinct `GROUP BY` key tuples. It is one for an ungrouped aggregation. |
-| `group_key_bytes` | Average encoded bytes in one grouping-key tuple; hash-table metadata is modeled separately. |
-| `topk_k` | Optional `k` for a Top-K operator. |
-| `output_rows`, `output_bytes` | Cardinality and logical width after an operator; needed to cost its parent. |
-| `right_rows`, `right_bytes` | Right/build-side statistics required by a binary join estimate. |
+`evaluation_count` is therefore a derived value, not an independent semantic
+axis. For a finite horizon it is computed from `QueryRecurrence`; if a
+repeated demand cannot be converted to a finite count without a horizon, the
+total-cost comparison is unavailable.
 
-`OperatorInputs` carries the latter output and join fields for the generic
-physical-operator formulas. The aggregation/Top-K adapter derives the
-intermediate cardinality it can prove: a grouped count produces
-`group_count` rows of approximately `group_key_bytes + 8` bytes each.
-Arbitrary filters, joins, and projections require supplied statistics; the
-model does not invent selectivity or output width.
+### Statistics not yet present in the workload schema
+
+Some physical estimates need facts that the current `DataWorkload` does not
+carry:
+
+| Missing evidence | Why it is needed | Correct ownership |
+|---|---|---|
+| Source byte size / average row width | Source scan bytes and row buffers. | Fresh data/catalog evidence. |
+| Distinct cardinality for a particular grouping-key tuple | Hash-aggregation state and per-subpopulation layouts. | Per-column/key-set statistics keyed by the lowered grouping expression. |
+| Average encoded grouping-key width | Exact hash entries and intermediate row width. | Schema/catalog statistics. |
+| Filter selectivity and operator output cardinality | Parent CPU and memory estimates. | Plan-node statistics derived from data evidence. |
+| Join-side and join-output cardinality | Build-side selection, hash state, and parent cardinality. | Plan-node statistics derived from join-key evidence. |
+| Spill, cache, and network behavior | External/distributed physical alternatives. | Deployment/execution-profile evidence. |
+
+These facts should be added as freshness-aware workload/catalog evidence or
+provided by an operator-statistics provider. They must not become a parallel
+user-authored cost-model workload format.
+
+`AnalyticalInputs` and `OperatorInputs` are currently flattened estimator
+adapters. Their fields (`group_count`, key bytes, output rows/bytes, and join
+side statistics) are formula arguments after canonical workload/IR evidence
+has been resolved. They are not new planner domain objects. Likewise,
+`dag_export --analytical-cost-json` is a development and reproducibility
+adapter; it is not the normalized planner API.
+
+The aggregation/Top-K adapter derives the intermediate cardinality it can
+prove: a grouped count produces `group_count` rows of approximately
+`group_key_bytes + 8` bytes each. Arbitrary filters, joins, and projections
+require supplied statistics; the model does not invent selectivity or output
+width.
 
 `group_count` and `input_rows` are different quantities. One hundred million
 rows may contain one hundred thousand distinct `service` values; that input
