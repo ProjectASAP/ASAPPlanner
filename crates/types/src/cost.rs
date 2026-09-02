@@ -302,13 +302,11 @@ impl std::error::Error for UnitMismatch {}
 /// nodes must be counted once in workload totals" requirement. `entries` is
 /// `(workload_node_id, annotation)` pairs; an entry with `workload_node_id:
 /// None` is never deduplicated against anything else (each is its own,
-/// always-unique contribution). An entry whose `annotation.value` is `None`
-/// (i.e. [`CostSource::Unavailable`]) contributes nothing to the sum but
-/// does not invalidate it — the total is simply computed over whichever
-/// inputs are actually known, same spirit as `Option`-typed inputs
-/// elsewhere in this module.
+/// always-unique contribution). If any distinct entry has no value, the
+/// aggregate is unavailable as well: returning a numeric subtotal would
+/// misrepresent it as the whole workload's cost.
 ///
-/// Rejects the sum with [`UnitMismatch`] the moment two *valued* entries
+/// Rejects the sum with [`UnitMismatch`] the moment two distinct entries
 /// disagree on [`CostUnit`] — "unit-incompatible aggregation is rejected".
 pub fn sum_workload_costs<'a, I>(entries: I) -> Result<CostAnnotation, UnitMismatch>
 where
@@ -318,12 +316,15 @@ where
     let mut unit: Option<CostUnit> = None;
     let mut total = 0.0_f64;
     let mut counted_any = false;
+    let mut missing_any = false;
     let mut model_versions: Vec<String> = Vec::new();
 
     for (workload_node_id, annotation) in entries {
-        let Some(value) = annotation.value else {
-            continue;
-        };
+        if let Some(id) = workload_node_id {
+            if !seen_ids.insert(id) {
+                continue; // already counted this shared node once
+            }
+        }
         match unit {
             None => unit = Some(annotation.unit),
             Some(existing) if existing != annotation.unit => {
@@ -334,11 +335,10 @@ where
             }
             _ => {}
         }
-        if let Some(id) = workload_node_id {
-            if !seen_ids.insert(id) {
-                continue; // already counted this shared node once
-            }
-        }
+        let Some(value) = annotation.value else {
+            missing_any = true;
+            continue;
+        };
         total += value;
         counted_any = true;
         if let Some(version) = &annotation.model_version {
@@ -348,7 +348,7 @@ where
         }
     }
 
-    Ok(if counted_any {
+    Ok(if counted_any && !missing_any {
         CostAnnotation {
             value: Some(total),
             unit: unit.expect("counted_any implies unit was set"),
@@ -529,11 +529,12 @@ mod tests {
     }
 
     #[test]
-    fn sum_workload_costs_skips_unavailable_entries_without_failing() {
+    fn sum_workload_costs_is_unavailable_when_any_distinct_entry_is_unavailable() {
         let known = ann(4.0, CostUnit::RelativeStructuralUnits);
         let unavailable = CostAnnotation::unavailable(CostUnit::RelativeStructuralUnits);
         let total = sum_workload_costs(vec![(None, &known), (None, &unavailable)]).unwrap();
-        assert_eq!(total.value, Some(4.0));
+        assert_eq!(total.value, None);
+        assert_eq!(total.source, CostSource::Unavailable);
     }
 
     #[test]
