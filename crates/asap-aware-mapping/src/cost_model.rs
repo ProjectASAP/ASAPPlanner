@@ -190,6 +190,18 @@ pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
 /// `replacement::implementations_for_with` constructs every candidate in the
 /// resulting order.
 pub trait CostModel {
+    /// Candidate-level availability for final selection. The default keeps
+    /// every candidate, including legacy models whose numeric estimate is a
+    /// display-only placeholder. Models that require evidence override this
+    /// method and return `None` rather than encoding "unavailable" as NaN.
+    fn candidate_cost(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &TargetSubDAG<'_>,
+    ) -> Option<Cost> {
+        Some(Cost(self.estimate_cost(candidate, target)))
+    }
+
     /// Rank `candidates` (as returned by
     /// [`summary_candidates`](crate::replacement::summary_candidates)) for
     /// `intent`, best choice first.

@@ -14,7 +14,7 @@ use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand};
 use serde::{Deserialize, Serialize};
 
-use crate::cost_model::{CostModel, DefaultCostModel};
+use crate::cost_model::{Cost, CostModel, DefaultCostModel};
 use crate::replacement::{
     accuracy_budget, accuracy_target, Replacement, ReplacementSubDAG, TargetSubDAG,
 };
@@ -141,7 +141,13 @@ fn evaluations_in_horizon(
             {
                 return Err(AnalyticalCostError::InvalidRecurrence);
             }
-            (estimate.expected_rate.0 * horizon_ms as f64 / 1000.0).floor() as u64
+            let expected = estimate.expected_rate.0 * horizon_ms as f64 / 1000.0;
+            if expected > u64::MAX as f64 {
+                return Err(AnalyticalCostError::Overflow);
+            }
+            // The integer adapter is deliberately conservative: a positive
+            // fractional expected demand still requires one provisioned read.
+            expected.ceil() as u64
         }
         QueryRecurrence::Unknown => return Err(AnalyticalCostError::InvalidRecurrence),
     };
@@ -216,21 +222,35 @@ pub struct OperatorInputs {
     pub output_bytes: u64,
     pub group_count: Option<u64>,
     pub key_bytes: Option<u64>,
+    /// Bytes of aggregate accumulator state retained per group. Required for
+    /// hash aggregation because one 8-byte value is not universal.
+    pub aggregate_value_bytes: Option<u64>,
     pub k: Option<u64>,
     pub right_rows: Option<u64>,
     pub right_bytes: Option<u64>,
+    pub hash_join_build_side: Option<HashJoinBuildSide>,
 }
 
-/// One node in an already-selected physical DAG. `retained` means its local
-/// state survives for the whole comparison horizon; otherwise its output can
-/// be released after its last consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HashJoinBuildSide {
+    Left,
+    Right,
+}
+
+/// One node in an already-selected physical DAG. Logical output cardinality,
+/// transient edge buffering, and state retained across the horizon are
+/// separate values.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhysicalDagNode {
     pub id: String,
     pub operator: PhysicalOperator,
     pub inputs: OperatorInputs,
     pub children: Vec<String>,
-    pub retained: bool,
+    /// Maximum transient edge buffer, distinct from logical `output_bytes`.
+    pub output_buffer_bytes: u64,
+    /// State that remains live after this node finishes (zero for ordinary
+    /// streaming operators).
+    pub retained_bytes: u64,
     pub execution: ExecutionMultiplicity,
 }
 
@@ -286,6 +306,27 @@ pub fn estimate_physical_dag(
     }
     visit(root, &by_id, &mut visiting, &mut visited, &mut order)?;
 
+    for id in &order {
+        let node = by_id[id];
+        if node.retained_bytes > 0 && matches!(node.execution, ExecutionMultiplicity::PerEvaluation)
+        {
+            return Err(AnalyticalCostError::InvalidPhysicalDag(
+                "per-evaluation node cannot retain state across the horizon",
+            ));
+        }
+        for child in &node.children {
+            let child = by_id[child.as_str()];
+            if matches!(node.execution, ExecutionMultiplicity::PerEvaluation)
+                && matches!(child.execution, ExecutionMultiplicity::Once)
+                && child.retained_bytes == 0
+            {
+                return Err(AnalyticalCostError::InvalidPhysicalDag(
+                    "per-evaluation node reads a non-retained build-once child",
+                ));
+            }
+        }
+    }
+
     let mut remaining_consumers: HashMap<&str, usize> = HashMap::new();
     for id in &order {
         for child in &by_id[id].children {
@@ -318,12 +359,14 @@ pub fn estimate_physical_dag(
                 .checked_add(local.peak_memory_bytes)
                 .ok_or(AnalyticalCostError::Overflow)?,
         );
-        let output = if node.retained {
-            node.inputs.output_bytes.max(local.peak_memory_bytes)
-        } else {
-            node.inputs.output_bytes
-        };
-        if node.retained || remaining_consumers.get(id).copied().unwrap_or(0) > 0 || id == root {
+        if node.retained_bytes > 0 {
+            live_bytes = live_bytes
+                .checked_add(node.retained_bytes)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            peak_memory_bytes = peak_memory_bytes.max(live_bytes);
+        }
+        let output = node.output_buffer_bytes;
+        if remaining_consumers.get(id).copied().unwrap_or(0) > 0 || id == root {
             live_bytes = live_bytes
                 .checked_add(output)
                 .ok_or(AnalyticalCostError::Overflow)?;
@@ -335,7 +378,7 @@ pub fn estimate_physical_dag(
                 AnalyticalCostError::InvalidPhysicalDag("invalid consumer count"),
             )?;
             *remaining -= 1;
-            if *remaining == 0 && !by_id[child.as_str()].retained {
+            if *remaining == 0 {
                 if let Some(bytes) = live_outputs.remove(child.as_str()) {
                     live_bytes = live_bytes
                         .checked_sub(bytes)
@@ -380,7 +423,28 @@ pub fn estimate_operator(
                 scan_bytes: 0,
             }
         }
-        PhysicalOperator::HashAggregate | PhysicalOperator::Deduplicate => {
+        PhysicalOperator::HashAggregate => {
+            let groups = input
+                .group_count
+                .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
+            let key = input
+                .key_bytes
+                .ok_or(AnalyticalCostError::MissingOrZero("key_bytes"))?;
+            let value = input
+                .aggregate_value_bytes
+                .ok_or(AnalyticalCostError::MissingOrZero("aggregate_value_bytes"))?;
+            ResourceEstimate {
+                cpu_ops: input.input_rows as f64,
+                peak_memory_bytes: checked_bytes(&[
+                    groups,
+                    key.checked_add(value)
+                        .and_then(|bytes| bytes.checked_add(16))
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                ])?,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::Deduplicate => {
             let groups = input
                 .group_count
                 .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
@@ -391,8 +455,7 @@ pub fn estimate_operator(
                 cpu_ops: input.input_rows as f64,
                 peak_memory_bytes: checked_bytes(&[
                     groups,
-                    key.checked_add(8 + 16)
-                        .ok_or(AnalyticalCostError::Overflow)?,
+                    key.checked_add(16).ok_or(AnalyticalCostError::Overflow)?,
                 ])?,
                 scan_bytes: 0,
             }
@@ -420,9 +483,15 @@ pub fn estimate_operator(
             let right_bytes = input
                 .right_bytes
                 .ok_or(AnalyticalCostError::MissingOrZero("right_bytes"))?;
+            let build_side = input
+                .hash_join_build_side
+                .ok_or(AnalyticalCostError::MissingOrZero("hash_join_build_side"))?;
             ResourceEstimate {
                 cpu_ops: input.input_rows as f64 + right_rows as f64 + input.output_rows as f64,
-                peak_memory_bytes: input.input_bytes.min(right_bytes),
+                peak_memory_bytes: match build_side {
+                    HashJoinBuildSide::Left => input.input_bytes,
+                    HashJoinBuildSide::Right => right_bytes,
+                },
                 scan_bytes: 0,
             }
         }
@@ -511,11 +580,17 @@ pub fn estimate_raw_aggregation(
         .checked_add(8 + 16) // exact value plus hash-table metadata
         .ok_or(AnalyticalCostError::Overflow)?;
     let topk_memory = topk_heap_bytes(inputs)?;
+    let scan_cpu = inputs.input_rows as f64 * inputs.evaluation_count as f64;
+    let scan_buffer = inputs.input_bytes.div_ceil(inputs.input_rows);
     Ok(ResourceEstimate {
-        cpu_ops: inputs.input_rows as f64 * inputs.evaluation_count as f64 + topk_cpu_ops(inputs),
-        peak_memory_bytes: checked_bytes(&[inputs.group_count, group_entry_bytes])?
-            .checked_add(topk_memory)
-            .ok_or(AnalyticalCostError::Overflow)?,
+        cpu_ops: scan_cpu
+            + inputs.input_rows as f64 * inputs.evaluation_count as f64
+            + topk_cpu_ops(inputs),
+        peak_memory_bytes: scan_buffer.max(
+            checked_bytes(&[inputs.group_count, group_entry_bytes])?
+                .checked_add(topk_memory)
+                .ok_or(AnalyticalCostError::Overflow)?,
+        ),
         scan_bytes: inputs
             .source_scan_bytes
             .checked_mul(inputs.evaluation_count)
@@ -607,14 +682,17 @@ fn estimate_sketch_aggregation_with_instances(
         .and_then(|bytes| bytes.checked_mul(inputs.group_count))
         .ok_or(AnalyticalCostError::Overflow)?;
     Ok(ResourceEstimate {
-        cpu_ops: inputs.input_rows as f64 * update_ops
+        cpu_ops: inputs.input_rows as f64
+            + inputs.input_rows as f64 * update_ops
             + inputs.evaluation_count as f64 * read_ops * physical_sketch_count as f64
             + topk_cpu_ops(inputs),
-        peak_memory_bytes: bytes_per_group
-            .checked_mul(physical_sketch_count)
-            .and_then(|bytes| bytes.checked_add(keyed_state))
-            .and_then(|bytes| bytes.checked_add(topk_heap_bytes(inputs).ok()?))
-            .ok_or(AnalyticalCostError::Overflow)?,
+        peak_memory_bytes: inputs.input_bytes.div_ceil(inputs.input_rows).max(
+            bytes_per_group
+                .checked_mul(physical_sketch_count)
+                .and_then(|bytes| bytes.checked_add(keyed_state))
+                .and_then(|bytes| bytes.checked_add(topk_heap_bytes(inputs).ok()?))
+                .ok_or(AnalyticalCostError::Overflow)?,
+        ),
         // One initial build scan; subsequent evaluations read the sketch.
         scan_bytes: inputs.source_scan_bytes,
     })
@@ -724,6 +802,7 @@ impl AnalyticalCostModel {
         candidate: &ReplacementSubDAG,
         target: &TargetSubDAG<'_>,
     ) -> Result<ResourceEstimate, AnalyticalCostError> {
+        require_supported_target(target.root)?;
         if topk_intent(target.root).is_some() {
             let Replacement::Summary(node) = &candidate.replacement else {
                 return Err(AnalyticalCostError::UnsupportedCandidate);
@@ -816,6 +895,7 @@ impl AnalyticalCostModel {
         &self,
         target: &asap_types::pre_asap::QueryExpr,
     ) -> Result<ResourceEstimate, AnalyticalCostError> {
+        require_supported_target(target)?;
         let scoped = self.inputs_for_target(target)?;
         if let Some(k) = topk_intent(target) {
             let mut base = self.inputs.validate()?;
@@ -910,6 +990,39 @@ fn topk_intent(target: &asap_types::pre_asap::QueryExpr) -> Option<u64> {
     })
 }
 
+fn require_supported_target(
+    target: &asap_types::pre_asap::QueryExpr,
+) -> Result<(), AnalyticalCostError> {
+    let asap_types::pre_asap::QueryExpr::Aggregate { child, .. } = target else {
+        return Err(AnalyticalCostError::UnsupportedCandidate);
+    };
+    match child.as_ref() {
+        asap_types::pre_asap::QueryExpr::Scan { predicates, .. } if predicates.is_empty() => Ok(()),
+        asap_types::pre_asap::QueryExpr::Aggregate {
+            measures,
+            having: None,
+            child: raw_child,
+            ..
+        } if topk_intent(target).is_some()
+            && matches!(measures.as_slice(), [AggIntent::Count { .. }])
+            && matches!(
+                raw_child.as_ref(),
+                asap_types::pre_asap::QueryExpr::Scan { predicates, .. }
+                    if predicates.is_empty()
+            ) =>
+        {
+            Ok(())
+        }
+        // Filters, joins, projections, windows, and nested aggregates require
+        // per-node statistics and must be supplied as a PhysicalDagNode plan.
+        _ => Err(AnalyticalCostError::UnsupportedCandidate),
+    }
+}
+
+pub fn query_topk_k(target: &asap_types::pre_asap::QueryExpr) -> Option<u64> {
+    topk_intent(target)
+}
+
 fn collect_sketches<'a>(
     node: &'a SummaryNode,
     visited: &mut HashSet<*const SummaryNode>,
@@ -920,9 +1033,19 @@ fn collect_sketches<'a>(
         return Ok(());
     }
     match &node.expr {
-        asap_types::post_asap::SummaryExpr::SummaryAgg { family, child, .. } => {
+        asap_types::post_asap::SummaryExpr::SummaryAgg {
+            family,
+            child,
+            grouping: node_grouping,
+            ..
+        } => {
             collect_sketches(child, visited, out)?;
             if let SummaryFamilyType::Sketch(kind, grouping) = family {
+                if grouping != node_grouping {
+                    return Err(AnalyticalCostError::InvalidPhysicalDag(
+                        "summary grouping metadata disagrees with its family",
+                    ));
+                }
                 out.push((kind, grouping));
             } else {
                 return Err(AnalyticalCostError::UnsupportedCandidate);
@@ -949,6 +1072,17 @@ fn collect_sketches<'a>(
 }
 
 impl CostModel for AnalyticalCostModel {
+    fn candidate_cost(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &TargetSubDAG<'_>,
+    ) -> Option<Cost> {
+        self.candidate_resources_for_target(candidate, target)
+            .and_then(|estimate| estimate.calibrated_cost(&self.calibration))
+            .ok()
+            .map(Cost)
+    }
+
     fn rank_candidates(
         &self,
         intent: &AggIntent,
@@ -962,7 +1096,9 @@ impl CostModel for AnalyticalCostModel {
         ranked.sort_by(|left, right| {
             let cost = |algorithm: &SketchAlgorithm| {
                 let params = self.size_params(algorithm.clone(), intent, epsilon, delta);
-                estimate_sketch_aggregation(algorithm.clone(), &params, self.inputs)
+                let mut inputs = self.inputs;
+                inputs.topk_k = None;
+                estimate_sketch_aggregation(algorithm.clone(), &params, inputs)
                     .and_then(|resources| resources.calibrated_cost(&self.calibration))
                     .unwrap_or(f64::INFINITY)
             };
@@ -979,9 +1115,8 @@ impl CostModel for AnalyticalCostModel {
     }
 
     fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
-        self.candidate_resources_for_target(candidate, target)
-            .and_then(|estimate| estimate.calibrated_cost(&self.calibration))
-            .unwrap_or(f64::NAN)
+        self.candidate_cost(candidate, target)
+            .map_or(f64::NAN, |cost| cost.0)
     }
 }
 
@@ -1029,7 +1164,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(estimate.cpu_ops, 4_080.0);
+        assert_eq!(estimate.cpu_ops, 5_080.0);
         assert_eq!(estimate.peak_memory_bytes, 6_464);
         assert_eq!(estimate.scan_bytes, 8_000);
     }
@@ -1071,7 +1206,7 @@ mod tests {
         topk.topk_k = Some(10);
         let raw = estimate_raw_aggregation(topk).unwrap();
         assert_eq!(raw.peak_memory_bytes, 5_600_400);
-        assert_eq!(raw.cpu_ops, 140_000_000.0);
+        assert_eq!(raw.cpu_ops, 240_000_000.0);
 
         let sketch = estimate_sketch_aggregation(
             SketchAlgorithm::Cms,
@@ -1083,7 +1218,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sketch.peak_memory_bytes, 1_092_800_400);
-        assert_eq!(sketch.cpu_ops, 95_000_000.0);
+        assert_eq!(sketch.cpu_ops, 96_000_000.0);
     }
 
     #[test]
@@ -1188,9 +1323,11 @@ mod tests {
                 output_bytes: 64_000,
                 group_count: None,
                 key_bytes: None,
+                aggregate_value_bytes: None,
                 k: None,
                 right_rows: None,
                 right_bytes: None,
+                hash_join_build_side: None,
             },
         )
         .unwrap();
@@ -1205,9 +1342,11 @@ mod tests {
                 output_bytes: 400,
                 group_count: None,
                 key_bytes: None,
+                aggregate_value_bytes: None,
                 k: Some(10),
                 right_rows: None,
                 right_bytes: None,
+                hash_join_build_side: None,
             },
         )
         .unwrap();
@@ -1224,15 +1363,76 @@ mod tests {
                 output_bytes: 12_800,
                 group_count: None,
                 key_bytes: None,
+                aggregate_value_bytes: None,
                 k: None,
                 right_rows: None,
                 right_bytes: None,
+                hash_join_build_side: None,
             },
         );
         assert_eq!(
             missing_join_stats,
             Err(AnalyticalCostError::MissingOrZero("right_rows"))
         );
+
+        let missing_build_side = estimate_operator(
+            PhysicalOperator::HashJoin,
+            OperatorInputs {
+                input_rows: 1_000,
+                input_bytes: 64_000,
+                output_rows: 100,
+                output_bytes: 12_800,
+                group_count: None,
+                key_bytes: None,
+                aggregate_value_bytes: None,
+                k: None,
+                right_rows: Some(10),
+                right_bytes: Some(1_280),
+                hash_join_build_side: None,
+            },
+        );
+        assert_eq!(
+            missing_build_side,
+            Err(AnalyticalCostError::MissingOrZero("hash_join_build_side"))
+        );
+
+        let build_left = estimate_operator(
+            PhysicalOperator::HashJoin,
+            OperatorInputs {
+                input_rows: 1_000,
+                input_bytes: 64_000,
+                output_rows: 100,
+                output_bytes: 12_800,
+                group_count: None,
+                key_bytes: None,
+                aggregate_value_bytes: None,
+                k: None,
+                right_rows: Some(10),
+                right_bytes: Some(1_280),
+                hash_join_build_side: Some(HashJoinBuildSide::Left),
+            },
+        )
+        .unwrap();
+        assert_eq!(build_left.peak_memory_bytes, 64_000);
+
+        let aggregate = estimate_operator(
+            PhysicalOperator::HashAggregate,
+            OperatorInputs {
+                input_rows: 1_000,
+                input_bytes: 64_000,
+                output_rows: 100,
+                output_bytes: 4_000,
+                group_count: Some(100),
+                key_bytes: Some(16),
+                aggregate_value_bytes: Some(24),
+                k: None,
+                right_rows: None,
+                right_bytes: None,
+                hash_join_build_side: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(aggregate.peak_memory_bytes, 5_600);
     }
 
     #[test]
@@ -1319,6 +1519,50 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_complete_dag_keeps_the_raw_plan() {
+        use asap_types::pre_asap::agg_intent::default_quantile;
+        use asap_types::pre_asap::query_expr::{QueryExpr, Reduction, Source};
+        use asap_types::pre_asap::schema::{Column, DataType, Schema};
+        use std::rc::Rc;
+
+        let scan = Rc::new(QueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Column::new("ts", DataType::Timestamp, false),
+                    Column::new("value", DataType::Float64, false),
+                    Column::new("job", DataType::Utf8, false),
+                ],
+                0,
+                vec![],
+            ),
+        });
+        let root = Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::by(vec![2]),
+            measures: vec![default_quantile(0.99)],
+            output_names: vec![],
+            having: None,
+            child: scan,
+        });
+        let space = crate::replacement::search_workload_with(
+            vec![("q", Rc::clone(&root))],
+            &crate::replacement::default_strategies(),
+        );
+        let planned_root = Rc::clone(&space.roots[0].1);
+        let mut unavailable_inputs = inputs(10);
+        unavailable_inputs.input_rows = 0;
+        let selected = space.global_selection(&AnalyticalCostModel {
+            inputs: unavailable_inputs,
+            calibration: calibration(),
+        });
+        assert!(
+            selected.for_target(&planned_root).unwrap().chosen.is_none(),
+            "an unavailable physical DAG must keep the pre-ASAP target"
+        );
+    }
+
+    #[test]
     fn physical_dag_counts_shared_scan_once_and_uses_live_memory() {
         let input = |input_rows, input_bytes, output_rows, output_bytes| OperatorInputs {
             input_rows,
@@ -1327,9 +1571,11 @@ mod tests {
             output_bytes,
             group_count: None,
             key_bytes: None,
+            aggregate_value_bytes: None,
             k: None,
             right_rows: None,
             right_bytes: None,
+            hash_join_build_side: None,
         };
         let nodes = vec![
             PhysicalDagNode {
@@ -1337,7 +1583,8 @@ mod tests {
                 operator: PhysicalOperator::Scan,
                 inputs: input(100, 1_000, 100, 1_000),
                 children: vec![],
-                retained: false,
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
             PhysicalDagNode {
@@ -1345,7 +1592,8 @@ mod tests {
                 operator: PhysicalOperator::Filter,
                 inputs: input(100, 1_000, 40, 400),
                 children: vec!["scan".into()],
-                retained: false,
+                output_buffer_bytes: 4,
+                retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
             PhysicalDagNode {
@@ -1353,7 +1601,8 @@ mod tests {
                 operator: PhysicalOperator::Filter,
                 inputs: input(100, 1_000, 40, 400),
                 children: vec!["scan".into()],
-                retained: false,
+                output_buffer_bytes: 4,
+                retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
             PhysicalDagNode {
@@ -1361,7 +1610,8 @@ mod tests {
                 operator: PhysicalOperator::Concat,
                 inputs: input(80, 800, 80, 800),
                 children: vec!["left".into(), "right".into()],
-                retained: false,
+                output_buffer_bytes: 8,
+                retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
         ];
@@ -1370,7 +1620,7 @@ mod tests {
         assert_eq!(estimate.scan_bytes, 2_000);
         // This is neither the sum of every node's memory nor just the largest
         // node: it is the maximum state simultaneously live at the fan-out.
-        assert_eq!(estimate.peak_memory_bytes, 1_800);
+        assert_eq!(estimate.peak_memory_bytes, 24);
     }
 
     #[test]
@@ -1414,12 +1664,15 @@ mod tests {
                     output_bytes: 1_000,
                     group_count: None,
                     key_bytes: None,
+                    aggregate_value_bytes: None,
                     k: None,
                     right_rows: None,
                     right_bytes: None,
+                    hash_join_build_side: None,
                 },
                 children: vec![],
-                retained: false,
+                output_buffer_bytes: 10,
+                retained_bytes: 0,
                 execution: ExecutionMultiplicity::Once,
             },
             PhysicalDagNode {
@@ -1432,12 +1685,15 @@ mod tests {
                     output_bytes: 16,
                     group_count: Some(1),
                     key_bytes: Some(8),
+                    aggregate_value_bytes: Some(8),
                     k: None,
                     right_rows: None,
                     right_bytes: None,
+                    hash_join_build_side: None,
                 },
                 children: vec!["scan".into()],
-                retained: true,
+                output_buffer_bytes: 16,
+                retained_bytes: 32,
                 execution: ExecutionMultiplicity::Once,
             },
             PhysicalDagNode {
@@ -1450,12 +1706,15 @@ mod tests {
                     output_bytes: 16,
                     group_count: None,
                     key_bytes: None,
+                    aggregate_value_bytes: None,
                     k: None,
                     right_rows: None,
                     right_bytes: None,
+                    hash_join_build_side: None,
                 },
                 children: vec!["state".into()],
-                retained: false,
+                output_buffer_bytes: 16,
+                retained_bytes: 0,
                 execution: ExecutionMultiplicity::PerEvaluation,
             },
         ];
