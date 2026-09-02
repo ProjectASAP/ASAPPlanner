@@ -116,10 +116,10 @@ fn promql_dashboard_materializes_continuous_summary_with_explained_rejections() 
     let space = search_workload_with(vec![("dashboard", Rc::clone(&root))], &strategies);
     let target = Rc::clone(&space.roots[0].1);
     let capabilities = SummaryMaintenanceLifecycleCapabilities {
-        ephemeral: true,
-        prepared: false,
-        shared: false,
-        continuously_maintained: true,
+        supports_ephemeral: true,
+        supports_prepared: false,
+        supports_shared: false,
+        supports_continuously_maintained: true,
     };
 
     let selection = global_selection_with_summary_maintenance_lifecycles(
