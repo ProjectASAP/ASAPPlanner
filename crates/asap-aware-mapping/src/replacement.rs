@@ -370,7 +370,7 @@ use crate::accuracy::{
     KLL_RANK_ERROR_EXPONENT_99,
 };
 use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
-use crate::cost_model::{CostModel, CseCandidate, DefaultCostModel, ShareDecision};
+use crate::cost_model::{Cost, CostModel, CseCandidate, DefaultCostModel, ShareDecision};
 use crate::grouping::HydraGroupingStrategy;
 use crate::recurrence::{
     evaluation_rate_of, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
@@ -2179,6 +2179,30 @@ pub struct PlanSpace<Id> {
     order: Vec<*const QueryExpr>,
 }
 
+/// Lifecycle-aware whole-subplan costs keyed by target and candidate identity.
+#[derive(Default)]
+pub(crate) struct CandidateCostOverrides {
+    costs: HashMap<(*const QueryExpr, *const ReplacementSubDAG), Cost>,
+}
+
+impl CandidateCostOverrides {
+    pub(crate) fn insert(
+        &mut self,
+        target: &Rc<QueryExpr>,
+        candidate: &ReplacementSubDAG,
+        cost: Cost,
+    ) {
+        self.costs
+            .insert((Rc::as_ptr(target), candidate as *const _), cost);
+    }
+
+    fn get(&self, target: &Rc<QueryExpr>, candidate: &ReplacementSubDAG) -> Option<Cost> {
+        self.costs
+            .get(&(Rc::as_ptr(target), candidate as *const _))
+            .copied()
+    }
+}
+
 impl<Id> PlanSpace<Id> {
     /// Every discovered group, in discovery order.
     pub fn groups(&self) -> impl Iterator<Item = &MemoGroup> {
@@ -2580,6 +2604,54 @@ impl<Id> PlanSpace<Id> {
             .map(|rate| UpdateRate(rate.0));
         self.recurrence_profiles(&recurrences, update_rate)
     }
+
+    /// Associate every discovered target with the normalized workload entries
+    /// whose roots can reach it.
+    pub(crate) fn workload_entries_by_target(
+        &self,
+        workload: &QueryWorkload,
+        root_workload_entries: &[usize],
+    ) -> Result<HashMap<*const QueryExpr, Vec<usize>>, RecurrenceError> {
+        let entry_count = workload.entries().count();
+        if root_workload_entries.len() != self.roots.len() {
+            return Err(RecurrenceError::RootCountMismatch {
+                expected: self.roots.len(),
+                got: root_workload_entries.len(),
+            });
+        }
+        let mut bindings: HashMap<*const QueryExpr, HashSet<usize>> = HashMap::new();
+        for ((_, root), &entry_index) in self.roots.iter().zip(root_workload_entries) {
+            if entry_index >= entry_count {
+                return Err(RecurrenceError::InvalidWorkloadEntry {
+                    index: entry_index,
+                    entry_count,
+                });
+            }
+            let mut seen = HashSet::new();
+            let mut queue = VecDeque::from([Rc::as_ptr(root)]);
+            while let Some(ptr) = queue.pop_front() {
+                if !seen.insert(ptr) {
+                    continue;
+                }
+                bindings.entry(ptr).or_default().insert(entry_index);
+                if let Some(group) = self.groups.get(&ptr) {
+                    queue.extend(
+                        direct_child_counts(&group.target)
+                            .into_iter()
+                            .map(|(child, _)| child),
+                    );
+                }
+            }
+        }
+        Ok(bindings
+            .into_iter()
+            .map(|(ptr, entries)| {
+                let mut entries: Vec<_> = entries.into_iter().collect();
+                entries.sort_unstable();
+                (ptr, entries)
+            })
+            .collect())
+    }
 }
 
 /// Record `times` occurrences of `recurrence` against `ptr` — `times > 1`
@@ -2860,6 +2932,23 @@ impl<'a> GlobalSelection<'a> {
     pub fn for_target(&self, target: &Rc<QueryExpr>) -> Option<&SelectedGroup<'a>> {
         self.groups.get(&Rc::as_ptr(target))
     }
+
+    /// Materialize the selected replacement at `target`. Exact operators
+    /// that remain in pre-ASAP IR are preserved by `KeepPreAsap`; logical
+    /// summary candidates are already fully bound post-ASAP nodes.
+    pub fn materialize(
+        &self,
+        target: &Rc<QueryExpr>,
+    ) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+        let Some(selected) = self.for_target(target) else {
+            return Ok(None);
+        };
+        match selected.chosen.map(|candidate| &candidate.replacement) {
+            Some(Replacement::Summary(node)) => Ok(Some(Rc::clone(node))),
+            Some(Replacement::Rewrite(rewritten)) => keep_pre_asap(rewritten).map(Some),
+            None => keep_pre_asap(target).map(Some),
+        }
+    }
 }
 
 impl<Id> PlanSpace<Id> {
@@ -2871,7 +2960,7 @@ impl<Id> PlanSpace<Id> {
     /// [`Self::cost_sorted`], whose per-group ranking only ever sees a
     /// group's own raw [`MemoGroup::consumer_count`].
     pub fn global_selection(&self, cost_model: &dyn CostModel) -> GlobalSelection<'_> {
-        self.global_selection_impl(cost_model, None, None)
+        self.global_selection_impl(cost_model, None, None, None)
             .expect("structural global selection cannot produce a recurrence error")
     }
 
@@ -2885,7 +2974,17 @@ impl<Id> PlanSpace<Id> {
         profiles: &RecurrenceProfileMap,
         horizon: Option<Horizon>,
     ) -> Result<GlobalSelection<'_>, RecurrenceError> {
-        self.global_selection_impl(cost_model, Some(profiles), horizon)
+        self.global_selection_impl(cost_model, Some(profiles), horizon, None)
+    }
+
+    pub(crate) fn global_selection_with_candidate_costs(
+        &self,
+        cost_model: &dyn CostModel,
+        profiles: &RecurrenceProfileMap,
+        horizon: Option<Horizon>,
+        costs: &CandidateCostOverrides,
+    ) -> Result<GlobalSelection<'_>, RecurrenceError> {
+        self.global_selection_impl(cost_model, Some(profiles), horizon, Some(costs))
     }
 
     fn global_selection_impl(
@@ -2893,6 +2992,7 @@ impl<Id> PlanSpace<Id> {
         cost_model: &dyn CostModel,
         profiles: Option<&RecurrenceProfileMap>,
         horizon: Option<Horizon>,
+        candidate_costs: Option<&CandidateCostOverrides>,
     ) -> Result<GlobalSelection<'_>, RecurrenceError> {
         let graph = reference_graph(self);
         let topo = topological_order(&self.order, &graph);
@@ -2907,7 +3007,21 @@ impl<Id> PlanSpace<Id> {
             let effective = effective_uses.get(ptr).copied().unwrap_or(0);
             effective_uses.insert(*ptr, effective);
 
-            let chosen = if effective >= 2 && cse_candidate_pair(group).is_some() {
+            let lifecycle_choice = candidate_costs.and_then(|costs| {
+                group
+                    .candidates
+                    .iter()
+                    .filter_map(|candidate| {
+                        costs
+                            .get(&group.target, candidate)
+                            .map(|cost| (candidate, cost))
+                    })
+                    .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0))
+                    .map(|(candidate, _)| candidate)
+            });
+            let chosen = if lifecycle_choice.is_some() {
+                lifecycle_choice
+            } else if effective >= 2 && cse_candidate_pair(group).is_some() {
                 let decision = if let Some(profiles) = profiles {
                     decide_group_with_recurrence(
                         group,
