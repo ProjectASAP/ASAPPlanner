@@ -130,14 +130,16 @@ not disagree. Zero bootstrap work is not a fabricated at-rest backlog.
 
 The streaming raw baseline is rooted at the same planning-time rows, logical
 bytes, source scan, and source-coverage identity as the summary bootstrap.
-Each raw baseline and candidate root is explicitly bound to its target query;
-the estimator never selects an arbitrary aggregation from a process-wide
-evidence map. All aggregation states bound to that target must agree on the
-single-source ingestion evolution used by the current raw evidence shape.
+Each candidate comparison is explicitly bound by `(target, root)`; the
+estimator never selects an arbitrary aggregation from a process-wide evidence
+map. Raw rows, bytes, source scan, and ingestion rate belong to the target.
+Nested and sibling aggregation inputs may be different intermediates, and
+missing evidence in one candidate does not contaminate another candidate.
+Binding validates the target QueryExpr's actual source and leaf predicates
+against the scope, then publishes the context atomically.
 Each evaluation adds rows and bytes that arrived since planning time, using
-the recurrence's evaluation offsets. A baseline whose bootstrap facts do not
-match every state attached to that source is unavailable. Multi-source raw
-comparison requires per-source raw evidence and currently fails closed.
+the recurrence's evaluation offsets. Multi-source raw comparison requires
+per-source raw evidence and currently fails closed.
 
 Periodic rebuild and implicit expiration-policy CPU remain unavailable. The
 authoritative lifecycle types express direct versus incremental maintenance,
@@ -381,11 +383,16 @@ structural-node-count fallback for final cost.
 for that exact `Rc` identity, including an apparently simple scan. This CPU
 explicitly excludes summary insertion. Bootstrap/source I/O is owned only by
 the enclosing aggregation evidence, so recursion cannot charge the same read
-twice. Missing evidence makes the whole candidate unavailable. The scan source and leaf
-predicates discovered in each aggregation child must equal the indexed
-`SourceCoverage`; an index cannot relabel source B as source A. The current
-streaming evidence assigns one source to each aggregation input, so an
-aggregation child with multiple source scans fails closed.
+twice. Missing evidence makes the whole candidate unavailable. The scan source
+and leaf predicates discovered in each aggregation child must equal the indexed
+`SourceCoverage`; an index cannot relabel source B as source A. The retained
+`KeepPreAsap` subtree is also a validated physical DAG, so unmodeled operators
+cannot hide behind one opaque CPU total. Its scan coverage must come from the
+same comparison scope. The current bootstrap evidence shape assigns one source
+to each aggregation input; a multi-source input (including PromQL info
+enrichment with an auxiliary metric) is unavailable until the provider supplies
+per-source streaming evolution rather than guessing how the global ingestion
+rate is divided.
 
 For bootstrap rows `B`, arriving rows `U`, active windows `A`, query
 evaluations `Q`, physical instances `P`, and unique `SummaryAgg` states `S`:
@@ -402,11 +409,12 @@ Here `P` is the provider-declared execution multiplicity of each physical
 operator, not a structural node count. Bootstrap scans are de-duplicated only
 when their provider-owned physical-read identities match. Sharing the same
 logical `SourceCoverage` is insufficient because two builds may independently
-read that source. Persistent state is summed. Transient liveness recursively
-adds a parent operator's workspace to the child outputs/workspaces it consumes;
-binary and n-ary consumers conservatively keep their input workspaces live
-together. This avoids undercounting a join or readout while its children are
-still live.
+read that source. Persistent state is summed. Every transient node declares
+workspace excluding its output buffer, plus a separate output-buffer size. A
+child-before-parent schedule retains a completed output until its last physical
+consumer, counts parent workspace and output during execution, and then
+releases dead child buffers. Reference counts preserve shared-node lifetimes
+without charging an already-released child's execution workspace.
 
 `B` comes from fresh `DataWorkload.input_cardinality`. For `Shared` and
 `ContinuouslyMaintained`, `U` is the conservative ceiling of
@@ -427,9 +435,15 @@ Persistent memory is:
 ```
 
 Merge or subtract additionally needs one transient result state per physical
-instance. Shared `Rc<SummaryNode>` identity is visited once, so shared state is
-not rebuilt or retained twice. Streaming input bytes are not reported as disk
-scan bytes; only the optional bootstrap source scan is.
+instance. Streaming input bytes are not reported as disk scan bytes; only the
+optional bootstrap source scan is.
+
+The lifecycle planner represents retention as a `CostRate` because it composes
+all lifecycle work over seconds. Resource calibration, however, prices peak
+capacity once, not byte-seconds. The adapter therefore divides the calibrated
+retained-memory charge by the comparison horizon before returning the
+lifecycle primitive. Integrating that rate over the same horizon produces
+exactly one peak-memory charge and agrees with complete-DAG costing.
 
 The at-rest summary-candidate bridge still has formulas for sketch build and
 readout only. It rejects summary join, merge, subtract, and delete explicitly
@@ -534,9 +548,13 @@ The lifecycle planner enumerates compatible lifecycle combinations for the
 unique `SummaryAgg` deployments and invokes `complete_summary_candidate_cost`
 for each combination before selecting the minimum. The hook receives explicit
 node-to-guarantee bindings plus the horizon and expected reads. Every
-`SummaryAgg` and `SummaryJoin` is bound to physical evidence by exact `Rc`
-identity, so heterogeneous states are costed independently and shared states
-once. Merge, subtract, delete, readout, and join participate in automatic
+Each logical occurrence is looked up by exact `Rc` identity, while every
+evidence record also carries a provider-owned physical identity. Equal physical
+identities deduplicate work and retained state only when their operator facts,
+edge statistics, lifecycle guarantee, and physical child identities agree;
+conflicts make the candidate unavailable. Thus heterogeneous states are costed
+independently and genuinely shared deployments once. Merge, subtract, delete,
+readout, and join participate in automatic
 candidate ranking. Exhaustive whole-root scoring is capped at 4,096 lifecycle
 combinations because an arbitrary whole-candidate hook cannot be soundly
 pruned by primitive costs; a larger space is unavailable rather than consuming
