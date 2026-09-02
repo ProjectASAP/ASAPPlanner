@@ -57,6 +57,7 @@ shell command.
 ```sh
 cargo run -p asap-devtools --bin dag_export -- \
   --post-asap --epsilon 0.01 \
+  --analytical-cost-json '{"inputs":{"data_arrival":"at_rest","input_rows":1000000,"input_bytes":64000000,"source_scan_bytes":64000000,"group_count":1,"group_key_bytes":16,"topk_k":null,"evaluation_count":100},"calibration":{"cost_per_cpu_op":0.000001,"cost_per_scan_byte":0.00000001,"cost_per_retained_byte":0.000000001,"version":"demo-calibration-v1"}}' \
   --sql "SELECT service, COUNT(*) FROM metrics GROUP BY service" --name q1 \
   > /tmp/dag.json
 ```
@@ -95,11 +96,11 @@ a selected replacement directly contains:
     "strategy": "SketchAlgorithmStrategy",
     "rationale": "count realizes as a Cms sketch",
     "rank": 0,
-    "cost": 3.0,
+    "cost": 5.64051088,
     "role": "replacement_root",
-    "baseline_cost": { "value": 6.0, "unit": "RelativeStructuralUnits", "source": "Modeled", "model_version": "dag_export-structural-cost-v1" },
-    "selected_cost": { "value": 3.0, "unit": "RelativeStructuralUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "delta": 3.0, "benefit_ratio": 0.5 },
-    "benefit": { "value": 3.0, "unit": "RelativeStructuralUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "benefit_ratio": 0.5 }
+    "baseline_cost": { "value": 164.000000016, "unit": "CostUnits", "source": "Modeled", "model_version": "analytical-resource-v1+demo-calibration-v1" },
+    "selected_cost": { "value": 5.64051088, "unit": "CostUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "delta": 158.359489136, "benefit_ratio": 0.965606640979 },
+    "benefit": { "value": 158.359489136, "unit": "CostUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "benefit_ratio": 0.965606640979 }
   }
 }
 ```
@@ -121,13 +122,12 @@ with IR text.
 `source` (`Modeled` / `Measured` / `Unavailable`), optionally `baseline` +
 `delta` + `benefit_ratio`, and `model_version`/`benchmark_id`/`inputs` for
 provenance. A missing `value` (`source: "Unavailable"`) always renders as
-**Not estimated** — the viewer never fabricates a number. Today every value
-`dag_export` produces is unit-tagged `RelativeStructuralUnits`: a
-structural-size proxy (the same one `asap_aware_mapping::cost_model`
-already uses for ranking), not a real cost-per-second rate — issue #287's
-recurrence-aware inputs (`update_rate`/`evaluation_rate`/`query_interval`)
-are what would let a future export use `CostUnitsPerSecond` instead; the
-annotation plumbing already accepts that unit unchanged.
+**Not estimated** — the viewer never fabricates a number. With
+`--analytical-cost-json`, `dag_export` emits calibrated `CostUnits` and keeps
+the CPU operations, peak memory, scan bytes, coefficients, and workload
+statistics in `inputs`. Without those inputs, or for an unsupported candidate,
+the annotation is `Unavailable`; structural node counts are never substituted.
+See the [analytical model design](../../docs/design_docs/asap-aware-mapping/analytical-resource-cost.md).
 
 The same three fields also appear on `TargetReplacement`
 (replacement-region baseline/selected/benefit), `NamedGraph.workload_cost` /
