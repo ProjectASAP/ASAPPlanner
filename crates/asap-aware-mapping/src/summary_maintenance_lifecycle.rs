@@ -577,25 +577,11 @@ fn workload_facts(
                     recurring_known = false;
                     continue;
                 }
-                let rate = match estimate.expected {
-                    asap_types::workload::ExpectedDemand::AverageRate(rate) => Some(rate.0),
-                    asap_types::workload::ExpectedDemand::InvocationCount(count) => {
-                        let millis = estimate
-                            .observation_window
-                            .end
-                            .0
-                            .saturating_sub(estimate.observation_window.start.0);
-                        (millis > 0).then_some(count as f64 / (millis as f64 / 1000.0))
-                    }
-                };
-                if let Some(rate) = rate {
-                    evaluation_rate += rate;
-                    has_evaluation_rate = true;
-                    if let Some(h) = horizon {
-                        recurring_reads += h.0 * rate;
-                    } else {
-                        recurring_known = false;
-                    }
+                let rate = estimate.expected_rate.0;
+                evaluation_rate += rate;
+                has_evaluation_rate = true;
+                if let Some(h) = horizon {
+                    recurring_reads += h.0 * rate;
                 } else {
                     recurring_known = false;
                 }
