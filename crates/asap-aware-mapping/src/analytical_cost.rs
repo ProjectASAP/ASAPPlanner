@@ -5,10 +5,13 @@
 //! [`ResourceCalibration`]; without that calibration the dimensional
 //! estimate is still useful for explanations, but is not silently comparable.
 
+use std::collections::HashSet;
+
 use asap_types::post_asap::{
     GroupingStrategy, SketchAlgorithm, SketchParams, SummaryFamilyType, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::workload::{DataWorkload, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand};
 use serde::{Deserialize, Serialize};
 
 use crate::cost_model::{CostModel, DefaultCostModel};
@@ -57,6 +60,95 @@ impl AnalyticalInputs {
         }
         Ok(self)
     }
+
+    /// Resolve the workload-owned axes of an analytical estimate. Physical
+    /// widths and cardinalities that are not represented by `DataWorkload`
+    /// remain explicit arguments instead of being guessed.
+    pub fn from_workload(
+        physical: PhysicalInputEvidence,
+        data: &DataWorkload,
+        query: &QueryWorkloadEntry,
+        planning_time_ms: u64,
+        horizon_ms: u64,
+    ) -> Result<Self, AnalyticalCostError> {
+        let input_rows = data
+            .input_cardinality
+            .value_at(planning_time_ms)
+            .copied()
+            .ok_or(AnalyticalCostError::MissingOrStale("input_cardinality"))?;
+        let evaluation_count =
+            evaluations_in_horizon(&query.recurrence, planning_time_ms, horizon_ms)?;
+        Self {
+            input_rows,
+            input_bytes: physical.input_bytes,
+            source_scan_bytes: physical.source_scan_bytes,
+            group_count: physical.group_count,
+            group_key_bytes: physical.group_key_bytes,
+            // Query-shape constants are read from the lowered IR by
+            // `inputs_for_target`, never duplicated in workload evidence.
+            topk_k: None,
+            evaluation_count,
+        }
+        .validate()
+    }
+}
+
+/// Catalog/operator statistics absent from the canonical workload schema.
+/// Provenance belongs to the provider that resolves this adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalInputEvidence {
+    pub input_bytes: u64,
+    pub source_scan_bytes: u64,
+    pub group_count: u64,
+    pub group_key_bytes: u64,
+}
+
+fn evaluations_in_horizon(
+    recurrence: &QueryRecurrence,
+    planning_time_ms: u64,
+    horizon_ms: u64,
+) -> Result<u64, AnalyticalCostError> {
+    if horizon_ms == 0 {
+        return Err(AnalyticalCostError::MissingOrZero("horizon_ms"));
+    }
+    let end = planning_time_ms.saturating_add(horizon_ms);
+    let count = match recurrence {
+        QueryRecurrence::OneTime {
+            invocations,
+            execute_at,
+        } => {
+            if execute_at.is_none_or(|at| at.0 >= planning_time_ms && at.0 <= end) {
+                *invocations
+            } else {
+                0
+            }
+        }
+        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
+            if interval.0 == 0 {
+                return Err(AnalyticalCostError::InvalidRecurrence);
+            }
+            horizon_ms / u64::from(interval.0)
+        }
+        QueryRecurrence::Repeated(RepeatedDemand::Scheduled(schedule)) => schedule
+            .iter()
+            .filter(|at| at.0 >= planning_time_ms && at.0 <= end)
+            .count()
+            as u64,
+        QueryRecurrence::Repeated(RepeatedDemand::EstimatedRate(estimate)) => {
+            if !estimate.is_fresh_at(planning_time_ms)
+                || !estimate.expected_rate.0.is_finite()
+                || estimate.expected_rate.0 < 0.0
+            {
+                return Err(AnalyticalCostError::InvalidRecurrence);
+            }
+            (estimate.expected_rate.0 * horizon_ms as f64 / 1000.0).floor() as u64
+        }
+        QueryRecurrence::Unknown => return Err(AnalyticalCostError::InvalidRecurrence),
+    };
+    if count == 0 {
+        return Err(AnalyticalCostError::NoEvaluationsInHorizon);
+    }
+    Ok(count)
 }
 
 /// Conversion from physical dimensions to one deployment-specific objective.
@@ -127,6 +219,139 @@ pub struct OperatorInputs {
     pub k: Option<u64>,
     pub right_rows: Option<u64>,
     pub right_bytes: Option<u64>,
+}
+
+/// One node in an already-selected physical DAG. `retained` means its local
+/// state survives for the whole comparison horizon; otherwise its output can
+/// be released after its last consumer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalDagNode {
+    pub id: String,
+    pub operator: PhysicalOperator,
+    pub inputs: OperatorInputs,
+    pub children: Vec<String>,
+    pub retained: bool,
+    pub execution: ExecutionMultiplicity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionMultiplicity {
+    Once,
+    PerEvaluation,
+}
+
+/// Compose local operator estimates once per physical identity. CPU and disk
+/// are additive; peak memory is simulated over a child-before-parent schedule
+/// and releases transient child outputs after their last consumer.
+pub fn estimate_physical_dag(
+    nodes: &[PhysicalDagNode],
+    root: &str,
+    evaluation_count: u64,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    use std::collections::HashMap;
+
+    if evaluation_count == 0 {
+        return Err(AnalyticalCostError::MissingOrZero("evaluation_count"));
+    }
+    let by_id: HashMap<&str, &PhysicalDagNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    if by_id.len() != nodes.len() {
+        return Err(AnalyticalCostError::InvalidPhysicalDag("duplicate node id"));
+    }
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut order = Vec::new();
+    fn visit<'a>(
+        id: &'a str,
+        nodes: &HashMap<&'a str, &'a PhysicalDagNode>,
+        visiting: &mut HashSet<&'a str>,
+        visited: &mut HashSet<&'a str>,
+        order: &mut Vec<&'a str>,
+    ) -> Result<(), AnalyticalCostError> {
+        if visited.contains(id) {
+            return Ok(());
+        }
+        if !visiting.insert(id) {
+            return Err(AnalyticalCostError::InvalidPhysicalDag("cycle"));
+        }
+        let node = nodes
+            .get(id)
+            .ok_or(AnalyticalCostError::InvalidPhysicalDag("missing node"))?;
+        for child in &node.children {
+            visit(child, nodes, visiting, visited, order)?;
+        }
+        visiting.remove(id);
+        visited.insert(id);
+        order.push(id);
+        Ok(())
+    }
+    visit(root, &by_id, &mut visiting, &mut visited, &mut order)?;
+
+    let mut remaining_consumers: HashMap<&str, usize> = HashMap::new();
+    for id in &order {
+        for child in &by_id[id].children {
+            *remaining_consumers.entry(child).or_default() += 1;
+        }
+    }
+    let mut cpu_ops = 0.0;
+    let mut scan_bytes = 0_u64;
+    let mut live_bytes = 0_u64;
+    let mut peak_memory_bytes = 0_u64;
+    let mut live_outputs: HashMap<&str, u64> = HashMap::new();
+    for id in order {
+        let node = by_id[id];
+        let local = estimate_operator(node.operator, node.inputs)?;
+        let executions = match node.execution {
+            ExecutionMultiplicity::Once => 1,
+            ExecutionMultiplicity::PerEvaluation => evaluation_count,
+        };
+        cpu_ops += local.cpu_ops * executions as f64;
+        scan_bytes = scan_bytes
+            .checked_add(
+                local
+                    .scan_bytes
+                    .checked_mul(executions)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            )
+            .ok_or(AnalyticalCostError::Overflow)?;
+        peak_memory_bytes = peak_memory_bytes.max(
+            live_bytes
+                .checked_add(local.peak_memory_bytes)
+                .ok_or(AnalyticalCostError::Overflow)?,
+        );
+        let output = if node.retained {
+            node.inputs.output_bytes.max(local.peak_memory_bytes)
+        } else {
+            node.inputs.output_bytes
+        };
+        if node.retained || remaining_consumers.get(id).copied().unwrap_or(0) > 0 || id == root {
+            live_bytes = live_bytes
+                .checked_add(output)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            live_outputs.insert(id, output);
+            peak_memory_bytes = peak_memory_bytes.max(live_bytes);
+        }
+        for child in &node.children {
+            let remaining = remaining_consumers.get_mut(child.as_str()).ok_or(
+                AnalyticalCostError::InvalidPhysicalDag("invalid consumer count"),
+            )?;
+            *remaining -= 1;
+            if *remaining == 0 && !by_id[child.as_str()].retained {
+                if let Some(bytes) = live_outputs.remove(child.as_str()) {
+                    live_bytes = live_bytes
+                        .checked_sub(bytes)
+                        .ok_or(AnalyticalCostError::Overflow)?;
+                }
+            }
+        }
+    }
+    if !cpu_ops.is_finite() {
+        return Err(AnalyticalCostError::Overflow);
+    }
+    Ok(ResourceEstimate {
+        cpu_ops,
+        peak_memory_bytes,
+        scan_bytes,
+    })
 }
 
 /// Estimate one physical operator. Child costs are deliberately excluded;
@@ -240,6 +465,12 @@ impl ResourceEstimate {
 pub enum AnalyticalCostError {
     #[error("required analytical input {0} is missing or zero")]
     MissingOrZero(&'static str),
+    #[error("required analytical evidence {0} is missing or stale")]
+    MissingOrStale(&'static str),
+    #[error("query recurrence cannot be resolved over the planning horizon")]
+    InvalidRecurrence,
+    #[error("query has no evaluations in the planning horizon")]
+    NoEvaluationsInHorizon,
     #[error("calibration {0} must be finite and non-negative, got {1}")]
     InvalidCalibration(&'static str, f64),
     #[error("at least one calibration coefficient must be positive")]
@@ -252,6 +483,10 @@ pub enum AnalyticalCostError {
     Overflow,
     #[error("candidate has no supported exact or sketch state")]
     UnsupportedCandidate,
+    #[error("summary operation {0} has no lifecycle-aware cost formula")]
+    UnsupportedSummaryOperation(&'static str),
+    #[error("invalid physical DAG: {0}")]
+    InvalidPhysicalDag(&'static str),
 }
 
 fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
@@ -411,6 +646,27 @@ pub struct AnalyticalCostModel {
 }
 
 impl AnalyticalCostModel {
+    pub fn from_workload(
+        physical: PhysicalInputEvidence,
+        data: &DataWorkload,
+        query: &QueryWorkloadEntry,
+        planning_time_ms: u64,
+        horizon_ms: u64,
+        calibration: ResourceCalibration,
+    ) -> Result<Self, AnalyticalCostError> {
+        calibration.validate()?;
+        Ok(Self {
+            inputs: AnalyticalInputs::from_workload(
+                physical,
+                data,
+                query,
+                planning_time_ms,
+                horizon_ms,
+            )?,
+            calibration,
+        })
+    }
+
     pub fn raw_cost(&self) -> Result<f64, AnalyticalCostError> {
         estimate_raw_aggregation(self.inputs)?.calibrated_cost(&self.calibration)
     }
@@ -422,21 +678,42 @@ impl AnalyticalCostModel {
         let Replacement::Summary(node) = &candidate.replacement else {
             return Err(AnalyticalCostError::UnsupportedCandidate);
         };
-        let (kind, grouping) =
-            sketch_from(node).ok_or(AnalyticalCostError::UnsupportedCandidate)?;
-        let inputs = self.inputs.validate()?;
-        let physical_sketch_count =
-            if matches!(grouping, GroupingStrategy::SharedMultiSubpopulation { .. }) {
-                1
-            } else {
-                inputs.group_count
-            };
-        estimate_sketch_aggregation_with_instances(
-            kind.algorithm().clone(),
-            kind.params(),
-            inputs,
-            physical_sketch_count,
-        )
+        let mut states = Vec::new();
+        let mut visited = HashSet::new();
+        collect_sketches(node, &mut visited, &mut states)?;
+        if states.is_empty() {
+            return Err(AnalyticalCostError::UnsupportedCandidate);
+        }
+        if states.len() != 1 {
+            // The compact summary bridge has no edge/source identities with
+            // which to decide whether several builds share an input read.
+            // Such plans must use `estimate_physical_dag`.
+            return Err(AnalyticalCostError::UnsupportedCandidate);
+        }
+        let mut total = ResourceEstimate {
+            cpu_ops: 0.0,
+            peak_memory_bytes: 0,
+            scan_bytes: 0,
+        };
+        for (kind, grouping) in states {
+            let inputs = self.inputs.validate()?;
+            let physical_sketch_count =
+                if matches!(grouping, GroupingStrategy::SharedMultiSubpopulation { .. }) {
+                    1
+                } else {
+                    inputs.group_count
+                };
+            total = add_resources(
+                total,
+                estimate_sketch_aggregation_with_instances(
+                    kind.algorithm().clone(),
+                    kind.params(),
+                    inputs,
+                    physical_sketch_count,
+                )?,
+            )?;
+        }
+        Ok(total)
     }
 
     /// Target-local estimate used for nested plans. An outer Top-K consumes
@@ -452,8 +729,12 @@ impl AnalyticalCostModel {
                 return Err(AnalyticalCostError::UnsupportedCandidate);
             };
             let mut states = Vec::new();
-            collect_sketches(node, &mut states);
+            let mut visited = HashSet::new();
+            collect_sketches(node, &mut visited, &mut states)?;
             if states.is_empty() {
+                return Err(AnalyticalCostError::UnsupportedCandidate);
+            }
+            if states.len() != 1 {
                 return Err(AnalyticalCostError::UnsupportedCandidate);
             }
             let fused_topk = states.len() == 1
@@ -514,6 +795,15 @@ impl AnalyticalCostModel {
             }
             return Ok(total);
         }
+        let Replacement::Summary(node) = &candidate.replacement else {
+            return Err(AnalyticalCostError::UnsupportedCandidate);
+        };
+        // Validate the complete candidate even when the target is not Top-K.
+        // In particular, never price a merge/delete/subtract as if that
+        // physical operation were free.
+        let mut states = Vec::new();
+        let mut visited = HashSet::new();
+        collect_sketches(node, &mut visited, &mut states)?;
         let scoped = self.inputs_for_target(target.root)?;
         let model = Self {
             inputs: scoped,
@@ -620,80 +910,42 @@ fn topk_intent(target: &asap_types::pre_asap::QueryExpr) -> Option<u64> {
     })
 }
 
-fn sketch_from(
-    node: &SummaryNode,
-) -> Option<(&asap_types::post_asap::SketchKind, &GroupingStrategy)> {
-    // A caller-visible candidate is normally rooted at `SummaryEstimate`,
-    // whose output schema is deliberately plain.  The physical sketch and
-    // its sized parameters live on the nested `SummaryAgg`, so inspecting
-    // only the root schema silently loses precisely the information this
-    // model needs.
-    match &node.expr {
-        asap_types::post_asap::SummaryExpr::SummaryAgg { family, child, .. } => match family {
-            SummaryFamilyType::Sketch(kind, grouping) => Some((kind, grouping)),
-            _ => sketch_from(child),
-        },
-        asap_types::post_asap::SummaryExpr::SummaryJoin {
-            family,
-            outer,
-            inner,
-            ..
-        } => match family {
-            SummaryFamilyType::Sketch(kind, grouping) => Some((kind, grouping)),
-            _ => sketch_from(outer).or_else(|| sketch_from(inner)),
-        },
-        asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. }
-        | asap_types::post_asap::SummaryExpr::SummaryDelete { summary_input, .. } => {
-            sketch_from(summary_input)
-        }
-        asap_types::post_asap::SummaryExpr::SummarySubtract { left, right } => {
-            sketch_from(left).or_else(|| sketch_from(right))
-        }
-        asap_types::post_asap::SummaryExpr::SummaryMerge { children } => {
-            children.iter().find_map(|child| sketch_from(child))
-        }
-        asap_types::post_asap::SummaryExpr::KeepPreAsap(_) => None,
-    }
-}
-
 fn collect_sketches<'a>(
     node: &'a SummaryNode,
+    visited: &mut HashSet<*const SummaryNode>,
     out: &mut Vec<(&'a asap_types::post_asap::SketchKind, &'a GroupingStrategy)>,
-) {
+) -> Result<(), AnalyticalCostError> {
+    let identity = node as *const SummaryNode;
+    if !visited.insert(identity) {
+        return Ok(());
+    }
     match &node.expr {
         asap_types::post_asap::SummaryExpr::SummaryAgg { family, child, .. } => {
-            collect_sketches(child, out);
+            collect_sketches(child, visited, out)?;
             if let SummaryFamilyType::Sketch(kind, grouping) = family {
                 out.push((kind, grouping));
+            } else {
+                return Err(AnalyticalCostError::UnsupportedCandidate);
             }
         }
-        asap_types::post_asap::SummaryExpr::SummaryJoin {
-            family,
-            outer,
-            inner,
-            ..
-        } => {
-            collect_sketches(outer, out);
-            collect_sketches(inner, out);
-            if let SummaryFamilyType::Sketch(kind, grouping) = family {
-                out.push((kind, grouping));
-            }
-        }
-        asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. }
-        | asap_types::post_asap::SummaryExpr::SummaryDelete { summary_input, .. } => {
-            collect_sketches(summary_input, out);
-        }
-        asap_types::post_asap::SummaryExpr::SummarySubtract { left, right } => {
-            collect_sketches(left, out);
-            collect_sketches(right, out);
-        }
-        asap_types::post_asap::SummaryExpr::SummaryMerge { children } => {
-            for child in children {
-                collect_sketches(child, out);
-            }
+        asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. } => {
+            collect_sketches(summary_input, visited, out)?;
         }
         asap_types::post_asap::SummaryExpr::KeepPreAsap(_) => {}
+        asap_types::post_asap::SummaryExpr::SummaryJoin { .. } => {
+            return Err(AnalyticalCostError::UnsupportedSummaryOperation("join"));
+        }
+        asap_types::post_asap::SummaryExpr::SummarySubtract { .. } => {
+            return Err(AnalyticalCostError::UnsupportedSummaryOperation("subtract"));
+        }
+        asap_types::post_asap::SummaryExpr::SummaryDelete { .. } => {
+            return Err(AnalyticalCostError::UnsupportedSummaryOperation("delete"));
+        }
+        asap_types::post_asap::SummaryExpr::SummaryMerge { .. } => {
+            return Err(AnalyticalCostError::UnsupportedSummaryOperation("merge"));
+        }
     }
+    Ok(())
 }
 
 impl CostModel for AnalyticalCostModel {
@@ -981,5 +1233,234 @@ mod tests {
             missing_join_stats,
             Err(AnalyticalCostError::MissingOrZero("right_rows"))
         );
+    }
+
+    #[test]
+    fn recurrence_is_derived_over_a_finite_horizon() {
+        use asap_types::workload::{
+            QueryRecurrence, RepeatedDemand, RepetitionInterval, TimestampMs,
+        };
+
+        assert_eq!(
+            evaluations_in_horizon(
+                &QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(
+                    10_000
+                ),)),
+                100_000,
+                60_000,
+            )
+            .unwrap(),
+            6
+        );
+        assert_eq!(
+            evaluations_in_horizon(
+                &QueryRecurrence::Repeated(RepeatedDemand::Scheduled(vec![
+                    TimestampMs(99_999),
+                    TimestampMs(100_000),
+                    TimestampMs(160_000),
+                    TimestampMs(160_001),
+                ])),
+                100_000,
+                60_000,
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            evaluations_in_horizon(&QueryRecurrence::Unknown, 0, 1_000),
+            Err(AnalyticalCostError::InvalidRecurrence)
+        );
+    }
+
+    #[test]
+    fn workload_adapter_rejects_stale_cardinality() {
+        use asap_types::workload::{
+            DataWorkload, Evidence, EvidenceSource, Predictability, Query, QueryRequirements,
+            QueryTimeScope, TimeSelection,
+        };
+        let data = DataWorkload {
+            input_cardinality: Evidence {
+                value: Some(1_000),
+                source: EvidenceSource::Observed,
+                observed_at_ms: Some(100),
+                valid_for_ms: Some(10),
+            },
+            ..DataWorkload::default()
+        };
+        let query = QueryWorkloadEntry {
+            query: Query("SELECT count(*) FROM t".into()),
+            requirements: QueryRequirements::default(),
+            predictability: Predictability::Unknown,
+            recurrence: QueryRecurrence::OneTime {
+                invocations: 1,
+                execute_at: None,
+            },
+            time_selection: TimeSelection {
+                scope: QueryTimeScope::Unknown,
+                lookback: None,
+                as_of: None,
+            },
+        };
+        assert_eq!(
+            AnalyticalInputs::from_workload(
+                PhysicalInputEvidence {
+                    input_bytes: 8_000,
+                    source_scan_bytes: 8_000,
+                    group_count: 1,
+                    group_key_bytes: 8,
+                },
+                &data,
+                &query,
+                111,
+                1_000,
+            ),
+            Err(AnalyticalCostError::MissingOrStale("input_cardinality"))
+        );
+    }
+
+    #[test]
+    fn physical_dag_counts_shared_scan_once_and_uses_live_memory() {
+        let input = |input_rows, input_bytes, output_rows, output_bytes| OperatorInputs {
+            input_rows,
+            input_bytes,
+            output_rows,
+            output_bytes,
+            group_count: None,
+            key_bytes: None,
+            k: None,
+            right_rows: None,
+            right_bytes: None,
+        };
+        let nodes = vec![
+            PhysicalDagNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                inputs: input(100, 1_000, 100, 1_000),
+                children: vec![],
+                retained: false,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDagNode {
+                id: "left".into(),
+                operator: PhysicalOperator::Filter,
+                inputs: input(100, 1_000, 40, 400),
+                children: vec!["scan".into()],
+                retained: false,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDagNode {
+                id: "right".into(),
+                operator: PhysicalOperator::Filter,
+                inputs: input(100, 1_000, 40, 400),
+                children: vec!["scan".into()],
+                retained: false,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDagNode {
+                id: "root".into(),
+                operator: PhysicalOperator::Concat,
+                inputs: input(80, 800, 80, 800),
+                children: vec!["left".into(), "right".into()],
+                retained: false,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+        ];
+        let estimate = estimate_physical_dag(&nodes, "root", 2).unwrap();
+        assert_eq!(estimate.cpu_ops, 760.0);
+        assert_eq!(estimate.scan_bytes, 2_000);
+        // This is neither the sum of every node's memory nor just the largest
+        // node: it is the maximum state simultaneously live at the fan-out.
+        assert_eq!(estimate.peak_memory_bytes, 1_800);
+    }
+
+    #[test]
+    fn unmodeled_summary_lifecycle_operations_fail_closed() {
+        use std::rc::Rc;
+
+        use asap_types::post_asap::{SummaryExpr, SummarySchema};
+        let leaf = Rc::new(SummaryNode {
+            expr: SummaryExpr::KeepPreAsap(Rc::new(
+                asap_types::pre_asap::QueryExpr::promql_scalar(1.0),
+            )),
+            schema: SummarySchema {
+                fields: vec![],
+                time_index: None,
+            },
+            guarantee: None,
+        });
+        let merge = SummaryNode {
+            expr: SummaryExpr::SummaryMerge {
+                children: vec![Rc::clone(&leaf), Rc::clone(&leaf)],
+            },
+            schema: leaf.schema.clone(),
+            guarantee: None,
+        };
+        assert_eq!(
+            collect_sketches(&merge, &mut HashSet::new(), &mut Vec::new()),
+            Err(AnalyticalCostError::UnsupportedSummaryOperation("merge"))
+        );
+    }
+
+    #[test]
+    fn physical_dag_separates_build_once_from_per_evaluation_work() {
+        let nodes = vec![
+            PhysicalDagNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                inputs: OperatorInputs {
+                    input_rows: 100,
+                    input_bytes: 1_000,
+                    output_rows: 100,
+                    output_bytes: 1_000,
+                    group_count: None,
+                    key_bytes: None,
+                    k: None,
+                    right_rows: None,
+                    right_bytes: None,
+                },
+                children: vec![],
+                retained: false,
+                execution: ExecutionMultiplicity::Once,
+            },
+            PhysicalDagNode {
+                id: "state".into(),
+                operator: PhysicalOperator::HashAggregate,
+                inputs: OperatorInputs {
+                    input_rows: 100,
+                    input_bytes: 1_000,
+                    output_rows: 1,
+                    output_bytes: 16,
+                    group_count: Some(1),
+                    key_bytes: Some(8),
+                    k: None,
+                    right_rows: None,
+                    right_bytes: None,
+                },
+                children: vec!["scan".into()],
+                retained: true,
+                execution: ExecutionMultiplicity::Once,
+            },
+            PhysicalDagNode {
+                id: "read".into(),
+                operator: PhysicalOperator::Limit,
+                inputs: OperatorInputs {
+                    input_rows: 1,
+                    input_bytes: 16,
+                    output_rows: 1,
+                    output_bytes: 16,
+                    group_count: None,
+                    key_bytes: None,
+                    k: None,
+                    right_rows: None,
+                    right_bytes: None,
+                },
+                children: vec!["state".into()],
+                retained: false,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+        ];
+        let estimate = estimate_physical_dag(&nodes, "read", 10).unwrap();
+        assert_eq!(estimate.cpu_ops, 210.0);
+        assert_eq!(estimate.scan_bytes, 1_000);
     }
 }

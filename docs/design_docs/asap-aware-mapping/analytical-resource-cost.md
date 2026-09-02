@@ -63,6 +63,15 @@ evidence has been resolved. They are estimator adapters, not planner domain
 objects. `dag_export --analytical-cost-json` is a development/reproducibility
 adapter, not a replacement for `QueryWorkload` or `DataWorkload`.
 
+The canonical workload adapter is `AnalyticalCostModel::from_workload`. It
+reads fresh source cardinality from `DataWorkload`, derives the finite
+evaluation count from `QueryWorkloadEntry.recurrence` plus the planning
+horizon, and combines those values with `PhysicalInputEvidence`. An unknown
+recurrence, a zero horizon, no invocation inside the horizon, or stale source
+cardinality makes the estimate unavailable. Query-shape constants such as
+Top-K `k` are read from the lowered target rather than copied out of the
+workload.
+
 ## Workload horizon and lifecycle
 
 Every alternative must cover the same source data and query horizon. The
@@ -119,6 +128,18 @@ For a selected DAG:
    DAG.
 7. Retained summaries remain live across reads. Streaming buffers may be
    released after their last consumer.
+
+`estimate_physical_dag` implements these rules for `PhysicalDagNode` values.
+Node IDs are physical identities: duplicate IDs, missing children, and cycles
+are rejected. A child-before-parent schedule maintains remaining-consumer
+counts, releases transient output after its last consumer, and keeps retained
+state live. Consequently a shared scan is charged once per execution and a
+fan-out's memory includes the outputs that really coexist.
+
+Every node declares `ExecutionMultiplicity::Once` or `PerEvaluation`.
+Build/maintenance nodes can therefore be charged once while query-side nodes
+are multiplied by the horizon's evaluation count; retention does not silently
+imply either execution frequency.
 
 For a tree-shaped pipeline, peak memory is normally the maximum live pipeline
 state, not the sum of every node's memory. At a fan-out, join, merge, or nested
@@ -186,6 +207,14 @@ Summary merge, subtract, delete, and readout are separate physical operators.
 Their CPU and memory use the concrete summary state size and number of input
 states. A plan using one of these operations is unavailable until the
 corresponding formula and required lifecycle evidence are present.
+
+The summary-candidate bridge currently has formulas for sketch build and
+readout only. It therefore rejects summary join, merge, subtract, and delete
+explicitly. It never walks through one of those nodes and charges only its
+children. Repeated `Rc<SummaryNode>` identities are deduplicated, and multiple
+sketch states are sent through the physical-DAG estimator; the compact
+single-summary adapter rejects them because it has no source-edge identities
+with which to decide whether their reads are shared.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
