@@ -1,4 +1,5 @@
 use crate::types::AccuracyTarget;
+use serde::{Deserialize, Serialize};
 
 // ── Query surface ─────────────────────────────────────────────────────────────
 
@@ -396,7 +397,8 @@ impl From<&RepeatingEntry> for QueryWorkloadEntry {
 
 /// Whether the data queried by this workload is static, still arriving, or a
 /// mixture of both. This is independent of whether queries repeat.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DataArrival {
     AtRest,
     ContinuouslyIngesting,
