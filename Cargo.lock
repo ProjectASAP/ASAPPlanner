@@ -307,6 +307,7 @@ name = "asap-aware-mapping"
 version = "0.1.0"
 dependencies = [
  "asap-types",
+ "serde",
  "serde_json",
  "thiserror",
 ]
@@ -355,6 +356,7 @@ dependencies = [
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-types",
+ "serde_json",
  "tokio",
 ]
 

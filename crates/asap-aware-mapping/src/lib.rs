@@ -190,6 +190,7 @@ pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
+pub mod summary_maintenance_dag_export;
 pub mod summary_maintenance_lifecycle;
 pub mod topk_reuse;
 
@@ -218,6 +219,10 @@ pub use replacement::{
     MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::AvgToSumOverCountStrategy;
+pub use summary_maintenance_dag_export::{
+    export_summary_maintenance_plan, SummaryMaintenanceDagExport,
+    SummaryMaintenanceDeploymentExport, SummaryMaintenanceLifecycleAlternativeExport,
+};
 pub use summary_maintenance_lifecycle::{
     global_selection_with_summary_maintenance_lifecycles,
     materialize_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
