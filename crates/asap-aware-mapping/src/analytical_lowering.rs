@@ -111,7 +111,7 @@ where
             match query {
                 QueryExpr::Scan { predicates, .. } => {
                     let inputs = self.stats(query)?;
-                    require_positive_operator_statistics(inputs)?;
+                    require_consistent_edge_statistics(inputs)?;
                     if predicates.is_empty() {
                         if inputs.input_rows != inputs.output_rows
                             || inputs.input_bytes != inputs.output_bytes
@@ -225,7 +225,7 @@ where
                     let left_id = self.lower(left)?;
                     let right_id = self.lower(right)?;
                     let inputs = self.stats(query)?;
-                    require_positive_operator_statistics(inputs)?;
+                    require_consistent_edge_statistics(inputs)?;
                     let left_inputs = self.node(&left_id)?.inputs;
                     let right_inputs = self.node(&right_id)?.inputs;
                     if inputs.input_rows != left_inputs.output_rows
@@ -260,7 +260,7 @@ where
                 ));
             }
             let inputs = self.stats(query)?;
-            require_positive_operator_statistics(inputs)?;
+            require_consistent_edge_statistics(inputs)?;
             let (rows, bytes) =
                 child_ids
                     .iter()
@@ -300,27 +300,30 @@ where
     })
 }
 
-fn require_positive_operator_statistics(inputs: OperatorInputs) -> Result<(), AnalyticalCostError> {
-    if inputs.input_rows == 0 {
-        return Err(AnalyticalCostError::MissingOrZero("operator input_rows"));
-    }
-    if inputs.input_bytes == 0 {
-        return Err(AnalyticalCostError::MissingOrZero("operator input_bytes"));
-    }
-    if inputs.output_rows == 0 {
-        return Err(AnalyticalCostError::MissingOrZero("operator output_rows"));
-    }
-    if inputs.output_bytes == 0 {
-        return Err(AnalyticalCostError::MissingOrZero("operator output_bytes"));
-    }
+fn require_consistent_edge_statistics(inputs: OperatorInputs) -> Result<(), AnalyticalCostError> {
+    require_cardinality_width("operator input", inputs.input_rows, inputs.input_bytes)?;
+    require_cardinality_width("operator output", inputs.output_rows, inputs.output_bytes)?;
     Ok(())
+}
+
+fn require_cardinality_width(
+    edge: &'static str,
+    rows: u64,
+    bytes: u64,
+) -> Result<(), AnalyticalCostError> {
+    match (rows, bytes) {
+        (0, 0) => Ok(()),
+        (0, _) => Err(AnalyticalCostError::InconsistentOperatorStatistics(edge)),
+        (_, 0) => Err(AnalyticalCostError::MissingOrZero(edge)),
+        _ => Ok(()),
+    }
 }
 
 fn require_unary_edge(
     inputs: OperatorInputs,
     child: OperatorInputs,
 ) -> Result<(), AnalyticalCostError> {
-    require_positive_operator_statistics(inputs)?;
+    require_consistent_edge_statistics(inputs)?;
     if inputs.input_rows != child.output_rows || inputs.input_bytes != child.output_bytes {
         return Err(AnalyticalCostError::InconsistentOperatorStatistics(
             "unary input does not match child output",
@@ -349,8 +352,8 @@ fn require_operator_statistics(
             let groups = inputs
                 .group_count
                 .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
-            if groups == 0 {
-                return Err(AnalyticalCostError::MissingOrZero("group_count"));
+            if groups == 0 && (inputs.input_rows != 0 || inputs.output_rows != 0) {
+                return invalid("zero groups require an empty grouped input and output");
             }
             if inputs.output_rows > groups {
                 return invalid("aggregate output exceeds group cardinality");
@@ -360,9 +363,6 @@ fn require_operator_statistics(
             let groups = inputs
                 .group_count
                 .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
-            if groups == 0 {
-                return Err(AnalyticalCostError::MissingOrZero("group_count"));
-            }
             if inputs.output_rows != groups || inputs.output_rows > inputs.input_rows {
                 return invalid("deduplicate output does not equal distinct cardinality");
             }
@@ -759,5 +759,40 @@ mod tests {
                 "unary input does not match child output"
             ))
         );
+    }
+
+    #[test]
+    fn query_lowering_accepts_a_consistently_empty_edge() {
+        use asap_types::pre_asap::{Column, DataType, ScalarValue, Schema};
+        use asap_types::pre_asap::{Predicate, QueryExpr, Source};
+        use std::rc::Rc;
+
+        let scan = Rc::new(QueryExpr::Scan {
+            source: Source::Table {
+                table_ref: "events".into(),
+            },
+            predicates: vec![],
+            schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
+        });
+        let filter = Rc::new(QueryExpr::Filter {
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(false)))),
+            child: scan,
+        });
+        let root = Rc::new(QueryExpr::Limit {
+            n: 10,
+            offset: 0,
+            child: filter,
+        });
+
+        let dag = lower_query_physical_dag(&root, |node| match node {
+            QueryExpr::Scan { .. } => Some(operator_inputs(100, 800, 100, 800)),
+            QueryExpr::Filter { .. } => Some(operator_inputs(100, 800, 0, 0)),
+            QueryExpr::Limit { .. } => Some(operator_inputs(0, 0, 0, 0)),
+            _ => None,
+        })
+        .unwrap();
+        let estimate = estimate_physical_dag(&dag.nodes, &dag.root, 1).unwrap();
+        assert_eq!(estimate.cpu_ops, 200.0);
+        assert_eq!(estimate.scan_bytes, 800);
     }
 }

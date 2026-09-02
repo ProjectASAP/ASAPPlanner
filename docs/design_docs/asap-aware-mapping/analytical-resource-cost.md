@@ -242,6 +242,8 @@ makes the entire query unavailable.
 
 The lowering validates every physical edge before costing:
 
+- `(rows = 0, bytes = 0)` is a valid empty edge, while positive rows still
+  require byte-width evidence and zero rows cannot carry non-zero bytes;
 - a unary operator's `input_rows` and `input_bytes` equal its child's output;
 - a hash join's left and right inputs equal the corresponding child outputs;
 - Concat and `UNION ALL` input/output totals equal the checked sum of all
