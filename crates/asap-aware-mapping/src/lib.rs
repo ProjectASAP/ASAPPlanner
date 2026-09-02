@@ -184,6 +184,7 @@
 pub mod accuracy;
 pub mod accuracy_reconciliation;
 pub mod analytical_cost;
+pub mod analytical_statistics;
 pub mod cost_model;
 pub mod explanation;
 pub mod grouping;
