@@ -73,6 +73,16 @@ pub enum PhysicalOperator {
     Window,
     Limit,
     PassThrough,
+    PromqlRange,
+    PromqlSubquery,
+    PromqlVectorBinary,
+    PromqlRelabel,
+    PromqlInfoEnrich,
+    PromqlSeriesSample,
+    PromqlBridge,
+    PromqlScalarLeaf,
+    PromqlPerSeries,
+    PromqlPresence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,8 +340,11 @@ fn validate_operator_statistics(
 ) -> Result<(), AnalyticalCostError> {
     let expected_inputs = match node.operator {
         PhysicalOperator::Scan => 1,
-        PhysicalOperator::HashJoin => 2,
+        PhysicalOperator::HashJoin
+        | PhysicalOperator::PromqlVectorBinary
+        | PhysicalOperator::PromqlInfoEnrich => 2,
         PhysicalOperator::Concat => node.children.len(),
+        PhysicalOperator::PromqlScalarLeaf => 0,
         _ => 1,
     };
     if node_statistics.inputs.len() != expected_inputs {
@@ -340,10 +353,9 @@ fn validate_operator_statistics(
             reason: "wrong input-edge count",
         });
     }
-    let expected_children = if matches!(node.operator, PhysicalOperator::Scan) {
-        0
-    } else {
-        expected_inputs
+    let expected_children = match node.operator {
+        PhysicalOperator::Scan | PhysicalOperator::PromqlScalarLeaf => 0,
+        _ => expected_inputs,
     };
     if node.children.len() != expected_children {
         return Err(AnalyticalCostError::InvalidPhysicalDag(
@@ -412,8 +424,21 @@ pub fn estimate_operator(
             .copied()
             .ok_or(AnalyticalCostError::MissingOrZero("operator input edge"))
     };
-    let left = input(0)?;
     let output = statistics.output;
+    if matches!(operator, PhysicalOperator::PromqlScalarLeaf) {
+        let promql = require_promql_statistics(&statistics, 0)?;
+        if promql.output_series > output.rows && output.rows > 0 {
+            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "output series exceed output rows",
+            ));
+        }
+        return Ok(ResourceEstimate {
+            cpu_ops: output.rows as f64,
+            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+            scan_bytes: 0,
+        });
+    }
+    let left = input(0)?;
     let estimate = match operator {
         PhysicalOperator::Scan => ResourceEstimate {
             cpu_ops: left.rows as f64,
@@ -509,27 +534,150 @@ pub fn estimate_operator(
             peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
             scan_bytes: 0,
         },
-        PhysicalOperator::Limit => {
-            let consumed = statistics
-                .limit_rows_consumed
-                .ok_or(AnalyticalCostError::MissingOrZero("limit_rows_consumed"))?;
-            if consumed > left.rows || consumed < output.rows {
-                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                    "Limit rows consumed must cover its output without exceeding its input",
-                ));
+        PhysicalOperator::Limit => ResourceEstimate {
+            cpu_ops: output.rows as f64,
+            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+            scan_bytes: 0,
+        },
+        PhysicalOperator::PromqlRange => {
+            let promql = require_promql_statistics(&statistics, 1)?;
+            let samples = promql
+                .window_samples_per_series
+                .filter(|value| *value > 0)
+                .ok_or(AnalyticalCostError::MissingOrZero("window_samples_per_series"))?;
+            ResourceEstimate {
+                cpu_ops: left.rows as f64,
+                peak_memory_bytes: checked_bytes(&[
+                    promql.input_series[0],
+                    samples,
+                    per_row_width(left.rows, left.bytes)?,
+                ])?,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::PromqlSubquery => {
+            let promql = require_promql_statistics(&statistics, 1)?;
+            if !matches!(promql.subquery_steps, Some(value) if value > 0) {
+                return Err(AnalyticalCostError::MissingOrZero("subquery_steps"));
             }
             ResourceEstimate {
-                cpu_ops: consumed as f64,
+                cpu_ops: left.rows as f64 + output.rows as f64,
+                peak_memory_bytes: left.bytes,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::PromqlVectorBinary | PhysicalOperator::PromqlInfoEnrich => {
+            let promql = require_promql_statistics(&statistics, 2)?;
+            let right = input(1)?;
+            let scalar_vector = matches!(operator, PhysicalOperator::PromqlVectorBinary)
+                && promql.input_series.contains(&0);
+            let matching_bytes = if scalar_vector {
+                per_row_width(output.rows, output.bytes)?
+            } else {
+                let build_side = statistics
+                    .hash_join_build_side
+                    .ok_or(AnalyticalCostError::MissingOrZero("hash_join_build_side"))?;
+                let key_bytes = statistics
+                    .key_bytes
+                    .ok_or(AnalyticalCostError::MissingOrZero("key_bytes"))?;
+                let build_series = match build_side {
+                    HashJoinBuildSide::Left => promql.input_series[0],
+                    HashJoinBuildSide::Right => promql.input_series[1],
+                };
+                checked_bytes(&[
+                    build_series,
+                    key_bytes.checked_add(16).ok_or(AnalyticalCostError::Overflow)?,
+                ])?
+            };
+            ResourceEstimate {
+                cpu_ops: left.rows as f64 + right.rows as f64 + output.rows as f64,
+                peak_memory_bytes: matching_bytes,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::PromqlRelabel => {
+            let promql = require_promql_statistics(&statistics, 1)?;
+            let operations = promql.scalar_ops_per_row.filter(|value| *value > 0).ok_or(
+                AnalyticalCostError::MissingOrZero("scalar_ops_per_row"),
+            )?;
+            ResourceEstimate {
+                cpu_ops: left.rows as f64 * operations as f64,
                 peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
                 scan_bytes: 0,
             }
         }
+        PhysicalOperator::PromqlSeriesSample => {
+            let promql = require_promql_statistics(&statistics, 1)?;
+            let key_bytes = statistics
+                .key_bytes
+                .ok_or(AnalyticalCostError::MissingOrZero("key_bytes"))?;
+            ResourceEstimate {
+                cpu_ops: left.rows as f64 + promql.input_series[0] as f64,
+                peak_memory_bytes: checked_bytes(&[
+                    promql.output_series,
+                    key_bytes.checked_add(16).ok_or(AnalyticalCostError::Overflow)?,
+                ])?,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::PromqlBridge => {
+            require_promql_statistics(&statistics, 1)?;
+            ResourceEstimate {
+                cpu_ops: left.rows as f64 + output.rows as f64,
+                peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::PromqlPerSeries => {
+            let promql = require_promql_statistics(&statistics, 1)?;
+            let operations = promql.scalar_ops_per_row.filter(|value| *value > 0).ok_or(
+                AnalyticalCostError::MissingOrZero("scalar_ops_per_row"),
+            )?;
+            let accumulator = statistics.aggregate_value_bytes.ok_or(
+                AnalyticalCostError::MissingOrZero("aggregate_value_bytes"),
+            )?;
+            ResourceEstimate {
+                cpu_ops: left.rows as f64 * operations as f64,
+                peak_memory_bytes: checked_bytes(&[promql.input_series[0], accumulator])?,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::PromqlPresence => {
+            let promql = require_promql_statistics(&statistics, 1)?;
+            let operations = promql.scalar_ops_per_row.filter(|value| *value > 0).ok_or(
+                AnalyticalCostError::MissingOrZero("scalar_ops_per_row"),
+            )?;
+            ResourceEstimate {
+                cpu_ops: left.rows as f64 * operations as f64 + output.rows as f64,
+                peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+                scan_bytes: 0,
+            }
+        }
+        PhysicalOperator::PromqlScalarLeaf => unreachable!(),
     };
     if estimate.cpu_ops.is_finite() {
         Ok(estimate)
     } else {
         Err(AnalyticalCostError::Overflow)
     }
+}
+
+fn require_promql_statistics(
+    statistics: &OperatorStatistics,
+    inputs: usize,
+) -> Result<&crate::analytical_statistics::PromqlOperatorStatistics, AnalyticalCostError> {
+    let promql = statistics.promql.as_ref().ok_or(
+        AnalyticalCostError::MissingOrStale("promql_operator_statistics"),
+    )?;
+    if promql.evaluation_steps == 0 {
+        return Err(AnalyticalCostError::MissingOrZero("evaluation_steps"));
+    }
+    if promql.input_series.len() != inputs {
+        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "PromQL input-series arity does not match physical inputs",
+        ));
+    }
+    Ok(promql)
 }
 
 impl ResourceEstimate {

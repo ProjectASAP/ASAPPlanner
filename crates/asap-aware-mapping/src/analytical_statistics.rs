@@ -221,6 +221,21 @@ pub struct OperatorStatistics {
     #[serde(default)]
     pub limit_rows_consumed: Option<u64>,
     pub hash_join_build_side: Option<HashJoinBuildSide>,
+    /// Series-oriented evidence used only by PromQL physical operators.
+    /// Logical row/byte edges remain authoritative in `inputs` and `output`.
+    #[serde(default)]
+    pub promql: Option<PromqlOperatorStatistics>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromqlOperatorStatistics {
+    /// Series cardinality for each logical input edge, in child order.
+    pub input_series: Vec<u64>,
+    pub output_series: u64,
+    pub evaluation_steps: u64,
+    pub window_samples_per_series: Option<u64>,
+    pub subquery_steps: Option<u64>,
+    pub scalar_ops_per_row: Option<u64>,
 }
 
 /// Resolves physical statistics and owns their catalog/observation freshness.

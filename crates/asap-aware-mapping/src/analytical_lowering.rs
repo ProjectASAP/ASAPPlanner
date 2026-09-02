@@ -296,10 +296,12 @@ pub fn lower_query_physical_dag(
                     child,
                     ..
                 } => {
-                    if having.is_some() || !supports_hash_aggregate(reduction, measures) {
+                    if having.is_some() {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
-                    self.lower_unary(query, occurrence, PhysicalOperator::HashAggregate, child)
+                    let operator = aggregate_operator(reduction, measures)
+                        .ok_or(AnalyticalCostError::UnsupportedQueryOperator)?;
+                    self.lower_unary(query, occurrence, operator, child)
                 }
                 QueryExpr::Dedup { child, .. } => {
                     self.lower_unary(query, occurrence, PhysicalOperator::Deduplicate, child)
@@ -394,8 +396,117 @@ pub fn lower_query_physical_dag(
                     }
                     self.lower_unary(query, occurrence, PhysicalOperator::Window, child)
                 }
+                QueryExpr::TimeRange { range, child } => {
+                    if range.is_zero() {
+                        return Err(AnalyticalCostError::MissingOrZero("range"));
+                    }
+                    self.lower_unary(query, id, PhysicalOperator::PromqlRange, child)
+                }
+                QueryExpr::PromqlSubquery { range, resolution, child } => {
+                    let child_id = self.lower(child)?;
+                    let statistics = self.stats(&id)?;
+                    let child_statistics = self.node_statistics(&child_id)?;
+                    require_unary_edge(&id, &statistics, &child_id, child_statistics)?;
+                    require_operator_statistics(PhysicalOperator::PromqlSubquery, &statistics)?;
+                    let supplied = require_promql_statistics(&statistics, 1)?
+                        .subquery_steps
+                        .ok_or(AnalyticalCostError::MissingOrZero("subquery_steps"))?;
+                    if let Some(expected) = subquery_steps(*range, *resolution)? {
+                        if supplied != expected {
+                            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                                "subquery_steps disagree with range and resolution",
+                            ));
+                        }
+                    }
+                    Ok(self.push(id, PhysicalOperator::PromqlSubquery, &statistics, vec![child_id], None))
+                }
                 QueryExpr::TimeShift { child, .. } => {
                     self.lower_unary(query, occurrence, PhysicalOperator::PassThrough, child)
+                }
+                QueryExpr::PromqlRelabel { child, .. } => {
+                    self.lower_unary(query, id, PhysicalOperator::PromqlRelabel, child)
+                }
+                QueryExpr::PromqlSeriesSample { by, kind, child, .. } => {
+                    let child_id = self.lower(child)?;
+                    let statistics = self.stats(&id)?;
+                    let child_statistics = self.node_statistics(&child_id)?;
+                    require_unary_edge(&id, &statistics, &child_id, child_statistics)?;
+                    validate_series_sample(by, *kind, &statistics)?;
+                    require_operator_statistics(PhysicalOperator::PromqlSeriesSample, &statistics)?;
+                    Ok(self.push(id, PhysicalOperator::PromqlSeriesSample, &statistics, vec![child_id], None))
+                }
+                QueryExpr::PromqlInfoEnrich { selector, child } => {
+                    let left_id = self.lower(child)?;
+                    let info_id = format!("{id}-info-scan");
+                    let coverage = bind_info_coverage(&info_id, selector, self.scope)?;
+                    let info_statistics = self.stats(&info_id)?;
+                    require_statistics_shape(&info_id, &info_statistics, 1)?;
+                    self.push(info_id.clone(), PhysicalOperator::Scan, &info_statistics, vec![], Some(coverage));
+                    let statistics = self.stats(&id)?;
+                    require_statistics_shape(&id, &statistics, 2)?;
+                    if statistics.inputs[0] != self.node_statistics(&left_id)?.output
+                        || statistics.inputs[1] != info_statistics.output
+                    {
+                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                            "info enrichment inputs do not match child outputs",
+                        ));
+                    }
+                    require_operator_statistics(PhysicalOperator::PromqlInfoEnrich, &statistics)?;
+                    Ok(self.push(id, PhysicalOperator::PromqlInfoEnrich, &statistics, vec![left_id, info_id], None))
+                }
+                QueryExpr::BinaryOp { lhs, rhs, vector_match, .. } => {
+                    let left_scalar = is_promql_scalar(lhs);
+                    let right_scalar = is_promql_scalar(rhs);
+                    if left_scalar && right_scalar {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    }
+                    let left_id = self.lower(lhs)?;
+                    let right_id = self.lower(rhs)?;
+                    let statistics = self.stats(&id)?;
+                    require_statistics_shape(&id, &statistics, 2)?;
+                    if statistics.inputs[0] != self.node_statistics(&left_id)?.output
+                        || statistics.inputs[1] != self.node_statistics(&right_id)?.output
+                    {
+                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                            "PromQL binary inputs do not match child outputs",
+                        ));
+                    }
+                    if left_scalar || right_scalar {
+                        if vector_match.is_some()
+                            || statistics.hash_join_build_side.is_some()
+                            || statistics.key_bytes.is_some()
+                        {
+                            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                                "scalar/vector binary operation cannot have label-match state",
+                            ));
+                        }
+                    } else if statistics.hash_join_build_side.is_none() || statistics.key_bytes.is_none() {
+                        return Err(AnalyticalCostError::MissingOrStale(
+                            "vector_binary_label_match_statistics",
+                        ));
+                    }
+                    require_promql_binary_edges(&statistics,
+                        self.node_statistics(&left_id)?, self.node_statistics(&right_id)?)?;
+                    require_operator_statistics(PhysicalOperator::PromqlVectorBinary, &statistics)?;
+                    Ok(self.push(id, PhysicalOperator::PromqlVectorBinary, &statistics, vec![left_id, right_id], None))
+                }
+                QueryExpr::PromqlVectorFromScalar(child)
+                | QueryExpr::PromqlScalarFromVector(child) => {
+                    self.lower_unary(query, id, PhysicalOperator::PromqlBridge, child)
+                }
+                QueryExpr::PromqlScalarBridge(inner)
+                    if matches!(inner.as_ref(), QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(_))) =>
+                {
+                    let statistics = self.stats(&id)?;
+                    require_statistics_shape(&id, &statistics, 0)?;
+                    require_operator_statistics(PhysicalOperator::PromqlScalarLeaf, &statistics)?;
+                    Ok(self.push(id, PhysicalOperator::PromqlScalarLeaf, &statistics, vec![], None))
+                }
+                QueryExpr::EvalTimestamp => {
+                    let statistics = self.stats(&id)?;
+                    require_statistics_shape(&id, &statistics, 0)?;
+                    require_operator_statistics(PhysicalOperator::PromqlScalarLeaf, &statistics)?;
+                    Ok(self.push(id, PhysicalOperator::PromqlScalarLeaf, &statistics, vec![], None))
                 }
                 QueryExpr::Concat { children } => {
                     let child_ids = children
