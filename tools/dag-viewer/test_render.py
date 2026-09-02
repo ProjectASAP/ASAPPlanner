@@ -57,15 +57,40 @@ def named_graph(name: str, source: str = "SELECT 1") -> dict:
 class LoadWorkloadTests(unittest.TestCase):
     def test_loads_summary_maintenance_export_as_a_lifecycle_plan(self):
         graph = named_graph("unused")["graph"]
+        summary = {
+            "selected_raw_recompute": True,
+            "summary_total_cost": None,
+            "raw_recompute_total_cost": 7.5,
+            "horizon_seconds": 60.0,
+            "evaluation_rate_per_second": 2.0,
+            "update_rate_per_second": 3.0,
+            "expected_reads": 120.0,
+        }
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "lifecycle.json"
-            path.write_text(json.dumps({"graph": graph, "deployments": []}))
+            path.write_text(json.dumps({"graph": graph, "deployments": [], **summary}))
             workload = load_workload([path])
 
         query = workload["queries"][0]
         self.assertEqual(query["name"], "lifecycle")
         self.assertTrue(query["lifecycle_plan"])
         self.assertEqual(query["post_graph"], graph)
+        self.assertEqual(
+            query["lifecycle_summary"],
+            {**summary, "deployment_count": 0},
+        )
+
+    def test_preserves_summary_plan_deployment_count(self):
+        graph = named_graph("unused")["graph"]
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "lifecycle.json"
+            path.write_text(json.dumps({"graph": graph, "deployments": [{}, {}]}))
+            workload = load_workload([path])
+
+        self.assertEqual(
+            workload["queries"][0]["lifecycle_summary"]["deployment_count"],
+            2,
+        )
 
     def test_merges_queries_across_files_in_order(self):
         with tempfile.TemporaryDirectory() as d:

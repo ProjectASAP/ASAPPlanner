@@ -1829,6 +1829,13 @@ mod tests {
         assert_eq!(plan.summary_total_cost, None);
         assert!(plan.deployments.is_empty());
         assert!(matches!(plan.root.expr, SummaryExpr::KeepPreAsap(_)));
+
+        let exported =
+            crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan);
+        assert!(exported.selected_raw_recompute);
+        assert_eq!(exported.raw_recompute_total_cost, Some(1.0));
+        assert_eq!(exported.summary_total_cost, None);
+        assert!(exported.deployments.is_empty());
     }
 
     #[test]

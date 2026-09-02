@@ -267,6 +267,16 @@ def load_workload(paths: list[Path]) -> dict:
                 "graph": data["graph"],
                 "post_graph": data["graph"],
                 "lifecycle_plan": True,
+                "lifecycle_summary": {
+                    "selected_raw_recompute": data.get("selected_raw_recompute", False),
+                    "summary_total_cost": data.get("summary_total_cost"),
+                    "raw_recompute_total_cost": data.get("raw_recompute_total_cost"),
+                    "horizon_seconds": data.get("horizon_seconds"),
+                    "evaluation_rate_per_second": data.get("evaluation_rate_per_second"),
+                    "update_rate_per_second": data.get("update_rate_per_second"),
+                    "expected_reads": data.get("expected_reads"),
+                    "deployment_count": len(data["deployments"]),
+                },
             }]
         for q in incoming:
             name = q["name"]

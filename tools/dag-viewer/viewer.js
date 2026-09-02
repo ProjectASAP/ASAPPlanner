@@ -98,13 +98,14 @@ function loadFiles(fileList) {
           graph: parsed.graph,
           post_graph: parsed.graph,
           lifecycle_plan: true,
+          lifecycle_summary: lifecyclePlanSummary(parsed),
         }] : []);
         const existingNames = new Set(queries.map((q) => q.name));
         incoming.forEach((q) => {
           let name = q.name;
           if (existingNames.has(name)) name = `${q.name} (${file.name})`;
           existingNames.add(name);
-          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, lifecycle_plan: q.lifecycle_plan });
+          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary });
         });
       } catch (err) {
         alert(`Failed to parse ${file.name}: ${err.message}`);
@@ -119,6 +120,19 @@ function loadFiles(fileList) {
     reader.readAsText(file);
   });
   fileInput.value = '';
+}
+
+function lifecyclePlanSummary(plan) {
+  return {
+    selected_raw_recompute: Boolean(plan.selected_raw_recompute),
+    summary_total_cost: plan.summary_total_cost ?? null,
+    raw_recompute_total_cost: plan.raw_recompute_total_cost ?? null,
+    horizon_seconds: plan.horizon_seconds ?? null,
+    evaluation_rate_per_second: plan.evaluation_rate_per_second ?? null,
+    update_rate_per_second: plan.update_rate_per_second ?? null,
+    expected_reads: plan.expected_reads ?? null,
+    deployment_count: Array.isArray(plan.deployments) ? plan.deployments.length : 0,
+  };
 }
 
 function getParticipants() {
@@ -554,6 +568,7 @@ function laneElements(laneId, laneLabel, graph, query, stage) {
         laneId,
         stage,
         queryName: query.name,
+        lifecycleSummary: query.lifecycle_summary,
         translations: translationsForNode(query, node, stage),
       },
     });
@@ -679,6 +694,19 @@ function showPrePostDetail(data) {
     : '';
 
   const decisions = data.translations || [];
+  const planSummary = data.lifecycleSummary;
+  let planSummaryHtml = '';
+  if (planSummary) {
+    const value = (item) => item === null || item === undefined ? 'unknown' : String(item);
+    const selected = planSummary.selected_raw_recompute
+      ? 'Raw recomputation'
+      : 'Summary maintenance';
+    planSummaryHtml = `<div class="translationBlock"><h3>Lifecycle plan decision</h3>
+      <div><strong>Selected:</strong> ${escapeHtml(selected)}</div>
+      <div class="translationMeta">summary cost: ${escapeHtml(value(planSummary.summary_total_cost))} · raw recompute cost: ${escapeHtml(value(planSummary.raw_recompute_total_cost))} · deployments: ${escapeHtml(value(planSummary.deployment_count))}</div>
+      <div class="translationMeta">horizon: ${escapeHtml(value(planSummary.horizon_seconds))} s · expected reads: ${escapeHtml(value(planSummary.expected_reads))} · evaluation rate: ${escapeHtml(value(planSummary.evaluation_rate_per_second))}/s · update rate: ${escapeHtml(value(planSummary.update_rate_per_second))}/s</div>
+    </div>`;
+  }
   const lifecycle = node.detail && node.detail.summary_maintenance;
   let lifecycleHtml = '';
   if (lifecycle) {
@@ -713,6 +741,7 @@ function showPrePostDetail(data) {
     <span class="chip" style="color:${catColors.border}; background:${catColors.bg}">${escapeHtml(chipLabel)}</span>
     <div style="font-weight:650; margin:0.3rem 0 0.4rem">${escapeHtml(node.label)}</div>
     ${rootHtml}
+    ${planSummaryHtml}
     ${translationHtml}
     ${lifecycleHtml}
     <h3 class="detailSubhead">IR node content</h3>
@@ -838,7 +867,7 @@ document.getElementById('resetBtn').addEventListener('click', () => { zoom = 1; 
 
 function loadWorkload(parsed) {
   const incoming = (parsed && parsed.queries) || [];
-  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, lifecycle_plan: q.lifecycle_plan }));
+  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary }));
   if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
   if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
 }
