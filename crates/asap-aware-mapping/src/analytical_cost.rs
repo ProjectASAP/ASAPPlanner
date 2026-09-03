@@ -586,11 +586,21 @@ pub fn estimate_operator(
             peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
             scan_bytes: 0,
         },
-        PhysicalOperator::Limit => ResourceEstimate {
-            cpu_ops: output.rows as f64,
-            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-            scan_bytes: 0,
-        },
+        PhysicalOperator::Limit => {
+            let consumed = statistics
+                .limit_rows_consumed
+                .ok_or(AnalyticalCostError::MissingOrZero("limit_rows_consumed"))?;
+            if consumed > left.rows || consumed < output.rows {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "Limit rows consumed must cover its output without exceeding its input",
+                ));
+            }
+            ResourceEstimate {
+                cpu_ops: consumed as f64,
+                peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+                scan_bytes: 0,
+            }
+        }
         PhysicalOperator::PromqlRange => {
             let promql = require_promql_statistics(&statistics, 1)?;
             let samples = promql
