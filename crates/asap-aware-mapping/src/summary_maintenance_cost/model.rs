@@ -11,6 +11,8 @@ pub struct SummaryMaintenanceCostModel {
     candidate_comparisons: HashMap<CandidateComparisonKey, BoundCandidateIdentity>,
     physical_plan_alternatives:
         HashMap<CandidateComparisonKey, Vec<StreamingPhysicalPlanAlternative>>,
+    window_framework_candidates:
+        HashMap<CandidateComparisonKey, Vec<StreamingWindowFrameworkCandidate>>,
 }
 
 type CandidateComparisonKey = (*const QueryExpr, *const SummaryNode);
@@ -413,6 +415,7 @@ impl SummaryMaintenanceCostModel {
             target_comparisons: HashMap::new(),
             candidate_comparisons: HashMap::new(),
             physical_plan_alternatives: HashMap::new(),
+            window_framework_candidates: HashMap::new(),
         }
     }
 
@@ -490,6 +493,56 @@ impl SummaryMaintenanceCostModel {
             ));
         }
         alternatives.push(alternative);
+        Ok(())
+    }
+
+    /// Add one complete abstract window assignment to Planner candidate search.
+    ///
+    /// The provider may bind multiple executor-feasible implementations for
+    /// the same framework assignment; their stable identities and complete
+    /// evidence keep the implementations distinct during ranking.
+    pub fn bind_window_framework_candidate(
+        &mut self,
+        target: &Rc<QueryExpr>,
+        root: &Rc<SummaryNode>,
+        candidate: StreamingWindowFrameworkCandidate,
+    ) -> Result<(), AnalyticalCostError> {
+        let key = (Rc::as_ptr(target), Rc::as_ptr(root));
+        if !self.candidate_comparisons.contains_key(&key) {
+            return Err(AnalyticalCostError::MissingOrStale(
+                "candidate comparison binding",
+            ));
+        }
+        if candidate.physical_plan_id.trim().is_empty() {
+            return Err(AnalyticalCostError::MissingOrZero("physical_plan_id"));
+        }
+        if candidate.assignments.is_empty() {
+            return Err(AnalyticalCostError::MissingOrZero(
+                "window framework assignments",
+            ));
+        }
+        let mut assigned = HashSet::new();
+        if candidate.assignments.iter().any(|assignment| {
+            !assigned.insert(Rc::as_ptr(&assignment.summary))
+                || matches!(
+                    &assignment.framework,
+                    Some(SummaryWindowFramework::Extension(name)) if name.trim().is_empty()
+                )
+        }) {
+            return Err(AnalyticalCostError::MissingOrZero(
+                "unique window framework assignments",
+            ));
+        }
+        let candidates = self.window_framework_candidates.entry(key).or_default();
+        if candidates
+            .iter()
+            .any(|existing| existing.physical_plan_id == candidate.physical_plan_id)
+        {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "window framework candidate",
+            ));
+        }
+        candidates.push(candidate);
         Ok(())
     }
 
@@ -661,23 +714,8 @@ impl CostModel for SummaryMaintenanceCostModel {
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
     ) -> Option<Cost> {
-        let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
-        match self.physical_plan_alternatives.get(&key) {
-            Some(alternatives) => alternatives
-                .iter()
-                .filter_map(|alternative| {
-                    self.complete_cost_with_evidence(
-                        root,
-                        deployments,
-                        comparison,
-                        &alternative.node_evidence,
-                    )
-                })
-                .min_by(|left, right| left.0.total_cmp(&right.0)),
-            None => {
-                self.complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
-            }
-        }
+        self.complete_summary_candidate_estimate(root, target, deployments, horizon, expected_reads)
+            .map(|estimate| estimate.cost)
     }
 
     fn complete_summary_candidate_estimate(
@@ -689,29 +727,64 @@ impl CostModel for SummaryMaintenanceCostModel {
         expected_reads: Option<f64>,
     ) -> Option<CompleteSummaryCandidateEstimate> {
         let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
-        let Some(alternatives) = self.physical_plan_alternatives.get(&key) else {
-            return self
-                .complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
-                .map(|cost| CompleteSummaryCandidateEstimate {
-                    cost,
-                    physical_plan_id: None,
-                });
-        };
-        alternatives
-            .iter()
-            .filter_map(|alternative| {
-                self.complete_cost_with_evidence(
-                    root,
-                    deployments,
-                    comparison,
-                    &alternative.node_evidence,
-                )
-                .map(|cost| CompleteSummaryCandidateEstimate {
-                    cost,
-                    physical_plan_id: Some(alternative.physical_plan_id.clone()),
+        if let Some(candidates) = self.window_framework_candidates.get(&key) {
+            return candidates
+                .iter()
+                .filter_map(|candidate| {
+                    if candidate.assignments.len() != deployments.len() {
+                        return None;
+                    }
+                    let window_frameworks = deployments
+                        .iter()
+                        .map(|deployment| {
+                            candidate
+                                .assignments
+                                .iter()
+                                .find(|assignment| {
+                                    std::ptr::eq(assignment.summary.as_ref(), deployment.summary)
+                                })
+                                .map(|assignment| assignment.framework.clone())
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    self.complete_cost_with_evidence(
+                        root,
+                        deployments,
+                        comparison,
+                        &candidate.node_evidence,
+                    )
+                    .map(|cost| CompleteSummaryCandidateEstimate {
+                        cost,
+                        physical_plan_id: Some(candidate.physical_plan_id.clone()),
+                        window_frameworks,
+                    })
                 })
+                .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0));
+        }
+        if let Some(alternatives) = self.physical_plan_alternatives.get(&key) {
+            return alternatives
+                .iter()
+                .filter_map(|alternative| {
+                    self.complete_cost_with_evidence(
+                        root,
+                        deployments,
+                        comparison,
+                        &alternative.node_evidence,
+                    )
+                    .map(|cost| CompleteSummaryCandidateEstimate {
+                        cost,
+                        physical_plan_id: Some(alternative.physical_plan_id.clone()),
+                        window_frameworks: vec![None; deployments.len()],
+                    })
+                })
+                .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0));
+        }
+        self
+            .complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
+            .map(|cost| CompleteSummaryCandidateEstimate {
+                cost,
+                physical_plan_id: None,
+                window_frameworks: vec![None; deployments.len()],
             })
-            .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0))
     }
 
     fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
@@ -3068,6 +3141,139 @@ mod tests {
             larger_workspace.summary_total_cost.unwrap().0 - shared.summary_total_cost.unwrap().0,
             640.0
         );
+    }
+
+    #[test]
+    fn planner_selects_an_abstract_window_framework_from_downstream_evidence() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            unreachable!();
+        };
+        let windowed_summary = Rc::clone(summary_input);
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+
+        let mut tumbling = model.node_evidence.clone();
+        for aggregate in tumbling.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 1;
+            aggregate.inputs.retained_window_count = 20;
+        }
+        let mut sliding = model.node_evidence.clone();
+        for aggregate in sliding.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 10;
+            aggregate.inputs.retained_window_count = 10;
+        }
+        let mut exponential_histogram = model.node_evidence.clone();
+        for aggregate in exponential_histogram.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 2;
+            aggregate.inputs.retained_window_count = 2;
+        }
+        for candidate in [
+            StreamingWindowFrameworkCandidate {
+                physical_plan_id: "tumbling-v1".into(),
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::Tumbling),
+                }],
+                node_evidence: tumbling,
+            },
+            StreamingWindowFrameworkCandidate {
+                physical_plan_id: "sliding-v1".into(),
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::Sliding),
+                }],
+                node_evidence: sliding,
+            },
+            StreamingWindowFrameworkCandidate {
+                physical_plan_id: "eh-v1".into(),
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::ExponentialHistogram),
+                }],
+                node_evidence: exponential_histogram,
+            },
+        ] {
+            model
+                .bind_window_framework_candidate(&target, &root, candidate)
+                .unwrap();
+        }
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: false,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: true,
+            },
+            &model,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.deployments[0].selected_window_framework,
+            Some(SummaryWindowFramework::ExponentialHistogram)
+        );
+        assert_eq!(
+            crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan)
+                .deployments[0]
+                .selected_window_framework,
+            Some(SummaryWindowFramework::ExponentialHistogram)
+        );
+    }
+
+    #[test]
+    fn window_framework_candidates_require_unique_nonempty_planner_primitives() {
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            unreachable!();
+        };
+        let windowed_summary = Rc::clone(summary_input);
+        let mut model = streaming_model();
+        bind_comparison(&mut model, &target, &root);
+
+        let empty = model.bind_window_framework_candidate(
+            &target,
+            &root,
+            StreamingWindowFrameworkCandidate {
+                physical_plan_id: "invalid-extension".into(),
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::Extension("  ".into())),
+                }],
+                node_evidence: model.node_evidence.clone(),
+            },
+        );
+        assert!(matches!(empty, Err(AnalyticalCostError::MissingOrZero(_))));
+
+        let candidate = StreamingWindowFrameworkCandidate {
+            physical_plan_id: "tumbling-v1".into(),
+            assignments: vec![StreamingWindowFrameworkAssignment {
+                summary: windowed_summary,
+                framework: Some(SummaryWindowFramework::Tumbling),
+            }],
+            node_evidence: model.node_evidence.clone(),
+        };
+        model
+            .bind_window_framework_candidate(&target, &root, candidate.clone())
+            .unwrap();
+        assert!(matches!(
+            model.bind_window_framework_candidate(&target, &root, candidate),
+            Err(AnalyticalCostError::ComparisonScopeMismatch(_))
+        ));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Physical summary-maintenance lifecycle vocabulary.
+//! Planner-level summary-maintenance lifecycle vocabulary.
 //!
 //! A **summary-maintenance lifecycle** describes when one materialized summary
 //! state is created, retained or shared, updated, and retired. It does not
@@ -31,7 +31,7 @@ pub enum OutputRepresentation {
     FinalizedValue,
 }
 
-/// Physical policy for when one materialized summary state is created,
+/// Abstract policy for when one materialized summary state is created,
 /// retained or shared, updated as data arrives, and retired.
 ///
 /// This is not the lifecycle of the source data or query. Query recurrence

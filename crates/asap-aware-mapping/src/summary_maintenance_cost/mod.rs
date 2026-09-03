@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryNode,
+    SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
 };
 use asap_types::pre_asap::{
     agg_intent::AggIntent, CompareOpKind, InfoMatcher, Predicate, QueryExpr, Source,
@@ -41,6 +41,8 @@ pub const SUMMARY_MAINTENANCE_COST_MODEL_VERSION: &str = "summary-maintenance-re
 
 mod evidence;
 mod model;
+mod window;
 
 pub use evidence::*;
 pub use model::*;
+pub use window::*;

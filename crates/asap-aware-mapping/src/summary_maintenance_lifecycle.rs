@@ -1,6 +1,6 @@
-//! Workload-aware physical summary-maintenance lifecycle planning.
+//! Workload-aware summary-maintenance lifecycle planning.
 //!
-//! A **summary-maintenance lifecycle** is the physical policy for when one
+//! A **summary-maintenance lifecycle** is the planner policy for when one
 //! materialized summary state is created, retained or shared, updated as data
 //! arrives, and retired. It is deliberately narrower than the end-to-end data
 //! lifecycle and independent of query recurrence. Recurrence says when and how
@@ -22,6 +22,7 @@ use std::rc::Rc;
 use asap_types::post_asap::{
     EvaluationSchedule, OutputRepresentation, SummaryExpr, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
+    SummaryWindowFramework,
 };
 use asap_types::pre_asap::QueryExpr;
 use asap_types::workload::{
@@ -130,7 +131,7 @@ pub enum SummaryMaintenanceLifecycleRejection {
     MissingCostEvidence,
 }
 
-/// One candidate physical policy for a particular summary deployment.
+/// One candidate lifecycle policy for a particular summary deployment.
 ///
 /// `total_cost: None` never means zero: it means the planner lacks enough
 /// evidence to cost the candidate. Such a candidate is not selectable and its
@@ -162,15 +163,18 @@ pub struct SummaryMaintenanceDeployment {
     pub summary_index: usize,
     /// The unique materialized `SummaryAgg` represented by this deployment.
     pub summary: Rc<SummaryNode>,
-    /// Physical lifecycle, evaluation, and representation commitment selected
-    /// for this state, or `None` when no alternative is selectable.
+    /// Lifecycle, evaluation, and representation commitment selected for this
+    /// state, or `None` when no alternative is selectable.
     pub summary_maintenance_lifecycle_guarantee: Option<SummaryMaintenanceLifecycleGuarantee>,
+    /// Abstract window primitive selected for this state. Concrete runtime
+    /// implementation, placement, and identity remain downstream decisions.
+    pub selected_window_framework: Option<SummaryWindowFramework>,
     /// Every lifecycle shape considered, including rejected and uncosted ones.
     pub alternatives: Vec<SummaryMaintenanceLifecycleAlternative>,
 }
 
-/// Workload-aware physical deployment decisions for every unique summary
-/// state reachable from one materialized post-ASAP root.
+/// Workload-aware lifecycle and window-framework decisions for every unique
+/// summary state reachable from one materialized post-ASAP root.
 #[derive(Debug, Clone)]
 pub struct SummaryMaintenanceLifecyclePlan {
     /// Root of the materialized post-ASAP DAG being deployed.
@@ -364,6 +368,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
                 summary_index,
                 summary,
                 summary_maintenance_lifecycle_guarantee: None,
+                selected_window_framework: None,
                 alternatives,
             }
         })
@@ -379,8 +384,9 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         facts.reads,
     );
     let summary_total_cost = complete_estimate.as_ref().map(|estimate| estimate.cost);
-    let selected_physical_plan_id =
-        complete_estimate.and_then(|estimate| estimate.physical_plan_id);
+    let selected_physical_plan_id = complete_estimate
+        .as_ref()
+        .and_then(|estimate| estimate.physical_plan_id.clone());
     let selected_raw_recompute = matches!(root.expr, SummaryExpr::KeepPreAsap(_));
     Ok(SummaryMaintenanceLifecyclePlan {
         root,
@@ -1105,6 +1111,9 @@ fn select_complete_lifecycle_combination(
             ) else {
                 return;
             };
+            if estimate.window_frameworks.len() != deployments.len() {
+                return;
+            }
             if best
                 .as_ref()
                 .is_none_or(|(best_estimate, _)| estimate.cost.0 < best_estimate.cost.0)
@@ -1166,6 +1175,12 @@ fn select_complete_lifecycle_combination(
     let (estimate, guarantees) = best?;
     for (index, guarantee) in guarantees {
         deployments[index].summary_maintenance_lifecycle_guarantee = Some(guarantee);
+    }
+    for (deployment, framework) in deployments
+        .iter_mut()
+        .zip(estimate.window_frameworks.iter().cloned())
+    {
+        deployment.selected_window_framework = framework;
     }
     Some(estimate)
 }
@@ -2005,6 +2020,7 @@ mod tests {
             summary_index: 0,
             summary: Rc::clone(&root),
             summary_maintenance_lifecycle_guarantee: None,
+            selected_window_framework: None,
             alternatives: vec![
                 SummaryMaintenanceLifecycleAlternative {
                     summary_maintenance_lifecycle: SummaryMaintenanceLifecycle::Ephemeral,
@@ -2066,6 +2082,7 @@ mod tests {
                 summary_index,
                 summary: Rc::clone(&root),
                 summary_maintenance_lifecycle_guarantee: None,
+                selected_window_framework: None,
                 alternatives: alternatives.clone(),
             })
             .collect();

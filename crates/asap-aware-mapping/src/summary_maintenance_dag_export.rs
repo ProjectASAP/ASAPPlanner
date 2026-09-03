@@ -14,6 +14,7 @@ use asap_types::dag_export::{self, SummaryDagGraph};
 use asap_types::post_asap::{
     EvaluationSchedule, OutputRepresentation, SummaryExpr, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
+    SummaryWindowFramework,
 };
 
 use crate::summary_maintenance_lifecycle::{
@@ -38,6 +39,8 @@ pub struct SummaryMaintenanceDagExport {
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryMaintenanceDeploymentExport {
     pub summary_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_window_framework: Option<SummaryWindowFramework>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<SummaryMaintenanceLifecycleGuaranteeExport>,
     pub alternatives: Vec<SummaryMaintenanceLifecycleAlternativeExport>,
@@ -119,6 +122,7 @@ pub fn export_summary_maintenance_plan(
         .iter()
         .map(|deployment| SummaryMaintenanceDeploymentExport {
             summary_index: deployment.summary_index,
+            selected_window_framework: deployment.selected_window_framework.clone(),
             selected: deployment
                 .summary_maintenance_lifecycle_guarantee
                 .as_ref()
