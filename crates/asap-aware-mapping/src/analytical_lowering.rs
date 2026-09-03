@@ -373,6 +373,7 @@ pub fn lower_query_physical_dag(
                     )?;
                     require_operator_statistics(PhysicalOperator::Limit, statistics)?;
                     require_limit_cardinality(*n, *offset, statistics)?;
+                    require_limit_consumption(*n, *offset, statistics)?;
                     self.push(evidence, PhysicalOperator::Limit, children, None)
                 }
                 QueryExpr::SQLWindowFunc {
@@ -682,6 +683,28 @@ fn require_limit_cardinality(
     Ok(())
 }
 
+fn require_limit_consumption(
+    n: usize,
+    offset: usize,
+    statistics: &OperatorStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let n = u64::try_from(n).map_err(|_| AnalyticalCostError::Overflow)?;
+    let offset = u64::try_from(offset).map_err(|_| AnalyticalCostError::Overflow)?;
+    let expected_consumed = if n == 0 {
+        0
+    } else {
+        statistics.inputs[0]
+            .rows
+            .min(offset.checked_add(n).ok_or(AnalyticalCostError::Overflow)?)
+    };
+    if statistics.limit_rows_consumed != Some(expected_consumed) {
+        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "limit rows consumed do not match n and offset",
+        ));
+    }
+    Ok(())
+}
+
 fn bind_scan_coverage(
     node_id: &str,
     source: &asap_types::pre_asap::Source,
@@ -806,6 +829,7 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            limit_rows_consumed: None,
             hash_join_build_side: None,
         }
     }
@@ -1224,7 +1248,10 @@ mod tests {
             ),
             (
                 "query-1".into(),
-                evidence(statistics(vec![edge(500, 6_000)], edge(20, 240))),
+                evidence(OperatorStatistics {
+                    limit_rows_consumed: Some(20),
+                    ..statistics(vec![edge(500, 6_000)], edge(20, 240))
+                }),
             ),
             (
                 "query-0".into(),
@@ -1475,7 +1502,10 @@ mod tests {
             ),
             (
                 "query-0".into(),
-                evidence(statistics(vec![edge(0, 0)], edge(0, 0))),
+                evidence(OperatorStatistics {
+                    limit_rows_consumed: Some(0),
+                    ..statistics(vec![edge(0, 0)], edge(0, 0))
+                }),
             ),
         ]);
         let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();

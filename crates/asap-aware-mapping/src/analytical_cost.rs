@@ -683,8 +683,6 @@ pub enum AnalyticalCostError {
     },
     #[error("invalid physical DAG: {0}")]
     InvalidPhysicalDag(&'static str),
-    #[error("inconsistent physical operator statistics: {0}")]
-    InconsistentOperatorStatistics(&'static str),
 }
 
 fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
