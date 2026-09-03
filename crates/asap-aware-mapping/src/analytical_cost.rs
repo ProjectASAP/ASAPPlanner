@@ -328,24 +328,14 @@ fn validate_operator_statistics(
     nodes: &HashMap<&str, &PhysicalDagNode>,
     statistics: &HashMap<&str, OperatorStatistics>,
 ) -> Result<(), AnalyticalCostError> {
-    let expected_inputs = match node.operator {
-        PhysicalOperator::Scan => 1,
-        PhysicalOperator::HashJoin => 2,
-        PhysicalOperator::Concat => node.children.len(),
-        _ => 1,
-    };
-    if node_statistics.inputs.len() != expected_inputs {
+    let arity = expected_input_arity(node.operator, node.children.len());
+    if node_statistics.inputs.len() != arity.statistics_inputs {
         return Err(AnalyticalCostError::InvalidOperatorStatistics {
             node: node.id.clone(),
-            reason: "wrong input-edge count",
+            reason: "operator-statistics input count does not match physical arity",
         });
     }
-    let expected_children = if matches!(node.operator, PhysicalOperator::Scan) {
-        0
-    } else {
-        expected_inputs
-    };
-    if node.children.len() != expected_children {
+    if node.children.len() != arity.dag_children {
         return Err(AnalyticalCostError::InvalidPhysicalDag(
             "operator child count does not match physical arity",
         ));
@@ -386,6 +376,53 @@ fn validate_operator_statistics(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OperatorInputArity {
+    /// Number of logical input-edge records required in `OperatorStatistics`.
+    statistics_inputs: usize,
+    /// Number of upstream physical nodes required in the DAG.
+    dag_children: usize,
+}
+
+/// Declare both notions of operator input explicitly. A scan has one external
+/// source-input statistics record but no upstream DAG node. Every other
+/// operator's statistics inputs correspond one-to-one with its DAG children.
+///
+/// Keep this match exhaustive: adding a physical operator must also define its
+/// statistics and DAG arity instead of silently inheriting unary behavior.
+fn expected_input_arity(
+    operator: PhysicalOperator,
+    variadic_child_count: usize,
+) -> OperatorInputArity {
+    let unary = OperatorInputArity {
+        statistics_inputs: 1,
+        dag_children: 1,
+    };
+    match operator {
+        PhysicalOperator::Scan => OperatorInputArity {
+            statistics_inputs: 1,
+            dag_children: 0,
+        },
+        PhysicalOperator::Filter
+        | PhysicalOperator::Project
+        | PhysicalOperator::HashAggregate
+        | PhysicalOperator::Sort
+        | PhysicalOperator::TopK
+        | PhysicalOperator::Deduplicate
+        | PhysicalOperator::Window
+        | PhysicalOperator::Limit
+        | PhysicalOperator::PassThrough => unary,
+        PhysicalOperator::HashJoin => OperatorInputArity {
+            statistics_inputs: 2,
+            dag_children: 2,
+        },
+        PhysicalOperator::Concat => OperatorInputArity {
+            statistics_inputs: variadic_child_count,
+            dag_children: variadic_child_count,
+        },
+    }
 }
 
 /// Estimate one physical operator. Child costs are deliberately excluded;
@@ -709,6 +746,38 @@ mod tests {
                 bytes: output_rows.saturating_mul(8),
             },
         )
+    }
+
+    #[test]
+    fn operator_arity_distinguishes_source_statistics_from_dag_children() {
+        assert_eq!(
+            expected_input_arity(PhysicalOperator::Scan, 0),
+            OperatorInputArity {
+                statistics_inputs: 1,
+                dag_children: 0,
+            }
+        );
+        assert_eq!(
+            expected_input_arity(PhysicalOperator::Filter, 1),
+            OperatorInputArity {
+                statistics_inputs: 1,
+                dag_children: 1,
+            }
+        );
+        assert_eq!(
+            expected_input_arity(PhysicalOperator::HashJoin, 2),
+            OperatorInputArity {
+                statistics_inputs: 2,
+                dag_children: 2,
+            }
+        );
+        assert_eq!(
+            expected_input_arity(PhysicalOperator::Concat, 3),
+            OperatorInputArity {
+                statistics_inputs: 3,
+                dag_children: 3,
+            }
+        );
     }
 
     #[test]

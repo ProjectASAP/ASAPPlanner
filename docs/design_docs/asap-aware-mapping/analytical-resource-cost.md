@@ -165,6 +165,20 @@ positive logical bytes so width-dependent formulas do not invent a row width.
 A parent therefore cannot silently substitute the original source cardinality
 for an intermediate edge.
 
+`OperatorStatistics.inputs` and `PhysicalDagNode.children` therefore have
+different arity only for a source leaf:
+
+| Operator shape | Statistics inputs | DAG children |
+|---|---:|---:|
+| `Scan` | 1 external source edge | 0 |
+| Unary operator | 1 | 1 |
+| `HashJoin` | 2 | 2 |
+| `Concat` | one per input | one per input |
+
+The implementation matches every `PhysicalOperator` variant explicitly. A new
+operator cannot silently inherit unary arity; its statistics-input and
+DAG-child counts must both be defined.
+
 `EdgeStatistics.bytes` is decoded logical data carried on an edge.
 `source_scan_bytes` is physical storage I/O and is charged only by `Scan`.
 Compression, column pruning, or encoded storage can therefore make these
