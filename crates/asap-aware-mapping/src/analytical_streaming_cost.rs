@@ -14,9 +14,7 @@ use asap_types::pre_asap::{agg_intent::AggIntent, QueryExpr};
 use asap_types::workload::{DataArrival, DataWorkload, QueryWorkloadEntry};
 use serde::{Deserialize, Serialize};
 
-use crate::analytical_cost::{
-    AnalyticalCostError, ResourceCalibration, ResourceEstimate,
-};
+use crate::analytical_cost::{AnalyticalCostError, ResourceCalibration, ResourceEstimate};
 use crate::analytical_statistics::evaluations_in_horizon;
 use crate::cost_model::{Cost, CostModel, DefaultCostModel};
 use crate::recurrence::CostRate;
