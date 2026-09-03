@@ -608,8 +608,10 @@ pub(crate) fn validate_operator_semantics(
         }
         PhysicalOperator::PromqlPresence => {
             let promql = require_promql_statistics(statistics, 1)?;
-            if promql.output_series > 1 {
-                return invalid("PromQL absence operator emits more than one series");
+            if promql.output_series > 1 || output.rows > promql.evaluation_steps {
+                return invalid(
+                    "PromQL absence operator exceeds one series or one row per evaluation",
+                );
             }
         }
         PhysicalOperator::HashJoin => {}
@@ -1828,6 +1830,33 @@ mod tests {
         });
         assert!(matches!(
             estimate_operator(PhysicalOperator::PromqlScalarLeaf, scalar),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+    }
+
+    #[test]
+    fn promql_absence_output_is_bounded_by_evaluation_steps() {
+        use crate::analytical_statistics::PromqlOperatorStatistics;
+
+        let mut presence = statistics(
+            vec![EdgeStatistics { rows: 1, bytes: 8 }],
+            EdgeStatistics {
+                rows: 11,
+                bytes: 88,
+            },
+        );
+        presence.aggregate_value_bytes = Some(8);
+        presence.promql = Some(PromqlOperatorStatistics {
+            input_series: vec![1],
+            output_series: 1,
+            evaluation_steps: 10,
+            window_samples_per_series: None,
+            subquery_steps: None,
+            scalar_ops_per_row: Some(1),
+            binary_operand_mode: None,
+        });
+        assert!(matches!(
+            estimate_operator(PhysicalOperator::PromqlPresence, presence),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
         ));
     }
