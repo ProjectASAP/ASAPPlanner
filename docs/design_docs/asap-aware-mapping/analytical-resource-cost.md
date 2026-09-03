@@ -1,0 +1,472 @@
+# Analytical resource cost model
+
+## Purpose and boundaries
+
+The analytical resource cost model version implemented here is explicitly for
+`DataArrival::AtRest`. It compares legal physical plans using CPU work, peak
+memory, and source/disk I/O. It replaces dimensionless plan-node counts with
+estimates derived from operator complexity, cardinality, row width, and
+concrete summary parameters.
+
+The model does not decide semantic or accuracy legality. Candidate generation
+and guarantee composition run first; costing ranks only the candidates that
+survive. Missing evidence produces an unavailable estimate, never an assumed
+zero or a structural-cost fallback.
+
+This document distinguishes two implementation layers:
+
+- the physical-DAG estimator, which can compose any DAG whose nodes have
+  supported physical operators and complete `OperatorInputs`; and
+- the planner bridge, which lowers a deliberately small set of replacement
+  shapes into that estimator and participates in automatic candidate ranking.
+
+Support in the first layer does not imply that the planner can yet lower and
+rank the same shape. The current bridge boundary is stated explicitly below.
+
+An estimate has physical dimensions:
+
+```text
+ResourceEstimate {
+    cpu_ops,
+    peak_memory_bytes,
+    scan_bytes,
+}
+```
+
+- `cpu_ops` is algorithmic work, not elapsed CPU time.
+- `peak_memory_bytes` is simultaneously live retained and working state.
+- `scan_bytes` is source/disk data read, not logical consumption of an
+  already-materialized in-memory edge.
+
+### Terms used by this document
+
+The following terms are part of the model, rather than assumptions that a
+reader must recover from the implementation:
+
+| Term | Definition |
+|---|---|
+| Comparison horizon | One finite interval `[start, end)` over which every alternative is charged. |
+| Evaluation | One invocation of the query during that interval. |
+| `evaluation_count` | The finite number of evaluations in the comparison horizon, derived from query recurrence. |
+| Physical node | One executable operator instance in the selected physical DAG. |
+| Physical identity | The node ID used to recognize one shared physical operator reached through multiple DAG paths. |
+| Local operator estimate | The CPU, transient memory, retained memory, and source reads caused by one execution of a node, excluding its children. |
+| Execution multiplicity | Whether that local estimate is incurred once in the horizon or once for every query evaluation. |
+
+Execution multiplicity has exactly two values:
+
+| Value | Executions in one comparison horizon | Typical use |
+|---|---:|---|
+| `Once` | `1` | Bootstrap/build work whose result is retained for later reads. |
+| `PerEvaluation` | `evaluation_count` | Raw recomputation or query-side work repeated for every invocation. |
+
+`Once` means once **within the comparison horizon**, not once for the lifetime
+of a process or deployment. `PerEvaluation` means once per query invocation,
+not once per input row, grouping key, DAG edge, or consumer. Per-row work is
+already represented by the operator's local formula; active-window fan-out and
+the number of physical summary instances are separate inputs.
+
+For physical node `n`, define:
+
+```text
+executions(n) = 1                         if n.execution = Once
+              = evaluation_count          if n.execution = PerEvaluation
+
+total_cpu_ops  = sum(local_cpu_ops(n) * executions(n))
+total_scan     = sum(local_scan_bytes(n) * executions(n))
+```
+
+Memory is not multiplied by `executions(n)`. `peak_memory_bytes` is the maximum
+simultaneously live memory found by the DAG schedule. Transient state from
+sequential evaluations can be reused, while state declared as retained remains
+live across later reads.
+
+Execution and retention are independent declarations, with two necessary
+consistency rules. A `PerEvaluation` node cannot retain state across the
+horizon. A `PerEvaluation` parent may consume a `Once` child only when that
+child retains the produced state; otherwise later evaluations would read a
+build result that no longer exists. Missing or contradictory declarations make
+the candidate unavailable.
+
+For example, suppose a fixed source snapshot is queried 12 times in the
+horizon. Let one source scan cost `C_scan` CPU operations and `B` source bytes,
+one raw aggregate cost `C_agg`, a retained-summary build cost `C_build`, and one
+summary read cost `C_read`:
+
+```text
+raw plan:
+  Scan       PerEvaluation
+  Aggregate  PerEvaluation
+  cpu_ops   = 12 * (C_scan + C_agg)
+  scan_bytes = 12 * B
+
+retained-summary plan:
+  Scan          Once
+  SummaryBuild  Once            // produces retained state
+  SummaryRead   PerEvaluation
+  cpu_ops   = C_scan + C_build + 12 * C_read
+  scan_bytes = B
+```
+
+The comparison does not assume that the retained-summary plan is cheaper. It
+only shows where repetition is charged; concrete operator formulas, summary
+parameters, memory, and calibration determine the winner.
+
+## Canonical workload and evidence sources
+
+The cost model does not define a second workload schema. It consumes the
+normalized workload, lowered query IR, and freshness-aware statistics:
+
+| Cost concept | Canonical source |
+|---|---|
+| Source row cardinality | Fresh `DataWorkload.input_cardinality: Evidence<u64>`. |
+| Data distribution | Fresh `DataWorkload.distribution: Evidence<DataDistribution>`. |
+| Arrival and update rate | `DataWorkload.arrival`, `ingestion_volume`, and `ingestion_rate`. |
+| Query demand | `QueryWorkloadEntry.recurrence`, normalized over an explicit horizon. |
+| Event-time range | `QueryWorkloadEntry.time_selection`. |
+| Accuracy and latency requirements | `QueryWorkloadEntry.requirements`. |
+| Operator shape, grouping keys, and constants such as Top-K `k` | Lowered `QueryExpr` and `AggIntent`. |
+
+Evidence is read through `Evidence<T>::value_at(planning_time)`. Stale,
+future, or improperly time-bounded evidence remains unknown. Costing follows
+the same freshness rule as accuracy and lifecycle planning.
+
+The current workload schema does not yet contain every physical statistic.
+The missing facts have explicit ownership:
+
+| Physical statistic | Ownership |
+|---|---|
+| Source byte size and average row width | Fresh data/catalog evidence. |
+| Distinct count for a grouping-key tuple | Per-key-set catalog or observed evidence. |
+| Encoded key width | Schema/catalog evidence. |
+| Filter selectivity and node output cardinality | Operator-statistics provider. |
+| Join-side and join-output cardinality | Join-key/operator statistics. |
+| Memory budget, spill I/O, cache behavior, and network bytes | Deployment/execution-profile evidence. |
+
+`OperatorInputs` contains the resolved statistics for one physical operator.
+It is an estimator input, not another planner workload object. The component
+that lowers a query into a physical DAG owns resolving these fields from the
+canonical workload, catalog, and operator-statistics sources. It must leave a
+plan unavailable when required evidence cannot be resolved.
+
+## Workload horizon and lifecycle
+
+Every alternative must cover the same source data and query horizon. The
+implemented `DataArrival::AtRest` comparison is build-once, read-many:
+
+```text
+retained-summary builds = 1
+query reads             = evaluation_count
+updates after build     = 0
+```
+
+`evaluation_count` is derived from `QueryRecurrence` over a finite horizon.
+It is not an independent workload axis. A repeated rate without a horizon
+cannot produce a finite total cost.
+
+An at-rest estimate must not be reused for `unknown`, `mixed`, or
+`continuously_ingesting` data. Callers must fail closed instead of pretending
+that incremental updates are a one-time snapshot build.
+
+The sketch alternative scans the selected source snapshot once and retains
+state. The raw alternative recomputes from that snapshot for every query
+read. Continuously ingesting data, rebuilds, deletions, expiration, and
+retention duration belong to the summary-maintenance lifecycle model. They
+must contribute update/build/delete work before a continuously maintained
+plan is compared with raw execution.
+
+## General DAG costing
+
+Costing operates on the physical DAG, not on a list of logical operators.
+Each costed node produces:
+
+```text
+NodeEstimate {
+    output_rows,
+    output_bytes,
+    cpu_ops,
+    retained_bytes,
+    working_bytes,
+    source_read_bytes,
+}
+```
+
+The node's output statistics feed its parents. A parent never substitutes
+the original source cardinality for an intermediate edge.
+
+### Composition rules
+
+For a selected DAG:
+
+1. Traverse in topological order.
+2. Estimate each distinct physical node once.
+3. Add CPU operations across nodes and across executions in the horizon.
+4. Add source/disk reads only at nodes that actually read source or spilled
+   data; an in-memory edge contributes zero source reads.
+5. Count a shared node once even when several parents consume it.
+6. Compute peak memory from liveness: add states that coexist, but do not add
+   disjoint transient buffers merely because both appear somewhere in the
+   DAG.
+7. Retained summaries remain live across reads. Streaming buffers may be
+   released after their last consumer.
+
+`estimate_physical_dag` implements these rules for `PhysicalDagNode` values.
+Node IDs are physical identities: duplicate IDs, missing children, and cycles
+are rejected. A child-before-parent schedule maintains remaining-consumer
+counts, releases transient output after its last consumer, and keeps retained
+state live. Consequently a shared scan is charged once per execution and a
+fan-out's memory includes the outputs that really coexist.
+
+Logical `output_bytes` feeds parent cardinality estimates; it is not an
+allocation. Each physical node separately supplies `output_buffer_bytes` for
+its live batch/edge buffer and `retained_bytes` for state that survives the
+operator. A streaming scan therefore retains a batch, not the complete source.
+
+Every node declares `ExecutionMultiplicity::Once` or `PerEvaluation`.
+Build/maintenance nodes can therefore be charged once while query-side nodes
+are multiplied by the horizon's evaluation count; retention does not silently
+imply either execution frequency.
+
+For a tree-shaped pipeline, peak memory is normally the maximum live pipeline
+state, not the sum of every node's memory. At a fan-out, join, merge, or nested
+summary boundary, multiple child states may coexist and must be combined.
+
+A rewrite candidate is costed from the rewritten physical DAG. It does not
+inherit the target's old node costs. A replacement candidate includes any
+newly embedded child summaries, while an independently shared child is
+deduplicated by physical identity.
+
+## Physical operator formulas
+
+Operator estimates are local: child CPU and I/O are excluded and composed by
+the DAG rules above.
+
+| Physical operator | CPU operations | Local memory | Source/disk reads |
+|---|---:|---:|---:|
+| Scan | `input_rows` | one input row/batch | `input_bytes` |
+| Filter | `input_rows` | one output row/batch | `0` |
+| Project or scalar pass-through | `input_rows` | one output row/batch | `0` |
+| Hash aggregate | `input_rows` | `groups × (key + aggregate_value_bytes + hash metadata)` | `0` |
+| Deduplicate | `input_rows` | keyed hash state | `0` |
+| In-memory sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
+| Heap Top-K | `rows × ceil(log2(max(min(k, rows), 2)))` | `min(k, rows) × row_bytes` | `0` |
+| Hash join | `left_rows + right_rows + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
+| Concat | `output_rows` | one output row/batch | `0` |
+| Ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
+| Limit | `limit_rows_consumed` (including `OFFSET`) | one output row/batch | `0` |
+
+These formulas name physical implementations. An external sort must add
+spill writes and reads; a nested-loop join must not use the hash-join formula.
+If the physical choice or its required statistics are unknown, the estimate
+is unavailable.
+
+In particular, hash aggregation requires the concrete accumulator width, and
+hash join requires an explicit left/right build-side choice. The estimator
+does not assume one 8-byte aggregate value or silently choose the smaller join
+input.
+
+## Summary operator formulas
+
+A retained sketch performs one build and serves later reads from state:
+
+```text
+cpu_ops = input_rows                         // build scan
+        + input_rows × update_ops(params)
+        + evaluation_count × physical_sketch_count × read_ops(params)
+
+scan_bytes = source_scan_bytes for the build
+```
+
+Concrete accuracy-sized parameters determine state and work:
+
+| Summary | Update operations per row | Read operations | State bytes per physical instance |
+|---|---:|---:|---:|
+| CMS | `depth` | `depth` | `width × depth × 8` |
+| CountSketch | `depth` | `depth` | `width × depth × 8` |
+| CMSWithHeap | `depth + ceil(log2(heap_size))` | `depth + heap_size` | `width × depth × 8 + heap_size × 16` |
+| CountSketchWithHeap | same form as CMSWithHeap | same form as CMSWithHeap | `width × depth × 8 + heap_size × 16` |
+| KLL | `1 + ceil(log2(k))` | `ceil(log2(k))` | `k × 8` |
+| HLL | `1` | `2^precision` | `2^precision` |
+| KMV | `ceil(log2(k))` | `k` | `k × 8` |
+| Theta | `ceil(log2(k))` | `k` | `k × 8` |
+
+For a per-subpopulation layout,
+`physical_sketch_count = subpopulation_count`. A shared layout has the number
+of physical structures described by that layout; the model must not infer it
+from logical group count alone.
+
+Summary merge, subtract, delete, and readout are separate physical operators.
+Their CPU and memory use the concrete summary state size and number of input
+states. A plan using one of these operations is unavailable until the
+corresponding formula and required lifecycle evidence are present.
+
+Summary construction uses physical-input realization rules before it emits a
+`SummaryAgg`. The default rule consumes the logical aggregate's immediate
+child and its declared input value. A composite implementation instead states
+which logical sub-DAG it consumes, which physical child replaces that sub-DAG,
+and which key or value enters the summary. The generic `SummaryAgg` constructor
+only materializes this resolved binding; it does not recognize query shapes or
+name concrete algorithms. If a composite rule recognizes a shape but cannot
+represent its complete physical input, that candidate is unavailable rather
+than falling through to the default rule.
+
+The currently registered composite rule is the count-ranked heavy-hitter
+realization described in the worked patterns below. The same boundary admits
+future AVG decomposition, window-summary composition, or other multi-operator
+primitives without adding special cases to the generic constructor.
+
+Summary build, merge, subtract, delete, and readout require their own physical
+operators and resolved statistics. Until an operation has such a formula, a
+complete candidate containing it is unavailable; costing only its modeled
+children would undercount the plan.
+
+`estimate_physical_dag` is deliberately independent of query shape. A caller
+supplies the complete physical DAG and one `OperatorInputs` record per node.
+Filters, projections, joins, windows, nested aggregates, Top-K, and shared
+sub-DAGs therefore use the same estimation path. Query lowering and planner
+selection are separate integration responsibilities and must not introduce a
+shape-specific shortcut or structural-node-count fallback.
+
+DDSketch is unavailable because occupied bins depend on value range and
+distribution. The model does not invent a bin count. Algorithm/parameter
+mismatches and arithmetic overflow also fail closed.
+
+## Accuracy evidence remains separate from cost
+
+Cost evidence cannot replace accuracy evidence. Examples include:
+
+- approximate Top-K requires a lower bound for the kth selected item, an
+  upper bound for excluded items, and their union-bounded failure probability;
+- distribution-sensitive sizing or error propagation consumes fresh
+  `DataWorkload.distribution` evidence;
+- a shared sketch layout requires a proven composition bound.
+
+The planner first rejects candidates without the necessary guarantee. Only
+the surviving candidates reach cost ranking.
+
+## Calibration
+
+Resource dimensions become one scalar objective through a versioned
+deployment calibration:
+
+```text
+cost = cpu_ops × cost_per_cpu_op
+     + scan_bytes × cost_per_scan_byte
+     + peak_memory_bytes × cost_per_retained_byte
+```
+
+Coefficients must be finite and non-negative, with at least one positive.
+`CostUnits` is not implicitly money, latency, or cost per second. Coefficients
+may be fitted from measurements or encode a deployment resource policy. The
+calibration version is exported so results from different policies are not
+treated as directly comparable.
+
+Changing calibration may change the selected plan. A memory-constrained
+deployment and an I/O-constrained deployment need not choose the same legal
+candidate.
+
+## Candidate selection and provenance
+
+The intended end-to-end selection pipeline is:
+
+1. enumerates semantically valid alternatives;
+2. checks end-to-end accuracy and lifecycle legality;
+3. derives fresh workload and operator statistics;
+4. sizes physical summary parameters;
+5. estimates the complete candidate DAG;
+6. applies calibration and ranks candidates by ascending cost.
+
+This module implements the physical estimation step. Lowering, evidence
+resolution, legality checks, and planner integration remain separate layers;
+each must preserve the complete-plan and fail-closed requirements above.
+
+The raw baseline and selected alternative use the same source snapshot,
+horizon, and calibration:
+
+```text
+benefit       = baseline_cost - selected_cost
+benefit_ratio = benefit / baseline_cost
+```
+
+Exported annotations contain resource totals, workload horizon, resolved
+operator inputs, calibration coefficients, evidence/model versions, and the
+baseline reference. This makes the scalar reproducible and identifies which
+resource dimension drove a decision.
+
+## Worked patterns
+
+The following are examples of the general DAG rules, not special definitions
+of the model.
+
+### Exact grouped aggregation
+
+For an 8-byte aggregate value and 16 bytes of hash metadata:
+
+```text
+entry_bytes = group_key_bytes + 8 + 16
+memory          = group_count × entry_bytes
+scan CPU/read   = input_rows
+aggregate CPU   = input_rows
+```
+
+Every raw evaluation rebuilds this state and rereads the source.
+
+An exact quantile does not use that formula. Its current in-memory baseline
+charges the source scan plus `input_rows × ceil(log2(input_rows))` sort work
+per evaluation and retains `input_bytes` as a conservative value-buffer upper
+bound. Exact cardinality is unavailable until distinct-count evidence for the
+measured value exists; `group_count` describes GROUP BY tuples and must not be
+substituted for it.
+
+### Count-ranked Top-K
+
+The logical form `TopK(Count GROUP BY key)` can be implemented by one global
+CMSWithHeap keyed directly by the grouping column:
+
+```text
+Scan -> CMSWithHeap(key) -> TopK readout
+```
+
+It is not one CMS per key. With `width = 272`, `depth = 5`, and
+`heap_size = 10`, state is:
+
+```text
+272 × 5 × 8 + 10 × 16 = 11,040 bytes
+```
+
+This fusion is one instance of costing the selected physical DAG rather than
+costing each logical aggregate independently.
+
+### Shared sub-DAG
+
+If two queries consume the same retained summary, build CPU, source scan, and
+retained state are counted once. Each readout contributes its own read CPU.
+If the planner chooses independent recomputation instead, both executions are
+counted.
+
+### Join and sort
+
+A hash-join alternative needs both input cardinalities, output cardinality,
+row widths, and build-side choice. A downstream in-memory sort consumes the
+join output statistics. If the sort exceeds memory and no spill model is
+available, that candidate is unavailable rather than costed as in-memory.
+
+## Unsupported and future dimensions
+
+An estimate is unavailable when required evidence, a physical formula, or a
+finite horizon is missing. Structural node counts are never substituted.
+
+The current scalar includes CPU, retained memory, and source/disk reads. A
+complete deployment model may additionally require:
+
+- source and spill writes;
+- network transfer;
+- cache residency;
+- parallelism and contention;
+- allocator fragmentation;
+- wall-clock critical-path latency;
+- energy or monetary cost.
+
+Those dimensions should extend the resource vector and calibration. They
+must not be silently represented as zero. Consumers render unavailable costs
+as `Not estimated`.

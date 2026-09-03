@@ -27,7 +27,9 @@ ASAP-aware mapping therefore answers two questions:
 1. **What transformations are valid?**
 2. **What combinations of alternatives form useful candidate plans?**
 
-It does **not** assign physical resources such as CPU or memory to operators. Physical resource allocation belongs to a later planning stage.
+It estimates CPU work, retained memory, and scan I/O for supported summary
+alternatives, but does **not** allocate machines or enforce physical resource
+budgets; deployment belongs to a later stage.
 
 ---
 
@@ -90,6 +92,8 @@ The design is split into focused documents:
   summaries and optimizations can be composed safely.
 - [End-to-end accuracy guarantees](end-to-end-accuracy-guarantees.md) specifies the typed
   guarantee IR, sketch contracts, composition rules, target checking, and fail-closed boundaries.
+- [Analytical resource cost](analytical-resource-cost.md) defines CPU, retained-memory,
+  and scan-I/O formulas, calibration, planner ranking, and fail-closed behavior.
 - [Query workloads, data workloads, and summary lifecycle maintenance](workload-demand-and-summary-lifecycle.md) separates
   query-workload properties from data-workload properties and defines ephemeral, prepared,
   shared, and continuously maintained summary-state alternatives.

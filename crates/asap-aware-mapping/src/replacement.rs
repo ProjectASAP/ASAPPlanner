@@ -396,6 +396,12 @@ pub enum ImplementError {
     /// records it as a [`RejectedCandidate`] instead of a candidate.
     #[error("accuracy-illegal candidate: {0}")]
     Accuracy(#[from] AccuracyError),
+    /// The selected summary family has a physical realization rule for this
+    /// logical shape, but the rule cannot represent the complete input. The
+    /// candidate must not fall back to ordinary one-node binding because that
+    /// would change its semantics.
+    #[error("unsupported physical summary realization: {0}")]
+    PhysicalRealization(&'static str),
 }
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
@@ -1300,13 +1306,14 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             else {
                 continue;
             };
-            let Some(readout_query) = aggregate_child(root)
-                .and_then(|child| child.output_schema().ok())
-                .map(|schema| readout(intent, &summarised_column(intent, &schema), models.cost))
-            else {
+            let family = SummaryFamilyType::Sketch(kind.clone(), GroupingStrategy::default());
+            let Some(child) = aggregate_child(root) else {
                 continue;
             };
-            let family = SummaryFamilyType::Sketch(kind.clone(), GroupingStrategy::default());
+            let Ok(input) = realize_physical_summary_input(intent, &family, child) else {
+                continue;
+            };
+            let readout_query = readout(intent, &input.col, models.cost);
             let Some(local) = models.accuracy.local_guarantee(&family, &readout_query) else {
                 continue;
             };
@@ -1390,7 +1397,7 @@ impl Proposals {
                 description: rationale,
                 error,
             }),
-            Err(ImplementError::Schema(_)) => {}
+            Err(ImplementError::Schema(_) | ImplementError::PhysicalRealization(_)) => {}
         }
     }
 }
@@ -1649,11 +1656,12 @@ pub(crate) fn construct_summary_with(
         // intent, no HAVING. (Multi-intent nodes and HAVING stay logical.)
         if bindable_intent(expr).is_some() {
             if let Some((family, estimate)) = summary_family(implementation) {
+                let input = realize_physical_summary_input(intent, &family, child)?;
                 return construct_summary_agg(
                     expr,
                     reduction,
                     intent,
-                    child,
+                    input,
                     family,
                     estimate,
                     models,
@@ -1693,6 +1701,53 @@ fn summary_family(implementation: Implementation) -> Option<(SummaryFamilyType, 
     })
 }
 
+/// The physical input consumed by one summary implementation. Most summaries
+/// consume the logical aggregate's immediate child and summarize its declared
+/// input value. Composite implementations can instead consume a larger
+/// logical sub-DAG and bind a different key or value.
+struct PhysicalSummaryInput {
+    child: Rc<QueryExpr>,
+    col: ColumnRef,
+}
+
+enum PhysicalSummaryInputRuleResult {
+    NotApplicable,
+    Realized(PhysicalSummaryInput),
+    Unsupported(&'static str),
+}
+
+type PhysicalSummaryInputRule =
+    fn(&AggIntent, &SummaryFamilyType, &Rc<QueryExpr>) -> PhysicalSummaryInputRuleResult;
+
+/// Ordered physical-realization rules for implementations that consume more
+/// than the immediate logical input. New composite primitives add a rule here
+/// instead of adding query- or algorithm-specific branches to
+/// `construct_summary_agg`.
+const PHYSICAL_SUMMARY_INPUT_RULES: &[PhysicalSummaryInputRule] =
+    &[realize_count_ranked_topk_input];
+
+fn realize_physical_summary_input(
+    intent: &AggIntent,
+    family: &SummaryFamilyType,
+    child: &Rc<QueryExpr>,
+) -> Result<PhysicalSummaryInput, ImplementError> {
+    for rule in PHYSICAL_SUMMARY_INPUT_RULES {
+        match rule(intent, family, child) {
+            PhysicalSummaryInputRuleResult::NotApplicable => {}
+            PhysicalSummaryInputRuleResult::Realized(input) => return Ok(input),
+            PhysicalSummaryInputRuleResult::Unsupported(reason) => {
+                return Err(ImplementError::PhysicalRealization(reason));
+            }
+        }
+    }
+
+    let child_schema = child.output_schema()?;
+    Ok(PhysicalSummaryInput {
+        child: Rc::clone(child),
+        col: summarised_column(intent, &child_schema),
+    })
+}
+
 /// Emit `SummaryAgg` (recursively binding the child), plus the
 /// `SummaryEstimate` readout when `estimate` is set.
 #[allow(clippy::too_many_arguments)]
@@ -1700,14 +1755,13 @@ fn construct_summary_agg(
     node: &QueryExpr,
     reduction: &Reduction,
     intent: &AggIntent,
-    child: &Rc<QueryExpr>,
+    input: PhysicalSummaryInput,
     family: SummaryFamilyType,
     estimate: bool,
     models: Models<'_>,
     child_target: Option<&AccuracyTarget>,
     allocation: Option<GuaranteeSource>,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
-    let child_schema = child.output_schema()?;
     // The single canonical pre-ASAP derivation (per-series vs cross-series,
     // name overrides) already computes the row shape; binding only retypes
     // the summary state column.
@@ -1719,7 +1773,7 @@ fn construct_summary_agg(
     let out_schema = node.output_schema()?;
     let state_idx = summary_col_index(&out_schema, &by, per_series);
 
-    let col = summarised_column(intent, &child_schema);
+    let col = input.col;
     let query = estimate.then(|| readout(intent, &col, models.cost));
 
     let mut state_schema = lift(&out_schema);
@@ -1727,7 +1781,7 @@ fn construct_summary_agg(
         field.dtype = family.clone();
     }
 
-    let bound_child = realize_child_with(child, models, child_target)?;
+    let bound_child = realize_child_with(&input.child, models, child_target)?;
 
     // ── Guarantee (issue #172) ──────────────────────────────────────────
     // Derived *before* the node exists, so an illegal composition is never
@@ -1776,6 +1830,67 @@ fn construct_summary_agg(
         })),
         None => Ok(agg),
     }
+}
+
+/// Realize the composite heavy-hitter implementation for
+/// `TopK(Count GROUP BY key)`. The heap sketch consumes the raw keyed stream;
+/// it does not consume an independently materialized Count result.
+fn realize_count_ranked_topk_input(
+    intent: &AggIntent,
+    family: &SummaryFamilyType,
+    child: &Rc<QueryExpr>,
+) -> PhysicalSummaryInputRuleResult {
+    if !matches!(intent, AggIntent::TopK { .. })
+        || !matches!(
+            family,
+            SummaryFamilyType::Sketch(kind, _)
+                if matches!(
+                    kind.algorithm(),
+                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap
+                )
+        )
+    {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    }
+    let QueryExpr::Aggregate {
+        reduction: Reduction::Reduce(keys),
+        measures,
+        having: None,
+        child: raw_child,
+        ..
+    } = child.as_ref()
+    else {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    };
+    if !matches!(measures.as_slice(), [AggIntent::Count { .. }]) {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    }
+    if keys.is_without() || keys.len() != 1 {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "count-ranked Top-K requires one explicit grouping key until tuple-key and without-group encoding are represented",
+        );
+    }
+    let Ok(schema) = raw_child.output_schema() else {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "count-ranked Top-K raw input schema cannot be derived",
+        );
+    };
+    let Some(column) = schema.columns.get(keys[0]) else {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "count-ranked Top-K grouping key is outside the raw input schema",
+        );
+    };
+    let key = match &column.table {
+        Some(table) => ColumnRef::Qualified {
+            table: table.clone(),
+            name: column.name.clone(),
+        },
+        None => ColumnRef::Named(column.name.clone()),
+    };
+    PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
+        child: Rc::clone(raw_child),
+        col: key,
+    })
 }
 
 /// The guarantee of the value a `family` node produces over `child` —
@@ -2251,8 +2366,15 @@ impl<Id> PlanSpace<Id> {
             .iter()
             .map(|ptr| {
                 let group = &self.groups[ptr];
-                let candidates = rank_group(group, cost_model);
                 let target = TargetSubDAG::with_consumer_count(&group.target, group.consumer_count);
+                let mut candidates = rank_group(group, cost_model);
+                // Availability is candidate-specific and cannot be expressed
+                // by `rank_candidates`' exhaustive permutation contract.
+                // Keep unavailable alternatives for explanation, but place
+                // them after every selectable candidate.
+                candidates.sort_by_key(|candidate| {
+                    cost_model.candidate_cost(candidate, &target).is_none()
+                });
                 let costs = candidates
                     .iter()
                     .map(|c| {
@@ -3042,17 +3164,28 @@ impl<Id> PlanSpace<Id> {
                             .candidates
                             .iter()
                             .filter(|candidate| !is_cse_candidate(candidate))
-                            .min_by(|a, b| {
+                            .filter_map(|candidate| {
                                 cost_model
-                                    .estimate_cost(a, &effective_target)
-                                    .total_cmp(&cost_model.estimate_cost(b, &effective_target))
-                            });
+                                    .candidate_cost(candidate, &effective_target)
+                                    .map(|cost| (candidate, cost))
+                            })
+                            .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0))
+                            .map(|(candidate, _)| candidate);
+                        let cse = cse.filter(|candidate| {
+                            cost_model
+                                .candidate_cost(candidate, &effective_target)
+                                .is_some()
+                        });
                         match (cse, logical) {
                             (Some(cse), Some(logical))
                                 if cost_model
-                                    .estimate_cost(logical, &effective_target)
-                                    .total_cmp(&cost_model.estimate_cost(cse, &effective_target))
-                                    .is_lt() =>
+                                    .candidate_cost(logical, &effective_target)
+                                    .unwrap()
+                                    .0
+                                    < cost_model
+                                        .candidate_cost(cse, &effective_target)
+                                        .unwrap()
+                                        .0 =>
                             {
                                 Some(logical)
                             }
@@ -3072,13 +3205,34 @@ impl<Id> PlanSpace<Id> {
                     // valid answer, just not a cross-group-aware one; this
                     // group also contributes no Share collapse to its own
                     // children (see `multiplier`'s `_ => effective` arm).
-                    None => rank_group(group, cost_model).into_iter().next(),
+                    None => rank_group(group, cost_model).into_iter().find(|candidate| {
+                        cost_model
+                            .candidate_cost(
+                                candidate,
+                                &TargetSubDAG::with_consumer_count(&group.target, effective),
+                            )
+                            .is_some()
+                    }),
                 }
             } else {
+                let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
                 rank_group(group, cost_model)
                     .into_iter()
-                    .find(|candidate| !is_cse_candidate(candidate))
-                    .or_else(|| cse_candidate_pair(group).map(|(share, _)| share))
+                    .find(|candidate| {
+                        !is_cse_candidate(candidate)
+                            && cost_model
+                                .candidate_cost(candidate, &effective_target)
+                                .is_some()
+                    })
+                    .or_else(|| {
+                        cse_candidate_pair(group)
+                            .map(|(share, _)| share)
+                            .filter(|candidate| {
+                                cost_model
+                                    .candidate_cost(candidate, &effective_target)
+                                    .is_some()
+                            })
+                    })
             };
 
             let outgoing_multiplier = multiplier(*ptr, &effective_uses, &chosen_share);
@@ -3510,6 +3664,32 @@ pub fn default_strategies_with<'a>(
         Box::new(HydraGroupingStrategy::new(cost_model)),
         Box::new(SharedSubtreeStrategy),
         Box::new(crate::rewrite::SemanticEquivalentRewriteStrategy),
+    ]
+}
+
+/// Default context-free strategies with both deployment costing and typed
+/// planning-time accuracy evidence. This is the production counterpart of
+/// constructing [`SketchAlgorithmStrategy::with_models_and_evidence`] and
+/// [`HydraGroupingStrategy::with_models_and_evidence`] separately.
+pub fn default_strategies_with_evidence<'a>(
+    cost_model: &'a dyn CostModel,
+    evidence: &'a dyn AccuracyEvidenceProvider,
+) -> Vec<Box<dyn ReplacementStrategy + 'a>> {
+    vec![
+        Box::new(SketchAlgorithmStrategy::with_models_and_evidence(
+            cost_model,
+            &DEFAULT_ACCURACY_MODEL,
+            &DEFAULT_ALLOCATOR,
+            evidence,
+        )),
+        Box::new(HydraGroupingStrategy::with_models_and_evidence(
+            cost_model,
+            &DEFAULT_ACCURACY_MODEL,
+            &DEFAULT_ALLOCATOR,
+            evidence,
+        )),
+        Box::new(SharedSubtreeStrategy),
+        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
     ]
 }
 
@@ -6603,6 +6783,87 @@ mod tests {
                     g.metric == ErrorMetric::TopKMembership
                         && g.failure_probability.evaluate() == Some(0.005))
         )));
+    }
+
+    #[test]
+    fn count_ranked_topk_fuses_to_one_global_heap_sketch() {
+        let inner = agg(
+            vec![2],
+            AggIntent::Count {
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            metric_scan(&["service"]),
+        );
+        let outer = Rc::new(agg(
+            vec![],
+            AggIntent::TopK {
+                k: 10,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            inner,
+        ));
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &SeparatedTopKEvidence,
+        );
+        let candidates = strategy.replacements(&TargetSubDAG::new(&outer));
+        let node = candidates
+            .iter()
+            .find_map(|candidate| match &candidate.replacement {
+                Replacement::Summary(node) if candidate.rationale.contains("CmsWithHeap") => {
+                    Some(node)
+                }
+                _ => None,
+            })
+            .expect("CMSWithHeap candidate");
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr else {
+            panic!("expected Top-K readout")
+        };
+        let SummaryExpr::SummaryAgg {
+            child, family, col, ..
+        } = &summary_input.expr
+        else {
+            panic!("expected fused summary aggregation")
+        };
+        assert!(matches!(
+            family,
+            SummaryFamilyType::Sketch(kind, _)
+                if kind.algorithm() == &SketchAlgorithm::CmsWithHeap
+        ));
+        assert_eq!(col, &ColumnRef::Named("service".into()));
+        assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(_)));
+    }
+
+    #[test]
+    fn unsupported_count_ranked_topk_key_shape_does_not_use_direct_binding() {
+        // A heap sketch needs one represented key. Until SummaryAgg can carry
+        // an encoded tuple key, a two-column GROUP BY must not fall through to
+        // the ordinary path and summarize the inner Count output instead.
+        let inner = agg(
+            vec![2, 3],
+            AggIntent::Count {
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            metric_scan(&["service", "region"]),
+        );
+        let outer = Rc::new(agg(
+            vec![],
+            AggIntent::TopK {
+                k: 10,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            inner,
+        ));
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &SeparatedTopKEvidence,
+        );
+
+        assert!(strategy.replacements(&TargetSubDAG::new(&outer)).is_empty());
     }
 
     #[test]
