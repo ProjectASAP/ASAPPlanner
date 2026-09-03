@@ -1,9 +1,9 @@
 //! Evidence-backed physical-plan costing at the planner selection boundary.
 
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use asap_types::post_asap::{SketchAlgorithm, SummaryExpr, SummaryNode};
-use asap_types::pre_asap::AggIntent;
+use asap_types::pre_asap::{AggIntent, QueryExpr};
 
 use crate::analytical_cost::{
     estimate_physical_dag_comparison, AnalyticalCostError, PhysicalDagComparisonEstimate,
@@ -17,6 +17,18 @@ use crate::analytical_statistics::ComparisonScope;
 use crate::cost_model::{Cost, CostModel, DefaultCostModel};
 use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
 
+/// One immutable generation of deployment evidence for a planner target.
+///
+/// The opaque version lets a provider bind every subsequent query and summary
+/// lookup to the same catalog/runtime snapshot. A cost-model instance retains
+/// this value for the target, so a caller that needs fresher evidence creates a
+/// new model instead of mixing generations in one ranking decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannerEvidenceSnapshot {
+    pub version: String,
+    pub scope: ComparisonScope,
+}
+
 /// Deployment evidence needed to price one planner alternative.
 ///
 /// The planner lowers raw queries and logical rewrites itself. A deployment
@@ -26,21 +38,23 @@ use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
 /// choices; that binder must return the complete summary DAG, including any
 /// embedded `KeepPreAsap` work.
 pub trait PlannerPhysicalPlanProvider {
-    fn comparison_scope(
+    /// Atomically captures the comparison scope and evidence generation.
+    fn capture_evidence_snapshot(
         &self,
         target: &TargetSubDAG<'_>,
-    ) -> Result<ComparisonScope, AnalyticalCostError>;
+    ) -> Result<PlannerEvidenceSnapshot, AnalyticalCostError>;
 
     fn query_node_evidence(
         &self,
+        snapshot: &PlannerEvidenceSnapshot,
         request: PhysicalNodeRequest<'_>,
     ) -> Result<PhysicalNodeEvidence, AnalyticalCostError>;
 
     fn summary_physical_dag(
         &self,
+        snapshot: &PlannerEvidenceSnapshot,
         summary: &Rc<SummaryNode>,
         target: &TargetSubDAG<'_>,
-        scope: &ComparisonScope,
     ) -> Result<PhysicalDag, AnalyticalCostError>;
 }
 
@@ -61,6 +75,14 @@ pub struct PlannerCandidateEstimate {
 pub struct AnalyticalPlannerCostModel<'a> {
     provider: &'a dyn PlannerPhysicalPlanProvider,
     calibration: ResourceCalibration,
+    target_evidence: RefCell<Vec<CachedTargetEvidence>>,
+}
+
+struct CachedTargetEvidence {
+    root: Rc<QueryExpr>,
+    consumer_count: usize,
+    snapshot: PlannerEvidenceSnapshot,
+    raw: PhysicalDag,
 }
 
 impl<'a> AnalyticalPlannerCostModel<'a> {
@@ -72,7 +94,41 @@ impl<'a> AnalyticalPlannerCostModel<'a> {
         Ok(Self {
             provider,
             calibration,
+            target_evidence: RefCell::new(Vec::new()),
         })
+    }
+
+    fn target_evidence(
+        &self,
+        target: &TargetSubDAG<'_>,
+    ) -> Result<(PlannerEvidenceSnapshot, PhysicalDag), AnalyticalCostError> {
+        if let Some(cached) = self.target_evidence.borrow().iter().find(|cached| {
+            Rc::ptr_eq(&cached.root, target.root) && cached.consumer_count == target.consumer_count
+        }) {
+            return Ok((cached.snapshot.clone(), cached.raw.clone()));
+        }
+
+        let snapshot = self.provider.capture_evidence_snapshot(target)?;
+        if snapshot.version.is_empty() {
+            return Err(AnalyticalCostError::MissingOrStale(
+                "planner_evidence_snapshot.version",
+            ));
+        }
+        snapshot.scope.validate()?;
+        let evidence = QueryEvidence {
+            provider: self.provider,
+            snapshot: &snapshot,
+        };
+        let raw = lower_query_physical_dag(target.root, &snapshot.scope, &evidence)?;
+        self.target_evidence
+            .borrow_mut()
+            .push(CachedTargetEvidence {
+                root: Rc::clone(target.root),
+                consumer_count: target.consumer_count,
+                snapshot: snapshot.clone(),
+                raw: raw.clone(),
+            });
+        Ok((snapshot, raw))
     }
 
     pub fn estimate_candidate(
@@ -80,41 +136,34 @@ impl<'a> AnalyticalPlannerCostModel<'a> {
         candidate: &ReplacementSubDAG,
         target: &TargetSubDAG<'_>,
     ) -> Result<PlannerCandidateEstimate, AnalyticalCostError> {
-        struct QueryEvidence<'a>(&'a dyn PlannerPhysicalPlanProvider);
-        impl PhysicalNodeEvidenceProvider for QueryEvidence<'_> {
-            fn evidence(
-                &self,
-                request: PhysicalNodeRequest<'_>,
-            ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
-                self.0.query_node_evidence(request)
-            }
-        }
-
-        let scope = self.provider.comparison_scope(target)?;
-        let evidence = QueryEvidence(self.provider);
-        let raw = lower_query_physical_dag(target.root, &scope, &evidence)?;
+        let (snapshot, raw) = self.target_evidence(target)?;
+        let scope = &snapshot.scope;
+        let evidence = QueryEvidence {
+            provider: self.provider,
+            snapshot: &snapshot,
+        };
         let replacement = match &candidate.replacement {
-            Replacement::Rewrite(query) => lower_query_physical_dag(query, &scope, &evidence)?,
+            Replacement::Rewrite(query) => lower_query_physical_dag(query, scope, &evidence)?,
             Replacement::Summary(summary) => match &summary.expr {
                 SummaryExpr::KeepPreAsap(query) => {
-                    lower_query_physical_dag(query, &scope, &evidence)?
+                    lower_query_physical_dag(query, scope, &evidence)?
                 }
                 _ => self
                     .provider
-                    .summary_physical_dag(summary, target, &scope)?,
+                    .summary_physical_dag(&snapshot, summary, target)?,
             },
         };
         let resources = estimate_physical_dag_comparison(
             PhysicalDagEstimateRequest {
                 nodes: &raw.nodes,
                 root: &raw.root,
-                scope: &scope,
+                scope,
                 statistics: &raw,
             },
             PhysicalDagEstimateRequest {
                 nodes: &replacement.nodes,
                 root: &replacement.root,
-                scope: &scope,
+                scope,
                 statistics: &replacement,
             },
         )?;
@@ -125,6 +174,20 @@ impl<'a> AnalyticalPlannerCostModel<'a> {
             raw_cost,
             candidate_cost,
         })
+    }
+}
+
+struct QueryEvidence<'a> {
+    provider: &'a dyn PlannerPhysicalPlanProvider,
+    snapshot: &'a PlannerEvidenceSnapshot,
+}
+
+impl PhysicalNodeEvidenceProvider for QueryEvidence<'_> {
+    fn evidence(
+        &self,
+        request: PhysicalNodeRequest<'_>,
+    ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
+        self.provider.query_node_evidence(self.snapshot, request)
     }
 }
 
@@ -163,6 +226,7 @@ impl CostModel for AnalyticalPlannerCostModel<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::collections::HashMap;
 
     use asap_types::pre_asap::{Column, DataType, QueryExpr, Reduction, Schema, Source};
@@ -244,9 +308,20 @@ mod tests {
     struct TestProvider {
         summary_available: bool,
         candidate_scan_bytes: u64,
+        snapshot_calls: Cell<u64>,
+        raw_evidence_calls: Cell<u64>,
     }
 
     impl TestProvider {
+        fn new(summary_available: bool, candidate_scan_bytes: u64) -> Self {
+            Self {
+                summary_available,
+                candidate_scan_bytes,
+                snapshot_calls: Cell::new(0),
+                raw_evidence_calls: Cell::new(0),
+            }
+        }
+
         fn summary_dag(&self, scope: &ComparisonScope) -> PhysicalDag {
             let scan_statistics = statistics(
                 self.candidate_scan_bytes,
@@ -321,17 +396,25 @@ mod tests {
     }
 
     impl PlannerPhysicalPlanProvider for TestProvider {
-        fn comparison_scope(
+        fn capture_evidence_snapshot(
             &self,
             _target: &TargetSubDAG<'_>,
-        ) -> Result<ComparisonScope, AnalyticalCostError> {
-            Ok(scope())
+        ) -> Result<PlannerEvidenceSnapshot, AnalyticalCostError> {
+            self.snapshot_calls.set(self.snapshot_calls.get() + 1);
+            Ok(PlannerEvidenceSnapshot {
+                version: "test-snapshot-1".into(),
+                scope: scope(),
+            })
         }
 
         fn query_node_evidence(
             &self,
+            snapshot: &PlannerEvidenceSnapshot,
             request: PhysicalNodeRequest<'_>,
         ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
+            assert_eq!(snapshot.version, "test-snapshot-1");
+            self.raw_evidence_calls
+                .set(self.raw_evidence_calls.get() + 1);
             let (physical_id, mut statistics) = match request.operator {
                 PhysicalOperator::Scan => (
                     "raw-scan",
@@ -357,12 +440,13 @@ mod tests {
 
         fn summary_physical_dag(
             &self,
+            snapshot: &PlannerEvidenceSnapshot,
             _summary: &Rc<SummaryNode>,
             _target: &TargetSubDAG<'_>,
-            scope: &ComparisonScope,
         ) -> Result<PhysicalDag, AnalyticalCostError> {
+            assert_eq!(snapshot.version, "test-snapshot-1");
             self.summary_available
-                .then(|| self.summary_dag(scope))
+                .then(|| self.summary_dag(&snapshot.scope))
                 .ok_or(AnalyticalCostError::MissingOrStale("summary_physical_plan"))
         }
     }
@@ -384,10 +468,7 @@ mod tests {
             &crate::replacement::default_strategies(),
         );
         let planned_root = Rc::clone(&space.roots[0].1);
-        let provider = TestProvider {
-            summary_available: true,
-            candidate_scan_bytes: 800,
-        };
+        let provider = TestProvider::new(true, 800);
         let model = AnalyticalPlannerCostModel::new(&provider, calibration()).unwrap();
 
         let selected = space.global_selection(&model);
@@ -405,10 +486,7 @@ mod tests {
             &crate::replacement::default_strategies(),
         );
         let planned_root = Rc::clone(&space.roots[0].1);
-        let provider = TestProvider {
-            summary_available: false,
-            candidate_scan_bytes: 800,
-        };
+        let provider = TestProvider::new(false, 800);
         let model = AnalyticalPlannerCostModel::new(&provider, calibration()).unwrap();
 
         let selected = space.global_selection(&model);
@@ -422,27 +500,28 @@ mod tests {
     fn candidate_with_incomplete_scope_is_unavailable() {
         struct WrongScope(TestProvider);
         impl PlannerPhysicalPlanProvider for WrongScope {
-            fn comparison_scope(
+            fn capture_evidence_snapshot(
                 &self,
                 target: &TargetSubDAG<'_>,
-            ) -> Result<ComparisonScope, AnalyticalCostError> {
-                self.0.comparison_scope(target)
+            ) -> Result<PlannerEvidenceSnapshot, AnalyticalCostError> {
+                self.0.capture_evidence_snapshot(target)
             }
 
             fn query_node_evidence(
                 &self,
+                snapshot: &PlannerEvidenceSnapshot,
                 request: PhysicalNodeRequest<'_>,
             ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
-                self.0.query_node_evidence(request)
+                self.0.query_node_evidence(snapshot, request)
             }
 
             fn summary_physical_dag(
                 &self,
+                snapshot: &PlannerEvidenceSnapshot,
                 summary: &Rc<SummaryNode>,
                 target: &TargetSubDAG<'_>,
-                scope: &ComparisonScope,
             ) -> Result<PhysicalDag, AnalyticalCostError> {
-                let mut dag = self.0.summary_physical_dag(summary, target, scope)?;
+                let mut dag = self.0.summary_physical_dag(snapshot, summary, target)?;
                 dag.nodes[0].source_coverage.as_mut().unwrap().snapshot_id = "other".into();
                 Ok(dag)
             }
@@ -451,10 +530,7 @@ mod tests {
         let root = query();
         let candidates = crate::replacement::SketchAlgorithmStrategy::default_cost_model()
             .replacements(&TargetSubDAG::new(&root));
-        let provider = WrongScope(TestProvider {
-            summary_available: true,
-            candidate_scan_bytes: 800,
-        });
+        let provider = WrongScope(TestProvider::new(true, 800));
         let model = AnalyticalPlannerCostModel::new(&provider, calibration()).unwrap();
         assert_eq!(
             model.candidate_cost(&candidates[0], &TargetSubDAG::new(&root)),
@@ -470,13 +546,31 @@ mod tests {
             &crate::replacement::default_strategies(),
         );
         let planned_root = Rc::clone(&space.roots[0].1);
-        let provider = TestProvider {
-            summary_available: true,
-            candidate_scan_bytes: 100_000,
-        };
+        let provider = TestProvider::new(true, 100_000);
         let model = AnalyticalPlannerCostModel::new(&provider, calibration()).unwrap();
 
         let selected = space.global_selection(&model);
         assert!(selected.for_target(&planned_root).unwrap().chosen.is_none());
+    }
+
+    #[test]
+    fn sibling_candidates_share_one_scope_and_raw_baseline() {
+        let root = query();
+        let candidates = crate::replacement::SketchAlgorithmStrategy::default_cost_model()
+            .replacements(&TargetSubDAG::new(&root));
+        assert!(candidates.len() >= 2);
+        let provider = TestProvider::new(true, 800);
+        let model = AnalyticalPlannerCostModel::new(&provider, calibration()).unwrap();
+        let target = TargetSubDAG::new(&root);
+
+        model.estimate_candidate(&candidates[0], &target).unwrap();
+        model.estimate_candidate(&candidates[1], &target).unwrap();
+
+        assert_eq!(provider.snapshot_calls.get(), 1);
+        assert_eq!(
+            provider.raw_evidence_calls.get(),
+            2,
+            "the scan and aggregate evidence for the raw baseline are captured once"
+        );
     }
 }
