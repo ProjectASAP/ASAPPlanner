@@ -38,6 +38,80 @@ ResourceEstimate {
 - `scan_bytes` is source/disk data read, not logical consumption of an
   already-materialized in-memory edge.
 
+### Terms used by this document
+
+The following terms are part of the model, rather than assumptions that a
+reader must recover from the implementation:
+
+| Term | Definition |
+|---|---|
+| Comparison horizon | One finite interval `[start, end)` over which every alternative is charged. |
+| Evaluation | One invocation of the query during that interval. |
+| `evaluation_count` | The finite number of evaluations in the comparison horizon, derived from query recurrence. |
+| Physical node | One executable operator instance in the selected physical DAG. |
+| Physical identity | The node ID used to recognize one shared physical operator reached through multiple DAG paths. |
+| Local operator estimate | The CPU, transient memory, retained memory, and source reads caused by one execution of a node, excluding its children. |
+| Execution multiplicity | Whether that local estimate is incurred once in the horizon or once for every query evaluation. |
+
+Execution multiplicity has exactly two values:
+
+| Value | Executions in one comparison horizon | Typical use |
+|---|---:|---|
+| `Once` | `1` | Bootstrap/build work whose result is retained for later reads. |
+| `PerEvaluation` | `evaluation_count` | Raw recomputation or query-side work repeated for every invocation. |
+
+`Once` means once **within the comparison horizon**, not once for the lifetime
+of a process or deployment. `PerEvaluation` means once per query invocation,
+not once per input row, grouping key, DAG edge, or consumer. Per-row work is
+already represented by the operator's local formula; active-window fan-out and
+the number of physical summary instances are separate inputs.
+
+For physical node `n`, define:
+
+```text
+executions(n) = 1                         if n.execution = Once
+              = evaluation_count          if n.execution = PerEvaluation
+
+total_cpu_ops  = sum(local_cpu_ops(n) * executions(n))
+total_scan     = sum(local_scan_bytes(n) * executions(n))
+```
+
+Memory is not multiplied by `executions(n)`. `peak_memory_bytes` is the maximum
+simultaneously live memory found by the DAG schedule. Transient state from
+sequential evaluations can be reused, while state declared as retained remains
+live across later reads.
+
+Execution and retention are independent declarations, with two necessary
+consistency rules. A `PerEvaluation` node cannot retain state across the
+horizon. A `PerEvaluation` parent may consume a `Once` child only when that
+child retains the produced state; otherwise later evaluations would read a
+build result that no longer exists. Missing or contradictory declarations make
+the candidate unavailable.
+
+For example, suppose a fixed source snapshot is queried 12 times in the
+horizon. Let one source scan cost `C_scan` CPU operations and `B` source bytes,
+one raw aggregate cost `C_agg`, a retained-summary build cost `C_build`, and one
+summary read cost `C_read`:
+
+```text
+raw plan:
+  Scan       PerEvaluation
+  Aggregate  PerEvaluation
+  cpu_ops   = 12 * (C_scan + C_agg)
+  scan_bytes = 12 * B
+
+retained-summary plan:
+  Scan          Once
+  SummaryBuild  Once            // produces retained state
+  SummaryRead   PerEvaluation
+  cpu_ops   = C_scan + C_build + 12 * C_read
+  scan_bytes = B
+```
+
+The comparison does not assume that the retained-summary plan is cheaper. It
+only shows where repetition is charged; concrete operator formulas, summary
+parameters, memory, and calibration determine the winner.
+
 ## Canonical workload and evidence sources
 
 The cost model does not define a second workload schema. It consumes the
