@@ -231,6 +231,10 @@ function buildCyStyle() {
     },
     ...categoryStyles,
     {
+      selector: 'node[category = "unknown"]',
+      style: { 'border-style': 'dashed', 'border-width': 3 },
+    },
+    {
       // KeepPreAsap (post-ASAP lane only) is post-ASAP-only
       // as a *kind*, but represents literally unchanged pre-ASAP content —
       // override the 'summary' category's color/icon with the same neutral

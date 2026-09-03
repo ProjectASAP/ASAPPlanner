@@ -8,6 +8,8 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/rust.yml'
+      # The types tests validate the viewer's exported-kind contract.
+      - 'tools/dag-viewer/**'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [ main ]
@@ -16,6 +18,8 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/rust.yml'
+      # The types tests validate the viewer's exported-kind contract.
+      - 'tools/dag-viewer/**'
   workflow_dispatch:
 
 concurrency:
