@@ -80,6 +80,9 @@ pub struct OperatorInputs {
     /// hash aggregation because one 8-byte value is not universal.
     pub aggregate_value_bytes: Option<u64>,
     pub k: Option<u64>,
+    /// Rows actually consumed by a physical Limit, including rows skipped by
+    /// OFFSET. This is distinct from `output_rows`.
+    pub limit_rows_consumed: Option<u64>,
     pub right_rows: Option<u64>,
     pub right_bytes: Option<u64>,
     pub hash_join_build_side: Option<HashJoinBuildSide>,
@@ -321,10 +324,11 @@ pub fn estimate_operator(
         },
         PhysicalOperator::TopK => {
             let k = input.k.ok_or(AnalyticalCostError::MissingOrZero("k"))?;
+            let heap_rows = k.min(input.input_rows);
             ResourceEstimate {
-                cpu_ops: input.input_rows as f64 * (k.max(2) as f64).log2().ceil(),
+                cpu_ops: input.input_rows as f64 * (heap_rows.max(2) as f64).log2().ceil(),
                 peak_memory_bytes: checked_bytes(&[
-                    k.min(input.input_rows),
+                    heap_rows,
                     per_row_width(input.input_rows, input.input_bytes)?,
                 ])?,
                 scan_bytes: 0,
@@ -343,9 +347,15 @@ pub fn estimate_operator(
             ResourceEstimate {
                 cpu_ops: input.input_rows as f64 + right_rows as f64 + input.output_rows as f64,
                 peak_memory_bytes: match build_side {
-                    HashJoinBuildSide::Left => input.input_bytes,
-                    HashJoinBuildSide::Right => right_bytes,
-                },
+                    HashJoinBuildSide::Left => input
+                        .input_rows
+                        .checked_mul(16)
+                        .and_then(|metadata| input.input_bytes.checked_add(metadata)),
+                    HashJoinBuildSide::Right => right_rows
+                        .checked_mul(16)
+                        .and_then(|metadata| right_bytes.checked_add(metadata)),
+                }
+                .ok_or(AnalyticalCostError::Overflow)?,
                 scan_bytes: 0,
             }
         }
@@ -354,11 +364,21 @@ pub fn estimate_operator(
             peak_memory_bytes: per_row_width(input.output_rows, input.output_bytes)?,
             scan_bytes: 0,
         },
-        PhysicalOperator::Limit => ResourceEstimate {
-            cpu_ops: input.output_rows as f64,
-            peak_memory_bytes: per_row_width(input.output_rows, input.output_bytes)?,
-            scan_bytes: 0,
-        },
+        PhysicalOperator::Limit => {
+            let consumed = input
+                .limit_rows_consumed
+                .ok_or(AnalyticalCostError::MissingOrZero("limit_rows_consumed"))?;
+            if consumed > input.input_rows || consumed < input.output_rows {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "Limit rows consumed must cover its output without exceeding its input",
+                ));
+            }
+            ResourceEstimate {
+                cpu_ops: consumed as f64,
+                peak_memory_bytes: per_row_width(input.output_rows, input.output_bytes)?,
+                scan_bytes: 0,
+            }
+        }
     };
     if estimate.cpu_ops.is_finite() {
         Ok(estimate)
@@ -396,6 +416,8 @@ pub enum AnalyticalCostError {
     Overflow,
     #[error("invalid physical DAG: {0}")]
     InvalidPhysicalDag(&'static str),
+    #[error("inconsistent physical operator statistics: {0}")]
+    InconsistentOperatorStatistics(&'static str),
 }
 
 fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
@@ -422,6 +444,7 @@ mod tests {
                 key_bytes: None,
                 aggregate_value_bytes: None,
                 k: None,
+                limit_rows_consumed: None,
                 right_rows: None,
                 right_bytes: None,
                 hash_join_build_side: None,
@@ -441,6 +464,7 @@ mod tests {
                 key_bytes: None,
                 aggregate_value_bytes: None,
                 k: Some(10),
+                limit_rows_consumed: None,
                 right_rows: None,
                 right_bytes: None,
                 hash_join_build_side: None,
@@ -462,6 +486,7 @@ mod tests {
                 key_bytes: None,
                 aggregate_value_bytes: None,
                 k: None,
+                limit_rows_consumed: None,
                 right_rows: None,
                 right_bytes: None,
                 hash_join_build_side: None,
@@ -483,6 +508,7 @@ mod tests {
                 key_bytes: None,
                 aggregate_value_bytes: None,
                 k: None,
+                limit_rows_consumed: None,
                 right_rows: Some(10),
                 right_bytes: Some(1_280),
                 hash_join_build_side: None,
@@ -504,13 +530,14 @@ mod tests {
                 key_bytes: None,
                 aggregate_value_bytes: None,
                 k: None,
+                limit_rows_consumed: None,
                 right_rows: Some(10),
                 right_bytes: Some(1_280),
                 hash_join_build_side: Some(HashJoinBuildSide::Left),
             },
         )
         .unwrap();
-        assert_eq!(build_left.peak_memory_bytes, 64_000);
+        assert_eq!(build_left.peak_memory_bytes, 80_000);
 
         let aggregate = estimate_operator(
             PhysicalOperator::HashAggregate,
@@ -523,6 +550,7 @@ mod tests {
                 key_bytes: Some(16),
                 aggregate_value_bytes: Some(24),
                 k: None,
+                limit_rows_consumed: None,
                 right_rows: None,
                 right_bytes: None,
                 hash_join_build_side: None,
@@ -530,6 +558,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(aggregate.peak_memory_bytes, 5_600);
+
+        let oversized_topk = estimate_operator(
+            PhysicalOperator::TopK,
+            OperatorInputs {
+                input_rows: 4,
+                input_bytes: 160,
+                output_rows: 4,
+                output_bytes: 160,
+                group_count: None,
+                key_bytes: None,
+                aggregate_value_bytes: None,
+                k: Some(1_000),
+                limit_rows_consumed: None,
+                right_rows: None,
+                right_bytes: None,
+                hash_join_build_side: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(oversized_topk.cpu_ops, 8.0);
+
+        let offset_limit = estimate_operator(
+            PhysicalOperator::Limit,
+            OperatorInputs {
+                input_rows: 1_000_000,
+                input_bytes: 40_000_000,
+                output_rows: 10,
+                output_bytes: 400,
+                group_count: None,
+                key_bytes: None,
+                aggregate_value_bytes: None,
+                k: None,
+                limit_rows_consumed: Some(900_010),
+                right_rows: None,
+                right_bytes: None,
+                hash_join_build_side: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(offset_limit.cpu_ops, 900_010.0);
     }
 
     #[test]
@@ -543,6 +611,7 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            limit_rows_consumed: None,
             right_rows: None,
             right_bytes: None,
             hash_join_build_side: None,
@@ -608,6 +677,7 @@ mod tests {
                     key_bytes: None,
                     aggregate_value_bytes: None,
                     k: None,
+                    limit_rows_consumed: None,
                     right_rows: None,
                     right_bytes: None,
                     hash_join_build_side: None,
@@ -629,6 +699,7 @@ mod tests {
                     key_bytes: Some(8),
                     aggregate_value_bytes: Some(8),
                     k: None,
+                    limit_rows_consumed: None,
                     right_rows: None,
                     right_bytes: None,
                     hash_join_build_side: None,
@@ -650,6 +721,7 @@ mod tests {
                     key_bytes: None,
                     aggregate_value_bytes: None,
                     k: None,
+                    limit_rows_consumed: Some(1),
                     right_rows: None,
                     right_bytes: None,
                     hash_join_build_side: None,

@@ -175,11 +175,11 @@ the DAG rules above.
 | Hash aggregate | `input_rows` | `groups × (key + aggregate_value_bytes + hash metadata)` | `0` |
 | Deduplicate | `input_rows` | keyed hash state | `0` |
 | In-memory sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
-| Heap Top-K | `rows × ceil(log2(max(k, 2)))` | `min(k, rows) × row_bytes` | `0` |
-| Hash join | `left_rows + right_rows + output_rows` | explicitly selected build-side bytes | `0` beyond children |
+| Heap Top-K | `rows × ceil(log2(max(min(k, rows), 2)))` | `min(k, rows) × row_bytes` | `0` |
+| Hash join | `left_rows + right_rows + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
 | Concat | `output_rows` | one output row/batch | `0` |
 | Ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
-| Limit | `output_rows` | one output row/batch | `0` |
+| Limit | `limit_rows_consumed` (including `OFFSET`) | one output row/batch | `0` |
 
 These formulas name physical implementations. An external sort must add
 spill writes and reads; a nested-loop join must not use the hash-join formula.
