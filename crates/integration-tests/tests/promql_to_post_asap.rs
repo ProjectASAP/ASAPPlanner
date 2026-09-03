@@ -10,7 +10,8 @@ use std::rc::Rc;
 
 use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+    search_workload, Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy,
+    TargetSubDAG,
 };
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
@@ -205,4 +206,53 @@ fn promql_exact_workload_binds_accumulators_not_sketches() {
         matches!(root.expr, SummaryExpr::KeepPreAsap(_)),
         "avg has no mergeable accumulator — stays logical"
     );
+}
+
+#[test]
+fn promql_sum_of_count_over_time_is_composed_by_default_search() {
+    let original = Rc::new(
+        lower_promql(
+            "sum by (service) (count_over_time(metrics[5m]))",
+            AccuracyTarget::Exact,
+        )
+        .expect("lowering failed"),
+    );
+    let original_schema = original.output_schema().unwrap();
+    let space = search_workload(vec![("query", original)]);
+    let root = &space.roots[0].1;
+    let group = space.group_for(root).expect("root memo group");
+    let candidate = group
+        .candidates
+        .iter()
+        .find(|candidate| candidate.strategy == "SemanticEquivalentRewriteStrategy")
+        .expect("default search should compose the lowered PromQL query");
+    let Replacement::Rewrite(rewritten) = &candidate.replacement else {
+        panic!("expected logical rewrite")
+    };
+
+    assert_eq!(rewritten.output_schema().unwrap(), original_schema);
+    let QueryExpr::Project { child, .. } = rewritten.as_ref() else {
+        panic!("sum(count_over_time) needs a Float64 cast Project")
+    };
+    let QueryExpr::Aggregate {
+        reduction: Reduction::Reduce(by),
+        measures,
+        child,
+        ..
+    } = child.as_ref()
+    else {
+        panic!("expected one composed aggregate")
+    };
+    assert_eq!(by.keys(), &[2]);
+    assert!(matches!(
+        measures.as_slice(),
+        [asap_types::pre_asap::AggIntent::Count {
+            accuracy: AccuracyTarget::Exact
+        }]
+    ));
+    assert!(matches!(
+        child.as_ref(),
+        QueryExpr::TimeRange { range, child }
+            if range.as_secs() == 300 && matches!(child.as_ref(), QueryExpr::Scan { .. })
+    ));
 }

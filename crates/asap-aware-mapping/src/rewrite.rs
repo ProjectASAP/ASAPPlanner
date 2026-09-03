@@ -1,4 +1,5 @@
-//! [`AvgToSumOverCountStrategy`] — semantic-equivalent query rewriting,
+//! [`SemanticEquivalentRewriteStrategy`] — algebraic, semantic-equivalent
+//! query rewriting,
 //! the third bullet in `docs/design_docs/asap_aware_mapping.md`'s "Degrees of freedom"
 //! section: "Semantic-equivalent rewriting (e.g. `avg` → `sum`/`count`) to
 //! increase how often the [sharing/sketch] optimizations above apply"
@@ -206,6 +207,95 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
     }))
 }
 
+/// Compose adjacent per-entity and cross-entity accumulators when their
+/// algebra, rather than a query-language spelling, proves equivalence.
+fn composed_aggregate_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
+    let original_schema = root.output_schema().ok()?;
+    let QueryExpr::Aggregate {
+        reduction: outer_reduction @ Reduction::Reduce(_),
+        measures: outer_measures,
+        output_names,
+        having: None,
+        child,
+    } = root.as_ref()
+    else {
+        return None;
+    };
+    let QueryExpr::Aggregate {
+        reduction: Reduction::PerEntity,
+        measures: inner_measures,
+        having: None,
+        child: inner_child,
+        ..
+    } = child.as_ref()
+    else {
+        return None;
+    };
+    let ([outer], [inner]) = (outer_measures.as_slice(), inner_measures.as_slice()) else {
+        return None;
+    };
+    let composed = match (outer, inner) {
+        (AggIntent::Sum { col: None }, AggIntent::Sum { .. })
+        | (AggIntent::Sum { col: None }, AggIntent::Count { .. })
+        | (AggIntent::Min { col: None }, AggIntent::Min { .. })
+        | (AggIntent::Max { col: None }, AggIntent::Max { .. }) => inner.clone(),
+        _ => return None,
+    };
+    let aggregate = Rc::new(QueryExpr::Aggregate {
+        reduction: outer_reduction.clone(),
+        measures: vec![composed],
+        output_names: output_names.clone(),
+        having: None,
+        child: Rc::clone(inner_child),
+    });
+
+    // The outer Sum sees PromQL's Float64 sample value, whereas the composed
+    // Count accumulator is Int64. Keep the original observable type.
+    let rewritten = if matches!(
+        (outer, inner),
+        (AggIntent::Sum { col: None }, AggIntent::Count { .. })
+    ) {
+        let Reduction::Reduce(by) = outer_reduction else {
+            unreachable!()
+        };
+        if by.is_without() {
+            return None;
+        }
+        let mut cols: Vec<ProjectItem> = (0..by.keys().len())
+            .map(|i| ProjectItem {
+                alias: None,
+                expr: QueryExpr::Column(i),
+            })
+            .collect();
+        cols.push(ProjectItem {
+            // PromQL deliberately supplies an empty output-name override. Use
+            // the already-derived caller-visible name instead of allowing
+            // Project to invent `col_N` and then failing schema equality.
+            alias: original_schema
+                .columns
+                .last()
+                .map(|column| column.name.clone()),
+            expr: QueryExpr::Cast {
+                expr: Rc::new(QueryExpr::Column(by.keys().len())),
+                to: DataType::Float64,
+                try_cast: false,
+            },
+        });
+        Rc::new(QueryExpr::Project {
+            cols,
+            qualifier: None,
+            child: aggregate,
+        })
+    } else {
+        aggregate
+    };
+
+    // Positional keys, aliases, types, and nullability are part of the rule's
+    // contract. A future schema change therefore disables rather than widens
+    // the rewrite.
+    (original_schema == rewritten.output_schema().ok()?).then_some(rewritten)
+}
+
 /// Rewrites `Aggregate{ measures: [Avg{col}], .. }` into the semantically
 /// equivalent pair of single-measure `Sum` and `Count` aggregates divided by
 /// a `BinaryOp` — see the module docs for why keeping the accumulators in
@@ -217,14 +307,27 @@ fn build_rewrite(root: &Rc<QueryExpr>) -> Option<Rc<QueryExpr>> {
 /// to hold a reference to — the same "no state needed" shape
 /// [`SharedSubtreeStrategy`] already has.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct AvgToSumOverCountStrategy;
+pub struct SemanticEquivalentRewriteStrategy;
 
-impl ReplacementStrategy for AvgToSumOverCountStrategy {
+/// Backward-compatible name for callers that registered the original, narrower
+/// average rewrite. It now denotes the same semantic-rewrite strategy.
+pub use SemanticEquivalentRewriteStrategy as AvgToSumOverCountStrategy;
+
+impl ReplacementStrategy for SemanticEquivalentRewriteStrategy {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
         avg_rewrite_target(target.root).is_some()
+            || composed_aggregate_rewrite(target.root).is_some()
     }
 
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
+        if let Some(rewritten) = composed_aggregate_rewrite(target.root) {
+            return vec![ReplacementSubDAG {
+                strategy: "SemanticEquivalentRewriteStrategy",
+                replacement: Replacement::Rewrite(rewritten),
+                provenance: crate::replacement::ReplacementProvenance::LogicalRewrite,
+                rationale: "compose compatible per-entity and cross-entity accumulators using their algebraic intent while preserving the original output schema".into(),
+            }];
+        }
         let Some(rewritten) = build_rewrite(target.root) else {
             return Vec::new();
         };
@@ -250,6 +353,7 @@ mod tests {
     use super::*;
     use asap_types::pre_asap::query_expr::Source;
     use asap_types::pre_asap::schema::{Column, Schema};
+    use std::time::Duration;
 
     fn metric_scan(labels: &[&str]) -> QueryExpr {
         let mut columns = vec![
@@ -583,5 +687,111 @@ mod tests {
 
         assert!(!AvgToSumOverCountStrategy.matches(&target));
         assert!(AvgToSumOverCountStrategy.replacements(&target).is_empty());
+    }
+
+    fn nested_aggregate(outer: AggIntent, inner: AggIntent) -> Rc<QueryExpr> {
+        let temporal = QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![inner],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(QueryExpr::TimeRange {
+                range: Duration::from_secs(300),
+                child: Rc::new(metric_scan(&["service"])),
+            }),
+        };
+        Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::by(vec![2]),
+            measures: vec![outer],
+            // Match the PromQL front end: an empty entry selects the intent's
+            // canonical output name rather than an explicit alias.
+            output_names: vec![String::new()],
+            having: None,
+            child: Rc::new(temporal),
+        })
+    }
+
+    #[test]
+    fn semantic_rewrite_composes_every_supported_aggregate_pair() {
+        let exact_count = AggIntent::Count {
+            accuracy: AccuracyTarget::Exact,
+        };
+        for (outer, inner) in [
+            (AggIntent::Sum { col: None }, AggIntent::Sum { col: None }),
+            (AggIntent::Sum { col: None }, exact_count),
+            (AggIntent::Min { col: None }, AggIntent::Min { col: None }),
+            (AggIntent::Max { col: None }, AggIntent::Max { col: None }),
+        ] {
+            let expected = inner.clone();
+            let original = nested_aggregate(outer, inner);
+            let candidates =
+                SemanticEquivalentRewriteStrategy.replacements(&TargetSubDAG::new(&original));
+            let [candidate] = candidates.as_slice() else {
+                panic!("supported pair should produce exactly one rewrite")
+            };
+            let Replacement::Rewrite(rewritten) = &candidate.replacement else {
+                panic!("expected a logical rewrite")
+            };
+            assert_eq!(
+                original.output_schema().unwrap(),
+                rewritten.output_schema().unwrap()
+            );
+            let aggregate = match rewritten.as_ref() {
+                QueryExpr::Aggregate { .. } => rewritten.as_ref(),
+                QueryExpr::Project { child, .. } => child.as_ref(),
+                other => panic!("expected Aggregate or cast Project, got {other:?}"),
+            };
+            let QueryExpr::Aggregate {
+                reduction: Reduction::Reduce(by),
+                measures,
+                child,
+                ..
+            } = aggregate
+            else {
+                panic!("expected composed cross-entity aggregate")
+            };
+            assert_eq!(by.keys(), &[2]);
+            assert_eq!(measures, &[expected]);
+            assert!(matches!(
+                child.as_ref(),
+                QueryExpr::TimeRange { range, child }
+                    if *range == Duration::from_secs(300)
+                        && matches!(child.as_ref(), QueryExpr::Scan { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn semantic_rewrite_rejects_non_composable_aggregate_pairs() {
+        for (outer, inner) in [
+            (AggIntent::Sum { col: None }, AggIntent::Min { col: None }),
+            (AggIntent::Avg { col: None }, AggIntent::Sum { col: None }),
+            (AggIntent::Min { col: None }, AggIntent::Max { col: None }),
+        ] {
+            let original = nested_aggregate(outer, inner);
+            assert!(composed_aggregate_rewrite(&original).is_none());
+        }
+    }
+
+    #[test]
+    fn default_search_discovers_promql_shaped_sum_count_composition() {
+        let root = nested_aggregate(
+            AggIntent::Sum { col: None },
+            AggIntent::Count {
+                accuracy: AccuracyTarget::Exact,
+            },
+        );
+        let space = crate::replacement::search_workload(vec![("sum-count", root)]);
+        let root = &space.roots[0].1;
+        let group = space.group_for(root).expect("root memo group");
+        let candidate = group
+            .candidates
+            .iter()
+            .find(|candidate| candidate.strategy == "SemanticEquivalentRewriteStrategy")
+            .expect("default search should run semantic rewrites");
+        let Replacement::Rewrite(rewritten) = &candidate.replacement else {
+            panic!("expected logical rewrite")
+        };
+        assert_eq!(rewritten.output_schema().unwrap().columns[1].name, "sum");
     }
 }
