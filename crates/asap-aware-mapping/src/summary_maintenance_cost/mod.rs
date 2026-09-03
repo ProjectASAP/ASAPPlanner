@@ -8,16 +8,19 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
+    BoundExpr, ErrorMetric, ExactKind, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
+    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
 };
 use asap_types::pre_asap::{
     agg_intent::AggIntent, CompareOpKind, InfoMatcher, Predicate, QueryExpr, Source,
 };
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand};
 use serde::{Deserialize, Serialize};
 
 use crate::analytical_cost::ExecutionMultiplicity;
+use crate::accuracy::{AccuracyModel, DefaultAccuracyModel};
 #[cfg(test)]
 use crate::analytical_cost::PhysicalNodeEvidence;
 use crate::analytical_cost::{

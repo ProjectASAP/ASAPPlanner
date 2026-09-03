@@ -587,6 +587,7 @@ impl SummaryMaintenanceCostModel {
         deployments: &[CostedSummaryDeployment<'_>],
         comparison: &StreamingTargetComparison,
         evidence: &StreamingNodeEvidence,
+        window_frameworks: &[Option<SummaryWindowFramework>],
     ) -> Option<Cost> {
         self.calibrated(
             estimate_heterogeneous_summary(
@@ -595,6 +596,7 @@ impl SummaryMaintenanceCostModel {
                 evidence,
                 &comparison.scope,
                 &comparison.raw,
+                window_frameworks,
             )
             .ok()?,
         )
@@ -713,9 +715,17 @@ impl CostModel for SummaryMaintenanceCostModel {
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
+        required_accuracy: &[AccuracyTarget],
     ) -> Option<Cost> {
-        self.complete_summary_candidate_estimate(root, target, deployments, horizon, expected_reads)
-            .map(|estimate| estimate.cost)
+        self.complete_summary_candidate_estimate(
+            root,
+            target,
+            deployments,
+            horizon,
+            expected_reads,
+            required_accuracy,
+        )
+        .map(|estimate| estimate.cost)
     }
 
     fn complete_summary_candidate_estimate(
@@ -725,6 +735,7 @@ impl CostModel for SummaryMaintenanceCostModel {
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
+        required_accuracy: &[AccuracyTarget],
     ) -> Option<CompleteSummaryCandidateEstimate> {
         let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
         if let Some(candidates) = self.window_framework_candidates.get(&key) {
@@ -732,6 +743,12 @@ impl CostModel for SummaryMaintenanceCostModel {
                 .iter()
                 .filter_map(|candidate| {
                     if candidate.assignments.len() != deployments.len() {
+                        return None;
+                    }
+                    if !candidate
+                        .accuracy
+                        .matches_assignments(&candidate.assignments)
+                    {
                         return None;
                     }
                     let window_frameworks = deployments
@@ -746,16 +763,31 @@ impl CostModel for SummaryMaintenanceCostModel {
                                 .map(|assignment| assignment.framework.clone())
                         })
                         .collect::<Option<Vec<_>>>()?;
+                    let uses_exponential_histogram = window_frameworks.iter().any(|framework| {
+                        matches!(
+                            framework,
+                            Some(SummaryWindowFramework::ExponentialHistogram)
+                        )
+                    });
+                    let window_accuracy_guarantee =
+                        candidate.accuracy.guarantee(uses_exponential_histogram)?;
+                    if !required_accuracy.iter().all(|target| {
+                        DefaultAccuracyModel.satisfies(&window_accuracy_guarantee, target)
+                    }) {
+                        return None;
+                    }
                     self.complete_cost_with_evidence(
                         root,
                         deployments,
                         comparison,
                         &candidate.node_evidence,
+                        &window_frameworks,
                     )
                     .map(|cost| CompleteSummaryCandidateEstimate {
                         cost,
                         physical_plan_id: Some(candidate.physical_plan_id.clone()),
                         window_frameworks,
+                        window_accuracy_guarantee: Some(window_accuracy_guarantee),
                     })
                 })
                 .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0));
@@ -769,22 +801,36 @@ impl CostModel for SummaryMaintenanceCostModel {
                         deployments,
                         comparison,
                         &alternative.node_evidence,
+                        &vec![None; deployments.len()],
                     )
                     .map(|cost| CompleteSummaryCandidateEstimate {
                         cost,
                         physical_plan_id: Some(alternative.physical_plan_id.clone()),
                         window_frameworks: vec![None; deployments.len()],
+                        window_accuracy_guarantee: None,
                     })
                 })
                 .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0));
         }
+        let frameworks = vec![None; deployments.len()];
         self
-            .complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
+            .complete_cost_with_evidence(
+                root,
+                deployments,
+                comparison,
+                &self.node_evidence,
+                &frameworks,
+            )
             .map(|cost| CompleteSummaryCandidateEstimate {
                 cost,
                 physical_plan_id: None,
-                window_frameworks: vec![None; deployments.len()],
+                window_frameworks: frameworks,
+                window_accuracy_guarantee: None,
             })
+    }
+
+    fn complete_summary_candidate_estimate_covers_lifecycle_costs(&self) -> bool {
+        true
     }
 
     fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
@@ -821,8 +867,19 @@ fn estimate_heterogeneous_summary(
     evidence: &StreamingNodeEvidence,
     scope: &ComparisonScope,
     raw: &StreamingRawInputEvidence,
+    window_frameworks: &[Option<SummaryWindowFramework>],
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
-    validate_summary_edges_and_physical_ids(root, evidence)?;
+    if window_frameworks.len() != deployments.len() {
+        return Err(AnalyticalCostError::ComparisonScopeMismatch(
+            "window framework assignments",
+        ));
+    }
+    let frameworks_by_node: HashMap<_, _> = deployments
+        .iter()
+        .zip(window_frameworks)
+        .map(|(deployment, framework)| (deployment.summary as *const _, framework))
+        .collect();
+    validate_summary_edges_and_physical_ids(root, evidence, &frameworks_by_node)?;
     fn summary_source_selections(
         node: &SummaryNode,
         seen: &mut HashSet<*const SummaryNode>,
@@ -869,6 +926,8 @@ fn estimate_heterogeneous_summary(
         (
             StreamingAggregateEvidence,
             SummaryMaintenanceLifecycleGuarantee,
+            String,
+            Option<SummaryWindowFramework>,
         ),
     >::new();
     for deployment in deployments {
@@ -924,12 +983,30 @@ fn estimate_heterogeneous_summary(
             }
         }
         validate_guarantee(deployment.guarantee, scope.data_arrival)?;
+        let logical_state = format!("{:?}", deployment.summary.expr);
+        let window_framework = (*frameworks_by_node
+            .get(&(deployment.summary as *const _))
+            .ok_or(AnalyticalCostError::MissingOrStale(
+                "window framework assignment",
+            ))?)
+        .clone();
         match physical_states.entry(node_evidence.physical_id.clone()) {
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert((node_evidence.clone(), deployment.guarantee.clone()));
+                entry.insert((
+                    node_evidence.clone(),
+                    deployment.guarantee.clone(),
+                    logical_state,
+                    window_framework,
+                ));
             }
             std::collections::hash_map::Entry::Occupied(entry)
-                if entry.get() != &(node_evidence.clone(), deployment.guarantee.clone()) =>
+                if entry.get()
+                    != &(
+                        node_evidence.clone(),
+                        deployment.guarantee.clone(),
+                        logical_state,
+                        window_framework,
+                    ) =>
             {
                 return Err(AnalyticalCostError::ComparisonScopeMismatch(
                     "summary physical identity",
@@ -1333,6 +1410,7 @@ fn add_operator_io(
 fn validate_summary_edges_and_physical_ids(
     root: &SummaryNode,
     evidence: &StreamingNodeEvidence,
+    frameworks_by_node: &HashMap<*const SummaryNode, &Option<SummaryWindowFramework>>,
 ) -> Result<(), AnalyticalCostError> {
     fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
         match &node.expr {
@@ -1394,6 +1472,7 @@ fn validate_summary_edges_and_physical_ids(
     fn visit(
         node: &SummaryNode,
         evidence: &StreamingNodeEvidence,
+        frameworks_by_node: &HashMap<*const SummaryNode, &Option<SummaryWindowFramework>>,
         seen: &mut HashSet<*const SummaryNode>,
         physical: &mut HashMap<String, (Vec<EdgeStatistics>, EdgeStatistics, String)>,
     ) -> Result<EdgeStatistics, AnalyticalCostError> {
@@ -1403,7 +1482,7 @@ fn validate_summary_edges_and_physical_ids(
         let child_nodes = children(node);
         let child_outputs = child_nodes
             .iter()
-            .map(|child| visit(child, evidence, seen, physical))
+            .map(|child| visit(child, evidence, frameworks_by_node, seen, physical))
             .collect::<Result<Vec<_>, _>>()?;
         let child_physical_ids = child_nodes
             .iter()
@@ -1425,7 +1504,11 @@ fn validate_summary_edges_and_physical_ids(
         // A provider identity names the complete physical operator, including
         // its inputs. Equal local widths/costs do not make operators consuming
         // different physical children the same deployment.
-        let fingerprint = format!("{local_fingerprint}|children={child_physical_ids:?}");
+        let framework = frameworks_by_node.get(&(node as *const _));
+        let fingerprint = format!(
+            "logical={:?}|framework={framework:?}|{local_fingerprint}|children={child_physical_ids:?}",
+            node.expr
+        );
         if id.is_empty()
             || inputs != child_outputs
             || !output.is_consistent()
@@ -1450,7 +1533,14 @@ fn validate_summary_edges_and_physical_ids(
         }
         Ok(output)
     }
-    visit(root, evidence, &mut HashSet::new(), &mut HashMap::new()).map(|_| ())
+    visit(
+        root,
+        evidence,
+        frameworks_by_node,
+        &mut HashSet::new(),
+        &mut HashMap::new(),
+    )
+    .map(|_| ())
 }
 
 fn summary_physical_id(
@@ -2733,7 +2823,7 @@ mod tests {
             .insert(delete_ptr, unrelated_agg);
 
         let plan = plan_summary_maintenance_lifecycles(
-            root,
+            Rc::clone(&root),
             WorkloadDemand::new(&workload, &[0]),
             0,
             Some(Horizon(5.0)),
@@ -3145,7 +3235,14 @@ mod tests {
 
     #[test]
     fn planner_selects_an_abstract_window_framework_from_downstream_evidence() {
-        let workload = streaming_workload();
+        let mut workload = streaming_workload();
+        workload.repeating_queries.as_mut().unwrap()[0]
+            .requirements
+            .accuracy =
+            asap_types::workload::AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
+                epsilon: 0.10,
+                delta: 0.01,
+            });
         let target = streaming_sum_query();
         let root = summary_with_operations(false, false, false);
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
@@ -3183,6 +3280,7 @@ mod tests {
                     summary: Rc::clone(&windowed_summary),
                     framework: Some(SummaryWindowFramework::Tumbling),
                 }],
+                accuracy: StreamingWindowAccuracyEvidence::Exact,
                 node_evidence: tumbling,
             },
             StreamingWindowFrameworkCandidate {
@@ -3191,6 +3289,7 @@ mod tests {
                     summary: Rc::clone(&windowed_summary),
                     framework: Some(SummaryWindowFramework::Sliding),
                 }],
+                accuracy: StreamingWindowAccuracyEvidence::Exact,
                 node_evidence: sliding,
             },
             StreamingWindowFrameworkCandidate {
@@ -3199,6 +3298,13 @@ mod tests {
                     summary: Rc::clone(&windowed_summary),
                     framework: Some(SummaryWindowFramework::ExponentialHistogram),
                 }],
+                accuracy: StreamingWindowAccuracyEvidence::ExponentialHistogram(
+                    ExponentialHistogramAccuracyEvidence::UniversalGsum {
+                        epsilon: 0.05,
+                        failure_probability: 0.01,
+                        range: ExponentialHistogramQueryRange::MostRecentWindow,
+                    },
+                ),
                 node_evidence: exponential_histogram,
             },
         ] {
@@ -3206,9 +3312,13 @@ mod tests {
                 .bind_window_framework_candidate(&target, &root, candidate)
                 .unwrap();
         }
+        // Framework candidates are authoritative. Selection must not depend
+        // on duplicating one arbitrary implementation into the legacy global
+        // evidence map.
+        model.node_evidence = StreamingNodeEvidence::default();
 
         let plan = plan_summary_maintenance_lifecycles(
-            root,
+            Rc::clone(&root),
             WorkloadDemand::new(&workload, &[0]),
             0,
             Some(Horizon(5.0)),
@@ -3226,12 +3336,43 @@ mod tests {
             plan.deployments[0].selected_window_framework,
             Some(SummaryWindowFramework::ExponentialHistogram)
         );
+        let guarantee = plan.window_accuracy_guarantee.as_ref().unwrap();
+        assert_eq!(guarantee.metric, ErrorMetric::RelativeValue);
+        assert!((guarantee.bound.evaluate().unwrap() - 0.05).abs() < f64::EPSILON);
+        let exported =
+            crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan);
         assert_eq!(
-            crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan)
-                .deployments[0]
-                .selected_window_framework,
+            exported.deployments[0].selected_window_framework,
             Some(SummaryWindowFramework::ExponentialHistogram)
         );
+        assert_eq!(
+            exported.window_accuracy_guarantee.unwrap().metric,
+            ErrorMetric::RelativeValue
+        );
+
+        workload.repeating_queries.as_mut().unwrap()[0]
+            .requirements
+            .accuracy =
+            asap_types::workload::AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.01));
+        let stricter = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: false,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: true,
+            },
+            &model,
+        )
+        .unwrap();
+        assert_ne!(
+            stricter.deployments[0].selected_window_framework,
+            Some(SummaryWindowFramework::ExponentialHistogram)
+        );
+        assert!(stricter.window_accuracy_guarantee.unwrap().is_exact());
     }
 
     #[test]
@@ -3254,6 +3395,7 @@ mod tests {
                     summary: Rc::clone(&windowed_summary),
                     framework: Some(SummaryWindowFramework::Extension("  ".into())),
                 }],
+                accuracy: StreamingWindowAccuracyEvidence::Exact,
                 node_evidence: model.node_evidence.clone(),
             },
         );
@@ -3265,6 +3407,7 @@ mod tests {
                 summary: windowed_summary,
                 framework: Some(SummaryWindowFramework::Tumbling),
             }],
+            accuracy: StreamingWindowAccuracyEvidence::Exact,
             node_evidence: model.node_evidence.clone(),
         };
         model
@@ -3274,6 +3417,194 @@ mod tests {
             model.bind_window_framework_candidate(&target, &root, candidate),
             Err(AnalyticalCostError::ComparisonScopeMismatch(_))
         ));
+    }
+
+    #[test]
+    fn one_physical_identity_cannot_alias_different_window_frameworks() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_join();
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            unreachable!();
+        };
+        let SummaryExpr::SummaryJoin { outer, inner, .. } = &summary_input.expr else {
+            unreachable!();
+        };
+        let aggregation_nodes = [Rc::clone(outer), Rc::clone(inner)];
+        let (aggregations, joins) = evidence_nodes(&root);
+        model.node_evidence.joins.insert(
+            joins[0] as *const _,
+            SummaryJoinEvidence {
+                physical_id: "joined-readout".into(),
+                inputs: vec![test_edge(), test_edge()],
+                output: test_edge(),
+                matched_state_pairs_per_evaluation: 1,
+                cpu_ops_per_matched_pair: 1.0,
+                working_memory_bytes: 8,
+                output_buffer_bytes: 0,
+                executions_per_evaluation: 1,
+                io_bytes_per_execution: Some(0),
+            },
+        );
+
+        let mut shared_aggregation =
+            model.node_evidence.aggregations[&(aggregations[0] as *const _)].clone();
+        shared_aggregation.physical_id = "shared-window-state".into();
+        model
+            .node_evidence
+            .aggregations
+            .insert(aggregations[0] as *const _, shared_aggregation.clone());
+        model
+            .node_evidence
+            .aggregations
+            .insert(aggregations[1] as *const _, shared_aggregation);
+
+        let retained_children: Vec<_> = aggregation_nodes
+            .iter()
+            .map(|aggregate| match &aggregate.expr {
+                SummaryExpr::SummaryAgg { child, .. } => Rc::clone(child),
+                _ => unreachable!(),
+            })
+            .collect();
+        let mut shared_retained =
+            model.node_evidence.retained_queries[&Rc::as_ptr(&retained_children[0])].clone();
+        shared_retained.physical_id = "shared-retained-input".into();
+        for child in &retained_children {
+            model
+                .node_evidence
+                .retained_queries
+                .insert(Rc::as_ptr(child), shared_retained.clone());
+        }
+
+        let candidate = StreamingWindowFrameworkCandidate {
+            assignments: vec![
+                StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&aggregation_nodes[0]),
+                    framework: Some(SummaryWindowFramework::Tumbling),
+                },
+                StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&aggregation_nodes[1]),
+                    framework: Some(SummaryWindowFramework::Sliding),
+                },
+            ],
+            accuracy: StreamingWindowAccuracyEvidence::Exact,
+            node_evidence: model.node_evidence.clone(),
+        };
+        model
+            .bind_window_framework_candidate(&target, &root, candidate)
+            .unwrap();
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(plan.summary_total_cost, None);
+    }
+
+    #[test]
+    fn promsketch_eh_accuracy_composes_registered_full_and_subwindow_bounds() {
+        let full = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::KllRank {
+                eh_epsilon: 0.01,
+                kll_epsilon: 0.02,
+                failure_probability: 0.01,
+                range: ExponentialHistogramQueryRange::MostRecentWindow,
+            },
+        )
+        .guarantee(true)
+        .unwrap();
+        assert_eq!(full.metric, ErrorMetric::Rank);
+        assert!((full.bound.evaluate().unwrap() - 0.04).abs() < f64::EPSILON);
+
+        let subwindow = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::KllRank {
+                eh_epsilon: 0.01,
+                kll_epsilon: 0.02,
+                failure_probability: 0.01,
+                range: ExponentialHistogramQueryRange::SubWindow {
+                    suffix_rows: 100,
+                    query_rows: 25,
+                },
+            },
+        )
+        .guarantee(true)
+        .unwrap();
+        assert!((subwindow.bound.evaluate().unwrap() - 0.10).abs() < f64::EPSILON);
+
+        let gsum = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::UniversalGsum {
+                epsilon: 0.05,
+                failure_probability: 0.30,
+                range: ExponentialHistogramQueryRange::SubWindow {
+                    suffix_rows: 100,
+                    query_rows: 25,
+                },
+            },
+        )
+        .guarantee(true)
+        .unwrap();
+        assert_eq!(gsum.metric, ErrorMetric::RelativeValue);
+        assert!((gsum.bound.evaluate().unwrap() - 0.20).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn exponential_histogram_without_registered_accuracy_composition_fails_closed() {
+        let mut workload = streaming_workload();
+        workload.repeating_queries.as_mut().unwrap()[0]
+            .requirements
+            .accuracy =
+            asap_types::workload::AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(1.0));
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            unreachable!();
+        };
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+        model
+            .bind_window_framework_candidate(
+                &target,
+                &root,
+                StreamingWindowFrameworkCandidate {
+                    assignments: vec![StreamingWindowFrameworkAssignment {
+                        summary: Rc::clone(summary_input),
+                        framework: Some(SummaryWindowFramework::ExponentialHistogram),
+                    }],
+                    accuracy: StreamingWindowAccuracyEvidence::Exact,
+                    node_evidence: model.node_evidence.clone(),
+                },
+            )
+            .unwrap();
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(plan.summary_total_cost, None);
     }
 
     #[test]
