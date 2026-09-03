@@ -94,6 +94,9 @@ The design is split into focused documents:
   guarantee IR, sketch contracts, composition rules, target checking, and fail-closed boundaries.
 - [Analytical resource cost](analytical-resource-cost.md) defines CPU, retained-memory,
   and scan-I/O formulas, calibration, planner ranking, and fail-closed behavior.
+- [Physical plan integration](physical-plan-integration.md) defines how pre-ASAP and
+  post-ASAP logical plans lower into the physical operator DAG consumed by statistics
+  resolution and analytical costing.
 - [Query workloads, data workloads, and summary lifecycle maintenance](workload-demand-and-summary-lifecycle.md) separates
   query-workload properties from data-workload properties and defines ephemeral, prepared,
   shared, and continuously maintained summary-state alternatives.

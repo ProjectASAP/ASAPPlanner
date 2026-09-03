@@ -13,15 +13,10 @@ and guarantee composition run first; costing ranks only the candidates that
 survive. Missing evidence produces an unavailable estimate, never an assumed
 zero or a structural-cost fallback.
 
-This document distinguishes two implementation layers:
-
-- the physical-DAG estimator, which can compose any DAG whose nodes have
-  supported physical operators and complete `OperatorInputs`; and
-- the planner bridge, which lowers a deliberately small set of replacement
-  shapes into that estimator and participates in automatic candidate ranking.
-
-Support in the first layer does not imply that the planner can yet lower and
-rank the same shape. The current bridge boundary is stated explicitly below.
+The physical-DAG estimator composes any DAG whose nodes have supported
+physical operators and complete `OperatorStatistics`. Query lowering and
+planner selection are separate integration layers; neither may substitute a
+shape-specific shortcut or structural node count.
 
 An estimate has physical dimensions:
 
@@ -125,7 +120,7 @@ normalized workload, lowered query IR, and freshness-aware statistics:
 | Query demand | `QueryWorkloadEntry.recurrence`, normalized over an explicit horizon. |
 | Event-time range | `QueryWorkloadEntry.time_selection`. |
 | Accuracy and latency requirements | `QueryWorkloadEntry.requirements`. |
-| Operator shape, grouping keys, and constants such as Top-K `k` | Lowered `QueryExpr` and `AggIntent`. |
+| Operator shape, grouping keys, and constants such as Top-K limit and offset | Lowered query and selected physical plan. |
 
 Evidence is read through `Evidence<T>::value_at(planning_time)`. Stale,
 future, or improperly time-bounded evidence remains unknown. Costing follows
@@ -143,11 +138,54 @@ The missing facts have explicit ownership:
 | Join-side and join-output cardinality | Join-key/operator statistics. |
 | Memory budget, spill I/O, cache behavior, and network bytes | Deployment/execution-profile evidence. |
 
-`OperatorInputs` contains the resolved statistics for one physical operator.
-It is an estimator input, not another planner workload object. The component
-that lowers a query into a physical DAG owns resolving these fields from the
-canonical workload, catalog, and operator-statistics sources. It must leave a
-plan unavailable when required evidence cannot be resolved.
+`OperatorStatistics` contains the resolved statistics for one physical
+operator. It is estimator evidence, not another planner workload object. The
+lowering provider owns resolving it from the canonical workload, catalog, and
+operator-statistics sources. Missing required evidence makes the entire plan
+unavailable.
+
+### Operator vocabulary and source of truth
+
+The complete logical-to-physical boundary is specified in
+[Physical plan integration](physical-plan-integration.md). This section
+summarizes the part required by the resource estimator.
+
+`PhysicalOperator` is the source of truth for the cost model's operator
+vocabulary. `OperatorStatistics` is paired one-to-one with that enum: each
+supported physical algorithm has one evidence shape containing exactly the
+facts its formula consumes. Exhaustive matches enforce that a newly added
+physical operator must define its arity, statistics variant, validation, and
+resource formula.
+
+Neither logical IR is the statistics schema:
+
+```text
+pre-ASAP QueryExpr  ─┐
+                     ├─ physical lowering ─> PhysicalDagNode/PhysicalOperator
+post-ASAP SummaryExpr┘                              │
+                                                    v
+                                           OperatorStatistics
+                                                    │
+                                                    v
+                                            ResourceEstimate
+```
+
+The pre-ASAP IR describes exact query semantics. The post-ASAP IR describes
+logical summary semantics, selected summary families, and summary operations.
+Neither identifies every physical algorithm, buffer, build side, or execution
+layout. For example, one logical `SummaryAgg` may lower to a CMS build, an
+exact accumulator build, or another supported summary implementation; a
+logical `SummaryEstimate` lowers to the corresponding physical readout. Those
+physical nodes need different formulas and evidence even though they originate
+from the same logical variant.
+
+The operator list in this version covers the physical query operators declared
+by `PhysicalOperator`. It is not a claim that every `SummaryExpr` variant has
+already been physically lowered. Summary build, join, merge, subtract, delete,
+and readout become costable only after their lowering introduces explicit
+physical operators and matching statistics variants. Until then, a candidate
+containing such an unlowered operation is unavailable rather than partially
+costed.
 
 ## Workload horizon and lifecycle
 
@@ -165,8 +203,8 @@ It is not an independent workload axis. A repeated rate without a horizon
 cannot produce a finite total cost.
 
 An at-rest estimate must not be reused for `unknown`, `mixed`, or
-`continuously_ingesting` data. Callers must fail closed instead of pretending
-that incremental updates are a one-time snapshot build.
+`continuously_ingesting` data. Callers fail closed instead of pretending that
+incremental updates are a one-time snapshot build.
 
 The sketch alternative scans the selected source snapshot once and retains
 state. The raw alternative recomputes from that snapshot for every query
@@ -175,24 +213,139 @@ retention duration belong to the summary-maintenance lifecycle model. They
 must contribute update/build/delete work before a continuously maintained
 plan is compared with raw execution.
 
+### Comparable source and workload scope
+
+A lower numerical cost is meaningful only when the two plans answer the same
+request over the same physical data. `ComparisonScope` therefore reuses the
+canonical workload and query terms rather than defining parallel strings:
+
+| Scope field | Authoritative type and meaning |
+|---|---|
+| Arrival mode | `DataArrival`; this model accepts only `AtRest`. |
+| Planning instant and finite horizon | `TimestampMs` and `DurationMs`. |
+| Invocation schedule | `QueryRecurrence`; the evaluation count is derived, not copied. |
+| Event-time coverage | `TimeSelection`. |
+| Logical sources | the existing query-IR `Source`, one per scan. |
+| Filters | canonical bound `Predicate` values copied from the query IR. |
+| Physical source contents | provider-owned `source_snapshot_id` per source. |
+
+The snapshot identifier is the only new scope concept. It is necessary because
+`Source` names a metric or table but neither the query IR nor workload schema
+identifies a catalog version, object generation, or storage snapshot. Reusing a
+query timestamp would be incorrect: query event time and storage version are
+independent facts.
+
+`ComparisonScope::from_workload` copies arrival, recurrence, and time selection
+from `DataWorkload` and `QueryWorkloadEntry`; the catalog/lowering boundary adds
+the source, snapshot identifier, and canonical predicates. Raw and candidate
+scopes must match exactly in every field before their estimates are compared.
+Unknown subsumption such as "this wider retained summary covers the requested
+interval" is not guessed here; it requires a separate semantic coverage proof.
+Missing sources, empty snapshot identifiers, invalid recurrence, or a zero
+horizon fail closed.
+
+Every reachable physical `Scan` carries one exact `SourceCoverage` copied from
+this scope. That coverage includes the existing `Source`, its provider-owned
+snapshot ID, and canonical predicates. A scan with no coverage, or coverage
+not present in `ComparisonScope.sources`, makes the plan unavailable. Other
+operators cannot declare source coverage. This prevents a DAG over source B
+from being estimated under source A's comparison scope.
+
 ## General DAG costing
 
 Costing operates on the physical DAG, not on a list of logical operators.
-Each costed node produces:
+An `OperatorStatisticsProvider` resolves one `OperatorStatistics` value for
+each reachable physical node:
 
 ```text
-NodeEstimate {
-    output_rows,
-    output_bytes,
-    cpu_ops,
-    retained_bytes,
-    working_bytes,
-    source_read_bytes,
+EdgeStatistics { rows, bytes }
+
+OperatorStatistics =
+    Scan {
+        edges: UnaryEdgeStatistics,
+        source_read_bytes,
+    }
+  | Filter { edges: UnaryEdgeStatistics }
+  | Project { edges: UnaryEdgeStatistics }
+  | HashAggregate {
+        edges: UnaryEdgeStatistics,
+        group_count,
+        key_bytes,
+        accumulator_bytes_per_group,
+    }
+  | InMemoryComparisonSort { edges: UnaryEdgeStatistics }
+  | TopK { edges: UnaryEdgeStatistics }
+  | HashJoin { edges: BinaryEdgeStatistics }
+  | HashDeduplicate {
+        edges: UnaryEdgeStatistics,
+        distinct_key_count,
+        key_bytes,
+    }
+  | Concat { inputs, output }
+  | InMemoryOrderedWindow { edges: UnaryEdgeStatistics }
+  | Limit { edges: UnaryEdgeStatistics }
+  | PassThrough { edges: UnaryEdgeStatistics }
 }
 ```
 
-The node's output statistics feed its parents. A parent never substitutes
-the original source cardinality for an intermediate edge.
+`UnaryEdgeStatistics` contains exactly one input and one output;
+`BinaryEdgeStatistics` contains an ordered pair of inputs and one output.
+`Concat` is the only variadic case. `EdgeStatistics` itself intentionally
+remains operator-independent: an edge carries logical rows and bytes, and the
+same edge is the output of one node and an input of every consumer. Making the
+edge type depend on either endpoint would prevent direct consistency checks.
+
+The outer enum is operator-specific. A Filter cannot accidentally carry
+group cardinality, a Top-K statistics record cannot carry a join build side,
+and a non-scan record cannot carry source-read bytes. Serialized evidence is
+internally tagged by operator and rejects unknown fields.
+
+Physical configuration is not catalog evidence and therefore lives on
+`PhysicalOperator`:
+
+| Physical operator | Configuration owned by the plan |
+|---|---|
+| `TopK` | output `limit` and `offset`; heap capacity is `limit + offset` |
+| `Limit` | output `limit` and `offset` |
+| `HashJoin` | left or right build side |
+
+This distinction removes the former flat optional `k` field. A Top-K bound is
+part of the chosen algorithm, while input/output cardinality and width are
+observed or estimated facts about that operator in this workload.
+
+The provider owns provenance, freshness, and derivation. The estimator resolves
+each reachable node once, so one estimate cannot mix values across a live
+catalog refresh. A scan has one external source input; every other input is in
+the same order as `PhysicalDagNode.children`. Every parent input must equal the
+corresponding child's output in both rows and bytes. Missing node evidence,
+invalid arity, inconsistent edge dimensions, or a parent/child conflict makes
+the entire DAG unavailable. `{ rows: 0, bytes: 0 }` is a valid empty logical
+edge, including after a filter, join, limit, or aggregate; non-empty edges need
+positive logical bytes so width-dependent formulas do not invent a row width.
+A parent therefore cannot silently substitute the original source cardinality
+for an intermediate edge.
+
+The statistics inputs and `PhysicalDagNode.children` therefore have
+different arity only for a source leaf:
+
+| Operator shape | Statistics inputs | DAG children |
+|---|---:|---:|
+| `Scan` | 1 external source edge | 0 |
+| Unary operator | 1 | 1 |
+| `HashJoin` | 2 | 2 |
+| `Concat` | one per input | one per input |
+
+The implementation matches every `PhysicalOperator` variant explicitly. A new
+operator cannot silently inherit unary arity; its statistics-input and
+DAG-child counts must both be defined.
+
+`EdgeStatistics.bytes` is decoded logical data carried on an edge.
+`Scan.source_read_bytes` is physical storage I/O and is charged only by
+`Scan`.
+Compression, column pruning, or encoded storage can therefore make these
+values different; neither is inferred from the other. Other statistics
+variants have no source-read field, so charging source I/O at a non-scan node
+is not representable.
 
 ### Composition rules
 
@@ -210,14 +363,18 @@ For a selected DAG:
 7. Retained summaries remain live across reads. Streaming buffers may be
    released after their last consumer.
 
-`estimate_physical_dag` implements these rules for `PhysicalDagNode` values.
+`estimate_physical_dag` implements these rules for `PhysicalDagNode` values,
+one `ComparisonScope`, and an `OperatorStatisticsProvider`. It is a
+single-plan diagnostic API. Code that ranks a raw and candidate plan must use
+`estimate_physical_dag_comparison`, which validates exact scope equality before
+estimating either plan and returns both dimensional estimates together.
 Node IDs are physical identities: duplicate IDs, missing children, and cycles
 are rejected. A child-before-parent schedule maintains remaining-consumer
 counts, releases transient output after its last consumer, and keeps retained
 state live. Consequently a shared scan is charged once per execution and a
 fan-out's memory includes the outputs that really coexist.
 
-Logical `output_bytes` feeds parent cardinality estimates; it is not an
+Logical edge `bytes` feeds parent cardinality estimates; it is not an
 allocation. Each physical node separately supplies `output_buffer_bytes` for
 its live batch/edge buffer and `retained_bytes` for state that survives the
 operator. A streaming scan therefore retains a batch, not the complete source.
@@ -226,6 +383,15 @@ Every node declares `ExecutionMultiplicity::Once` or `PerEvaluation`.
 Build/maintenance nodes can therefore be charged once while query-side nodes
 are multiplied by the horizon's evaluation count; retention does not silently
 imply either execution frequency.
+
+The parent/child compatibility rules are:
+
+| Parent | Child | Validity |
+|---|---|---|
+| `Once` | `Once` | valid |
+| `Once` | `PerEvaluation` | invalid; a build-once result cannot depend on repeated executions |
+| `PerEvaluation` | `PerEvaluation` | valid |
+| `PerEvaluation` | `Once` | valid only when the child exposes retained state |
 
 For a tree-shaped pipeline, peak memory is normally the maximum live pipeline
 state, not the sum of every node's memory. At a fan-out, join, merge, or nested
@@ -243,20 +409,23 @@ the DAG rules above.
 
 | Physical operator | CPU operations | Local memory | Source/disk reads |
 |---|---:|---:|---:|
-| Scan | `input_rows` | one input row/batch | `input_bytes` |
+| Scan | `input_rows` | one decoded input row/batch | `source_read_bytes` |
 | Filter | `input_rows` | one output row/batch | `0` |
 | Project or scalar pass-through | `input_rows` | one output row/batch | `0` |
-| Hash aggregate | `input_rows` | `groups × (key + aggregate_value_bytes + hash metadata)` | `0` |
-| Deduplicate | `input_rows` | keyed hash state | `0` |
-| In-memory sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
-| Heap Top-K | `rows × ceil(log2(max(min(k, rows), 2)))` | `min(k, rows) × row_bytes` | `0` |
+| Hash aggregate | `input_rows` | `groups × (key_bytes + accumulator_bytes_per_group + hash metadata)` | `0` |
+| Hash deduplicate | `input_rows` | `distinct_key_count × (key_bytes + hash metadata)` | `0` |
+| In-memory comparison sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
+| Heap Top-K | `rows × ceil(log2(max(min(limit + offset, rows), 2)))` | `min(limit + offset, rows) × row_bytes` | `0` |
 | Hash join | `left_rows + right_rows + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
 | Concat | `output_rows` | one output row/batch | `0` |
-| Ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
-| Limit | `limit_rows_consumed` (including `OFFSET`) | one output row/batch | `0` |
+| In-memory ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
+| Limit | `min(input_rows, limit + offset)` | one output row/batch | `0` |
 
-These formulas name physical implementations. An external sort must add
-spill writes and reads; a nested-loop join must not use the hash-join formula.
+These formulas name physical implementations. The enum uses names such as
+`InMemoryComparisonSort`, `HashDeduplicate`, and `InMemoryOrderedWindow` so a
+new algorithm cannot silently inherit a formula merely because it has the
+same logical purpose. An external sort must add spill writes and reads; a
+nested-loop join must not use the hash-join formula.
 If the physical choice or its required statistics are unknown, the estimate
 is unavailable.
 
@@ -272,9 +441,9 @@ A retained sketch performs one build and serves later reads from state:
 ```text
 cpu_ops = input_rows                         // build scan
         + input_rows × update_ops(params)
-        + evaluation_count × physical_sketch_count × read_ops(params)
+        + evaluation_count × physical_summary_count × read_ops(params)
 
-scan_bytes = source_scan_bytes for the build
+scan_bytes = source_read_bytes for the build
 ```
 
 Concrete accuracy-sized parameters determine state and work:
@@ -291,7 +460,7 @@ Concrete accuracy-sized parameters determine state and work:
 | Theta | `ceil(log2(k))` | `k` | `k × 8` |
 
 For a per-subpopulation layout,
-`physical_sketch_count = subpopulation_count`. A shared layout has the number
+`physical_summary_count = subpopulation_count`. A shared layout has the number
 of physical structures described by that layout; the model must not infer it
 from logical group count alone.
 
@@ -320,12 +489,10 @@ operators and resolved statistics. Until an operation has such a formula, a
 complete candidate containing it is unavailable; costing only its modeled
 children would undercount the plan.
 
-`estimate_physical_dag` is deliberately independent of query shape. A caller
-supplies the complete physical DAG and one `OperatorInputs` record per node.
-Filters, projections, joins, windows, nested aggregates, Top-K, and shared
-sub-DAGs therefore use the same estimation path. Query lowering and planner
-selection are separate integration responsibilities and must not introduce a
-shape-specific shortcut or structural-node-count fallback.
+`estimate_physical_dag` is independent of query shape. A caller supplies the
+complete physical DAG and per-node evidence. Filters, projections, joins,
+windows, nested aggregates, Top-K, and shared sub-DAGs therefore use the same
+estimation path.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
@@ -378,20 +545,21 @@ The intended end-to-end selection pipeline is:
 
 This module implements the physical estimation step. Lowering, evidence
 resolution, legality checks, and planner integration remain separate layers;
-each must preserve the complete-plan and fail-closed requirements above.
+each preserves the complete-plan and fail-closed requirements above.
 
-The raw baseline and selected alternative use the same source snapshot,
-horizon, and calibration:
+Before applying the following arithmetic, callers validate exact equality of
+the raw and selected alternative's `ComparisonScope`, and use the same
+calibration:
 
 ```text
 benefit       = baseline_cost - selected_cost
 benefit_ratio = benefit / baseline_cost
 ```
 
-Exported annotations contain resource totals, workload horizon, resolved
-operator inputs, calibration coefficients, evidence/model versions, and the
-baseline reference. This makes the scalar reproducible and identifies which
-resource dimension drove a decision.
+An export of a cost decision includes resource totals, calibration
+coefficients, evidence/model versions, the baseline reference, validated
+comparison scope, and per-node statistics provenance. These facts reproduce
+why two estimates were considered comparable.
 
 ## Worked patterns
 
