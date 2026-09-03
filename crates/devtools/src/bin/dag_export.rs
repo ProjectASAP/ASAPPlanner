@@ -59,7 +59,7 @@ use asap_aware_mapping::analytical_lowering::{
     PhysicalDag, PhysicalNodeEvidence, PhysicalNodeRequest,
 };
 use asap_aware_mapping::analytical_planner::{
-    AnalyticalPlannerCostModel, PlannerPhysicalPlanProvider,
+    AnalyticalPlannerCostModel, PlannerEvidenceSnapshot, PlannerPhysicalPlanProvider,
 };
 use asap_aware_mapping::analytical_statistics::ComparisonScope;
 #[cfg(test)]
@@ -248,17 +248,26 @@ impl ExportPhysicalProvider<'_> {
 }
 
 impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
-    fn comparison_scope(
+    fn capture_evidence_snapshot(
         &self,
         _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
-    ) -> Result<ComparisonScope, AnalyticalCostError> {
-        self.target.scope.resolve()
+    ) -> Result<PlannerEvidenceSnapshot, AnalyticalCostError> {
+        Ok(PlannerEvidenceSnapshot {
+            version: "dag-export-evidence-v1".into(),
+            scope: self.target.scope.resolve()?,
+        })
     }
 
     fn query_node_evidence(
         &self,
+        snapshot: &PlannerEvidenceSnapshot,
         request: PhysicalNodeRequest<'_>,
     ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
+        if snapshot.scope != self.target.scope.resolve()? {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "planner evidence snapshot",
+            ));
+        }
         let mut matches = self
             .target
             .query_nodes
@@ -287,10 +296,15 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
 
     fn summary_physical_dag(
         &self,
+        snapshot: &PlannerEvidenceSnapshot,
         _summary: &Rc<SummaryNode>,
         _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
-        _scope: &ComparisonScope,
     ) -> Result<PhysicalDag, AnalyticalCostError> {
+        if snapshot.scope != self.target.scope.resolve()? {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "planner evidence snapshot",
+            ));
+        }
         self.candidate
             .summary_dag()
             .cloned()
@@ -1444,6 +1458,8 @@ mod tests {
                         key_bytes: None,
                         aggregate_value_bytes: None,
                         k: None,
+                        topk_output_offset: None,
+                        limit_rows_consumed: None,
                         hash_join_build_side: None,
                         promql: None,
                     },
@@ -1458,6 +1474,8 @@ mod tests {
                         key_bytes: Some(8),
                         aggregate_value_bytes: Some(8),
                         k: None,
+                        topk_output_offset: None,
+                        limit_rows_consumed: None,
                         hash_join_build_side: None,
                         promql: None,
                     },
@@ -1493,6 +1511,8 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            topk_output_offset: None,
+            limit_rows_consumed: None,
             hash_join_build_side: None,
             promql: None,
         };
