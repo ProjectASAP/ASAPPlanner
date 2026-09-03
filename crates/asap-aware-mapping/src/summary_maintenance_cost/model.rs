@@ -769,8 +769,10 @@ impl CostModel for SummaryMaintenanceCostModel {
                             Some(SummaryWindowFramework::ExponentialHistogram)
                         )
                     });
-                    let window_accuracy_guarantee =
-                        candidate.accuracy.guarantee(uses_exponential_histogram)?;
+                    let window_accuracy_guarantee = candidate.accuracy.end_to_end_guarantee(
+                        uses_exponential_histogram,
+                        root.guarantee.as_ref(),
+                    )?;
                     if !required_accuracy.iter().all(|target| {
                         DefaultAccuracyModel.satisfies(&window_accuracy_guarantee, target)
                     }) {
@@ -3561,6 +3563,37 @@ mod tests {
     }
 
     #[test]
+    fn eh_accuracy_rejects_negative_components_and_mismatched_summary_guarantees() {
+        let evidence = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::KllRank {
+                eh_epsilon: -0.01,
+                kll_epsilon: 0.03,
+                failure_probability: 0.01,
+                range: ExponentialHistogramQueryRange::MostRecentWindow,
+            },
+        );
+        assert!(evidence.guarantee(true).is_none());
+
+        let evidence = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::KllRank {
+                eh_epsilon: 0.01,
+                kll_epsilon: 0.02,
+                failure_probability: 0.01,
+                range: ExponentialHistogramQueryRange::MostRecentWindow,
+            },
+        );
+        let actual_summary = ResultGuarantee {
+            metric: ErrorMetric::Rank,
+            bound: BoundExpr::Constant { value: 0.03 },
+            failure_probability: ProbabilityExpr::Constant { value: 0.01 },
+            provenance: vec![],
+        };
+        assert!(evidence
+            .end_to_end_guarantee(true, Some(&actual_summary))
+            .is_none());
+    }
+
+    #[test]
     fn exponential_histogram_without_registered_accuracy_composition_fails_closed() {
         let mut workload = streaming_workload();
         workload.repeating_queries.as_mut().unwrap()[0]
@@ -4102,7 +4135,7 @@ mod tests {
                 },
             },
             schema,
-            guarantee: None,
+            guarantee: Some(ResultGuarantee::exact("exact count readout")),
         })
     }
 
