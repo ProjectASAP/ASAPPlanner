@@ -1051,8 +1051,8 @@ fn require_operator_statistics(
         }
         PhysicalOperator::PromqlRelabel => {
             let promql = require_promql_statistics(statistics, 1)?;
-            if output.rows != input.rows || promql.output_series > promql.input_series[0] {
-                return invalid("relabel changes rows or expands series cardinality");
+            if output.rows != input.rows || promql.output_series != promql.input_series[0] {
+                return invalid("relabel changes row or series cardinality");
             }
         }
         PhysicalOperator::PromqlSeriesSample => {
@@ -2837,13 +2837,13 @@ mod tests {
         let mut relabel = with_promql(
             statistics(vec![edge(1_000, 16_000)], edge(1_000, 20_000)),
             vec![100],
-            95,
+            100,
             10,
         );
         relabel.promql.as_mut().unwrap().scalar_ops_per_row = Some(8);
         let mut sample = with_promql(
             statistics(vec![edge(1_000, 20_000)], edge(100, 2_000)),
-            vec![95],
+            vec![100],
             10,
             10,
         );
@@ -2879,6 +2879,22 @@ mod tests {
             ]
         );
         assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).is_ok());
+
+        let mut shrinking = provided;
+        shrinking
+            .get_mut("query-2")
+            .unwrap()
+            .statistics
+            .promql
+            .as_mut()
+            .unwrap()
+            .output_series = 99;
+        assert_eq!(
+            lower_query_physical_dag(&root, &scope, &scripted(&shrinking)),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "relabel changes row or series cardinality"
+            ))
+        );
     }
 
     #[test]
