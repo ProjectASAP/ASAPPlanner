@@ -70,6 +70,45 @@ lowering provider owns resolving it from the canonical workload, catalog, and
 operator-statistics sources. Missing required evidence makes the entire plan
 unavailable.
 
+### Operator vocabulary and source of truth
+
+`PhysicalOperator` is the source of truth for the cost model's operator
+vocabulary. `OperatorStatistics` is paired one-to-one with that enum: each
+supported physical algorithm has one evidence shape containing exactly the
+facts its formula consumes. Exhaustive matches enforce that a newly added
+physical operator must define its arity, statistics variant, validation, and
+resource formula.
+
+Neither logical IR is the statistics schema:
+
+```text
+pre-ASAP QueryExpr  ─┐
+                     ├─ physical lowering ─> PhysicalDagNode/PhysicalOperator
+post-ASAP SummaryExpr┘                              │
+                                                    v
+                                           OperatorStatistics
+                                                    │
+                                                    v
+                                            ResourceEstimate
+```
+
+The pre-ASAP IR describes exact query semantics. The post-ASAP IR describes
+logical summary semantics, selected summary families, and summary operations.
+Neither identifies every physical algorithm, buffer, build side, or execution
+layout. For example, one logical `SummaryAgg` may lower to a CMS build, an
+exact accumulator build, or another supported summary implementation; a
+logical `SummaryEstimate` lowers to the corresponding physical readout. Those
+physical nodes need different formulas and evidence even though they originate
+from the same logical variant.
+
+The operator list in this version covers the physical query operators declared
+by `PhysicalOperator`. It is not a claim that every `SummaryExpr` variant has
+already been physically lowered. Summary build, join, merge, subtract, delete,
+and readout become costable only after their lowering introduces explicit
+physical operators and matching statistics variants. Until then, a candidate
+containing such an unlowered operation is unavailable rather than partially
+costed.
+
 ## Workload horizon and lifecycle
 
 Every alternative must cover the same source data and query horizon. The
@@ -110,7 +149,7 @@ canonical workload and query terms rather than defining parallel strings:
 | Event-time coverage | `TimeSelection`. |
 | Logical sources | the existing query-IR `Source`, one per scan. |
 | Filters | canonical bound `Predicate` values copied from the query IR. |
-| Physical source contents | provider-owned `snapshot_id` per source. |
+| Physical source contents | provider-owned `source_snapshot_id` per source. |
 
 The snapshot identifier is the only new scope concept. It is necessary because
 `Source` names a metric or table but neither the query IR nor workload schema

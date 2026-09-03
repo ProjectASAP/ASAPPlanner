@@ -33,9 +33,10 @@ pub struct ComparisonScope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceCoverage {
     pub source: Source,
-    /// Catalog version, object generation, snapshot timestamp, or another
-    /// provider-owned stable identifier for the physical source contents.
-    pub snapshot_id: String,
+    /// Provider-owned stable identifier for the physical source contents,
+    /// such as a catalog snapshot, table version, or object generation.
+    /// This is independent of the query's event-time `as_of` value.
+    pub source_snapshot_id: String,
     /// Canonical predicates copied from the bound/canonicalized query IR.
     pub predicates: Vec<Predicate>,
 }
@@ -78,9 +79,11 @@ impl ComparisonScope {
         if self
             .sources
             .iter()
-            .any(|source| source.snapshot_id.is_empty())
+            .any(|source| source.source_snapshot_id.is_empty())
         {
-            return Err(AnalyticalCostError::MissingComparisonScope("snapshot_id"));
+            return Err(AnalyticalCostError::MissingComparisonScope(
+                "source_snapshot_id",
+            ));
         }
         evaluations_in_horizon(&self.recurrence, self.planning_time.0, self.horizon.0)
     }
@@ -198,10 +201,19 @@ pub struct BinaryEdgeStatistics {
     pub output: EdgeStatistics,
 }
 
-/// Authoritative evidence for one physical operator, structured by operator
-/// kind so unrelated facts cannot be combined in one flat bag of `Option`s.
+/// Workload-dependent evidence for one operator in an already-lowered
+/// physical DAG. [`PhysicalOperator`](crate::analytical_cost::PhysicalOperator)
+/// is the authoritative operator vocabulary: every one of its variants has a
+/// matching statistics variant here.
+///
+/// This enum intentionally does not mirror either logical IR. `QueryExpr` and
+/// `SummaryExpr` are inputs to physical lowering, and one logical node may
+/// expand into several physical nodes or choose among several algorithms.
 /// Physical configuration such as a Top-K limit or hash-join build side lives
-/// on `PhysicalOperator`; this enum contains workload/catalog statistics only.
+/// on `PhysicalOperator`; this enum contains only workload/catalog evidence
+/// required to cost the selected algorithm. Structuring that evidence by
+/// physical kind prevents unrelated facts from being combined in a flat bag
+/// of `Option`s.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operator", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperatorStatistics {

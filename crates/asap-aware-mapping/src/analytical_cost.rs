@@ -1242,7 +1242,7 @@ mod tests {
                 source: Source::Table {
                     table_ref: "metrics".into(),
                 },
-                snapshot_id: "catalog-version-42".into(),
+                source_snapshot_id: "catalog-version-42".into(),
                 predicates: vec![],
             }],
         }
@@ -1263,7 +1263,7 @@ mod tests {
         assert_eq!(validate_comparison_scopes(&raw, &raw).unwrap(), 6);
 
         let mut candidate = raw.clone();
-        candidate.sources[0].snapshot_id = "catalog-version-43".into();
+        candidate.sources[0].source_snapshot_id = "catalog-version-43".into();
         assert_eq!(
             validate_comparison_scopes(&raw, &candidate),
             Err(AnalyticalCostError::ComparisonScopeMismatch("sources"))
@@ -1495,7 +1495,7 @@ mod tests {
                 source: asap_types::pre_asap::query_expr::Source::Table {
                     table_ref: "other_metrics".into(),
                 },
-                snapshot_id: "catalog-version-42".into(),
+                source_snapshot_id: "catalog-version-42".into(),
                 predicates: vec![],
             }),
             output_buffer_bytes: 10,
@@ -1561,7 +1561,7 @@ mod tests {
             source: asap_types::pre_asap::query_expr::Source::Table {
                 table_ref: "auxiliary".into(),
             },
-            snapshot_id: "catalog-version-42".into(),
+            source_snapshot_id: "catalog-version-42".into(),
             predicates: vec![],
         });
         let nodes = vec![PhysicalDagNode {
@@ -1673,7 +1673,7 @@ mod tests {
         )]);
         let raw_scope = comparison_scope();
         let mut candidate_scope = raw_scope.clone();
-        candidate_scope.sources[0].snapshot_id = "catalog-version-43".into();
+        candidate_scope.sources[0].source_snapshot_id = "catalog-version-43".into();
 
         assert_eq!(
             estimate_physical_dag_comparison(
