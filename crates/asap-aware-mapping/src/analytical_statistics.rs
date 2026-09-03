@@ -213,6 +213,10 @@ pub struct OperatorStatistics {
     pub key_bytes: Option<u64>,
     pub aggregate_value_bytes: Option<u64>,
     pub k: Option<u64>,
+    /// Rows skipped after maintaining the Top-K heap. A plain Top-K uses zero;
+    /// fused ORDER BY/LIMIT/OFFSET uses the logical offset.
+    #[serde(default)]
+    pub topk_output_offset: Option<u64>,
     /// Rows consumed by a physical Limit, including rows skipped by OFFSET.
     /// This is an execution statistic rather than the output cardinality.
     #[serde(default)]

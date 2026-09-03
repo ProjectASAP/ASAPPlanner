@@ -359,6 +359,16 @@ pub fn lower_query_physical_dag(
                                     "Top-K statistics disagree with LIMIT n + offset",
                                 ));
                             }
+                            if statistics.topk_output_offset
+                                != Some(
+                                    u64::try_from(*offset)
+                                        .map_err(|_| AnalyticalCostError::Overflow)?,
+                                )
+                            {
+                                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                                    "Top-K statistics disagree with LIMIT offset",
+                                ));
+                            }
                             require_limit_cardinality(*n, *offset, statistics)?;
                             return self.push(evidence, PhysicalOperator::TopK, children, None);
                         }
@@ -1312,6 +1322,7 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            topk_output_offset: None,
             limit_rows_consumed: None,
             hash_join_build_side: None,
             promql: None,
@@ -1453,6 +1464,7 @@ mod tests {
         aggregate_statistics.aggregate_value_bytes = Some(8);
         let mut topk_statistics = statistics(vec![edge(100, 4_000)], edge(10, 400));
         topk_statistics.k = Some(15);
+        topk_statistics.topk_output_offset = Some(5);
         let mut raw_scan = statistics(vec![edge(1_000, 64_000)], edge(1_000, 64_000));
         raw_scan.source_scan_bytes = 64_000;
         let provided = HashMap::from([

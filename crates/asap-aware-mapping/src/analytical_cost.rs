@@ -517,8 +517,11 @@ pub(crate) fn validate_operator_semantics(
                 .k
                 .filter(|k| *k > 0)
                 .ok_or(AnalyticalCostError::MissingOrZero("k"))?;
-            if output.rows > input.rows.min(k) {
-                return invalid("top-k output exceeds its cardinality bound");
+            let offset = statistics
+                .topk_output_offset
+                .ok_or(AnalyticalCostError::MissingOrZero("topk_output_offset"))?;
+            if offset > k || output.rows != input.rows.min(k).saturating_sub(offset) {
+                return invalid("top-k output does not equal its cardinality bound");
             }
         }
         PhysicalOperator::Limit => {
@@ -587,8 +590,8 @@ pub(crate) fn validate_operator_semantics(
         }
         PhysicalOperator::PromqlRelabel => {
             let promql = require_promql_statistics(statistics, 1)?;
-            if output.rows != input.rows || promql.output_series > promql.input_series[0] {
-                return invalid("relabel changes rows or expands series cardinality");
+            if output.rows != input.rows || promql.output_series != promql.input_series[0] {
+                return invalid("relabel changes row or series cardinality");
             }
         }
         PhysicalOperator::PromqlSeriesSample => {
@@ -1266,6 +1269,7 @@ mod tests {
             PhysicalOperator::TopK,
             OperatorStatistics {
                 k: Some(10),
+                topk_output_offset: Some(0),
                 ..statistics(
                     vec![EdgeStatistics {
                         rows: 1_000,
@@ -1375,6 +1379,7 @@ mod tests {
             PhysicalOperator::TopK,
             OperatorStatistics {
                 k: Some(1_000),
+                topk_output_offset: Some(0),
                 ..statistics(
                     vec![EdgeStatistics {
                         rows: 4,
@@ -1597,6 +1602,7 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            topk_output_offset: None,
             limit_rows_consumed: None,
             hash_join_build_side: None,
             promql: None,
