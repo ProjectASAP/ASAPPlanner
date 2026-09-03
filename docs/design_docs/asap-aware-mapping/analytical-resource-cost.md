@@ -511,6 +511,21 @@ executor-supported layout. Conversely, choosing a tumbling window does not by
 itself decide whether the state is ephemeral, prepared, shared, or continuously
 maintained.
 
+#### Boundary example: incremental maintenance
+
+- ASAPPlanner decides whether a logical summary should use incremental
+  maintenance—that is, whether existing summary state should be updated as new
+  data arrives.
+- ASAPQuery-backend decides how to physically implement that incremental
+  maintenance, for example with tumbling windows, sliding windows and panes,
+  a PromSketch exponential histogram, or another runtime-supported structure.
+- ASAPCollector executes the physical plan produced by the backend and
+  maintains the specified windows and summary states.
+
+The key distinction is that `Incremental` describes how the summary is
+updated, while tumbling, sliding, and exponential-histogram windows describe
+its physical layout. These decisions are orthogonal.
+
 The ASAPQuery
 [configuration formulation](https://github.com/ProjectASAP/ASAPQuery/blob/8aa93f417ee662c188d65da5eb20ceefa01e5c12/.design_docs/sketch-config-optimization-formulation.md)
 and [MIP formulation](https://github.com/ProjectASAP/ASAPQuery/blob/8aa93f417ee662c188d65da5eb20ceefa01e5c12/.design_docs/optimizer-mip-formulation.md)
