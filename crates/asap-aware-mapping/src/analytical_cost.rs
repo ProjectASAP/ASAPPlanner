@@ -12,8 +12,8 @@ use asap_types::workload::DataArrival;
 use serde::{Deserialize, Serialize};
 
 use crate::analytical_statistics::{
-    validate_comparison_scopes, ComparisonScope, OperatorStatistics, OperatorStatisticsProvider,
-    SourceCoverage,
+    validate_comparison_scopes, ComparisonScope, EdgeStatistics, OperatorStatistics,
+    OperatorStatisticsProvider, SourceCoverage,
 };
 
 pub const ANALYTICAL_MODEL_VERSION: &str = "analytical-resource-at-rest-v1";
@@ -395,7 +395,7 @@ pub fn estimate_operator(
     operator: PhysicalOperator,
     statistics: OperatorStatistics,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
-    validate_operator_semantics(operator, &input)?;
+    validate_operator_semantics(operator, &statistics)?;
     let per_row_width = |rows: u64, bytes: u64| -> Result<u64, AnalyticalCostError> {
         match (rows, bytes) {
             (0, 0) => return Ok(0),
@@ -535,53 +535,77 @@ pub fn estimate_operator(
 
 fn validate_operator_semantics(
     operator: PhysicalOperator,
-    input: &OperatorInputs,
+    statistics: &OperatorStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let inconsistent = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
+    if !matches!(operator, PhysicalOperator::Scan) && statistics.source_scan_bytes != 0 {
+        return inconsistent("only Scan may charge source bytes");
+    }
+    let input = statistics.inputs.first().copied().ok_or(
+        AnalyticalCostError::InconsistentOperatorStatistics("operator input is missing"),
+    )?;
+    let output = statistics.output;
     match operator {
         PhysicalOperator::Scan => {
-            if input.input_rows != input.output_rows || input.input_bytes != input.output_bytes {
+            if input != output {
                 return inconsistent("Scan input and output edges differ");
             }
         }
         PhysicalOperator::Filter => {
-            if input.output_rows > input.input_rows || input.output_bytes > input.input_bytes {
+            if output.rows > input.rows || output.bytes > input.bytes {
                 return inconsistent("Filter output expands its input");
             }
         }
         PhysicalOperator::Project => {
-            if input.output_rows != input.input_rows {
+            if output.rows != input.rows {
                 return inconsistent("Project changes row cardinality");
             }
         }
         PhysicalOperator::HashAggregate | PhysicalOperator::Deduplicate => {
-            let groups = input
+            let groups = statistics
                 .group_count
                 .filter(|groups| *groups > 0)
                 .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
-            if groups > input.input_rows || input.output_rows != groups {
+            if groups > input.rows || output.rows != groups {
                 return inconsistent("grouped output differs from distinct group cardinality");
             }
         }
-        PhysicalOperator::Sort
-        | PhysicalOperator::Window
-        | PhysicalOperator::PassThrough
-        | PhysicalOperator::Concat => {
-            if input.input_rows != input.output_rows || input.input_bytes != input.output_bytes {
+        PhysicalOperator::Sort | PhysicalOperator::Window | PhysicalOperator::PassThrough => {
+            if input != output {
                 return inconsistent("cardinality-preserving operator changes its edge");
             }
         }
+        PhysicalOperator::Concat => {
+            let total = statistics.inputs.iter().try_fold(
+                EdgeStatistics { rows: 0, bytes: 0 },
+                |total, edge| {
+                    Ok::<_, AnalyticalCostError>(EdgeStatistics {
+                        rows: total
+                            .rows
+                            .checked_add(edge.rows)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                        bytes: total
+                            .bytes
+                            .checked_add(edge.bytes)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                    })
+                },
+            )?;
+            if output != total {
+                return inconsistent("Concat output differs from the sum of its inputs");
+            }
+        }
         PhysicalOperator::TopK => {
-            let k = input
+            let k = statistics
                 .k
                 .filter(|k| *k > 0)
                 .ok_or(AnalyticalCostError::MissingOrZero("k"))?;
-            if input.output_rows != input.input_rows.min(k) {
+            if output.rows != input.rows.min(k) {
                 return inconsistent("Top-K output differs from its cardinality bound");
             }
         }
         PhysicalOperator::Limit => {
-            if input.output_rows > input.input_rows {
+            if output.rows > input.rows {
                 return inconsistent("Limit output exceeds its input");
             }
         }
@@ -674,21 +698,17 @@ mod tests {
         SourceCoverage,
     };
 
-    fn unary_inputs(input_rows: u64, output_rows: u64) -> OperatorInputs {
-        OperatorInputs {
-            input_rows,
-            input_bytes: input_rows.saturating_mul(8),
-            output_rows,
-            output_bytes: output_rows.saturating_mul(8),
-            group_count: None,
-            key_bytes: None,
-            aggregate_value_bytes: None,
-            k: None,
-            limit_rows_consumed: None,
-            right_rows: None,
-            right_bytes: None,
-            hash_join_build_side: None,
-        }
+    fn unary_inputs(input_rows: u64, output_rows: u64) -> OperatorStatistics {
+        statistics(
+            vec![EdgeStatistics {
+                rows: input_rows,
+                bytes: input_rows.saturating_mul(8),
+            }],
+            EdgeStatistics {
+                rows: output_rows,
+                bytes: output_rows.saturating_mul(8),
+            },
+        )
     }
 
     #[test]
