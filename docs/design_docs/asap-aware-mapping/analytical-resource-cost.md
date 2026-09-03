@@ -613,13 +613,14 @@ stale evidence, an unknown physical algorithm, invalid edges, incomplete
 source coverage, or a candidate that is not cheaper yields `None`. When no
 candidate remains, `chosen = None` preserves the raw pre-ASAP target.
 
-Complete-plan costing also changes CSE selection order. Global selection sends
-all share and recompute alternatives through `candidate_cost`; it does not use
-the legacy structural CSE hook to discard one arm first. Once an arm is chosen,
-the existing consumer-count propagation records whether that physical
-alternative shares or recomputes. Within each returned physical DAG, stable
-provider-owned physical IDs deduplicate shared scans, builds, and retained
-states. Logical `Rc` identity is never substituted for physical identity.
+Logical CSE share/recompute rewrites are not complete physical alternatives:
+they do not encode retained shared state or independent execution
+multiplicity. The analytical adapter therefore does not assign them an
+optimistic complete-plan cost. They continue through the existing CSE policy
+until a physical binder can return explicit DAGs for both arms. Within every
+bound physical DAG, stable provider-owned physical IDs deduplicate shared
+scans, builds, and retained states; logical `Rc` identity is never substituted
+for physical identity.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
