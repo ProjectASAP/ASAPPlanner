@@ -29,8 +29,6 @@ pub struct SummaryMaintenanceDagExport {
     pub update_rate_per_second: Option<f64>,
     pub expected_reads: Option<f64>,
     pub selected_raw_recompute: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_physical_plan_id: Option<String>,
     pub summary_total_cost: Option<f64>,
     pub raw_recompute_total_cost: Option<f64>,
 }
@@ -158,7 +156,6 @@ pub fn export_summary_maintenance_plan(
         update_rate_per_second: plan.update_rate.map(|rate| rate.0),
         expected_reads: plan.expected_reads,
         selected_raw_recompute: plan.selected_raw_recompute,
-        selected_physical_plan_id: plan.selected_physical_plan_id.clone(),
         summary_total_cost: plan.summary_total_cost.map(|cost| cost.0),
         raw_recompute_total_cost: plan.raw_recompute_total_cost.map(|cost| cost.0),
     }

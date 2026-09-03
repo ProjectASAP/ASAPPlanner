@@ -108,16 +108,6 @@ pub struct CostedSummaryDeployment<'a> {
     pub selected_cost: Cost,
 }
 
-/// Complete physical-plan result for one lifecycle combination. Models that
-/// enumerate multiple deployment implementations can expose the stable
-/// provider-owned identity of the winning alternative without adding a
-/// closed window-framework enum to the planner.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompleteSummaryCandidateEstimate {
-    pub cost: Cost,
-    pub physical_plan_id: Option<String>,
-}
-
 impl Cost {
     /// The cost of an operation that costs nothing at all.
     pub const ZERO: Cost = Cost(0.0);
@@ -600,23 +590,6 @@ pub trait CostModel {
                 .map(|deployment| deployment.selected_cost.0)
                 .sum(),
         ))
-    }
-
-    /// Complete-plan estimate plus the identity of the selected physical
-    /// implementation, when the model searched more than one implementation.
-    fn complete_summary_candidate_estimate(
-        &self,
-        root: &SummaryNode,
-        target: Option<&QueryExpr>,
-        deployments: &[CostedSummaryDeployment<'_>],
-        horizon: Option<Horizon>,
-        expected_reads: Option<f64>,
-    ) -> Option<CompleteSummaryCandidateEstimate> {
-        self.complete_summary_candidate_cost(root, target, deployments, horizon, expected_reads)
-            .map(|cost| CompleteSummaryCandidateEstimate {
-                cost,
-                physical_plan_id: None,
-            })
     }
 
     /// Cost of evaluating `target` directly from its logical/raw inputs once.

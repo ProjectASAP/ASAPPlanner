@@ -205,7 +205,7 @@ pub use accuracy::{
     PropagationStats, WorkloadAccuracyEvidence,
 };
 pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
-pub use cost_model::{CompleteSummaryCandidateEstimate, CostModel, DefaultCostModel};
+pub use cost_model::{CostModel, DefaultCostModel};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
