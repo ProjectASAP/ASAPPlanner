@@ -330,15 +330,23 @@ pub struct StreamingAnalyticalCostModel {
     pub calibration: ResourceCalibration,
     pub capabilities: SummaryMaintenanceCapabilities,
     target_comparisons: HashMap<*const QueryExpr, StreamingTargetComparison>,
-    candidate_comparisons: HashSet<(*const QueryExpr, *const SummaryNode)>,
+    candidate_comparisons:
+        HashMap<(*const QueryExpr, *const SummaryNode), StreamingCandidateIdentity>,
     physical_plan_alternatives:
         HashMap<(*const QueryExpr, *const SummaryNode), Vec<StreamingPhysicalPlanAlternative>>,
 }
 
 #[derive(Debug, Clone)]
 struct StreamingTargetComparison {
+    _target: Rc<QueryExpr>,
     scope: ComparisonScope,
     raw: StreamingRawInputEvidence,
+}
+
+#[derive(Debug, Clone)]
+struct StreamingCandidateIdentity {
+    _target: Rc<QueryExpr>,
+    _root: Rc<SummaryNode>,
 }
 
 fn promql_info_source(selector: &[InfoMatcher]) -> Option<Source> {
@@ -646,7 +654,7 @@ impl StreamingAnalyticalCostModel {
             calibration,
             capabilities,
             target_comparisons: HashMap::new(),
-            candidate_comparisons: HashSet::new(),
+            candidate_comparisons: HashMap::new(),
             physical_plan_alternatives: HashMap::new(),
         }
     }
@@ -678,9 +686,17 @@ impl StreamingAnalyticalCostModel {
         // not carry one owning target; context identity is `(target, root)`.
         self.target_comparisons
             .entry(target_ptr)
-            .or_insert(StreamingTargetComparison { scope, raw });
+            .or_insert(StreamingTargetComparison {
+                _target: Rc::clone(target),
+                scope,
+                raw,
+            });
         self.candidate_comparisons
-            .insert((target_ptr, Rc::as_ptr(root)));
+            .entry((target_ptr, Rc::as_ptr(root)))
+            .or_insert_with(|| StreamingCandidateIdentity {
+                _target: Rc::clone(target),
+                _root: Rc::clone(root),
+            });
         Ok(())
     }
 
@@ -696,7 +712,7 @@ impl StreamingAnalyticalCostModel {
         alternative: StreamingPhysicalPlanAlternative,
     ) -> Result<(), AnalyticalCostError> {
         let key = (Rc::as_ptr(target), Rc::as_ptr(root));
-        if !self.candidate_comparisons.contains(&key) {
+        if !self.candidate_comparisons.contains_key(&key) {
             return Err(AnalyticalCostError::MissingOrStale(
                 "candidate comparison binding",
             ));
@@ -733,7 +749,7 @@ impl StreamingAnalyticalCostModel {
             None => {
                 let mut targets = self
                     .candidate_comparisons
-                    .iter()
+                    .keys()
                     .filter_map(|(target, candidate)| (*candidate == root_ptr).then_some(*target));
                 let only = targets.next()?;
                 if targets.next().is_some() {
@@ -743,7 +759,7 @@ impl StreamingAnalyticalCostModel {
             }
         };
         let key = (target_ptr, root_ptr);
-        if !self.candidate_comparisons.contains(&key) {
+        if !self.candidate_comparisons.contains_key(&key) {
             return None;
         }
         let comparison = self.target_comparisons.get(&target_ptr)?;
@@ -2763,6 +2779,22 @@ mod tests {
             .bind_candidate_comparison(&target_b, &root, streaming_scope(), streaming_raw())
             .unwrap();
         assert_eq!(model.candidate_comparisons.len(), 2);
+    }
+
+    #[test]
+    fn comparison_registry_owns_the_nodes_behind_identity_keys() {
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let target_refs = Rc::strong_count(&target);
+        let root_refs = Rc::strong_count(&root);
+        let mut model = streaming_model();
+
+        model
+            .bind_candidate_comparison(&target, &root, streaming_scope(), streaming_raw())
+            .unwrap();
+
+        assert!(Rc::strong_count(&target) > target_refs);
+        assert!(Rc::strong_count(&root) > root_refs);
     }
 
     #[test]

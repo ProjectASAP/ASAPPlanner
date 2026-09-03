@@ -29,6 +29,8 @@ use asap_types::workload::{
     WorkloadError,
 };
 
+use crate::analytical_cost::AnalyticalCostError;
+use crate::analytical_statistics::evaluations_in_horizon;
 use crate::cost_model::{
     CompleteSummaryCandidateEstimate, Cost, CostModel, CostedSummaryDeployment,
 };
@@ -615,7 +617,33 @@ fn workload_facts(
     let update_rate = data
         .and_then(|data| data.ingestion_rate.value_at(now_ms))
         .map(|rate| UpdateRate(rate.0));
-    let reads = recurring_known.then_some(one_time_invocations as f64 + recurring_reads);
+    let reads = if let Some(horizon) = horizon {
+        let horizon_ms = horizon.0 * 1_000.0;
+        if !horizon_ms.is_finite()
+            || horizon_ms <= 0.0
+            || horizon_ms > u64::MAX as f64
+            || horizon_ms.fract() != 0.0
+        {
+            None
+        } else {
+            workload_entry_indices
+                .iter()
+                .try_fold(0_u64, |total, index| {
+                    match evaluations_in_horizon(
+                        &entries[*index].recurrence,
+                        now_ms,
+                        horizon_ms as u64,
+                    ) {
+                        Ok(count) => total.checked_add(count),
+                        Err(AnalyticalCostError::NoEvaluationsInHorizon) => Some(total),
+                        Err(_) => None,
+                    }
+                })
+                .map(|count| count as f64)
+        }
+    } else {
+        recurring_known.then_some(one_time_invocations as f64 + recurring_reads)
+    };
     Ok(SummaryMaintenanceWorkloadFacts {
         reads,
         one_time_invocations,
@@ -1558,6 +1586,17 @@ mod tests {
             .summary_maintenance_lifecycle_guarantee
             .as_ref()
             .map(|guarantee| &guarantee.summary_maintenance_lifecycle)
+    }
+
+    #[test]
+    fn fixed_interval_reads_use_the_physical_horizon_multiplicity() {
+        let mut query = repeating();
+        query.demand = RepeatedDemand::FixedInterval(RepetitionInterval(600));
+        let workload = workload(vec![], vec![query], at_rest());
+
+        let facts = workload_facts(&workload, &[0], 0, Some(Horizon(1.0))).unwrap();
+
+        assert_eq!(facts.reads, Some(1.0));
     }
 
     #[test]
