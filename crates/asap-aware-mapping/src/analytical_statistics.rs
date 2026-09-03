@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use asap_types::pre_asap::query_expr::{Predicate, Source};
+use asap_types::pre_asap::query_expr::{InfoMatcher, Predicate, Source};
 use asap_types::workload::{
     DataArrival, DataWorkload, DurationMs, QueryRecurrence, QueryWorkloadEntry, RepeatedDemand,
     TimeSelection, TimestampMs,
@@ -39,6 +39,10 @@ pub struct SourceCoverage {
     pub source_snapshot_id: String,
     /// Canonical predicates copied from the bound/canonicalized query IR.
     pub predicates: Vec<Predicate>,
+    /// Symbolic selectors on an info-metric source. Ordinary query scans leave
+    /// this empty because their selection is represented by `predicates`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub info_matchers: Vec<InfoMatcher>,
 }
 
 impl ComparisonScope {
@@ -72,16 +76,6 @@ impl ComparisonScope {
         }
         if self.horizon.0 == 0 {
             return Err(AnalyticalCostError::MissingOrZero("horizon"));
-        }
-        if self
-            .sources
-            .iter()
-            .enumerate()
-            .any(|(index, source)| self.sources[..index].contains(source))
-        {
-            return Err(AnalyticalCostError::MissingComparisonScope(
-                "duplicate source coverage",
-            ));
         }
         if self
             .sources
@@ -215,6 +209,10 @@ impl EdgeStatistics {
 pub struct UnaryEdgeStatistics {
     pub input: EdgeStatistics,
     pub output: EdgeStatistics,
+    /// Time-series shape on the same logical edges. This is edge metadata,
+    /// not an operator-specific bag of optional cost parameters.
+    #[serde(default)]
+    pub promql: Option<PromqlUnaryEdgeStatistics>,
 }
 
 /// Input and output evidence for a binary physical operator. The input order
@@ -223,6 +221,44 @@ pub struct UnaryEdgeStatistics {
 pub struct BinaryEdgeStatistics {
     pub inputs: [EdgeStatistics; 2],
     pub output: EdgeStatistics,
+    #[serde(default)]
+    pub promql: Option<PromqlBinaryEdgeStatistics>,
+}
+
+/// PromQL value shape carried alongside rows/bytes on a physical edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromqlEdgeStatistics {
+    pub series: u64,
+    pub evaluation_steps: u64,
+    pub value_kind: PromqlValueKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromqlValueKind {
+    Scalar,
+    /// Vector/sample data. Operator semantics determine whether rows are
+    /// instant results or decoded source samples for a range evaluation.
+    Vector,
+    RangeVector,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromqlUnaryEdgeStatistics {
+    pub input: PromqlEdgeStatistics,
+    pub output: PromqlEdgeStatistics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromqlBinaryEdgeStatistics {
+    pub inputs: [PromqlEdgeStatistics; 2],
+    pub output: PromqlEdgeStatistics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromqlNaryEdgeStatistics {
+    pub inputs: Vec<PromqlEdgeStatistics>,
+    pub output: PromqlEdgeStatistics,
 }
 
 /// Input distribution for an algorithm that independently orders partitions.
@@ -285,6 +321,8 @@ pub enum OperatorStatistics {
     Concat {
         inputs: Vec<EdgeStatistics>,
         output: EdgeStatistics,
+        #[serde(default)]
+        promql: Option<PromqlNaryEdgeStatistics>,
     },
     InMemoryAnalyticWindow {
         edges: UnaryEdgeStatistics,
@@ -294,6 +332,47 @@ pub enum OperatorStatistics {
         edges: UnaryEdgeStatistics,
     },
     PassThrough {
+        edges: UnaryEdgeStatistics,
+    },
+    PromqlRange {
+        edges: UnaryEdgeStatistics,
+        max_window_samples_per_series: u64,
+    },
+    PromqlSubquery {
+        edges: UnaryEdgeStatistics,
+        subquery_steps: u64,
+    },
+    PromqlBinary {
+        edges: BinaryEdgeStatistics,
+        matching_key_bytes: u64,
+    },
+    PromqlRelabel {
+        edges: UnaryEdgeStatistics,
+    },
+    PromqlInfoEnrich {
+        edges: BinaryEdgeStatistics,
+        matching_key_bytes: u64,
+    },
+    PromqlSeriesSample {
+        edges: UnaryEdgeStatistics,
+        group_count: u64,
+        key_bytes: u64,
+    },
+    PromqlScalarToVector {
+        edges: UnaryEdgeStatistics,
+    },
+    PromqlVectorToScalar {
+        edges: UnaryEdgeStatistics,
+    },
+    PromqlScalarLeaf {
+        output: EdgeStatistics,
+        promql_output: PromqlEdgeStatistics,
+    },
+    PromqlPerSeries {
+        edges: UnaryEdgeStatistics,
+        accumulator_bytes_per_series: u64,
+    },
+    PromqlPresence {
         edges: UnaryEdgeStatistics,
     },
 }
@@ -310,9 +389,18 @@ impl OperatorStatistics {
             | Self::HashDeduplicate { .. }
             | Self::InMemoryAnalyticWindow { .. }
             | Self::Limit { .. }
-            | Self::PassThrough { .. } => 1,
-            Self::HashJoin { .. } => 2,
+            | Self::PassThrough { .. }
+            | Self::PromqlRange { .. }
+            | Self::PromqlSubquery { .. }
+            | Self::PromqlRelabel { .. }
+            | Self::PromqlSeriesSample { .. }
+            | Self::PromqlScalarToVector { .. }
+            | Self::PromqlVectorToScalar { .. }
+            | Self::PromqlPerSeries { .. }
+            | Self::PromqlPresence { .. } => 1,
+            Self::HashJoin { .. } | Self::PromqlBinary { .. } | Self::PromqlInfoEnrich { .. } => 2,
             Self::Concat { inputs, .. } => inputs.len(),
+            Self::PromqlScalarLeaf { .. } => 0,
         }
     }
 
@@ -327,9 +415,20 @@ impl OperatorStatistics {
             | Self::TopK { edges }
             | Self::InMemoryAnalyticWindow { edges, .. }
             | Self::Limit { edges }
-            | Self::PassThrough { edges } => (index == 0).then_some(edges.input),
-            Self::HashJoin { edges } => edges.inputs.get(index).copied(),
+            | Self::PassThrough { edges }
+            | Self::PromqlRange { edges, .. }
+            | Self::PromqlSubquery { edges, .. }
+            | Self::PromqlRelabel { edges }
+            | Self::PromqlSeriesSample { edges, .. }
+            | Self::PromqlScalarToVector { edges }
+            | Self::PromqlVectorToScalar { edges }
+            | Self::PromqlPerSeries { edges, .. }
+            | Self::PromqlPresence { edges } => (index == 0).then_some(edges.input),
+            Self::HashJoin { edges }
+            | Self::PromqlBinary { edges, .. }
+            | Self::PromqlInfoEnrich { edges, .. } => edges.inputs.get(index).copied(),
             Self::Concat { inputs, .. } => inputs.get(index).copied(),
+            Self::PromqlScalarLeaf { .. } => None,
         }
     }
 
@@ -344,9 +443,80 @@ impl OperatorStatistics {
             | Self::TopK { edges }
             | Self::InMemoryAnalyticWindow { edges, .. }
             | Self::Limit { edges }
-            | Self::PassThrough { edges } => edges.output,
-            Self::HashJoin { edges } => edges.output,
+            | Self::PassThrough { edges }
+            | Self::PromqlRange { edges, .. }
+            | Self::PromqlSubquery { edges, .. }
+            | Self::PromqlRelabel { edges }
+            | Self::PromqlSeriesSample { edges, .. }
+            | Self::PromqlScalarToVector { edges }
+            | Self::PromqlVectorToScalar { edges }
+            | Self::PromqlPerSeries { edges, .. }
+            | Self::PromqlPresence { edges } => edges.output,
+            Self::HashJoin { edges }
+            | Self::PromqlBinary { edges, .. }
+            | Self::PromqlInfoEnrich { edges, .. } => edges.output,
             Self::Concat { output, .. } => *output,
+            Self::PromqlScalarLeaf { output, .. } => *output,
+        }
+    }
+
+    pub fn promql_input(&self, index: usize) -> Option<PromqlEdgeStatistics> {
+        match self {
+            Self::Concat {
+                promql: Some(edges),
+                ..
+            } => edges.inputs.get(index).copied(),
+            Self::PromqlScalarLeaf { .. } => None,
+            Self::HashJoin { edges }
+            | Self::PromqlBinary { edges, .. }
+            | Self::PromqlInfoEnrich { edges, .. } => edges.promql?.inputs.get(index).copied(),
+            _ => self.unary_promql().and_then(
+                |edges| {
+                    if index == 0 {
+                        Some(edges.input)
+                    } else {
+                        None
+                    }
+                },
+            ),
+        }
+    }
+
+    pub fn promql_output(&self) -> Option<PromqlEdgeStatistics> {
+        match self {
+            Self::Concat {
+                promql: Some(edges),
+                ..
+            } => Some(edges.output),
+            Self::PromqlScalarLeaf { promql_output, .. } => Some(*promql_output),
+            Self::HashJoin { edges }
+            | Self::PromqlBinary { edges, .. }
+            | Self::PromqlInfoEnrich { edges, .. } => Some(edges.promql?.output),
+            _ => Some(self.unary_promql()?.output),
+        }
+    }
+
+    pub(crate) fn unary_promql(&self) -> Option<PromqlUnaryEdgeStatistics> {
+        match self {
+            Self::Scan { edges, .. }
+            | Self::Filter { edges }
+            | Self::Project { edges }
+            | Self::HashAggregate { edges, .. }
+            | Self::InMemoryComparisonSort { edges, .. }
+            | Self::TopK { edges }
+            | Self::HashDeduplicate { edges, .. }
+            | Self::InMemoryAnalyticWindow { edges, .. }
+            | Self::Limit { edges }
+            | Self::PassThrough { edges }
+            | Self::PromqlRange { edges, .. }
+            | Self::PromqlSubquery { edges, .. }
+            | Self::PromqlRelabel { edges }
+            | Self::PromqlSeriesSample { edges, .. }
+            | Self::PromqlScalarToVector { edges }
+            | Self::PromqlVectorToScalar { edges }
+            | Self::PromqlPerSeries { edges, .. }
+            | Self::PromqlPresence { edges } => edges.promql,
+            _ => None,
         }
     }
 }

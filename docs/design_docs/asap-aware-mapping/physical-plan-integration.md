@@ -271,11 +271,115 @@ is unavailable until lowering propagates that temporal context into descendant
 Scan evidence and physical identity. `PassThrough` must never hide an
 unsupported operation.
 
+### `PromqlRange { range_millis }`
+
+Forms a range vector for each evaluation step and retains at most the observed
+`max_window_samples_per_series` samples for each input series. For example,
+the selector in `rate(http_requests_total[5m])` lowers to `PromqlRange` with
+`range_millis = 300000`. Evidence carries series count, evaluation-step count,
+value kind, and the maximum samples in one per-series range. CPU visits every
+input sample; local memory is `series × max_window_samples_per_series ×
+sample_width`. This query-time range buffer is not a tumbling, sliding, pane,
+or exponential-histogram layout for maintaining a summary.
+
+### `PromqlSubquery { range_millis, resolution_millis }`
+
+Evaluates a child expression at inner steps and groups those results into a
+range vector at each outer step. For example,
+`max_over_time(rate(http_requests_total[5m])[1h:1m])` contains a one-hour
+subquery at one-minute resolution. Evidence supplies the realized
+`subquery_steps`; child steps must equal `outer_steps × subquery_steps`. CPU
+charges child-result visits plus emitted results, and memory retains the
+materialized inner-step input for one invocation.
+
+### `PromqlBinary { operation, operand_mode, cardinality, build_side }`
+
+Evaluates scalar/vector arithmetic or comparison, or a PromQL `and`, `or`, or
+`unless` set operation. For example,
+`rate(errors_total[5m]) / on(service) group_left(region) service_info` is a
+many-to-one vector match; `up or maintenance_mode` is a set union. The node
+records whether each operand is scalar or vector, vector-match cardinality,
+operation class, and a hash-build side for vector/vector matching. Evidence
+supplies both edge shapes and encoded matching-key width. CPU visits both
+inputs and the output; vector/vector memory is the selected build-side series
+times key width plus hash metadata. Operation-specific cardinality bounds are
+validated (`or` may use the sum, while `and`/`unless` cannot exceed the left).
+
+### `PromqlRelabel { expression_operations_per_row }`
+
+Evaluates a PromQL label transformation without changing series or sample
+cardinality. For example,
+`label_replace(up, "host", "$1", "instance", "(.*):.*")` lowers to this
+operator. The physical configuration counts expression work per sample; CPU
+is rows times that count and memory is one output row or batch.
+
+### `PromqlInfoEnrich { matcher_operations_per_info_row }`
+
+Builds a lookup over an info metric and enriches the data vector while
+preserving its left-side cardinality. For example,
+`info(rate(http_server_request_duration_seconds_count[2m]))` lowers the data
+expression and a separately scoped info-series `Scan`, then joins them here.
+Evidence supplies both vector edges and matching-key width. CPU visits data,
+info, and output rows plus selector-matcher work; memory is the info-side hash
+state. Both scans must be present in the comparison scope.
+
+### `PromqlSeriesSample { kind, grouping_key_count }`
+
+Selects series by deterministic sampling within optional label groups. For
+example, `limitk(10, up)` records `LimitK { k: 10 }`, while
+`limit_ratio(0.1, up)` records the exact ratio bits. Evidence supplies group
+count and encoded selection-key width. CPU visits samples and hashes input
+series; memory retains selected series keys. `limitk` output is bounded by
+`min(input_series, group_count × k)`. The current lowerer rejects the
+unsupported `without` grouping form instead of changing its semantics.
+
+### `PromqlScalarToVector`
+
+Materializes one vector sample per evaluation step from a scalar, as in
+`vector(1)`. Its edge contract is Scalar to a one-series Vector with the same
+steps. CPU visits input and output rows; memory is one output row or batch.
+
+### `PromqlVectorToScalar`
+
+Converts a vector to a scalar at each evaluation step, as in `scalar(up)`.
+Its edge contract is Vector to Scalar with the same steps. CPU visits input
+and output rows; memory is one output row or batch.
+
+### `PromqlScalarLeaf`
+
+Produces a source-free scalar for each evaluation step. Number literals,
+`time()`, and `pi()` are examples. It has no child or external input edge, and
+its output must contain exactly one scalar row per step. CPU is one operation
+per emitted scalar and memory is one scalar row.
+
+### `PromqlPerSeries { operations_per_row, accumulator_count }`
+
+Updates fixed-size state independently for each series and emits at most one
+instant-vector sample per series and step. Examples include
+`rate(http_requests_total[5m])` after `PromqlRange`, and
+`avg_over_time(temperature_celsius[10m])`. The configuration records primitive
+update work and accumulator count; evidence supplies accumulator bytes per
+series. CPU is `input_rows × operations_per_row`; memory is
+`input_series × accumulator_bytes_per_series`. Ordered or
+distribution-dependent functions are unavailable until a distinct physical
+algorithm and formula exist.
+
+### `PromqlPresence { kind, operations_per_row }`
+
+Implements presence semantics while preserving their two different
+cardinality rules. `Absent` covers `absent(up)` and
+`absent_over_time(up[5m])`; it may synthesize at most one series and one row
+per evaluation step, and an entirely empty input emits one row per step.
+`PresentPerSeries` covers `present_over_time(up[5m])`; its output is bounded by
+the input series and input rows. CPU visits input and output rows; memory is
+one output row or batch.
+
 ## Comparison and failure behavior
 
 Raw and post-ASAP alternatives must cover the same `ComparisonScope`: arrival
 mode, planning time, workload horizon, recurrence, event-time selection,
-logical sources, predicates, and physical source snapshots.
+logical sources, ordinary predicates or info-metric matchers, and physical
+source snapshots.
 
 Missing statistics, stale evidence, an unsupported physical algorithm,
 unlowered logical operations, inconsistent edges, or different comparison
