@@ -236,30 +236,42 @@ mod tests {
     };
 
     use crate::analytical_cost::{ExecutionMultiplicity, PhysicalDagNode, PhysicalOperator};
-    use crate::analytical_statistics::{EdgeStatistics, OperatorStatistics, SourceCoverage};
+    use crate::analytical_statistics::{
+        EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
+    };
     use crate::replacement::ReplacementStrategy;
 
     fn edge(rows: u64, bytes: u64) -> EdgeStatistics {
         EdgeStatistics { rows, bytes }
     }
 
-    fn statistics(
-        source_scan_bytes: u64,
-        inputs: Vec<EdgeStatistics>,
-        output: EdgeStatistics,
-    ) -> OperatorStatistics {
-        OperatorStatistics {
-            source_scan_bytes,
-            inputs,
+    fn unary_edges(input: EdgeStatistics, output: EdgeStatistics) -> UnaryEdgeStatistics {
+        UnaryEdgeStatistics {
+            input,
             output,
-            group_count: None,
-            key_bytes: None,
-            aggregate_value_bytes: None,
-            k: None,
-            topk_output_offset: None,
-            limit_rows_consumed: None,
-            hash_join_build_side: None,
             promql: None,
+        }
+    }
+
+    fn scan_statistics(source_read_bytes: u64, edge: EdgeStatistics) -> OperatorStatistics {
+        OperatorStatistics::Scan {
+            edges: unary_edges(edge, edge),
+            source_read_bytes,
+        }
+    }
+
+    fn aggregate_statistics(input: EdgeStatistics, output: EdgeStatistics) -> OperatorStatistics {
+        OperatorStatistics::HashAggregate {
+            edges: unary_edges(input, output),
+            group_count: 1,
+            key_bytes: 0,
+            accumulator_bytes_per_group: 8,
+        }
+    }
+
+    fn pass_through_statistics(edge: EdgeStatistics) -> OperatorStatistics {
+        OperatorStatistics::PassThrough {
+            edges: unary_edges(edge, edge),
         }
     }
 
@@ -299,8 +311,9 @@ mod tests {
                 source: Source::Table {
                     table_ref: "events".into(),
                 },
-                snapshot_id: "snapshot-1".into(),
+                source_snapshot_id: "snapshot-1".into(),
                 predicates: vec![],
+                info_matchers: vec![],
             }],
         }
     }
@@ -323,16 +336,9 @@ mod tests {
         }
 
         fn summary_dag(&self, scope: &ComparisonScope) -> PhysicalDag {
-            let scan_statistics = statistics(
-                self.candidate_scan_bytes,
-                vec![edge(100, 800)],
-                edge(100, 800),
-            );
-            let mut aggregate_statistics = statistics(0, vec![edge(100, 800)], edge(1, 8));
-            aggregate_statistics.group_count = Some(1);
-            aggregate_statistics.key_bytes = Some(8);
-            aggregate_statistics.aggregate_value_bytes = Some(8);
-            let read_statistics = statistics(0, vec![edge(1, 8)], edge(1, 8));
+            let scan_statistics = scan_statistics(self.candidate_scan_bytes, edge(100, 800));
+            let aggregate_statistics = aggregate_statistics(edge(100, 800), edge(1, 8));
+            let read_statistics = pass_through_statistics(edge(1, 8));
             let evidence = HashMap::from([
                 (
                     "candidate-scan".into(),
@@ -372,7 +378,10 @@ mod tests {
                     },
                     PhysicalDagNode {
                         id: "candidate-state".into(),
-                        operator: PhysicalOperator::HashAggregate,
+                        operator: PhysicalOperator::HashAggregate {
+                            grouping_key_count: 0,
+                            accumulator_count: 1,
+                        },
                         children: vec!["candidate-scan".into()],
                         source_coverage: None,
                         output_buffer_bytes: 8,
@@ -415,22 +424,17 @@ mod tests {
             assert_eq!(snapshot.version, "test-snapshot-1");
             self.raw_evidence_calls
                 .set(self.raw_evidence_calls.get() + 1);
-            let (physical_id, mut statistics) = match request.operator {
-                PhysicalOperator::Scan => (
-                    "raw-scan",
-                    statistics(800, vec![edge(100, 800)], edge(100, 800)),
-                ),
-                PhysicalOperator::HashAggregate => (
+            let (physical_id, statistics) = match request.operator {
+                PhysicalOperator::Scan => ("raw-scan", scan_statistics(800, edge(100, 800))),
+                PhysicalOperator::HashAggregate {
+                    grouping_key_count: 0,
+                    accumulator_count: 1,
+                } => (
                     "raw-aggregate",
-                    statistics(0, vec![edge(100, 800)], edge(1, 8)),
+                    aggregate_statistics(edge(100, 800), edge(1, 8)),
                 ),
                 _ => return Err(AnalyticalCostError::UnsupportedQueryOperator),
             };
-            if request.operator == PhysicalOperator::HashAggregate {
-                statistics.group_count = Some(1);
-                statistics.key_bytes = Some(8);
-                statistics.aggregate_value_bytes = Some(8);
-            }
             Ok(PhysicalNodeEvidence {
                 physical_id: physical_id.into(),
                 output_buffer_bytes: 8,
@@ -522,7 +526,11 @@ mod tests {
                 target: &TargetSubDAG<'_>,
             ) -> Result<PhysicalDag, AnalyticalCostError> {
                 let mut dag = self.0.summary_physical_dag(snapshot, summary, target)?;
-                dag.nodes[0].source_coverage.as_mut().unwrap().snapshot_id = "other".into();
+                dag.nodes[0]
+                    .source_coverage
+                    .as_mut()
+                    .unwrap()
+                    .source_snapshot_id = "other".into();
                 Ok(dag)
             }
         }
