@@ -678,12 +678,16 @@ fn validate_operator_semantics(
         }
         (
             PhysicalOperator::InMemoryComparisonSort
-            | PhysicalOperator::InMemoryOrderedWindow
             | PhysicalOperator::PassThrough,
             _,
         ) => {
             if input != output {
                 return inconsistent("cardinality-preserving operator changes its edge");
+            }
+        }
+        (PhysicalOperator::InMemoryOrderedWindow, _) => {
+            if input.rows != output.rows {
+                return inconsistent("Window changes row cardinality");
             }
         }
         (PhysicalOperator::Concat, OperatorStatistics::Concat { inputs, .. }) => {
