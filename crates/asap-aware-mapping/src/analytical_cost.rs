@@ -570,9 +570,14 @@ fn validate_operator_semantics(
                 return inconsistent("grouped output differs from distinct group cardinality");
             }
         }
-        PhysicalOperator::Sort | PhysicalOperator::Window | PhysicalOperator::PassThrough => {
+        PhysicalOperator::Sort | PhysicalOperator::PassThrough => {
             if input != output {
                 return inconsistent("cardinality-preserving operator changes its edge");
+            }
+        }
+        PhysicalOperator::Window => {
+            if input.rows != output.rows {
+                return inconsistent("Window changes row cardinality");
             }
         }
         PhysicalOperator::Concat => {
@@ -600,8 +605,8 @@ fn validate_operator_semantics(
                 .k
                 .filter(|k| *k > 0)
                 .ok_or(AnalyticalCostError::MissingOrZero("k"))?;
-            if output.rows != input.rows.min(k) {
-                return inconsistent("Top-K output differs from its cardinality bound");
+            if output.rows > input.rows.min(k) {
+                return inconsistent("Top-K output exceeds its cardinality bound");
             }
         }
         PhysicalOperator::Limit => {
