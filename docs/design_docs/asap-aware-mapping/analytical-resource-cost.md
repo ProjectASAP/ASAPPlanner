@@ -321,12 +321,14 @@ input.
 
 ## Summary operator formulas
 
-A retained sketch performs one build and serves later reads from state:
+A retained summary performs one build and serves later reads from state. The
+following expression applies to any summary family; `update_ops`, `read_ops`,
+and state size are supplied by that family's physical implementation:
 
 ```text
 cpu_ops = input_rows                         // build scan
         + input_rows × update_ops(params)
-        + evaluation_count × physical_sketch_count × read_ops(params)
+        + evaluation_count × summary_state_instances_per_window × read_ops(params)
 
 scan_bytes = source_scan_bytes for the build
 ```
@@ -345,9 +347,11 @@ Concrete accuracy-sized parameters determine state and work:
 | Theta | `ceil(log2(k))` | `k` | `k × 8` |
 
 For a per-subpopulation layout,
-`physical_sketch_count = subpopulation_count`. A shared layout has the number
-of physical structures described by that layout; the model must not infer it
-from logical group count alone.
+`summary_state_instances_per_window = subpopulation_count`. A shared layout
+has the number of physical summary-state instances described by that layout;
+the model must not infer it from logical group count alone. These instances
+may be sketches, exact accumulators, samples, wavelet states, fitted models,
+or another supported summary representation.
 
 Summary merge, subtract, delete, and readout are separate physical operations.
 The incremental estimator discovers them from the selected `SummaryExpr` DAG
@@ -435,9 +439,9 @@ Persistent memory is:
 
 ```text
 (active_window_count + retained_window_count)
-  * physical_sketch_count
+  * summary_state_instances_per_window
   * unique_summary_state_count
-  * state_bytes_per_sketch
+  * summary_state_bytes_per_instance
 ```
 
 Merge or subtract additionally needs one transient result state per physical

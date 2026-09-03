@@ -67,9 +67,9 @@ pub struct StreamingPhysicalInputEvidence {
     pub retained_window_count: u64,
     /// Independent state instances per window: one for shared
     /// multi-subpopulation state, otherwise the resolved group count.
-    pub physical_sketch_count: u64,
+    pub summary_state_instances_per_window: u64,
     /// Resident bytes of one concrete state instance.
-    pub state_bytes_per_sketch: u64,
+    pub summary_state_bytes_per_instance: u64,
 }
 
 /// Workload-normalized inputs for incremental maintenance over one finite
@@ -83,8 +83,8 @@ pub struct StreamingSummaryInputs {
     pub active_window_count: u64,
     pub bootstrap_window_count: u64,
     pub retained_window_count: u64,
-    pub physical_sketch_count: u64,
-    pub state_bytes_per_sketch: u64,
+    pub summary_state_instances_per_window: u64,
+    pub summary_state_bytes_per_instance: u64,
 }
 
 impl StreamingSummaryInputs {
@@ -124,8 +124,8 @@ impl StreamingSummaryInputs {
             active_window_count: physical.active_window_count,
             bootstrap_window_count: physical.bootstrap_window_count,
             retained_window_count: physical.retained_window_count,
-            physical_sketch_count: physical.physical_sketch_count,
-            state_bytes_per_sketch: physical.state_bytes_per_sketch,
+            summary_state_instances_per_window: physical.summary_state_instances_per_window,
+            summary_state_bytes_per_instance: physical.summary_state_bytes_per_instance,
         }
         .validate()
     }
@@ -134,8 +134,14 @@ impl StreamingSummaryInputs {
         for (name, value) in [
             ("active_window_count", self.active_window_count),
             ("bootstrap_window_count", self.bootstrap_window_count),
-            ("physical_sketch_count", self.physical_sketch_count),
-            ("state_bytes_per_sketch", self.state_bytes_per_sketch),
+            (
+                "summary_state_instances_per_window",
+                self.summary_state_instances_per_window,
+            ),
+            (
+                "summary_state_bytes_per_instance",
+                self.summary_state_bytes_per_instance,
+            ),
         ] {
             if value == 0 {
                 return Err(AnalyticalCostError::MissingOrZero(name));
@@ -799,8 +805,8 @@ impl StreamingAnalyticalCostModel {
         let retained = inputs
             .active_window_count
             .checked_add(inputs.retained_window_count)?
-            .checked_mul(inputs.physical_sketch_count)?
-            .checked_mul(inputs.state_bytes_per_sketch)?;
+            .checked_mul(inputs.summary_state_instances_per_window)?
+            .checked_mul(inputs.summary_state_bytes_per_instance)?;
         let retention_total = self.calibrated(ResourceEstimate {
             cpu_ops: 0.0,
             peak_memory_bytes: retained,
@@ -1161,8 +1167,8 @@ fn estimate_heterogeneous_summary(
         let retained = inputs
             .active_window_count
             .checked_add(inputs.retained_window_count)
-            .and_then(|windows| windows.checked_mul(inputs.physical_sketch_count))
-            .and_then(|states| states.checked_mul(inputs.state_bytes_per_sketch))
+            .and_then(|windows| windows.checked_mul(inputs.summary_state_instances_per_window))
+            .and_then(|states| states.checked_mul(inputs.summary_state_bytes_per_instance))
             .ok_or(AnalyticalCostError::Overflow)?;
         if ephemeral {
             ephemeral_state_bytes = ephemeral_state_bytes
@@ -1960,7 +1966,7 @@ fn estimate_incremental_summary_maintenance_with_join(
         .checked_mul(inputs.active_window_count)
         .and_then(|n| n.checked_mul(counts.state_builds))
         .ok_or(AnalyticalCostError::Overflow)?;
-    let instances = inputs.physical_sketch_count as f64;
+    let instances = inputs.summary_state_instances_per_window as f64;
     let evaluations = evaluation_count as f64;
     let cpu_ops = (build_inserts as f64 + update_inserts as f64) * insert
         + evaluations * counts.merges_per_read as f64 * instances * merge
@@ -1975,19 +1981,19 @@ fn estimate_incremental_summary_maintenance_with_join(
     let state_instances = inputs
         .active_window_count
         .checked_add(inputs.retained_window_count)
-        .and_then(|n| n.checked_mul(inputs.physical_sketch_count))
+        .and_then(|n| n.checked_mul(inputs.summary_state_instances_per_window))
         .and_then(|n| n.checked_mul(counts.state_builds))
         .ok_or(AnalyticalCostError::Overflow)?;
     let retained_bytes = state_instances
-        .checked_mul(inputs.state_bytes_per_sketch)
+        .checked_mul(inputs.summary_state_bytes_per_instance)
         .ok_or(AnalyticalCostError::Overflow)?;
     // Merge/subtract may stream over persistent inputs but still needs one
     // result state per physical instance. Persistent retained windows are
     // already included above and are not loaded a second time.
     let transient_bytes = if counts.merges_per_read > 0 || counts.subtracts_per_read > 0 {
         inputs
-            .physical_sketch_count
-            .checked_mul(inputs.state_bytes_per_sketch)
+            .summary_state_instances_per_window
+            .checked_mul(inputs.summary_state_bytes_per_instance)
             .ok_or(AnalyticalCostError::Overflow)?
     } else {
         0
@@ -2354,8 +2360,8 @@ mod tests {
             active_window_count: 2,
             bootstrap_window_count: 1,
             retained_window_count: 3,
-            physical_sketch_count: 2,
-            state_bytes_per_sketch: 100,
+            summary_state_instances_per_window: 2,
+            summary_state_bytes_per_instance: 100,
         }
     }
 
@@ -2463,8 +2469,8 @@ mod tests {
             active_window_count: 1,
             bootstrap_window_count: 1,
             retained_window_count: 1,
-            physical_sketch_count: 1,
-            state_bytes_per_sketch: 8,
+            summary_state_instances_per_window: 1,
+            summary_state_bytes_per_instance: 8,
         };
         assert_eq!(
             inputs.validate(),
@@ -2529,8 +2535,8 @@ mod tests {
             active_window_count: 2,
             bootstrap_window_count: 1,
             retained_window_count: 3,
-            physical_sketch_count: 2,
-            state_bytes_per_sketch: 100,
+            summary_state_instances_per_window: 2,
+            summary_state_bytes_per_instance: 100,
         };
         let mut model = streaming_model();
         let workload = QueryWorkload {
@@ -3098,7 +3104,7 @@ mod tests {
         assert_eq!(incomplete.summary_total_cost, None);
 
         let mut second_inputs = streaming_inputs();
-        second_inputs.state_bytes_per_sketch = 250;
+        second_inputs.summary_state_bytes_per_instance = 250;
         let mut second_cpu = streaming_cpu();
         second_cpu.insert_cpu_ops = Some(5.0);
         model.node_evidence.aggregations.insert(
@@ -3455,8 +3461,8 @@ mod tests {
                 active_window_count: 2,
                 bootstrap_window_count: 1,
                 retained_window_count: 3,
-                physical_sketch_count: 2,
-                state_bytes_per_sketch: 100,
+                summary_state_instances_per_window: 2,
+                summary_state_bytes_per_instance: 100,
             },
             SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(2.0),
@@ -3484,8 +3490,8 @@ mod tests {
                 active_window_count: 1,
                 bootstrap_window_count: 1,
                 retained_window_count: 2,
-                physical_sketch_count: 2,
-                state_bytes_per_sketch: 10,
+                summary_state_instances_per_window: 2,
+                summary_state_bytes_per_instance: 10,
             },
             SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(1.0),
@@ -3519,8 +3525,8 @@ mod tests {
                     active_window_count: 1,
                     bootstrap_window_count: 1,
                     retained_window_count: 1,
-                    physical_sketch_count: 1,
-                    state_bytes_per_sketch: 8,
+                    summary_state_instances_per_window: 1,
+                    summary_state_bytes_per_instance: 8,
                 },
                 SummaryOperationCpuEvidence {
                     insert_cpu_ops: Some(1.0),
@@ -3546,8 +3552,8 @@ mod tests {
                     active_window_count: 1,
                     bootstrap_window_count: 1,
                     retained_window_count: 1,
-                    physical_sketch_count: 1,
-                    state_bytes_per_sketch: 8,
+                    summary_state_instances_per_window: 1,
+                    summary_state_bytes_per_instance: 8,
                 },
                 SummaryOperationCpuEvidence {
                     insert_cpu_ops: Some(1.0),
@@ -3577,8 +3583,8 @@ mod tests {
                     active_window_count: 1,
                     bootstrap_window_count: 1,
                     retained_window_count: 1,
-                    physical_sketch_count: 1,
-                    state_bytes_per_sketch: 8,
+                    summary_state_instances_per_window: 1,
+                    summary_state_bytes_per_instance: 8,
                 },
                 SummaryOperationCpuEvidence {
                     insert_cpu_ops: Some(1.0),
@@ -3612,8 +3618,8 @@ mod tests {
                 active_window_count: 1,
                 bootstrap_window_count: 1,
                 retained_window_count: 1,
-                physical_sketch_count: 1,
-                state_bytes_per_sketch: 8,
+                summary_state_instances_per_window: 1,
+                summary_state_bytes_per_instance: 8,
             },
             SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(1.0),
@@ -3649,8 +3655,8 @@ mod tests {
                     active_window_count: 1,
                     bootstrap_window_count: 1,
                     retained_window_count: 1,
-                    physical_sketch_count: 1,
-                    state_bytes_per_sketch: 8,
+                    summary_state_instances_per_window: 1,
+                    summary_state_bytes_per_instance: 8,
                 },
                 SummaryOperationCpuEvidence {
                     insert_cpu_ops: Some(1.0),
@@ -3694,8 +3700,8 @@ mod tests {
             active_window_count: 1,
             bootstrap_window_count: 1,
             retained_window_count: 1,
-            physical_sketch_count: 1,
-            state_bytes_per_sketch: 8,
+            summary_state_instances_per_window: 1,
+            summary_state_bytes_per_instance: 8,
         };
         let cpu = SummaryOperationCpuEvidence {
             insert_cpu_ops: Some(1.0),
@@ -4051,8 +4057,8 @@ mod tests {
             active_window_count: 2,
             bootstrap_window_count: 1,
             retained_window_count: 3,
-            physical_sketch_count: 2,
-            state_bytes_per_sketch: 100,
+            summary_state_instances_per_window: 2,
+            summary_state_bytes_per_instance: 100,
         }
     }
 
@@ -4113,7 +4119,7 @@ mod tests {
                             },
                             output: test_edge(),
                             cpu_ops,
-                            working_memory_bytes: inputs.state_bytes_per_sketch,
+                            working_memory_bytes: inputs.summary_state_bytes_per_instance,
                             output_buffer_bytes: 0,
                             executions_per_evaluation: 1,
                             events_per_second: None,
@@ -4128,7 +4134,7 @@ mod tests {
                             inputs: vec![test_edge(), test_edge()],
                             output: test_edge(),
                             cpu_ops,
-                            working_memory_bytes: inputs.state_bytes_per_sketch,
+                            working_memory_bytes: inputs.summary_state_bytes_per_instance,
                             output_buffer_bytes: 0,
                             executions_per_evaluation: 1,
                             events_per_second: None,
