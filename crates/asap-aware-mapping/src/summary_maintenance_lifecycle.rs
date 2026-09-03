@@ -20,11 +20,12 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    EvaluationSchedule, OutputRepresentation, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
-    SummaryWindowFramework,
+    EvaluationSchedule, OutputRepresentation, ResultGuarantee, SummaryExpr,
+    SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
+    SummaryNode, SummaryWindowFramework,
 };
 use asap_types::pre_asap::QueryExpr;
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::{
     DataArrival, Predictability, QueryRecurrence, QueryWorkload, RepeatedDemand, TimestampMs,
     WorkloadError,
@@ -196,6 +197,9 @@ pub struct SummaryMaintenanceLifecyclePlan {
     pub selected_raw_recompute: bool,
     /// Cost of the selected set of summary deployments, when fully known.
     pub summary_total_cost: Option<Cost>,
+    /// Composed accuracy guarantee supplied by the selected physical window
+    /// evidence, when the window framework introduces approximation.
+    pub window_accuracy_guarantee: Option<ResultGuarantee>,
     /// Cost of evaluating the original expression for the same demand, when
     /// fully known.
     pub raw_recompute_total_cost: Option<Cost>,
@@ -267,6 +271,7 @@ pub enum SummaryMaintenanceLifecycleSelectionError {
 /// for one candidate target and counts consumers rather than invocations.
 #[derive(Debug)]
 struct SummaryMaintenanceWorkloadFacts {
+    required_accuracy: Vec<AccuracyTarget>,
     /// Total one-time and recurring reads inside the horizon. `None` means a
     /// recurrence or horizon was unknown, not zero reads.
     reads: Option<f64>,
@@ -379,8 +384,12 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         comparison_target,
         horizon,
         facts.reads,
+        &facts.required_accuracy,
     );
     let summary_total_cost = complete_estimate.as_ref().map(|estimate| estimate.cost);
+    let window_accuracy_guarantee = complete_estimate
+        .as_ref()
+        .and_then(|estimate| estimate.window_accuracy_guarantee.clone());
     let selected_raw_recompute = matches!(root.expr, SummaryExpr::KeepPreAsap(_));
     Ok(SummaryMaintenanceLifecyclePlan {
         root,
@@ -391,6 +400,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         expected_reads: facts.reads,
         selected_raw_recompute,
         summary_total_cost,
+        window_accuracy_guarantee,
         raw_recompute_total_cost: None,
     })
 }
@@ -491,6 +501,7 @@ pub fn materialize_with_summary_maintenance_lifecycles(
                 plan.deployments.clear();
                 plan.selected_raw_recompute = true;
                 plan.summary_total_cost = None;
+                plan.window_accuracy_guarantee = None;
             }
             Ok(plan)
         })
@@ -512,6 +523,7 @@ fn workload_facts(
     let mut prepared_end: Option<TimestampMs> = None;
     let mut prepared_eligible = true;
     let mut requires_deletion = false;
+    let mut required_accuracy = Vec::new();
 
     let entries: Vec<_> = workload.entries().collect();
     if workload_entry_indices.is_empty() {
@@ -528,6 +540,7 @@ fn workload_facts(
                 entry_count: entries.len(),
             },
         )?;
+        required_accuracy.push(entry.requirements.accuracy.target());
         requires_deletion |= entry.time_selection.lookback.is_some()
             && entry.time_selection.as_of.is_none()
             && matches!(
@@ -643,6 +656,7 @@ fn workload_facts(
         recurring_known.then_some(one_time_invocations as f64 + recurring_reads)
     };
     Ok(SummaryMaintenanceWorkloadFacts {
+        required_accuracy,
         reads,
         one_time_invocations,
         evaluation_rate: has_evaluation_rate.then_some(EvaluationRate(evaluation_rate)),
@@ -1038,6 +1052,7 @@ fn select_complete_lifecycle_combination(
     comparison_target: Option<&QueryExpr>,
     horizon: Option<Horizon>,
     expected_reads: Option<f64>,
+    required_accuracy: &[AccuracyTarget],
 ) -> Option<CompleteSummaryCandidateEstimate> {
     const MAX_COMPLETE_LIFECYCLE_COMBINATIONS: usize = 4_096;
     if deployments.is_empty() {
@@ -1047,13 +1062,20 @@ fn select_complete_lifecycle_combination(
     // cannot soundly prune the search. Bound exhaustive enumeration and fail
     // closed instead of allowing an adversarial DAG to consume exponential
     // planner time.
+    let complete_costing = cost_model.complete_summary_candidate_estimate_covers_lifecycle_costs();
+    let eligible = |alternative: &SummaryMaintenanceLifecycleAlternative| {
+        alternative.selectable()
+            || (complete_costing
+                && alternative.rejection
+                    == Some(SummaryMaintenanceLifecycleRejection::MissingCostEvidence))
+    };
     let combinations = deployments
         .iter()
         .try_fold(1_usize, |product, deployment| {
             let selectable = deployment
                 .alternatives
                 .iter()
-                .filter(|alternative| alternative.selectable())
+                .filter(|alternative| eligible(alternative))
                 .count();
             product.checked_mul(selectable)
         })?;
@@ -1074,6 +1096,8 @@ fn select_complete_lifecycle_combination(
         comparison_target: Option<&QueryExpr>,
         horizon: Option<Horizon>,
         expected_reads: Option<f64>,
+        required_accuracy: &[AccuracyTarget],
+        complete_costing: bool,
         selected: &mut Vec<(usize, SummaryMaintenanceLifecycleGuarantee, Cost)>,
         best: &mut Option<(
             CompleteSummaryCandidateEstimate,
@@ -1103,6 +1127,7 @@ fn select_complete_lifecycle_combination(
                 &costed,
                 horizon,
                 expected_reads,
+                required_accuracy,
             ) else {
                 return;
             };
@@ -1126,7 +1151,12 @@ fn select_complete_lifecycle_combination(
         for alternative in deployments[index]
             .alternatives
             .iter()
-            .filter(|alternative| alternative.selectable())
+            .filter(|alternative| {
+                alternative.selectable()
+                    || (complete_costing
+                        && alternative.rejection
+                            == Some(SummaryMaintenanceLifecycleRejection::MissingCostEvidence))
+            })
         {
             let lifecycle = alternative.summary_maintenance_lifecycle.clone();
             let guarantee = SummaryMaintenanceLifecycleGuarantee {
@@ -1135,7 +1165,11 @@ fn select_complete_lifecycle_combination(
                 summary_maintenance_lifecycle: lifecycle,
                 output_representation: OutputRepresentation::SummaryState,
             };
-            selected.push((index, guarantee, alternative.total_cost.unwrap()));
+            selected.push((
+                index,
+                guarantee,
+                alternative.total_cost.unwrap_or(Cost::ZERO),
+            ));
             visit(
                 index + 1,
                 root,
@@ -1146,6 +1180,8 @@ fn select_complete_lifecycle_combination(
                 comparison_target,
                 horizon,
                 expected_reads,
+                required_accuracy,
+                complete_costing,
                 selected,
                 best,
             );
@@ -1164,6 +1200,8 @@ fn select_complete_lifecycle_combination(
         comparison_target,
         horizon,
         expected_reads,
+        required_accuracy,
+        complete_costing,
         &mut Vec::new(),
         &mut best,
     );
@@ -1368,6 +1406,7 @@ mod tests {
             deployments: &[CostedSummaryDeployment<'_>],
             _horizon: Option<Horizon>,
             _expected_reads: Option<f64>,
+            _required_accuracy: &[AccuracyTarget],
         ) -> Option<Cost> {
             Some(
                 if deployments.iter().all(|deployment| {
@@ -2042,6 +2081,7 @@ mod tests {
             None,
             Some(Horizon(10.0)),
             Some(2.0),
+            &[],
         );
 
         assert_eq!(total.map(|estimate| estimate.cost), Some(Cost(1.0)));
@@ -2091,6 +2131,7 @@ mod tests {
                 None,
                 Some(Horizon(10.0)),
                 Some(2.0),
+                &[],
             ),
             None
         );

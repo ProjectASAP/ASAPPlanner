@@ -15,10 +15,12 @@ costs for `DataArrival::ContinuouslyIngesting`. The same module also exposes a
 whole-selected-summary estimator for merge, subtract, delete, readout, and
 join shapes.
 
-The model does not decide semantic or accuracy legality. Candidate generation
-and guarantee composition run first; costing ranks only the candidates that
-survive. Missing evidence produces an unavailable estimate, never an assumed
-zero or a structural-cost fallback.
+The model does not decide semantic legality. Ordinary summary guarantees are
+composed before costing. A window framework that itself introduces error must,
+however, carry a typed composed guarantee in the same complete evidence bundle;
+the streaming adapter checks that guarantee against every bound workload
+accuracy target before the candidate can be ranked. Missing evidence produces
+an unavailable estimate, never an assumed zero or a structural-cost fallback.
 
 This document distinguishes four implementation layers:
 
@@ -65,6 +67,14 @@ normalized workload, lowered query IR, and freshness-aware statistics:
 | Event-time range | `QueryWorkloadEntry.time_selection`. |
 | Accuracy and latency requirements | `QueryWorkloadEntry.requirements`. |
 | Operator shape, grouping keys, and constants such as Top-K `k` | Lowered `QueryExpr` and `AggIntent`. |
+
+`DataWorkload` does define whether input is streaming: its `arrival` field is
+`AtRest`, `ContinuouslyIngesting`, `Mixed`, or `Unknown`, and a continuous
+arrival rate comes from fresh `ingestion_rate` evidence. These facts describe
+how source data arrives. They do not choose a lifecycle or a window framework:
+`Incremental` describes how a selected summary state is updated, while
+tumbling, sliding, and exponential histogram describe how that state is
+organized over time.
 
 Evidence is read through `Evidence<T>::value_at(planning_time)`. Stale,
 future, or improperly time-bounded evidence remains unknown. Costing follows
@@ -511,6 +521,36 @@ Cost evidence cannot replace accuracy evidence. Examples include:
   `DataWorkload.distribution` evidence;
 - a shared sketch layout requires a proven composition bound.
 
+Window candidates therefore contain both physical-resource evidence and a
+registered accuracy composition. Exact tumbling or sliding coverage contributes
+no additional error. For exponential histogram, the currently registered
+PromSketch cases are:
+
+```text
+EH + KLL, most-recent window:
+    normalized rank error <= 2 * epsilon_EH + epsilon_KLL
+
+EH + KLL, arbitrary sub-window:
+    query-relative normalized rank error
+      <= 2 * epsilon_EH * suffix_rows / query_rows + epsilon_KLL
+
+EH Universal/GSum, most-recent window:
+    relative error <= epsilon
+
+EH Universal/GSum, arbitrary sub-window:
+    query-relative error <= epsilon * suffix_rows / query_rows
+```
+
+Here `suffix_rows` is the cardinality from the query's left endpoint through
+the maintained window's right endpoint, and `query_rows` is the requested
+sub-window cardinality. Both must be positive and `suffix_rows >= query_rows`.
+The failure probability is carried separately in `ResultGuarantee`. The EH+KLL
+rule is accepted only for a KLL summary; the current Universal/GSum rule is
+accepted only for exact `Count` or `Sum` accumulator states. An EH assignment
+with an exact marker, a mismatched family, invalid parameters, or an unregistered
+composition is unavailable. These rules follow
+[Approximation-First Timeseries Query At Scale](https://www.vldb.org/pvldb/vol18/p2348-zhu.pdf).
+
 The planner first rejects candidates without the necessary guarantee. Only
 the surviving candidates reach cost ranking.
 
@@ -560,8 +600,9 @@ for each combination before selecting the minimum. The hook receives explicit
 node-to-guarantee bindings plus the horizon and expected reads. Each logical
 occurrence is looked up by exact `Rc` identity, while every
 evidence record also carries a provider-owned physical identity. Equal physical
-identities deduplicate work and retained state only when their operator facts,
-edge statistics, lifecycle guarantee, and physical child identities agree;
+identities deduplicate work and retained state only when their logical summary,
+selected window framework, operator facts, edge statistics, lifecycle
+guarantee, and physical child identities agree;
 conflicts make the candidate unavailable. Thus heterogeneous states are costed
 independently and genuinely shared deployments once. Merge, subtract, delete,
 readout, and join participate in automatic

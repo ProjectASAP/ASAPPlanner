@@ -14,6 +14,13 @@ maintained**. A window framework answers **which abstract time-organization
 primitive is used**. A physical deployment answers **which concrete
 implementation realizes those choices, and where it runs**.
 
+`DataWorkload.arrival` declares whether source data is `AtRest`,
+`ContinuouslyIngesting`, `Mixed`, or `Unknown`; fresh `ingestion_rate` evidence
+quantifies a continuous stream. This is an input fact, not a maintenance
+decision. For example, continuously arriving data does not by itself force a
+summary to be continuously maintained—the Planner may still compare an
+ephemeral rebuild with incremental alternatives over the same horizon.
+
 ## Ownership
 
 | Owner | Decisions |
@@ -110,7 +117,8 @@ expressed as evidence rather than as a Planner-owned implementation:
    Planner candidate and retains its concrete identity.
 2. It supplies `StreamingNodeEvidence` for that implementation, including bootstrap
    routing, active and retained state counts, state size, physical operations,
-   edges, and source coverage.
+   edges, source coverage, and any registered window-specific accuracy
+   composition.
 3. ASAPPlanner evaluates legal lifecycle combinations over the supplied
    `ComparisonScope`. Missing evidence makes the candidate unavailable; it is
    never interpreted as zero cost.

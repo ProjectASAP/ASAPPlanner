@@ -3092,17 +3092,27 @@ impl<Id> PlanSpace<Id> {
             let lifecycle_choice = candidate_costs
                 .filter(|costs| costs.finalizes(&group.target))
                 .map(|costs| {
-                    let summary = group
+                    let effective_target =
+                        TargetSubDAG::with_consumer_count(&group.target, effective);
+                    let candidate = group
                         .candidates
                         .iter()
                         .filter_map(|candidate| {
                             costs
                                 .get(&group.target, candidate)
+                                .or_else(|| {
+                                    (cost_model.candidate_cost_covers_complete_plan()
+                                        && matches!(candidate.replacement, Replacement::Rewrite(_)))
+                                    .then(|| {
+                                        cost_model.candidate_cost(candidate, &effective_target)
+                                    })
+                                    .flatten()
+                                })
                                 .map(|cost| (candidate, cost))
                         })
                         .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0));
-                    match (summary, costs.raw(&group.target)) {
-                        (Some((_, summary_cost)), Some(raw)) if raw.0 <= summary_cost.0 => None,
+                    match (candidate, costs.raw(&group.target)) {
+                        (Some((_, candidate_cost)), Some(raw)) if raw.0 <= candidate_cost.0 => None,
                         (Some((candidate, _)), _) => Some(candidate),
                         (None, Some(_)) => None,
                         (None, None) => None,
@@ -5925,6 +5935,21 @@ mod tests {
         let planned = &space.roots[0].1;
 
         let selected = space.global_selection(&CompletePlanCost);
+        let chosen = selected.for_target(planned).unwrap().chosen.unwrap();
+        assert!(matches!(
+            &chosen.replacement,
+            Replacement::Rewrite(rewrite) if Rc::ptr_eq(rewrite, planned)
+        ));
+
+        // Lifecycle costing finalizes a target so raw and summary costs are
+        // compared atomically. That must not hide a complete-plan rewrite
+        // candidate from the same memo group.
+        let mut lifecycle_costs = CandidateCostOverrides::default();
+        lifecycle_costs.finalize_target(planned);
+        lifecycle_costs.insert_raw(planned, Cost(100.0));
+        let selected = space
+            .global_selection_impl(&CompletePlanCost, None, None, Some(&lifecycle_costs))
+            .unwrap();
         let chosen = selected.for_target(planned).unwrap().chosen.unwrap();
         assert!(matches!(
             &chosen.replacement,

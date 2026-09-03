@@ -49,12 +49,14 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    GroupingStrategy, HydraParams, SketchAlgorithm, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
+    GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
+    SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
+    SummaryWindowFramework,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::types::AccuracyTarget;
 
 use crate::recurrence::{
     self, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
@@ -120,6 +122,10 @@ pub struct CompleteSummaryCandidateEstimate {
     /// complete-cost hook. `None` explicitly means that deployment does not
     /// use a summary-window framework.
     pub window_frameworks: Vec<Option<SummaryWindowFramework>>,
+    /// End-to-end guarantee supplied by the selected window realization.
+    /// `None` means that the complete model supplied no window-specific
+    /// guarantee; `Some` may be exact or approximate.
+    pub window_accuracy_guarantee: Option<ResultGuarantee>,
 }
 
 impl Cost {
@@ -597,6 +603,7 @@ pub trait CostModel {
         deployments: &[CostedSummaryDeployment<'_>],
         _horizon: Option<Horizon>,
         _expected_reads: Option<f64>,
+        _required_accuracy: &[AccuracyTarget],
     ) -> Option<Cost> {
         Some(Cost(
             deployments
@@ -616,12 +623,29 @@ pub trait CostModel {
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<Horizon>,
         expected_reads: Option<f64>,
+        required_accuracy: &[AccuracyTarget],
     ) -> Option<CompleteSummaryCandidateEstimate> {
-        self.complete_summary_candidate_cost(root, target, deployments, horizon, expected_reads)
-            .map(|cost| CompleteSummaryCandidateEstimate {
-                cost,
-                window_frameworks: vec![None; deployments.len()],
-            })
+        self.complete_summary_candidate_cost(
+            root,
+            target,
+            deployments,
+            horizon,
+            expected_reads,
+            required_accuracy,
+        )
+        .map(|cost| CompleteSummaryCandidateEstimate {
+            cost,
+            window_frameworks: vec![None; deployments.len()],
+            window_accuracy_guarantee: None,
+        })
+    }
+
+    /// Whether the complete-candidate hook is authoritative for lifecycle
+    /// costs. When true, lifecycle alternatives rejected only because their
+    /// legacy per-state cost is missing remain eligible for complete-DAG
+    /// evaluation. Semantic and runtime-capability rejections still apply.
+    fn complete_summary_candidate_estimate_covers_lifecycle_costs(&self) -> bool {
+        false
     }
 
     /// Cost of evaluating `target` directly from its logical/raw inputs once.
