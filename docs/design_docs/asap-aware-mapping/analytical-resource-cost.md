@@ -46,7 +46,7 @@ normalized workload, lowered query IR, and freshness-aware statistics:
 | Query demand | `QueryWorkloadEntry.recurrence`, normalized over an explicit horizon. |
 | Event-time range | `QueryWorkloadEntry.time_selection`. |
 | Accuracy and latency requirements | `QueryWorkloadEntry.requirements`. |
-| Operator shape, grouping keys, and constants such as Top-K `k` | Lowered `QueryExpr` and `AggIntent`. |
+| Operator shape, grouping keys, and constants such as Top-K limit and offset | Lowered query and selected physical plan. |
 
 Evidence is read through `Evidence<T>::value_at(planning_time)`. Stale,
 future, or improperly time-bounded evidence remains unknown. Costing follows
@@ -141,17 +141,60 @@ An `OperatorStatisticsProvider` resolves one `OperatorStatistics` value for
 each reachable physical node:
 
 ```text
-OperatorStatistics {
-    source_scan_bytes,
-    inputs: [EdgeStatistics { rows, bytes }, ...],
-    output: EdgeStatistics { rows, bytes },
-    group_count,
-    key_bytes,
-    aggregate_value_bytes,
-    k,
-    hash_join_build_side,
+EdgeStatistics { rows, bytes }
+
+OperatorStatistics =
+    Scan {
+        edges: UnaryEdgeStatistics,
+        source_read_bytes,
+    }
+  | Filter { edges: UnaryEdgeStatistics }
+  | Project { edges: UnaryEdgeStatistics }
+  | HashAggregate {
+        edges: UnaryEdgeStatistics,
+        group_count,
+        key_bytes,
+        accumulator_bytes_per_group,
+    }
+  | InMemoryComparisonSort { edges: UnaryEdgeStatistics }
+  | TopK { edges: UnaryEdgeStatistics }
+  | HashJoin { edges: BinaryEdgeStatistics }
+  | HashDeduplicate {
+        edges: UnaryEdgeStatistics,
+        distinct_key_count,
+        key_bytes,
+    }
+  | Concat { inputs, output }
+  | InMemoryOrderedWindow { edges: UnaryEdgeStatistics }
+  | Limit { edges: UnaryEdgeStatistics }
+  | PassThrough { edges: UnaryEdgeStatistics }
 }
 ```
+
+`UnaryEdgeStatistics` contains exactly one input and one output;
+`BinaryEdgeStatistics` contains an ordered pair of inputs and one output.
+`Concat` is the only variadic case. `EdgeStatistics` itself intentionally
+remains operator-independent: an edge carries logical rows and bytes, and the
+same edge is the output of one node and an input of every consumer. Making the
+edge type depend on either endpoint would prevent direct consistency checks.
+
+The outer enum is operator-specific. A Filter cannot accidentally carry
+group cardinality, a Top-K statistics record cannot carry a join build side,
+and a non-scan record cannot carry source-read bytes. Serialized evidence is
+internally tagged by operator and rejects unknown fields.
+
+Physical configuration is not catalog evidence and therefore lives on
+`PhysicalOperator`:
+
+| Physical operator | Configuration owned by the plan |
+|---|---|
+| `TopK` | output `limit` and `offset`; heap capacity is `limit + offset` |
+| `Limit` | output `limit` and `offset` |
+| `HashJoin` | left or right build side |
+
+This distinction removes the former flat optional `k` field. A Top-K bound is
+part of the chosen algorithm, while input/output cardinality and width are
+observed or estimated facts about that operator in this workload.
 
 The provider owns provenance, freshness, and derivation. The estimator resolves
 each reachable node once, so one estimate cannot mix values across a live
@@ -165,7 +208,7 @@ positive logical bytes so width-dependent formulas do not invent a row width.
 A parent therefore cannot silently substitute the original source cardinality
 for an intermediate edge.
 
-`OperatorStatistics.inputs` and `PhysicalDagNode.children` therefore have
+The statistics inputs and `PhysicalDagNode.children` therefore have
 different arity only for a source leaf:
 
 | Operator shape | Statistics inputs | DAG children |
@@ -180,10 +223,12 @@ operator cannot silently inherit unary arity; its statistics-input and
 DAG-child counts must both be defined.
 
 `EdgeStatistics.bytes` is decoded logical data carried on an edge.
-`source_scan_bytes` is physical storage I/O and is charged only by `Scan`.
+`Scan.source_read_bytes` is physical storage I/O and is charged only by
+`Scan`.
 Compression, column pruning, or encoded storage can therefore make these
-values different; neither is inferred from the other. Non-scan operators must
-report zero source bytes in the current in-memory operator model.
+values different; neither is inferred from the other. Other statistics
+variants have no source-read field, so charging source I/O at a non-scan node
+is not representable.
 
 ### Composition rules
 
@@ -247,20 +292,23 @@ the DAG rules above.
 
 | Physical operator | CPU operations | Local memory | Source/disk reads |
 |---|---:|---:|---:|
-| Scan | `input_rows` | one decoded input row/batch | `source_scan_bytes` |
+| Scan | `input_rows` | one decoded input row/batch | `source_read_bytes` |
 | Filter | `input_rows` | one output row/batch | `0` |
 | Project or scalar pass-through | `input_rows` | one output row/batch | `0` |
-| Hash aggregate | `input_rows` | `groups × (key + aggregate_value_bytes + hash metadata)` | `0` |
-| Deduplicate | `input_rows` | keyed hash state | `0` |
-| In-memory sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
-| Heap Top-K | `rows × ceil(log2(max(min(k, rows), 2)))` | `min(k, rows) × row_bytes` | `0` |
+| Hash aggregate | `input_rows` | `groups × (key_bytes + accumulator_bytes_per_group + hash metadata)` | `0` |
+| Hash deduplicate | `input_rows` | `distinct_key_count × (key_bytes + hash metadata)` | `0` |
+| In-memory comparison sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
+| Heap Top-K | `rows × ceil(log2(max(min(limit + offset, rows), 2)))` | `min(limit + offset, rows) × row_bytes` | `0` |
 | Hash join | `left_rows + right_rows + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
 | Concat | `output_rows` | one output row/batch | `0` |
-| Ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
-| Limit | `limit_rows_consumed` (including `OFFSET`) | one output row/batch | `0` |
+| In-memory ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
+| Limit | `min(input_rows, limit + offset)` | one output row/batch | `0` |
 
-These formulas name physical implementations. An external sort must add
-spill writes and reads; a nested-loop join must not use the hash-join formula.
+These formulas name physical implementations. The enum uses names such as
+`InMemoryComparisonSort`, `HashDeduplicate`, and `InMemoryOrderedWindow` so a
+new algorithm cannot silently inherit a formula merely because it has the
+same logical purpose. An external sort must add spill writes and reads; a
+nested-loop join must not use the hash-join formula.
 If the physical choice or its required statistics are unknown, the estimate
 is unavailable.
 
@@ -276,9 +324,9 @@ A retained sketch performs one build and serves later reads from state:
 ```text
 cpu_ops = input_rows                         // build scan
         + input_rows × update_ops(params)
-        + evaluation_count × physical_sketch_count × read_ops(params)
+        + evaluation_count × physical_summary_count × read_ops(params)
 
-scan_bytes = source_scan_bytes for the build
+scan_bytes = source_read_bytes for the build
 ```
 
 Concrete accuracy-sized parameters determine state and work:
@@ -295,7 +343,7 @@ Concrete accuracy-sized parameters determine state and work:
 | Theta | `ceil(log2(k))` | `k` | `k × 8` |
 
 For a per-subpopulation layout,
-`physical_sketch_count = subpopulation_count`. A shared layout has the number
+`physical_summary_count = subpopulation_count`. A shared layout has the number
 of physical structures described by that layout; the model must not infer it
 from logical group count alone.
 

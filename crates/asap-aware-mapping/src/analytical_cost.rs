@@ -65,13 +65,23 @@ pub enum PhysicalOperator {
     Filter,
     Project,
     HashAggregate,
-    Sort,
-    TopK,
-    HashJoin,
-    Deduplicate,
+    InMemoryComparisonSort,
+    /// Heap-based bounded ordering. The heap retains `limit + offset` rows
+    /// while the operator returns at most `limit` rows after skipping offset.
+    TopK {
+        limit: u64,
+        offset: u64,
+    },
+    HashJoin {
+        build_side: HashJoinBuildSide,
+    },
+    HashDeduplicate,
     Concat,
-    Window,
-    Limit,
+    InMemoryOrderedWindow,
+    Limit {
+        limit: u64,
+        offset: u64,
+    },
     PassThrough,
 }
 
@@ -329,7 +339,7 @@ fn validate_operator_statistics(
     statistics: &HashMap<&str, OperatorStatistics>,
 ) -> Result<(), AnalyticalCostError> {
     let arity = expected_input_arity(node.operator, node.children.len());
-    if node_statistics.inputs.len() != arity.statistics_inputs {
+    if node_statistics.input_count() != arity.statistics_inputs {
         return Err(AnalyticalCostError::InvalidOperatorStatistics {
             node: node.id.clone(),
             reason: "operator-statistics input count does not match physical arity",
@@ -340,20 +350,15 @@ fn validate_operator_statistics(
             "operator child count does not match physical arity",
         ));
     }
-    match node.operator {
-        PhysicalOperator::Scan => {}
-        _ if node_statistics.source_scan_bytes != 0 => {
-            return Err(AnalyticalCostError::InvalidOperatorStatistics {
-                node: node.id.clone(),
-                reason: "only scan operators may read source bytes",
-            });
-        }
-        _ => {}
+    if !statistics_match_operator(node.operator, node_statistics) {
+        return Err(AnalyticalCostError::InvalidOperatorStatistics {
+            node: node.id.clone(),
+            reason: "statistics variant does not match physical operator",
+        });
     }
-    for edge in node_statistics
-        .inputs
-        .iter()
-        .chain(std::iter::once(&node_statistics.output))
+    for edge in (0..node_statistics.input_count())
+        .filter_map(|index| node_statistics.input(index))
+        .chain(std::iter::once(node_statistics.output()))
     {
         if !edge.is_consistent() {
             return Err(AnalyticalCostError::InvalidOperatorStatistics {
@@ -367,7 +372,7 @@ fn validate_operator_statistics(
             .get(child_id.as_str())
             .ok_or(AnalyticalCostError::InvalidPhysicalDag("missing node"))?;
         let child_statistics = &statistics[child.id.as_str()];
-        if node_statistics.inputs[input_index] != child_statistics.output {
+        if node_statistics.input(input_index) != Some(child_statistics.output()) {
             return Err(AnalyticalCostError::ConflictingEdgeStatistics {
                 parent: node.id.clone(),
                 child: child.id.clone(),
@@ -376,6 +381,38 @@ fn validate_operator_statistics(
         }
     }
     Ok(())
+}
+
+fn statistics_match_operator(operator: PhysicalOperator, statistics: &OperatorStatistics) -> bool {
+    match operator {
+        PhysicalOperator::Scan => matches!(statistics, OperatorStatistics::Scan { .. }),
+        PhysicalOperator::Filter => matches!(statistics, OperatorStatistics::Filter { .. }),
+        PhysicalOperator::Project => matches!(statistics, OperatorStatistics::Project { .. }),
+        PhysicalOperator::HashAggregate => {
+            matches!(statistics, OperatorStatistics::HashAggregate { .. })
+        }
+        PhysicalOperator::InMemoryComparisonSort => {
+            matches!(
+                statistics,
+                OperatorStatistics::InMemoryComparisonSort { .. }
+            )
+        }
+        PhysicalOperator::TopK { .. } => matches!(statistics, OperatorStatistics::TopK { .. }),
+        PhysicalOperator::HashJoin { .. } => {
+            matches!(statistics, OperatorStatistics::HashJoin { .. })
+        }
+        PhysicalOperator::HashDeduplicate => {
+            matches!(statistics, OperatorStatistics::HashDeduplicate { .. })
+        }
+        PhysicalOperator::Concat => matches!(statistics, OperatorStatistics::Concat { .. }),
+        PhysicalOperator::InMemoryOrderedWindow => {
+            matches!(statistics, OperatorStatistics::InMemoryOrderedWindow { .. })
+        }
+        PhysicalOperator::Limit { .. } => matches!(statistics, OperatorStatistics::Limit { .. }),
+        PhysicalOperator::PassThrough => {
+            matches!(statistics, OperatorStatistics::PassThrough { .. })
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,13 +445,13 @@ fn expected_input_arity(
         PhysicalOperator::Filter
         | PhysicalOperator::Project
         | PhysicalOperator::HashAggregate
-        | PhysicalOperator::Sort
-        | PhysicalOperator::TopK
-        | PhysicalOperator::Deduplicate
-        | PhysicalOperator::Window
-        | PhysicalOperator::Limit
+        | PhysicalOperator::InMemoryComparisonSort
+        | PhysicalOperator::TopK { .. }
+        | PhysicalOperator::HashDeduplicate
+        | PhysicalOperator::InMemoryOrderedWindow
+        | PhysicalOperator::Limit { .. }
         | PhysicalOperator::PassThrough => unary,
-        PhysicalOperator::HashJoin => OperatorInputArity {
+        PhysicalOperator::HashJoin { .. } => OperatorInputArity {
             statistics_inputs: 2,
             dag_children: 2,
         },
@@ -445,73 +482,78 @@ pub fn estimate_operator(
     };
     let input = |index: usize| {
         statistics
-            .inputs
-            .get(index)
-            .copied()
+            .input(index)
             .ok_or(AnalyticalCostError::MissingOrZero("operator input edge"))
     };
     let left = input(0)?;
-    let output = statistics.output;
-    let estimate = match operator {
-        PhysicalOperator::Scan => ResourceEstimate {
+    let output = statistics.output();
+    let estimate = match (operator, &statistics) {
+        (
+            PhysicalOperator::Scan,
+            OperatorStatistics::Scan {
+                source_read_bytes, ..
+            },
+        ) => ResourceEstimate {
             cpu_ops: left.rows as f64,
             peak_memory_bytes: per_row_width(left.rows, left.bytes)?,
-            scan_bytes: statistics.source_scan_bytes,
+            scan_bytes: *source_read_bytes,
         },
-        PhysicalOperator::Filter | PhysicalOperator::Project | PhysicalOperator::PassThrough => {
-            ResourceEstimate {
-                cpu_ops: left.rows as f64,
-                peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-                scan_bytes: 0,
-            }
-        }
-        PhysicalOperator::HashAggregate => {
-            let groups = statistics
-                .group_count
-                .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
-            let key = statistics
-                .key_bytes
-                .ok_or(AnalyticalCostError::MissingOrZero("key_bytes"))?;
-            let value = statistics
-                .aggregate_value_bytes
-                .ok_or(AnalyticalCostError::MissingOrZero("aggregate_value_bytes"))?;
-            ResourceEstimate {
-                cpu_ops: left.rows as f64,
-                peak_memory_bytes: checked_bytes(&[
-                    groups,
-                    key.checked_add(value)
-                        .and_then(|bytes| bytes.checked_add(16))
-                        .ok_or(AnalyticalCostError::Overflow)?,
-                ])?,
-                scan_bytes: 0,
-            }
-        }
-        PhysicalOperator::Deduplicate => {
-            let groups = statistics
-                .group_count
-                .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
-            let key = statistics
-                .key_bytes
-                .ok_or(AnalyticalCostError::MissingOrZero("key_bytes"))?;
-            ResourceEstimate {
-                cpu_ops: left.rows as f64,
-                peak_memory_bytes: checked_bytes(&[
-                    groups,
-                    key.checked_add(16).ok_or(AnalyticalCostError::Overflow)?,
-                ])?,
-                scan_bytes: 0,
-            }
-        }
-        PhysicalOperator::Sort | PhysicalOperator::Window => ResourceEstimate {
-            cpu_ops: left.rows as f64 * (left.rows.max(2) as f64).log2().ceil(),
-            peak_memory_bytes: left.bytes,
+        (
+            PhysicalOperator::Filter | PhysicalOperator::Project | PhysicalOperator::PassThrough,
+            _,
+        ) => ResourceEstimate {
+            cpu_ops: left.rows as f64,
+            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
             scan_bytes: 0,
         },
-        PhysicalOperator::TopK => {
-            let k = statistics
-                .k
-                .ok_or(AnalyticalCostError::MissingOrZero("k"))?;
-            let heap_rows = k.min(left.rows);
+        (
+            PhysicalOperator::HashAggregate,
+            OperatorStatistics::HashAggregate {
+                group_count,
+                key_bytes,
+                accumulator_bytes_per_group,
+                ..
+            },
+        ) => ResourceEstimate {
+            cpu_ops: left.rows as f64,
+            peak_memory_bytes: checked_bytes(&[
+                *group_count,
+                key_bytes
+                    .checked_add(*accumulator_bytes_per_group)
+                    .and_then(|bytes| bytes.checked_add(16))
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            ])?,
+            scan_bytes: 0,
+        },
+        (
+            PhysicalOperator::HashDeduplicate,
+            OperatorStatistics::HashDeduplicate {
+                distinct_key_count,
+                key_bytes,
+                ..
+            },
+        ) => ResourceEstimate {
+            cpu_ops: left.rows as f64,
+            peak_memory_bytes: checked_bytes(&[
+                *distinct_key_count,
+                key_bytes
+                    .checked_add(16)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            ])?,
+            scan_bytes: 0,
+        },
+        (PhysicalOperator::InMemoryComparisonSort | PhysicalOperator::InMemoryOrderedWindow, _) => {
+            ResourceEstimate {
+                cpu_ops: left.rows as f64 * (left.rows.max(2) as f64).log2().ceil(),
+                peak_memory_bytes: left.bytes,
+                scan_bytes: 0,
+            }
+        }
+        (PhysicalOperator::TopK { limit, offset }, _) => {
+            let heap_capacity = limit
+                .checked_add(offset)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            let heap_rows = heap_capacity.min(left.rows);
             ResourceEstimate {
                 cpu_ops: left.rows as f64 * (heap_rows.max(2) as f64).log2().ceil(),
                 peak_memory_bytes: checked_bytes(&[
@@ -521,11 +563,8 @@ pub fn estimate_operator(
                 scan_bytes: 0,
             }
         }
-        PhysicalOperator::HashJoin => {
+        (PhysicalOperator::HashJoin { build_side }, _) => {
             let right = input(1)?;
-            let build_side = statistics
-                .hash_join_build_side
-                .ok_or(AnalyticalCostError::MissingOrZero("hash_join_build_side"))?;
             ResourceEstimate {
                 cpu_ops: left.rows as f64 + right.rows as f64 + output.rows as f64,
                 peak_memory_bytes: match build_side {
@@ -542,25 +581,31 @@ pub fn estimate_operator(
                 scan_bytes: 0,
             }
         }
-        PhysicalOperator::Concat => ResourceEstimate {
+        (PhysicalOperator::Concat, _) => ResourceEstimate {
             cpu_ops: output.rows as f64,
             peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
             scan_bytes: 0,
         },
-        PhysicalOperator::Limit => {
-            let consumed = statistics
-                .limit_rows_consumed
-                .ok_or(AnalyticalCostError::MissingOrZero("limit_rows_consumed"))?;
-            if consumed > left.rows || consumed < output.rows {
-                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                    "Limit rows consumed must cover its output without exceeding its input",
-                ));
-            }
+        (PhysicalOperator::Limit { limit, offset }, _) => {
+            let consumed = if limit == 0 {
+                0
+            } else {
+                left.rows.min(
+                    offset
+                        .checked_add(limit)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                )
+            };
             ResourceEstimate {
                 cpu_ops: consumed as f64,
                 peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
                 scan_bytes: 0,
             }
+        }
+        _ => {
+            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "statistics variant does not match physical operator",
+            ));
         }
     };
     if estimate.cpu_ops.is_finite() {
@@ -575,78 +620,109 @@ fn validate_operator_semantics(
     statistics: &OperatorStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let inconsistent = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
-    if !matches!(operator, PhysicalOperator::Scan) && statistics.source_scan_bytes != 0 {
-        return inconsistent("only Scan may charge source bytes");
+    if !statistics_match_operator(operator, statistics) {
+        return inconsistent("statistics variant does not match physical operator");
     }
-    let input = statistics.inputs.first().copied().ok_or(
-        AnalyticalCostError::InconsistentOperatorStatistics("operator input is missing"),
-    )?;
-    let output = statistics.output;
-    match operator {
-        PhysicalOperator::Scan => {
+    let input = statistics
+        .input(0)
+        .ok_or(AnalyticalCostError::InconsistentOperatorStatistics(
+            "operator input is missing",
+        ))?;
+    let output = statistics.output();
+    match (operator, statistics) {
+        (PhysicalOperator::Scan, _) => {
             if input != output {
                 return inconsistent("Scan input and output edges differ");
             }
         }
-        PhysicalOperator::Filter => {
+        (PhysicalOperator::Filter, _) => {
             if output.rows > input.rows || output.bytes > input.bytes {
                 return inconsistent("Filter output expands its input");
             }
         }
-        PhysicalOperator::Project => {
+        (PhysicalOperator::Project, _) => {
             if output.rows != input.rows {
                 return inconsistent("Project changes row cardinality");
             }
         }
-        PhysicalOperator::HashAggregate | PhysicalOperator::Deduplicate => {
-            let groups = statistics
-                .group_count
-                .filter(|groups| *groups > 0)
-                .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
-            if groups > input.rows || output.rows != groups {
+        (
+            PhysicalOperator::HashAggregate,
+            OperatorStatistics::HashAggregate {
+                group_count,
+                key_bytes,
+                accumulator_bytes_per_group,
+                ..
+            },
+        ) => {
+            if *group_count == 0 || *key_bytes == 0 || *accumulator_bytes_per_group == 0 {
+                return inconsistent("HashAggregate state statistics must be positive");
+            }
+            if *group_count > input.rows || output.rows != *group_count {
                 return inconsistent("grouped output differs from distinct group cardinality");
             }
         }
-        PhysicalOperator::Sort | PhysicalOperator::Window | PhysicalOperator::PassThrough => {
+        (
+            PhysicalOperator::HashDeduplicate,
+            OperatorStatistics::HashDeduplicate {
+                distinct_key_count,
+                key_bytes,
+                ..
+            },
+        ) => {
+            if *distinct_key_count == 0 || *key_bytes == 0 {
+                return inconsistent("Deduplicate state statistics must be positive");
+            }
+            if *distinct_key_count > input.rows || output.rows != *distinct_key_count {
+                return inconsistent("deduplicated output differs from distinct key cardinality");
+            }
+        }
+        (
+            PhysicalOperator::InMemoryComparisonSort
+            | PhysicalOperator::InMemoryOrderedWindow
+            | PhysicalOperator::PassThrough,
+            _,
+        ) => {
             if input != output {
                 return inconsistent("cardinality-preserving operator changes its edge");
             }
         }
-        PhysicalOperator::Concat => {
-            let total = statistics.inputs.iter().try_fold(
-                EdgeStatistics { rows: 0, bytes: 0 },
-                |total, edge| {
-                    Ok::<_, AnalyticalCostError>(EdgeStatistics {
-                        rows: total
-                            .rows
-                            .checked_add(edge.rows)
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                        bytes: total
-                            .bytes
-                            .checked_add(edge.bytes)
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                    })
-                },
-            )?;
+        (PhysicalOperator::Concat, OperatorStatistics::Concat { inputs, .. }) => {
+            let total =
+                inputs
+                    .iter()
+                    .try_fold(EdgeStatistics { rows: 0, bytes: 0 }, |total, edge| {
+                        Ok::<_, AnalyticalCostError>(EdgeStatistics {
+                            rows: total
+                                .rows
+                                .checked_add(edge.rows)
+                                .ok_or(AnalyticalCostError::Overflow)?,
+                            bytes: total
+                                .bytes
+                                .checked_add(edge.bytes)
+                                .ok_or(AnalyticalCostError::Overflow)?,
+                        })
+                    })?;
             if output != total {
                 return inconsistent("Concat output differs from the sum of its inputs");
             }
         }
-        PhysicalOperator::TopK => {
-            let k = statistics
-                .k
-                .filter(|k| *k > 0)
-                .ok_or(AnalyticalCostError::MissingOrZero("k"))?;
-            if output.rows != input.rows.min(k) {
+        (PhysicalOperator::TopK { limit, offset }, _) => {
+            if limit == 0 {
+                return inconsistent("Top-K limit must be positive");
+            }
+            let expected = input.rows.saturating_sub(offset).min(limit);
+            if output.rows != expected {
                 return inconsistent("Top-K output differs from its cardinality bound");
             }
         }
-        PhysicalOperator::Limit => {
-            if output.rows > input.rows {
-                return inconsistent("Limit output exceeds its input");
+        (PhysicalOperator::Limit { limit, offset }, _) => {
+            let expected = input.rows.saturating_sub(offset).min(limit);
+            if output.rows != expected {
+                return inconsistent("Limit output differs from limit and offset");
             }
         }
-        PhysicalOperator::HashJoin => {}
+        (PhysicalOperator::HashJoin { .. }, _) => {}
+        _ => return inconsistent("statistics variant does not match physical operator"),
     }
     Ok(())
 }
@@ -731,21 +807,21 @@ fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
 mod tests {
     use super::*;
     use crate::analytical_statistics::{
-        validate_comparison_scopes, ComparisonScope, EdgeStatistics, OperatorStatistics,
-        SourceCoverage,
+        validate_comparison_scopes, BinaryEdgeStatistics, ComparisonScope, EdgeStatistics,
+        OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
     };
 
-    fn unary_inputs(input_rows: u64, output_rows: u64) -> OperatorStatistics {
-        statistics(
-            vec![EdgeStatistics {
+    fn unary_row_edges(input_rows: u64, output_rows: u64) -> UnaryEdgeStatistics {
+        UnaryEdgeStatistics {
+            input: EdgeStatistics {
                 rows: input_rows,
                 bytes: input_rows.saturating_mul(8),
-            }],
-            EdgeStatistics {
+            },
+            output: EdgeStatistics {
                 rows: output_rows,
                 bytes: output_rows.saturating_mul(8),
             },
-        )
+        }
     }
 
     #[test]
@@ -765,7 +841,12 @@ mod tests {
             }
         );
         assert_eq!(
-            expected_input_arity(PhysicalOperator::HashJoin, 2),
+            expected_input_arity(
+                PhysicalOperator::HashJoin {
+                    build_side: HashJoinBuildSide::Left,
+                },
+                2,
+            ),
             OperatorInputArity {
                 statistics_inputs: 2,
                 dag_children: 2,
@@ -783,27 +864,47 @@ mod tests {
     #[test]
     fn operator_estimator_rejects_contradictory_cardinality_evidence() {
         assert!(matches!(
-            estimate_operator(PhysicalOperator::Filter, unary_inputs(10, 11)),
+            estimate_operator(
+                PhysicalOperator::Filter,
+                OperatorStatistics::Filter {
+                    edges: unary_row_edges(10, 11),
+                },
+            ),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
         ));
         assert!(matches!(
-            estimate_operator(PhysicalOperator::Project, unary_inputs(10, 9)),
+            estimate_operator(
+                PhysicalOperator::Project,
+                OperatorStatistics::Project {
+                    edges: unary_row_edges(10, 9),
+                },
+            ),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
         ));
 
-        let mut aggregate = unary_inputs(10, 3);
-        aggregate.group_count = Some(2);
-        aggregate.key_bytes = Some(8);
-        aggregate.aggregate_value_bytes = Some(8);
         assert!(matches!(
-            estimate_operator(PhysicalOperator::HashAggregate, aggregate),
+            estimate_operator(
+                PhysicalOperator::HashAggregate,
+                OperatorStatistics::HashAggregate {
+                    edges: unary_row_edges(10, 3),
+                    group_count: 2,
+                    key_bytes: 8,
+                    accumulator_bytes_per_group: 8,
+                },
+            ),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
         ));
 
-        let mut topk = unary_inputs(10, 4);
-        topk.k = Some(3);
         assert!(matches!(
-            estimate_operator(PhysicalOperator::TopK, topk),
+            estimate_operator(
+                PhysicalOperator::TopK {
+                    limit: 3,
+                    offset: 0,
+                },
+                OperatorStatistics::TopK {
+                    edges: unary_row_edges(10, 4),
+                },
+            ),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
         ));
     }
@@ -812,37 +913,39 @@ mod tests {
     fn physical_operator_formulas_keep_disk_at_scan_and_require_join_stats() {
         let scan = estimate_operator(
             PhysicalOperator::Scan,
-            OperatorStatistics {
-                source_scan_bytes: 64_000,
-                ..statistics(
-                    vec![EdgeStatistics {
-                        rows: 1_000,
-                        bytes: 64_000,
-                    }],
-                    EdgeStatistics {
+            OperatorStatistics::Scan {
+                source_read_bytes: 64_000,
+                edges: UnaryEdgeStatistics {
+                    input: EdgeStatistics {
                         rows: 1_000,
                         bytes: 64_000,
                     },
-                )
+                    output: EdgeStatistics {
+                        rows: 1_000,
+                        bytes: 64_000,
+                    },
+                },
             },
         )
         .unwrap();
         assert_eq!(scan.scan_bytes, 64_000);
 
         let topk = estimate_operator(
-            PhysicalOperator::TopK,
-            OperatorStatistics {
-                k: Some(10),
-                ..statistics(
-                    vec![EdgeStatistics {
+            PhysicalOperator::TopK {
+                limit: 10,
+                offset: 0,
+            },
+            OperatorStatistics::TopK {
+                edges: UnaryEdgeStatistics {
+                    input: EdgeStatistics {
                         rows: 1_000,
                         bytes: 40_000,
-                    }],
-                    EdgeStatistics {
+                    },
+                    output: EdgeStatistics {
                         rows: 10,
                         bytes: 400,
                     },
-                )
+                },
             },
         )
         .unwrap();
@@ -850,54 +953,28 @@ mod tests {
         assert_eq!(topk.cpu_ops, 4_000.0);
         assert_eq!(topk.peak_memory_bytes, 400);
 
-        let missing_join_stats = estimate_operator(
-            PhysicalOperator::HashJoin,
-            statistics(
-                vec![EdgeStatistics {
-                    rows: 1_000,
-                    bytes: 64_000,
-                }],
-                EdgeStatistics {
-                    rows: 100,
-                    bytes: 12_800,
-                },
-            ),
+        let mismatched_join_statistics = estimate_operator(
+            PhysicalOperator::HashJoin {
+                build_side: HashJoinBuildSide::Left,
+            },
+            OperatorStatistics::Filter {
+                edges: unary_row_edges(1_000, 100),
+            },
         );
         assert_eq!(
-            missing_join_stats,
-            Err(AnalyticalCostError::MissingOrZero("operator input edge"))
-        );
-
-        let missing_build_side = estimate_operator(
-            PhysicalOperator::HashJoin,
-            statistics(
-                vec![
-                    EdgeStatistics {
-                        rows: 1_000,
-                        bytes: 64_000,
-                    },
-                    EdgeStatistics {
-                        rows: 10,
-                        bytes: 1_280,
-                    },
-                ],
-                EdgeStatistics {
-                    rows: 100,
-                    bytes: 12_800,
-                },
-            ),
-        );
-        assert_eq!(
-            missing_build_side,
-            Err(AnalyticalCostError::MissingOrZero("hash_join_build_side"))
+            mismatched_join_statistics,
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "statistics variant does not match physical operator"
+            ))
         );
 
         let build_left = estimate_operator(
-            PhysicalOperator::HashJoin,
-            OperatorStatistics {
-                hash_join_build_side: Some(HashJoinBuildSide::Left),
-                ..statistics(
-                    vec![
+            PhysicalOperator::HashJoin {
+                build_side: HashJoinBuildSide::Left,
+            },
+            OperatorStatistics::HashJoin {
+                edges: BinaryEdgeStatistics {
+                    inputs: [
                         EdgeStatistics {
                             rows: 1_000,
                             bytes: 64_000,
@@ -907,11 +984,11 @@ mod tests {
                             bytes: 1_280,
                         },
                     ],
-                    EdgeStatistics {
+                    output: EdgeStatistics {
                         rows: 100,
                         bytes: 12_800,
                     },
-                )
+                },
             },
         )
         .unwrap();
@@ -919,58 +996,62 @@ mod tests {
 
         let aggregate = estimate_operator(
             PhysicalOperator::HashAggregate,
-            OperatorStatistics {
-                group_count: Some(100),
-                key_bytes: Some(16),
-                aggregate_value_bytes: Some(24),
-                ..statistics(
-                    vec![EdgeStatistics {
+            OperatorStatistics::HashAggregate {
+                group_count: 100,
+                key_bytes: 16,
+                accumulator_bytes_per_group: 24,
+                edges: UnaryEdgeStatistics {
+                    input: EdgeStatistics {
                         rows: 1_000,
                         bytes: 64_000,
-                    }],
-                    EdgeStatistics {
+                    },
+                    output: EdgeStatistics {
                         rows: 100,
                         bytes: 4_000,
                     },
-                )
+                },
             },
         )
         .unwrap();
         assert_eq!(aggregate.peak_memory_bytes, 5_600);
 
         let oversized_topk = estimate_operator(
-            PhysicalOperator::TopK,
-            OperatorStatistics {
-                k: Some(1_000),
-                ..statistics(
-                    vec![EdgeStatistics {
-                        rows: 4,
-                        bytes: 160,
-                    }],
-                    EdgeStatistics {
+            PhysicalOperator::TopK {
+                limit: 1_000,
+                offset: 0,
+            },
+            OperatorStatistics::TopK {
+                edges: UnaryEdgeStatistics {
+                    input: EdgeStatistics {
                         rows: 4,
                         bytes: 160,
                     },
-                )
+                    output: EdgeStatistics {
+                        rows: 4,
+                        bytes: 160,
+                    },
+                },
             },
         )
         .unwrap();
         assert_eq!(oversized_topk.cpu_ops, 8.0);
 
         let offset_limit = estimate_operator(
-            PhysicalOperator::Limit,
-            OperatorStatistics {
-                limit_rows_consumed: Some(900_010),
-                ..statistics(
-                    vec![EdgeStatistics {
+            PhysicalOperator::Limit {
+                limit: 10,
+                offset: 900_000,
+            },
+            OperatorStatistics::Limit {
+                edges: UnaryEdgeStatistics {
+                    input: EdgeStatistics {
                         rows: 1_000_000,
                         bytes: 40_000_000,
-                    }],
-                    EdgeStatistics {
+                    },
+                    output: EdgeStatistics {
                         rows: 10,
                         bytes: 400,
                     },
-                )
+                },
             },
         )
         .unwrap();
@@ -1029,22 +1110,32 @@ mod tests {
         let provided = HashMap::from([
             (
                 "scan".into(),
-                OperatorStatistics {
-                    source_scan_bytes: 1_000,
-                    ..statistics(vec![scan_edge], scan_edge)
+                OperatorStatistics::Scan {
+                    edges: unary_edges(scan_edge, scan_edge),
+                    source_read_bytes: 1_000,
                 },
             ),
-            ("left".into(), statistics(vec![scan_edge], branch_edge)),
-            ("right".into(), statistics(vec![scan_edge], branch_edge)),
+            (
+                "left".into(),
+                OperatorStatistics::Filter {
+                    edges: unary_edges(scan_edge, branch_edge),
+                },
+            ),
+            (
+                "right".into(),
+                OperatorStatistics::Filter {
+                    edges: unary_edges(scan_edge, branch_edge),
+                },
+            ),
             (
                 "root".into(),
-                statistics(
-                    vec![branch_edge, branch_edge],
-                    EdgeStatistics {
+                OperatorStatistics::Concat {
+                    inputs: vec![branch_edge, branch_edge],
+                    output: EdgeStatistics {
                         rows: 80,
                         bytes: 800,
                     },
-                ),
+                },
             ),
         ]);
         let mut scope = comparison_scope();
@@ -1081,7 +1172,10 @@ mod tests {
             },
             PhysicalDagNode {
                 id: "read".into(),
-                operator: PhysicalOperator::Limit,
+                operator: PhysicalOperator::Limit {
+                    limit: 1,
+                    offset: 0,
+                },
                 children: vec!["state".into()],
                 source_coverage: None,
                 output_buffer_bytes: 16,
@@ -1097,25 +1191,24 @@ mod tests {
         let provided = HashMap::from([
             (
                 "scan".into(),
-                OperatorStatistics {
-                    source_scan_bytes: 1_000,
-                    ..statistics(vec![scan_edge], scan_edge)
+                OperatorStatistics::Scan {
+                    edges: unary_edges(scan_edge, scan_edge),
+                    source_read_bytes: 1_000,
                 },
             ),
             (
                 "state".into(),
-                OperatorStatistics {
-                    group_count: Some(1),
-                    key_bytes: Some(8),
-                    aggregate_value_bytes: Some(8),
-                    ..statistics(vec![scan_edge], state_edge)
+                OperatorStatistics::HashAggregate {
+                    edges: unary_edges(scan_edge, state_edge),
+                    group_count: 1,
+                    key_bytes: 8,
+                    accumulator_bytes_per_group: 8,
                 },
             ),
             (
                 "read".into(),
-                OperatorStatistics {
-                    limit_rows_consumed: Some(1),
-                    ..statistics(vec![state_edge], state_edge)
+                OperatorStatistics::Limit {
+                    edges: unary_edges(state_edge, state_edge),
                 },
             ),
         ]);
@@ -1155,18 +1248,8 @@ mod tests {
         }
     }
 
-    fn statistics(inputs: Vec<EdgeStatistics>, output: EdgeStatistics) -> OperatorStatistics {
-        OperatorStatistics {
-            source_scan_bytes: 0,
-            inputs,
-            output,
-            group_count: None,
-            key_bytes: None,
-            aggregate_value_bytes: None,
-            k: None,
-            limit_rows_consumed: None,
-            hash_join_build_side: None,
-        }
+    fn unary_edges(input: EdgeStatistics, output: EdgeStatistics) -> UnaryEdgeStatistics {
+        UnaryEdgeStatistics { input, output }
     }
 
     #[test]
@@ -1240,18 +1323,18 @@ mod tests {
         let scope = comparison_scope();
         let mut provided = HashMap::from([(
             "scan".to_string(),
-            OperatorStatistics {
-                source_scan_bytes: 1_000,
-                ..statistics(
-                    vec![EdgeStatistics {
-                        rows: 100,
-                        bytes: 1_000,
-                    }],
+            OperatorStatistics::Scan {
+                edges: unary_edges(
                     EdgeStatistics {
                         rows: 100,
                         bytes: 1_000,
                     },
-                )
+                    EdgeStatistics {
+                        rows: 100,
+                        bytes: 1_000,
+                    },
+                ),
+                source_read_bytes: 1_000,
             },
         )]);
 
@@ -1264,16 +1347,18 @@ mod tests {
 
         provided.insert(
             "filter".into(),
-            statistics(
-                vec![EdgeStatistics {
-                    rows: 99,
-                    bytes: 990,
-                }],
-                EdgeStatistics {
-                    rows: 40,
-                    bytes: 400,
-                },
-            ),
+            OperatorStatistics::Filter {
+                edges: unary_edges(
+                    EdgeStatistics {
+                        rows: 99,
+                        bytes: 990,
+                    },
+                    EdgeStatistics {
+                        rows: 40,
+                        bytes: 400,
+                    },
+                ),
+            },
         );
         assert_eq!(
             estimate_physical_dag(&nodes, "filter", &scope, &provided),
@@ -1313,32 +1398,34 @@ mod tests {
         let provided = HashMap::from([
             (
                 "scan".to_string(),
-                OperatorStatistics {
-                    source_scan_bytes: 1_000,
-                    ..statistics(
-                        vec![EdgeStatistics {
-                            rows: 100,
-                            bytes: 1_000,
-                        }],
+                OperatorStatistics::Scan {
+                    edges: unary_edges(
                         EdgeStatistics {
                             rows: 100,
                             bytes: 1_000,
                         },
-                    )
+                        EdgeStatistics {
+                            rows: 100,
+                            bytes: 1_000,
+                        },
+                    ),
+                    source_read_bytes: 1_000,
                 },
             ),
             (
                 "filter".to_string(),
-                statistics(
-                    vec![EdgeStatistics {
-                        rows: 100,
-                        bytes: 1_000,
-                    }],
-                    EdgeStatistics {
-                        rows: 40,
-                        bytes: 400,
-                    },
-                ),
+                OperatorStatistics::Filter {
+                    edges: unary_edges(
+                        EdgeStatistics {
+                            rows: 100,
+                            bytes: 1_000,
+                        },
+                        EdgeStatistics {
+                            rows: 40,
+                            bytes: 400,
+                        },
+                    ),
+                },
             ),
         ]);
 
@@ -1378,14 +1465,16 @@ mod tests {
         let provided = HashMap::from([
             (
                 "scan".into(),
-                OperatorStatistics {
-                    source_scan_bytes: 1_000,
-                    ..statistics(vec![input], input)
+                OperatorStatistics::Scan {
+                    edges: unary_edges(input, input),
+                    source_read_bytes: 1_000,
                 },
             ),
             (
                 "filter".into(),
-                statistics(vec![input], EdgeStatistics { rows: 0, bytes: 0 }),
+                OperatorStatistics::Filter {
+                    edges: unary_edges(input, EdgeStatistics { rows: 0, bytes: 0 }),
+                },
             ),
         ]);
 
@@ -1419,9 +1508,9 @@ mod tests {
         };
         let provided = HashMap::from([(
             "scan".into(),
-            OperatorStatistics {
-                source_scan_bytes: 250,
-                ..statistics(vec![edge], edge)
+            OperatorStatistics::Scan {
+                edges: unary_edges(edge, edge),
+                source_read_bytes: 250,
             },
         )]);
 
@@ -1450,9 +1539,9 @@ mod tests {
         };
         let provided = HashMap::from([(
             "scan".into(),
-            OperatorStatistics {
-                source_scan_bytes: 250,
-                ..statistics(vec![edge], edge)
+            OperatorStatistics::Scan {
+                edges: unary_edges(edge, edge),
+                source_read_bytes: 250,
             },
         )]);
 
@@ -1490,9 +1579,9 @@ mod tests {
         };
         let provided = HashMap::from([(
             "scan".into(),
-            OperatorStatistics {
-                source_scan_bytes: 250,
-                ..statistics(vec![edge], edge)
+            OperatorStatistics::Scan {
+                edges: unary_edges(edge, edge),
+                source_read_bytes: 250,
             },
         )]);
 
@@ -1535,18 +1624,18 @@ mod tests {
         let provided = HashMap::from([
             (
                 "scan".into(),
-                OperatorStatistics {
-                    source_scan_bytes: 250,
-                    ..statistics(vec![input], input)
+                OperatorStatistics::Scan {
+                    edges: unary_edges(input, input),
+                    source_read_bytes: 250,
                 },
             ),
             (
                 "aggregate".into(),
-                OperatorStatistics {
-                    group_count: Some(1),
-                    key_bytes: Some(8),
-                    aggregate_value_bytes: Some(8),
-                    ..statistics(vec![input], output)
+                OperatorStatistics::HashAggregate {
+                    edges: unary_edges(input, output),
+                    group_count: 1,
+                    key_bytes: 8,
+                    accumulator_bytes_per_group: 8,
                 },
             ),
         ]);
@@ -1577,9 +1666,9 @@ mod tests {
         };
         let provided = HashMap::from([(
             "scan".into(),
-            OperatorStatistics {
-                source_scan_bytes: 250,
-                ..statistics(vec![edge], edge)
+            OperatorStatistics::Scan {
+                edges: unary_edges(edge, edge),
+                source_read_bytes: 250,
             },
         )]);
         let raw_scope = comparison_scope();
@@ -1613,9 +1702,9 @@ mod tests {
         };
         let estimate = estimate_operator(
             PhysicalOperator::Scan,
-            OperatorStatistics {
-                source_scan_bytes: 2_500,
-                ..statistics(vec![logical], logical)
+            OperatorStatistics::Scan {
+                edges: unary_edges(logical, logical),
+                source_read_bytes: 2_500,
             },
         )
         .unwrap();
@@ -1625,55 +1714,43 @@ mod tests {
     }
 
     #[test]
-    fn non_scan_operator_cannot_charge_source_bytes() {
-        let coverage = comparison_scope().sources[0].clone();
-        let nodes = vec![
-            PhysicalDagNode {
-                id: "scan".into(),
-                operator: PhysicalOperator::Scan,
-                children: vec![],
-                source_coverage: Some(coverage),
-                output_buffer_bytes: 10,
-                retained_bytes: 0,
-                execution: ExecutionMultiplicity::PerEvaluation,
-            },
-            PhysicalDagNode {
-                id: "filter".into(),
-                operator: PhysicalOperator::Filter,
-                children: vec!["scan".into()],
-                source_coverage: None,
-                output_buffer_bytes: 10,
-                retained_bytes: 0,
-                execution: ExecutionMultiplicity::PerEvaluation,
-            },
-        ];
+    fn non_scan_operator_estimates_cannot_charge_source_reads() {
         let edge = EdgeStatistics {
             rows: 100,
             bytes: 1_000,
         };
-        let provided = HashMap::from([
-            (
-                "scan".into(),
-                OperatorStatistics {
-                    source_scan_bytes: 250,
-                    ..statistics(vec![edge], edge)
-                },
-            ),
-            (
-                "filter".into(),
-                OperatorStatistics {
-                    source_scan_bytes: 250,
-                    ..statistics(vec![edge], edge)
-                },
-            ),
-        ]);
+        let filter = OperatorStatistics::Filter {
+            edges: unary_edges(edge, edge),
+        };
 
         assert_eq!(
-            estimate_physical_dag(&nodes, "filter", &comparison_scope(), &provided),
-            Err(AnalyticalCostError::InvalidOperatorStatistics {
-                node: "filter".into(),
-                reason: "only scan operators may read source bytes",
-            })
+            estimate_operator(PhysicalOperator::Filter, filter)
+                .unwrap()
+                .scan_bytes,
+            0
+        );
+    }
+
+    #[test]
+    fn serialized_operator_statistics_reject_unrelated_fields() {
+        let edge = serde_json::json!({ "rows": 100, "bytes": 1_000 });
+        let edges = serde_json::json!({ "input": edge, "output": edge });
+
+        assert!(
+            serde_json::from_value::<OperatorStatistics>(serde_json::json!({
+                "operator": "filter",
+                "edges": edges.clone(),
+                "source_read_bytes": 1_000
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<OperatorStatistics>(serde_json::json!({
+                "operator": "top_k",
+                "edges": edges,
+                "k": 10
+            }))
+            .is_err()
         );
     }
 }

@@ -13,7 +13,7 @@ use asap_types::workload::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::analytical_cost::{AnalyticalCostError, HashJoinBuildSide};
+use crate::analytical_cost::AnalyticalCostError;
 
 /// The semantic and workload boundary within which two resource estimates
 /// may be compared. Canonical workload and query-IR types remain authoritative;
@@ -183,27 +183,126 @@ impl EdgeStatistics {
     }
 }
 
-/// Authoritative cardinality and width facts for one physical operator.
-/// `inputs` has one entry per child edge, except `Scan`, whose single entry
-/// describes its external source edge. The output is compared with every
-/// parent's corresponding input, so conflicting provider evidence fails.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OperatorStatistics {
-    /// Physical bytes read from storage by this operator. This is independent
-    /// of decoded logical bytes on `inputs`; it must be zero for non-scan
-    /// operators in the current in-memory physical model.
-    pub source_scan_bytes: u64,
-    pub inputs: Vec<EdgeStatistics>,
+/// Input and output evidence for a unary physical operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnaryEdgeStatistics {
+    pub input: EdgeStatistics,
     pub output: EdgeStatistics,
-    pub group_count: Option<u64>,
-    pub key_bytes: Option<u64>,
-    pub aggregate_value_bytes: Option<u64>,
-    pub k: Option<u64>,
-    /// Rows consumed by a physical Limit, including rows skipped by OFFSET.
-    /// This is an execution statistic rather than the output cardinality.
-    #[serde(default)]
-    pub limit_rows_consumed: Option<u64>,
-    pub hash_join_build_side: Option<HashJoinBuildSide>,
+}
+
+/// Input and output evidence for a binary physical operator. The input order
+/// is the physical operator's left/right order and must match its DAG children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryEdgeStatistics {
+    pub inputs: [EdgeStatistics; 2],
+    pub output: EdgeStatistics,
+}
+
+/// Authoritative evidence for one physical operator, structured by operator
+/// kind so unrelated facts cannot be combined in one flat bag of `Option`s.
+/// Physical configuration such as a Top-K limit or hash-join build side lives
+/// on `PhysicalOperator`; this enum contains workload/catalog statistics only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operator", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OperatorStatistics {
+    Scan {
+        edges: UnaryEdgeStatistics,
+        /// Physical bytes read from storage, independent of decoded logical
+        /// bytes on the source edge.
+        source_read_bytes: u64,
+    },
+    Filter {
+        edges: UnaryEdgeStatistics,
+    },
+    Project {
+        edges: UnaryEdgeStatistics,
+    },
+    HashAggregate {
+        edges: UnaryEdgeStatistics,
+        group_count: u64,
+        key_bytes: u64,
+        accumulator_bytes_per_group: u64,
+    },
+    InMemoryComparisonSort {
+        edges: UnaryEdgeStatistics,
+    },
+    TopK {
+        edges: UnaryEdgeStatistics,
+    },
+    HashJoin {
+        edges: BinaryEdgeStatistics,
+    },
+    HashDeduplicate {
+        edges: UnaryEdgeStatistics,
+        distinct_key_count: u64,
+        key_bytes: u64,
+    },
+    Concat {
+        inputs: Vec<EdgeStatistics>,
+        output: EdgeStatistics,
+    },
+    InMemoryOrderedWindow {
+        edges: UnaryEdgeStatistics,
+    },
+    Limit {
+        edges: UnaryEdgeStatistics,
+    },
+    PassThrough {
+        edges: UnaryEdgeStatistics,
+    },
+}
+
+impl OperatorStatistics {
+    pub fn input_count(&self) -> usize {
+        match self {
+            Self::Scan { .. }
+            | Self::Filter { .. }
+            | Self::Project { .. }
+            | Self::HashAggregate { .. }
+            | Self::InMemoryComparisonSort { .. }
+            | Self::TopK { .. }
+            | Self::HashDeduplicate { .. }
+            | Self::InMemoryOrderedWindow { .. }
+            | Self::Limit { .. }
+            | Self::PassThrough { .. } => 1,
+            Self::HashJoin { .. } => 2,
+            Self::Concat { inputs, .. } => inputs.len(),
+        }
+    }
+
+    pub fn input(&self, index: usize) -> Option<EdgeStatistics> {
+        match self {
+            Self::Scan { edges, .. }
+            | Self::HashAggregate { edges, .. }
+            | Self::HashDeduplicate { edges, .. } => (index == 0).then_some(edges.input),
+            Self::Filter { edges }
+            | Self::Project { edges }
+            | Self::InMemoryComparisonSort { edges }
+            | Self::TopK { edges }
+            | Self::InMemoryOrderedWindow { edges }
+            | Self::Limit { edges }
+            | Self::PassThrough { edges } => (index == 0).then_some(edges.input),
+            Self::HashJoin { edges } => edges.inputs.get(index).copied(),
+            Self::Concat { inputs, .. } => inputs.get(index).copied(),
+        }
+    }
+
+    pub fn output(&self) -> EdgeStatistics {
+        match self {
+            Self::Scan { edges, .. }
+            | Self::HashAggregate { edges, .. }
+            | Self::HashDeduplicate { edges, .. } => edges.output,
+            Self::Filter { edges }
+            | Self::Project { edges }
+            | Self::InMemoryComparisonSort { edges }
+            | Self::TopK { edges }
+            | Self::InMemoryOrderedWindow { edges }
+            | Self::Limit { edges }
+            | Self::PassThrough { edges } => edges.output,
+            Self::HashJoin { edges } => edges.output,
+            Self::Concat { output, .. } => *output,
+        }
+    }
 }
 
 /// Resolves physical statistics and owns their catalog/observation freshness.
