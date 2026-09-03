@@ -21,9 +21,7 @@ use crate::analytical_cost::{
     estimate_physical_dag, AnalyticalCostError, PhysicalDagNode, PhysicalOperator,
     ResourceCalibration, ResourceEstimate,
 };
-use crate::physical_operator_statistics::{
-    evaluations_in_horizon, ComparisonScope, EdgeStatistics, OperatorStatistics,
-};
+use crate::physical_operator_statistics::{ComparisonScope, EdgeStatistics, OperatorStatistics};
 use crate::cost_model::CostedSummaryDeployment;
 use crate::cost_model::{Cost, CostModel, DefaultCostModel};
 use crate::recurrence::CostRate;
@@ -3494,7 +3492,10 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            topk_output_offset: None,
+            limit_rows_consumed: None,
             hash_join_build_side: None,
+            promql: None,
         };
         StreamingRawInputEvidence {
             input_rows_per_evaluation: 10,
@@ -3528,7 +3529,10 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            topk_output_offset: None,
+            limit_rows_consumed: None,
             hash_join_build_side: None,
+            promql: None,
         };
         StreamingPhysicalDagEvidence {
             nodes: vec![node],
