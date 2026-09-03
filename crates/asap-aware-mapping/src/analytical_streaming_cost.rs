@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
+    SummaryMaintenanceLifecycleGuarantee, SummaryNode,
 };
 use asap_types::pre_asap::{
     agg_intent::AggIntent, CompareOpKind, InfoMatcher, Predicate, QueryExpr, Source,
@@ -22,8 +22,9 @@ use crate::analytical_cost::{
     PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
 use crate::analytical_statistics::{ComparisonScope, EdgeStatistics, OperatorStatistics};
-use crate::cost_model::CostedSummaryDeployment;
-use crate::cost_model::{Cost, CostModel, DefaultCostModel};
+use crate::cost_model::{
+    CompleteSummaryCandidateEstimate, Cost, CostModel, CostedSummaryDeployment, DefaultCostModel,
+};
 use crate::recurrence::CostRate;
 use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
 use crate::summary_maintenance_lifecycle::{
@@ -31,7 +32,7 @@ use crate::summary_maintenance_lifecycle::{
     SummaryMaintenanceLifecycleCostInputs,
 };
 
-pub const ANALYTICAL_STREAMING_MODEL_VERSION: &str = "analytical-summary-incremental-v1";
+pub const ANALYTICAL_STREAMING_MODEL_VERSION: &str = "analytical-summary-lifecycle-v2";
 
 /// Owned, immutable evidence for one fully lowered physical DAG.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -303,6 +304,17 @@ pub struct StreamingRawInputEvidence {
     pub physical_dag: StreamingPhysicalDagEvidence,
 }
 
+/// One complete, provider-enumerated physical implementation of a streaming
+/// summary DAG. `physical_plan_id` deliberately remains provider-owned: it
+/// can name tumbling, sliding, PromSketch exponential-histogram, or a future
+/// framework without extending a planner enum. The evidence must cover the
+/// entire candidate DAG; incomplete alternatives are unavailable.
+#[derive(Debug, Clone)]
+pub struct StreamingPhysicalPlanAlternative {
+    pub physical_plan_id: String,
+    pub node_evidence: StreamingNodeEvidence,
+}
+
 /// Adapter that supplies the existing lifecycle planner with analytical
 /// streaming costs. It does not define lifecycle policy: the planner's
 /// existing enums and legality checks remain authoritative.
@@ -313,6 +325,8 @@ pub struct StreamingAnalyticalCostModel {
     pub capabilities: SummaryMaintenanceCapabilities,
     target_comparisons: HashMap<*const QueryExpr, StreamingTargetComparison>,
     candidate_comparisons: HashSet<(*const QueryExpr, *const SummaryNode)>,
+    physical_plan_alternatives:
+        HashMap<(*const QueryExpr, *const SummaryNode), Vec<StreamingPhysicalPlanAlternative>>,
 }
 
 #[derive(Debug, Clone)]
@@ -516,23 +530,28 @@ fn validate_raw_snapshot_dimensions(
             })
             .ok_or(AnalyticalCostError::Overflow)?;
     }
-    let scan_node = raw
-        .physical_dag
-        .nodes
-        .iter()
-        .find(|node| node.operator == PhysicalOperator::Scan)
-        .ok_or(AnalyticalCostError::MissingComparisonScope("raw scan"))?;
-    let statistics = raw
-        .physical_dag
-        .statistics
-        .get(&scan_node.id)
-        .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(scan_node.id.clone()))?;
-    if statistics.inputs.as_slice() != [EdgeStatistics { rows, bytes }]
-        || statistics.source_scan_bytes != scan
-    {
-        return Err(AnalyticalCostError::ComparisonScopeMismatch(
-            "raw source evolution",
-        ));
+    let mut scan_count = 0_usize;
+    for id in &visited {
+        let node = nodes[id];
+        if node.operator != PhysicalOperator::Scan {
+            continue;
+        }
+        scan_count += 1;
+        let statistics = raw
+            .physical_dag
+            .statistics
+            .get(&node.id)
+            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node.id.clone()))?;
+        if statistics.inputs.as_slice() != [EdgeStatistics { rows, bytes }]
+            || statistics.source_scan_bytes != scan
+        {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "raw source evolution",
+            ));
+        }
+    }
+    if scan_count == 0 {
+        return Err(AnalyticalCostError::MissingComparisonScope("raw scan"));
     }
     Ok(())
 }
@@ -567,6 +586,50 @@ fn evaluation_offsets_ms(scope: &ComparisonScope) -> Result<Vec<u64>, Analytical
     }
 }
 
+fn ephemeral_rows_over_horizon(
+    inputs: StreamingSummaryInputs,
+    scope: &ComparisonScope,
+) -> Result<u64, AnalyticalCostError> {
+    evaluation_offsets_ms(scope)?
+        .into_iter()
+        .try_fold(0_u64, |total, offset| {
+            let arrivals = (inputs.ingestion_rate_per_second * offset as f64 / 1_000.0).ceil();
+            if !arrivals.is_finite() || arrivals < 0.0 || arrivals > u64::MAX as f64 {
+                return Err(AnalyticalCostError::Overflow);
+            }
+            total
+                .checked_add(inputs.initial_input_rows)
+                .and_then(|value| value.checked_add(arrivals as u64))
+                .ok_or(AnalyticalCostError::Overflow)
+        })
+}
+
+fn ephemeral_scan_bytes_over_horizon(
+    inputs: StreamingSummaryInputs,
+    raw: &StreamingRawInputEvidence,
+    scope: &ComparisonScope,
+) -> Result<u64, AnalyticalCostError> {
+    if inputs.initial_source_scan_bytes == 0 {
+        return Ok(0);
+    }
+    evaluation_offsets_ms(scope)?
+        .into_iter()
+        .try_fold(0_u64, |total, offset| {
+            let arrivals = (inputs.ingestion_rate_per_second * offset as f64 / 1_000.0).ceil();
+            if !arrivals.is_finite() || arrivals < 0.0 || arrivals > u64::MAX as f64 {
+                return Err(AnalyticalCostError::Overflow);
+            }
+            total
+                .checked_add(inputs.initial_source_scan_bytes)
+                .and_then(|value| {
+                    (arrivals as u64)
+                        .checked_mul(raw.arriving_row_bytes)
+                        .and_then(|arriving| value.checked_add(arriving))
+                })
+                .ok_or(AnalyticalCostError::Overflow)
+        })
+}
+
 impl StreamingAnalyticalCostModel {
     pub fn new(
         calibration: ResourceCalibration,
@@ -578,6 +641,7 @@ impl StreamingAnalyticalCostModel {
             capabilities,
             target_comparisons: HashMap::new(),
             candidate_comparisons: HashSet::new(),
+            physical_plan_alternatives: HashMap::new(),
         }
     }
 
@@ -612,6 +676,96 @@ impl StreamingAnalyticalCostModel {
         self.candidate_comparisons
             .insert((target_ptr, Rc::as_ptr(root)));
         Ok(())
+    }
+
+    /// Add a complete physical implementation to the candidate space for an
+    /// already-bound `(target, root)` comparison. Feasibility and concrete
+    /// window construction remain the provider's responsibility; this model
+    /// compares every supplied implementation over the same scope and
+    /// lifecycle combinations.
+    pub fn bind_physical_plan_alternative(
+        &mut self,
+        target: &Rc<QueryExpr>,
+        root: &Rc<SummaryNode>,
+        alternative: StreamingPhysicalPlanAlternative,
+    ) -> Result<(), AnalyticalCostError> {
+        let key = (Rc::as_ptr(target), Rc::as_ptr(root));
+        if !self.candidate_comparisons.contains(&key) {
+            return Err(AnalyticalCostError::MissingOrStale(
+                "candidate comparison binding",
+            ));
+        }
+        if alternative.physical_plan_id.trim().is_empty() {
+            return Err(AnalyticalCostError::MissingOrZero("physical_plan_id"));
+        }
+        let alternatives = self.physical_plan_alternatives.entry(key).or_default();
+        if alternatives
+            .iter()
+            .any(|existing| existing.physical_plan_id == alternative.physical_plan_id)
+        {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "physical plan identity",
+            ));
+        }
+        alternatives.push(alternative);
+        Ok(())
+    }
+
+    fn comparison_context(
+        &self,
+        root: &SummaryNode,
+        target: Option<&QueryExpr>,
+        horizon: Option<crate::recurrence::Horizon>,
+        expected_reads: Option<f64>,
+    ) -> Option<(
+        (*const QueryExpr, *const SummaryNode),
+        &StreamingTargetComparison,
+    )> {
+        let root_ptr = root as *const _;
+        let target_ptr = match target {
+            Some(target) => target as *const _,
+            None => {
+                let mut targets = self
+                    .candidate_comparisons
+                    .iter()
+                    .filter_map(|(target, candidate)| (*candidate == root_ptr).then_some(*target));
+                let only = targets.next()?;
+                if targets.next().is_some() {
+                    return None;
+                }
+                only
+            }
+        };
+        let key = (target_ptr, root_ptr);
+        if !self.candidate_comparisons.contains(&key) {
+            return None;
+        }
+        let comparison = self.target_comparisons.get(&target_ptr)?;
+        if horizon.map(|value| value.0 * 1_000.0) != Some(comparison.scope.horizon.0 as f64)
+            || expected_reads != Some(comparison.scope.validate().ok()? as f64)
+        {
+            return None;
+        }
+        Some((key, comparison))
+    }
+
+    fn complete_cost_with_evidence(
+        &self,
+        root: &SummaryNode,
+        deployments: &[CostedSummaryDeployment<'_>],
+        comparison: &StreamingTargetComparison,
+        evidence: &StreamingNodeEvidence,
+    ) -> Option<Cost> {
+        self.calibrated(
+            estimate_heterogeneous_summary(
+                root,
+                deployments,
+                evidence,
+                &comparison.scope,
+                &comparison.raw,
+            )
+            .ok()?,
+        )
     }
 
     fn canonical_inputs(&self, summary: &SummaryNode) -> Option<StreamingAggregateEvidence> {
@@ -726,40 +880,57 @@ impl CostModel for StreamingAnalyticalCostModel {
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
     ) -> Option<Cost> {
-        let root_ptr = root as *const _;
-        let target_ptr = match target {
-            Some(target) => target as *const _,
+        let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
+        match self.physical_plan_alternatives.get(&key) {
+            Some(alternatives) => alternatives
+                .iter()
+                .filter_map(|alternative| {
+                    self.complete_cost_with_evidence(
+                        root,
+                        deployments,
+                        comparison,
+                        &alternative.node_evidence,
+                    )
+                })
+                .min_by(|left, right| left.0.total_cmp(&right.0)),
             None => {
-                let mut targets = self
-                    .candidate_comparisons
-                    .iter()
-                    .filter_map(|(target, candidate)| (*candidate == root_ptr).then_some(*target));
-                let only = targets.next()?;
-                if targets.next().is_some() {
-                    return None;
-                }
-                only
+                self.complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
             }
+        }
+    }
+
+    fn complete_summary_candidate_estimate(
+        &self,
+        root: &SummaryNode,
+        target: Option<&QueryExpr>,
+        deployments: &[CostedSummaryDeployment<'_>],
+        horizon: Option<crate::recurrence::Horizon>,
+        expected_reads: Option<f64>,
+    ) -> Option<CompleteSummaryCandidateEstimate> {
+        let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
+        let Some(alternatives) = self.physical_plan_alternatives.get(&key) else {
+            return self
+                .complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
+                .map(|cost| CompleteSummaryCandidateEstimate {
+                    cost,
+                    physical_plan_id: None,
+                });
         };
-        if !self.candidate_comparisons.contains(&(target_ptr, root_ptr)) {
-            return None;
-        }
-        let comparison = self.target_comparisons.get(&target_ptr)?;
-        if horizon.map(|value| value.0 * 1_000.0) != Some(comparison.scope.horizon.0 as f64)
-            || expected_reads != Some(comparison.scope.validate().ok()? as f64)
-        {
-            return None;
-        }
-        self.calibrated(
-            estimate_heterogeneous_summary(
-                root,
-                deployments,
-                &self.node_evidence,
-                &comparison.scope,
-                &comparison.raw,
-            )
-            .ok()?,
-        )
+        alternatives
+            .iter()
+            .filter_map(|alternative| {
+                self.complete_cost_with_evidence(
+                    root,
+                    deployments,
+                    comparison,
+                    &alternative.node_evidence,
+                )
+                .map(|cost| CompleteSummaryCandidateEstimate {
+                    cost,
+                    physical_plan_id: Some(alternative.physical_plan_id.clone()),
+                })
+            })
+            .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0))
     }
 
     fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
@@ -890,6 +1061,7 @@ fn estimate_heterogeneous_summary(
         .collect();
     let mut cpu_ops = 0.0;
     let mut persistent_bytes = 0_u64;
+    let mut ephemeral_state_bytes = 0_u64;
     let mut scans = HashMap::<String, (usize, u64)>::new();
     let mut physical_states = HashMap::<
         String,
@@ -946,7 +1118,36 @@ fn estimate_heterogeneous_summary(
             }
             std::collections::hash_map::Entry::Occupied(_) => continue,
         }
-        let (bootstrap, updates, _) = lifecycle_row_counts(inputs, deployment.guarantee, scope)?;
+        let ephemeral = matches!(
+            deployment.guarantee.summary_maintenance_lifecycle,
+            SummaryMaintenanceLifecycle::Ephemeral
+        );
+        let (bootstrap, updates, source_scan_bytes) = if ephemeral {
+            (
+                ephemeral_rows_over_horizon(inputs, scope)?,
+                0,
+                ephemeral_scan_bytes_over_horizon(inputs, raw, scope)?,
+            )
+        } else {
+            let (bootstrap, updates, _) =
+                lifecycle_row_counts(inputs, deployment.guarantee, scope)?;
+            let extra_rows = bootstrap
+                .checked_sub(inputs.initial_input_rows)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            let source_scan_bytes = if inputs.initial_source_scan_bytes == 0 {
+                0
+            } else {
+                inputs
+                    .initial_source_scan_bytes
+                    .checked_add(
+                        extra_rows
+                            .checked_mul(raw.arriving_row_bytes)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                    )
+                    .ok_or(AnalyticalCostError::Overflow)?
+            };
+            (bootstrap, updates, source_scan_bytes)
+        };
         let insert = required_cpu("insert_cpu_ops", node_evidence.cpu.insert_cpu_ops)?;
         let insert_calls = bootstrap
             .checked_mul(inputs.bootstrap_window_count)
@@ -963,9 +1164,15 @@ fn estimate_heterogeneous_summary(
             .and_then(|windows| windows.checked_mul(inputs.physical_sketch_count))
             .and_then(|states| states.checked_mul(inputs.state_bytes_per_sketch))
             .ok_or(AnalyticalCostError::Overflow)?;
-        persistent_bytes = persistent_bytes
-            .checked_add(retained)
-            .ok_or(AnalyticalCostError::Overflow)?;
+        if ephemeral {
+            ephemeral_state_bytes = ephemeral_state_bytes
+                .checked_add(retained)
+                .ok_or(AnalyticalCostError::Overflow)?;
+        } else {
+            persistent_bytes = persistent_bytes
+                .checked_add(retained)
+                .ok_or(AnalyticalCostError::Overflow)?;
+        }
         if node_evidence.bootstrap_read_identity.is_empty() {
             return Err(AnalyticalCostError::MissingOrStale(
                 "bootstrap_read_identity",
@@ -973,17 +1180,10 @@ fn estimate_heterogeneous_summary(
         }
         match scans.entry(node_evidence.bootstrap_read_identity.clone()) {
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert((
-                    node_evidence.source_coverage_index,
-                    inputs.initial_source_scan_bytes,
-                ));
+                entry.insert((node_evidence.source_coverage_index, source_scan_bytes));
             }
             std::collections::hash_map::Entry::Occupied(entry)
-                if *entry.get()
-                    != (
-                        node_evidence.source_coverage_index,
-                        inputs.initial_source_scan_bytes,
-                    ) =>
+                if *entry.get() != (node_evidence.source_coverage_index, source_scan_bytes) =>
             {
                 return Err(AnalyticalCostError::ComparisonScopeMismatch(
                     "bootstrap source bytes",
@@ -1283,7 +1483,8 @@ fn estimate_heterogeneous_summary(
     Ok(ResourceEstimate {
         cpu_ops,
         peak_memory_bytes: persistent_bytes
-            .checked_add(transient_bytes)
+            .checked_add(ephemeral_state_bytes)
+            .and_then(|bytes| bytes.checked_add(transient_bytes))
             .ok_or(AnalyticalCostError::Overflow)?,
         scan_bytes: scans
             .values()
@@ -1873,7 +2074,6 @@ fn validate_guarantee(
     arrival: DataArrival,
 ) -> Result<(), AnalyticalCostError> {
     if guarantee.output_representation != asap_types::post_asap::OutputRepresentation::SummaryState
-        || guarantee.summary_maintenance_mode != SummaryMaintenanceMode::Incremental
         || guarantee.summary_maintenance_mode
             != maintenance_mode(&guarantee.summary_maintenance_lifecycle, arrival)
         || guarantee.evaluation_schedule
@@ -2069,6 +2269,34 @@ mod tests {
         physical.nodes.push(repeated);
 
         validate_physical_scope_coverage(&physical, &streaming_scope()).unwrap();
+    }
+
+    #[test]
+    fn raw_evolution_ignores_unreachable_decoys_and_checks_the_reachable_scan() {
+        let mut raw = streaming_raw();
+        let mut decoy = raw.physical_dag.nodes[0].clone();
+        decoy.id = "unreachable-matching-scan".into();
+        let mut reachable = raw.physical_dag.nodes[0].clone();
+        reachable.id = "reachable-stale-scan".into();
+        let mut stale = raw.physical_dag.statistics["raw-scan"].clone();
+        stale.inputs[0].rows -= 1;
+        stale.output.rows -= 1;
+        raw.physical_dag.nodes = vec![decoy, reachable];
+        raw.physical_dag.root = "reachable-stale-scan".into();
+        raw.physical_dag.statistics = HashMap::from([
+            (
+                "unreachable-matching-scan".into(),
+                raw.physical_dag.statistics["raw-scan"].clone(),
+            ),
+            ("reachable-stale-scan".into(), stale),
+        ]);
+
+        assert_eq!(
+            validate_raw_snapshot_dimensions(&raw, &streaming_scope()),
+            Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "raw source evolution"
+            ))
+        );
     }
 
     fn estimate_test(
@@ -2970,6 +3198,120 @@ mod tests {
     }
 
     #[test]
+    fn complete_streaming_cost_can_select_an_ephemeral_direct_build() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: true,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: false,
+            },
+            &model,
+        )
+        .unwrap();
+
+        assert!(plan.summary_total_cost.is_some());
+        assert!(matches!(
+            plan.deployments[0]
+                .summary_maintenance_lifecycle_guarantee
+                .as_ref()
+                .map(|guarantee| &guarantee.summary_maintenance_lifecycle),
+            Some(SummaryMaintenanceLifecycle::Ephemeral)
+        ));
+    }
+
+    #[test]
+    fn complete_streaming_cost_ranks_provider_owned_window_frameworks() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+
+        let mut tumbling = model.node_evidence.clone();
+        for aggregate in tumbling.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 1;
+            aggregate.inputs.retained_window_count = 20;
+        }
+        let mut sliding = model.node_evidence.clone();
+        for aggregate in sliding.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 10;
+            aggregate.inputs.retained_window_count = 10;
+        }
+        let mut exponential_histogram = model.node_evidence.clone();
+        for aggregate in exponential_histogram.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 2;
+            aggregate.inputs.retained_window_count = 2;
+        }
+        for alternative in [
+            StreamingPhysicalPlanAlternative {
+                physical_plan_id: "tumbling".into(),
+                node_evidence: tumbling,
+            },
+            StreamingPhysicalPlanAlternative {
+                physical_plan_id: "sliding".into(),
+                node_evidence: sliding,
+            },
+            StreamingPhysicalPlanAlternative {
+                physical_plan_id: "promsketch_exponential_histogram".into(),
+                node_evidence: exponential_histogram,
+            },
+        ] {
+            model
+                .bind_physical_plan_alternative(&target, &root, alternative)
+                .unwrap();
+        }
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: false,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: true,
+            },
+            &model,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.selected_physical_plan_id.as_deref(),
+            Some("promsketch_exponential_histogram")
+        );
+        assert_eq!(
+            crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan)
+                .selected_physical_plan_id
+                .as_deref(),
+            Some("promsketch_exponential_histogram")
+        );
+    }
+
+    #[test]
     fn whole_dag_fails_closed_for_missing_retained_work_or_false_source_lineage() {
         let workload = streaming_workload();
         let target = streaming_sum_query();
@@ -3598,6 +3940,8 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            topk_output_offset: None,
+            limit_rows_consumed: None,
             hash_join_build_side: None,
             promql: None,
         };
@@ -3633,6 +3977,8 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            topk_output_offset: None,
+            limit_rows_consumed: None,
             hash_join_build_side: None,
             promql: None,
         };
