@@ -94,6 +94,9 @@ The design is split into focused documents:
   guarantee IR, sketch contracts, composition rules, target checking, and fail-closed boundaries.
 - [Analytical resource cost](analytical-resource-cost.md) defines CPU, retained-memory,
   and scan-I/O formulas, calibration, planner ranking, and fail-closed behavior.
+- [ASAPPlanner and downstream application boundaries](../asapplanner-downstream-boundary.md)
+  separates logical summary lifecycle decisions from downstream physical
+  compilation, deployment, and execution.
 - [Query workloads, data workloads, and summary lifecycle maintenance](workload-demand-and-summary-lifecycle.md) separates
   query-workload properties from data-workload properties and defines ephemeral, prepared,
   shared, and continuously maintained summary-state alternatives.

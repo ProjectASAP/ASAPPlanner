@@ -491,71 +491,13 @@ DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
 mismatches and arithmetic overflow also fail closed.
 
-### Boundary with ASAPQuery physical optimization
+### Downstream physical-planning boundary
 
-ASAPPlanner and the ASAPQuery control plane make different decisions. A
-summary lifecycle answers **when a logical summary state exists and how it is
-maintained**. A physical deployment answers **how and where that state is
-implemented**.
-
-| Owner | Decisions |
-| --- | --- |
-| ASAPPlanner | Logical query-time semantics; summary family, algorithm, parameters, grouping, accuracy, and composition; `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained` lifecycle; `DirectBuild` or `Incremental` maintenance mode; legal evaluation schedule and exact fallback. |
-| ASAPQuery-backend physical compiler and workload optimizer | Concrete tumbling, sliding/pane, exponential-histogram, or other window implementation; window size, slide, pane layout, retention, watermark and lateness policy; collector/backend placement, sharding, storage, transmission, materialization identity, and runtime capability checks; workload-wide sharing and query-to-deployment assignments. |
-| ASAPCollector and the ASAPQuery data plane | Validate and execute their projections of the compiled physical plan and report the active plan identity and runtime evidence. They do not independently change the logical summary or choose another physical layout. |
-
-`Incremental` is not a window type. It means that an existing logical summary
-state is updated as data arrives. The physical compiler may realize that mode
-with tumbling windows, overlapping panes, an exponential histogram, or another
-executor-supported layout. Conversely, choosing a tumbling window does not by
-itself decide whether the state is ephemeral, prepared, shared, or continuously
-maintained.
-
-#### Boundary example: incremental maintenance
-
-- ASAPPlanner decides whether a logical summary should use incremental
-  maintenance—that is, whether existing summary state should be updated as new
-  data arrives.
-- ASAPQuery-backend decides how to physically implement that incremental
-  maintenance, for example with tumbling windows, sliding windows and panes,
-  a PromSketch exponential histogram, or another runtime-supported structure.
-- ASAPCollector executes the physical plan produced by the backend and
-  maintains the specified windows and summary states.
-
-The key distinction is that `Incremental` describes how the summary is
-updated, while tumbling, sliding, and exponential-histogram windows describe
-its physical layout. These decisions are orthogonal.
-
-The ASAPQuery
-[configuration formulation](https://github.com/ProjectASAP/ASAPQuery/blob/8aa93f417ee662c188d65da5eb20ceefa01e5c12/.design_docs/sketch-config-optimization-formulation.md)
-and [MIP formulation](https://github.com/ProjectASAP/ASAPQuery/blob/8aa93f417ee662c188d65da5eb20ceefa01e5c12/.design_docs/optimizer-mip-formulation.md)
-describe physical configurations and workload-wide deployment assignments.
-Under this boundary, that optimization belongs in ASAPQuery-backend rather
-than becoming a second window domain model inside ASAPPlanner. ASAPPlanner
-reuses only their general resource principles: ingestion work scales with
-arrival rate, overlapping active states multiply update work, retained states
-consume memory, and merge/subtract/readout work scales with query recurrence.
-
-The boundary is a cost-evidence exchange:
-
-1. ASAPQuery-backend enumerates one executor-feasible physical deployment and
-   keeps its physical identity outside ASAPPlanner.
-2. It supplies `StreamingNodeEvidence` for that deployment, including bootstrap
-   routing, active and retained state counts, state size, physical operations,
-   edges, and source coverage.
-3. ASAPPlanner evaluates the legal lifecycle combinations for the logical
-   summary DAG over the supplied `ComparisonScope`. Missing evidence makes the
-   candidate unavailable; it never becomes an optimistic zero.
-4. ASAPQuery-backend repeats this for other physical deployments, then performs
-   workload-wide placement, facility-location, and query-assignment selection
-   using the returned complete estimates as coefficients.
-5. The backend emits consistent CollectorPlan, BackendPlan, and QueryPlan
-   projections. The runtimes validate and execute those projections.
-
-ASAPPlanner neither enumerates physical deployments nor returns a physical-plan
-identifier. `SummarySubtract` is charged only when it is present in the
-supplied physical evidence DAG, and every physically retained state represented
-by that evidence is charged.
+This cost model consumes resource evidence for a physical implementation, but
+ASAPPlanner does not own or select that implementation. Component ownership,
+including the distinction between incremental lifecycle maintenance and
+physical windows, is defined in
+[ASAPPlanner and downstream application boundaries](../asapplanner-downstream-boundary.md).
 
 ## Accuracy evidence remains separate from cost
 
