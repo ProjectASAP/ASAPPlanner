@@ -99,7 +99,7 @@ impl OperatorStatisticsProvider for PhysicalDag {
 
 /// Lower a resolved query operator DAG to the physical operators understood by
 /// this cost model. The authoritative provider supplies statistics by the
-/// deterministic physical IDs assigned here; missing evidence makes the
+/// stable physical IDs owned by that provider; missing evidence makes the
 /// complete query unavailable. Scalar expressions remain part of their
 /// containing operator's local cost.
 pub fn lower_query_physical_dag(
@@ -264,31 +264,55 @@ pub fn lower_query_physical_dag(
                         Some(coverage),
                     )?;
                     let children = vec![scan_id.clone()];
-                    let filter_evidence = self.resolve(
-                        query,
-                        PhysicalOperator::Filter,
-                        occurrence,
-                        false,
-                        &children,
-                        None,
-                    )?;
+                    let predicate_operations_per_row = predicates
+                        .iter()
+                        .try_fold(0_u64, |total, predicate| {
+                            total
+                                .checked_add(scalar_operation_count(&predicate.0)?)
+                                .ok_or(AnalyticalCostError::Overflow)
+                        })?
+                        .max(1);
+                    let filter_operator = PhysicalOperator::Filter {
+                        predicate_operations_per_row,
+                    };
+                    let filter_evidence =
+                        self.resolve(query, filter_operator, occurrence, false, &children, None)?;
                     require_unary_edge(
                         &filter_evidence.physical_id,
                         &filter_evidence.statistics,
                         &scan_id,
                         &scan_statistics,
                     )?;
-                    require_operator_statistics(
-                        PhysicalOperator::Filter,
-                        &filter_evidence.statistics,
-                    )?;
-                    self.push(filter_evidence, PhysicalOperator::Filter, children, None)
+                    require_operator_statistics(filter_operator, &filter_evidence.statistics)?;
+                    self.push(filter_evidence, filter_operator, children, None)
                 }
-                QueryExpr::Filter { child, .. } => {
-                    self.lower_unary(query, occurrence, PhysicalOperator::Filter, child)
+                QueryExpr::Filter { pred, child } => {
+                    let operator = PhysicalOperator::Filter {
+                        predicate_operations_per_row: scalar_operation_count(&pred.0)?.max(1),
+                    };
+                    self.lower_unary(query, occurrence, operator, child)
                 }
-                QueryExpr::Project { child, .. } => {
-                    self.lower_unary(query, occurrence, PhysicalOperator::Project, child)
+                QueryExpr::Project { cols, child, .. } => {
+                    let expression_operations_per_row = cols
+                        .iter()
+                        .try_fold(0_u64, |total, item| {
+                            total
+                                .checked_add(
+                                    scalar_operation_count(&item.expr)?
+                                        .checked_add(1)
+                                        .ok_or(AnalyticalCostError::Overflow)?,
+                                )
+                                .ok_or(AnalyticalCostError::Overflow)
+                        })?
+                        .max(1);
+                    self.lower_unary(
+                        query,
+                        occurrence,
+                        PhysicalOperator::Project {
+                            expression_operations_per_row,
+                        },
+                        child,
+                    )
                 }
                 QueryExpr::Aggregate {
                     reduction,
@@ -297,22 +321,67 @@ pub fn lower_query_physical_dag(
                     child,
                     ..
                 } => {
-                    if having.is_some() || !supports_hash_aggregate(reduction, measures) {
+                    let asap_types::pre_asap::Reduction::Reduce(grouping) = reduction else {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    };
+                    if grouping.is_without()
+                        || having.is_some()
+                        || !supports_hash_aggregate(reduction, measures)
+                    {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
-                    self.lower_unary(query, occurrence, PhysicalOperator::HashAggregate, child)
+                    self.lower_unary(
+                        query,
+                        occurrence,
+                        PhysicalOperator::HashAggregate {
+                            grouping_key_count: u64::try_from(grouping.keys().len())
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                            accumulator_count: u64::try_from(measures.len())
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                        },
+                        child,
+                    )
                 }
-                QueryExpr::Dedup { child, .. } => {
-                    self.lower_unary(query, occurrence, PhysicalOperator::HashDeduplicate, child)
+                QueryExpr::Dedup { cols, child } => {
+                    let key_count = if cols.is_empty() {
+                        child
+                            .output_schema()
+                            .map_err(|_| AnalyticalCostError::UnsupportedQueryOperator)?
+                            .columns
+                            .len()
+                    } else {
+                        cols.len()
+                    };
+                    if key_count == 0 {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    }
+                    self.lower_unary(
+                        query,
+                        occurrence,
+                        PhysicalOperator::HashDeduplicate {
+                            key_count: u64::try_from(key_count)
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                        },
+                        child,
+                    )
                 }
-                QueryExpr::Sort { keys, child, .. } => {
+                QueryExpr::Sort {
+                    keys,
+                    partition_by,
+                    child,
+                    ..
+                } => {
                     if keys.is_empty() {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
                     self.lower_unary(
                         query,
                         occurrence,
-                        PhysicalOperator::InMemoryComparisonSort,
+                        PhysicalOperator::InMemoryComparisonSort {
+                            ordering_key_count: u64::try_from(keys.len())
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                            partitioned: partition_by != &GroupKeys::none(),
+                        },
                         child,
                     )
                 }
@@ -331,7 +400,12 @@ pub fn lower_query_physical_dag(
                                 u64::try_from(*n).map_err(|_| AnalyticalCostError::Overflow)?;
                             let offset = u64::try_from(*offset)
                                 .map_err(|_| AnalyticalCostError::Overflow)?;
-                            let operator = PhysicalOperator::TopK { limit, offset };
+                            let operator = PhysicalOperator::TopK {
+                                limit,
+                                offset,
+                                ordering_key_count: u64::try_from(keys.len())
+                                    .map_err(|_| AnalyticalCostError::Overflow)?,
+                            };
                             let evidence =
                                 self.resolve(query, operator, occurrence, false, &children, None)?;
                             let statistics = &evidence.statistics;
@@ -374,6 +448,7 @@ pub fn lower_query_physical_dag(
                 }
                 QueryExpr::SQLWindowFunc {
                     func,
+                    partition_by,
                     order_by,
                     child,
                     ..
@@ -391,11 +466,20 @@ pub fn lower_query_physical_dag(
                     self.lower_unary(
                         query,
                         occurrence,
-                        PhysicalOperator::InMemoryOrderedWindow,
+                        PhysicalOperator::InMemoryAnalyticWindow {
+                            partition_key_count: u64::try_from(partition_by.keys().len())
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                            ordering_key_count: u64::try_from(order_by.len())
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                            function_operations_per_row: 1,
+                        },
                         child,
                     )
                 }
-                QueryExpr::TimeShift { child, .. } => {
+                QueryExpr::TimeShift { shift, child } => {
+                    if !shift.is_identity() {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    }
                     self.lower_unary(query, occurrence, PhysicalOperator::PassThrough, child)
                 }
                 QueryExpr::Concat { children } => {
@@ -421,11 +505,15 @@ pub fn lower_query_physical_dag(
                     left,
                     right,
                 } => {
-                    if matches!(kind, asap_types::pre_asap::JoinKind::Cross)
-                        || !is_hash_join_predicate(&pred.0, left, right)
-                    {
+                    let equality_key_count =
+                        if matches!(kind, asap_types::pre_asap::JoinKind::Cross) {
+                            None
+                        } else {
+                            hash_join_key_count(&pred.0, left, right)
+                        };
+                    let Some(equality_key_count) = equality_key_count else {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
-                    }
+                    };
                     let left_id = self.lower(left)?;
                     let right_id = self.lower(right)?;
                     let children = vec![left_id.clone(), right_id.clone()];
@@ -437,7 +525,10 @@ pub fn lower_query_physical_dag(
                         } else {
                             HashJoinBuildSide::Right
                         };
-                    let operator = PhysicalOperator::HashJoin { build_side };
+                    let operator = PhysicalOperator::HashJoin {
+                        build_side,
+                        equality_key_count,
+                    };
                     let evidence =
                         self.resolve(query, operator, occurrence, false, &children, None)?;
                     let statistics = &evidence.statistics;
@@ -630,15 +721,15 @@ fn bind_scan_coverage(
     Ok(coverage)
 }
 
-fn is_hash_join_predicate(
+fn hash_join_key_count(
     expr: &asap_types::pre_asap::QueryExpr,
     left: &asap_types::pre_asap::QueryExpr,
     right: &asap_types::pre_asap::QueryExpr,
-) -> bool {
+) -> Option<u64> {
     use asap_types::pre_asap::{CompareOpKind, QueryExpr};
 
     let (Ok(left_schema), Ok(right_schema)) = (left.output_schema(), right.output_schema()) else {
-        return false;
+        return None;
     };
     let left_width = left_schema.columns.len();
     let total_width = left_width.saturating_add(right_schema.columns.len());
@@ -653,33 +744,104 @@ fn is_hash_join_predicate(
         }
     }
 
-    fn predicate(expr: &QueryExpr, left_width: usize, total_width: usize) -> bool {
+    fn predicate(expr: &QueryExpr, left_width: usize, total_width: usize) -> Option<u64> {
         match expr {
             QueryExpr::Compare {
                 left,
                 op: CompareOpKind::Eq,
                 right,
             } => match (left.as_ref(), right.as_ref()) {
-                (QueryExpr::Column(left), QueryExpr::Column(right)) => matches!(
-                    (
-                        column_side(*left, left_width, total_width),
-                        column_side(*right, left_width, total_width)
-                    ),
-                    (Some(false), Some(true)) | (Some(true), Some(false))
-                ),
-                _ => false,
+                (QueryExpr::Column(left), QueryExpr::Column(right)) => match (
+                    column_side(*left, left_width, total_width),
+                    column_side(*right, left_width, total_width),
+                ) {
+                    (Some(false), Some(true)) | (Some(true), Some(false)) => Some(1),
+                    _ => None,
+                },
+                _ => None,
             },
-            QueryExpr::BoolAnd(parts) => {
-                !parts.is_empty()
-                    && parts
-                        .iter()
-                        .all(|part| predicate(part, left_width, total_width))
+            QueryExpr::BoolAnd(parts) if !parts.is_empty() => {
+                parts.iter().try_fold(0_u64, |count, part| {
+                    count.checked_add(predicate(part, left_width, total_width)?)
+                })
             }
-            _ => false,
+            _ => None,
         }
     }
 
     predicate(expr, left_width, total_width)
+}
+
+fn scalar_operation_count(
+    expr: &asap_types::pre_asap::QueryExpr,
+) -> Result<u64, AnalyticalCostError> {
+    use asap_types::pre_asap::QueryExpr;
+
+    let add = |parts: &[&QueryExpr]| {
+        parts.iter().try_fold(0_u64, |total, part| {
+            total
+                .checked_add(scalar_operation_count(part)?)
+                .ok_or(AnalyticalCostError::Overflow)
+        })
+    };
+    let with_local = |children| {
+        add(children)?
+            .checked_add(1)
+            .ok_or(AnalyticalCostError::Overflow)
+    };
+    match expr {
+        QueryExpr::Column(_)
+        | QueryExpr::Literal(_)
+        | QueryExpr::EvalTimestamp
+        | QueryExpr::CurrentTimestamp => Ok(0),
+        QueryExpr::Compare { left, right, .. } | QueryExpr::Arithmetic { left, right, .. } => {
+            with_local(&[left, right])
+        }
+        QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
+            let children = parts.iter().collect::<Vec<_>>();
+            add(&children)?
+                .checked_add(
+                    u64::try_from(parts.len().saturating_sub(1))
+                        .map_err(|_| AnalyticalCostError::Overflow)?,
+                )
+                .ok_or(AnalyticalCostError::Overflow)
+        }
+        QueryExpr::Not(child)
+        | QueryExpr::IsNull(child)
+        | QueryExpr::IsNotNull(child)
+        | QueryExpr::PromqlScalarBridge(child) => with_local(&[child]),
+        QueryExpr::Cast { expr, .. } => with_local(&[expr]),
+        QueryExpr::InList { expr, list, .. } => {
+            let mut children = Vec::with_capacity(list.len() + 1);
+            children.push(expr.as_ref());
+            children.extend(list.iter());
+            add(&children)?
+                .checked_add(u64::try_from(list.len()).map_err(|_| AnalyticalCostError::Overflow)?)
+                .ok_or(AnalyticalCostError::Overflow)
+        }
+        QueryExpr::FunctionCall { args, .. } => {
+            let children = args.iter().collect::<Vec<_>>();
+            with_local(&children)
+        }
+        QueryExpr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            let mut children = Vec::new();
+            if let Some(operand) = operand {
+                children.push(operand.as_ref());
+            }
+            for (when, then) in branches {
+                children.extend([when, then]);
+            }
+            if let Some(else_expr) = else_expr {
+                children.push(else_expr.as_ref());
+            }
+            with_local(&children)
+        }
+        _ => Err(AnalyticalCostError::UnsupportedQueryOperator),
+    }
 }
 
 fn supports_hash_aggregate(
@@ -713,7 +875,7 @@ mod tests {
         estimate_physical_dag, estimate_physical_dag_comparison, PhysicalDagEstimateRequest,
     };
     use crate::analytical_statistics::{
-        validate_comparison_scopes, BinaryEdgeStatistics, UnaryEdgeStatistics,
+        validate_comparison_scopes, BinaryEdgeStatistics, PartitionStatistics, UnaryEdgeStatistics,
     };
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
@@ -742,14 +904,30 @@ mod tests {
     ) -> OperatorStatistics {
         let edges = unary_edges(input, output);
         match operator {
-            PhysicalOperator::Filter => OperatorStatistics::Filter { edges },
-            PhysicalOperator::Project => OperatorStatistics::Project { edges },
-            PhysicalOperator::InMemoryComparisonSort => {
-                OperatorStatistics::InMemoryComparisonSort { edges }
+            PhysicalOperator::Filter { .. } => OperatorStatistics::Filter { edges },
+            PhysicalOperator::Project { .. } => OperatorStatistics::Project { edges },
+            PhysicalOperator::InMemoryComparisonSort { .. } => {
+                OperatorStatistics::InMemoryComparisonSort {
+                    edges,
+                    input_partitioning: PartitionStatistics {
+                        partitions: (!input.eq(&edge(0, 0)))
+                            .then_some(input)
+                            .into_iter()
+                            .collect(),
+                    },
+                }
             }
             PhysicalOperator::TopK { .. } => OperatorStatistics::TopK { edges },
-            PhysicalOperator::InMemoryOrderedWindow => {
-                OperatorStatistics::InMemoryOrderedWindow { edges }
+            PhysicalOperator::InMemoryAnalyticWindow { .. } => {
+                OperatorStatistics::InMemoryAnalyticWindow {
+                    edges,
+                    input_partitioning: PartitionStatistics {
+                        partitions: (!input.eq(&edge(0, 0)))
+                            .then_some(input)
+                            .into_iter()
+                            .collect(),
+                    },
+                }
             }
             PhysicalOperator::Limit { .. } => OperatorStatistics::Limit { edges },
             PhysicalOperator::PassThrough => OperatorStatistics::PassThrough { edges },
@@ -872,6 +1050,7 @@ mod tests {
             PhysicalOperator::TopK {
                 limit: 10,
                 offset: 5,
+                ordering_key_count: 1,
             },
             edge(100, 4_000),
             edge(10, 400),
@@ -882,7 +1061,9 @@ mod tests {
             (
                 "query-2".into(),
                 evidence(unary_statistics(
-                    PhysicalOperator::Filter,
+                    PhysicalOperator::Filter {
+                        predicate_operations_per_row: 1,
+                    },
                     edge(1_000, 64_000),
                     edge(400, 25_600),
                 )),
@@ -899,11 +1080,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 PhysicalOperator::Scan,
-                PhysicalOperator::Filter,
-                PhysicalOperator::HashAggregate,
+                PhysicalOperator::Filter {
+                    predicate_operations_per_row: 1,
+                },
+                PhysicalOperator::HashAggregate {
+                    grouping_key_count: 1,
+                    accumulator_count: 1,
+                },
                 PhysicalOperator::TopK {
                     limit: 10,
                     offset: 5,
+                    ordering_key_count: 1,
                 },
             ]
         );
@@ -1178,7 +1365,9 @@ mod tests {
             (
                 "query-6".into(),
                 evidence(unary_statistics(
-                    PhysicalOperator::Filter,
+                    PhysicalOperator::Filter {
+                        predicate_operations_per_row: 1,
+                    },
                     edge(1_000, 8_000),
                     edge(800, 6_400),
                 )),
@@ -1186,7 +1375,9 @@ mod tests {
             (
                 "query-5".into(),
                 evidence(unary_statistics(
-                    PhysicalOperator::Project,
+                    PhysicalOperator::Project {
+                        expression_operations_per_row: 1,
+                    },
                     edge(800, 6_400),
                     edge(800, 3_200),
                 )),
@@ -1195,7 +1386,11 @@ mod tests {
             (
                 "query-3".into(),
                 evidence(unary_statistics(
-                    PhysicalOperator::InMemoryOrderedWindow,
+                    PhysicalOperator::InMemoryAnalyticWindow {
+                        partition_key_count: 0,
+                        ordering_key_count: 1,
+                        function_operations_per_row: 1,
+                    },
                     edge(500, 2_000),
                     edge(500, 6_000),
                 )),
@@ -1203,7 +1398,10 @@ mod tests {
             (
                 "query-2".into(),
                 evidence(unary_statistics(
-                    PhysicalOperator::InMemoryComparisonSort,
+                    PhysicalOperator::InMemoryComparisonSort {
+                        ordering_key_count: 1,
+                        partitioned: true,
+                    },
                     edge(500, 6_000),
                     edge(500, 6_000),
                 )),
@@ -1237,11 +1435,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 PhysicalOperator::Scan,
-                PhysicalOperator::Filter,
-                PhysicalOperator::Project,
-                PhysicalOperator::HashDeduplicate,
-                PhysicalOperator::InMemoryOrderedWindow,
-                PhysicalOperator::InMemoryComparisonSort,
+                PhysicalOperator::Filter {
+                    predicate_operations_per_row: 1,
+                },
+                PhysicalOperator::Project {
+                    expression_operations_per_row: 1,
+                },
+                PhysicalOperator::HashDeduplicate { key_count: 1 },
+                PhysicalOperator::InMemoryAnalyticWindow {
+                    partition_key_count: 0,
+                    ordering_key_count: 1,
+                    function_operations_per_row: 1,
+                },
+                PhysicalOperator::InMemoryComparisonSort {
+                    ordering_key_count: 1,
+                    partitioned: true,
+                },
                 PhysicalOperator::Limit {
                     limit: 20,
                     offset: 0,
@@ -1382,7 +1591,9 @@ mod tests {
             (
                 "query-0".into(),
                 evidence(unary_statistics(
-                    PhysicalOperator::Project,
+                    PhysicalOperator::Project {
+                        expression_operations_per_row: 1,
+                    },
                     edge(99, 792),
                     edge(99, 396),
                 )),
@@ -1421,8 +1632,13 @@ mod tests {
         );
 
         let mut complete = conflicting.clone();
-        complete.get_mut("query-0").unwrap().statistics =
-            unary_statistics(PhysicalOperator::Project, edge(100, 800), edge(100, 400));
+        complete.get_mut("query-0").unwrap().statistics = unary_statistics(
+            PhysicalOperator::Project {
+                expression_operations_per_row: 1,
+            },
+            edge(100, 800),
+            edge(100, 400),
+        );
         let extra_scope = scope(vec![
             comparison_scope.sources[0].clone(),
             coverage(
@@ -1475,7 +1691,9 @@ mod tests {
             (
                 "query-1".into(),
                 evidence(unary_statistics(
-                    PhysicalOperator::Filter,
+                    PhysicalOperator::Filter {
+                        predicate_operations_per_row: 1,
+                    },
                     edge(100, 800),
                     edge(0, 0),
                 )),
@@ -1552,6 +1770,13 @@ mod tests {
             output_name: "lag".into(),
             child: scan(),
         });
+        let shifted = Rc::new(QueryExpr::TimeShift {
+            shift: asap_types::pre_asap::TimeShift {
+                offset_ms: 60_000,
+                at: None,
+            },
+            child: scan(),
+        });
         let scope = scope(vec![coverage(
             Source::Table {
                 table_ref: "events".into(),
@@ -1564,11 +1789,26 @@ mod tests {
             &per_entity,
             &empty_sort_limit,
             &unsupported_window,
+            &shifted,
         ] {
             assert_eq!(
                 lower_query_physical_dag(query, &scope, &scripted(&unavailable)),
                 Err(AnalyticalCostError::UnsupportedQueryOperator)
             );
         }
+    }
+
+    #[test]
+    fn scalar_work_counts_every_local_predicate_operation() {
+        use asap_types::pre_asap::{CompareOpKind, QueryExpr, ScalarValue};
+
+        let comparison = || QueryExpr::Compare {
+            left: Rc::new(QueryExpr::Column(0)),
+            op: CompareOpKind::Eq,
+            right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(1))),
+        };
+        let predicate = QueryExpr::BoolAnd(vec![comparison(), comparison()]);
+
+        assert_eq!(scalar_operation_count(&predicate), Ok(3));
     }
 }

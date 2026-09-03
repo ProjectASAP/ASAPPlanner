@@ -204,7 +204,10 @@ OperatorStatistics =
         key_bytes,
         accumulator_bytes_per_group,
     }
-  | InMemoryComparisonSort { edges: UnaryEdgeStatistics }
+  | InMemoryComparisonSort {
+        edges: UnaryEdgeStatistics,
+        input_partitioning: PartitionStatistics,
+    }
   | TopK { edges: UnaryEdgeStatistics }
   | HashJoin { edges: BinaryEdgeStatistics }
   | HashDeduplicate {
@@ -213,7 +216,10 @@ OperatorStatistics =
         key_bytes,
     }
   | Concat { inputs, output }
-  | InMemoryOrderedWindow { edges: UnaryEdgeStatistics }
+  | InMemoryAnalyticWindow {
+        edges: UnaryEdgeStatistics,
+        input_partitioning: PartitionStatistics,
+    }
   | Limit { edges: UnaryEdgeStatistics }
   | PassThrough { edges: UnaryEdgeStatistics }
 }
@@ -236,9 +242,15 @@ Physical configuration is not catalog evidence and therefore lives on
 
 | Physical operator | Configuration owned by the plan |
 |---|---|
-| `TopK` | output `limit` and `offset`; heap capacity is `limit + offset` |
+| `Filter` | predicate operations per input row |
+| `Project` | expression/copy operations per input row |
+| `HashAggregate` | grouping-key and accumulator counts |
+| `InMemoryComparisonSort` | ordering-key count and whether ordering is partitioned |
+| `TopK` | output `limit`, `offset`, and ordering-key count; heap capacity is `limit + offset` |
 | `Limit` | output `limit` and `offset` |
-| `HashJoin` | left or right build side |
+| `HashJoin` | left or right build side and equality-key count |
+| `HashDeduplicate` | deduplication-key count |
+| `InMemoryAnalyticWindow` | partition/order-key counts and window-function work per row |
 
 This distinction removes the former flat optional `k` field. A Top-K bound is
 part of the chosen algorithm, while input/output cardinality and width are
@@ -276,7 +288,16 @@ DAG-child counts must both be defined.
 Compression, column pruning, or encoded storage can therefore make these
 values different; neither is inferred from the other. Other statistics
 variants have no source-read field, so charging source I/O at a non-scan node
-is not representable.
+is not representable. A non-empty Scan must report positive source-read bytes;
+zero cannot stand in for missing I/O evidence.
+
+Hash-aggregate validation distinguishes logical grouping from the workload's
+observed number of groups. An ungrouped aggregate has
+`grouping_key_count = 0`, `key_bytes = 0`, and `group_count = 1`, including on
+empty input because SQL scalar aggregation still emits one row. A grouped
+aggregate has at least one grouping key and positive encoded key width, but it
+may report `group_count = 0` when its input is empty. In both cases output rows
+must equal `group_count`.
 
 ### Composition rules
 
@@ -386,14 +407,14 @@ The supported mappings are:
 | Filter | Filter |
 | Project | Project |
 | Reducing Count/Sum/Min/Max/Avg/StdDev/Variance/Group/CountValues without HAVING | HashAggregate |
-| Dedup | Deduplicate |
-| Equi-Join | HashJoin with an evidence-selected build side |
+| Dedup | HashDeduplicate |
+| Equi-Join | HashJoin whose build side is selected from child output evidence |
 | Concat or `UNION ALL` | Concat |
 | Sort with at least one ordering key | in-memory Sort |
 | global non-empty-key Sort followed by Limit | heap TopK, with `k = offset + n` from the query IR |
 | partitioned Sort followed by Limit | Sort → Limit |
-| RowNumber/Rank/DenseRank SQLWindowFunc with non-empty order_by | ordered in-memory Window |
-| TimeShift | PassThrough |
+| RowNumber/Rank/DenseRank SQLWindowFunc with non-empty order_by | InMemoryAnalyticWindow |
+| identity TimeShift only | PassThrough |
 
 Per-entity reductions, HAVING, ordered/distribution-dependent intents such as
 exact quantile or cardinality, Top-K aggregate intents, and extensions remain
@@ -430,19 +451,20 @@ the DAG rules above.
 | Physical operator | CPU operations | Local memory | Source/disk reads |
 |---|---:|---:|---:|
 | Scan | `input_rows` | one decoded input row/batch | `source_read_bytes` |
-| Filter | `input_rows` | one output row/batch | `0` |
-| Project or scalar pass-through | `input_rows` | one output row/batch | `0` |
-| Hash aggregate | `input_rows` | `groups × (key_bytes + accumulator_bytes_per_group + hash metadata)` | `0` |
-| Hash deduplicate | `input_rows` | `distinct_key_count × (key_bytes + hash metadata)` | `0` |
-| In-memory comparison sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
-| Heap Top-K | `rows × ceil(log2(max(min(limit + offset, rows), 2)))` | `min(limit + offset, rows) × row_bytes` | `0` |
-| Hash join | `left_rows + right_rows + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
+| Filter | `input_rows × predicate_operations_per_row` | one output row/batch | `0` |
+| Project | `input_rows × expression_operations_per_row` | one output row/batch | `0` |
+| Scalar pass-through | `input_rows` | one output row/batch | `0` |
+| Hash aggregate | `input_rows × (grouping_key_count + accumulator_count)` | `groups × (key_bytes + accumulator_bytes_per_group + hash metadata)` | `0` |
+| Hash deduplicate | `input_rows × key_count` | `distinct_key_count × (key_bytes + hash metadata)` | `0` |
+| In-memory comparison sort | `sum(n_i × ceil(log2(n_i)) × ordering_key_count)` | largest partition bytes | `0` |
+| Heap Top-K | `rows × ceil(log2(max(min(limit + offset, rows), 2))) × ordering_key_count` | `min(limit + offset, rows) × row_bytes` | `0` |
+| Hash join | `(left_rows + right_rows) × equality_key_count + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
 | Concat | `output_rows` | one output row/batch | `0` |
-| In-memory ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
+| In-memory analytic window | per-partition ordering work plus per-row function work | largest partition bytes | `0` |
 | Limit | `min(input_rows, limit + offset)` | one output row/batch | `0` |
 
 These formulas name physical implementations. The enum uses names such as
-`InMemoryComparisonSort`, `HashDeduplicate`, and `InMemoryOrderedWindow` so a
+`InMemoryComparisonSort`, `HashDeduplicate`, and `InMemoryAnalyticWindow` so a
 new algorithm cannot silently inherit a formula merely because it has the
 same logical purpose. An external sort must add spill writes and reads; a
 nested-loop join must not use the hash-join formula.

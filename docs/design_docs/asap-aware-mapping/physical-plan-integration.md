@@ -148,6 +148,129 @@ requires a corresponding statistics variant and exhaustive integration into:
 - CPU, memory, and I/O formulas;
 - lowering and coverage tests.
 
+## Physical operator catalog
+
+This catalog defines every physical node currently accepted by the analytical
+estimator. SQL examples describe the logical shape; the physical node is the
+algorithm selected when lowering that shape. A query outside the stated shape
+is unavailable until another physical operator is defined.
+
+### `Scan`
+
+Reads a physical source snapshot and emits decoded logical rows. For example,
+`SELECT * FROM metrics` lowers its source leaf to `Scan`. Its evidence contains
+the external/output edge and `source_read_bytes`. A non-empty scan must report
+positive physical read bytes. CPU is one decode/visit per input row; memory is
+one decoded row or batch; I/O is `source_read_bytes`.
+
+### `Filter { predicate_operations_per_row }`
+
+Evaluates a scalar predicate and retains matching rows. For example,
+`SELECT * FROM metrics WHERE latency > 100 AND status = 500` lowers to
+`Scan -> Filter`. The configuration counts the comparison/boolean operations
+in the predicate; the evidence provides input and filtered output edges. CPU
+is `input_rows * predicate_operations_per_row`; memory is one output row or
+batch; it adds no source I/O.
+
+### `Project { expression_operations_per_row }`
+
+Computes and copies a SELECT list without changing row cardinality. For
+example, `SELECT latency * 1000 AS latency_us, service FROM metrics` lowers to
+`Scan -> Project`. The configuration counts expression and output-copy work;
+the evidence supplies the changed logical row width. CPU is
+`input_rows * expression_operations_per_row`; memory is one output row or
+batch; it adds no source I/O.
+
+### `HashAggregate { grouping_key_count, accumulator_count }`
+
+Builds hash-group state and updates one or more accumulators. For example,
+`SELECT service, COUNT(*), SUM(bytes) FROM metrics GROUP BY service` uses one
+grouping key and two accumulators. Evidence supplies `group_count`, encoded
+key bytes, and total accumulator bytes per group. CPU is
+`input_rows * (grouping_key_count + accumulator_count)`; memory is
+`group_count * (key_bytes + accumulator_bytes_per_group + hash metadata)`.
+An ungrouped aggregate has zero keys, zero key bytes, and exactly one output
+group even for empty input. A grouped aggregate may have zero groups when its
+input is empty.
+
+### `InMemoryComparisonSort { ordering_key_count, partitioned }`
+
+Comparison-sorts rows without spilling. A global example is
+`SELECT * FROM metrics ORDER BY latency`; a partitioned logical shape is
+`ORDER BY latency` within each region. Evidence lists the observed input edge
+for every independently sorted partition. CPU is
+`sum(n_i * ceil(log2(n_i)) * ordering_key_count)` and peak local memory is the
+largest partition bytes. A global sort must provide exactly one partition.
+If a provider cannot prove an in-memory implementation or its partition
+distribution, the candidate is unavailable rather than silently using a
+global-sort estimate.
+
+### `TopK { limit, offset, ordering_key_count }`
+
+Maintains a bounded comparison heap for a global `ORDER BY ... LIMIT/OFFSET`.
+For example, `SELECT service, count FROM counts ORDER BY count DESC LIMIT 10`
+uses a heap of at most ten rows. CPU is
+`input_rows * ceil(log2(min(limit + offset, input_rows))) * ordering_key_count`;
+memory is the bounded heap rows times logical row width. Partitioned Top-K is
+not this operator and requires its own supported physical realization.
+
+### `HashJoin { build_side, equality_key_count }`
+
+Builds a hash table on the selected side and probes it with the other side.
+For example, `SELECT * FROM requests r JOIN services s ON r.service_id = s.id`
+uses one equality key. Evidence supplies ordered left/right edges and the join
+output. CPU charges equality-key hashing/probing for both inputs plus emitted
+output rows; memory is the selected build-side bytes plus hash metadata. A
+cross join, non-equality predicate, or unknown join algorithm is unavailable.
+
+### `HashDeduplicate { key_count }`
+
+Retains one hash-table entry per distinct key. For example,
+`SELECT DISTINCT service, region FROM metrics` has two deduplication keys.
+Evidence supplies distinct-key count and encoded key bytes. CPU is
+`input_rows * key_count`; memory is
+`distinct_key_count * (key_bytes + hash metadata)`. Empty input legitimately
+has zero distinct keys.
+
+### `Concat`
+
+Concatenates one or more union-compatible inputs without deduplication. For
+example, `SELECT * FROM east UNION ALL SELECT * FROM west` lowers both scans
+into one `Concat`. Its output rows and bytes must equal the checked sum of all
+input edges. CPU is one append/forward operation per output row; memory is one
+output row or batch. A zero-input Concat is invalid.
+
+### `InMemoryAnalyticWindow`
+
+Evaluates an ordered SQL analytic function over in-memory partitions. For
+example,
+`ROW_NUMBER() OVER (PARTITION BY region ORDER BY latency DESC)` partitions by
+region, orders each partition, and appends the row-number column. Its physical
+configuration records partition keys, ordering keys, and function work per
+row; evidence supplies the actual partition distribution. Ordering CPU and
+memory use the same per-partition calculation as comparison sort, plus window
+function work for each row. This is **not** a streaming tumbling window,
+sliding window, pane layout, or exponential-histogram window framework.
+
+### `Limit { limit, offset }`
+
+Stops after consuming enough rows to satisfy an unordered limit. For example,
+`SELECT * FROM metrics LIMIT 10 OFFSET 5` consumes at most fifteen rows and
+emits at most ten. CPU is the number of consumed rows; memory is one output row
+or batch. An ordered limit is represented by Sort plus Limit or a supported
+Top-K implementation.
+
+### `PassThrough`
+
+Represents a proven row- and byte-preserving physical boundary with per-row
+forwarding work. The current lowerer uses it only for a programmatically
+constructed identity `TimeShift(default, Scan(metrics))`, whose query semantics
+are the same as `SELECT * FROM metrics`; normal front ends omit that identity
+wrapper. A non-identity PromQL `offset` or `@` changes source time coverage and
+is unavailable until lowering propagates that temporal context into descendant
+Scan evidence and physical identity. `PassThrough` must never hide an
+unsupported operation.
+
 ## Comparison and failure behavior
 
 Raw and post-ASAP alternatives must cover the same `ComparisonScope`: arrival
