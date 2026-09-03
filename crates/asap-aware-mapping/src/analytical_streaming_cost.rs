@@ -941,7 +941,7 @@ impl StreamingAnalyticalCostModel {
         candidate: StreamingWindowFrameworkCandidate,
     ) -> Result<(), AnalyticalCostError> {
         let key = (Rc::as_ptr(target), Rc::as_ptr(root));
-        if !self.candidate_comparisons.contains(&key) {
+        if !self.candidate_comparisons.contains_key(&key) {
             return Err(AnalyticalCostError::MissingOrStale(
                 "candidate comparison binding",
             ));
