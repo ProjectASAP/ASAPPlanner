@@ -77,6 +77,10 @@ unavailable.
 
 ### Operator vocabulary and source of truth
 
+The complete logical-to-physical boundary is specified in
+[Physical plan integration](physical-plan-integration.md). This section
+summarizes the part required by the resource estimator.
+
 `PhysicalOperator` is the source of truth for the cost model's operator
 vocabulary. `OperatorStatistics` is paired one-to-one with that enum: each
 supported physical algorithm has one evidence shape containing exactly the
