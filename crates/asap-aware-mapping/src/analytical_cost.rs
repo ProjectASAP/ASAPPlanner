@@ -191,6 +191,7 @@ pub fn estimate_physical_dag(
         .map(|id| statistics.statistics(id).map(|value| (*id, value)))
         .collect::<Result<_, _>>()?;
 
+    let mut consumed_sources = Vec::new();
     for id in &order {
         let node = by_id[id];
         let node_statistics = &resolved_statistics[id];
@@ -203,6 +204,9 @@ pub fn estimate_physical_dag(
                     return Err(AnalyticalCostError::ScanOutsideComparisonScope(
                         node.id.clone(),
                     ));
+                }
+                if !consumed_sources.contains(&coverage) {
+                    consumed_sources.push(coverage);
                 }
             }
             _ if node.source_coverage.is_some() => {
@@ -237,6 +241,15 @@ pub fn estimate_physical_dag(
                 ));
             }
         }
+    }
+    if scope
+        .sources
+        .iter()
+        .any(|expected| !consumed_sources.contains(&expected))
+    {
+        return Err(AnalyticalCostError::InvalidPhysicalDag(
+            "physical scans omit a comparison-scope source",
+        ));
     }
 
     let mut remaining_consumers: HashMap<&str, usize> = HashMap::new();
@@ -460,10 +473,11 @@ pub fn estimate_operator(
             let k = statistics
                 .k
                 .ok_or(AnalyticalCostError::MissingOrZero("k"))?;
+            let heap_rows = k.min(left.rows);
             ResourceEstimate {
-                cpu_ops: left.rows as f64 * (k.max(2) as f64).log2().ceil(),
+                cpu_ops: left.rows as f64 * (heap_rows.max(2) as f64).log2().ceil(),
                 peak_memory_bytes: checked_bytes(&[
-                    k.min(left.rows),
+                    heap_rows,
                     per_row_width(left.rows, left.bytes)?,
                 ])?,
                 scan_bytes: 0,
@@ -477,9 +491,16 @@ pub fn estimate_operator(
             ResourceEstimate {
                 cpu_ops: left.rows as f64 + right.rows as f64 + output.rows as f64,
                 peak_memory_bytes: match build_side {
-                    HashJoinBuildSide::Left => left.bytes,
-                    HashJoinBuildSide::Right => right.bytes,
-                },
+                    HashJoinBuildSide::Left => left
+                        .rows
+                        .checked_mul(16)
+                        .and_then(|metadata| left.bytes.checked_add(metadata)),
+                    HashJoinBuildSide::Right => right
+                        .rows
+                        .checked_mul(16)
+                        .and_then(|metadata| right.bytes.checked_add(metadata)),
+                }
+                .ok_or(AnalyticalCostError::Overflow)?,
                 scan_bytes: 0,
             }
         }
@@ -488,11 +509,21 @@ pub fn estimate_operator(
             peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
             scan_bytes: 0,
         },
-        PhysicalOperator::Limit => ResourceEstimate {
-            cpu_ops: output.rows as f64,
-            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-            scan_bytes: 0,
-        },
+        PhysicalOperator::Limit => {
+            let consumed = statistics
+                .limit_rows_consumed
+                .ok_or(AnalyticalCostError::MissingOrZero("limit_rows_consumed"))?;
+            if consumed > left.rows || consumed < output.rows {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "Limit rows consumed must cover its output without exceeding its input",
+                ));
+            }
+            ResourceEstimate {
+                cpu_ops: consumed as f64,
+                peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+                scan_bytes: 0,
+            }
+        }
     };
     if estimate.cpu_ops.is_finite() {
         Ok(estimate)
@@ -717,19 +748,18 @@ mod tests {
 
         let oversized_topk = estimate_operator(
             PhysicalOperator::TopK,
-            OperatorInputs {
-                input_rows: 4,
-                input_bytes: 160,
-                output_rows: 4,
-                output_bytes: 160,
-                group_count: None,
-                key_bytes: None,
-                aggregate_value_bytes: None,
+            OperatorStatistics {
                 k: Some(1_000),
-                limit_rows_consumed: None,
-                right_rows: None,
-                right_bytes: None,
-                hash_join_build_side: None,
+                ..statistics(
+                    vec![EdgeStatistics {
+                        rows: 4,
+                        bytes: 160,
+                    }],
+                    EdgeStatistics {
+                        rows: 4,
+                        bytes: 160,
+                    },
+                )
             },
         )
         .unwrap();
@@ -737,19 +767,18 @@ mod tests {
 
         let offset_limit = estimate_operator(
             PhysicalOperator::Limit,
-            OperatorInputs {
-                input_rows: 1_000_000,
-                input_bytes: 40_000_000,
-                output_rows: 10,
-                output_bytes: 400,
-                group_count: None,
-                key_bytes: None,
-                aggregate_value_bytes: None,
-                k: None,
+            OperatorStatistics {
                 limit_rows_consumed: Some(900_010),
-                right_rows: None,
-                right_bytes: None,
-                hash_join_build_side: None,
+                ..statistics(
+                    vec![EdgeStatistics {
+                        rows: 1_000_000,
+                        bytes: 40_000_000,
+                    }],
+                    EdgeStatistics {
+                        rows: 10,
+                        bytes: 400,
+                    },
+                )
             },
         )
         .unwrap();
@@ -890,7 +919,13 @@ mod tests {
                     ..statistics(vec![scan_edge], state_edge)
                 },
             ),
-            ("read".into(), statistics(vec![state_edge], state_edge)),
+            (
+                "read".into(),
+                OperatorStatistics {
+                    limit_rows_consumed: Some(1),
+                    ..statistics(vec![state_edge], state_edge)
+                },
+            ),
         ]);
         let mut scope = comparison_scope();
         scope.horizon.0 = 100_000;
@@ -937,6 +972,7 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            limit_rows_consumed: None,
             hash_join_build_side: None,
         }
     }
@@ -1232,6 +1268,46 @@ mod tests {
             estimate_physical_dag(&nodes, "scan", &comparison_scope(), &provided),
             Err(AnalyticalCostError::MissingScanSourceCoverage(
                 "scan".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn physical_dag_rejects_an_unconsumed_scope_source() {
+        let mut scope = comparison_scope();
+        let coverage = scope.sources[0].clone();
+        scope.sources.push(SourceCoverage {
+            source: asap_types::pre_asap::query_expr::Source::Table {
+                table_ref: "auxiliary".into(),
+            },
+            snapshot_id: "catalog-version-42".into(),
+            predicates: vec![],
+        });
+        let nodes = vec![PhysicalDagNode {
+            id: "scan".into(),
+            operator: PhysicalOperator::Scan,
+            children: vec![],
+            source_coverage: Some(coverage),
+            output_buffer_bytes: 10,
+            retained_bytes: 0,
+            execution: ExecutionMultiplicity::PerEvaluation,
+        }];
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        let provided = HashMap::from([(
+            "scan".into(),
+            OperatorStatistics {
+                source_scan_bytes: 250,
+                ..statistics(vec![edge], edge)
+            },
+        )]);
+
+        assert_eq!(
+            estimate_physical_dag(&nodes, "scan", &scope, &provided),
+            Err(AnalyticalCostError::InvalidPhysicalDag(
+                "physical scans omit a comparison-scope source"
             ))
         );
     }
