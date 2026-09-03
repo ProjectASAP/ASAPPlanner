@@ -13,7 +13,7 @@ use asap_types::workload::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::analytical_cost::{AnalyticalCostError, HashJoinBuildSide};
+use crate::analytical_cost::AnalyticalCostError;
 
 /// The semantic and workload boundary within which two resource estimates
 /// may be compared. Canonical workload and query-IR types remain authoritative;
@@ -33,9 +33,10 @@ pub struct ComparisonScope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceCoverage {
     pub source: Source,
-    /// Catalog version, object generation, snapshot timestamp, or another
-    /// provider-owned stable identifier for the physical source contents.
-    pub snapshot_id: String,
+    /// Provider-owned stable identifier for the physical source contents,
+    /// such as a catalog snapshot, table version, or object generation.
+    /// This is independent of the query's event-time `as_of` value.
+    pub source_snapshot_id: String,
     /// Canonical predicates copied from the bound/canonicalized query IR.
     pub predicates: Vec<Predicate>,
 }
@@ -85,9 +86,21 @@ impl ComparisonScope {
         if self
             .sources
             .iter()
-            .any(|source| source.snapshot_id.is_empty())
+            .enumerate()
+            .any(|(index, source)| self.sources[..index].contains(source))
         {
-            return Err(AnalyticalCostError::MissingComparisonScope("snapshot_id"));
+            return Err(AnalyticalCostError::MissingComparisonScope(
+                "duplicate source coverage",
+            ));
+        }
+        if self
+            .sources
+            .iter()
+            .any(|source| source.source_snapshot_id.is_empty())
+        {
+            return Err(AnalyticalCostError::MissingComparisonScope(
+                "source_snapshot_id",
+            ));
         }
         evaluations_in_horizon(&self.recurrence, self.planning_time.0, self.horizon.0)
     }
@@ -197,57 +210,145 @@ impl EdgeStatistics {
     }
 }
 
-/// Authoritative cardinality and width facts for one physical operator.
-/// `inputs` has one entry per child edge, except `Scan`, whose single entry
-/// describes its external source edge. The output is compared with every
-/// parent's corresponding input, so conflicting provider evidence fails.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct OperatorStatistics {
-    /// Physical bytes read from storage by this operator. This is independent
-    /// of decoded logical bytes on `inputs`; it must be zero for non-scan
-    /// operators in the current in-memory physical model.
-    pub source_scan_bytes: u64,
-    pub inputs: Vec<EdgeStatistics>,
-    pub output: EdgeStatistics,
-    pub group_count: Option<u64>,
-    pub key_bytes: Option<u64>,
-    pub aggregate_value_bytes: Option<u64>,
-    pub k: Option<u64>,
-    /// Rows skipped after maintaining the Top-K heap. A plain Top-K uses zero;
-    /// fused ORDER BY/LIMIT/OFFSET uses the logical offset.
-    #[serde(default)]
-    pub topk_output_offset: Option<u64>,
-    /// Rows consumed by a physical Limit, including rows skipped by OFFSET.
-    /// This is an execution statistic rather than the output cardinality.
-    #[serde(default)]
-    pub limit_rows_consumed: Option<u64>,
-    pub hash_join_build_side: Option<HashJoinBuildSide>,
-    /// Series-oriented evidence used only by PromQL physical operators.
-    /// Logical row/byte edges remain authoritative in `inputs` and `output`.
-    #[serde(default)]
-    pub promql: Option<PromqlOperatorStatistics>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PromqlOperatorStatistics {
-    /// Series cardinality for each logical input edge, in child order.
-    pub input_series: Vec<u64>,
-    pub output_series: u64,
-    pub evaluation_steps: u64,
-    pub window_samples_per_series: Option<u64>,
-    pub subquery_steps: Option<u64>,
-    pub scalar_ops_per_row: Option<u64>,
-    /// Physical operand shape for a PromQL binary operator. Series cardinality
-    /// cannot encode this because a vector may legitimately contain zero series.
-    #[serde(default)]
-    pub binary_operand_mode: Option<PromqlBinaryOperandMode>,
-}
-
+/// Input and output evidence for a unary physical operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PromqlBinaryOperandMode {
-    VectorVector,
-    VectorScalar,
-    ScalarVector,
+pub struct UnaryEdgeStatistics {
+    pub input: EdgeStatistics,
+    pub output: EdgeStatistics,
+}
+
+/// Input and output evidence for a binary physical operator. The input order
+/// is the physical operator's left/right order and must match its DAG children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryEdgeStatistics {
+    pub inputs: [EdgeStatistics; 2],
+    pub output: EdgeStatistics,
+}
+
+/// Input distribution for an algorithm that independently orders partitions.
+/// The checked sum of these edges must equal the operator input. A global sort
+/// has exactly one partition; an empty input has no partitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartitionStatistics {
+    pub partitions: Vec<EdgeStatistics>,
+}
+
+/// Workload-dependent evidence for one operator in an already-lowered
+/// physical DAG. [`PhysicalOperator`](crate::analytical_cost::PhysicalOperator)
+/// is the authoritative operator vocabulary: every one of its variants has a
+/// matching statistics variant here.
+///
+/// This enum intentionally does not mirror either logical IR. `QueryExpr` and
+/// `SummaryExpr` are inputs to physical lowering, and one logical node may
+/// expand into several physical nodes or choose among several algorithms.
+/// Physical configuration such as a Top-K limit or hash-join build side lives
+/// on `PhysicalOperator`; this enum contains only workload/catalog evidence
+/// required to cost the selected algorithm. Structuring that evidence by
+/// physical kind prevents unrelated facts from being combined in a flat bag
+/// of `Option`s.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operator", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OperatorStatistics {
+    Scan {
+        edges: UnaryEdgeStatistics,
+        /// Physical bytes read from storage, independent of decoded logical
+        /// bytes on the source edge.
+        source_read_bytes: u64,
+    },
+    Filter {
+        edges: UnaryEdgeStatistics,
+    },
+    Project {
+        edges: UnaryEdgeStatistics,
+    },
+    HashAggregate {
+        edges: UnaryEdgeStatistics,
+        group_count: u64,
+        key_bytes: u64,
+        accumulator_bytes_per_group: u64,
+    },
+    InMemoryComparisonSort {
+        edges: UnaryEdgeStatistics,
+        input_partitioning: PartitionStatistics,
+    },
+    TopK {
+        edges: UnaryEdgeStatistics,
+    },
+    HashJoin {
+        edges: BinaryEdgeStatistics,
+    },
+    HashDeduplicate {
+        edges: UnaryEdgeStatistics,
+        distinct_key_count: u64,
+        key_bytes: u64,
+    },
+    Concat {
+        inputs: Vec<EdgeStatistics>,
+        output: EdgeStatistics,
+    },
+    InMemoryAnalyticWindow {
+        edges: UnaryEdgeStatistics,
+        input_partitioning: PartitionStatistics,
+    },
+    Limit {
+        edges: UnaryEdgeStatistics,
+    },
+    PassThrough {
+        edges: UnaryEdgeStatistics,
+    },
+}
+
+impl OperatorStatistics {
+    pub fn input_count(&self) -> usize {
+        match self {
+            Self::Scan { .. }
+            | Self::Filter { .. }
+            | Self::Project { .. }
+            | Self::HashAggregate { .. }
+            | Self::InMemoryComparisonSort { .. }
+            | Self::TopK { .. }
+            | Self::HashDeduplicate { .. }
+            | Self::InMemoryAnalyticWindow { .. }
+            | Self::Limit { .. }
+            | Self::PassThrough { .. } => 1,
+            Self::HashJoin { .. } => 2,
+            Self::Concat { inputs, .. } => inputs.len(),
+        }
+    }
+
+    pub fn input(&self, index: usize) -> Option<EdgeStatistics> {
+        match self {
+            Self::Scan { edges, .. }
+            | Self::HashAggregate { edges, .. }
+            | Self::HashDeduplicate { edges, .. } => (index == 0).then_some(edges.input),
+            Self::Filter { edges }
+            | Self::Project { edges }
+            | Self::InMemoryComparisonSort { edges, .. }
+            | Self::TopK { edges }
+            | Self::InMemoryAnalyticWindow { edges, .. }
+            | Self::Limit { edges }
+            | Self::PassThrough { edges } => (index == 0).then_some(edges.input),
+            Self::HashJoin { edges } => edges.inputs.get(index).copied(),
+            Self::Concat { inputs, .. } => inputs.get(index).copied(),
+        }
+    }
+
+    pub fn output(&self) -> EdgeStatistics {
+        match self {
+            Self::Scan { edges, .. }
+            | Self::HashAggregate { edges, .. }
+            | Self::HashDeduplicate { edges, .. } => edges.output,
+            Self::Filter { edges }
+            | Self::Project { edges }
+            | Self::InMemoryComparisonSort { edges, .. }
+            | Self::TopK { edges }
+            | Self::InMemoryAnalyticWindow { edges, .. }
+            | Self::Limit { edges }
+            | Self::PassThrough { edges } => edges.output,
+            Self::HashJoin { edges } => edges.output,
+            Self::Concat { output, .. } => *output,
+        }
+    }
 }
 
 /// Resolves physical statistics and owns their catalog/observation freshness.

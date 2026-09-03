@@ -5,12 +5,11 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use crate::analytical_cost::{
-    validate_operator_semantics as require_operator_statistics, AnalyticalCostError,
-    ExecutionMultiplicity, PhysicalDagNode, PhysicalOperator,
+    validate_operator_semantics, AnalyticalCostError, ExecutionMultiplicity, HashJoinBuildSide,
+    PhysicalDagNode, PhysicalOperator,
 };
 use crate::analytical_statistics::{
-    ComparisonScope, EdgeStatistics, OperatorStatistics, OperatorStatisticsProvider,
-    PromqlBinaryOperandMode, SourceCoverage,
+    ComparisonScope, EdgeStatistics, OperatorStatistics, OperatorStatisticsProvider, SourceCoverage,
 };
 
 /// A lowered physical DAG and the node whose output is the query result.
@@ -100,7 +99,7 @@ impl OperatorStatisticsProvider for PhysicalDag {
 
 /// Lower a resolved query operator DAG to the physical operators understood by
 /// this cost model. The authoritative provider supplies statistics by the
-/// deterministic physical IDs assigned here; missing evidence makes the
+/// stable physical IDs owned by that provider; missing evidence makes the
 /// complete query unavailable. Scalar expressions remain part of their
 /// containing operator's local cost.
 pub fn lower_query_physical_dag(
@@ -202,7 +201,6 @@ pub fn lower_query_physical_dag(
                 &child_id,
                 child_statistics,
             )?;
-            require_promql_unary_edge(operator, statistics, child_statistics)?;
             require_operator_statistics(operator, statistics)?;
             self.push(evidence, operator, children, None)
         }
@@ -266,31 +264,55 @@ pub fn lower_query_physical_dag(
                         Some(coverage),
                     )?;
                     let children = vec![scan_id.clone()];
-                    let filter_evidence = self.resolve(
-                        query,
-                        PhysicalOperator::Filter,
-                        occurrence,
-                        false,
-                        &children,
-                        None,
-                    )?;
+                    let predicate_operations_per_row = predicates
+                        .iter()
+                        .try_fold(0_u64, |total, predicate| {
+                            total
+                                .checked_add(scalar_operation_count(&predicate.0)?)
+                                .ok_or(AnalyticalCostError::Overflow)
+                        })?
+                        .max(1);
+                    let filter_operator = PhysicalOperator::Filter {
+                        predicate_operations_per_row,
+                    };
+                    let filter_evidence =
+                        self.resolve(query, filter_operator, occurrence, false, &children, None)?;
                     require_unary_edge(
                         &filter_evidence.physical_id,
                         &filter_evidence.statistics,
                         &scan_id,
                         &scan_statistics,
                     )?;
-                    require_operator_statistics(
-                        PhysicalOperator::Filter,
-                        &filter_evidence.statistics,
-                    )?;
-                    self.push(filter_evidence, PhysicalOperator::Filter, children, None)
+                    require_operator_statistics(filter_operator, &filter_evidence.statistics)?;
+                    self.push(filter_evidence, filter_operator, children, None)
                 }
-                QueryExpr::Filter { child, .. } => {
-                    self.lower_unary(query, occurrence, PhysicalOperator::Filter, child)
+                QueryExpr::Filter { pred, child } => {
+                    let operator = PhysicalOperator::Filter {
+                        predicate_operations_per_row: scalar_operation_count(&pred.0)?.max(1),
+                    };
+                    self.lower_unary(query, occurrence, operator, child)
                 }
-                QueryExpr::Project { child, .. } => {
-                    self.lower_unary(query, occurrence, PhysicalOperator::Project, child)
+                QueryExpr::Project { cols, child, .. } => {
+                    let expression_operations_per_row = cols
+                        .iter()
+                        .try_fold(0_u64, |total, item| {
+                            total
+                                .checked_add(
+                                    scalar_operation_count(&item.expr)?
+                                        .checked_add(1)
+                                        .ok_or(AnalyticalCostError::Overflow)?,
+                                )
+                                .ok_or(AnalyticalCostError::Overflow)
+                        })?
+                        .max(1);
+                    self.lower_unary(
+                        query,
+                        occurrence,
+                        PhysicalOperator::Project {
+                            expression_operations_per_row,
+                        },
+                        child,
+                    )
                 }
                 QueryExpr::Aggregate {
                     reduction,
@@ -299,21 +321,69 @@ pub fn lower_query_physical_dag(
                     child,
                     ..
                 } => {
-                    if having.is_some() {
+                    let asap_types::pre_asap::Reduction::Reduce(grouping) = reduction else {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    };
+                    if grouping.is_without()
+                        || having.is_some()
+                        || !supports_hash_aggregate(reduction, measures)
+                    {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
-                    let operator = aggregate_operator(reduction, measures)
-                        .ok_or(AnalyticalCostError::UnsupportedQueryOperator)?;
-                    self.lower_unary(query, occurrence, operator, child)
+                    self.lower_unary(
+                        query,
+                        occurrence,
+                        PhysicalOperator::HashAggregate {
+                            grouping_key_count: u64::try_from(grouping.keys().len())
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                            accumulator_count: u64::try_from(measures.len())
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                        },
+                        child,
+                    )
                 }
-                QueryExpr::Dedup { child, .. } => {
-                    self.lower_unary(query, occurrence, PhysicalOperator::Deduplicate, child)
+                QueryExpr::Dedup { cols, child } => {
+                    let key_count = if cols.is_empty() {
+                        child
+                            .output_schema()
+                            .map_err(|_| AnalyticalCostError::UnsupportedQueryOperator)?
+                            .columns
+                            .len()
+                    } else {
+                        cols.len()
+                    };
+                    if key_count == 0 {
+                        return Err(AnalyticalCostError::UnsupportedQueryOperator);
+                    }
+                    self.lower_unary(
+                        query,
+                        occurrence,
+                        PhysicalOperator::HashDeduplicate {
+                            key_count: u64::try_from(key_count)
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                        },
+                        child,
+                    )
                 }
-                QueryExpr::Sort { keys, child, .. } => {
+                QueryExpr::Sort {
+                    keys,
+                    partition_by,
+                    child,
+                    ..
+                } => {
                     if keys.is_empty() {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
-                    self.lower_unary(query, occurrence, PhysicalOperator::Sort, child)
+                    self.lower_unary(
+                        query,
+                        occurrence,
+                        PhysicalOperator::InMemoryComparisonSort {
+                            ordering_key_count: u64::try_from(keys.len())
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                            partitioned: partition_by != &GroupKeys::none(),
+                        },
+                        child,
+                    )
                 }
                 QueryExpr::Limit { n, offset, child } => {
                     if let QueryExpr::Sort {
@@ -326,14 +396,18 @@ pub fn lower_query_physical_dag(
                         if !keys.is_empty() && partition_by == &GroupKeys::none() {
                             let child_id = self.lower(sorted_child)?;
                             let children = vec![child_id.clone()];
-                            let evidence = self.resolve(
-                                query,
-                                PhysicalOperator::TopK,
-                                occurrence,
-                                false,
-                                &children,
-                                None,
-                            )?;
+                            let limit =
+                                u64::try_from(*n).map_err(|_| AnalyticalCostError::Overflow)?;
+                            let offset = u64::try_from(*offset)
+                                .map_err(|_| AnalyticalCostError::Overflow)?;
+                            let operator = PhysicalOperator::TopK {
+                                limit,
+                                offset,
+                                ordering_key_count: u64::try_from(keys.len())
+                                    .map_err(|_| AnalyticalCostError::Overflow)?,
+                            };
+                            let evidence =
+                                self.resolve(query, operator, occurrence, false, &children, None)?;
                             let statistics = &evidence.statistics;
                             let child_statistics = self.node_statistics(&child_id)?;
                             require_unary_edge(
@@ -342,47 +416,25 @@ pub fn lower_query_physical_dag(
                                 &child_id,
                                 child_statistics,
                             )?;
-                            require_promql_unary_edge(
-                                PhysicalOperator::TopK,
-                                statistics,
-                                child_statistics,
-                            )?;
-                            let bound = n
-                                .checked_add(*offset)
-                                .and_then(|value| u64::try_from(value).ok())
+                            let bound = limit
+                                .checked_add(offset)
                                 .ok_or(AnalyticalCostError::Overflow)?;
                             if bound == 0 {
                                 return Err(AnalyticalCostError::MissingOrZero("topk_k"));
                             }
-                            if statistics.k != Some(bound) {
-                                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                                    "Top-K statistics disagree with LIMIT n + offset",
-                                ));
-                            }
-                            if statistics.topk_output_offset
-                                != Some(
-                                    u64::try_from(*offset)
-                                        .map_err(|_| AnalyticalCostError::Overflow)?,
-                                )
-                            {
-                                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                                    "Top-K statistics disagree with LIMIT offset",
-                                ));
-                            }
-                            require_limit_cardinality(*n, *offset, statistics)?;
-                            return self.push(evidence, PhysicalOperator::TopK, children, None);
+                            require_operator_statistics(operator, statistics)?;
+                            return self.push(evidence, operator, children, None);
                         }
                     }
                     let child_id = self.lower(child)?;
                     let children = vec![child_id.clone()];
-                    let evidence = self.resolve(
-                        query,
-                        PhysicalOperator::Limit,
-                        occurrence,
-                        false,
-                        &children,
-                        None,
-                    )?;
+                    let operator = PhysicalOperator::Limit {
+                        limit: u64::try_from(*n).map_err(|_| AnalyticalCostError::Overflow)?,
+                        offset: u64::try_from(*offset)
+                            .map_err(|_| AnalyticalCostError::Overflow)?,
+                    };
+                    let evidence =
+                        self.resolve(query, operator, occurrence, false, &children, None)?;
                     let statistics = &evidence.statistics;
                     let child_statistics = self.node_statistics(&child_id)?;
                     require_unary_edge(
@@ -391,18 +443,12 @@ pub fn lower_query_physical_dag(
                         &child_id,
                         child_statistics,
                     )?;
-                    require_promql_unary_edge(
-                        PhysicalOperator::Limit,
-                        statistics,
-                        child_statistics,
-                    )?;
-                    require_operator_statistics(PhysicalOperator::Limit, statistics)?;
-                    require_limit_cardinality(*n, *offset, statistics)?;
-                    require_limit_consumption(*n, *offset, statistics)?;
-                    self.push(evidence, PhysicalOperator::Limit, children, None)
+                    require_operator_statistics(operator, statistics)?;
+                    self.push(evidence, operator, children, None)
                 }
                 QueryExpr::SQLWindowFunc {
                     func,
+                    partition_by,
                     order_by,
                     child,
                     ..
@@ -417,297 +463,24 @@ pub fn lower_query_physical_dag(
                     {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
-                    self.lower_unary(query, occurrence, PhysicalOperator::Window, child)
-                }
-                QueryExpr::TimeRange { range, child } => {
-                    if range.is_zero() {
-                        return Err(AnalyticalCostError::MissingOrZero("range"));
-                    }
-                    self.lower_unary(query, occurrence, PhysicalOperator::PromqlRange, child)
-                }
-                QueryExpr::PromqlSubquery {
-                    range,
-                    resolution,
-                    child,
-                } => {
-                    let child_id = self.lower(child)?;
-                    let children = vec![child_id.clone()];
-                    let evidence = self.resolve(
+                    self.lower_unary(
                         query,
-                        PhysicalOperator::PromqlSubquery,
                         occurrence,
-                        false,
-                        &children,
-                        None,
-                    )?;
-                    let statistics = &evidence.statistics;
-                    let child_statistics = self.node_statistics(&child_id)?;
-                    require_unary_edge(
-                        &evidence.physical_id,
-                        statistics,
-                        &child_id,
-                        child_statistics,
-                    )?;
-                    require_promql_unary_edge(
-                        PhysicalOperator::PromqlSubquery,
-                        statistics,
-                        child_statistics,
-                    )?;
-                    require_operator_statistics(PhysicalOperator::PromqlSubquery, statistics)?;
-                    let supplied = require_promql_statistics(statistics, 1)?
-                        .subquery_steps
-                        .ok_or(AnalyticalCostError::MissingOrZero("subquery_steps"))?;
-                    let parent_steps = require_promql_statistics(statistics, 1)?.evaluation_steps;
-                    let expected_child_steps = parent_steps
-                        .checked_mul(supplied)
-                        .ok_or(AnalyticalCostError::Overflow)?;
-                    let child_steps = child_statistics
-                        .promql
-                        .as_ref()
-                        .ok_or(AnalyticalCostError::MissingOrStale(
-                            "child_promql_operator_statistics",
-                        ))?
-                        .evaluation_steps;
-                    if child_steps != expected_child_steps {
-                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                            "subquery child steps do not equal parent steps times subquery steps",
-                        ));
-                    }
-                    if let Some(expected) = subquery_steps(*range, *resolution)? {
-                        if supplied != expected {
-                            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                                "subquery_steps disagree with range and resolution",
-                            ));
-                        }
-                    }
-                    self.push(evidence, PhysicalOperator::PromqlSubquery, children, None)
-                }
-                QueryExpr::TimeShift { child, .. } => {
-                    self.lower_unary(query, occurrence, PhysicalOperator::PassThrough, child)
-                }
-                QueryExpr::PromqlRelabel { child, .. } => {
-                    self.lower_unary(query, occurrence, PhysicalOperator::PromqlRelabel, child)
-                }
-                QueryExpr::PromqlSeriesSample {
-                    by, kind, child, ..
-                } => {
-                    let child_id = self.lower(child)?;
-                    let children = vec![child_id.clone()];
-                    let evidence = self.resolve(
-                        query,
-                        PhysicalOperator::PromqlSeriesSample,
-                        occurrence,
-                        false,
-                        &children,
-                        None,
-                    )?;
-                    let statistics = &evidence.statistics;
-                    let child_statistics = self.node_statistics(&child_id)?;
-                    require_unary_edge(
-                        &evidence.physical_id,
-                        statistics,
-                        &child_id,
-                        child_statistics,
-                    )?;
-                    require_promql_unary_edge(
-                        PhysicalOperator::PromqlSeriesSample,
-                        statistics,
-                        child_statistics,
-                    )?;
-                    validate_series_sample(by, *kind, statistics)?;
-                    require_operator_statistics(PhysicalOperator::PromqlSeriesSample, statistics)?;
-                    self.push(
-                        evidence,
-                        PhysicalOperator::PromqlSeriesSample,
-                        children,
-                        None,
+                        PhysicalOperator::InMemoryAnalyticWindow {
+                            partition_key_count: u64::try_from(partition_by.keys().len())
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                            ordering_key_count: u64::try_from(order_by.len())
+                                .map_err(|_| AnalyticalCostError::Overflow)?,
+                            function_operations_per_row: 1,
+                        },
+                        child,
                     )
                 }
-                QueryExpr::PromqlInfoEnrich { selector, child } => {
-                    let left_id = self.lower(child)?;
-                    let coverage = bind_info_coverage(
-                        &format!("occurrence-{occurrence}-info"),
-                        selector,
-                        self.scope,
-                    )?;
-                    let info_evidence = self.resolve(
-                        query,
-                        PhysicalOperator::Scan,
-                        occurrence,
-                        true,
-                        &[],
-                        Some(&coverage),
-                    )?;
-                    require_statistics_shape(
-                        &info_evidence.physical_id,
-                        &info_evidence.statistics,
-                        1,
-                    )?;
-                    require_scan_edges_equal(&info_evidence.statistics)?;
-                    let info_statistics = info_evidence.statistics.clone();
-                    let info_id = self.push(
-                        info_evidence,
-                        PhysicalOperator::Scan,
-                        vec![],
-                        Some(coverage),
-                    )?;
-                    let children = vec![left_id.clone(), info_id.clone()];
-                    let evidence = self.resolve(
-                        query,
-                        PhysicalOperator::PromqlInfoEnrich,
-                        occurrence,
-                        false,
-                        &children,
-                        None,
-                    )?;
-                    let statistics = &evidence.statistics;
-                    require_statistics_shape(&evidence.physical_id, statistics, 2)?;
-                    if statistics.inputs[0] != self.node_statistics(&left_id)?.output
-                        || statistics.inputs[1] != info_statistics.output
-                    {
-                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                            "info enrichment inputs do not match child outputs",
-                        ));
-                    }
-                    require_promql_binary_edges(
-                        statistics,
-                        self.node_statistics(&left_id)?,
-                        &info_statistics,
-                    )?;
-                    if selector.iter().any(|matcher| matcher.label != "__name__")
-                        && !matches!(
-                            require_promql_statistics(statistics, 2)?.scalar_ops_per_row,
-                            Some(value) if value > 0
-                        )
-                    {
-                        return Err(AnalyticalCostError::MissingOrZero(
-                            "info_matcher_ops_per_row",
-                        ));
-                    }
-                    require_operator_statistics(PhysicalOperator::PromqlInfoEnrich, statistics)?;
-                    self.push(evidence, PhysicalOperator::PromqlInfoEnrich, children, None)
-                }
-                QueryExpr::BinaryOp {
-                    lhs,
-                    rhs,
-                    vector_match,
-                    ..
-                } => {
-                    let left_scalar = is_promql_scalar(lhs);
-                    let right_scalar = is_promql_scalar(rhs);
-                    if left_scalar && right_scalar {
+                QueryExpr::TimeShift { shift, child } => {
+                    if !shift.is_identity() {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
                     }
-                    let left_id = self.lower(lhs)?;
-                    let right_id = self.lower(rhs)?;
-                    let children = vec![left_id.clone(), right_id.clone()];
-                    let evidence = self.resolve(
-                        query,
-                        PhysicalOperator::PromqlVectorBinary,
-                        occurrence,
-                        false,
-                        &children,
-                        None,
-                    )?;
-                    let statistics = &evidence.statistics;
-                    require_statistics_shape(&evidence.physical_id, statistics, 2)?;
-                    if statistics.inputs[0] != self.node_statistics(&left_id)?.output
-                        || statistics.inputs[1] != self.node_statistics(&right_id)?.output
-                    {
-                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                            "PromQL binary inputs do not match child outputs",
-                        ));
-                    }
-                    let operand_mode = match (left_scalar, right_scalar) {
-                        (false, false) => PromqlBinaryOperandMode::VectorVector,
-                        (false, true) => PromqlBinaryOperandMode::VectorScalar,
-                        (true, false) => PromqlBinaryOperandMode::ScalarVector,
-                        (true, true) => unreachable!("scalar/scalar was rejected above"),
-                    };
-                    if require_promql_statistics(statistics, 2)?.binary_operand_mode
-                        != Some(operand_mode)
-                    {
-                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                            "PromQL binary operand mode disagrees with its logical operands",
-                        ));
-                    }
-                    if left_scalar || right_scalar {
-                        if vector_match.is_some()
-                            || statistics.hash_join_build_side.is_some()
-                            || statistics.key_bytes.is_some()
-                        {
-                            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                                "scalar/vector binary operation cannot have label-match state",
-                            ));
-                        }
-                    } else if statistics.hash_join_build_side.is_none()
-                        || statistics.key_bytes.is_none()
-                    {
-                        return Err(AnalyticalCostError::MissingOrStale(
-                            "vector_binary_label_match_statistics",
-                        ));
-                    }
-                    require_promql_binary_edges(
-                        statistics,
-                        self.node_statistics(&left_id)?,
-                        self.node_statistics(&right_id)?,
-                    )?;
-                    require_operator_statistics(PhysicalOperator::PromqlVectorBinary, statistics)?;
-                    self.push(
-                        evidence,
-                        PhysicalOperator::PromqlVectorBinary,
-                        children,
-                        None,
-                    )
-                }
-                QueryExpr::PromqlVectorFromScalar(child) => self.lower_unary(
-                    query,
-                    occurrence,
-                    PhysicalOperator::PromqlScalarToVector,
-                    child,
-                ),
-                QueryExpr::PromqlScalarFromVector(child) => self.lower_unary(
-                    query,
-                    occurrence,
-                    PhysicalOperator::PromqlVectorToScalar,
-                    child,
-                ),
-                QueryExpr::PromqlScalarBridge(inner)
-                    if matches!(
-                        inner.as_ref(),
-                        QueryExpr::Literal(asap_types::pre_asap::ScalarValue::Float64(_))
-                    ) =>
-                {
-                    let evidence = self.resolve(
-                        query,
-                        PhysicalOperator::PromqlScalarLeaf,
-                        occurrence,
-                        false,
-                        &[],
-                        None,
-                    )?;
-                    require_statistics_shape(&evidence.physical_id, &evidence.statistics, 0)?;
-                    require_operator_statistics(
-                        PhysicalOperator::PromqlScalarLeaf,
-                        &evidence.statistics,
-                    )?;
-                    self.push(evidence, PhysicalOperator::PromqlScalarLeaf, vec![], None)
-                }
-                QueryExpr::EvalTimestamp => {
-                    let evidence = self.resolve(
-                        query,
-                        PhysicalOperator::PromqlScalarLeaf,
-                        occurrence,
-                        false,
-                        &[],
-                        None,
-                    )?;
-                    require_statistics_shape(&evidence.physical_id, &evidence.statistics, 0)?;
-                    require_operator_statistics(
-                        PhysicalOperator::PromqlScalarLeaf,
-                        &evidence.statistics,
-                    )?;
-                    self.push(evidence, PhysicalOperator::PromqlScalarLeaf, vec![], None)
+                    self.lower_unary(query, occurrence, PhysicalOperator::PassThrough, child)
                 }
                 QueryExpr::Concat { children } => {
                     let child_ids = children
@@ -732,35 +505,43 @@ pub fn lower_query_physical_dag(
                     left,
                     right,
                 } => {
-                    if matches!(kind, asap_types::pre_asap::JoinKind::Cross)
-                        || !is_hash_join_predicate(&pred.0, left, right)
-                    {
+                    let equality_key_count =
+                        if matches!(kind, asap_types::pre_asap::JoinKind::Cross) {
+                            None
+                        } else {
+                            hash_join_key_count(&pred.0, left, right)
+                        };
+                    let Some(equality_key_count) = equality_key_count else {
                         return Err(AnalyticalCostError::UnsupportedQueryOperator);
-                    }
+                    };
                     let left_id = self.lower(left)?;
                     let right_id = self.lower(right)?;
                     let children = vec![left_id.clone(), right_id.clone()];
-                    let evidence = self.resolve(
-                        query,
-                        PhysicalOperator::HashJoin,
-                        occurrence,
-                        false,
-                        &children,
-                        None,
-                    )?;
-                    let statistics = &evidence.statistics;
-                    require_statistics_shape(&evidence.physical_id, statistics, 2)?;
                     let left_statistics = self.node_statistics(&left_id)?;
                     let right_statistics = self.node_statistics(&right_id)?;
-                    if statistics.inputs[0] != left_statistics.output
-                        || statistics.inputs[1] != right_statistics.output
+                    let build_side =
+                        if left_statistics.output().bytes <= right_statistics.output().bytes {
+                            HashJoinBuildSide::Left
+                        } else {
+                            HashJoinBuildSide::Right
+                        };
+                    let operator = PhysicalOperator::HashJoin {
+                        build_side,
+                        equality_key_count,
+                    };
+                    let evidence =
+                        self.resolve(query, operator, occurrence, false, &children, None)?;
+                    let statistics = &evidence.statistics;
+                    require_statistics_shape(&evidence.physical_id, statistics, 2)?;
+                    if statistics.input(0) != Some(left_statistics.output())
+                        || statistics.input(1) != Some(right_statistics.output())
                     {
                         return Err(AnalyticalCostError::InconsistentOperatorStatistics(
                             "join inputs do not match child outputs",
                         ));
                     }
-                    require_operator_statistics(PhysicalOperator::HashJoin, statistics)?;
-                    self.push(evidence, PhysicalOperator::HashJoin, children, None)
+                    require_operator_statistics(operator, statistics)?;
+                    self.push(evidence, operator, children, None)
                 }
                 _ => Err(AnalyticalCostError::UnsupportedQueryOperator),
             }
@@ -791,7 +572,7 @@ pub fn lower_query_physical_dag(
                 (0_u64, 0_u64),
                 |(rows, bytes), (index, child)| {
                     let child_statistics = self.node_statistics(child)?;
-                    if statistics.inputs[index] != child_statistics.output {
+                    if statistics.input(index) != Some(child_statistics.output()) {
                         return Err(AnalyticalCostError::ConflictingEdgeStatistics {
                             parent: evidence.physical_id.clone(),
                             child: child.clone(),
@@ -799,15 +580,15 @@ pub fn lower_query_physical_dag(
                         });
                     }
                     Ok::<_, AnalyticalCostError>((
-                        rows.checked_add(child_statistics.output.rows)
+                        rows.checked_add(child_statistics.output().rows)
                             .ok_or(AnalyticalCostError::Overflow)?,
                         bytes
-                            .checked_add(child_statistics.output.bytes)
+                            .checked_add(child_statistics.output().bytes)
                             .ok_or(AnalyticalCostError::Overflow)?,
                     ))
                 },
             )?;
-            if statistics.output != (EdgeStatistics { rows, bytes }) {
+            if statistics.output() != (EdgeStatistics { rows, bytes }) {
                 return Err(AnalyticalCostError::InconsistentOperatorStatistics(
                     "concat statistics do not equal the sum of child outputs",
                 ));
@@ -866,16 +647,15 @@ fn require_statistics_shape(
     statistics: &OperatorStatistics,
     input_count: usize,
 ) -> Result<(), AnalyticalCostError> {
-    if statistics.inputs.len() != input_count {
+    if statistics.input_count() != input_count {
         return Err(AnalyticalCostError::InvalidOperatorStatistics {
             node: node.into(),
             reason: "wrong input-edge count",
         });
     }
-    if statistics
-        .inputs
-        .iter()
-        .chain(std::iter::once(&statistics.output))
+    if (0..statistics.input_count())
+        .filter_map(|index| statistics.input(index))
+        .chain(std::iter::once(statistics.output()))
         .any(|edge| !edge.is_consistent())
     {
         return Err(AnalyticalCostError::InvalidOperatorStatistics {
@@ -887,7 +667,7 @@ fn require_statistics_shape(
 }
 
 fn require_scan_edges_equal(statistics: &OperatorStatistics) -> Result<(), AnalyticalCostError> {
-    if statistics.inputs[0] != statistics.output {
+    if statistics.input(0) != Some(statistics.output()) {
         return Err(AnalyticalCostError::InconsistentOperatorStatistics(
             "Scan external input edge does not match its output edge",
         ));
@@ -902,7 +682,7 @@ fn require_unary_edge(
     child: &OperatorStatistics,
 ) -> Result<(), AnalyticalCostError> {
     require_statistics_shape(node, statistics, 1)?;
-    if statistics.inputs[0] != child.output {
+    if statistics.input(0) != Some(child.output()) {
         return Err(AnalyticalCostError::ConflictingEdgeStatistics {
             parent: node.into(),
             child: child_id.into(),
@@ -912,186 +692,11 @@ fn require_unary_edge(
     Ok(())
 }
 
-fn require_promql_statistics(
-    statistics: &OperatorStatistics,
-    arity: usize,
-) -> Result<&crate::analytical_statistics::PromqlOperatorStatistics, AnalyticalCostError> {
-    let promql = statistics
-        .promql
-        .as_ref()
-        .ok_or(AnalyticalCostError::MissingOrStale(
-            "promql_operator_statistics",
-        ))?;
-    if promql.evaluation_steps == 0 {
-        return Err(AnalyticalCostError::MissingOrZero("evaluation_steps"));
-    }
-    if promql.input_series.len() != arity {
-        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-            "PromQL input-series arity does not match physical inputs",
-        ));
-    }
-    for (index, series) in promql.input_series.iter().enumerate() {
-        if *series > statistics.inputs[index].rows && statistics.inputs[index].rows > 0 {
-            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                "input series exceed input rows",
-            ));
-        }
-    }
-    if promql.output_series > statistics.output.rows && statistics.output.rows > 0 {
-        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-            "output series exceed output rows",
-        ));
-    }
-    Ok(promql)
-}
-
-fn require_promql_binary_edges(
-    statistics: &OperatorStatistics,
-    left: &OperatorStatistics,
-    right: &OperatorStatistics,
-) -> Result<(), AnalyticalCostError> {
-    let parent = require_promql_statistics(statistics, 2)?;
-    let left = left
-        .promql
-        .as_ref()
-        .ok_or(AnalyticalCostError::MissingOrStale(
-            "left_promql_operator_statistics",
-        ))?;
-    let right = right
-        .promql
-        .as_ref()
-        .ok_or(AnalyticalCostError::MissingOrStale(
-            "right_promql_operator_statistics",
-        ))?;
-    if parent.input_series != [left.output_series, right.output_series]
-        || parent.evaluation_steps != left.evaluation_steps
-        || parent.evaluation_steps != right.evaluation_steps
-    {
-        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-            "PromQL binary series or step statistics do not match its children",
-        ));
-    }
-    Ok(())
-}
-
-fn require_promql_unary_edge(
+fn require_operator_statistics(
     operator: PhysicalOperator,
     statistics: &OperatorStatistics,
-    child: &OperatorStatistics,
 ) -> Result<(), AnalyticalCostError> {
-    match (statistics.promql.as_ref(), child.promql.as_ref()) {
-        (None, None) => Ok(()),
-        (Some(parent), Some(child)) => {
-            require_promql_statistics(statistics, 1)?;
-            if parent.input_series[0] != child.output_series
-                || (!matches!(operator, PhysicalOperator::PromqlSubquery)
-                    && parent.evaluation_steps != child.evaluation_steps)
-            {
-                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                    "PromQL unary series or step statistics do not match its child",
-                ));
-            }
-            Ok(())
-        }
-        _ => Err(AnalyticalCostError::InconsistentOperatorStatistics(
-            "PromQL statistics are missing on one side of an edge",
-        )),
-    }
-}
-
-fn subquery_steps(
-    range: std::time::Duration,
-    resolution: Option<std::time::Duration>,
-) -> Result<Option<u64>, AnalyticalCostError> {
-    if range.is_zero() {
-        return Err(AnalyticalCostError::MissingOrZero("subquery range"));
-    }
-    let Some(resolution) = resolution else {
-        return Ok(None);
-    };
-    if resolution.is_zero() {
-        return Err(AnalyticalCostError::MissingOrZero("subquery resolution"));
-    }
-    Ok(Some(
-        u64::try_from(range.as_nanos() / resolution.as_nanos() + 1)
-            .map_err(|_| AnalyticalCostError::Overflow)?,
-    ))
-}
-
-fn validate_series_sample(
-    by: &asap_types::pre_asap::GroupKeys,
-    kind: asap_types::pre_asap::SampleKind,
-    statistics: &OperatorStatistics,
-) -> Result<(), AnalyticalCostError> {
-    let promql = require_promql_statistics(statistics, 1)?;
-    let groups = if !by.is_without() && by.keys().is_empty() {
-        1
-    } else {
-        statistics
-            .group_count
-            .ok_or(AnalyticalCostError::MissingOrStale("sample_group_count"))?
-    };
-    match kind {
-        asap_types::pre_asap::SampleKind::LimitK(k) => {
-            let k = u64::try_from(k).map_err(|_| AnalyticalCostError::Overflow)?;
-            if statistics.k != Some(k) {
-                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                    "limitk statistics disagree with query k",
-                ));
-            }
-            let bound = groups.checked_mul(k).ok_or(AnalyticalCostError::Overflow)?;
-            if promql.output_series > promql.input_series[0].min(bound) {
-                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                    "limitk output exceeds its cardinality bound",
-                ));
-            }
-        }
-        asap_types::pre_asap::SampleKind::LimitRatio(ratio)
-            if !ratio.is_finite() || !(-1.0..=1.0).contains(&ratio) =>
-        {
-            return Err(AnalyticalCostError::UnsupportedQueryOperator)
-        }
-        asap_types::pre_asap::SampleKind::LimitRatio(_) => {}
-    }
-    Ok(())
-}
-
-fn require_limit_cardinality(
-    n: usize,
-    offset: usize,
-    statistics: &OperatorStatistics,
-) -> Result<(), AnalyticalCostError> {
-    let n = u64::try_from(n).map_err(|_| AnalyticalCostError::Overflow)?;
-    let offset = u64::try_from(offset).map_err(|_| AnalyticalCostError::Overflow)?;
-    let expected = statistics.inputs[0].rows.saturating_sub(offset).min(n);
-    if statistics.output.rows != expected {
-        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-            "limit output does not match n and offset",
-        ));
-    }
-    Ok(())
-}
-
-fn require_limit_consumption(
-    n: usize,
-    offset: usize,
-    statistics: &OperatorStatistics,
-) -> Result<(), AnalyticalCostError> {
-    let n = u64::try_from(n).map_err(|_| AnalyticalCostError::Overflow)?;
-    let offset = u64::try_from(offset).map_err(|_| AnalyticalCostError::Overflow)?;
-    let expected_consumed = if n == 0 {
-        0
-    } else {
-        statistics.inputs[0]
-            .rows
-            .min(offset.checked_add(n).ok_or(AnalyticalCostError::Overflow)?)
-    };
-    if statistics.limit_rows_consumed != Some(expected_consumed) {
-        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-            "limit rows consumed do not match n and offset",
-        ));
-    }
-    Ok(())
+    validate_operator_semantics(operator, statistics)
 }
 
 fn bind_scan_coverage(
@@ -1116,41 +721,15 @@ fn bind_scan_coverage(
     Ok(coverage)
 }
 
-fn bind_info_coverage(
-    node_id: &str,
-    selector: &[asap_types::pre_asap::InfoMatcher],
-    scope: &ComparisonScope,
-) -> Result<SourceCoverage, AnalyticalCostError> {
-    use asap_types::pre_asap::{CompareOpKind, Source};
-
-    let mut metric: Option<&str> = None;
-    for matcher in selector
-        .iter()
-        .filter(|matcher| matcher.label == "__name__")
-    {
-        if matcher.op != CompareOpKind::Eq {
-            return Err(AnalyticalCostError::UnsupportedQueryOperator);
-        }
-        if metric.is_some_and(|current| current != matcher.value) {
-            return Err(AnalyticalCostError::UnsupportedQueryOperator);
-        }
-        metric = Some(&matcher.value);
-    }
-    let source = Source::TimeSeries {
-        metric: metric.unwrap_or("target_info").into(),
-    };
-    bind_scan_coverage(node_id, &source, &[], scope)
-}
-
-fn is_hash_join_predicate(
+fn hash_join_key_count(
     expr: &asap_types::pre_asap::QueryExpr,
     left: &asap_types::pre_asap::QueryExpr,
     right: &asap_types::pre_asap::QueryExpr,
-) -> bool {
+) -> Option<u64> {
     use asap_types::pre_asap::{CompareOpKind, QueryExpr};
 
     let (Ok(left_schema), Ok(right_schema)) = (left.output_schema(), right.output_schema()) else {
-        return false;
+        return None;
     };
     let left_width = left_schema.columns.len();
     let total_width = left_width.saturating_add(right_schema.columns.len());
@@ -1165,33 +744,104 @@ fn is_hash_join_predicate(
         }
     }
 
-    fn predicate(expr: &QueryExpr, left_width: usize, total_width: usize) -> bool {
+    fn predicate(expr: &QueryExpr, left_width: usize, total_width: usize) -> Option<u64> {
         match expr {
             QueryExpr::Compare {
                 left,
                 op: CompareOpKind::Eq,
                 right,
             } => match (left.as_ref(), right.as_ref()) {
-                (QueryExpr::Column(left), QueryExpr::Column(right)) => matches!(
-                    (
-                        column_side(*left, left_width, total_width),
-                        column_side(*right, left_width, total_width)
-                    ),
-                    (Some(false), Some(true)) | (Some(true), Some(false))
-                ),
-                _ => false,
+                (QueryExpr::Column(left), QueryExpr::Column(right)) => match (
+                    column_side(*left, left_width, total_width),
+                    column_side(*right, left_width, total_width),
+                ) {
+                    (Some(false), Some(true)) | (Some(true), Some(false)) => Some(1),
+                    _ => None,
+                },
+                _ => None,
             },
-            QueryExpr::BoolAnd(parts) => {
-                !parts.is_empty()
-                    && parts
-                        .iter()
-                        .all(|part| predicate(part, left_width, total_width))
+            QueryExpr::BoolAnd(parts) if !parts.is_empty() => {
+                parts.iter().try_fold(0_u64, |count, part| {
+                    count.checked_add(predicate(part, left_width, total_width)?)
+                })
             }
-            _ => false,
+            _ => None,
         }
     }
 
     predicate(expr, left_width, total_width)
+}
+
+fn scalar_operation_count(
+    expr: &asap_types::pre_asap::QueryExpr,
+) -> Result<u64, AnalyticalCostError> {
+    use asap_types::pre_asap::QueryExpr;
+
+    let add = |parts: &[&QueryExpr]| {
+        parts.iter().try_fold(0_u64, |total, part| {
+            total
+                .checked_add(scalar_operation_count(part)?)
+                .ok_or(AnalyticalCostError::Overflow)
+        })
+    };
+    let with_local = |children| {
+        add(children)?
+            .checked_add(1)
+            .ok_or(AnalyticalCostError::Overflow)
+    };
+    match expr {
+        QueryExpr::Column(_)
+        | QueryExpr::Literal(_)
+        | QueryExpr::EvalTimestamp
+        | QueryExpr::CurrentTimestamp => Ok(0),
+        QueryExpr::Compare { left, right, .. } | QueryExpr::Arithmetic { left, right, .. } => {
+            with_local(&[left, right])
+        }
+        QueryExpr::BoolAnd(parts) | QueryExpr::BoolOr(parts) => {
+            let children = parts.iter().collect::<Vec<_>>();
+            add(&children)?
+                .checked_add(
+                    u64::try_from(parts.len().saturating_sub(1))
+                        .map_err(|_| AnalyticalCostError::Overflow)?,
+                )
+                .ok_or(AnalyticalCostError::Overflow)
+        }
+        QueryExpr::Not(child)
+        | QueryExpr::IsNull(child)
+        | QueryExpr::IsNotNull(child)
+        | QueryExpr::PromqlScalarBridge(child) => with_local(&[child]),
+        QueryExpr::Cast { expr, .. } => with_local(&[expr]),
+        QueryExpr::InList { expr, list, .. } => {
+            let mut children = Vec::with_capacity(list.len() + 1);
+            children.push(expr.as_ref());
+            children.extend(list.iter());
+            add(&children)?
+                .checked_add(u64::try_from(list.len()).map_err(|_| AnalyticalCostError::Overflow)?)
+                .ok_or(AnalyticalCostError::Overflow)
+        }
+        QueryExpr::FunctionCall { args, .. } => {
+            let children = args.iter().collect::<Vec<_>>();
+            with_local(&children)
+        }
+        QueryExpr::Case {
+            operand,
+            branches,
+            else_expr,
+        } => {
+            let mut children = Vec::new();
+            if let Some(operand) = operand {
+                children.push(operand.as_ref());
+            }
+            for (when, then) in branches {
+                children.extend([when, then]);
+            }
+            if let Some(else_expr) = else_expr {
+                children.push(else_expr.as_ref());
+            }
+            with_local(&children)
+        }
+        _ => Err(AnalyticalCostError::UnsupportedQueryOperator),
+    }
 }
 
 fn supports_hash_aggregate(
@@ -1218,92 +868,15 @@ fn supports_hash_aggregate(
         })
 }
 
-fn aggregate_operator(
-    reduction: &asap_types::pre_asap::Reduction,
-    measures: &[asap_types::pre_asap::AggIntent],
-) -> Option<PhysicalOperator> {
-    use asap_types::pre_asap::Reduction;
-
-    if supports_hash_aggregate(reduction, measures) {
-        Some(PhysicalOperator::HashAggregate)
-    } else if matches!(reduction, Reduction::PerEntity)
-        && !measures.is_empty()
-        && measures.iter().all(presence_intent)
-    {
-        Some(PhysicalOperator::PromqlPresence)
-    } else if matches!(reduction, Reduction::PerEntity)
-        && !measures.is_empty()
-        && measures.iter().all(fixed_state_per_series_intent)
-    {
-        Some(PhysicalOperator::PromqlPerSeries)
-    } else {
-        None
-    }
-}
-
-fn presence_intent(intent: &asap_types::pre_asap::AggIntent) -> bool {
-    matches!(
-        intent,
-        asap_types::pre_asap::AggIntent::Absent | asap_types::pre_asap::AggIntent::AbsentOverTime
-    )
-}
-
-fn fixed_state_per_series_intent(intent: &asap_types::pre_asap::AggIntent) -> bool {
-    use asap_types::pre_asap::AggIntent;
-    matches!(
-        intent,
-        AggIntent::Rate
-            | AggIntent::Count { .. }
-            | AggIntent::Sum { .. }
-            | AggIntent::Min { .. }
-            | AggIntent::Max { .. }
-            | AggIntent::Avg { .. }
-            | AggIntent::StdDev { .. }
-            | AggIntent::Variance { .. }
-            | AggIntent::Increase
-            | AggIntent::Changes
-            | AggIntent::Delta
-            | AggIntent::IDelta
-            | AggIntent::Deriv
-            | AggIntent::Resets
-            | AggIntent::PredictLinear { .. }
-            | AggIntent::DoubleExpSmoothing { .. }
-            | AggIntent::HistogramCount
-            | AggIntent::HistogramSum
-            | AggIntent::HistogramAvg
-            | AggIntent::HistogramStdDev
-            | AggIntent::HistogramStdVar
-            | AggIntent::HistogramFraction { .. }
-            | AggIntent::Math(_)
-            | AggIntent::PresentOverTime
-            | AggIntent::TimeFn(_)
-            | AggIntent::LastOverTime
-            | AggIntent::FirstOverTime
-            | AggIntent::TsOfMinOverTime
-            | AggIntent::TsOfMaxOverTime
-            | AggIntent::TsOfFirstOverTime
-            | AggIntent::TsOfLastOverTime
-    )
-}
-
-fn is_promql_scalar(query: &asap_types::pre_asap::QueryExpr) -> bool {
-    use asap_types::pre_asap::QueryExpr;
-    matches!(
-        query,
-        QueryExpr::PromqlScalarBridge(_)
-            | QueryExpr::PromqlScalarFromVector(_)
-            | QueryExpr::EvalTimestamp
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::analytical_cost::{
-        estimate_physical_dag, estimate_physical_dag_comparison, HashJoinBuildSide,
-        PhysicalDagEstimateRequest,
+        estimate_physical_dag, estimate_physical_dag_comparison, PhysicalDagEstimateRequest,
     };
-    use crate::analytical_statistics::validate_comparison_scopes;
+    use crate::analytical_statistics::{
+        validate_comparison_scopes, BinaryEdgeStatistics, PartitionStatistics, UnaryEdgeStatistics,
+    };
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
     };
@@ -1313,46 +886,61 @@ mod tests {
         EdgeStatistics { rows, bytes }
     }
 
-    fn statistics(inputs: Vec<EdgeStatistics>, output: EdgeStatistics) -> OperatorStatistics {
-        OperatorStatistics {
-            source_scan_bytes: 0,
-            inputs,
-            output,
-            group_count: None,
-            key_bytes: None,
-            aggregate_value_bytes: None,
-            k: None,
-            topk_output_offset: None,
-            limit_rows_consumed: None,
-            hash_join_build_side: None,
-            promql: None,
+    fn unary_edges(input: EdgeStatistics, output: EdgeStatistics) -> UnaryEdgeStatistics {
+        UnaryEdgeStatistics { input, output }
+    }
+
+    fn scan_stats(edge: EdgeStatistics, source_read_bytes: u64) -> OperatorStatistics {
+        OperatorStatistics::Scan {
+            edges: unary_edges(edge, edge),
+            source_read_bytes,
+        }
+    }
+
+    fn unary_statistics(
+        operator: PhysicalOperator,
+        input: EdgeStatistics,
+        output: EdgeStatistics,
+    ) -> OperatorStatistics {
+        let edges = unary_edges(input, output);
+        match operator {
+            PhysicalOperator::Filter { .. } => OperatorStatistics::Filter { edges },
+            PhysicalOperator::Project { .. } => OperatorStatistics::Project { edges },
+            PhysicalOperator::InMemoryComparisonSort { .. } => {
+                OperatorStatistics::InMemoryComparisonSort {
+                    edges,
+                    input_partitioning: PartitionStatistics {
+                        partitions: (!input.eq(&edge(0, 0)))
+                            .then_some(input)
+                            .into_iter()
+                            .collect(),
+                    },
+                }
+            }
+            PhysicalOperator::TopK { .. } => OperatorStatistics::TopK { edges },
+            PhysicalOperator::InMemoryAnalyticWindow { .. } => {
+                OperatorStatistics::InMemoryAnalyticWindow {
+                    edges,
+                    input_partitioning: PartitionStatistics {
+                        partitions: (!input.eq(&edge(0, 0)))
+                            .then_some(input)
+                            .into_iter()
+                            .collect(),
+                    },
+                }
+            }
+            PhysicalOperator::Limit { .. } => OperatorStatistics::Limit { edges },
+            PhysicalOperator::PassThrough => OperatorStatistics::PassThrough { edges },
+            _ => panic!("test helper requires a stateless unary operator"),
         }
     }
 
     fn evidence(statistics: OperatorStatistics) -> PhysicalNodeEvidence {
         PhysicalNodeEvidence {
             physical_id: String::new(),
-            output_buffer_bytes: statistics.output.bytes.min(1_024),
+            output_buffer_bytes: statistics.output().bytes.min(1_024),
             statistics,
         }
-    }
-
-    fn with_promql(
-        mut statistics: OperatorStatistics,
-        input_series: Vec<u64>,
-        output_series: u64,
-        evaluation_steps: u64,
-    ) -> OperatorStatistics {
-        statistics.promql = Some(crate::analytical_statistics::PromqlOperatorStatistics {
-            input_series,
-            output_series,
-            evaluation_steps,
-            window_samples_per_series: None,
-            subquery_steps: None,
-            scalar_ops_per_row: None,
-            binary_operand_mode: None,
-        });
-        statistics
     }
 
     fn scripted<'a>(
@@ -1360,13 +948,7 @@ mod tests {
     ) -> impl Fn(PhysicalNodeRequest<'_>) -> Result<PhysicalNodeEvidence, AnalyticalCostError> + 'a
     {
         move |request| {
-            let key = if request.synthetic
-                && matches!(
-                    request.logical_node,
-                    asap_types::pre_asap::QueryExpr::PromqlInfoEnrich { .. }
-                ) {
-                format!("query-{}-info-scan", request.occurrence)
-            } else if request.synthetic {
+            let key = if request.synthetic {
                 format!("query-{}-scan", request.occurrence)
             } else {
                 format!("query-{}", request.occurrence)
@@ -1404,7 +986,7 @@ mod tests {
     ) -> SourceCoverage {
         SourceCoverage {
             source,
-            snapshot_id: "snapshot-1".into(),
+            source_snapshot_id: "snapshot-1".into(),
             predicates,
         }
     }
@@ -1458,20 +1040,33 @@ mod tests {
             ))],
         );
         let scope = scope(vec![scan_coverage]);
-        let mut aggregate_statistics = statistics(vec![edge(400, 25_600)], edge(100, 4_000));
-        aggregate_statistics.group_count = Some(100);
-        aggregate_statistics.key_bytes = Some(16);
-        aggregate_statistics.aggregate_value_bytes = Some(8);
-        let mut topk_statistics = statistics(vec![edge(100, 4_000)], edge(10, 400));
-        topk_statistics.k = Some(15);
-        topk_statistics.topk_output_offset = Some(5);
-        let mut raw_scan = statistics(vec![edge(1_000, 64_000)], edge(1_000, 64_000));
-        raw_scan.source_scan_bytes = 64_000;
+        let aggregate_statistics = OperatorStatistics::HashAggregate {
+            edges: unary_edges(edge(400, 25_600), edge(100, 4_000)),
+            group_count: 100,
+            key_bytes: 16,
+            accumulator_bytes_per_group: 8,
+        };
+        let topk_statistics = unary_statistics(
+            PhysicalOperator::TopK {
+                limit: 10,
+                offset: 5,
+                ordering_key_count: 1,
+            },
+            edge(100, 4_000),
+            edge(10, 400),
+        );
+        let raw_scan = scan_stats(edge(1_000, 64_000), 64_000);
         let provided = HashMap::from([
             ("query-2-scan".into(), evidence(raw_scan)),
             (
                 "query-2".into(),
-                evidence(statistics(vec![edge(1_000, 64_000)], edge(400, 25_600))),
+                evidence(unary_statistics(
+                    PhysicalOperator::Filter {
+                        predicate_operations_per_row: 1,
+                    },
+                    edge(1_000, 64_000),
+                    edge(400, 25_600),
+                )),
             ),
             ("query-1".into(), evidence(aggregate_statistics)),
             ("query-0".into(), evidence(topk_statistics)),
@@ -1485,14 +1080,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 PhysicalOperator::Scan,
-                PhysicalOperator::Filter,
-                PhysicalOperator::HashAggregate,
-                PhysicalOperator::TopK,
+                PhysicalOperator::Filter {
+                    predicate_operations_per_row: 1,
+                },
+                PhysicalOperator::HashAggregate {
+                    grouping_key_count: 1,
+                    accumulator_count: 1,
+                },
+                PhysicalOperator::TopK {
+                    limit: 10,
+                    offset: 5,
+                    ordering_key_count: 1,
+                },
             ]
         );
         let topk = dag.nodes.last().unwrap();
         assert_eq!(topk.children, vec![dag.nodes[2].id.clone()]);
-        assert_eq!(provided[&topk.id].statistics.k, Some(15));
+        assert!(matches!(
+            provided[&topk.id].statistics,
+            OperatorStatistics::TopK { .. }
+        ));
         let physical_scan = &dag.nodes[0];
         assert_eq!(physical_scan.id, "query-2-scan");
         assert_eq!(
@@ -1502,7 +1109,7 @@ mod tests {
         assert_eq!(physical_scan.output_buffer_bytes, 1_024);
         assert_ne!(
             physical_scan.output_buffer_bytes,
-            provided[&physical_scan.id].statistics.output.bytes
+            provided[&physical_scan.id].statistics.output().bytes
         );
         assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).is_ok());
 
@@ -1510,8 +1117,10 @@ mod tests {
         inconsistent_scan
             .get_mut("query-2-scan")
             .unwrap()
-            .statistics
-            .output = edge(999, 63_936);
+            .statistics = OperatorStatistics::Scan {
+            edges: unary_edges(edge(1_000, 64_000), edge(999, 63_936)),
+            source_read_bytes: 64_000,
+        };
         assert_eq!(
             lower_query_physical_dag(&root, &scope, &scripted(&inconsistent_scan)),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(
@@ -1550,10 +1159,13 @@ mod tests {
             vec![],
         );
         let independent_scope = scope(vec![source_coverage.clone()]);
-        let mut scan_statistics = statistics(vec![edge(100, 800)], edge(100, 800));
-        scan_statistics.source_scan_bytes = 800;
-        let mut join_statistics = statistics(vec![edge(100, 800), edge(100, 800)], edge(25, 400));
-        join_statistics.hash_join_build_side = Some(HashJoinBuildSide::Right);
+        let scan_statistics = scan_stats(edge(100, 800), 800);
+        let join_statistics = OperatorStatistics::HashJoin {
+            edges: BinaryEdgeStatistics {
+                inputs: [edge(100, 800), edge(100, 800)],
+                output: edge(25, 400),
+            },
+        };
         let provided = HashMap::from([
             ("query-1".into(), evidence(scan_statistics.clone())),
             ("query-2".into(), evidence(scan_statistics.clone())),
@@ -1572,12 +1184,12 @@ mod tests {
         let shared_provider = |request: PhysicalNodeRequest<'_>| {
             let (physical_id, statistics) = match request.operator {
                 PhysicalOperator::Scan => ("shared-scan", scan_statistics.clone()),
-                PhysicalOperator::HashJoin => ("join", join_statistics.clone()),
+                PhysicalOperator::HashJoin { .. } => ("join", join_statistics.clone()),
                 _ => return Err(AnalyticalCostError::UnsupportedQueryOperator),
             };
             Ok(PhysicalNodeEvidence {
                 physical_id: physical_id.into(),
-                output_buffer_bytes: statistics.output.bytes.min(1_024),
+                output_buffer_bytes: statistics.output().bytes.min(1_024),
                 statistics,
             })
         };
@@ -1640,15 +1252,15 @@ mod tests {
         let conflicting_identity = |request: PhysicalNodeRequest<'_>| {
             let (physical_id, mut statistics) = match request.operator {
                 PhysicalOperator::Scan => ("shared-scan", scan_statistics.clone()),
-                PhysicalOperator::HashJoin => ("join", join_statistics.clone()),
+                PhysicalOperator::HashJoin { .. } => ("join", join_statistics.clone()),
                 _ => return Err(AnalyticalCostError::UnsupportedQueryOperator),
             };
             if request.operator == PhysicalOperator::Scan && request.occurrence == 2 {
-                statistics.source_scan_bytes += 1;
+                statistics = scan_stats(edge(100, 800), 801);
             }
             Ok(PhysicalNodeEvidence {
                 physical_id: physical_id.into(),
-                output_buffer_bytes: statistics.output.bytes.min(1_024),
+                output_buffer_bytes: statistics.output().bytes.min(1_024),
                 statistics,
             })
         };
@@ -1742,40 +1354,76 @@ mod tests {
             vec![],
         );
         let scope = scope(vec![source_coverage]);
-        let mut scan_statistics = statistics(vec![edge(1_000, 8_000)], edge(1_000, 8_000));
-        scan_statistics.source_scan_bytes = 8_000;
-        let mut dedup_statistics = statistics(vec![edge(800, 3_200)], edge(500, 2_000));
-        dedup_statistics.group_count = Some(500);
-        dedup_statistics.key_bytes = Some(8);
+        let scan_statistics = scan_stats(edge(1_000, 8_000), 8_000);
+        let dedup_statistics = OperatorStatistics::HashDeduplicate {
+            edges: unary_edges(edge(800, 3_200), edge(500, 2_000)),
+            distinct_key_count: 500,
+            key_bytes: 8,
+        };
         let provided = HashMap::from([
             ("query-7".into(), evidence(scan_statistics)),
             (
                 "query-6".into(),
-                evidence(statistics(vec![edge(1_000, 8_000)], edge(800, 6_400))),
+                evidence(unary_statistics(
+                    PhysicalOperator::Filter {
+                        predicate_operations_per_row: 1,
+                    },
+                    edge(1_000, 8_000),
+                    edge(800, 6_400),
+                )),
             ),
             (
                 "query-5".into(),
-                evidence(statistics(vec![edge(800, 6_400)], edge(800, 3_200))),
+                evidence(unary_statistics(
+                    PhysicalOperator::Project {
+                        expression_operations_per_row: 1,
+                    },
+                    edge(800, 6_400),
+                    edge(800, 3_200),
+                )),
             ),
             ("query-4".into(), evidence(dedup_statistics)),
             (
                 "query-3".into(),
-                evidence(statistics(vec![edge(500, 2_000)], edge(500, 6_000))),
+                evidence(unary_statistics(
+                    PhysicalOperator::InMemoryAnalyticWindow {
+                        partition_key_count: 0,
+                        ordering_key_count: 1,
+                        function_operations_per_row: 1,
+                    },
+                    edge(500, 2_000),
+                    edge(500, 6_000),
+                )),
             ),
             (
                 "query-2".into(),
-                evidence(statistics(vec![edge(500, 6_000)], edge(500, 6_000))),
+                evidence(unary_statistics(
+                    PhysicalOperator::InMemoryComparisonSort {
+                        ordering_key_count: 1,
+                        partitioned: true,
+                    },
+                    edge(500, 6_000),
+                    edge(500, 6_000),
+                )),
             ),
             (
                 "query-1".into(),
-                evidence(OperatorStatistics {
-                    limit_rows_consumed: Some(20),
-                    ..statistics(vec![edge(500, 6_000)], edge(20, 240))
-                }),
+                evidence(unary_statistics(
+                    PhysicalOperator::Limit {
+                        limit: 20,
+                        offset: 0,
+                    },
+                    edge(500, 6_000),
+                    edge(20, 240),
+                )),
             ),
             (
                 "query-0".into(),
-                evidence(statistics(vec![edge(20, 240)], edge(20, 240))),
+                evidence(unary_statistics(
+                    PhysicalOperator::PassThrough,
+                    edge(20, 240),
+                    edge(20, 240),
+                )),
             ),
         ]);
         let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
@@ -1787,12 +1435,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 PhysicalOperator::Scan,
-                PhysicalOperator::Filter,
-                PhysicalOperator::Project,
-                PhysicalOperator::Deduplicate,
-                PhysicalOperator::Window,
-                PhysicalOperator::Sort,
-                PhysicalOperator::Limit,
+                PhysicalOperator::Filter {
+                    predicate_operations_per_row: 1,
+                },
+                PhysicalOperator::Project {
+                    expression_operations_per_row: 1,
+                },
+                PhysicalOperator::HashDeduplicate { key_count: 1 },
+                PhysicalOperator::InMemoryAnalyticWindow {
+                    partition_key_count: 0,
+                    ordering_key_count: 1,
+                    function_operations_per_row: 1,
+                },
+                PhysicalOperator::InMemoryComparisonSort {
+                    ordering_key_count: 1,
+                    partitioned: true,
+                },
+                PhysicalOperator::Limit {
+                    limit: 20,
+                    offset: 0,
+                },
                 PhysicalOperator::PassThrough,
             ]
         );
@@ -1832,16 +1494,17 @@ mod tests {
                 vec![],
             ),
         ]);
-        let mut left_statistics = statistics(vec![edge(10, 80)], edge(10, 80));
-        left_statistics.source_scan_bytes = 80;
-        let mut right_statistics = statistics(vec![edge(20, 160)], edge(20, 160));
-        right_statistics.source_scan_bytes = 160;
+        let left_statistics = scan_stats(edge(10, 80), 80);
+        let right_statistics = scan_stats(edge(20, 160), 160);
         let provided = HashMap::from([
             ("query-1".into(), evidence(left_statistics)),
             ("query-2".into(), evidence(right_statistics)),
             (
                 "query-0".into(),
-                evidence(statistics(vec![edge(10, 80), edge(20, 160)], edge(30, 240))),
+                evidence(OperatorStatistics::Concat {
+                    inputs: vec![edge(10, 80), edge(20, 160)],
+                    output: edge(30, 240),
+                }),
             ),
         ]);
         let dag = lower_query_physical_dag(&union, &scope, &scripted(&provided)).unwrap();
@@ -1922,13 +1585,18 @@ mod tests {
             lower_query_physical_dag(&root, &comparison_scope, &MissingBuffer),
             Err(AnalyticalCostError::MissingOrStale("output_buffer_bytes"))
         );
-        let mut scan_statistics = statistics(vec![edge(100, 800)], edge(100, 800));
-        scan_statistics.source_scan_bytes = 800;
+        let scan_statistics = scan_stats(edge(100, 800), 800);
         let conflicting = HashMap::from([
             ("query-1".into(), evidence(scan_statistics)),
             (
                 "query-0".into(),
-                evidence(statistics(vec![edge(99, 792)], edge(99, 396))),
+                evidence(unary_statistics(
+                    PhysicalOperator::Project {
+                        expression_operations_per_row: 1,
+                    },
+                    edge(99, 792),
+                    edge(99, 396),
+                )),
             ),
         ]);
         assert_eq!(
@@ -1954,7 +1622,7 @@ mod tests {
         );
 
         let mut second_snapshot = comparison_scope.sources[0].clone();
-        second_snapshot.snapshot_id = "snapshot-2".into();
+        second_snapshot.source_snapshot_id = "snapshot-2".into();
         let ambiguous_scope = scope(vec![comparison_scope.sources[0].clone(), second_snapshot]);
         assert_eq!(
             lower_query_physical_dag(&root, &ambiguous_scope, &scripted(&conflicting)),
@@ -1964,8 +1632,13 @@ mod tests {
         );
 
         let mut complete = conflicting.clone();
-        complete.get_mut("query-0").unwrap().statistics =
-            statistics(vec![edge(100, 800)], edge(100, 400));
+        complete.get_mut("query-0").unwrap().statistics = unary_statistics(
+            PhysicalOperator::Project {
+                expression_operations_per_row: 1,
+            },
+            edge(100, 800),
+            edge(100, 400),
+        );
         let extra_scope = scope(vec![
             comparison_scope.sources[0].clone(),
             coverage(
@@ -2012,20 +1685,29 @@ mod tests {
             },
             vec![],
         )]);
-        let mut scan_statistics = statistics(vec![edge(100, 800)], edge(100, 800));
-        scan_statistics.source_scan_bytes = 800;
+        let scan_statistics = scan_stats(edge(100, 800), 800);
         let provided = HashMap::from([
             ("query-2".into(), evidence(scan_statistics)),
             (
                 "query-1".into(),
-                evidence(statistics(vec![edge(100, 800)], edge(0, 0))),
+                evidence(unary_statistics(
+                    PhysicalOperator::Filter {
+                        predicate_operations_per_row: 1,
+                    },
+                    edge(100, 800),
+                    edge(0, 0),
+                )),
             ),
             (
                 "query-0".into(),
-                evidence(OperatorStatistics {
-                    limit_rows_consumed: Some(0),
-                    ..statistics(vec![edge(0, 0)], edge(0, 0))
-                }),
+                evidence(unary_statistics(
+                    PhysicalOperator::Limit {
+                        limit: 10,
+                        offset: 0,
+                    },
+                    edge(0, 0),
+                    edge(0, 0),
+                )),
             ),
         ]);
         let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
@@ -2063,6 +1745,13 @@ mod tests {
             having: None,
             child: scan(),
         });
+        let per_entity = Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![AggIntent::Rate],
+            output_names: vec![],
+            having: None,
+            child: scan(),
+        });
         let empty_sort_limit = Rc::new(QueryExpr::Limit {
             n: 10,
             offset: 0,
@@ -2081,6 +1770,13 @@ mod tests {
             output_name: "lag".into(),
             child: scan(),
         });
+        let shifted = Rc::new(QueryExpr::TimeShift {
+            shift: asap_types::pre_asap::TimeShift {
+                offset_ms: 60_000,
+                at: None,
+            },
+            child: scan(),
+        });
         let scope = scope(vec![coverage(
             Source::Table {
                 table_ref: "events".into(),
@@ -2088,11 +1784,13 @@ mod tests {
             vec![],
         )]);
         let unavailable = HashMap::<String, PhysicalNodeEvidence>::new();
-        assert_eq!(
-            lower_query_physical_dag(&exact_quantile, &scope, &scripted(&unavailable)),
-            Err(AnalyticalCostError::UnsupportedQueryOperator)
-        );
-        for query in [&empty_sort_limit, &unsupported_window] {
+        for query in [
+            &exact_quantile,
+            &per_entity,
+            &empty_sort_limit,
+            &unsupported_window,
+            &shifted,
+        ] {
             assert_eq!(
                 lower_query_physical_dag(query, &scope, &scripted(&unavailable)),
                 Err(AnalyticalCostError::UnsupportedQueryOperator)
@@ -2101,709 +1799,16 @@ mod tests {
     }
 
     #[test]
-    fn promql_range_and_subquery_use_authoritative_edge_and_window_evidence() {
-        use asap_types::pre_asap::{Column, DataType, QueryExpr, Schema, Source};
-        use std::{rc::Rc, time::Duration};
+    fn scalar_work_counts_every_local_predicate_operation() {
+        use asap_types::pre_asap::{CompareOpKind, QueryExpr, ScalarValue};
 
-        let source = Source::TimeSeries { metric: "m".into() };
-        let scan = Rc::new(QueryExpr::Scan {
-            source: source.clone(),
-            predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
-        });
-        let range = Rc::new(QueryExpr::TimeRange {
-            range: Duration::from_secs(300),
-            child: scan,
-        });
-        let root = Rc::new(QueryExpr::PromqlSubquery {
-            range: Duration::from_secs(300),
-            resolution: Some(Duration::from_secs(60)),
-            child: range,
-        });
-        let scope = scope(vec![coverage(source, vec![])]);
-        let mut scan = with_promql(
-            statistics(vec![edge(60_000, 960_000)], edge(60_000, 960_000)),
-            vec![100],
-            100,
-            6,
-        );
-        scan.source_scan_bytes = 120_000;
-        let mut range = with_promql(
-            statistics(vec![edge(60_000, 960_000)], edge(600, 9_600)),
-            vec![100],
-            100,
-            6,
-        );
-        range.promql.as_mut().unwrap().window_samples_per_series = Some(100);
-        let mut subquery = with_promql(
-            statistics(vec![edge(600, 9_600)], edge(100, 1_600)),
-            vec![100],
-            100,
-            1,
-        );
-        subquery.promql.as_mut().unwrap().subquery_steps = Some(6);
-        let provided = HashMap::from([
-            ("query-2".into(), evidence(scan)),
-            ("query-1".into(), evidence(range)),
-            ("query-0".into(), evidence(subquery)),
-        ]);
-
-        let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
-        assert_eq!(
-            dag.nodes
-                .iter()
-                .map(|node| node.operator)
-                .collect::<Vec<_>>(),
-            vec![
-                PhysicalOperator::Scan,
-                PhysicalOperator::PromqlRange,
-                PhysicalOperator::PromqlSubquery,
-            ]
-        );
-        let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).unwrap();
-        assert_eq!(estimate.scan_bytes, 120_000);
-        assert!(estimate.peak_memory_bytes >= 160_000);
-    }
-
-    #[test]
-    fn nested_promql_subqueries_compose_internal_evaluation_steps() {
-        use asap_types::pre_asap::{Column, DataType, QueryExpr, Schema, Source};
-        use std::{rc::Rc, time::Duration};
-
-        let source = Source::TimeSeries { metric: "m".into() };
-        let scan = Rc::new(QueryExpr::Scan {
-            source: source.clone(),
-            predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
-        });
-        let range = Rc::new(QueryExpr::TimeRange {
-            range: Duration::from_secs(60),
-            child: scan,
-        });
-        let inner = Rc::new(QueryExpr::PromqlSubquery {
-            range: Duration::from_secs(60),
-            resolution: Some(Duration::from_secs(60)),
-            child: range,
-        });
-        let root = Rc::new(QueryExpr::PromqlSubquery {
-            range: Duration::from_secs(120),
-            resolution: Some(Duration::from_secs(60)),
-            child: inner,
-        });
-        let scope = scope(vec![coverage(source, vec![])]);
-        let mut scan = with_promql(
-            statistics(vec![edge(60, 960)], edge(60, 960)),
-            vec![10],
-            10,
-            6,
-        );
-        scan.source_scan_bytes = 480;
-        let mut range = with_promql(
-            statistics(vec![edge(60, 960)], edge(60, 960)),
-            vec![10],
-            10,
-            6,
-        );
-        range.promql.as_mut().unwrap().window_samples_per_series = Some(6);
-        let mut inner = with_promql(
-            statistics(vec![edge(60, 960)], edge(30, 480)),
-            vec![10],
-            10,
-            3,
-        );
-        inner.promql.as_mut().unwrap().subquery_steps = Some(2);
-        let mut outer = with_promql(
-            statistics(vec![edge(30, 480)], edge(10, 160)),
-            vec![10],
-            10,
-            1,
-        );
-        outer.promql.as_mut().unwrap().subquery_steps = Some(3);
-        let provided = HashMap::from([
-            ("query-3".into(), evidence(scan)),
-            ("query-2".into(), evidence(range)),
-            ("query-1".into(), evidence(inner)),
-            ("query-0".into(), evidence(outer)),
-        ]);
-        assert!(lower_query_physical_dag(&root, &scope, &scripted(&provided)).is_ok());
-
-        let mut overflow = provided;
-        overflow
-            .get_mut("query-0")
-            .unwrap()
-            .statistics
-            .promql
-            .as_mut()
-            .unwrap()
-            .evaluation_steps = u64::MAX;
-        assert_eq!(
-            lower_query_physical_dag(&root, &scope, &scripted(&overflow)),
-            Err(AnalyticalCostError::Overflow)
-        );
-    }
-
-    #[test]
-    fn scalar_only_promql_accepts_empty_scope_but_scan_queries_do_not() {
-        use asap_types::pre_asap::{Column, DataType, QueryExpr, Schema, Source};
-        use std::rc::Rc;
-
-        let empty_scope = scope(vec![]);
-        let scalar = Rc::new(QueryExpr::promql_scalar(5.0));
-        let scalar_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
-        let mut provided = HashMap::from([("query-0".into(), evidence(scalar_statistics))]);
-        let dag = lower_query_physical_dag(&scalar, &empty_scope, &scripted(&provided)).unwrap();
-        assert_eq!(dag.nodes[0].operator, PhysicalOperator::PromqlScalarLeaf);
-        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &empty_scope, &dag.evidence).is_ok());
-        provided.get_mut("query-0").unwrap().statistics.output = edge(9, 72);
-        assert!(matches!(
-            lower_query_physical_dag(&scalar, &empty_scope, &scripted(&provided)),
-            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
-        ));
-
-        let timestamp = Rc::new(QueryExpr::EvalTimestamp);
-        let timestamp_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
-        let provided = HashMap::from([("query-0".into(), evidence(timestamp_statistics))]);
-        let dag = lower_query_physical_dag(&timestamp, &empty_scope, &scripted(&provided)).unwrap();
-        assert_eq!(dag.nodes[0].operator, PhysicalOperator::PromqlScalarLeaf);
-
-        let vector = Rc::new(QueryExpr::PromqlVectorFromScalar(Rc::new(
-            QueryExpr::promql_scalar(1.0),
-        )));
-        let scalar_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
-        let vector_statistics =
-            with_promql(statistics(vec![edge(10, 80)], edge(10, 80)), vec![0], 1, 10);
-        let mut provided = HashMap::from([
-            ("query-1".into(), evidence(scalar_statistics)),
-            ("query-0".into(), evidence(vector_statistics)),
-        ]);
-        let dag = lower_query_physical_dag(&vector, &empty_scope, &scripted(&provided)).unwrap();
-        assert_eq!(dag.nodes[0].operator, PhysicalOperator::PromqlScalarLeaf);
-        assert_eq!(
-            dag.nodes[1].operator,
-            PhysicalOperator::PromqlScalarToVector
-        );
-
-        provided
-            .get_mut("query-0")
-            .unwrap()
-            .statistics
-            .promql
-            .as_mut()
-            .unwrap()
-            .output_series = 0;
-        assert!(matches!(
-            lower_query_physical_dag(&vector, &empty_scope, &scripted(&provided)),
-            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
-        ));
-
-        let scalar_from_vector = Rc::new(QueryExpr::PromqlScalarFromVector(vector));
-        let scalar_statistics = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
-        let vector_statistics =
-            with_promql(statistics(vec![edge(10, 80)], edge(10, 80)), vec![0], 1, 10);
-        let scalar_from_vector_statistics =
-            with_promql(statistics(vec![edge(10, 80)], edge(10, 80)), vec![1], 0, 10);
-        let mut provided = HashMap::from([
-            ("query-2".into(), evidence(scalar_statistics)),
-            ("query-1".into(), evidence(vector_statistics)),
-            ("query-0".into(), evidence(scalar_from_vector_statistics)),
-        ]);
-        let dag = lower_query_physical_dag(&scalar_from_vector, &empty_scope, &scripted(&provided))
-            .unwrap();
-        assert_eq!(
-            dag.nodes[2].operator,
-            PhysicalOperator::PromqlVectorToScalar
-        );
-        provided
-            .get_mut("query-0")
-            .unwrap()
-            .statistics
-            .promql
-            .as_mut()
-            .unwrap()
-            .output_series = 1;
-        assert!(matches!(
-            lower_query_physical_dag(&scalar_from_vector, &empty_scope, &scripted(&provided)),
-            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
-        ));
-        let promql = provided
-            .get_mut("query-0")
-            .unwrap()
-            .statistics
-            .promql
-            .as_mut()
-            .unwrap();
-        promql.output_series = 0;
-        promql.input_series = vec![2];
-        assert!(matches!(
-            lower_query_physical_dag(&scalar_from_vector, &empty_scope, &scripted(&provided)),
-            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
-        ));
-
-        let scan = Rc::new(QueryExpr::Scan {
-            source: Source::TimeSeries { metric: "m".into() },
-            predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
-        });
-        assert!(matches!(
-            lower_query_physical_dag(&scan, &empty_scope, &scripted(&provided)),
-            Err(AnalyticalCostError::ScanOutsideComparisonScope(_))
-        ));
-    }
-
-    #[test]
-    fn promql_info_enrichment_lowers_its_source_as_a_scoped_scan() {
-        use asap_types::pre_asap::{
-            Column, CompareOpKind, DataType, InfoMatcher, QueryExpr, Schema, Source,
+        let comparison = || QueryExpr::Compare {
+            left: Rc::new(QueryExpr::Column(0)),
+            op: CompareOpKind::Eq,
+            right: Rc::new(QueryExpr::Literal(ScalarValue::Int64(1))),
         };
-        use std::rc::Rc;
+        let predicate = QueryExpr::BoolAnd(vec![comparison(), comparison()]);
 
-        let primary = Source::TimeSeries { metric: "m".into() };
-        let info = Source::TimeSeries {
-            metric: "target_info".into(),
-        };
-        let child = Rc::new(QueryExpr::Scan {
-            source: primary.clone(),
-            predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
-        });
-        let root = Rc::new(QueryExpr::PromqlInfoEnrich {
-            selector: vec![InfoMatcher {
-                label: "job".into(),
-                op: CompareOpKind::Eq,
-                value: "api".into(),
-            }],
-            child,
-        });
-        let scope = scope(vec![coverage(primary, vec![]), coverage(info, vec![])]);
-        let mut left = with_promql(
-            statistics(vec![edge(100, 1_600)], edge(100, 1_600)),
-            vec![10],
-            10,
-            10,
-        );
-        left.source_scan_bytes = 800;
-        let mut right = with_promql(
-            statistics(vec![edge(20, 1_000)], edge(20, 1_000)),
-            vec![2],
-            2,
-            10,
-        );
-        right.source_scan_bytes = 400;
-        let mut enrich = with_promql(
-            statistics(vec![edge(100, 1_600), edge(20, 1_000)], edge(100, 2_400)),
-            vec![10, 2],
-            10,
-            10,
-        );
-        enrich.key_bytes = Some(16);
-        enrich.hash_join_build_side = Some(HashJoinBuildSide::Right);
-        enrich.promql.as_mut().unwrap().scalar_ops_per_row = Some(3);
-        let provided = HashMap::from([
-            ("query-1".into(), evidence(left)),
-            ("query-0-info-scan".into(), evidence(right)),
-            ("query-0".into(), evidence(enrich)),
-        ]);
-
-        let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
-        assert_eq!(dag.nodes[1].operator, PhysicalOperator::Scan);
-        assert_eq!(dag.nodes[1].source_coverage, Some(scope.sources[1].clone()));
-        assert_eq!(dag.nodes[2].children.len(), 2);
-        let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).unwrap();
-        assert_eq!(estimate.scan_bytes, 1_200);
-        assert_eq!(estimate.cpu_ops, 400.0);
-
-        let mut missing_matcher_work = provided.clone();
-        missing_matcher_work
-            .get_mut("query-0")
-            .unwrap()
-            .statistics
-            .promql
-            .as_mut()
-            .unwrap()
-            .scalar_ops_per_row = None;
-        assert_eq!(
-            lower_query_physical_dag(&root, &scope, &scripted(&missing_matcher_work)),
-            Err(AnalyticalCostError::MissingOrZero(
-                "info_matcher_ops_per_row"
-            ))
-        );
-
-        let mut wrong_build_side = provided;
-        wrong_build_side
-            .get_mut("query-0")
-            .unwrap()
-            .statistics
-            .hash_join_build_side = Some(HashJoinBuildSide::Left);
-        assert_eq!(
-            lower_query_physical_dag(&root, &scope, &scripted(&wrong_build_side)),
-            Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                "info enrichment must build its label index from the right side"
-            ))
-        );
-    }
-
-    #[test]
-    fn promql_vector_scalar_binary_keeps_two_edges_without_label_state() {
-        use asap_types::pre_asap::{
-            ArithmeticOpKind, BinaryOpKind, Column, DataType, QueryExpr, Schema, Source,
-        };
-        use std::rc::Rc;
-
-        let source = Source::TimeSeries { metric: "m".into() };
-        let vector = Rc::new(QueryExpr::Scan {
-            source: source.clone(),
-            predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
-        });
-        let scalar = Rc::new(QueryExpr::promql_scalar(2.0));
-        let root = Rc::new(QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-            lhs: Rc::clone(&vector),
-            rhs: scalar,
-            vector_match: None,
-        });
-        let scope = scope(vec![coverage(source, vec![])]);
-        let mut vector_statistics = with_promql(
-            statistics(vec![edge(1_000, 16_000)], edge(1_000, 16_000)),
-            vec![100],
-            100,
-            10,
-        );
-        vector_statistics.source_scan_bytes = 8_000;
-        let scalar = with_promql(statistics(vec![], edge(10, 80)), vec![], 0, 10);
-        let mut binary = with_promql(
-            statistics(vec![edge(1_000, 16_000), edge(10, 80)], edge(1_000, 16_000)),
-            vec![100, 0],
-            100,
-            10,
-        );
-        binary.promql.as_mut().unwrap().binary_operand_mode =
-            Some(PromqlBinaryOperandMode::VectorScalar);
-        let provided = HashMap::from([
-            ("query-1".into(), evidence(vector_statistics)),
-            ("query-2".into(), evidence(scalar)),
-            ("query-0".into(), evidence(binary)),
-        ]);
-
-        let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
-        assert_eq!(dag.nodes.last().unwrap().children.len(), 2);
-        assert_eq!(
-            dag.nodes.last().unwrap().operator,
-            PhysicalOperator::PromqlVectorBinary
-        );
-        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).is_ok());
-
-        let eval_timestamp = Rc::new(QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-            lhs: Rc::clone(&vector),
-            rhs: Rc::new(QueryExpr::EvalTimestamp),
-            vector_match: None,
-        });
-        assert!(lower_query_physical_dag(&eval_timestamp, &scope, &scripted(&provided)).is_ok());
-
-        let sql_timestamp = Rc::new(QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
-            lhs: vector,
-            rhs: Rc::new(QueryExpr::CurrentTimestamp),
-            vector_match: None,
-        });
-        assert_eq!(
-            lower_query_physical_dag(&sql_timestamp, &scope, &scripted(&provided)),
-            Err(AnalyticalCostError::UnsupportedQueryOperator)
-        );
-    }
-
-    #[test]
-    fn promql_vector_binary_requires_explicit_label_match_state() {
-        use asap_types::pre_asap::{
-            ArithmeticOpKind, BinaryOpKind, Column, DataType, QueryExpr, Schema, Source,
-            VectorMatch, VectorMatchKind,
-        };
-        use std::rc::Rc;
-
-        let left_source = Source::TimeSeries {
-            metric: "requests".into(),
-        };
-        let right_source = Source::TimeSeries {
-            metric: "errors".into(),
-        };
-        let scan = |source: Source| {
-            Rc::new(QueryExpr::Scan {
-                source,
-                predicates: vec![],
-                schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
-            })
-        };
-        let root = Rc::new(QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
-            lhs: scan(left_source.clone()),
-            rhs: scan(right_source.clone()),
-            vector_match: Some(VectorMatch {
-                kind: VectorMatchKind::On,
-                labels: vec!["service".into()],
-                grouping: None,
-            }),
-        });
-        let scope = scope(vec![
-            coverage(left_source, vec![]),
-            coverage(right_source, vec![]),
-        ]);
-        let mut left = with_promql(
-            statistics(vec![edge(1_000, 16_000)], edge(1_000, 16_000)),
-            vec![100],
-            100,
-            10,
-        );
-        left.source_scan_bytes = 8_000;
-        let mut right = with_promql(
-            statistics(vec![edge(500, 8_000)], edge(500, 8_000)),
-            vec![50],
-            50,
-            10,
-        );
-        right.source_scan_bytes = 4_000;
-        let mut binary = with_promql(
-            statistics(
-                vec![edge(1_000, 16_000), edge(500, 8_000)],
-                edge(400, 6_400),
-            ),
-            vec![100, 50],
-            40,
-            10,
-        );
-        binary.key_bytes = Some(32);
-        binary.hash_join_build_side = Some(HashJoinBuildSide::Right);
-        binary.promql.as_mut().unwrap().binary_operand_mode =
-            Some(PromqlBinaryOperandMode::VectorVector);
-        let provided = HashMap::from([
-            ("query-1".into(), evidence(left)),
-            ("query-2".into(), evidence(right)),
-            ("query-0".into(), evidence(binary)),
-        ]);
-        let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
-        let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).unwrap();
-        assert_eq!(estimate.cpu_ops, 3_400.0);
-        assert_eq!(estimate.scan_bytes, 12_000);
-
-        let mut empty = provided.clone();
-        for id in ["query-1", "query-2"] {
-            let evidence = empty.get_mut(id).unwrap();
-            evidence.statistics.inputs[0] = edge(0, 0);
-            evidence.statistics.output = edge(0, 0);
-            let promql = evidence.statistics.promql.as_mut().unwrap();
-            promql.input_series[0] = 0;
-            promql.output_series = 0;
-            evidence.output_buffer_bytes = 0;
-        }
-        let evidence = empty.get_mut("query-0").unwrap();
-        evidence.statistics.inputs = vec![edge(0, 0), edge(0, 0)];
-        evidence.statistics.output = edge(0, 0);
-        let promql = evidence.statistics.promql.as_mut().unwrap();
-        promql.input_series = vec![0, 0];
-        promql.output_series = 0;
-        evidence.output_buffer_bytes = 0;
-        let empty_dag = lower_query_physical_dag(&root, &scope, &scripted(&empty)).unwrap();
-        assert!(estimate_physical_dag(
-            &empty_dag.nodes,
-            &empty_dag.root,
-            &scope,
-            &empty_dag.evidence
-        )
-        .is_ok());
-
-        let mut missing = provided;
-        missing
-            .get_mut("query-0")
-            .unwrap()
-            .statistics
-            .hash_join_build_side = None;
-        assert_eq!(
-            lower_query_physical_dag(&root, &scope, &scripted(&missing)),
-            Err(AnalyticalCostError::MissingOrStale(
-                "vector_binary_label_match_statistics"
-            ))
-        );
-    }
-
-    #[test]
-    fn promql_relabel_sample_and_per_series_operators_are_costed() {
-        use asap_types::pre_asap::{
-            AggIntent, Column, DataType, GroupKeys, QueryExpr, Reduction, SampleKind, Schema,
-            Source,
-        };
-        use std::rc::Rc;
-
-        let source = Source::TimeSeries { metric: "m".into() };
-        let scan = Rc::new(QueryExpr::Scan {
-            source: source.clone(),
-            predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
-        });
-        let relabel = Rc::new(QueryExpr::PromqlRelabel {
-            dst: "service".into(),
-            value: Rc::new(QueryExpr::FunctionCall {
-                name: "label_replace".into(),
-                args: vec![],
-            }),
-            child: scan,
-        });
-        let sample = Rc::new(QueryExpr::PromqlSeriesSample {
-            by: GroupKeys::none(),
-            kind: SampleKind::LimitK(10),
-            child: relabel,
-        });
-        let root = Rc::new(QueryExpr::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures: vec![AggIntent::Rate],
-            output_names: vec![],
-            having: None,
-            child: sample,
-        });
-        let scope = scope(vec![coverage(source, vec![])]);
-        let mut scan = with_promql(
-            statistics(vec![edge(1_000, 16_000)], edge(1_000, 16_000)),
-            vec![100],
-            100,
-            10,
-        );
-        scan.source_scan_bytes = 8_000;
-        let mut relabel = with_promql(
-            statistics(vec![edge(1_000, 16_000)], edge(1_000, 20_000)),
-            vec![100],
-            100,
-            10,
-        );
-        relabel.promql.as_mut().unwrap().scalar_ops_per_row = Some(8);
-        let mut sample = with_promql(
-            statistics(vec![edge(1_000, 20_000)], edge(100, 2_000)),
-            vec![100],
-            10,
-            10,
-        );
-        sample.group_count = Some(1);
-        sample.key_bytes = Some(24);
-        sample.k = Some(10);
-        let mut aggregate = with_promql(
-            statistics(vec![edge(100, 2_000)], edge(10, 200)),
-            vec![10],
-            10,
-            10,
-        );
-        aggregate.aggregate_value_bytes = Some(16);
-        aggregate.promql.as_mut().unwrap().scalar_ops_per_row = Some(2);
-        let provided = HashMap::from([
-            ("query-3".into(), evidence(scan)),
-            ("query-2".into(), evidence(relabel)),
-            ("query-1".into(), evidence(sample)),
-            ("query-0".into(), evidence(aggregate)),
-        ]);
-
-        let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
-        assert_eq!(
-            dag.nodes
-                .iter()
-                .map(|node| node.operator)
-                .collect::<Vec<_>>(),
-            vec![
-                PhysicalOperator::Scan,
-                PhysicalOperator::PromqlRelabel,
-                PhysicalOperator::PromqlSeriesSample,
-                PhysicalOperator::PromqlPerSeries,
-            ]
-        );
-        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).is_ok());
-
-        let mut shrinking = provided;
-        shrinking
-            .get_mut("query-2")
-            .unwrap()
-            .statistics
-            .promql
-            .as_mut()
-            .unwrap()
-            .output_series = 99;
-        assert_eq!(
-            lower_query_physical_dag(&root, &scope, &scripted(&shrinking)),
-            Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                "relabel changes row or series cardinality"
-            ))
-        );
-    }
-
-    #[test]
-    fn promql_over_time_and_native_histogram_intents_use_per_series_work() {
-        use asap_types::pre_asap::AggIntent;
-        use asap_types::types::AccuracyTarget;
-
-        let intents = vec![
-            AggIntent::Count {
-                accuracy: AccuracyTarget::Exact,
-            },
-            AggIntent::Sum { col: None },
-            AggIntent::Min { col: None },
-            AggIntent::Max { col: None },
-            AggIntent::Avg { col: None },
-            AggIntent::StdDev {
-                col: None,
-                population: true,
-            },
-            AggIntent::Variance {
-                col: None,
-                population: true,
-            },
-            AggIntent::HistogramCount,
-            AggIntent::HistogramSum,
-            AggIntent::HistogramAvg,
-            AggIntent::HistogramStdDev,
-            AggIntent::HistogramStdVar,
-            AggIntent::HistogramFraction {
-                lower: 0.0,
-                upper: 1.0,
-            },
-        ];
-        for intent in intents {
-            assert_eq!(
-                aggregate_operator(&asap_types::pre_asap::Reduction::PerEntity, &[intent]),
-                Some(PhysicalOperator::PromqlPerSeries)
-            );
-        }
-    }
-
-    #[test]
-    fn promql_presence_can_synthesize_one_row_from_an_empty_scan() {
-        use asap_types::pre_asap::{
-            AggIntent, Column, DataType, QueryExpr, Reduction, Schema, Source,
-        };
-        use std::rc::Rc;
-
-        let source = Source::TimeSeries {
-            metric: "missing".into(),
-        };
-        let scan = Rc::new(QueryExpr::Scan {
-            source: source.clone(),
-            predicates: vec![],
-            schema: Schema::new(vec![Column::new("value", DataType::Float64, false)]),
-        });
-        let root = Rc::new(QueryExpr::Aggregate {
-            reduction: Reduction::PerEntity,
-            measures: vec![AggIntent::Absent],
-            output_names: vec![],
-            having: None,
-            child: scan,
-        });
-        let scope = scope(vec![coverage(source, vec![])]);
-        let scan = with_promql(statistics(vec![edge(0, 0)], edge(0, 0)), vec![0], 0, 1);
-        let mut presence = with_promql(statistics(vec![edge(0, 0)], edge(1, 8)), vec![0], 1, 1);
-        presence.promql.as_mut().unwrap().scalar_ops_per_row = Some(1);
-        let provided = HashMap::from([
-            ("query-1".into(), evidence(scan)),
-            ("query-0".into(), evidence(presence)),
-        ]);
-        let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
-        assert_eq!(
-            dag.nodes.last().unwrap().operator,
-            PhysicalOperator::PromqlPresence
-        );
-        assert!(estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).is_ok());
+        assert_eq!(scalar_operation_count(&predicate), Ok(3));
     }
 }

@@ -51,7 +51,7 @@ normalized workload, lowered query IR, and freshness-aware statistics:
 | Query demand | `QueryWorkloadEntry.recurrence`, normalized over an explicit horizon. |
 | Event-time range | `QueryWorkloadEntry.time_selection`. |
 | Accuracy and latency requirements | `QueryWorkloadEntry.requirements`. |
-| Operator shape, grouping keys, and constants such as Top-K `k` | Lowered `QueryExpr` and `AggIntent`. |
+| Operator shape, grouping keys, and constants such as Top-K limit and offset | Lowered query and selected physical plan. |
 
 Evidence is read through `Evidence<T>::value_at(planning_time)`. Stale,
 future, or improperly time-bounded evidence remains unknown. Costing follows
@@ -74,6 +74,49 @@ operator. It is estimator evidence, not another planner workload object. The
 lowering provider owns resolving it from the canonical workload, catalog, and
 operator-statistics sources. Missing required evidence makes the entire plan
 unavailable.
+
+### Operator vocabulary and source of truth
+
+The complete logical-to-physical boundary is specified in
+[Physical plan integration](physical-plan-integration.md). This section
+summarizes the part required by the resource estimator.
+
+`PhysicalOperator` is the source of truth for the cost model's operator
+vocabulary. `OperatorStatistics` is paired one-to-one with that enum: each
+supported physical algorithm has one evidence shape containing exactly the
+facts its formula consumes. Exhaustive matches enforce that a newly added
+physical operator must define its arity, statistics variant, validation, and
+resource formula.
+
+Neither logical IR is the statistics schema:
+
+```text
+pre-ASAP QueryExpr  ─┐
+                     ├─ physical lowering ─> PhysicalDagNode/PhysicalOperator
+post-ASAP SummaryExpr┘                              │
+                                                    v
+                                           OperatorStatistics
+                                                    │
+                                                    v
+                                            ResourceEstimate
+```
+
+The pre-ASAP IR describes exact query semantics. The post-ASAP IR describes
+logical summary semantics, selected summary families, and summary operations.
+Neither identifies every physical algorithm, buffer, build side, or execution
+layout. For example, one logical `SummaryAgg` may lower to a CMS build, an
+exact accumulator build, or another supported summary implementation; a
+logical `SummaryEstimate` lowers to the corresponding physical readout. Those
+physical nodes need different formulas and evidence even though they originate
+from the same logical variant.
+
+The operator list in this version covers the physical query operators declared
+by `PhysicalOperator`. It is not a claim that every `SummaryExpr` variant has
+already been physically lowered. Summary build, join, merge, subtract, delete,
+and readout become costable only after their lowering introduces explicit
+physical operators and matching statistics variants. Until then, a candidate
+containing such an unlowered operation is unavailable rather than partially
+costed.
 
 ## Workload horizon and lifecycle
 
@@ -115,7 +158,7 @@ canonical workload and query terms rather than defining parallel strings:
 | Event-time coverage | `TimeSelection`. |
 | Logical sources | the existing query-IR `Source`, one per scan. |
 | Filters | canonical bound `Predicate` values copied from the query IR. |
-| Physical source contents | provider-owned `snapshot_id` per source. |
+| Physical source contents | provider-owned `source_snapshot_id` per source. |
 
 The snapshot identifier is the only new scope concept. It is necessary because
 `Source` names a metric or table but neither the query IR nor workload schema
@@ -149,22 +192,72 @@ An `OperatorStatisticsProvider` resolves one `OperatorStatistics` value for
 each reachable physical node:
 
 ```text
-OperatorStatistics {
-    source_scan_bytes,
-    inputs: [EdgeStatistics { rows, bytes }, ...],
-    output: EdgeStatistics { rows, bytes },
-    group_count,
-    key_bytes,
-    aggregate_value_bytes,
-    k,
-    hash_join_build_side,
-    promql: PromqlOperatorStatistics {
-        input_series, output_series, evaluation_steps,
-        window_samples_per_series, subquery_steps, scalar_ops_per_row,
-        binary_operand_mode,
-    },
+EdgeStatistics { rows, bytes }
+
+OperatorStatistics =
+    Scan {
+        edges: UnaryEdgeStatistics,
+        source_read_bytes,
+    }
+  | Filter { edges: UnaryEdgeStatistics }
+  | Project { edges: UnaryEdgeStatistics }
+  | HashAggregate {
+        edges: UnaryEdgeStatistics,
+        group_count,
+        key_bytes,
+        accumulator_bytes_per_group,
+    }
+  | InMemoryComparisonSort {
+        edges: UnaryEdgeStatistics,
+        input_partitioning: PartitionStatistics,
+    }
+  | TopK { edges: UnaryEdgeStatistics }
+  | HashJoin { edges: BinaryEdgeStatistics }
+  | HashDeduplicate {
+        edges: UnaryEdgeStatistics,
+        distinct_key_count,
+        key_bytes,
+    }
+  | Concat { inputs, output }
+  | InMemoryAnalyticWindow {
+        edges: UnaryEdgeStatistics,
+        input_partitioning: PartitionStatistics,
+    }
+  | Limit { edges: UnaryEdgeStatistics }
+  | PassThrough { edges: UnaryEdgeStatistics }
 }
 ```
+
+`UnaryEdgeStatistics` contains exactly one input and one output;
+`BinaryEdgeStatistics` contains an ordered pair of inputs and one output.
+`Concat` is the only variadic case. `EdgeStatistics` itself intentionally
+remains operator-independent: an edge carries logical rows and bytes, and the
+same edge is the output of one node and an input of every consumer. Making the
+edge type depend on either endpoint would prevent direct consistency checks.
+
+The outer enum is operator-specific. A Filter cannot accidentally carry
+group cardinality, a Top-K statistics record cannot carry a join build side,
+and a non-scan record cannot carry source-read bytes. Serialized evidence is
+internally tagged by operator and rejects unknown fields.
+
+Physical configuration is not catalog evidence and therefore lives on
+`PhysicalOperator`:
+
+| Physical operator | Configuration owned by the plan |
+|---|---|
+| `Filter` | predicate operations per input row |
+| `Project` | expression/copy operations per input row |
+| `HashAggregate` | grouping-key and accumulator counts |
+| `InMemoryComparisonSort` | ordering-key count and whether ordering is partitioned |
+| `TopK` | output `limit`, `offset`, and ordering-key count; heap capacity is `limit + offset` |
+| `Limit` | output `limit` and `offset` |
+| `HashJoin` | left or right build side and equality-key count |
+| `HashDeduplicate` | deduplication-key count |
+| `InMemoryAnalyticWindow` | partition/order-key counts and window-function work per row |
+
+This distinction removes the former flat optional `k` field. A Top-K bound is
+part of the chosen algorithm, while input/output cardinality and width are
+observed or estimated facts about that operator in this workload.
 
 The provider owns provenance, freshness, and derivation. The estimator resolves
 each reachable node once, so one estimate cannot mix values across a live
@@ -178,11 +271,36 @@ positive logical bytes so width-dependent formulas do not invent a row width.
 A parent therefore cannot silently substitute the original source cardinality
 for an intermediate edge.
 
+The statistics inputs and `PhysicalDagNode.children` therefore have
+different arity only for a source leaf:
+
+| Operator shape | Statistics inputs | DAG children |
+|---|---:|---:|
+| `Scan` | 1 external source edge | 0 |
+| Unary operator | 1 | 1 |
+| `HashJoin` | 2 | 2 |
+| `Concat` | one per input | one per input |
+
+The implementation matches every `PhysicalOperator` variant explicitly. A new
+operator cannot silently inherit unary arity; its statistics-input and
+DAG-child counts must both be defined.
+
 `EdgeStatistics.bytes` is decoded logical data carried on an edge.
-`source_scan_bytes` is physical storage I/O and is charged only by `Scan`.
+`Scan.source_read_bytes` is physical storage I/O and is charged only by
+`Scan`.
 Compression, column pruning, or encoded storage can therefore make these
-values different; neither is inferred from the other. Non-scan operators must
-report zero source bytes in the current in-memory operator model.
+values different; neither is inferred from the other. Other statistics
+variants have no source-read field, so charging source I/O at a non-scan node
+is not representable. A non-empty Scan must report positive source-read bytes;
+zero cannot stand in for missing I/O evidence.
+
+Hash-aggregate validation distinguishes logical grouping from the workload's
+observed number of groups. An ungrouped aggregate has
+`grouping_key_count = 0`, `key_bytes = 0`, and `group_count = 1`, including on
+empty input because SQL scalar aggregation still emits one row. A grouped
+aggregate has at least one grouping key and positive encoded key width, but it
+may report `group_count = 0` when its input is empty. In both cases output rows
+must equal `group_count`.
 
 ### Composition rules
 
@@ -277,8 +395,7 @@ Multiple independent physical Scans may use the same coverage, while a
 provider-declared shared Scan uses it once, so those physical alternatives can
 still be compared under the same semantic scope.
 
-The estimator validates every physical edge before costing; the query lowerer
-reuses the same operator-semantic validator for earlier diagnostics:
+The lowering validates every physical edge before costing:
 
 - `(rows = 0, bytes = 0)` is a valid empty edge, while positive rows still
   require byte-width evidence and zero rows cannot carry non-zero bytes;
@@ -300,32 +417,18 @@ The supported mappings are:
 | Filter | Filter |
 | Project | Project |
 | Reducing Count/Sum/Min/Max/Avg/StdDev/Variance/Group/CountValues without HAVING | HashAggregate |
-| Dedup | Deduplicate |
-| Equi-Join | HashJoin with an evidence-selected build side |
+| Dedup | HashDeduplicate |
+| Equi-Join | HashJoin whose build side is selected from child output evidence |
 | Concat or `UNION ALL` | Concat |
 | Sort with at least one ordering key | in-memory Sort |
 | global non-empty-key Sort followed by Limit | heap TopK, with `k = offset + n` from the query IR |
 | partitioned Sort followed by Limit | Sort → Limit |
-| RowNumber/Rank/DenseRank SQLWindowFunc with non-empty order_by | ordered in-memory Window |
-| TimeRange | PromqlRange sliding window |
-| PromqlSubquery | materialized PromqlSubquery |
-| BinaryOp | two-input PromqlVectorBinary; vector/vector uses explicit label-match state |
-| PromqlRelabel | PromqlRelabel |
-| PromqlInfoEnrich | left input plus an explicit scoped info-metric Scan |
-| PromqlSeriesSample | PromqlSeriesSample using the existing SampleKind |
-| PromqlVectorFromScalar | unary PromqlScalarToVector |
-| PromqlScalarFromVector | unary PromqlVectorToScalar |
-| PromqlScalarBridge(float) / EvalTimestamp | zero-input PromqlScalarLeaf |
-| Count/Sum/Min/Max/Avg/StdDev/Variance with PerEntity (`*_over_time`) | PromqlPerSeries |
-| native histogram count/sum/avg/stddev/stdvar/fraction accessor | PromqlPerSeries |
-| other supported fixed-state per-entity reduction | PromqlPerSeries |
-| Absent / AbsentOverTime | PromqlPresence |
-| TimeShift | PassThrough |
+| RowNumber/Rank/DenseRank SQLWindowFunc with non-empty order_by | InMemoryAnalyticWindow |
+| identity TimeShift only | PassThrough |
 
-HAVING, ordered/distribution-dependent intents such as exact quantile or
-cardinality, Top-K aggregate intents, non-fixed-state per-entity algorithms,
-and extensions remain unavailable until they have an explicit physical
-algorithm. Hash-join lowering
+Per-entity reductions, HAVING, ordered/distribution-dependent intents such as
+exact quantile or cardinality, Top-K aggregate intents, and extensions remain
+unavailable until they have an explicit physical algorithm. Hash-join lowering
 also uses the bound left and right output schemas to prove that every equality
 compares one column from each side; same-side or out-of-range `ColumnId`s fail
 closed.
@@ -344,47 +447,11 @@ embedded physical identity and that every node's buffer equals the provider
 snapshot before returning statistics, preventing the public node and evidence
 views from silently drifting apart.
 
-PromQL rows and logical bytes are totals for one workload query evaluation;
-range and subquery values therefore include their internal evaluation steps.
-`evaluation_steps` and `subquery_steps` validate and cost that internal shape.
-For every subquery, `child.evaluation_steps` must equal checked
-`parent.evaluation_steps × subquery_steps`; nested subqueries apply the same
-equation recursively. Overflow or disagreement makes the candidate
-unavailable. `ComparisonScope` alone multiplies the completed query over the
-workload horizon. They are never multiplied into the horizon a second time. Series
-cardinality is carried in child order and must agree across every physical
-edge. Missing window, step, series, expression-work, label-key, or accumulator
-evidence makes the entire candidate unavailable.
-
-Scalar/vector bridges retain their direction in the physical operator. A
-scalar-to-vector bridge consumes zero input series and emits exactly one series;
-both input and output contain one row per evaluation step. A vector-to-scalar
-bridge emits zero series and exactly one scalar row per evaluation step; its
-input-series count must equal the vector child's output-series count.
-
-PromQL binary evidence also records an explicit physical operand mode:
-vector/vector, vector/scalar, or scalar/vector. Cardinality does not determine
-the mode because a vector may legitimately contain zero series. Lowering
-checks the mode against the canonical logical operands. Vector/vector always
-requires label-match state, including for an empty vector; only the two
-scalar/vector modes omit it. A scalar leaf has no inputs or series and emits
-exactly one scalar row per evaluation step.
-
-`info()` resolves its default `target_info` metric, or one exact `__name__`
-matcher, to a concrete existing `Source::TimeSeries` coverage. Its right side
-is an ordinary physical Scan with its own statistics, buffer, snapshot, and
-source bytes; the enrichment operator itself performs no source I/O. The info
-operator must build its label index from this right side. Other label matchers
-remain local enrichment/filter work and require explicit positive
-`scalar_ops_per_row`; their CPU contribution is
-`info_rows × scalar_ops_per_row`. Non-exact metric-name
-selection stays unavailable until a catalog resolver can return the complete
-concrete source set.
-
-Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, opaque PromQL
-extensions, non-exact `info()` metric selection, and SQL `CurrentTimestamp` as
-a PromQL scalar stay unavailable. They are not modeled as free pass-through
-work.
+Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, PromQL
+range/subquery execution, vector matching, and PromQL-specific enrichment/
+relabel/sample operators stay unavailable. Their cost requires a physical
+implementation or multiplicity/state facts that the current physical-operator
+vocabulary cannot represent; they are not treated as free pass-through work.
 
 ## Physical operator formulas
 
@@ -393,30 +460,24 @@ the DAG rules above.
 
 | Physical operator | CPU operations | Local memory | Source/disk reads |
 |---|---:|---:|---:|
-| Scan | `input_rows` | one decoded input row/batch | `source_scan_bytes` |
-| Filter | `input_rows` | one output row/batch | `0` |
-| Project or scalar pass-through | `input_rows` | one output row/batch | `0` |
-| Hash aggregate | `input_rows` | `groups × (key + aggregate_value_bytes + hash metadata)` | `0` |
-| Deduplicate | `input_rows` | keyed hash state | `0` |
-| In-memory sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
-| Heap Top-K | `rows × ceil(log2(max(min(k, rows), 2)))` | `min(k, rows) × row_bytes` | `0` |
-| Hash join | `left_rows + right_rows + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
+| Scan | `input_rows` | one decoded input row/batch | `source_read_bytes` |
+| Filter | `input_rows × predicate_operations_per_row` | one output row/batch | `0` |
+| Project | `input_rows × expression_operations_per_row` | one output row/batch | `0` |
+| Scalar pass-through | `input_rows` | one output row/batch | `0` |
+| Hash aggregate | `input_rows × (grouping_key_count + accumulator_count)` | `groups × (key_bytes + accumulator_bytes_per_group + hash metadata)` | `0` |
+| Hash deduplicate | `input_rows × key_count` | `distinct_key_count × (key_bytes + hash metadata)` | `0` |
+| In-memory comparison sort | `sum(n_i × ceil(log2(n_i)) × ordering_key_count)` | largest partition bytes | `0` |
+| Heap Top-K | `rows × ceil(log2(max(min(limit + offset, rows), 2))) × ordering_key_count` | `min(limit + offset, rows) × row_bytes` | `0` |
+| Hash join | `(left_rows + right_rows) × equality_key_count + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
 | Concat | `output_rows` | one output row/batch | `0` |
-| Ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
-| Limit | `output_rows` | one output row/batch | `0` |
-| PromQL range | `input_rows` | `input_series × window_samples_per_series × decoded_sample_bytes` | `0` beyond child |
-| PromQL subquery | `input_rows + output_rows` | materialized inner-step logical bytes | `0` beyond child |
-| PromQL vector binary | left + right + output rows | selected-side label-match hash state; one output row for scalar/vector | `0` beyond children |
-| PromQL relabel | `input_rows × scalar_ops_per_row` | one output row/batch | `0` |
-| PromQL info enrichment | left + info + output rows + `info_rows × matcher_ops_per_row` | right-side label-match hash state | `0` beyond its explicit Scan child |
-| PromQL series sample | input rows + input series | selected-series key/hash state | `0` |
-| PromQL scalar-to-vector / vector-to-scalar bridge | input + output rows | one output row/batch | `0` |
-| PromQL scalar leaf | output rows | one output row/batch | `0` |
-| PromQL per-series intent | `input_rows × scalar_ops_per_row` | `input_series × accumulator_bytes` | `0` |
-| PromQL absence | input work + synthesized output | one output row/batch | `0` |
+| In-memory analytic window | per-partition ordering work plus per-row function work | largest partition bytes | `0` |
+| Limit | `min(input_rows, limit + offset)` | one output row/batch | `0` |
 
-These formulas name physical implementations. An external sort must add
-spill writes and reads; a nested-loop join must not use the hash-join formula.
+These formulas name physical implementations. The enum uses names such as
+`InMemoryComparisonSort`, `HashDeduplicate`, and `InMemoryAnalyticWindow` so a
+new algorithm cannot silently inherit a formula merely because it has the
+same logical purpose. An external sort must add spill writes and reads; a
+nested-loop join must not use the hash-join formula.
 If the physical choice or its required statistics are unknown, the estimate
 is unavailable.
 
@@ -432,9 +493,9 @@ A retained sketch performs one build and serves later reads from state:
 ```text
 cpu_ops = input_rows                         // build scan
         + input_rows × update_ops(params)
-        + evaluation_count × physical_sketch_count × read_ops(params)
+        + evaluation_count × physical_summary_count × read_ops(params)
 
-scan_bytes = source_scan_bytes for the build
+scan_bytes = source_read_bytes for the build
 ```
 
 Concrete accuracy-sized parameters determine state and work:
@@ -451,7 +512,7 @@ Concrete accuracy-sized parameters determine state and work:
 | Theta | `ceil(log2(k))` | `k` | `k × 8` |
 
 For a per-subpopulation layout,
-`physical_sketch_count = subpopulation_count`. A shared layout has the number
+`physical_summary_count = subpopulation_count`. A shared layout has the number
 of physical structures described by that layout; the model must not infer it
 from logical group count alone.
 
