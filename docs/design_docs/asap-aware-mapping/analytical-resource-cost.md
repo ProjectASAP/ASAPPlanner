@@ -494,9 +494,11 @@ mismatches and arithmetic overflow also fail closed.
 ### Downstream physical-planning boundary
 
 This cost model consumes resource evidence for a physical implementation, but
-ASAPPlanner does not own or select that implementation. Component ownership,
-including the distinction between incremental lifecycle maintenance and
-physical windows, is defined in
+ASAPPlanner does not own or select that implementation. It does select the
+abstract per-summary `SummaryWindowFramework` assignment by comparing complete
+`StreamingWindowFrameworkCandidate` evidence bundles. Component ownership,
+including the distinction between a window primitive and its concrete runtime
+implementation, is defined in
 [ASAPPlanner and downstream application boundaries](../asapplanner-downstream-boundary.md).
 
 ## Accuracy evidence remains separate from cost

@@ -1,11 +1,12 @@
-//! Physical construction mode for a materialized summary.
+//! Planner-level construction mode for a materialized summary.
 //!
 //! A [`super::SummaryNode`] is a logical summary expression and deliberately
 //! does not carry this choice: the same candidate may be built directly for
-//! one workload or maintained incrementally for another. Physical planning
-//! attaches the selected mode to its deployment guarantee.
+//! one workload or maintained incrementally for another. Planner search
+//! attaches the selected mode to its lifecycle guarantee; downstream physical
+//! compilation chooses its concrete implementation.
 
-/// How a physical summary deployment obtains its state.
+/// How a summary deployment obtains its state, independent of implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SummaryMaintenanceMode {
     /// Rebuild the summary from its complete input when the deployment needs
