@@ -192,6 +192,8 @@ mod tests {
             key_bytes: None,
             aggregate_value_bytes: None,
             k: None,
+            topk_output_offset: None,
+            limit_rows_consumed: None,
             hash_join_build_side: None,
             promql: None,
         }
