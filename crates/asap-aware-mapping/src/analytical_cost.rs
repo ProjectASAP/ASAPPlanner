@@ -615,7 +615,7 @@ pub fn estimate_operator(
     }
 }
 
-fn validate_operator_semantics(
+pub(crate) fn validate_operator_semantics(
     operator: PhysicalOperator,
     statistics: &OperatorStatistics,
 ) -> Result<(), AnalyticalCostError> {
@@ -676,11 +676,7 @@ fn validate_operator_semantics(
                 return inconsistent("deduplicated output differs from distinct key cardinality");
             }
         }
-        (
-            PhysicalOperator::InMemoryComparisonSort
-            | PhysicalOperator::PassThrough,
-            _,
-        ) => {
+        (PhysicalOperator::InMemoryComparisonSort | PhysicalOperator::PassThrough, _) => {
             if input != output {
                 return inconsistent("cardinality-preserving operator changes its edge");
             }
