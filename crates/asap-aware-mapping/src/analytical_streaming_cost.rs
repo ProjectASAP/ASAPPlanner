@@ -13,7 +13,8 @@ use asap_types::post_asap::{
 use asap_types::workload::{DataArrival, DataWorkload, QueryWorkloadEntry};
 use serde::{Deserialize, Serialize};
 
-use crate::analytical_cost::{evaluations_in_horizon, AnalyticalCostError, ResourceEstimate};
+use crate::analytical_cost::{AnalyticalCostError, ResourceEstimate};
+use crate::analytical_statistics::evaluations_in_horizon;
 use crate::summary_maintenance_lifecycle::{evaluation_schedule, maintenance_mode};
 
 pub const ANALYTICAL_STREAMING_MODEL_VERSION: &str = "analytical-summary-incremental-v1";
