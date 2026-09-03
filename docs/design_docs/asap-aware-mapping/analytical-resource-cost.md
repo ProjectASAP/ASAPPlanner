@@ -491,45 +491,56 @@ DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
 mismatches and arithmetic overflow also fail closed.
 
-### Relationship to the ASAPQuery formulations
+### Boundary with ASAPQuery physical optimization
+
+ASAPPlanner and the ASAPQuery control plane make different decisions. A
+summary lifecycle answers **when a logical summary state exists and how it is
+maintained**. A physical deployment answers **how and where that state is
+implemented**.
+
+| Owner | Decisions |
+| --- | --- |
+| ASAPPlanner | Logical query-time semantics; summary family, algorithm, parameters, grouping, accuracy, and composition; `Ephemeral`, `Prepared`, `Shared`, or `ContinuouslyMaintained` lifecycle; `DirectBuild` or `Incremental` maintenance mode; legal evaluation schedule and exact fallback. |
+| ASAPQuery-backend physical compiler and workload optimizer | Concrete tumbling, sliding/pane, exponential-histogram, or other window implementation; window size, slide, pane layout, retention, watermark and lateness policy; collector/backend placement, sharding, storage, transmission, materialization identity, and runtime capability checks; workload-wide sharing and query-to-deployment assignments. |
+| ASAPCollector and the ASAPQuery data plane | Validate and execute their projections of the compiled physical plan and report the active plan identity and runtime evidence. They do not independently change the logical summary or choose another physical layout. |
+
+`Incremental` is not a window type. It means that an existing logical summary
+state is updated as data arrives. The physical compiler may realize that mode
+with tumbling windows, overlapping panes, an exponential histogram, or another
+executor-supported layout. Conversely, choosing a tumbling window does not by
+itself decide whether the state is ephemeral, prepared, shared, or continuously
+maintained.
 
 The ASAPQuery
 [configuration formulation](https://github.com/ProjectASAP/ASAPQuery/blob/8aa93f417ee662c188d65da5eb20ceefa01e5c12/.design_docs/sketch-config-optimization-formulation.md)
 and [MIP formulation](https://github.com/ProjectASAP/ASAPQuery/blob/8aa93f417ee662c188d65da5eb20ceefa01e5c12/.design_docs/optimizer-mip-formulation.md)
-at source revision `8aa93f4` are source material for physical streaming
-multipliers, not an additional ASAPPlanner domain model. Their
-shared principles used here are: ingestion cost scales with arrival rate;
-overlapping active windows multiply insert work and state; retained windows
-consume persistent memory; and merge/subtract/readout are charged at query
-recurrence.
+describe physical configurations and workload-wide deployment assignments.
+Under this boundary, that optimization belongs in ASAPQuery-backend rather
+than becoming a second window domain model inside ASAPPlanner. ASAPPlanner
+reuses only their general resource principles: ingestion work scales with
+arrival rate, overlapping active states multiply update work, retained states
+consume memory, and merge/subtract/readout work scales with query recurrence.
 
-The documents disagree on important physical details. One limits subtract to
-non-overlapping prefix states and charges all retained states as steady-state
-memory; the other permits subtract over overlapping configurations and omits
-retained-but-unused state from continuous memory. ASAPPlanner therefore does
-not encode or select a window framework. It owns logical query-time semantics,
-summary-family selection, accuracy, and lifecycle legality. The downstream
-physical compiler owns window construction, panes, retention layout,
-placement, sharding, and executor capability checks.
+The boundary is a cost-evidence exchange:
 
-For one physical implementation already chosen by that compiler,
-`StreamingNodeEvidence` supplies complete per-node resource facts such as
-bootstrap routing, active and retained state counts, state size, operations,
-and source coverage. ASAPPlanner can use that evidence to compare lifecycle
-combinations over one `ComparisonScope`, but it neither enumerates physical
-implementations nor returns a physical-plan identifier. A downstream
-orchestrator that wants to compare several physical implementations invokes
-the planner once per complete evidence bundle and keeps the physical identity
-outside the planner result. Missing evidence makes that invocation unavailable;
-it cannot win through an optimistic zero. `SummarySubtract` is charged only
-when it is an actual evidence DAG node, and every physically retained state in
-the supplied implementation is charged.
+1. ASAPQuery-backend enumerates one executor-feasible physical deployment and
+   keeps its physical identity outside ASAPPlanner.
+2. It supplies `StreamingNodeEvidence` for that deployment, including bootstrap
+   routing, active and retained state counts, state size, physical operations,
+   edges, and source coverage.
+3. ASAPPlanner evaluates the legal lifecycle combinations for the logical
+   summary DAG over the supplied `ComparisonScope`. Missing evidence makes the
+   candidate unavailable; it never becomes an optimistic zero.
+4. ASAPQuery-backend repeats this for other physical deployments, then performs
+   workload-wide placement, facility-location, and query-assignment selection
+   using the returned complete estimates as coefficients.
+5. The backend emits consistent CollectorPlan, BackendPlan, and QueryPlan
+   projections. The runtimes validate and execute those projections.
 
-The global facility-location/MIP decisions from those documents—deploying one
-configuration and assigning multiple atomic queries to it—remain outside this
-candidate-local comparison. A downstream workload-level optimizer may use the
-complete estimates as coefficients while retaining ownership of physical
-configuration identities and assignment variables.
+ASAPPlanner neither enumerates physical deployments nor returns a physical-plan
+identifier. `SummarySubtract` is charged only when it is present in the
+supplied physical evidence DAG, and every physically retained state represented
+by that evidence is charged.
 
 ## Accuracy evidence remains separate from cost
 
