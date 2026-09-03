@@ -157,7 +157,7 @@ canonical workload and query terms rather than defining parallel strings:
 | Invocation schedule | `QueryRecurrence`; the evaluation count is derived, not copied. |
 | Event-time coverage | `TimeSelection`. |
 | Logical sources | the existing query-IR `Source`, one per scan. |
-| Filters | canonical bound `Predicate` values copied from the query IR. |
+| Source selection | canonical bound `Predicate` values for ordinary scans and symbolic `InfoMatcher` values for info-metric scans. |
 | Physical source contents | provider-owned `source_snapshot_id` per source. |
 
 The snapshot identifier is the only new scope concept. It is necessary because
@@ -168,16 +168,19 @@ independent facts.
 
 `ComparisonScope::from_workload` copies arrival, recurrence, and time selection
 from `DataWorkload` and `QueryWorkloadEntry`; the catalog/lowering boundary adds
-the source, snapshot identifier, and canonical predicates. Raw and candidate
+the source, snapshot identifier, and canonical source selection. Raw and candidate
 scopes must match exactly in every field before their estimates are compared.
 Unknown subsumption such as "this wider retained summary covers the requested
 interval" is not guessed here; it requires a separate semantic coverage proof.
-Missing sources, empty snapshot identifiers, invalid recurrence, or a zero
-horizon fail closed.
+An empty source set is valid only for a fully source-free logical DAG such as
+`time()`, a number literal, or `vector(1)`. After lowering, the reachable Scan
+coverage set must equal the scope source set: a Scan query with an empty scope,
+or a source-free query with a non-empty scope, fails closed. Empty snapshot
+identifiers, invalid recurrence, or a zero horizon also fail closed.
 
 Every reachable physical `Scan` carries one exact `SourceCoverage` copied from
 this scope. That coverage includes the existing `Source`, its provider-owned
-snapshot ID, and canonical predicates. A scan with no coverage, or coverage
+snapshot ID, and canonical ordinary predicates or info-metric matchers. A scan with no coverage, or coverage
 not present in `ComparisonScope.sources`, makes the plan unavailable. Other
 operators cannot declare source coverage. This prevents a DAG over source B
 from being estimated under source A's comparison scope.
@@ -222,6 +225,17 @@ OperatorStatistics =
     }
   | Limit { edges: UnaryEdgeStatistics }
   | PassThrough { edges: UnaryEdgeStatistics }
+  | PromqlRange { edges, max_window_samples_per_series }
+  | PromqlSubquery { edges, subquery_steps }
+  | PromqlBinary { edges, matching_key_bytes }
+  | PromqlRelabel { edges }
+  | PromqlInfoEnrich { edges, matching_key_bytes }
+  | PromqlSeriesSample { edges, group_count, key_bytes }
+  | PromqlScalarToVector { edges }
+  | PromqlVectorToScalar { edges }
+  | PromqlScalarLeaf { output, promql_output }
+  | PromqlPerSeries { edges, accumulator_bytes_per_series }
+  | PromqlPresence { edges }
 }
 ```
 
@@ -231,6 +245,24 @@ OperatorStatistics =
 remains operator-independent: an edge carries logical rows and bytes, and the
 same edge is the output of one node and an input of every consumer. Making the
 edge type depend on either endpoint would prevent direct consistency checks.
+
+PromQL operators additionally attach a typed `PromqlEdgeStatistics` view to
+the same physical edge:
+
+```text
+PromqlEdgeStatistics {
+    series,
+    evaluation_steps,
+    value_kind: Scalar | Vector | RangeVector,
+}
+```
+
+Rows/bytes still describe materialized logical data; PromQL metadata describes
+its series and step shape. They are complementary, not alternative
+cardinalities. Unary, binary, and variadic wrappers preserve the physical
+arity, and parent input metadata must exactly match the corresponding child
+output. Once a child carries PromQL metadata, a parent may not silently drop
+it. Scalar leaves have zero inputs and emit exactly one scalar row per step.
 
 The outer enum is operator-specific. A Filter cannot accidentally carry
 group cardinality, a Top-K statistics record cannot carry a join build side,
@@ -251,6 +283,14 @@ Physical configuration is not catalog evidence and therefore lives on
 | `HashJoin` | left or right build side and equality-key count |
 | `HashDeduplicate` | deduplication-key count |
 | `InMemoryAnalyticWindow` | partition/order-key counts and window-function work per row |
+| `PromqlRange` | selector range duration |
+| `PromqlSubquery` | range and optional explicit resolution |
+| `PromqlBinary` | operation class, operand modes, match cardinality, and vector/vector hash-build side |
+| `PromqlRelabel` | expression work per sample |
+| `PromqlInfoEnrich` | info-selector matcher work per info row |
+| `PromqlSeriesSample` | `limitk`/`limit_ratio` choice and grouping-key count |
+| `PromqlPerSeries` | primitive update work and accumulator count |
+| `PromqlPresence` | absence versus per-series-presence mode and test work per input row |
 
 This distinction removes the former flat optional `k` field. A Top-K bound is
 part of the chosen algorithm, while input/output cardinality and width are
@@ -309,9 +349,10 @@ For a selected DAG:
 4. Add source/disk reads only at nodes that actually read source or spilled
    data; an in-memory edge contributes zero source reads.
 5. Count a shared node once even when several parents consume it.
-6. Compute peak memory from liveness: add states that coexist, but do not add
-   disjoint transient buffers merely because both appear somewhere in the
-   DAG.
+6. Compute peak memory from liveness. During one node's execution, all live
+   child outputs, the operator's local workspace, and its new output buffer
+   coexist. Do not add disjoint transient buffers merely because both appear
+   somewhere in the DAG.
 7. Retained summaries remain live across reads. Streaming buffers may be
    released after their last consumer.
 
@@ -325,6 +366,12 @@ are rejected. A child-before-parent schedule maintains remaining-consumer
 counts, releases transient output after its last consumer, and keeps retained
 state live. Consequently a shared scan is charged once per execution and a
 fan-out's memory includes the outputs that really coexist.
+
+Each estimate independently requires the semantic set of source coverages on
+its reachable Scan nodes to equal `ComparisonScope.sources`. Multiple physical
+Scans may repeat one coverage, but no scope source may be omitted and no Scan
+may add another coverage. This invariant is enforced by the estimator itself,
+including for callers that construct a physical DAG without the query lowerer.
 
 Logical edge `bytes` feeds parent cardinality estimates; it is not an
 allocation. Each physical node separately supplies `output_buffer_bytes` for
@@ -415,10 +462,21 @@ The supported mappings are:
 | partitioned Sort followed by Limit | Sort → Limit |
 | RowNumber/Rank/DenseRank SQLWindowFunc with non-empty order_by | InMemoryAnalyticWindow |
 | identity TimeShift only | PassThrough |
+| range selector `[duration]` | PromqlRange |
+| PromQL subquery `[range:resolution]` | PromqlSubquery |
+| PromQL scalar/vector or vector/vector binary expression | PromqlBinary |
+| `label_replace`/`label_join` | PromqlRelabel |
+| `info(...)` | info-series Scan → PromqlInfoEnrich |
+| `limitk`/`limit_ratio` | PromqlSeriesSample |
+| `vector(scalar)` / `scalar(vector)` | PromqlScalarToVector / PromqlVectorToScalar |
+| scalar literal, `time()`, or `pi()` | PromqlScalarLeaf |
+| supported fixed-state per-series range reduction | PromqlPerSeries |
+| absence/presence reduction | PromqlPresence |
 
-Per-entity reductions, HAVING, ordered/distribution-dependent intents such as
-exact quantile or cardinality, Top-K aggregate intents, and extensions remain
-unavailable until they have an explicit physical algorithm. Hash-join lowering
+HAVING, cross-series PromQL aggregation, and ordered/distribution-dependent
+per-series intents such as exact quantile, cardinality, and Top-K aggregate
+intents remain unavailable until they have an explicit physical algorithm.
+Hash-join lowering
 also uses the bound left and right output schemas to prove that every equality
 compares one column from each side; same-side or out-of-range `ColumnId`s fail
 closed.
@@ -437,11 +495,11 @@ embedded physical identity and that every node's buffer equals the provider
 snapshot before returning statistics, preventing the public node and evidence
 views from silently drifting apart.
 
-Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, PromQL
-range/subquery execution, vector matching, and PromQL-specific enrichment/
-relabel/sample operators stay unavailable. Their cost requires a physical
-implementation or multiplicity/state facts that the current physical-operator
-vocabulary cannot represent; they are not treated as free pass-through work.
+Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, and unlisted
+PromQL algorithms stay unavailable. They are not treated as free pass-through
+work. In particular, generic `HashAggregate` cannot masquerade as a PromQL
+cross-series aggregation: such a candidate needs a physical operator whose
+per-step series grouping and memory semantics are explicit.
 
 ## Physical operator formulas
 
@@ -462,6 +520,16 @@ the DAG rules above.
 | Concat | `output_rows` | one output row/batch | `0` |
 | In-memory analytic window | per-partition ordering work plus per-row function work | largest partition bytes | `0` |
 | Limit | `min(input_rows, limit + offset)` | one output row/batch | `0` |
+| PromQL range | `input_rows` | `input_series × max_window_samples_per_series × sample_bytes` | `0` |
+| PromQL subquery | `input_rows + output_rows` | materialized inner-step input bytes | `0` |
+| PromQL vector binary | `left_rows + right_rows + output_rows` | vector/vector match hash state, or one output row for scalar/vector | `0` |
+| PromQL relabel | `input_rows × expression_operations_per_row` | one output row/batch | `0` |
+| PromQL info enrichment | input/output visits plus matcher work | info-side series hash state | `0` |
+| PromQL series sample | `input_rows + input_series` | selected-series key state | `0` |
+| PromQL scalar/vector bridge | `input_rows + output_rows` | one output row/batch | `0` |
+| PromQL scalar leaf | `evaluation_steps` | one scalar row | `0` |
+| PromQL fixed-state per-series operation | `input_rows × operations_per_row` | `input_series × accumulator_bytes_per_series` | `0` |
+| PromQL presence | `input_rows × operations_per_row + output_rows` | one output row/batch | `0` |
 
 These formulas name physical implementations. The enum uses names such as
 `InMemoryComparisonSort`, `HashDeduplicate`, and `InMemoryAnalyticWindow` so a

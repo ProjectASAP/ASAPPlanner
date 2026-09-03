@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::analytical_statistics::{
     validate_comparison_scopes, ComparisonScope, EdgeStatistics, OperatorStatistics,
-    OperatorStatisticsProvider, SourceCoverage,
+    OperatorStatisticsProvider, PromqlEdgeStatistics, PromqlValueKind, SourceCoverage,
 };
 
 pub const ANALYTICAL_MODEL_VERSION: &str = "analytical-resource-at-rest-v1";
@@ -105,6 +105,76 @@ pub enum PhysicalOperator {
         offset: u64,
     },
     PassThrough,
+    PromqlRange {
+        range_millis: u64,
+    },
+    PromqlSubquery {
+        range_millis: u64,
+        resolution_millis: Option<u64>,
+    },
+    PromqlBinary {
+        operation: PromqlBinaryOperation,
+        operand_mode: PromqlBinaryOperandMode,
+        cardinality: PromqlVectorCardinality,
+        build_side: Option<HashJoinBuildSide>,
+    },
+    PromqlRelabel {
+        expression_operations_per_row: u64,
+    },
+    PromqlInfoEnrich {
+        matcher_operations_per_info_row: u64,
+    },
+    PromqlSeriesSample {
+        kind: PromqlSeriesSampleKind,
+        grouping_key_count: u64,
+    },
+    PromqlScalarToVector,
+    PromqlVectorToScalar,
+    PromqlScalarLeaf,
+    PromqlPerSeries {
+        operations_per_row: u64,
+        accumulator_count: u64,
+    },
+    PromqlPresence {
+        kind: PromqlPresenceKind,
+        operations_per_row: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlBinaryOperandMode {
+    VectorVector,
+    VectorScalar,
+    ScalarVector,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlBinaryOperation {
+    ArithmeticOrComparison,
+    And,
+    Or,
+    Unless,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlVectorCardinality {
+    OneToOne,
+    ManyToOne,
+    OneToMany,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlSeriesSampleKind {
+    LimitK { k: u64 },
+    LimitRatio { ratio_bits: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromqlPresenceKind {
+    /// `absent` and `absent_over_time`: synthesize at most one output series.
+    Absent,
+    /// `present_over_time`: emit independently for each input series.
+    PresentPerSeries,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -314,6 +384,7 @@ pub fn estimate_physical_dag(
         peak_memory_bytes = peak_memory_bytes.max(
             live_bytes
                 .checked_add(local.peak_memory_bytes)
+                .and_then(|bytes| bytes.checked_add(node.output_buffer_bytes))
                 .ok_or(AnalyticalCostError::Overflow)?,
         );
         if node.retained_bytes > 0 {
@@ -402,6 +473,59 @@ fn validate_operator_statistics(
             });
         }
     }
+    validate_operator_semantics(node.operator, node_statistics)?;
+    validate_promql_child_edges(node, node_statistics, statistics)?;
+    Ok(())
+}
+
+fn validate_promql_child_edges(
+    node: &PhysicalDagNode,
+    node_statistics: &OperatorStatistics,
+    statistics: &HashMap<&str, OperatorStatistics>,
+) -> Result<(), AnalyticalCostError> {
+    let output = node_statistics.promql_output();
+    let child_has_promql = node
+        .children
+        .iter()
+        .any(|child_id| statistics[child_id.as_str()].promql_output().is_some());
+    if output.is_none() && child_has_promql {
+        return Err(AnalyticalCostError::InvalidOperatorStatistics {
+            node: node.id.clone(),
+            reason: "operator drops child PromQL edge statistics",
+        });
+    }
+    let Some(output) = output else { return Ok(()) };
+    validate_promql_edge(output)?;
+    for (index, child_id) in node.children.iter().enumerate() {
+        let input =
+            node_statistics
+                .promql_input(index)
+                .ok_or(AnalyticalCostError::MissingOrStale(
+                    "promql_input_edge_statistics",
+                ))?;
+        let child = statistics[child_id.as_str()].promql_output().ok_or(
+            AnalyticalCostError::MissingOrStale("promql_child_output_statistics"),
+        )?;
+        validate_promql_edge(input)?;
+        if input != child {
+            return Err(AnalyticalCostError::InvalidOperatorStatistics {
+                node: node.id.clone(),
+                reason: "PromQL parent input does not match child output",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_promql_edge(edge: PromqlEdgeStatistics) -> Result<(), AnalyticalCostError> {
+    if edge.evaluation_steps == 0 {
+        return Err(AnalyticalCostError::MissingOrZero("evaluation_steps"));
+    }
+    if matches!(edge.value_kind, PromqlValueKind::Scalar) && edge.series != 0 {
+        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "PromQL scalar edge cannot carry series",
+        ));
+    }
     Ok(())
 }
 
@@ -438,6 +562,39 @@ fn statistics_match_operator(operator: PhysicalOperator, statistics: &OperatorSt
         PhysicalOperator::Limit { .. } => matches!(statistics, OperatorStatistics::Limit { .. }),
         PhysicalOperator::PassThrough => {
             matches!(statistics, OperatorStatistics::PassThrough { .. })
+        }
+        PhysicalOperator::PromqlRange { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlRange { .. })
+        }
+        PhysicalOperator::PromqlSubquery { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlSubquery { .. })
+        }
+        PhysicalOperator::PromqlBinary { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlBinary { .. })
+        }
+        PhysicalOperator::PromqlRelabel { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlRelabel { .. })
+        }
+        PhysicalOperator::PromqlInfoEnrich { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlInfoEnrich { .. })
+        }
+        PhysicalOperator::PromqlSeriesSample { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlSeriesSample { .. })
+        }
+        PhysicalOperator::PromqlScalarToVector => {
+            matches!(statistics, OperatorStatistics::PromqlScalarToVector { .. })
+        }
+        PhysicalOperator::PromqlVectorToScalar => {
+            matches!(statistics, OperatorStatistics::PromqlVectorToScalar { .. })
+        }
+        PhysicalOperator::PromqlScalarLeaf => {
+            matches!(statistics, OperatorStatistics::PromqlScalarLeaf { .. })
+        }
+        PhysicalOperator::PromqlPerSeries { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlPerSeries { .. })
+        }
+        PhysicalOperator::PromqlPresence { .. } => {
+            matches!(statistics, OperatorStatistics::PromqlPresence { .. })
         }
     }
 }
@@ -477,10 +634,24 @@ fn expected_input_arity(
         | PhysicalOperator::HashDeduplicate { .. }
         | PhysicalOperator::InMemoryAnalyticWindow { .. }
         | PhysicalOperator::Limit { .. }
-        | PhysicalOperator::PassThrough => unary,
-        PhysicalOperator::HashJoin { .. } => OperatorInputArity {
+        | PhysicalOperator::PassThrough
+        | PhysicalOperator::PromqlRange { .. }
+        | PhysicalOperator::PromqlSubquery { .. }
+        | PhysicalOperator::PromqlRelabel { .. }
+        | PhysicalOperator::PromqlSeriesSample { .. }
+        | PhysicalOperator::PromqlScalarToVector
+        | PhysicalOperator::PromqlVectorToScalar
+        | PhysicalOperator::PromqlPerSeries { .. }
+        | PhysicalOperator::PromqlPresence { .. } => unary,
+        PhysicalOperator::HashJoin { .. }
+        | PhysicalOperator::PromqlBinary { .. }
+        | PhysicalOperator::PromqlInfoEnrich { .. } => OperatorInputArity {
             statistics_inputs: 2,
             dag_children: 2,
+        },
+        PhysicalOperator::PromqlScalarLeaf => OperatorInputArity {
+            statistics_inputs: 0,
+            dag_children: 0,
         },
         PhysicalOperator::Concat => OperatorInputArity {
             statistics_inputs: variadic_child_count,
@@ -587,8 +758,27 @@ pub fn estimate_operator(
             .input(index)
             .ok_or(AnalyticalCostError::MissingOrZero("operator input edge"))
     };
-    let left = input(0)?;
     let output = statistics.output();
+    if let (
+        PhysicalOperator::PromqlScalarLeaf,
+        OperatorStatistics::PromqlScalarLeaf { promql_output, .. },
+    ) = (operator, &statistics)
+    {
+        validate_promql_edge(*promql_output)?;
+        if promql_output.value_kind != PromqlValueKind::Scalar
+            || output.rows != promql_output.evaluation_steps
+        {
+            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "PromQL scalar leaf must emit one scalar row per evaluation step",
+            ));
+        }
+        return Ok(ResourceEstimate {
+            cpu_ops: output.rows as f64,
+            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+            scan_bytes: 0,
+        });
+    }
+    let left = input(0)?;
     let estimate = match (operator, &statistics) {
         (
             PhysicalOperator::Scan,
@@ -766,6 +956,160 @@ pub fn estimate_operator(
                 scan_bytes: 0,
             }
         }
+        (
+            PhysicalOperator::PromqlRange { .. },
+            OperatorStatistics::PromqlRange {
+                edges,
+                max_window_samples_per_series,
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            ResourceEstimate {
+                cpu_ops: left.rows as f64,
+                peak_memory_bytes: checked_bytes(&[
+                    promql.input.series,
+                    *max_window_samples_per_series,
+                    per_row_width(left.rows, left.bytes)?,
+                ])?,
+                scan_bytes: 0,
+            }
+        }
+        (
+            PhysicalOperator::PromqlSubquery { .. },
+            OperatorStatistics::PromqlSubquery { edges, .. },
+        ) => ResourceEstimate {
+            cpu_ops: left.rows as f64 + output.rows as f64,
+            peak_memory_bytes: edges.input.bytes,
+            scan_bytes: 0,
+        },
+        (
+            PhysicalOperator::PromqlBinary {
+                operand_mode,
+                build_side,
+                ..
+            },
+            OperatorStatistics::PromqlBinary {
+                edges,
+                matching_key_bytes,
+            },
+        ) => {
+            let promql = require_promql_binary(edges)?;
+            let right = input(1)?;
+            let matching_bytes = match operand_mode {
+                PromqlBinaryOperandMode::VectorScalar | PromqlBinaryOperandMode::ScalarVector => {
+                    per_row_width(output.rows, output.bytes)?
+                }
+                PromqlBinaryOperandMode::VectorVector => {
+                    let build_series = match build_side.ok_or(
+                        AnalyticalCostError::MissingOrStale("vector_match_build_side"),
+                    )? {
+                        HashJoinBuildSide::Left => promql.inputs[0].series,
+                        HashJoinBuildSide::Right => promql.inputs[1].series,
+                    };
+                    checked_bytes(&[
+                        build_series,
+                        matching_key_bytes
+                            .checked_add(16)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                    ])?
+                }
+            };
+            ResourceEstimate {
+                cpu_ops: left.rows as f64 + right.rows as f64 + output.rows as f64,
+                peak_memory_bytes: matching_bytes,
+                scan_bytes: 0,
+            }
+        }
+        (
+            PhysicalOperator::PromqlRelabel {
+                expression_operations_per_row,
+            },
+            OperatorStatistics::PromqlRelabel { .. },
+        ) => ResourceEstimate {
+            cpu_ops: checked_cpu_product(left.rows, expression_operations_per_row)?,
+            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+            scan_bytes: 0,
+        },
+        (
+            PhysicalOperator::PromqlInfoEnrich {
+                matcher_operations_per_info_row,
+            },
+            OperatorStatistics::PromqlInfoEnrich {
+                edges,
+                matching_key_bytes,
+            },
+        ) => {
+            let promql = require_promql_binary(edges)?;
+            let right = input(1)?;
+            ResourceEstimate {
+                cpu_ops: left.rows as f64
+                    + right.rows as f64
+                    + output.rows as f64
+                    + checked_cpu_product(right.rows, matcher_operations_per_info_row)?,
+                peak_memory_bytes: checked_bytes(&[
+                    promql.inputs[1].series,
+                    matching_key_bytes
+                        .checked_add(16)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                ])?,
+                scan_bytes: 0,
+            }
+        }
+        (
+            PhysicalOperator::PromqlSeriesSample { .. },
+            OperatorStatistics::PromqlSeriesSample {
+                edges, key_bytes, ..
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            ResourceEstimate {
+                cpu_ops: left.rows as f64 + promql.input.series as f64,
+                peak_memory_bytes: checked_bytes(&[
+                    promql.output.series,
+                    key_bytes
+                        .checked_add(16)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                ])?,
+                scan_bytes: 0,
+            }
+        }
+        (PhysicalOperator::PromqlScalarToVector | PhysicalOperator::PromqlVectorToScalar, _) => {
+            ResourceEstimate {
+                cpu_ops: left.rows as f64 + output.rows as f64,
+                peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+                scan_bytes: 0,
+            }
+        }
+        (
+            PhysicalOperator::PromqlPerSeries {
+                operations_per_row, ..
+            },
+            OperatorStatistics::PromqlPerSeries {
+                edges,
+                accumulator_bytes_per_series,
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            ResourceEstimate {
+                cpu_ops: checked_cpu_product(left.rows, operations_per_row)?,
+                peak_memory_bytes: checked_bytes(&[
+                    promql.input.series,
+                    *accumulator_bytes_per_series,
+                ])?,
+                scan_bytes: 0,
+            }
+        }
+        (
+            PhysicalOperator::PromqlPresence {
+                operations_per_row, ..
+            },
+            OperatorStatistics::PromqlPresence { .. },
+        ) => ResourceEstimate {
+            cpu_ops: checked_cpu_product(left.rows, operations_per_row)? + output.rows as f64,
+            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+            scan_bytes: 0,
+        },
+        (PhysicalOperator::PromqlScalarLeaf, _) => unreachable!(),
         _ => {
             return Err(AnalyticalCostError::InconsistentOperatorStatistics(
                 "statistics variant does not match physical operator",
@@ -796,6 +1140,21 @@ pub(crate) fn validate_operator_semantics(
     ) {
         return inconsistent("Concat must have at least one input");
     }
+    if let (
+        PhysicalOperator::PromqlScalarLeaf,
+        OperatorStatistics::PromqlScalarLeaf {
+            output,
+            promql_output,
+        },
+    ) = (operator, statistics)
+    {
+        validate_promql_edge_shape(*output, *promql_output)?;
+        return if promql_output.value_kind == PromqlValueKind::Scalar {
+            Ok(())
+        } else {
+            inconsistent("PromQL scalar leaf output is not scalar")
+        };
+    }
     let input = statistics
         .input(0)
         .ok_or(AnalyticalCostError::InconsistentOperatorStatistics(
@@ -806,7 +1165,8 @@ pub(crate) fn validate_operator_semantics(
         (
             PhysicalOperator::Scan,
             OperatorStatistics::Scan {
-                source_read_bytes, ..
+                edges,
+                source_read_bytes,
             },
         ) => {
             if input != output {
@@ -814,6 +1174,13 @@ pub(crate) fn validate_operator_semantics(
             }
             if input.rows > 0 && *source_read_bytes == 0 {
                 return inconsistent("non-empty Scan has zero source-read bytes");
+            }
+            if let Some(promql) = edges.promql {
+                validate_promql_edge_shape(edges.input, promql.input)?;
+                validate_promql_edge_shape(edges.output, promql.output)?;
+                if promql.input != promql.output {
+                    return inconsistent("Scan changes its PromQL edge shape");
+                }
             }
         }
         (
@@ -828,6 +1195,9 @@ pub(crate) fn validate_operator_semantics(
             if output.rows > input.rows || output.bytes > input.bytes {
                 return inconsistent("Filter output expands its input");
             }
+            if let Some(promql) = statistics.unary_promql() {
+                validate_promql_filter_shape(promql)?;
+            }
         }
         (
             PhysicalOperator::Project {
@@ -840,6 +1210,9 @@ pub(crate) fn validate_operator_semantics(
             }
             if output.rows != input.rows {
                 return inconsistent("Project changes row cardinality");
+            }
+            if let Some(promql) = statistics.unary_promql() {
+                validate_promql_cardinality_preserving_shape(promql)?;
             }
         }
         (
@@ -854,6 +1227,11 @@ pub(crate) fn validate_operator_semantics(
                 ..
             },
         ) => {
+            if statistics.promql_output().is_some() {
+                return inconsistent(
+                    "PromQL cross-series aggregation needs an explicit physical operator",
+                );
+            }
             if accumulator_count == 0 || *accumulator_bytes_per_group == 0 {
                 return inconsistent("HashAggregate accumulator work and width must be positive");
             }
@@ -906,6 +1284,9 @@ pub(crate) fn validate_operator_semantics(
             if input != output {
                 return inconsistent("cardinality-preserving operator changes its edge");
             }
+            if let Some(promql) = statistics.unary_promql() {
+                validate_promql_cardinality_preserving_shape(promql)?;
+            }
         }
         (
             PhysicalOperator::InMemoryAnalyticWindow {
@@ -947,6 +1328,34 @@ pub(crate) fn validate_operator_semantics(
             if output != total {
                 return inconsistent("Concat output differs from the sum of its inputs");
             }
+            if let OperatorStatistics::Concat {
+                promql: Some(promql),
+                ..
+            } = statistics
+            {
+                if promql.inputs.len() != inputs.len() || promql.inputs.is_empty() {
+                    return inconsistent("PromQL Concat edge arity is invalid");
+                }
+                let first = promql.inputs[0];
+                let series_bound = promql.inputs.iter().try_fold(0_u64, |total, edge| {
+                    if edge.evaluation_steps != first.evaluation_steps
+                        || edge.value_kind != first.value_kind
+                    {
+                        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                            "PromQL Concat inputs have different shapes",
+                        ));
+                    }
+                    total
+                        .checked_add(edge.series)
+                        .ok_or(AnalyticalCostError::Overflow)
+                })?;
+                if promql.output.evaluation_steps != first.evaluation_steps
+                    || promql.output.value_kind != first.value_kind
+                    || promql.output.series > series_bound
+                {
+                    return inconsistent("PromQL Concat output exceeds its input-series bound");
+                }
+            }
         }
         (
             PhysicalOperator::TopK {
@@ -980,7 +1389,471 @@ pub(crate) fn validate_operator_semantics(
                 return inconsistent("HashJoin has no equality keys");
             }
         }
+        (
+            PhysicalOperator::PromqlRange { range_millis },
+            OperatorStatistics::PromqlRange {
+                edges,
+                max_window_samples_per_series,
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            if range_millis == 0 || *max_window_samples_per_series == 0 {
+                return inconsistent("PromQL range needs a positive range and window bound");
+            }
+            if promql.input.value_kind != PromqlValueKind::Vector
+                || promql.output.value_kind != PromqlValueKind::RangeVector
+                || promql.input.series != promql.output.series
+                || promql.input.evaluation_steps != promql.output.evaluation_steps
+            {
+                return inconsistent("PromQL range edge shape is invalid");
+            }
+        }
+        (
+            PhysicalOperator::PromqlSubquery {
+                range_millis,
+                resolution_millis,
+            },
+            OperatorStatistics::PromqlSubquery {
+                edges,
+                subquery_steps,
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            if range_millis == 0
+                || resolution_millis == Some(0)
+                || *subquery_steps == 0
+                || promql.input.value_kind != PromqlValueKind::RangeVector
+                || promql.output.value_kind != PromqlValueKind::RangeVector
+                || promql.input.series != promql.output.series
+            {
+                return inconsistent("PromQL subquery configuration or edge shape is invalid");
+            }
+            let expected = promql
+                .output
+                .evaluation_steps
+                .checked_mul(*subquery_steps)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            if promql.input.evaluation_steps != expected {
+                return inconsistent(
+                    "subquery child steps do not equal output steps times subquery steps",
+                );
+            }
+        }
+        (
+            PhysicalOperator::PromqlBinary {
+                operation,
+                operand_mode,
+                cardinality,
+                build_side,
+            },
+            OperatorStatistics::PromqlBinary {
+                edges,
+                matching_key_bytes,
+            },
+        ) => validate_promql_binary(
+            operation,
+            operand_mode,
+            cardinality,
+            build_side,
+            *matching_key_bytes,
+            edges,
+        )?,
+        (
+            PhysicalOperator::PromqlRelabel {
+                expression_operations_per_row,
+            },
+            OperatorStatistics::PromqlRelabel { edges },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            validate_instant_vector_rows(output, promql.output)?;
+            if expression_operations_per_row == 0
+                || input.rows != output.rows
+                || promql.input.series != promql.output.series
+                || promql.input.evaluation_steps != promql.output.evaluation_steps
+                || promql.input.value_kind != PromqlValueKind::Vector
+                || promql.output.value_kind != PromqlValueKind::Vector
+            {
+                return inconsistent("PromQL relabel configuration or edge shape is invalid");
+            }
+        }
+        (
+            PhysicalOperator::PromqlInfoEnrich {
+                matcher_operations_per_info_row,
+            },
+            OperatorStatistics::PromqlInfoEnrich {
+                edges,
+                matching_key_bytes,
+            },
+        ) => {
+            let promql = require_promql_binary(edges)?;
+            validate_instant_vector_rows(output, promql.output)?;
+            if matcher_operations_per_info_row == 0
+                || *matching_key_bytes == 0
+                || input.rows != output.rows
+                || promql.inputs[0].series != promql.output.series
+                || promql.inputs[0].evaluation_steps != promql.output.evaluation_steps
+                || promql.inputs[1].evaluation_steps != promql.output.evaluation_steps
+                || promql
+                    .inputs
+                    .iter()
+                    .any(|edge| edge.value_kind != PromqlValueKind::Vector)
+                || promql.output.value_kind != PromqlValueKind::Vector
+            {
+                return inconsistent(
+                    "PromQL info enrichment configuration or edge shape is invalid",
+                );
+            }
+        }
+        (
+            PhysicalOperator::PromqlSeriesSample {
+                kind,
+                grouping_key_count,
+            },
+            OperatorStatistics::PromqlSeriesSample {
+                edges,
+                group_count,
+                key_bytes,
+            },
+        ) => validate_promql_series_sample(
+            kind,
+            grouping_key_count,
+            *group_count,
+            *key_bytes,
+            edges,
+        )?,
+        (
+            PhysicalOperator::PromqlScalarToVector,
+            OperatorStatistics::PromqlScalarToVector { edges },
+        )
+        | (
+            PhysicalOperator::PromqlVectorToScalar,
+            OperatorStatistics::PromqlVectorToScalar { edges },
+        ) => {
+            validate_promql_bridge(operator, edges)?;
+        }
+        (PhysicalOperator::PromqlScalarLeaf, _) => unreachable!(),
+        (
+            PhysicalOperator::PromqlPerSeries {
+                operations_per_row,
+                accumulator_count,
+            },
+            OperatorStatistics::PromqlPerSeries {
+                edges,
+                accumulator_bytes_per_series,
+            },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            validate_instant_vector_rows(output, promql.output)?;
+            if operations_per_row == 0
+                || accumulator_count == 0
+                || *accumulator_bytes_per_series == 0
+                || promql.output.value_kind != PromqlValueKind::Vector
+                || promql.output.series > promql.input.series
+                || promql.output.evaluation_steps != promql.input.evaluation_steps
+            {
+                return inconsistent("PromQL per-series configuration or edge shape is invalid");
+            }
+        }
+        (
+            PhysicalOperator::PromqlPresence {
+                kind,
+                operations_per_row,
+            },
+            OperatorStatistics::PromqlPresence { edges },
+        ) => {
+            let promql = require_promql_unary(edges)?;
+            validate_instant_vector_rows(output, promql.output)?;
+            if operations_per_row == 0 || promql.output.value_kind != PromqlValueKind::Vector {
+                return inconsistent("PromQL presence output violates its per-step bound");
+            }
+            match kind {
+                PromqlPresenceKind::Absent
+                    if promql.output.series > 1
+                        || output.rows > promql.output.evaluation_steps
+                        || (input.rows == 0 && output.rows != promql.output.evaluation_steps)
+                        || (output.rows == 0 && promql.output.series != 0)
+                        || (output.rows > 0 && promql.output.series != 1) =>
+                {
+                    return inconsistent("PromQL absence output violates its per-step bound");
+                }
+                PromqlPresenceKind::PresentPerSeries
+                    if output.rows > input.rows
+                        || promql.output.series > promql.input.series
+                        || promql.output.evaluation_steps != promql.input.evaluation_steps
+                        || (input.rows == 0 && (output.rows != 0 || promql.output.series != 0)) =>
+                {
+                    return inconsistent(
+                        "PromQL present-over-time output exceeds its per-series bound",
+                    );
+                }
+                _ => {}
+            }
+        }
         _ => return inconsistent("statistics variant does not match physical operator"),
+    }
+    Ok(())
+}
+
+fn require_promql_unary(
+    edges: &crate::analytical_statistics::UnaryEdgeStatistics,
+) -> Result<crate::analytical_statistics::PromqlUnaryEdgeStatistics, AnalyticalCostError> {
+    let promql = edges.promql.ok_or(AnalyticalCostError::MissingOrStale(
+        "promql_edge_statistics",
+    ))?;
+    validate_promql_edge_shape(edges.input, promql.input)?;
+    validate_promql_edge_shape(edges.output, promql.output)?;
+    Ok(promql)
+}
+
+fn require_promql_binary(
+    edges: &crate::analytical_statistics::BinaryEdgeStatistics,
+) -> Result<crate::analytical_statistics::PromqlBinaryEdgeStatistics, AnalyticalCostError> {
+    let promql = edges.promql.ok_or(AnalyticalCostError::MissingOrStale(
+        "promql_edge_statistics",
+    ))?;
+    validate_promql_edge_shape(edges.inputs[0], promql.inputs[0])?;
+    validate_promql_edge_shape(edges.inputs[1], promql.inputs[1])?;
+    validate_promql_edge_shape(edges.output, promql.output)?;
+    Ok(promql)
+}
+
+fn validate_promql_cardinality_preserving_shape(
+    promql: crate::analytical_statistics::PromqlUnaryEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    validate_promql_edge(promql.input)?;
+    validate_promql_edge(promql.output)?;
+    if promql.input == promql.output {
+        Ok(())
+    } else {
+        Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "cardinality-preserving operator changes its PromQL edge shape",
+        ))
+    }
+}
+
+fn validate_promql_filter_shape(
+    promql: crate::analytical_statistics::PromqlUnaryEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    validate_promql_edge(promql.input)?;
+    validate_promql_edge(promql.output)?;
+    if promql.input.evaluation_steps == promql.output.evaluation_steps
+        && promql.input.value_kind == promql.output.value_kind
+        && promql.output.series <= promql.input.series
+    {
+        Ok(())
+    } else {
+        Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "Filter changes PromQL steps/kind or expands its series",
+        ))
+    }
+}
+
+fn validate_instant_vector_rows(
+    logical: EdgeStatistics,
+    promql: PromqlEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    if promql.value_kind != PromqlValueKind::Vector {
+        return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "instant-vector result has a non-vector value kind",
+        ));
+    }
+    let bound = promql
+        .series
+        .checked_mul(promql.evaluation_steps)
+        .ok_or(AnalyticalCostError::Overflow)?;
+    if logical.rows <= bound {
+        Ok(())
+    } else {
+        Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "instant-vector rows exceed series times evaluation steps",
+        ))
+    }
+}
+
+fn validate_promql_edge_shape(
+    logical: EdgeStatistics,
+    promql: PromqlEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    validate_promql_edge(promql)?;
+    let max_rows = promql.series.checked_mul(promql.evaluation_steps);
+    match promql.value_kind {
+        PromqlValueKind::Scalar if logical.rows != promql.evaluation_steps => {
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "PromQL scalar rows do not equal evaluation steps",
+            ))
+        }
+        PromqlValueKind::RangeVector if max_rows.is_none_or(|bound| logical.rows > bound) => {
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "PromQL vector rows exceed series times evaluation steps",
+            ))
+        }
+        PromqlValueKind::Vector if logical.rows > 0 && promql.series == 0 => {
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "PromQL samples have no source series",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_promql_bridge(
+    operator: PhysicalOperator,
+    edges: &crate::analytical_statistics::UnaryEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let promql = require_promql_unary(edges)?;
+    let valid = match operator {
+        PhysicalOperator::PromqlScalarToVector => {
+            validate_instant_vector_rows(edges.output, promql.output)?;
+            promql.input.value_kind == PromqlValueKind::Scalar
+                && promql.output.value_kind == PromqlValueKind::Vector
+                && promql.output.series == 1
+                && promql.input.evaluation_steps == promql.output.evaluation_steps
+                && edges.input.rows == edges.output.rows
+        }
+        PhysicalOperator::PromqlVectorToScalar => {
+            promql.input.value_kind == PromqlValueKind::Vector
+                && promql.output.value_kind == PromqlValueKind::Scalar
+                && promql.input.evaluation_steps == promql.output.evaluation_steps
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(AnalyticalCostError::InconsistentOperatorStatistics(
+            "PromQL scalar/vector bridge edge shape is invalid",
+        ))
+    }
+}
+
+fn validate_promql_binary(
+    operation: PromqlBinaryOperation,
+    operand_mode: PromqlBinaryOperandMode,
+    cardinality: PromqlVectorCardinality,
+    build_side: Option<HashJoinBuildSide>,
+    matching_key_bytes: u64,
+    edges: &crate::analytical_statistics::BinaryEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let promql = require_promql_binary(edges)?;
+    validate_instant_vector_rows(edges.output, promql.output)?;
+    let invalid = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
+    if matches!(
+        operation,
+        PromqlBinaryOperation::And | PromqlBinaryOperation::Or | PromqlBinaryOperation::Unless
+    ) && cardinality != PromqlVectorCardinality::OneToOne
+    {
+        return invalid("PromQL set operations cannot use group_left or group_right");
+    }
+    if promql.output.value_kind != PromqlValueKind::Vector
+        || promql.inputs[0].evaluation_steps != promql.output.evaluation_steps
+        || promql.inputs[1].evaluation_steps != promql.output.evaluation_steps
+    {
+        return invalid("PromQL binary evaluation steps or output kind are invalid");
+    }
+    let (row_bound, series_bound) = match operand_mode {
+        PromqlBinaryOperandMode::VectorScalar => {
+            if promql.inputs[0].value_kind != PromqlValueKind::Vector
+                || promql.inputs[1].value_kind != PromqlValueKind::Scalar
+                || cardinality != PromqlVectorCardinality::OneToOne
+                || build_side.is_some()
+                || matching_key_bytes != 0
+            {
+                return invalid("vector/scalar binary configuration is invalid");
+            }
+            (edges.inputs[0].rows, promql.inputs[0].series)
+        }
+        PromqlBinaryOperandMode::ScalarVector => {
+            if promql.inputs[0].value_kind != PromqlValueKind::Scalar
+                || promql.inputs[1].value_kind != PromqlValueKind::Vector
+                || cardinality != PromqlVectorCardinality::OneToOne
+                || build_side.is_some()
+                || matching_key_bytes != 0
+            {
+                return invalid("scalar/vector binary configuration is invalid");
+            }
+            (edges.inputs[1].rows, promql.inputs[1].series)
+        }
+        PromqlBinaryOperandMode::VectorVector => {
+            if promql
+                .inputs
+                .iter()
+                .any(|input| input.value_kind != PromqlValueKind::Vector)
+                || build_side.is_none()
+                || matching_key_bytes == 0
+            {
+                return invalid("vector/vector binary label-match configuration is invalid");
+            }
+            match operation {
+                PromqlBinaryOperation::And | PromqlBinaryOperation::Unless => {
+                    (edges.inputs[0].rows, promql.inputs[0].series)
+                }
+                PromqlBinaryOperation::Or => (
+                    edges.inputs[0]
+                        .rows
+                        .checked_add(edges.inputs[1].rows)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                    promql.inputs[0]
+                        .series
+                        .checked_add(promql.inputs[1].series)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                ),
+                PromqlBinaryOperation::ArithmeticOrComparison => match cardinality {
+                    PromqlVectorCardinality::OneToOne => (
+                        edges.inputs[0].rows.min(edges.inputs[1].rows),
+                        promql.inputs[0].series.min(promql.inputs[1].series),
+                    ),
+                    PromqlVectorCardinality::ManyToOne => {
+                        (edges.inputs[0].rows, promql.inputs[0].series)
+                    }
+                    PromqlVectorCardinality::OneToMany => {
+                        (edges.inputs[1].rows, promql.inputs[1].series)
+                    }
+                },
+            }
+        }
+    };
+    if edges.output.rows > row_bound || promql.output.series > series_bound {
+        return invalid("PromQL binary output exceeds its semantic cardinality bound");
+    }
+    Ok(())
+}
+
+fn validate_promql_series_sample(
+    kind: PromqlSeriesSampleKind,
+    grouping_key_count: u64,
+    group_count: u64,
+    key_bytes: u64,
+    edges: &crate::analytical_statistics::UnaryEdgeStatistics,
+) -> Result<(), AnalyticalCostError> {
+    let promql = require_promql_unary(edges)?;
+    validate_instant_vector_rows(edges.output, promql.output)?;
+    let invalid = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
+    if key_bytes == 0
+        || promql.input.value_kind != PromqlValueKind::Vector
+        || promql.output.value_kind != PromqlValueKind::Vector
+        || promql.input.evaluation_steps != promql.output.evaluation_steps
+        || edges.output.rows > edges.input.rows
+        || promql.output.series > promql.input.series
+        || (grouping_key_count == 0 && group_count != 1)
+        || (grouping_key_count > 0 && group_count == 0 && promql.input.series > 0)
+    {
+        return invalid("PromQL series-sample configuration or edge shape is invalid");
+    }
+    if let PromqlSeriesSampleKind::LimitK { k } = kind {
+        if k == 0 {
+            return invalid("PromQL limitk must be positive");
+        }
+        let bound = group_count
+            .checked_mul(k)
+            .ok_or(AnalyticalCostError::Overflow)?;
+        if promql.output.series > promql.input.series.min(bound) {
+            return invalid("PromQL limitk output exceeds its group bound");
+        }
+    } else if let PromqlSeriesSampleKind::LimitRatio { ratio_bits } = kind {
+        let ratio = f64::from_bits(ratio_bits);
+        if !ratio.is_finite() || !(-1.0..=1.0).contains(&ratio) {
+            return invalid("PromQL limit_ratio is outside [-1, 1]");
+        }
     }
     Ok(())
 }
@@ -1068,7 +1941,8 @@ mod tests {
     use super::*;
     use crate::analytical_statistics::{
         validate_comparison_scopes, BinaryEdgeStatistics, ComparisonScope, EdgeStatistics,
-        OperatorStatistics, PartitionStatistics, SourceCoverage, UnaryEdgeStatistics,
+        OperatorStatistics, PartitionStatistics, PromqlBinaryEdgeStatistics, PromqlEdgeStatistics,
+        PromqlUnaryEdgeStatistics, PromqlValueKind, SourceCoverage, UnaryEdgeStatistics,
     };
 
     fn filter_operator() -> PhysicalOperator {
@@ -1100,6 +1974,48 @@ mod tests {
                 rows: output_rows,
                 bytes: output_rows.saturating_mul(8),
             },
+            promql: None,
+        }
+    }
+
+    fn promql_edge(
+        series: u64,
+        evaluation_steps: u64,
+        value_kind: PromqlValueKind,
+    ) -> PromqlEdgeStatistics {
+        PromqlEdgeStatistics {
+            series,
+            evaluation_steps,
+            value_kind,
+        }
+    }
+
+    fn promql_binary_statistics(output_rows: u64, output_series: u64) -> OperatorStatistics {
+        let left = EdgeStatistics {
+            rows: 100,
+            bytes: 1_600,
+        };
+        let right = EdgeStatistics {
+            rows: 50,
+            bytes: 800,
+        };
+        let output = EdgeStatistics {
+            rows: output_rows,
+            bytes: output_rows.saturating_mul(16),
+        };
+        OperatorStatistics::PromqlBinary {
+            edges: BinaryEdgeStatistics {
+                inputs: [left, right],
+                output,
+                promql: Some(PromqlBinaryEdgeStatistics {
+                    inputs: [
+                        promql_edge(10, 10, PromqlValueKind::Vector),
+                        promql_edge(5, 10, PromqlValueKind::Vector),
+                    ],
+                    output: promql_edge(output_series, 10, PromqlValueKind::Vector),
+                }),
+            },
+            matching_key_bytes: 8,
         }
     }
 
@@ -1139,6 +2055,219 @@ mod tests {
                 dag_children: 3,
             }
         );
+    }
+
+    #[test]
+    fn promql_binary_operation_controls_cardinality_bounds() {
+        let operator = |operation| PhysicalOperator::PromqlBinary {
+            operation,
+            operand_mode: PromqlBinaryOperandMode::VectorVector,
+            cardinality: PromqlVectorCardinality::OneToOne,
+            build_side: Some(HashJoinBuildSide::Right),
+        };
+
+        assert!(estimate_operator(
+            operator(PromqlBinaryOperation::Or),
+            promql_binary_statistics(150, 15),
+        )
+        .is_ok());
+        assert!(matches!(
+            estimate_operator(
+                operator(PromqlBinaryOperation::ArithmeticOrComparison),
+                promql_binary_statistics(60, 5),
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+        assert!(matches!(
+            estimate_operator(
+                operator(PromqlBinaryOperation::And),
+                promql_binary_statistics(101, 10),
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+    }
+
+    #[test]
+    fn promql_bridges_require_directional_edge_kinds() {
+        let scalar = promql_edge(0, 10, PromqlValueKind::Scalar);
+        let vector = promql_edge(1, 10, PromqlValueKind::Vector);
+        let edges = |input, output| UnaryEdgeStatistics {
+            input: EdgeStatistics {
+                rows: 10,
+                bytes: 80,
+            },
+            output: EdgeStatistics {
+                rows: 10,
+                bytes: 80,
+            },
+            promql: Some(PromqlUnaryEdgeStatistics { input, output }),
+        };
+        assert!(estimate_operator(
+            PhysicalOperator::PromqlScalarToVector,
+            OperatorStatistics::PromqlScalarToVector {
+                edges: edges(scalar, vector),
+            },
+        )
+        .is_ok());
+        assert!(matches!(
+            estimate_operator(
+                PhysicalOperator::PromqlScalarToVector,
+                OperatorStatistics::PromqlScalarToVector {
+                    edges: edges(vector, scalar),
+                },
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+    }
+
+    #[test]
+    fn promql_scalar_leaf_has_no_input_and_one_row_per_step() {
+        let statistics = OperatorStatistics::PromqlScalarLeaf {
+            output: EdgeStatistics {
+                rows: 10,
+                bytes: 80,
+            },
+            promql_output: promql_edge(0, 10, PromqlValueKind::Scalar),
+        };
+        let estimate = estimate_operator(PhysicalOperator::PromqlScalarLeaf, statistics).unwrap();
+
+        assert_eq!(estimate.cpu_ops, 10.0);
+        assert_eq!(estimate.peak_memory_bytes, 8);
+    }
+
+    #[test]
+    fn physical_dag_cannot_drop_promql_edge_evidence() {
+        let edge = EdgeStatistics {
+            rows: 10,
+            bytes: 80,
+        };
+        let promql = promql_edge(1, 10, PromqlValueKind::Vector);
+        let nodes = vec![
+            PhysicalDagNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                source_coverage: Some(comparison_scope().sources[0].clone()),
+                output_buffer_bytes: 8,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+            PhysicalDagNode {
+                id: "filter".into(),
+                operator: filter_operator(),
+                children: vec!["scan".into()],
+                source_coverage: None,
+                output_buffer_bytes: 8,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            },
+        ];
+        let provided = HashMap::from([
+            (
+                "scan".into(),
+                OperatorStatistics::Scan {
+                    edges: UnaryEdgeStatistics {
+                        input: edge,
+                        output: edge,
+                        promql: Some(PromqlUnaryEdgeStatistics {
+                            input: promql,
+                            output: promql,
+                        }),
+                    },
+                    source_read_bytes: 80,
+                },
+            ),
+            (
+                "filter".into(),
+                OperatorStatistics::Filter {
+                    edges: unary_edges(edge, edge),
+                },
+            ),
+        ]);
+
+        assert!(matches!(
+            estimate_physical_dag(&nodes, "filter", &comparison_scope(), &provided),
+            Err(AnalyticalCostError::InvalidOperatorStatistics {
+                reason: "operator drops child PromQL edge statistics",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn generic_hash_aggregate_cannot_masquerade_as_promql_aggregation() {
+        let input = EdgeStatistics {
+            rows: 10,
+            bytes: 80,
+        };
+        let output = EdgeStatistics { rows: 1, bytes: 8 };
+        let statistics = OperatorStatistics::HashAggregate {
+            edges: UnaryEdgeStatistics {
+                input,
+                output,
+                promql: Some(PromqlUnaryEdgeStatistics {
+                    input: promql_edge(1, 10, PromqlValueKind::Vector),
+                    output: promql_edge(1, 10, PromqlValueKind::Vector),
+                }),
+            },
+            group_count: 1,
+            key_bytes: 0,
+            accumulator_bytes_per_group: 8,
+        };
+
+        assert_eq!(
+            estimate_operator(
+                PhysicalOperator::HashAggregate {
+                    grouping_key_count: 0,
+                    accumulator_count: 1,
+                },
+                statistics,
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "PromQL cross-series aggregation needs an explicit physical operator"
+            ))
+        );
+    }
+
+    #[test]
+    fn present_over_time_keeps_per_series_cardinality() {
+        let input = EdgeStatistics {
+            rows: 100,
+            bytes: 1_600,
+        };
+        let output = EdgeStatistics {
+            rows: 80,
+            bytes: 1_280,
+        };
+        let valid = OperatorStatistics::PromqlPresence {
+            edges: UnaryEdgeStatistics {
+                input,
+                output,
+                promql: Some(PromqlUnaryEdgeStatistics {
+                    input: promql_edge(10, 10, PromqlValueKind::RangeVector),
+                    output: promql_edge(8, 10, PromqlValueKind::Vector),
+                }),
+            },
+        };
+
+        assert!(estimate_operator(
+            PhysicalOperator::PromqlPresence {
+                kind: PromqlPresenceKind::PresentPerSeries,
+                operations_per_row: 1,
+            },
+            valid.clone(),
+        )
+        .is_ok());
+        assert!(matches!(
+            estimate_operator(
+                PhysicalOperator::PromqlPresence {
+                    kind: PromqlPresenceKind::Absent,
+                    operations_per_row: 1,
+                },
+                valid,
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
     }
 
     #[test]
@@ -1205,6 +2334,7 @@ mod tests {
                         rows: 1_000,
                         bytes: 64_000,
                     },
+                    promql: None,
                 },
             },
         )
@@ -1227,6 +2357,7 @@ mod tests {
                         rows: 10,
                         bytes: 400,
                     },
+                    promql: None,
                 },
             },
         )
@@ -1272,6 +2403,7 @@ mod tests {
                         rows: 100,
                         bytes: 12_800,
                     },
+                    promql: None,
                 },
             },
         )
@@ -1293,6 +2425,7 @@ mod tests {
                         rows: 100,
                         bytes: 4_000,
                     },
+                    promql: None,
                 },
             },
         )
@@ -1315,6 +2448,7 @@ mod tests {
                         rows: 4,
                         bytes: 160,
                     },
+                    promql: None,
                 },
             },
         )
@@ -1336,6 +2470,7 @@ mod tests {
                         rows: 10,
                         bytes: 400,
                     },
+                    promql: None,
                 },
             },
         )
@@ -1420,6 +2555,7 @@ mod tests {
                         rows: 80,
                         bytes: 800,
                     },
+                    promql: None,
                 },
             ),
         ]);
@@ -1430,7 +2566,7 @@ mod tests {
         assert_eq!(estimate.scan_bytes, 2_000);
         // This is neither the sum of every node's memory nor just the largest
         // node: it is the maximum state simultaneously live at the fan-out.
-        assert_eq!(estimate.peak_memory_bytes, 24);
+        assert_eq!(estimate.peak_memory_bytes, 28);
     }
 
     #[test]
@@ -1529,12 +2665,17 @@ mod tests {
                 },
                 source_snapshot_id: "catalog-version-42".into(),
                 predicates: vec![],
+                info_matchers: vec![],
             }],
         }
     }
 
     fn unary_edges(input: EdgeStatistics, output: EdgeStatistics) -> UnaryEdgeStatistics {
-        UnaryEdgeStatistics { input, output }
+        UnaryEdgeStatistics {
+            input,
+            output,
+            promql: None,
+        }
     }
 
     #[test]
@@ -1766,7 +2907,7 @@ mod tests {
         let estimate =
             estimate_physical_dag(&nodes, "filter", &comparison_scope(), &provided).unwrap();
         assert_eq!(estimate.cpu_ops, 1_200.0);
-        assert_eq!(estimate.peak_memory_bytes, 10);
+        assert_eq!(estimate.peak_memory_bytes, 20);
         assert_eq!(estimate.scan_bytes, 6_000);
     }
 
@@ -1782,6 +2923,7 @@ mod tests {
                 },
                 source_snapshot_id: "catalog-version-42".into(),
                 predicates: vec![],
+                info_matchers: vec![],
             }),
             output_buffer_bytes: 10,
             retained_bytes: 0,
@@ -1848,6 +2990,7 @@ mod tests {
             },
             source_snapshot_id: "catalog-version-42".into(),
             predicates: vec![],
+            info_matchers: vec![],
         });
         let nodes = vec![PhysicalDagNode {
             id: "scan".into(),
@@ -2126,6 +3269,7 @@ mod tests {
                 OperatorStatistics::Concat {
                     inputs: vec![],
                     output: EdgeStatistics { rows: 0, bytes: 0 },
+                    promql: None,
                 },
             ),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(
