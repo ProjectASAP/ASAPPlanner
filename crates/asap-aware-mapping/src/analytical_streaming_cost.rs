@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryNode,
+    SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
 };
 use asap_types::pre_asap::{
     agg_intent::AggIntent, CompareOpKind, InfoMatcher, Predicate, QueryExpr, Source,
@@ -22,7 +22,9 @@ use crate::analytical_cost::{
     PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
 use crate::analytical_statistics::{ComparisonScope, EdgeStatistics, OperatorStatistics};
-use crate::cost_model::{Cost, CostModel, CostedSummaryDeployment, DefaultCostModel};
+use crate::cost_model::{
+    CompleteSummaryCandidateEstimate, Cost, CostModel, CostedSummaryDeployment, DefaultCostModel,
+};
 use crate::recurrence::CostRate;
 use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
 use crate::summary_maintenance_lifecycle::{
@@ -30,7 +32,7 @@ use crate::summary_maintenance_lifecycle::{
     SummaryMaintenanceLifecycleCostInputs,
 };
 
-pub const ANALYTICAL_STREAMING_MODEL_VERSION: &str = "analytical-summary-lifecycle-v2";
+pub const ANALYTICAL_STREAMING_MODEL_VERSION: &str = "analytical-summary-lifecycle-v3";
 
 /// Owned, immutable evidence for one fully lowered physical DAG.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,8 +50,8 @@ impl StreamingPhysicalDagEvidence {
 
 /// Physical evidence that is not represented by [`DataWorkload`] for one
 /// incrementally maintained summary deployment. Window counts describe the
-/// already-selected physical deployment; this layer does not define another
-/// tumbling/sliding policy enum.
+/// downstream realization used to cost one Planner window-framework
+/// candidate; they do not identify a concrete runtime implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StreamingPhysicalInputEvidence {
     /// Logical bytes in the snapshot used to bootstrap the state.
@@ -308,6 +310,40 @@ pub struct StreamingRawInputEvidence {
     pub physical_dag: StreamingPhysicalDagEvidence,
 }
 
+/// One per-state window choice within a complete Planner candidate.
+#[derive(Debug, Clone)]
+pub struct StreamingWindowFrameworkAssignment {
+    pub summary: Rc<SummaryNode>,
+    /// `None` explicitly means that this state is not window-organized.
+    pub framework: Option<SummaryWindowFramework>,
+}
+
+/// Cost evidence for one complete abstract window-framework assignment across
+/// a summary DAG in Planner search.
+///
+/// The provider may derive this evidence from a concrete downstream
+/// implementation under the current data workload, but implementation and
+/// deployment identities are deliberately not part of this Planner value.
+#[derive(Debug, Clone)]
+pub struct StreamingWindowFrameworkCandidate {
+    /// Exactly one assignment for every summary deployment in the DAG.
+    pub assignments: Vec<StreamingWindowFrameworkAssignment>,
+    pub node_evidence: StreamingNodeEvidence,
+}
+
+fn same_window_assignment(
+    left: &StreamingWindowFrameworkCandidate,
+    right: &StreamingWindowFrameworkCandidate,
+) -> bool {
+    left.assignments.len() == right.assignments.len()
+        && left.assignments.iter().all(|left_assignment| {
+            right.assignments.iter().any(|right_assignment| {
+                Rc::ptr_eq(&left_assignment.summary, &right_assignment.summary)
+                    && left_assignment.framework == right_assignment.framework
+            })
+        })
+}
+
 /// Adapter that supplies the existing lifecycle planner with analytical
 /// streaming costs. It does not define lifecycle policy: the planner's
 /// existing enums and legality checks remain authoritative.
@@ -318,6 +354,8 @@ pub struct StreamingAnalyticalCostModel {
     pub capabilities: SummaryMaintenanceCapabilities,
     target_comparisons: HashMap<*const QueryExpr, StreamingTargetComparison>,
     candidate_comparisons: HashSet<(*const QueryExpr, *const SummaryNode)>,
+    window_framework_candidates:
+        HashMap<(*const QueryExpr, *const SummaryNode), Vec<StreamingWindowFrameworkCandidate>>,
 }
 
 #[derive(Debug, Clone)]
@@ -632,6 +670,7 @@ impl StreamingAnalyticalCostModel {
             capabilities,
             target_comparisons: HashMap::new(),
             candidate_comparisons: HashSet::new(),
+            window_framework_candidates: HashMap::new(),
         }
     }
 
@@ -665,6 +704,55 @@ impl StreamingAnalyticalCostModel {
             .or_insert(StreamingTargetComparison { scope, raw });
         self.candidate_comparisons
             .insert((target_ptr, Rc::as_ptr(root)));
+        Ok(())
+    }
+
+    /// Add one complete abstract window assignment to Planner candidate search.
+    ///
+    /// The evidence describes the cheapest executor-feasible realization the
+    /// downstream provider can supply for this framework and data workload.
+    /// Concrete implementation, placement, and deployment IDs stay with the
+    /// provider. Providers must collapse concrete implementations to the
+    /// cheapest evidence for each distinct abstract assignment.
+    pub fn bind_window_framework_candidate(
+        &mut self,
+        target: &Rc<QueryExpr>,
+        root: &Rc<SummaryNode>,
+        candidate: StreamingWindowFrameworkCandidate,
+    ) -> Result<(), AnalyticalCostError> {
+        let key = (Rc::as_ptr(target), Rc::as_ptr(root));
+        if !self.candidate_comparisons.contains(&key) {
+            return Err(AnalyticalCostError::MissingOrStale(
+                "candidate comparison binding",
+            ));
+        }
+        if candidate.assignments.is_empty() {
+            return Err(AnalyticalCostError::MissingOrZero(
+                "window framework assignments",
+            ));
+        }
+        let mut assigned = HashSet::new();
+        if candidate.assignments.iter().any(|assignment| {
+            !assigned.insert(Rc::as_ptr(&assignment.summary))
+                || matches!(
+                    &assignment.framework,
+                    Some(SummaryWindowFramework::Extension(name)) if name.trim().is_empty()
+                )
+        }) {
+            return Err(AnalyticalCostError::MissingOrZero(
+                "unique window framework assignments",
+            ));
+        }
+        let candidates = self.window_framework_candidates.entry(key).or_default();
+        if candidates
+            .iter()
+            .any(|existing| same_window_assignment(existing, &candidate))
+        {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "window framework candidate",
+            ));
+        }
+        candidates.push(candidate);
         Ok(())
     }
 
@@ -837,8 +925,57 @@ impl CostModel for StreamingAnalyticalCostModel {
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
     ) -> Option<Cost> {
-        let (_, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
-        self.complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
+        self.complete_summary_candidate_estimate(root, target, deployments, horizon, expected_reads)
+            .map(|estimate| estimate.cost)
+    }
+
+    fn complete_summary_candidate_estimate(
+        &self,
+        root: &SummaryNode,
+        target: Option<&QueryExpr>,
+        deployments: &[CostedSummaryDeployment<'_>],
+        horizon: Option<crate::recurrence::Horizon>,
+        expected_reads: Option<f64>,
+    ) -> Option<CompleteSummaryCandidateEstimate> {
+        let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
+        let Some(candidates) = self.window_framework_candidates.get(&key) else {
+            return self
+                .complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
+                .map(|cost| CompleteSummaryCandidateEstimate {
+                    cost,
+                    window_frameworks: vec![None; deployments.len()],
+                });
+        };
+        candidates
+            .iter()
+            .filter_map(|candidate| {
+                if candidate.assignments.len() != deployments.len() {
+                    return None;
+                }
+                let window_frameworks = deployments
+                    .iter()
+                    .map(|deployment| {
+                        candidate
+                            .assignments
+                            .iter()
+                            .find(|assignment| {
+                                std::ptr::eq(assignment.summary.as_ref(), deployment.summary)
+                            })
+                            .map(|assignment| assignment.framework.clone())
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                self.complete_cost_with_evidence(
+                    root,
+                    deployments,
+                    comparison,
+                    &candidate.node_evidence,
+                )
+                .map(|cost| CompleteSummaryCandidateEstimate {
+                    cost,
+                    window_frameworks,
+                })
+            })
+            .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0))
     }
 
     fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
@@ -3141,6 +3278,134 @@ mod tests {
                 .as_ref()
                 .map(|guarantee| &guarantee.summary_maintenance_lifecycle),
             Some(SummaryMaintenanceLifecycle::Ephemeral)
+        ));
+    }
+
+    #[test]
+    fn planner_selects_an_abstract_window_framework_from_downstream_evidence() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            unreachable!();
+        };
+        let windowed_summary = Rc::clone(summary_input);
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+
+        let mut tumbling = model.node_evidence.clone();
+        for aggregate in tumbling.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 1;
+            aggregate.inputs.retained_window_count = 20;
+        }
+        let mut sliding = model.node_evidence.clone();
+        for aggregate in sliding.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 10;
+            aggregate.inputs.retained_window_count = 10;
+        }
+        let mut exponential_histogram = model.node_evidence.clone();
+        for aggregate in exponential_histogram.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 2;
+            aggregate.inputs.retained_window_count = 2;
+        }
+        for candidate in [
+            StreamingWindowFrameworkCandidate {
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::Tumbling),
+                }],
+                node_evidence: tumbling,
+            },
+            StreamingWindowFrameworkCandidate {
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::Sliding),
+                }],
+                node_evidence: sliding,
+            },
+            StreamingWindowFrameworkCandidate {
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::ExponentialHistogram),
+                }],
+                node_evidence: exponential_histogram,
+            },
+        ] {
+            model
+                .bind_window_framework_candidate(&target, &root, candidate)
+                .unwrap();
+        }
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: false,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: true,
+            },
+            &model,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.deployments[0].selected_window_framework,
+            Some(SummaryWindowFramework::ExponentialHistogram)
+        );
+        assert_eq!(
+            crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan)
+                .deployments[0]
+                .selected_window_framework,
+            Some(SummaryWindowFramework::ExponentialHistogram)
+        );
+    }
+
+    #[test]
+    fn window_framework_candidates_require_unique_nonempty_planner_primitives() {
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            unreachable!();
+        };
+        let windowed_summary = Rc::clone(summary_input);
+        let mut model = streaming_model();
+        bind_comparison(&mut model, &target, &root);
+
+        let empty = model.bind_window_framework_candidate(
+            &target,
+            &root,
+            StreamingWindowFrameworkCandidate {
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::Extension("  ".into())),
+                }],
+                node_evidence: model.node_evidence.clone(),
+            },
+        );
+        assert!(matches!(empty, Err(AnalyticalCostError::MissingOrZero(_))));
+
+        let candidate = StreamingWindowFrameworkCandidate {
+            assignments: vec![StreamingWindowFrameworkAssignment {
+                summary: windowed_summary,
+                framework: Some(SummaryWindowFramework::Tumbling),
+            }],
+            node_evidence: model.node_evidence.clone(),
+        };
+        model
+            .bind_window_framework_candidate(&target, &root, candidate.clone())
+            .unwrap();
+        assert!(matches!(
+            model.bind_window_framework_candidate(&target, &root, candidate),
+            Err(AnalyticalCostError::ComparisonScopeMismatch(_))
         ));
     }
 
