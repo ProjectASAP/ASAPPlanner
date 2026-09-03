@@ -22,9 +22,7 @@ use crate::analytical_cost::{
     PhysicalOperator, ResourceCalibration, ResourceEstimate,
 };
 use crate::analytical_statistics::{ComparisonScope, EdgeStatistics, OperatorStatistics};
-use crate::cost_model::{
-    CompleteSummaryCandidateEstimate, Cost, CostModel, CostedSummaryDeployment, DefaultCostModel,
-};
+use crate::cost_model::{Cost, CostModel, CostedSummaryDeployment, DefaultCostModel};
 use crate::recurrence::CostRate;
 use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
 use crate::summary_maintenance_lifecycle::{
@@ -310,17 +308,6 @@ pub struct StreamingRawInputEvidence {
     pub physical_dag: StreamingPhysicalDagEvidence,
 }
 
-/// One complete, provider-enumerated physical implementation of a streaming
-/// summary DAG. `physical_plan_id` deliberately remains provider-owned: it
-/// can name tumbling, sliding, PromSketch exponential-histogram, or a future
-/// framework without extending a planner enum. The evidence must cover the
-/// entire candidate DAG; incomplete alternatives are unavailable.
-#[derive(Debug, Clone)]
-pub struct StreamingPhysicalPlanAlternative {
-    pub physical_plan_id: String,
-    pub node_evidence: StreamingNodeEvidence,
-}
-
 /// Adapter that supplies the existing lifecycle planner with analytical
 /// streaming costs. It does not define lifecycle policy: the planner's
 /// existing enums and legality checks remain authoritative.
@@ -332,8 +319,6 @@ pub struct StreamingAnalyticalCostModel {
     target_comparisons: HashMap<*const QueryExpr, StreamingTargetComparison>,
     candidate_comparisons:
         HashMap<(*const QueryExpr, *const SummaryNode), StreamingCandidateIdentity>,
-    physical_plan_alternatives:
-        HashMap<(*const QueryExpr, *const SummaryNode), Vec<StreamingPhysicalPlanAlternative>>,
 }
 
 #[derive(Debug, Clone)]
@@ -655,7 +640,6 @@ impl StreamingAnalyticalCostModel {
             capabilities,
             target_comparisons: HashMap::new(),
             candidate_comparisons: HashMap::new(),
-            physical_plan_alternatives: HashMap::new(),
         }
     }
 
@@ -697,39 +681,6 @@ impl StreamingAnalyticalCostModel {
                 _target: Rc::clone(target),
                 _root: Rc::clone(root),
             });
-        Ok(())
-    }
-
-    /// Add a complete physical implementation to the candidate space for an
-    /// already-bound `(target, root)` comparison. Feasibility and concrete
-    /// window construction remain the provider's responsibility; this model
-    /// compares every supplied implementation over the same scope and
-    /// lifecycle combinations.
-    pub fn bind_physical_plan_alternative(
-        &mut self,
-        target: &Rc<QueryExpr>,
-        root: &Rc<SummaryNode>,
-        alternative: StreamingPhysicalPlanAlternative,
-    ) -> Result<(), AnalyticalCostError> {
-        let key = (Rc::as_ptr(target), Rc::as_ptr(root));
-        if !self.candidate_comparisons.contains_key(&key) {
-            return Err(AnalyticalCostError::MissingOrStale(
-                "candidate comparison binding",
-            ));
-        }
-        if alternative.physical_plan_id.trim().is_empty() {
-            return Err(AnalyticalCostError::MissingOrZero("physical_plan_id"));
-        }
-        let alternatives = self.physical_plan_alternatives.entry(key).or_default();
-        if alternatives
-            .iter()
-            .any(|existing| existing.physical_plan_id == alternative.physical_plan_id)
-        {
-            return Err(AnalyticalCostError::ComparisonScopeMismatch(
-                "physical plan identity",
-            ));
-        }
-        alternatives.push(alternative);
         Ok(())
     }
 
@@ -902,57 +853,8 @@ impl CostModel for StreamingAnalyticalCostModel {
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
     ) -> Option<Cost> {
-        let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
-        match self.physical_plan_alternatives.get(&key) {
-            Some(alternatives) => alternatives
-                .iter()
-                .filter_map(|alternative| {
-                    self.complete_cost_with_evidence(
-                        root,
-                        deployments,
-                        comparison,
-                        &alternative.node_evidence,
-                    )
-                })
-                .min_by(|left, right| left.0.total_cmp(&right.0)),
-            None => {
-                self.complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
-            }
-        }
-    }
-
-    fn complete_summary_candidate_estimate(
-        &self,
-        root: &SummaryNode,
-        target: Option<&QueryExpr>,
-        deployments: &[CostedSummaryDeployment<'_>],
-        horizon: Option<crate::recurrence::Horizon>,
-        expected_reads: Option<f64>,
-    ) -> Option<CompleteSummaryCandidateEstimate> {
-        let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
-        let Some(alternatives) = self.physical_plan_alternatives.get(&key) else {
-            return self
-                .complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
-                .map(|cost| CompleteSummaryCandidateEstimate {
-                    cost,
-                    physical_plan_id: None,
-                });
-        };
-        alternatives
-            .iter()
-            .filter_map(|alternative| {
-                self.complete_cost_with_evidence(
-                    root,
-                    deployments,
-                    comparison,
-                    &alternative.node_evidence,
-                )
-                .map(|cost| CompleteSummaryCandidateEstimate {
-                    cost,
-                    physical_plan_id: Some(alternative.physical_plan_id.clone()),
-                })
-            })
-            .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0))
+        let (_, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
+        self.complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
     }
 
     fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
@@ -3272,81 +3174,6 @@ mod tests {
                 .map(|guarantee| &guarantee.summary_maintenance_lifecycle),
             Some(SummaryMaintenanceLifecycle::Ephemeral)
         ));
-    }
-
-    #[test]
-    fn complete_streaming_cost_ranks_provider_owned_window_frameworks() {
-        let workload = streaming_workload();
-        let target = streaming_sum_query();
-        let root = summary_with_operations(false, false, false);
-        let mut model = streaming_model();
-        bind_aggregations(
-            &mut model,
-            &target,
-            &root,
-            streaming_inputs(),
-            streaming_cpu(),
-        );
-
-        let mut tumbling = model.node_evidence.clone();
-        for aggregate in tumbling.aggregations.values_mut() {
-            aggregate.inputs.active_window_count = 1;
-            aggregate.inputs.retained_window_count = 20;
-        }
-        let mut sliding = model.node_evidence.clone();
-        for aggregate in sliding.aggregations.values_mut() {
-            aggregate.inputs.active_window_count = 10;
-            aggregate.inputs.retained_window_count = 10;
-        }
-        let mut exponential_histogram = model.node_evidence.clone();
-        for aggregate in exponential_histogram.aggregations.values_mut() {
-            aggregate.inputs.active_window_count = 2;
-            aggregate.inputs.retained_window_count = 2;
-        }
-        for alternative in [
-            StreamingPhysicalPlanAlternative {
-                physical_plan_id: "tumbling".into(),
-                node_evidence: tumbling,
-            },
-            StreamingPhysicalPlanAlternative {
-                physical_plan_id: "sliding".into(),
-                node_evidence: sliding,
-            },
-            StreamingPhysicalPlanAlternative {
-                physical_plan_id: "promsketch_exponential_histogram".into(),
-                node_evidence: exponential_histogram,
-            },
-        ] {
-            model
-                .bind_physical_plan_alternative(&target, &root, alternative)
-                .unwrap();
-        }
-
-        let plan = plan_summary_maintenance_lifecycles(
-            root,
-            WorkloadDemand::new(&workload, &[0]),
-            0,
-            Some(Horizon(5.0)),
-            SummaryMaintenanceLifecycleCapabilities {
-                supports_ephemeral: false,
-                supports_prepared: false,
-                supports_shared: false,
-                supports_continuously_maintained: true,
-            },
-            &model,
-        )
-        .unwrap();
-
-        assert_eq!(
-            plan.selected_physical_plan_id.as_deref(),
-            Some("promsketch_exponential_histogram")
-        );
-        assert_eq!(
-            crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan)
-                .selected_physical_plan_id
-                .as_deref(),
-            Some("promsketch_exponential_histogram")
-        );
     }
 
     #[test]

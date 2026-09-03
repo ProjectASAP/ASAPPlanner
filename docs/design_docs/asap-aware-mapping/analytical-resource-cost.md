@@ -503,33 +503,33 @@ overlapping active windows multiply insert work and state; retained windows
 consume persistent memory; and merge/subtract/readout are charged at query
 recurrence.
 
-The documents disagree on important details. One limits subtract to
-non-overlapping/tumbling prefix states and charges all retained windows as
-steady-state memory; the other permits subtract over sliding configurations
-and omits retained-but-unused sliding storage from continuous memory. ASAPPlanner
-therefore does not encode those assumptions in a second closed window enum.
-Instead, the physical-plan provider enumerates every semantically and
-operationally feasible complete implementation. Its stable, provider-owned ID
-may identify a tumbling layout, a sliding layout, a PromSketch exponential
-histogram, or another window framework. Each alternative binds complete
-per-node evidence, including bootstrap routing, active and retained window
-counts, state size, operations, and source coverage.
+The documents disagree on important physical details. One limits subtract to
+non-overlapping prefix states and charges all retained states as steady-state
+memory; the other permits subtract over overlapping configurations and omits
+retained-but-unused state from continuous memory. ASAPPlanner therefore does
+not encode or select a window framework. It owns logical query-time semantics,
+summary-family selection, accuracy, and lifecycle legality. The downstream
+physical compiler owns window construction, panes, retention layout,
+placement, sharding, and executor capability checks.
 
-The planner takes the Cartesian product of legal lifecycle combinations and
-those physical alternatives and prices each combination over the same
-`ComparisonScope`. Missing evidence makes that physical alternative
-unavailable; it cannot win through an optimistic zero. The cheapest complete
-combination is selected, and its provider-owned physical-plan ID is retained in
-the lifecycle plan and DAG export. Thus window *legality and enumeration* stay
-with the physical provider, while cost-based *selection* belongs to the
-planner. `SummarySubtract` is charged only when it is an actual physical DAG
-node, and every physically retained window in the chosen evidence is charged.
+For one physical implementation already chosen by that compiler,
+`StreamingNodeEvidence` supplies complete per-node resource facts such as
+bootstrap routing, active and retained state counts, state size, operations,
+and source coverage. ASAPPlanner can use that evidence to compare lifecycle
+combinations over one `ComparisonScope`, but it neither enumerates physical
+implementations nor returns a physical-plan identifier. A downstream
+orchestrator that wants to compare several physical implementations invokes
+the planner once per complete evidence bundle and keeps the physical identity
+outside the planner result. Missing evidence makes that invocation unavailable;
+it cannot win through an optimistic zero. `SummarySubtract` is charged only
+when it is an actual evidence DAG node, and every physically retained state in
+the supplied implementation is charged.
 
 The global facility-location/MIP decisions from those documents—deploying one
 configuration and assigning multiple atomic queries to it—remain outside this
-candidate-local comparison. The open physical-alternative interface does not
-introduce `x`/`y` assignment variables; a future workload-level optimizer may
-use the same complete estimates as coefficients.
+candidate-local comparison. A downstream workload-level optimizer may use the
+complete estimates as coefficients while retaining ownership of physical
+configuration identities and assignment variables.
 
 ## Accuracy evidence remains separate from cost
 
