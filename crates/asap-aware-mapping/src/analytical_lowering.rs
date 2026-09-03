@@ -808,7 +808,7 @@ mod tests {
     ) -> SourceCoverage {
         SourceCoverage {
             source,
-            snapshot_id: "snapshot-1".into(),
+            source_snapshot_id: "snapshot-1".into(),
             predicates,
         }
     }
@@ -1411,7 +1411,7 @@ mod tests {
         );
 
         let mut second_snapshot = comparison_scope.sources[0].clone();
-        second_snapshot.snapshot_id = "snapshot-2".into();
+        second_snapshot.source_snapshot_id = "snapshot-2".into();
         let ambiguous_scope = scope(vec![comparison_scope.sources[0].clone(), second_snapshot]);
         assert_eq!(
             lower_query_physical_dag(&root, &ambiguous_scope, &scripted(&conflicting)),

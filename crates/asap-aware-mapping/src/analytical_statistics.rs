@@ -76,7 +76,10 @@ impl ComparisonScope {
         if self.sources.is_empty() {
             return Err(AnalyticalCostError::MissingComparisonScope("sources"));
         }
-        if self.sources.iter().enumerate()
+        if self
+            .sources
+            .iter()
+            .enumerate()
             .any(|(index, source)| self.sources[..index].contains(source))
         {
             return Err(AnalyticalCostError::MissingComparisonScope(
