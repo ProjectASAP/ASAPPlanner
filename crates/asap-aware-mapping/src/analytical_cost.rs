@@ -261,6 +261,7 @@ pub fn estimate_operator(
     operator: PhysicalOperator,
     input: OperatorInputs,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
+    validate_operator_semantics(operator, &input)?;
     let per_row_width = |rows: u64, bytes: u64| -> Result<u64, AnalyticalCostError> {
         if rows == 0 || bytes == 0 {
             return Err(AnalyticalCostError::MissingOrZero("operator rows/bytes"));
@@ -387,6 +388,63 @@ pub fn estimate_operator(
     }
 }
 
+fn validate_operator_semantics(
+    operator: PhysicalOperator,
+    input: &OperatorInputs,
+) -> Result<(), AnalyticalCostError> {
+    let inconsistent = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
+    match operator {
+        PhysicalOperator::Scan => {
+            if input.input_rows != input.output_rows || input.input_bytes != input.output_bytes {
+                return inconsistent("Scan input and output edges differ");
+            }
+        }
+        PhysicalOperator::Filter => {
+            if input.output_rows > input.input_rows || input.output_bytes > input.input_bytes {
+                return inconsistent("Filter output expands its input");
+            }
+        }
+        PhysicalOperator::Project => {
+            if input.output_rows != input.input_rows {
+                return inconsistent("Project changes row cardinality");
+            }
+        }
+        PhysicalOperator::HashAggregate | PhysicalOperator::Deduplicate => {
+            let groups = input
+                .group_count
+                .filter(|groups| *groups > 0)
+                .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
+            if groups > input.input_rows || input.output_rows != groups {
+                return inconsistent("grouped output differs from distinct group cardinality");
+            }
+        }
+        PhysicalOperator::Sort
+        | PhysicalOperator::Window
+        | PhysicalOperator::PassThrough
+        | PhysicalOperator::Concat => {
+            if input.input_rows != input.output_rows || input.input_bytes != input.output_bytes {
+                return inconsistent("cardinality-preserving operator changes its edge");
+            }
+        }
+        PhysicalOperator::TopK => {
+            let k = input
+                .k
+                .filter(|k| *k > 0)
+                .ok_or(AnalyticalCostError::MissingOrZero("k"))?;
+            if input.output_rows != input.input_rows.min(k) {
+                return inconsistent("Top-K output differs from its cardinality bound");
+            }
+        }
+        PhysicalOperator::Limit => {
+            if input.output_rows > input.input_rows {
+                return inconsistent("Limit output exceeds its input");
+            }
+        }
+        PhysicalOperator::HashJoin => {}
+    }
+    Ok(())
+}
+
 impl ResourceEstimate {
     pub fn calibrated_cost(
         self,
@@ -430,6 +488,51 @@ fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unary_inputs(input_rows: u64, output_rows: u64) -> OperatorInputs {
+        OperatorInputs {
+            input_rows,
+            input_bytes: input_rows.saturating_mul(8),
+            output_rows,
+            output_bytes: output_rows.saturating_mul(8),
+            group_count: None,
+            key_bytes: None,
+            aggregate_value_bytes: None,
+            k: None,
+            limit_rows_consumed: None,
+            right_rows: None,
+            right_bytes: None,
+            hash_join_build_side: None,
+        }
+    }
+
+    #[test]
+    fn operator_estimator_rejects_contradictory_cardinality_evidence() {
+        assert!(matches!(
+            estimate_operator(PhysicalOperator::Filter, unary_inputs(10, 11)),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+        assert!(matches!(
+            estimate_operator(PhysicalOperator::Project, unary_inputs(10, 9)),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+
+        let mut aggregate = unary_inputs(10, 3);
+        aggregate.group_count = Some(2);
+        aggregate.key_bytes = Some(8);
+        aggregate.aggregate_value_bytes = Some(8);
+        assert!(matches!(
+            estimate_operator(PhysicalOperator::HashAggregate, aggregate),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+
+        let mut topk = unary_inputs(10, 4);
+        topk.k = Some(3);
+        assert!(matches!(
+            estimate_operator(PhysicalOperator::TopK, topk),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
+        ));
+    }
 
     #[test]
     fn physical_operator_formulas_keep_disk_at_scan_and_require_join_stats() {
