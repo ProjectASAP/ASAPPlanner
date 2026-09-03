@@ -401,7 +401,7 @@ impl StreamingWindowAccuracyEvidence {
             Self::ExponentialHistogram(ExponentialHistogramAccuracyEvidence::KllRank {
                 ..
             }) => {
-                !eh_summaries.is_empty()
+                eh_summaries.len() == 1
                     && eh_summaries.iter().all(|assignment| {
                         matches!(
                             &assignment.summary.expr,
@@ -415,7 +415,7 @@ impl StreamingWindowAccuracyEvidence {
             Self::ExponentialHistogram(ExponentialHistogramAccuracyEvidence::UniversalGsum {
                 ..
             }) => {
-                !eh_summaries.is_empty()
+                eh_summaries.len() == 1
                     && eh_summaries.iter().all(|assignment| {
                         matches!(
                             &assignment.summary.expr,
@@ -448,22 +448,36 @@ impl StreamingWindowAccuracyEvidence {
                         kll_epsilon,
                         failure_probability,
                         range,
-                    } => (
-                        ErrorMetric::Rank,
-                        2.0 * eh_epsilon * range.suffix_to_query_ratio()? + kll_epsilon,
-                        failure_probability,
-                        "promsketch_eh_kll_rank",
-                    ),
+                    } => {
+                        if !eh_epsilon.is_finite()
+                            || eh_epsilon < 0.0
+                            || !kll_epsilon.is_finite()
+                            || kll_epsilon < 0.0
+                        {
+                            return None;
+                        }
+                        (
+                            ErrorMetric::Rank,
+                            2.0 * eh_epsilon * range.suffix_to_query_ratio()? + kll_epsilon,
+                            failure_probability,
+                            "promsketch_eh_kll_rank",
+                        )
+                    }
                     ExponentialHistogramAccuracyEvidence::UniversalGsum {
                         epsilon,
                         failure_probability,
                         range,
-                    } => (
-                        ErrorMetric::RelativeValue,
-                        epsilon * range.suffix_to_query_ratio()?,
-                        failure_probability,
-                        "promsketch_eh_universal_gsum",
-                    ),
+                    } => {
+                        if !epsilon.is_finite() || epsilon < 0.0 {
+                            return None;
+                        }
+                        (
+                            ErrorMetric::RelativeValue,
+                            epsilon * range.suffix_to_query_ratio()?,
+                            failure_probability,
+                            "promsketch_eh_universal_gsum",
+                        )
+                    }
                 };
                 if !bound.is_finite()
                     || bound < 0.0
@@ -487,6 +501,36 @@ impl StreamingWindowAccuracyEvidence {
                 })
             }
             Self::ExponentialHistogram(_) => None,
+        }
+    }
+
+    fn end_to_end_guarantee(
+        &self,
+        uses_exponential_histogram: bool,
+        summary_guarantee: Option<&ResultGuarantee>,
+    ) -> Option<ResultGuarantee> {
+        let summary = summary_guarantee?;
+        match self {
+            Self::Exact if !uses_exponential_histogram => Some(summary.clone()),
+            Self::ExponentialHistogram(ExponentialHistogramAccuracyEvidence::KllRank {
+                kll_epsilon,
+                failure_probability,
+                ..
+            }) if uses_exponential_histogram => {
+                let summary_bound = summary.bound.evaluate()?;
+                let summary_failure = summary.failure_probability.evaluate()?;
+                if summary.metric != ErrorMetric::Rank
+                    || summary_bound != *kll_epsilon
+                    || summary_failure != *failure_probability
+                {
+                    return None;
+                }
+                self.guarantee(true)
+            }
+            Self::ExponentialHistogram(ExponentialHistogramAccuracyEvidence::UniversalGsum {
+                ..
+            }) if uses_exponential_histogram && summary.is_exact() => self.guarantee(true),
+            _ => None,
         }
     }
 }
@@ -1171,8 +1215,9 @@ impl CostModel for StreamingAnalyticalCostModel {
                         Some(SummaryWindowFramework::ExponentialHistogram)
                     )
                 });
-                let window_accuracy_guarantee =
-                    candidate.accuracy.guarantee(uses_exponential_histogram)?;
+                let window_accuracy_guarantee = candidate
+                    .accuracy
+                    .end_to_end_guarantee(uses_exponential_histogram, root.guarantee.as_ref())?;
                 if !required_accuracy.iter().all(|target| {
                     DefaultAccuracyModel.satisfies(&window_accuracy_guarantee, target)
                 }) {
@@ -3884,6 +3929,37 @@ mod tests {
     }
 
     #[test]
+    fn eh_accuracy_rejects_negative_components_and_mismatched_summary_guarantees() {
+        let evidence = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::KllRank {
+                eh_epsilon: -0.01,
+                kll_epsilon: 0.03,
+                failure_probability: 0.01,
+                range: ExponentialHistogramQueryRange::MostRecentWindow,
+            },
+        );
+        assert!(evidence.guarantee(true).is_none());
+
+        let evidence = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::KllRank {
+                eh_epsilon: 0.01,
+                kll_epsilon: 0.02,
+                failure_probability: 0.01,
+                range: ExponentialHistogramQueryRange::MostRecentWindow,
+            },
+        );
+        let actual_summary = ResultGuarantee {
+            metric: ErrorMetric::Rank,
+            bound: BoundExpr::Constant { value: 0.03 },
+            failure_probability: ProbabilityExpr::Constant { value: 0.01 },
+            provenance: vec![],
+        };
+        assert!(evidence
+            .end_to_end_guarantee(true, Some(&actual_summary))
+            .is_none());
+    }
+
+    #[test]
     fn exponential_histogram_without_registered_accuracy_composition_fails_closed() {
         let mut workload = streaming_workload();
         workload.repeating_queries.as_mut().unwrap()[0]
@@ -4425,7 +4501,7 @@ mod tests {
                 },
             },
             schema,
-            guarantee: None,
+            guarantee: Some(ResultGuarantee::exact("exact count readout")),
         })
     }
 
