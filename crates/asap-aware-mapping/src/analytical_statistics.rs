@@ -199,6 +199,10 @@ pub struct OperatorStatistics {
     pub key_bytes: Option<u64>,
     pub aggregate_value_bytes: Option<u64>,
     pub k: Option<u64>,
+    /// Rows consumed by a physical Limit, including rows skipped by OFFSET.
+    /// This is an execution statistic rather than the output cardinality.
+    #[serde(default)]
+    pub limit_rows_consumed: Option<u64>,
     pub hash_join_build_side: Option<HashJoinBuildSide>,
 }
 
