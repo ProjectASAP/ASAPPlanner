@@ -79,6 +79,16 @@ impl ComparisonScope {
         if self
             .sources
             .iter()
+            .enumerate()
+            .any(|(index, source)| self.sources[..index].contains(source))
+        {
+            return Err(AnalyticalCostError::MissingComparisonScope(
+                "duplicate source coverage",
+            ));
+        }
+        if self
+            .sources
+            .iter()
             .any(|source| source.source_snapshot_id.is_empty())
         {
             return Err(AnalyticalCostError::MissingComparisonScope(
@@ -110,7 +120,14 @@ pub fn validate_comparison_scopes(
             "time_selection",
             raw.time_selection == candidate.time_selection,
         ),
-        ("sources", raw.sources == candidate.sources),
+        (
+            "sources",
+            raw.sources.len() == candidate.sources.len()
+                && raw
+                    .sources
+                    .iter()
+                    .all(|source| candidate.sources.contains(source)),
+        ),
     ] {
         if !matches {
             return Err(AnalyticalCostError::ComparisonScopeMismatch(name));
@@ -201,6 +218,14 @@ pub struct BinaryEdgeStatistics {
     pub output: EdgeStatistics,
 }
 
+/// Input distribution for an algorithm that independently orders partitions.
+/// The checked sum of these edges must equal the operator input. A global sort
+/// has exactly one partition; an empty input has no partitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartitionStatistics {
+    pub partitions: Vec<EdgeStatistics>,
+}
+
 /// Workload-dependent evidence for one operator in an already-lowered
 /// physical DAG. [`PhysicalOperator`](crate::analytical_cost::PhysicalOperator)
 /// is the authoritative operator vocabulary: every one of its variants has a
@@ -237,6 +262,7 @@ pub enum OperatorStatistics {
     },
     InMemoryComparisonSort {
         edges: UnaryEdgeStatistics,
+        input_partitioning: PartitionStatistics,
     },
     TopK {
         edges: UnaryEdgeStatistics,
@@ -253,8 +279,9 @@ pub enum OperatorStatistics {
         inputs: Vec<EdgeStatistics>,
         output: EdgeStatistics,
     },
-    InMemoryOrderedWindow {
+    InMemoryAnalyticWindow {
         edges: UnaryEdgeStatistics,
+        input_partitioning: PartitionStatistics,
     },
     Limit {
         edges: UnaryEdgeStatistics,
@@ -274,7 +301,7 @@ impl OperatorStatistics {
             | Self::InMemoryComparisonSort { .. }
             | Self::TopK { .. }
             | Self::HashDeduplicate { .. }
-            | Self::InMemoryOrderedWindow { .. }
+            | Self::InMemoryAnalyticWindow { .. }
             | Self::Limit { .. }
             | Self::PassThrough { .. } => 1,
             Self::HashJoin { .. } => 2,
@@ -289,9 +316,9 @@ impl OperatorStatistics {
             | Self::HashDeduplicate { edges, .. } => (index == 0).then_some(edges.input),
             Self::Filter { edges }
             | Self::Project { edges }
-            | Self::InMemoryComparisonSort { edges }
+            | Self::InMemoryComparisonSort { edges, .. }
             | Self::TopK { edges }
-            | Self::InMemoryOrderedWindow { edges }
+            | Self::InMemoryAnalyticWindow { edges, .. }
             | Self::Limit { edges }
             | Self::PassThrough { edges } => (index == 0).then_some(edges.input),
             Self::HashJoin { edges } => edges.inputs.get(index).copied(),
@@ -306,9 +333,9 @@ impl OperatorStatistics {
             | Self::HashDeduplicate { edges, .. } => edges.output,
             Self::Filter { edges }
             | Self::Project { edges }
-            | Self::InMemoryComparisonSort { edges }
+            | Self::InMemoryComparisonSort { edges, .. }
             | Self::TopK { edges }
-            | Self::InMemoryOrderedWindow { edges }
+            | Self::InMemoryAnalyticWindow { edges, .. }
             | Self::Limit { edges }
             | Self::PassThrough { edges } => edges.output,
             Self::HashJoin { edges } => edges.output,

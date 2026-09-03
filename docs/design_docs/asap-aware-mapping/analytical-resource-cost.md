@@ -13,10 +13,15 @@ and guarantee composition run first; costing ranks only the candidates that
 survive. Missing evidence produces an unavailable estimate, never an assumed
 zero or a structural-cost fallback.
 
-The physical-DAG estimator composes any DAG whose nodes have supported
-physical operators and complete `OperatorStatistics`. Query lowering and
-planner selection are separate integration layers; neither may substitute a
-shape-specific shortcut or structural node count.
+This document distinguishes three implementation layers:
+
+- the physical-DAG estimator, which can compose any DAG whose nodes have
+  supported physical operators and complete `OperatorStatistics`; and
+- query-DAG lowering, which recursively maps supported resolved `QueryExpr`
+  operators to that physical representation; and
+- replacement lowering and ranking, which must compare complete alternatives.
+
+No layer may substitute a shape-specific shortcut or structural node count.
 
 An estimate has physical dimensions:
 
@@ -199,7 +204,10 @@ OperatorStatistics =
         key_bytes,
         accumulator_bytes_per_group,
     }
-  | InMemoryComparisonSort { edges: UnaryEdgeStatistics }
+  | InMemoryComparisonSort {
+        edges: UnaryEdgeStatistics,
+        input_partitioning: PartitionStatistics,
+    }
   | TopK { edges: UnaryEdgeStatistics }
   | HashJoin { edges: BinaryEdgeStatistics }
   | HashDeduplicate {
@@ -208,7 +216,10 @@ OperatorStatistics =
         key_bytes,
     }
   | Concat { inputs, output }
-  | InMemoryOrderedWindow { edges: UnaryEdgeStatistics }
+  | InMemoryAnalyticWindow {
+        edges: UnaryEdgeStatistics,
+        input_partitioning: PartitionStatistics,
+    }
   | Limit { edges: UnaryEdgeStatistics }
   | PassThrough { edges: UnaryEdgeStatistics }
 }
@@ -231,9 +242,15 @@ Physical configuration is not catalog evidence and therefore lives on
 
 | Physical operator | Configuration owned by the plan |
 |---|---|
-| `TopK` | output `limit` and `offset`; heap capacity is `limit + offset` |
+| `Filter` | predicate operations per input row |
+| `Project` | expression/copy operations per input row |
+| `HashAggregate` | grouping-key and accumulator counts |
+| `InMemoryComparisonSort` | ordering-key count and whether ordering is partitioned |
+| `TopK` | output `limit`, `offset`, and ordering-key count; heap capacity is `limit + offset` |
 | `Limit` | output `limit` and `offset` |
-| `HashJoin` | left or right build side |
+| `HashJoin` | left or right build side and equality-key count |
+| `HashDeduplicate` | deduplication-key count |
+| `InMemoryAnalyticWindow` | partition/order-key counts and window-function work per row |
 
 This distinction removes the former flat optional `k` field. A Top-K bound is
 part of the chosen algorithm, while input/output cardinality and width are
@@ -271,7 +288,16 @@ DAG-child counts must both be defined.
 Compression, column pruning, or encoded storage can therefore make these
 values different; neither is inferred from the other. Other statistics
 variants have no source-read field, so charging source I/O at a non-scan node
-is not representable.
+is not representable. A non-empty Scan must report positive source-read bytes;
+zero cannot stand in for missing I/O evidence.
+
+Hash-aggregate validation distinguishes logical grouping from the workload's
+observed number of groups. An ungrouped aggregate has
+`grouping_key_count = 0`, `key_bytes = 0`, and `group_count = 1`, including on
+empty input because SQL scalar aggregation still emits one row. A grouped
+aggregate has at least one grouping key and positive encoded key width, but it
+may report `group_count = 0` when its input is empty. In both cases output rows
+must equal `group_count`.
 
 ### Composition rules
 
@@ -328,6 +354,95 @@ inherit the target's old node costs. A replacement candidate includes any
 newly embedded child summaries, while an independently shared child is
 deduplicated by physical identity.
 
+### Query-DAG lowering and statistics contract
+
+`lower_query_physical_dag` recursively lowers a resolved `Rc<QueryExpr>` and
+returns a `PhysicalDag` containing both its nodes and root ID. It consumes the
+existing query and physical-operator enums; it does not introduce a parallel
+logical operator vocabulary. For every occurrence, the lowerer sends a
+`PhysicalNodeRequest` containing the logical node, selected existing
+`PhysicalOperator`, occurrence and synthetic-role metadata, already-lowered
+child physical IDs, and any source coverage to a
+`PhysicalNodeEvidenceProvider`. The provider atomically returns its own stable
+`physical_id`, the authoritative `OperatorStatistics`, and explicit
+`output_buffer_bytes`; logical edge bytes are never substituted for an
+allocation. Missing evidence makes the entire query unavailable. The returned
+`PhysicalDag` snapshots this evidence so costing does not re-read a live
+catalog after lowering.
+
+Each lowered Scan is bound to exactly one `SourceCoverage` in the comparison
+scope by the existing source and canonical predicate values. The bound value
+therefore also supplies the provider-owned snapshot ID. Zero matches fail as
+outside scope; multiple matching coverages fail as ambiguous rather than
+choosing an arbitrary snapshot. When a predicate-bearing logical Scan expands
+to Scan → Filter, the synthetic Scan has its own physical ID, statistics, and
+buffer evidence and carries that exact coverage; the Filter has separate
+evidence and no source coverage.
+`ComparisonScope.sources` is an order-independent set of semantic coverages;
+duplicates are invalid. After lowering, every reachable physical Scan must use
+a member of that set and every member must be used by at least one Scan.
+Multiple independent physical Scans may use the same coverage, while a
+provider-declared shared Scan uses it once, so those physical alternatives can
+still be compared under the same semantic scope.
+
+The lowering validates every physical edge before costing:
+
+- `(rows = 0, bytes = 0)` is a valid empty edge, while positive rows still
+  require byte-width evidence and zero rows cannot carry non-zero bytes;
+- a unary operator's `input_rows` and `input_bytes` equal its child's output;
+- a Scan's external logical input edge equals its output edge, including the
+  synthetic raw Scan created for a predicate-bearing logical Scan;
+- a hash join's left and right inputs equal the corresponding child outputs;
+- Concat and `UNION ALL` input/output totals equal the checked sum of all
+  child outputs; and
+- row-preserving, reducing, and bounded operators obey their cardinality
+  invariants.
+
+The supported mappings are:
+
+| Existing `QueryExpr` shape | Physical DAG |
+|---|---|
+| Scan without predicates | Scan |
+| Scan with pushed predicates | Scan → Filter |
+| Filter | Filter |
+| Project | Project |
+| Reducing Count/Sum/Min/Max/Avg/StdDev/Variance/Group/CountValues without HAVING | HashAggregate |
+| Dedup | HashDeduplicate |
+| Equi-Join | HashJoin whose build side is selected from child output evidence |
+| Concat or `UNION ALL` | Concat |
+| Sort with at least one ordering key | in-memory Sort |
+| global non-empty-key Sort followed by Limit | heap TopK, with `k = offset + n` from the query IR |
+| partitioned Sort followed by Limit | Sort → Limit |
+| RowNumber/Rank/DenseRank SQLWindowFunc with non-empty order_by | InMemoryAnalyticWindow |
+| identity TimeShift only | PassThrough |
+
+Per-entity reductions, HAVING, ordered/distribution-dependent intents such as
+exact quantile or cardinality, Top-K aggregate intents, and extensions remain
+unavailable until they have an explicit physical algorithm. Hash-join lowering
+also uses the bound left and right output schemas to prove that every equality
+compares one column from each side; same-side or out-of-range `ColumnId`s fail
+closed.
+
+An `Rc<QueryExpr>` address is not physical identity. Every logical occurrence
+is independent unless the provider returns the same non-empty `physical_id`.
+Repeated IDs deduplicate only when operator, children, coverage, statistics,
+and buffer evidence are identical; conflicting reuse fails closed. This
+generic lowering creates raw-query operators with
+`ExecutionMultiplicity::PerEvaluation` and zero retained state. Buffer sizes
+are always provider-owned physical evidence.
+
+The DAG itself implements `OperatorStatisticsProvider` over its evidence
+snapshot. That boundary verifies that each map key equals the evidence's
+embedded physical identity and that every node's buffer equals the provider
+snapshot before returning statistics, preventing the public node and evidence
+views from silently drifting apart.
+
+Cross/non-equi joins, `INTERSECT`, `EXCEPT`, distinct `UNION`, PromQL
+range/subquery execution, vector matching, and PromQL-specific enrichment/
+relabel/sample operators stay unavailable. Their cost requires a physical
+implementation or multiplicity/state facts that the current physical-operator
+vocabulary cannot represent; they are not treated as free pass-through work.
+
 ## Physical operator formulas
 
 Operator estimates are local: child CPU and I/O are excluded and composed by
@@ -336,19 +451,20 @@ the DAG rules above.
 | Physical operator | CPU operations | Local memory | Source/disk reads |
 |---|---:|---:|---:|
 | Scan | `input_rows` | one decoded input row/batch | `source_read_bytes` |
-| Filter | `input_rows` | one output row/batch | `0` |
-| Project or scalar pass-through | `input_rows` | one output row/batch | `0` |
-| Hash aggregate | `input_rows` | `groups × (key_bytes + accumulator_bytes_per_group + hash metadata)` | `0` |
-| Hash deduplicate | `input_rows` | `distinct_key_count × (key_bytes + hash metadata)` | `0` |
-| In-memory comparison sort | `rows × ceil(log2(rows))` | `input_bytes` | `0` |
-| Heap Top-K | `rows × ceil(log2(max(min(limit + offset, rows), 2)))` | `min(limit + offset, rows) × row_bytes` | `0` |
-| Hash join | `left_rows + right_rows + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
+| Filter | `input_rows × predicate_operations_per_row` | one output row/batch | `0` |
+| Project | `input_rows × expression_operations_per_row` | one output row/batch | `0` |
+| Scalar pass-through | `input_rows` | one output row/batch | `0` |
+| Hash aggregate | `input_rows × (grouping_key_count + accumulator_count)` | `groups × (key_bytes + accumulator_bytes_per_group + hash metadata)` | `0` |
+| Hash deduplicate | `input_rows × key_count` | `distinct_key_count × (key_bytes + hash metadata)` | `0` |
+| In-memory comparison sort | `sum(n_i × ceil(log2(n_i)) × ordering_key_count)` | largest partition bytes | `0` |
+| Heap Top-K | `rows × ceil(log2(max(min(limit + offset, rows), 2))) × ordering_key_count` | `min(limit + offset, rows) × row_bytes` | `0` |
+| Hash join | `(left_rows + right_rows) × equality_key_count + output_rows` | selected build-side logical bytes plus 16 bytes of hash metadata per build row | `0` beyond children |
 | Concat | `output_rows` | one output row/batch | `0` |
-| In-memory ordered window | `rows × ceil(log2(rows))` | live partition/input bytes | `0` |
+| In-memory analytic window | per-partition ordering work plus per-row function work | largest partition bytes | `0` |
 | Limit | `min(input_rows, limit + offset)` | one output row/batch | `0` |
 
 These formulas name physical implementations. The enum uses names such as
-`InMemoryComparisonSort`, `HashDeduplicate`, and `InMemoryOrderedWindow` so a
+`InMemoryComparisonSort`, `HashDeduplicate`, and `InMemoryAnalyticWindow` so a
 new algorithm cannot silently inherit a formula merely because it has the
 same logical purpose. An external sort must add spill writes and reads; a
 nested-loop join must not use the hash-join formula.
@@ -403,7 +519,9 @@ children would undercount the plan.
 `estimate_physical_dag` is independent of query shape. A caller supplies the
 complete physical DAG and per-node evidence. Filters, projections, joins,
 windows, nested aggregates, Top-K, and shared sub-DAGs therefore use the same
-estimation path.
+estimation path. The generic query lowerer recursively maps the supported raw
+query operators into that representation. Replacement lowering remains a
+separate layer and must include all summary-maintenance work.
 
 DDSketch is unavailable because occupied bins depend on value range and
 distribution. The model does not invent a bin count. Algorithm/parameter
@@ -454,9 +572,10 @@ The intended end-to-end selection pipeline is:
 5. estimates the complete candidate DAG;
 6. applies calibration and ranks candidates by ascending cost.
 
-This module implements the physical estimation step. Lowering, evidence
-resolution, legality checks, and planner integration remain separate layers;
-each preserves the complete-plan and fail-closed requirements above.
+The query lowerer and physical estimator cover the supported raw-query shapes
+listed above. Replacement evidence resolution, legality checks, and planner
+integration remain separate layers; each preserves the complete-plan and
+fail-closed requirements above.
 
 Before applying the following arithmetic, callers validate exact equality of
 the raw and selected alternative's `ComparisonScope`, and use the same

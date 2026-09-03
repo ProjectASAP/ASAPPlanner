@@ -62,22 +62,44 @@ pub struct ResourceEstimate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PhysicalOperator {
     Scan,
-    Filter,
-    Project,
-    HashAggregate,
-    InMemoryComparisonSort,
+    Filter {
+        /// Scalar predicate operations evaluated for each input row.
+        predicate_operations_per_row: u64,
+    },
+    Project {
+        /// Scalar expression/copy operations evaluated for each input row.
+        expression_operations_per_row: u64,
+    },
+    HashAggregate {
+        grouping_key_count: u64,
+        accumulator_count: u64,
+    },
+    InMemoryComparisonSort {
+        ordering_key_count: u64,
+        partitioned: bool,
+    },
     /// Heap-based bounded ordering. The heap retains `limit + offset` rows
     /// while the operator returns at most `limit` rows after skipping offset.
     TopK {
         limit: u64,
         offset: u64,
+        ordering_key_count: u64,
     },
     HashJoin {
         build_side: HashJoinBuildSide,
+        equality_key_count: u64,
     },
-    HashDeduplicate,
+    HashDeduplicate {
+        key_count: u64,
+    },
     Concat,
-    InMemoryOrderedWindow,
+    /// SQL analytic window evaluated over ordered in-memory partitions. This
+    /// is unrelated to streaming tumbling/sliding/EH window layouts.
+    InMemoryAnalyticWindow {
+        partition_key_count: u64,
+        ordering_key_count: u64,
+        function_operations_per_row: u64,
+    },
     Limit {
         limit: u64,
         offset: u64,
@@ -386,12 +408,14 @@ fn validate_operator_statistics(
 fn statistics_match_operator(operator: PhysicalOperator, statistics: &OperatorStatistics) -> bool {
     match operator {
         PhysicalOperator::Scan => matches!(statistics, OperatorStatistics::Scan { .. }),
-        PhysicalOperator::Filter => matches!(statistics, OperatorStatistics::Filter { .. }),
-        PhysicalOperator::Project => matches!(statistics, OperatorStatistics::Project { .. }),
-        PhysicalOperator::HashAggregate => {
+        PhysicalOperator::Filter { .. } => matches!(statistics, OperatorStatistics::Filter { .. }),
+        PhysicalOperator::Project { .. } => {
+            matches!(statistics, OperatorStatistics::Project { .. })
+        }
+        PhysicalOperator::HashAggregate { .. } => {
             matches!(statistics, OperatorStatistics::HashAggregate { .. })
         }
-        PhysicalOperator::InMemoryComparisonSort => {
+        PhysicalOperator::InMemoryComparisonSort { .. } => {
             matches!(
                 statistics,
                 OperatorStatistics::InMemoryComparisonSort { .. }
@@ -401,12 +425,15 @@ fn statistics_match_operator(operator: PhysicalOperator, statistics: &OperatorSt
         PhysicalOperator::HashJoin { .. } => {
             matches!(statistics, OperatorStatistics::HashJoin { .. })
         }
-        PhysicalOperator::HashDeduplicate => {
+        PhysicalOperator::HashDeduplicate { .. } => {
             matches!(statistics, OperatorStatistics::HashDeduplicate { .. })
         }
         PhysicalOperator::Concat => matches!(statistics, OperatorStatistics::Concat { .. }),
-        PhysicalOperator::InMemoryOrderedWindow => {
-            matches!(statistics, OperatorStatistics::InMemoryOrderedWindow { .. })
+        PhysicalOperator::InMemoryAnalyticWindow { .. } => {
+            matches!(
+                statistics,
+                OperatorStatistics::InMemoryAnalyticWindow { .. }
+            )
         }
         PhysicalOperator::Limit { .. } => matches!(statistics, OperatorStatistics::Limit { .. }),
         PhysicalOperator::PassThrough => {
@@ -442,13 +469,13 @@ fn expected_input_arity(
             statistics_inputs: 1,
             dag_children: 0,
         },
-        PhysicalOperator::Filter
-        | PhysicalOperator::Project
-        | PhysicalOperator::HashAggregate
-        | PhysicalOperator::InMemoryComparisonSort
+        PhysicalOperator::Filter { .. }
+        | PhysicalOperator::Project { .. }
+        | PhysicalOperator::HashAggregate { .. }
+        | PhysicalOperator::InMemoryComparisonSort { .. }
         | PhysicalOperator::TopK { .. }
-        | PhysicalOperator::HashDeduplicate
-        | PhysicalOperator::InMemoryOrderedWindow
+        | PhysicalOperator::HashDeduplicate { .. }
+        | PhysicalOperator::InMemoryAnalyticWindow { .. }
         | PhysicalOperator::Limit { .. }
         | PhysicalOperator::PassThrough => unary,
         PhysicalOperator::HashJoin { .. } => OperatorInputArity {
@@ -460,6 +487,81 @@ fn expected_input_arity(
             dag_children: variadic_child_count,
         },
     }
+}
+
+fn checked_cpu_product(rows: u64, operations_per_row: u64) -> Result<f64, AnalyticalCostError> {
+    Ok(rows
+        .checked_mul(operations_per_row)
+        .ok_or(AnalyticalCostError::Overflow)? as f64)
+}
+
+fn partitioned_order_estimate(
+    partitioning: &crate::analytical_statistics::PartitionStatistics,
+    comparison_operations: u64,
+    row_operations: u64,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    let mut cpu_ops = 0.0;
+    let mut peak_memory_bytes = 0;
+    for partition in &partitioning.partitions {
+        let comparisons = partition.rows as f64
+            * (partition.rows.max(2) as f64).log2().ceil()
+            * comparison_operations as f64;
+        cpu_ops += comparisons + checked_cpu_product(partition.rows, row_operations)?;
+        peak_memory_bytes = peak_memory_bytes.max(partition.bytes);
+    }
+    if !cpu_ops.is_finite() {
+        return Err(AnalyticalCostError::Overflow);
+    }
+    Ok(ResourceEstimate {
+        cpu_ops,
+        peak_memory_bytes,
+        scan_bytes: 0,
+    })
+}
+
+fn validate_partitioning(
+    input: EdgeStatistics,
+    partitioning: &crate::analytical_statistics::PartitionStatistics,
+    partitioned: bool,
+) -> Result<(), AnalyticalCostError> {
+    let inconsistent = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
+    if input.rows == 0 {
+        return if partitioning.partitions.is_empty() {
+            Ok(())
+        } else {
+            inconsistent("empty input has non-empty partition evidence")
+        };
+    }
+    if partitioning.partitions.is_empty() {
+        return inconsistent("non-empty ordered input has no partition evidence");
+    }
+    if !partitioned && partitioning.partitions.len() != 1 {
+        return inconsistent("global ordering must have exactly one partition");
+    }
+    let total = partitioning.partitions.iter().try_fold(
+        EdgeStatistics { rows: 0, bytes: 0 },
+        |total, partition| {
+            if !partition.is_consistent() || partition.rows == 0 {
+                return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                    "ordered partition evidence is invalid",
+                ));
+            }
+            Ok(EdgeStatistics {
+                rows: total
+                    .rows
+                    .checked_add(partition.rows)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+                bytes: total
+                    .bytes
+                    .checked_add(partition.bytes)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            })
+        },
+    )?;
+    if total != input {
+        return inconsistent("ordered partitions do not sum to the input edge");
+    }
+    Ok(())
 }
 
 /// Estimate one physical operator. Child costs are deliberately excluded;
@@ -499,15 +601,35 @@ pub fn estimate_operator(
             scan_bytes: *source_read_bytes,
         },
         (
-            PhysicalOperator::Filter | PhysicalOperator::Project | PhysicalOperator::PassThrough,
+            PhysicalOperator::Filter {
+                predicate_operations_per_row,
+            },
             _,
         ) => ResourceEstimate {
+            cpu_ops: checked_cpu_product(left.rows, predicate_operations_per_row)?,
+            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+            scan_bytes: 0,
+        },
+        (
+            PhysicalOperator::Project {
+                expression_operations_per_row,
+            },
+            _,
+        ) => ResourceEstimate {
+            cpu_ops: checked_cpu_product(left.rows, expression_operations_per_row)?,
+            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
+            scan_bytes: 0,
+        },
+        (PhysicalOperator::PassThrough, _) => ResourceEstimate {
             cpu_ops: left.rows as f64,
             peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
             scan_bytes: 0,
         },
         (
-            PhysicalOperator::HashAggregate,
+            PhysicalOperator::HashAggregate {
+                grouping_key_count,
+                accumulator_count,
+            },
             OperatorStatistics::HashAggregate {
                 group_count,
                 key_bytes,
@@ -515,7 +637,12 @@ pub fn estimate_operator(
                 ..
             },
         ) => ResourceEstimate {
-            cpu_ops: left.rows as f64,
+            cpu_ops: checked_cpu_product(
+                left.rows,
+                grouping_key_count
+                    .checked_add(accumulator_count)
+                    .ok_or(AnalyticalCostError::Overflow)?,
+            )?,
             peak_memory_bytes: checked_bytes(&[
                 *group_count,
                 key_bytes
@@ -526,14 +653,14 @@ pub fn estimate_operator(
             scan_bytes: 0,
         },
         (
-            PhysicalOperator::HashDeduplicate,
+            PhysicalOperator::HashDeduplicate { key_count },
             OperatorStatistics::HashDeduplicate {
                 distinct_key_count,
                 key_bytes,
                 ..
             },
         ) => ResourceEstimate {
-            cpu_ops: left.rows as f64,
+            cpu_ops: checked_cpu_product(left.rows, key_count)?,
             peak_memory_bytes: checked_bytes(&[
                 *distinct_key_count,
                 key_bytes
@@ -542,20 +669,46 @@ pub fn estimate_operator(
             ])?,
             scan_bytes: 0,
         },
-        (PhysicalOperator::InMemoryComparisonSort | PhysicalOperator::InMemoryOrderedWindow, _) => {
-            ResourceEstimate {
-                cpu_ops: left.rows as f64 * (left.rows.max(2) as f64).log2().ceil(),
-                peak_memory_bytes: left.bytes,
-                scan_bytes: 0,
-            }
-        }
-        (PhysicalOperator::TopK { limit, offset }, _) => {
+        (
+            PhysicalOperator::InMemoryComparisonSort {
+                ordering_key_count, ..
+            },
+            OperatorStatistics::InMemoryComparisonSort {
+                input_partitioning, ..
+            },
+        ) => partitioned_order_estimate(input_partitioning, ordering_key_count, 0)?,
+        (
+            PhysicalOperator::InMemoryAnalyticWindow {
+                partition_key_count,
+                ordering_key_count,
+                function_operations_per_row,
+            },
+            OperatorStatistics::InMemoryAnalyticWindow {
+                input_partitioning, ..
+            },
+        ) => partitioned_order_estimate(
+            input_partitioning,
+            partition_key_count
+                .checked_add(ordering_key_count)
+                .ok_or(AnalyticalCostError::Overflow)?,
+            function_operations_per_row,
+        )?,
+        (
+            PhysicalOperator::TopK {
+                limit,
+                offset,
+                ordering_key_count,
+            },
+            _,
+        ) => {
             let heap_capacity = limit
                 .checked_add(offset)
                 .ok_or(AnalyticalCostError::Overflow)?;
             let heap_rows = heap_capacity.min(left.rows);
             ResourceEstimate {
-                cpu_ops: left.rows as f64 * (heap_rows.max(2) as f64).log2().ceil(),
+                cpu_ops: left.rows as f64
+                    * (heap_rows.max(2) as f64).log2().ceil()
+                    * ordering_key_count as f64,
                 peak_memory_bytes: checked_bytes(&[
                     heap_rows,
                     per_row_width(left.rows, left.bytes)?,
@@ -563,10 +716,21 @@ pub fn estimate_operator(
                 scan_bytes: 0,
             }
         }
-        (PhysicalOperator::HashJoin { build_side }, _) => {
+        (
+            PhysicalOperator::HashJoin {
+                build_side,
+                equality_key_count,
+            },
+            _,
+        ) => {
             let right = input(1)?;
             ResourceEstimate {
-                cpu_ops: left.rows as f64 + right.rows as f64 + output.rows as f64,
+                cpu_ops: checked_cpu_product(
+                    left.rows
+                        .checked_add(right.rows)
+                        .ok_or(AnalyticalCostError::Overflow)?,
+                    equality_key_count,
+                )? + output.rows as f64,
                 peak_memory_bytes: match build_side {
                     HashJoinBuildSide::Left => left
                         .rows
@@ -615,13 +779,22 @@ pub fn estimate_operator(
     }
 }
 
-fn validate_operator_semantics(
+pub(crate) fn validate_operator_semantics(
     operator: PhysicalOperator,
     statistics: &OperatorStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let inconsistent = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
     if !statistics_match_operator(operator, statistics) {
         return inconsistent("statistics variant does not match physical operator");
+    }
+    if matches!(
+        (operator, statistics),
+        (
+            PhysicalOperator::Concat,
+            OperatorStatistics::Concat { inputs, .. }
+        ) if inputs.is_empty()
+    ) {
+        return inconsistent("Concat must have at least one input");
     }
     let input = statistics
         .input(0)
@@ -630,23 +803,50 @@ fn validate_operator_semantics(
         ))?;
     let output = statistics.output();
     match (operator, statistics) {
-        (PhysicalOperator::Scan, _) => {
+        (
+            PhysicalOperator::Scan,
+            OperatorStatistics::Scan {
+                source_read_bytes, ..
+            },
+        ) => {
             if input != output {
                 return inconsistent("Scan input and output edges differ");
             }
+            if input.rows > 0 && *source_read_bytes == 0 {
+                return inconsistent("non-empty Scan has zero source-read bytes");
+            }
         }
-        (PhysicalOperator::Filter, _) => {
+        (
+            PhysicalOperator::Filter {
+                predicate_operations_per_row,
+            },
+            _,
+        ) => {
+            if predicate_operations_per_row == 0 {
+                return inconsistent("Filter has no predicate work");
+            }
             if output.rows > input.rows || output.bytes > input.bytes {
                 return inconsistent("Filter output expands its input");
             }
         }
-        (PhysicalOperator::Project, _) => {
+        (
+            PhysicalOperator::Project {
+                expression_operations_per_row,
+            },
+            _,
+        ) => {
+            if expression_operations_per_row == 0 {
+                return inconsistent("Project has no expression work");
+            }
             if output.rows != input.rows {
                 return inconsistent("Project changes row cardinality");
             }
         }
         (
-            PhysicalOperator::HashAggregate,
+            PhysicalOperator::HashAggregate {
+                grouping_key_count,
+                accumulator_count,
+            },
             OperatorStatistics::HashAggregate {
                 group_count,
                 key_bytes,
@@ -654,39 +854,81 @@ fn validate_operator_semantics(
                 ..
             },
         ) => {
-            if *group_count == 0 || *key_bytes == 0 || *accumulator_bytes_per_group == 0 {
-                return inconsistent("HashAggregate state statistics must be positive");
+            if accumulator_count == 0 || *accumulator_bytes_per_group == 0 {
+                return inconsistent("HashAggregate accumulator work and width must be positive");
             }
-            if *group_count > input.rows || output.rows != *group_count {
+            if grouping_key_count == 0 {
+                if *key_bytes != 0 || *group_count != 1 {
+                    return inconsistent(
+                        "ungrouped HashAggregate must have one zero-key-width group",
+                    );
+                }
+            } else if *key_bytes == 0 || *group_count > input.rows {
+                return inconsistent("grouped HashAggregate has invalid group evidence");
+            }
+            if output.rows != *group_count {
                 return inconsistent("grouped output differs from distinct group cardinality");
             }
         }
         (
-            PhysicalOperator::HashDeduplicate,
+            PhysicalOperator::HashDeduplicate { key_count },
             OperatorStatistics::HashDeduplicate {
                 distinct_key_count,
                 key_bytes,
                 ..
             },
         ) => {
-            if *distinct_key_count == 0 || *key_bytes == 0 {
-                return inconsistent("Deduplicate state statistics must be positive");
+            if key_count == 0 || *key_bytes == 0 {
+                return inconsistent("Deduplicate key count and width must be positive");
             }
             if *distinct_key_count > input.rows || output.rows != *distinct_key_count {
                 return inconsistent("deduplicated output differs from distinct key cardinality");
             }
         }
         (
-            PhysicalOperator::InMemoryComparisonSort
-            | PhysicalOperator::InMemoryOrderedWindow
-            | PhysicalOperator::PassThrough,
-            _,
+            PhysicalOperator::InMemoryComparisonSort {
+                ordering_key_count,
+                partitioned,
+            },
+            OperatorStatistics::InMemoryComparisonSort {
+                input_partitioning, ..
+            },
         ) => {
+            if ordering_key_count == 0 {
+                return inconsistent("Sort has no ordering keys");
+            }
+            if input != output {
+                return inconsistent("cardinality-preserving operator changes its edge");
+            }
+            validate_partitioning(input, input_partitioning, partitioned)?;
+        }
+        (PhysicalOperator::PassThrough, _) => {
             if input != output {
                 return inconsistent("cardinality-preserving operator changes its edge");
             }
         }
+        (
+            PhysicalOperator::InMemoryAnalyticWindow {
+                partition_key_count,
+                ordering_key_count,
+                function_operations_per_row,
+            },
+            OperatorStatistics::InMemoryAnalyticWindow {
+                input_partitioning, ..
+            },
+        ) => {
+            if ordering_key_count == 0 || function_operations_per_row == 0 {
+                return inconsistent("analytic Window work must be positive");
+            }
+            if input.rows != output.rows {
+                return inconsistent("Window changes row cardinality");
+            }
+            validate_partitioning(input, input_partitioning, partition_key_count > 0)?;
+        }
         (PhysicalOperator::Concat, OperatorStatistics::Concat { inputs, .. }) => {
+            if inputs.is_empty() {
+                return inconsistent("Concat must have at least one input");
+            }
             let total =
                 inputs
                     .iter()
@@ -706,9 +948,16 @@ fn validate_operator_semantics(
                 return inconsistent("Concat output differs from the sum of its inputs");
             }
         }
-        (PhysicalOperator::TopK { limit, offset }, _) => {
-            if limit == 0 {
-                return inconsistent("Top-K limit must be positive");
+        (
+            PhysicalOperator::TopK {
+                limit,
+                offset,
+                ordering_key_count,
+            },
+            _,
+        ) => {
+            if limit == 0 || ordering_key_count == 0 {
+                return inconsistent("Top-K limit and ordering-key count must be positive");
             }
             let expected = input.rows.saturating_sub(offset).min(limit);
             if output.rows != expected {
@@ -721,7 +970,16 @@ fn validate_operator_semantics(
                 return inconsistent("Limit output differs from limit and offset");
             }
         }
-        (PhysicalOperator::HashJoin { .. }, _) => {}
+        (
+            PhysicalOperator::HashJoin {
+                equality_key_count, ..
+            },
+            _,
+        ) => {
+            if equality_key_count == 0 {
+                return inconsistent("HashJoin has no equality keys");
+            }
+        }
         _ => return inconsistent("statistics variant does not match physical operator"),
     }
     Ok(())
@@ -768,6 +1026,10 @@ pub enum AnalyticalCostError {
     Overflow,
     #[error("candidate has no supported exact or sketch state")]
     UnsupportedCandidate,
+    #[error("query operator has no physical implementation in the analytical model")]
+    UnsupportedQueryOperator,
+    #[error("inconsistent operator statistics: {0}")]
+    InconsistentOperatorStatistics(&'static str),
     #[error("summary operation {0} has no lifecycle-aware cost formula")]
     UnsupportedSummaryOperation(&'static str),
     #[error("required comparison-scope field {0} is missing")]
@@ -792,8 +1054,6 @@ pub enum AnalyticalCostError {
     },
     #[error("invalid physical DAG: {0}")]
     InvalidPhysicalDag(&'static str),
-    #[error("inconsistent physical operator statistics: {0}")]
-    InconsistentOperatorStatistics(&'static str),
 }
 
 fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
@@ -808,8 +1068,27 @@ mod tests {
     use super::*;
     use crate::analytical_statistics::{
         validate_comparison_scopes, BinaryEdgeStatistics, ComparisonScope, EdgeStatistics,
-        OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
+        OperatorStatistics, PartitionStatistics, SourceCoverage, UnaryEdgeStatistics,
     };
+
+    fn filter_operator() -> PhysicalOperator {
+        PhysicalOperator::Filter {
+            predicate_operations_per_row: 1,
+        }
+    }
+
+    fn project_operator() -> PhysicalOperator {
+        PhysicalOperator::Project {
+            expression_operations_per_row: 1,
+        }
+    }
+
+    fn aggregate_operator() -> PhysicalOperator {
+        PhysicalOperator::HashAggregate {
+            grouping_key_count: 1,
+            accumulator_count: 1,
+        }
+    }
 
     fn unary_row_edges(input_rows: u64, output_rows: u64) -> UnaryEdgeStatistics {
         UnaryEdgeStatistics {
@@ -834,7 +1113,7 @@ mod tests {
             }
         );
         assert_eq!(
-            expected_input_arity(PhysicalOperator::Filter, 1),
+            expected_input_arity(filter_operator(), 1),
             OperatorInputArity {
                 statistics_inputs: 1,
                 dag_children: 1,
@@ -844,6 +1123,7 @@ mod tests {
             expected_input_arity(
                 PhysicalOperator::HashJoin {
                     build_side: HashJoinBuildSide::Left,
+                    equality_key_count: 1,
                 },
                 2,
             ),
@@ -865,7 +1145,7 @@ mod tests {
     fn operator_estimator_rejects_contradictory_cardinality_evidence() {
         assert!(matches!(
             estimate_operator(
-                PhysicalOperator::Filter,
+                filter_operator(),
                 OperatorStatistics::Filter {
                     edges: unary_row_edges(10, 11),
                 },
@@ -874,7 +1154,7 @@ mod tests {
         ));
         assert!(matches!(
             estimate_operator(
-                PhysicalOperator::Project,
+                project_operator(),
                 OperatorStatistics::Project {
                     edges: unary_row_edges(10, 9),
                 },
@@ -884,7 +1164,7 @@ mod tests {
 
         assert!(matches!(
             estimate_operator(
-                PhysicalOperator::HashAggregate,
+                aggregate_operator(),
                 OperatorStatistics::HashAggregate {
                     edges: unary_row_edges(10, 3),
                     group_count: 2,
@@ -900,6 +1180,7 @@ mod tests {
                 PhysicalOperator::TopK {
                     limit: 3,
                     offset: 0,
+                    ordering_key_count: 1,
                 },
                 OperatorStatistics::TopK {
                     edges: unary_row_edges(10, 4),
@@ -934,6 +1215,7 @@ mod tests {
             PhysicalOperator::TopK {
                 limit: 10,
                 offset: 0,
+                ordering_key_count: 1,
             },
             OperatorStatistics::TopK {
                 edges: UnaryEdgeStatistics {
@@ -956,6 +1238,7 @@ mod tests {
         let mismatched_join_statistics = estimate_operator(
             PhysicalOperator::HashJoin {
                 build_side: HashJoinBuildSide::Left,
+                equality_key_count: 1,
             },
             OperatorStatistics::Filter {
                 edges: unary_row_edges(1_000, 100),
@@ -971,6 +1254,7 @@ mod tests {
         let build_left = estimate_operator(
             PhysicalOperator::HashJoin {
                 build_side: HashJoinBuildSide::Left,
+                equality_key_count: 1,
             },
             OperatorStatistics::HashJoin {
                 edges: BinaryEdgeStatistics {
@@ -995,7 +1279,7 @@ mod tests {
         assert_eq!(build_left.peak_memory_bytes, 80_000);
 
         let aggregate = estimate_operator(
-            PhysicalOperator::HashAggregate,
+            aggregate_operator(),
             OperatorStatistics::HashAggregate {
                 group_count: 100,
                 key_bytes: 16,
@@ -1019,6 +1303,7 @@ mod tests {
             PhysicalOperator::TopK {
                 limit: 1_000,
                 offset: 0,
+                ordering_key_count: 1,
             },
             OperatorStatistics::TopK {
                 edges: UnaryEdgeStatistics {
@@ -1073,7 +1358,7 @@ mod tests {
             },
             PhysicalDagNode {
                 id: "left".into(),
-                operator: PhysicalOperator::Filter,
+                operator: filter_operator(),
                 children: vec!["scan".into()],
                 source_coverage: None,
                 output_buffer_bytes: 4,
@@ -1082,7 +1367,7 @@ mod tests {
             },
             PhysicalDagNode {
                 id: "right".into(),
-                operator: PhysicalOperator::Filter,
+                operator: filter_operator(),
                 children: vec!["scan".into()],
                 source_coverage: None,
                 output_buffer_bytes: 4,
@@ -1163,7 +1448,7 @@ mod tests {
             },
             PhysicalDagNode {
                 id: "state".into(),
-                operator: PhysicalOperator::HashAggregate,
+                operator: aggregate_operator(),
                 children: vec!["scan".into()],
                 source_coverage: None,
                 output_buffer_bytes: 16,
@@ -1215,7 +1500,7 @@ mod tests {
         let mut scope = comparison_scope();
         scope.horizon.0 = 100_000;
         let estimate = estimate_physical_dag(&nodes, "read", &scope, &provided).unwrap();
-        assert_eq!(estimate.cpu_ops, 210.0);
+        assert_eq!(estimate.cpu_ops, 310.0);
         assert_eq!(estimate.scan_bytes, 1_000);
     }
 
@@ -1312,7 +1597,7 @@ mod tests {
             },
             PhysicalDagNode {
                 id: "filter".into(),
-                operator: PhysicalOperator::Filter,
+                operator: filter_operator(),
                 children: vec!["scan".into()],
                 source_coverage: None,
                 output_buffer_bytes: 4,
@@ -1387,7 +1672,7 @@ mod tests {
             },
             PhysicalDagNode {
                 id: "filter".into(),
-                operator: PhysicalOperator::Filter,
+                operator: filter_operator(),
                 children: vec!["scan".into()],
                 source_coverage: None,
                 output_buffer_bytes: 4,
@@ -1450,7 +1735,7 @@ mod tests {
             },
             PhysicalDagNode {
                 id: "filter".into(),
-                operator: PhysicalOperator::Filter,
+                operator: filter_operator(),
                 children: vec!["scan".into()],
                 source_coverage: None,
                 output_buffer_bytes: 0,
@@ -1608,7 +1893,7 @@ mod tests {
             },
             PhysicalDagNode {
                 id: "aggregate".into(),
-                operator: PhysicalOperator::HashAggregate,
+                operator: aggregate_operator(),
                 children: vec!["scan".into()],
                 source_coverage: None,
                 output_buffer_bytes: 16,
@@ -1724,10 +2009,128 @@ mod tests {
         };
 
         assert_eq!(
-            estimate_operator(PhysicalOperator::Filter, filter)
+            estimate_operator(filter_operator(), filter)
                 .unwrap()
                 .scan_bytes,
             0
+        );
+    }
+
+    #[test]
+    fn non_empty_scan_cannot_claim_zero_source_reads() {
+        let logical = EdgeStatistics {
+            rows: 10,
+            bytes: 80,
+        };
+        assert_eq!(
+            estimate_operator(
+                PhysicalOperator::Scan,
+                OperatorStatistics::Scan {
+                    edges: unary_edges(logical, logical),
+                    source_read_bytes: 0,
+                },
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "non-empty Scan has zero source-read bytes"
+            ))
+        );
+    }
+
+    #[test]
+    fn hash_aggregate_handles_empty_grouped_and_ungrouped_inputs() {
+        let empty = EdgeStatistics { rows: 0, bytes: 0 };
+        let ungrouped = estimate_operator(
+            PhysicalOperator::HashAggregate {
+                grouping_key_count: 0,
+                accumulator_count: 1,
+            },
+            OperatorStatistics::HashAggregate {
+                edges: unary_edges(empty, EdgeStatistics { rows: 1, bytes: 8 }),
+                group_count: 1,
+                key_bytes: 0,
+                accumulator_bytes_per_group: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(ungrouped.cpu_ops, 0.0);
+        assert_eq!(ungrouped.peak_memory_bytes, 24);
+
+        let grouped = estimate_operator(
+            PhysicalOperator::HashAggregate {
+                grouping_key_count: 1,
+                accumulator_count: 1,
+            },
+            OperatorStatistics::HashAggregate {
+                edges: unary_edges(empty, empty),
+                group_count: 0,
+                key_bytes: 8,
+                accumulator_bytes_per_group: 8,
+            },
+        )
+        .unwrap();
+        assert_eq!(grouped.peak_memory_bytes, 0);
+    }
+
+    #[test]
+    fn operator_local_work_and_partition_distribution_change_cpu_and_memory() {
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 800,
+        };
+        let filter = OperatorStatistics::Filter {
+            edges: unary_edges(edge, edge),
+        };
+        assert_eq!(
+            estimate_operator(
+                PhysicalOperator::Filter {
+                    predicate_operations_per_row: 3,
+                },
+                filter,
+            )
+            .unwrap()
+            .cpu_ops,
+            300.0
+        );
+
+        let sort = estimate_operator(
+            PhysicalOperator::InMemoryComparisonSort {
+                ordering_key_count: 1,
+                partitioned: true,
+            },
+            OperatorStatistics::InMemoryComparisonSort {
+                edges: unary_edges(edge, edge),
+                input_partitioning: PartitionStatistics {
+                    partitions: vec![
+                        EdgeStatistics {
+                            rows: 50,
+                            bytes: 400,
+                        },
+                        EdgeStatistics {
+                            rows: 50,
+                            bytes: 400,
+                        },
+                    ],
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(sort.cpu_ops, 600.0);
+        assert_eq!(sort.peak_memory_bytes, 400);
+    }
+
+    #[test]
+    fn concat_requires_at_least_one_physical_input() {
+        assert_eq!(
+            estimate_operator(
+                PhysicalOperator::Concat,
+                OperatorStatistics::Concat {
+                    inputs: vec![],
+                    output: EdgeStatistics { rows: 0, bytes: 0 },
+                },
+            ),
+            Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "Concat must have at least one input"
+            ))
         );
     }
 
