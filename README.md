@@ -230,11 +230,15 @@ semantic information that matters downstream.
 - [Description of post-ASAP IR](docs/design_docs/post-asap-ir.md)
 - [Converting a QueryWorkload to a pre-ASAP plan](docs/design_docs/parse_and_canonicalize.md)
 - [Converting a pre-ASAP plan to a post-ASAP plan](docs/design_docs/asap-aware-mapping/README.md)
+- [ASAPPlanner and downstream application boundaries](docs/design_docs/asapplanner-downstream-boundary.md)
 - [Guide on how to use ASAPPlanner](docs/user-guide/user-guide.md)
 
 # Open questions
 
-1. **Integration with downstream artifacts:** How to connect the output of ASAPPlanner to ASAPQuery? ASAPPlanner produces a post-ASAP plan that has semantics of batch query execution over data at rest. Somehow this needs to be converted into two plans (1) streaming dataflow graph that computes summaries on raw data, and (2) batch query execution plan that uses summaries to answer queries.
+1. **Integration with downstream artifacts:** Implement the documented
+   [ASAPPlanner and downstream application boundary](docs/design_docs/asapplanner-downstream-boundary.md)
+   so one backend compilation produces consistent Collector, backend, and
+   query-plan projections from the selected logical Post-ASAP DAG.
 2. **Grouping semantics:** Should grouping remain embedded in `Aggregate`, or should grouping
    become a reusable relational dimension node?
 3. **Expression semantics:** Which arithmetic or derived expressions need dedicated semantic
