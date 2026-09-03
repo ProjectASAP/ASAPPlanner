@@ -29,6 +29,14 @@ const NOW_MS: u64 = 1_000_000;
 struct FullyCostedRuntime;
 
 impl CostModel for FullyCostedRuntime {
+    fn raw_query_recompute_total_cost(
+        &self,
+        _target: &asap_types::pre_asap::QueryExpr,
+        _expected_reads: f64,
+    ) -> Option<Cost> {
+        Some(Cost(1_000.0))
+    }
+
     fn rank_candidates(
         &self,
         _intent: &AggIntent,
