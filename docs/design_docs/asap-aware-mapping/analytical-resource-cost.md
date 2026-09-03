@@ -300,6 +300,21 @@ Their CPU and memory use the concrete summary state size and number of input
 states. A plan using one of these operations is unavailable until the
 corresponding formula and required lifecycle evidence are present.
 
+Summary construction uses physical-input realization rules before it emits a
+`SummaryAgg`. The default rule consumes the logical aggregate's immediate
+child and its declared input value. A composite implementation instead states
+which logical sub-DAG it consumes, which physical child replaces that sub-DAG,
+and which key or value enters the summary. The generic `SummaryAgg` constructor
+only materializes this resolved binding; it does not recognize query shapes or
+name concrete algorithms. If a composite rule recognizes a shape but cannot
+represent its complete physical input, that candidate is unavailable rather
+than falling through to the default rule.
+
+The currently registered composite rule is the count-ranked heavy-hitter
+realization described in the worked patterns below. The same boundary admits
+future AVG decomposition, window-summary composition, or other multi-operator
+primitives without adding special cases to the generic constructor.
+
 Summary build, merge, subtract, delete, and readout require their own physical
 operators and resolved statistics. Until an operation has such a formula, a
 complete candidate containing it is unavailable; costing only its modeled
