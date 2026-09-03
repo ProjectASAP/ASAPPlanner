@@ -502,17 +502,30 @@ recurrence.
 The documents disagree on important details. One limits subtract to
 non-overlapping/tumbling prefix states and charges all retained windows as
 steady-state memory; the other permits subtract over sliding configurations
-and omits retained-but-unused sliding storage from continuous memory. This
-implementation follows ASAPPlanner's selected `SummaryExpr` and lifecycle
-semantics instead of choosing a new window/query-method policy: subtraction is
-costed only when a `SummarySubtract` node already exists, and every physically
-retained window supplied by the deployment is charged. Window legality remains
-the responsibility of candidate generation and lifecycle planning.
+and omits retained-but-unused sliding storage from continuous memory. ASAPPlanner
+therefore does not encode those assumptions in a second closed window enum.
+Instead, the physical-plan provider enumerates every semantically and
+operationally feasible complete implementation. Its stable, provider-owned ID
+may identify a tumbling layout, a sliding layout, a PromSketch exponential
+histogram, or another window framework. Each alternative binds complete
+per-node evidence, including bootstrap routing, active and retained window
+counts, state size, operations, and source coverage.
 
-The global facility-location/MIP decisions from those documents—deploying a
-configuration once and assigning multiple atomic queries to it—are outside
-this estimator. It costs one already-selected deployment and does not introduce
-`x`/`y` assignment variables.
+The planner takes the Cartesian product of legal lifecycle combinations and
+those physical alternatives and prices each combination over the same
+`ComparisonScope`. Missing evidence makes that physical alternative
+unavailable; it cannot win through an optimistic zero. The cheapest complete
+combination is selected, and its provider-owned physical-plan ID is retained in
+the lifecycle plan and DAG export. Thus window *legality and enumeration* stay
+with the physical provider, while cost-based *selection* belongs to the
+planner. `SummarySubtract` is charged only when it is an actual physical DAG
+node, and every physically retained window in the chosen evidence is charged.
+
+The global facility-location/MIP decisions from those documents—deploying one
+configuration and assigning multiple atomic queries to it—remain outside this
+candidate-local comparison. The open physical-alternative interface does not
+introduce `x`/`y` assignment variables; a future workload-level optimizer may
+use the same complete estimates as coefficients.
 
 ## Accuracy evidence remains separate from cost
 
