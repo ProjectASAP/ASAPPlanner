@@ -928,103 +928,6 @@ pub fn estimate_operator(
     }
 }
 
-fn validate_operator_semantics(
-    operator: PhysicalOperator,
-    statistics: &OperatorStatistics,
-) -> Result<(), AnalyticalCostError> {
-    let inconsistent = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
-    if !matches!(operator, PhysicalOperator::Scan) && statistics.source_scan_bytes != 0 {
-        return inconsistent("only Scan may charge source bytes");
-    }
-    let input = statistics.inputs.first().copied().ok_or(
-        AnalyticalCostError::InconsistentOperatorStatistics("operator input is missing"),
-    )?;
-    let output = statistics.output;
-    match operator {
-        PhysicalOperator::Scan => {
-            if input != output {
-                return inconsistent("Scan input and output edges differ");
-            }
-        }
-        PhysicalOperator::Filter => {
-            if output.rows > input.rows || output.bytes > input.bytes {
-                return inconsistent("Filter output expands its input");
-            }
-        }
-        PhysicalOperator::Project => {
-            if output.rows != input.rows {
-                return inconsistent("Project changes row cardinality");
-            }
-        }
-        PhysicalOperator::HashAggregate | PhysicalOperator::Deduplicate => {
-            let groups = statistics
-                .group_count
-                .filter(|groups| *groups > 0)
-                .ok_or(AnalyticalCostError::MissingOrZero("group_count"))?;
-            if groups > input.rows || output.rows != groups {
-                return inconsistent("grouped output differs from distinct group cardinality");
-            }
-        }
-        PhysicalOperator::Sort | PhysicalOperator::PassThrough => {
-            if input != output {
-                return inconsistent("cardinality-preserving operator changes its edge");
-            }
-        }
-        PhysicalOperator::Window => {
-            if input.rows != output.rows {
-                return inconsistent("Window changes row cardinality");
-            }
-        }
-        PhysicalOperator::Concat => {
-            let total = statistics.inputs.iter().try_fold(
-                EdgeStatistics { rows: 0, bytes: 0 },
-                |total, edge| {
-                    Ok::<_, AnalyticalCostError>(EdgeStatistics {
-                        rows: total
-                            .rows
-                            .checked_add(edge.rows)
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                        bytes: total
-                            .bytes
-                            .checked_add(edge.bytes)
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                    })
-                },
-            )?;
-            if output != total {
-                return inconsistent("Concat output differs from the sum of its inputs");
-            }
-        }
-        PhysicalOperator::TopK => {
-            let k = statistics
-                .k
-                .filter(|k| *k > 0)
-                .ok_or(AnalyticalCostError::MissingOrZero("k"))?;
-            if output.rows > input.rows.min(k) {
-                return inconsistent("Top-K output exceeds its cardinality bound");
-            }
-        }
-        PhysicalOperator::Limit => {
-            if output.rows > input.rows {
-                return inconsistent("Limit output exceeds its input");
-            }
-        }
-        PhysicalOperator::HashJoin
-        | PhysicalOperator::PromqlRange
-        | PhysicalOperator::PromqlSubquery
-        | PhysicalOperator::PromqlVectorBinary
-        | PhysicalOperator::PromqlRelabel
-        | PhysicalOperator::PromqlInfoEnrich
-        | PhysicalOperator::PromqlSeriesSample
-        | PhysicalOperator::PromqlScalarToVector
-        | PhysicalOperator::PromqlVectorToScalar
-        | PhysicalOperator::PromqlScalarLeaf
-        | PhysicalOperator::PromqlPerSeries
-        | PhysicalOperator::PromqlPresence => {}
-    }
-    Ok(())
-}
-
 fn validate_promql_bridge(
     operator: PhysicalOperator,
     statistics: &OperatorStatistics,
@@ -1238,6 +1141,7 @@ mod tests {
 
         let mut topk = unary_inputs(10, 4);
         topk.k = Some(3);
+        topk.topk_output_offset = Some(0);
         assert!(matches!(
             estimate_operator(PhysicalOperator::TopK, topk),
             Err(AnalyticalCostError::InconsistentOperatorStatistics(_))
