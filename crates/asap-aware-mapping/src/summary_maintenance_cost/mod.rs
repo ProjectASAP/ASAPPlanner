@@ -42,6 +42,7 @@ use crate::summary_maintenance_lifecycle::{
 
 pub const SUMMARY_MAINTENANCE_COST_MODEL_VERSION: &str = "summary-maintenance-resource-v1";
 
+mod estimator;
 mod evidence;
 mod model;
 mod window;

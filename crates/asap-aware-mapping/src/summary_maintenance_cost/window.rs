@@ -29,9 +29,7 @@ pub struct StreamingWindowFrameworkCandidate {
     pub node_evidence: StreamingNodeEvidence,
 }
 
-pub(super) fn summary_aggregation_identities(
-    root: &SummaryNode,
-) -> HashSet<*const SummaryNode> {
+pub(super) fn summary_aggregation_identities(root: &SummaryNode) -> HashSet<*const SummaryNode> {
     fn visit(
         node: &SummaryNode,
         seen: &mut HashSet<*const SummaryNode>,
@@ -172,10 +170,7 @@ impl StreamingWindowAccuracyEvidence {
     /// Compose the two EH combinations proved by PromSketch
     /// (doi:10.14778/3742728.3742732). Unknown EH combinations deliberately
     /// have no catch-all arm.
-    pub(super) fn guarantee(
-        &self,
-        uses_exponential_histogram: bool,
-    ) -> Option<ResultGuarantee> {
+    pub(super) fn guarantee(&self, uses_exponential_histogram: bool) -> Option<ResultGuarantee> {
         match self {
             Self::Exact if !uses_exponential_histogram => {
                 Some(ResultGuarantee::exact("exact window coverage"))
