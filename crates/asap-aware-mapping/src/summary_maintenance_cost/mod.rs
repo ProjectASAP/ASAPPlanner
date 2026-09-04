@@ -19,8 +19,8 @@ use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand};
 use serde::{Deserialize, Serialize};
 
-use crate::analytical_cost::ExecutionMultiplicity;
 use crate::accuracy::{AccuracyModel, DefaultAccuracyModel};
+use crate::analytical_cost::ExecutionMultiplicity;
 #[cfg(test)]
 use crate::analytical_cost::PhysicalNodeEvidence;
 use crate::analytical_cost::{

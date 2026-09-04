@@ -10,12 +10,13 @@ plans. These are separate concerns:
 - the **analytical estimation layer** applies algorithmic formulas to that
   evidence to estimate CPU work, peak memory, and source/disk I/O.
 
-There are two arrival-specific entry points. The complete physical-DAG
-comparison currently models `DataArrival::AtRest`. The streaming summary
-extension models `DataArrival::ContinuouslyIngesting` over a finite horizon,
-including bootstrap, arriving updates, retained state, and query readout.
-Evidence from one arrival mode must not be reused for the other. `Mixed` and
-`Unknown` remain unavailable until their distinct data regions are modeled.
+The physical-resource estimator itself is independent of the arrival mode.
+Two planner adapters currently lower work into it. `PhysicalPlanCostModel`
+compares complete at-rest plans. `SummaryMaintenanceCostModel` resolves
+`DataArrival::ContinuouslyIngesting` over a finite horizon, including
+bootstrap, arriving updates, retained state, and query readout. Evidence from
+one arrival mode must not be reused for the other. `Mixed` and `Unknown`
+remain unavailable until their distinct data regions are modeled.
 
 Both entry points replace dimensionless plan-node counts with estimates
 derived from operator complexity, cardinality, row width, and concrete summary
@@ -46,6 +47,32 @@ Support in the estimator does not imply that a deployment has selected and
 bound that physical algorithm. Unknown query lowering or summary binding makes
 the entire alternative unavailable.
 No layer may substitute a shape-specific shortcut or structural node count.
+
+The source modules follow those responsibilities rather than treating
+"analytical" and "streaming" as competing cost systems:
+
+```text
+query_physical_lowering.rs ──► EvidenceBackedPhysicalDag
+                                      │
+physical_operator_statistics.rs ──────┤ physical evidence contract
+                                      ▼
+analytical_cost.rs ─────────── operator formulas and CPU/memory/I/O composition
+        │
+        ├──────────────► physical_plan_cost_model.rs
+        │                 at-rest raw/rewrite/summary comparison adapter
+        │
+        └──────────────► summary_maintenance_cost/
+                          evidence.rs   authoritative summary evidence
+                          estimator.rs  complete maintenance-DAG resources
+                          window.rs     window assignment and accuracy
+                          model.rs      lifecycle/alternative ranking adapter
+```
+
+Raw query plans and incrementally maintained summary plans share
+`EvidenceBackedPhysicalDag`; there is no streaming-only duplicate of the
+physical DAG or operator-statistics contract. Summary-maintenance modules add
+only the evidence and scheduling semantics that do not exist for an ordinary
+query plan.
 
 An estimate has physical dimensions:
 
