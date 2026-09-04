@@ -629,11 +629,8 @@ fn workload_facts(
             workload_entry_indices
                 .iter()
                 .try_fold(0_u64, |total, index| {
-                    match evaluations_in_horizon(
-                        &entries[*index].recurrence,
-                        now_ms,
-                        horizon_ms as u64,
-                    ) {
+                    let entry = entries.get(*index)?;
+                    match evaluations_in_horizon(&entry.recurrence, now_ms, horizon_ms as u64) {
                         Ok(count) => total.checked_add(count),
                         Err(AnalyticalCostError::NoEvaluationsInHorizon) => Some(total),
                         Err(_) => None,

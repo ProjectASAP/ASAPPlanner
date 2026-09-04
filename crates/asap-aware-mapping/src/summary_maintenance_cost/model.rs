@@ -9,6 +9,8 @@ pub struct SummaryMaintenanceCostModel {
     pub capabilities: SummaryMaintenanceCapabilities,
     target_comparisons: HashMap<*const QueryExpr, StreamingTargetComparison>,
     candidate_comparisons: HashMap<CandidateComparisonKey, BoundCandidateIdentity>,
+    physical_plan_alternatives:
+        HashMap<CandidateComparisonKey, Vec<StreamingPhysicalPlanAlternative>>,
 }
 
 type CandidateComparisonKey = (*const QueryExpr, *const SummaryNode);
@@ -154,29 +156,76 @@ fn validate_physical_scope_coverage(
     physical: &EvidenceBackedPhysicalDag,
     scope: &ComparisonScope,
 ) -> Result<(), AnalyticalCostError> {
-    let mut declared = scope.sources.clone();
-    for node in physical
-        .nodes
-        .iter()
+    let nodes = reachable_physical_nodes(physical)?;
+    let mut covered = HashSet::new();
+    for node in nodes
+        .into_iter()
         .filter(|node| node.operator == PhysicalOperator::Scan)
     {
         let coverage = node
             .source_coverage
             .as_ref()
             .ok_or_else(|| AnalyticalCostError::MissingScanSourceCoverage(node.id.clone()))?;
-        let Some(index) = declared.iter().position(|value| value == coverage) else {
+        let Some(index) = scope.sources.iter().position(|value| value == coverage) else {
             return Err(AnalyticalCostError::ComparisonScopeMismatch(
                 "physical source coverage",
             ));
         };
-        declared.swap_remove(index);
+        covered.insert(index);
     }
-    if !declared.is_empty() {
+    if covered.len() != scope.sources.len() {
         return Err(AnalyticalCostError::ComparisonScopeMismatch(
             "physical source coverage",
         ));
     }
     Ok(())
+}
+
+fn reachable_physical_nodes(
+    physical: &EvidenceBackedPhysicalDag,
+) -> Result<Vec<&PhysicalDagNode>, AnalyticalCostError> {
+    let by_id: HashMap<_, _> = physical
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    if by_id.len() != physical.nodes.len() {
+        return Err(AnalyticalCostError::InvalidPhysicalDag("duplicate node id"));
+    }
+    fn visit<'a>(
+        id: &'a str,
+        by_id: &HashMap<&'a str, &'a PhysicalDagNode>,
+        visiting: &mut HashSet<&'a str>,
+        visited: &mut HashSet<&'a str>,
+        nodes: &mut Vec<&'a PhysicalDagNode>,
+    ) -> Result<(), AnalyticalCostError> {
+        if visited.contains(id) {
+            return Ok(());
+        }
+        if !visiting.insert(id) {
+            return Err(AnalyticalCostError::InvalidPhysicalDag("cycle"));
+        }
+        let node = by_id
+            .get(id)
+            .copied()
+            .ok_or(AnalyticalCostError::InvalidPhysicalDag("missing node"))?;
+        for child in &node.children {
+            visit(child, by_id, visiting, visited, nodes)?;
+        }
+        visiting.remove(id);
+        visited.insert(id);
+        nodes.push(node);
+        Ok(())
+    }
+    let mut nodes = Vec::new();
+    visit(
+        physical.root.as_str(),
+        &by_id,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+        &mut nodes,
+    )?;
+    Ok(nodes)
 }
 
 fn validate_raw_snapshot_dimensions(
@@ -234,9 +283,8 @@ fn validate_raw_snapshot_dimensions(
             })
             .ok_or(AnalyticalCostError::Overflow)?;
     }
-    if raw
-        .physical_dag
-        .nodes
+    let reachable = reachable_physical_nodes(&raw.physical_dag)?;
+    if reachable
         .iter()
         .any(|node| node.execution != ExecutionMultiplicity::Once)
     {
@@ -244,42 +292,83 @@ fn validate_raw_snapshot_dimensions(
             "streaming raw horizon evidence must use once-counted aggregate statistics",
         ));
     }
-    let mut scan_nodes = raw
-        .physical_dag
-        .nodes
-        .iter()
-        .filter(|node| node.operator == PhysicalOperator::Scan);
-    let scan_node = scan_nodes
-        .next()
-        .ok_or(AnalyticalCostError::MissingComparisonScope("raw scan"))?;
-    if scan_nodes.next().is_some() {
-        return Err(AnalyticalCostError::MissingComparisonScope(
-            "single raw scan evolution",
-        ));
-    }
-    let evidence = raw
-        .physical_dag
-        .evidence
-        .get(&scan_node.id)
-        .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(scan_node.id.clone()))?;
-    let statistics = &evidence.statistics;
-    let OperatorStatistics::Scan {
-        edges,
-        source_read_bytes,
-    } = statistics
-    else {
-        return Err(AnalyticalCostError::InvalidOperatorStatistics {
-            node: scan_node.id.clone(),
-            reason: "raw scan evidence uses the wrong statistics variant",
-        });
-    };
     let expected = EdgeStatistics { rows, bytes };
-    if edges.input != expected || edges.output != expected || *source_read_bytes != scan {
-        return Err(AnalyticalCostError::ComparisonScopeMismatch(
-            "raw source evolution",
-        ));
+    let mut scan_count = 0;
+    for scan_node in reachable
+        .into_iter()
+        .filter(|node| node.operator == PhysicalOperator::Scan)
+    {
+        scan_count += 1;
+        let evidence = raw
+            .physical_dag
+            .evidence
+            .get(&scan_node.id)
+            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(scan_node.id.clone()))?;
+        let statistics = &evidence.statistics;
+        let OperatorStatistics::Scan {
+            edges,
+            source_read_bytes,
+        } = statistics
+        else {
+            return Err(AnalyticalCostError::InvalidOperatorStatistics {
+                node: scan_node.id.clone(),
+                reason: "raw scan evidence uses the wrong statistics variant",
+            });
+        };
+        if edges.input != expected || edges.output != expected || *source_read_bytes != scan {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "raw source evolution",
+            ));
+        }
+    }
+    if scan_count == 0 {
+        return Err(AnalyticalCostError::MissingComparisonScope("raw scan"));
     }
     Ok(())
+}
+
+fn ephemeral_rows_over_horizon(
+    inputs: StreamingSummaryInputs,
+    scope: &ComparisonScope,
+) -> Result<u64, AnalyticalCostError> {
+    evaluation_offsets_ms(scope)?
+        .into_iter()
+        .try_fold(0_u64, |total, offset| {
+            let arrivals = (inputs.ingestion_rate_per_second * offset as f64 / 1_000.0).ceil();
+            if !arrivals.is_finite() || arrivals < 0.0 || arrivals > u64::MAX as f64 {
+                return Err(AnalyticalCostError::Overflow);
+            }
+            total
+                .checked_add(inputs.initial_input_rows)
+                .and_then(|value| value.checked_add(arrivals as u64))
+                .ok_or(AnalyticalCostError::Overflow)
+        })
+}
+
+fn ephemeral_scan_bytes_over_horizon(
+    inputs: StreamingSummaryInputs,
+    raw: &StreamingRawInputEvidence,
+    scope: &ComparisonScope,
+) -> Result<u64, AnalyticalCostError> {
+    if inputs.initial_source_scan_bytes == 0 {
+        return Ok(0);
+    }
+    evaluation_offsets_ms(scope)?
+        .into_iter()
+        .try_fold(0_u64, |total, offset| {
+            let arrivals = (inputs.ingestion_rate_per_second * offset as f64 / 1_000.0).ceil();
+            if !arrivals.is_finite() || arrivals < 0.0 || arrivals > u64::MAX as f64 {
+                return Err(AnalyticalCostError::Overflow);
+            }
+            total
+                .checked_add(inputs.initial_source_scan_bytes)
+                .and_then(|value| {
+                    (arrivals as u64)
+                        .checked_mul(raw.arriving_source_row_bytes)
+                        .and_then(|arriving| value.checked_add(arriving))
+                })
+                .ok_or(AnalyticalCostError::Overflow)
+        })
 }
 
 fn evaluation_offsets_ms(scope: &ComparisonScope) -> Result<Vec<u64>, AnalyticalCostError> {
@@ -323,6 +412,7 @@ impl SummaryMaintenanceCostModel {
             capabilities,
             target_comparisons: HashMap::new(),
             candidate_comparisons: HashMap::new(),
+            physical_plan_alternatives: HashMap::new(),
         }
     }
 
@@ -371,6 +461,90 @@ impl SummaryMaintenanceCostModel {
             },
         );
         Ok(())
+    }
+
+    /// Add one complete physical implementation for an already-bound logical
+    /// candidate. Duplicate or empty provider identities are rejected.
+    pub fn bind_physical_plan_alternative(
+        &mut self,
+        target: &Rc<QueryExpr>,
+        root: &Rc<SummaryNode>,
+        alternative: StreamingPhysicalPlanAlternative,
+    ) -> Result<(), AnalyticalCostError> {
+        let key = (Rc::as_ptr(target), Rc::as_ptr(root));
+        if !self.candidate_comparisons.contains_key(&key) {
+            return Err(AnalyticalCostError::MissingOrStale(
+                "candidate comparison binding",
+            ));
+        }
+        if alternative.physical_plan_id.trim().is_empty() {
+            return Err(AnalyticalCostError::MissingOrZero("physical_plan_id"));
+        }
+        let alternatives = self.physical_plan_alternatives.entry(key).or_default();
+        if alternatives
+            .iter()
+            .any(|existing| existing.physical_plan_id == alternative.physical_plan_id)
+        {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "physical plan identity",
+            ));
+        }
+        alternatives.push(alternative);
+        Ok(())
+    }
+
+    fn comparison_context(
+        &self,
+        root: &SummaryNode,
+        target: Option<&QueryExpr>,
+        horizon: Option<crate::recurrence::Horizon>,
+        expected_reads: Option<f64>,
+    ) -> Option<(CandidateComparisonKey, &StreamingTargetComparison)> {
+        let root_ptr = root as *const _;
+        let target_ptr = match target {
+            Some(target) => target as *const _,
+            None => {
+                let mut targets = self
+                    .candidate_comparisons
+                    .keys()
+                    .filter_map(|(target, candidate)| (*candidate == root_ptr).then_some(*target));
+                let only = targets.next()?;
+                if targets.next().is_some() {
+                    return None;
+                }
+                only
+            }
+        };
+        let key = (target_ptr, root_ptr);
+        if !self.candidate_comparisons.contains_key(&key) {
+            return None;
+        }
+        let comparison = self.target_comparisons.get(&target_ptr)?;
+        if horizon.map(|value| value.0 * 1_000.0) != Some(comparison.scope.horizon.0 as f64)
+            || expected_reads != Some(comparison.scope.validate().ok()? as f64)
+        {
+            return None;
+        }
+        Some((key, comparison))
+    }
+
+    fn complete_cost_with_evidence(
+        &self,
+        root: &SummaryNode,
+        deployments: &[CostedSummaryDeployment<'_>],
+        comparison: &StreamingTargetComparison,
+        evidence: &StreamingNodeEvidence,
+    ) -> Option<Cost> {
+        self.calibrated(
+            estimate_heterogeneous_summary(
+                root,
+                deployments,
+                evidence,
+                &comparison.scope,
+                &comparison.raw,
+            )
+            .ok()?,
+        )
     }
 
     fn canonical_inputs(&self, summary: &SummaryNode) -> Option<StreamingAggregateEvidence> {
@@ -487,41 +661,57 @@ impl CostModel for SummaryMaintenanceCostModel {
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
     ) -> Option<Cost> {
-        let root_ptr = root as *const _;
-        let target_ptr = match target {
-            Some(target) => target as *const _,
+        let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
+        match self.physical_plan_alternatives.get(&key) {
+            Some(alternatives) => alternatives
+                .iter()
+                .filter_map(|alternative| {
+                    self.complete_cost_with_evidence(
+                        root,
+                        deployments,
+                        comparison,
+                        &alternative.node_evidence,
+                    )
+                })
+                .min_by(|left, right| left.0.total_cmp(&right.0)),
             None => {
-                let mut targets = self
-                    .candidate_comparisons
-                    .keys()
-                    .filter_map(|(target, candidate)| (*candidate == root_ptr).then_some(*target));
-                let only = targets.next()?;
-                if targets.next().is_some() {
-                    return None;
-                }
-                only
+                self.complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
             }
+        }
+    }
+
+    fn complete_summary_candidate_estimate(
+        &self,
+        root: &SummaryNode,
+        target: Option<&QueryExpr>,
+        deployments: &[CostedSummaryDeployment<'_>],
+        horizon: Option<crate::recurrence::Horizon>,
+        expected_reads: Option<f64>,
+    ) -> Option<CompleteSummaryCandidateEstimate> {
+        let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
+        let Some(alternatives) = self.physical_plan_alternatives.get(&key) else {
+            return self
+                .complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
+                .map(|cost| CompleteSummaryCandidateEstimate {
+                    cost,
+                    physical_plan_id: None,
+                });
         };
-        if !self
-            .candidate_comparisons
-            .contains_key(&(target_ptr, root_ptr))
-        {
-            return None;
-        }
-        let comparison = self.target_comparisons.get(&target_ptr)?;
-        if horizon.map(|value| value.0 * 1_000.0) != Some(comparison.scope.horizon.0 as f64)
-            || expected_reads != Some(comparison.scope.validate().ok()? as f64)
-        {
-            return None;
-        }
-        let estimate = estimate_heterogeneous_summary(
-            root,
-            deployments,
-            &self.node_evidence,
-            &comparison.scope,
-            &comparison.raw,
-        );
-        self.calibrated(estimate.ok()?)
+        alternatives
+            .iter()
+            .filter_map(|alternative| {
+                self.complete_cost_with_evidence(
+                    root,
+                    deployments,
+                    comparison,
+                    &alternative.node_evidence,
+                )
+                .map(|cost| CompleteSummaryCandidateEstimate {
+                    cost,
+                    physical_plan_id: Some(alternative.physical_plan_id.clone()),
+                })
+            })
+            .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0))
     }
 
     fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
@@ -599,6 +789,7 @@ fn estimate_heterogeneous_summary(
         .collect();
     let mut cpu_ops = 0.0;
     let mut persistent_bytes = 0_u64;
+    let mut ephemeral_state_bytes = 0_u64;
     let mut scans = HashMap::<String, (usize, u64)>::new();
     let mut physical_states = HashMap::<
         String,
@@ -673,7 +864,36 @@ fn estimate_heterogeneous_summary(
             }
             std::collections::hash_map::Entry::Occupied(_) => continue,
         }
-        let (bootstrap, updates, _) = lifecycle_row_counts(inputs, deployment.guarantee, scope)?;
+        let ephemeral = matches!(
+            deployment.guarantee.summary_maintenance_lifecycle,
+            SummaryMaintenanceLifecycle::Ephemeral
+        );
+        let (bootstrap, updates, source_scan_bytes) = if ephemeral {
+            (
+                ephemeral_rows_over_horizon(inputs, scope)?,
+                0,
+                ephemeral_scan_bytes_over_horizon(inputs, raw, scope)?,
+            )
+        } else {
+            let (bootstrap, updates, _) =
+                lifecycle_row_counts(inputs, deployment.guarantee, scope)?;
+            let bootstrap_extra_rows = bootstrap
+                .checked_sub(inputs.initial_input_rows)
+                .ok_or(AnalyticalCostError::Overflow)?;
+            let source_scan_bytes = if node_evidence.source_coverage_index.is_some() {
+                inputs
+                    .initial_source_scan_bytes
+                    .checked_add(
+                        bootstrap_extra_rows
+                            .checked_mul(raw.arriving_source_row_bytes)
+                            .ok_or(AnalyticalCostError::Overflow)?,
+                    )
+                    .ok_or(AnalyticalCostError::Overflow)?
+            } else {
+                0
+            };
+            (bootstrap, updates, source_scan_bytes)
+        };
         let insert = validated_operator_cpu("insert_cpu_ops", node_evidence.insert_cpu_ops)?;
         let insert_calls = bootstrap
             .checked_mul(inputs.bootstrap_window_count)
@@ -684,15 +904,27 @@ fn estimate_heterogeneous_summary(
             })
             .ok_or(AnalyticalCostError::Overflow)?;
         cpu_ops += insert_calls as f64 * insert;
-        let retained = inputs
-            .active_window_count
-            .checked_add(inputs.retained_window_count)
-            .and_then(|windows| windows.checked_mul(inputs.physical_summary_count))
+        let live_window_count = if ephemeral {
+            inputs.bootstrap_window_count
+        } else {
+            inputs
+                .active_window_count
+                .checked_add(inputs.retained_window_count)
+                .ok_or(AnalyticalCostError::Overflow)?
+        };
+        let state_bytes = live_window_count
+            .checked_mul(inputs.physical_summary_count)
             .and_then(|states| states.checked_mul(inputs.state_bytes_per_summary))
             .ok_or(AnalyticalCostError::Overflow)?;
-        persistent_bytes = persistent_bytes
-            .checked_add(retained)
-            .ok_or(AnalyticalCostError::Overflow)?;
+        if ephemeral {
+            ephemeral_state_bytes = ephemeral_state_bytes
+                .checked_add(state_bytes)
+                .ok_or(AnalyticalCostError::Overflow)?;
+        } else {
+            persistent_bytes = persistent_bytes
+                .checked_add(state_bytes)
+                .ok_or(AnalyticalCostError::Overflow)?;
+        }
         if let Some(source_index) = node_evidence.source_coverage_index {
             if node_evidence.bootstrap_read_identity.is_empty() {
                 return Err(AnalyticalCostError::MissingOrStale(
@@ -701,10 +933,10 @@ fn estimate_heterogeneous_summary(
             }
             match scans.entry(node_evidence.bootstrap_read_identity.clone()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert((source_index, inputs.initial_source_scan_bytes));
+                    entry.insert((source_index, source_scan_bytes));
                 }
                 std::collections::hash_map::Entry::Occupied(entry)
-                    if *entry.get() != (source_index, inputs.initial_source_scan_bytes) =>
+                    if *entry.get() != (source_index, source_scan_bytes) =>
                 {
                     return Err(AnalyticalCostError::ComparisonScopeMismatch(
                         "bootstrap source bytes",
@@ -991,6 +1223,7 @@ fn estimate_heterogeneous_summary(
         cpu_ops,
         peak_memory_bytes: persistent_bytes
             .checked_add(transient_bytes)
+            .and_then(|bytes| bytes.checked_add(ephemeral_state_bytes))
             .ok_or(AnalyticalCostError::Overflow)?,
         scan_bytes: scans
             .values()
@@ -1559,7 +1792,6 @@ fn validate_guarantee(
     arrival: DataArrival,
 ) -> Result<(), AnalyticalCostError> {
     if guarantee.output_representation != asap_types::post_asap::OutputRepresentation::SummaryState
-        || guarantee.summary_maintenance_mode != SummaryMaintenanceMode::Incremental
         || guarantee.summary_maintenance_mode
             != maintenance_mode(&guarantee.summary_maintenance_lifecycle, arrival)
         || guarantee.evaluation_schedule
@@ -1995,6 +2227,109 @@ mod tests {
     }
 
     #[test]
+    fn complete_streaming_cost_can_select_an_ephemeral_direct_build() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: true,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: false,
+            },
+            &model,
+        )
+        .unwrap();
+
+        assert!(plan.summary_total_cost.is_some());
+        assert!(matches!(
+            plan.deployments[0]
+                .summary_maintenance_lifecycle_guarantee
+                .as_ref()
+                .map(|guarantee| &guarantee.summary_maintenance_lifecycle),
+            Some(SummaryMaintenanceLifecycle::Ephemeral)
+        ));
+    }
+
+    #[test]
+    fn complete_streaming_cost_ranks_provider_owned_physical_plans() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+
+        let mut high_retention = model.node_evidence.clone();
+        for aggregate in high_retention.aggregations.values_mut() {
+            aggregate.inputs.retained_window_count = 20;
+        }
+        let mut low_retention = model.node_evidence.clone();
+        for aggregate in low_retention.aggregations.values_mut() {
+            aggregate.inputs.retained_window_count = 2;
+        }
+        for alternative in [
+            StreamingPhysicalPlanAlternative {
+                physical_plan_id: "high-retention-layout".into(),
+                node_evidence: high_retention,
+            },
+            StreamingPhysicalPlanAlternative {
+                physical_plan_id: "low-retention-layout".into(),
+                node_evidence: low_retention,
+            },
+        ] {
+            model
+                .bind_physical_plan_alternative(&target, &root, alternative)
+                .unwrap();
+        }
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: false,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: true,
+            },
+            &model,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.selected_physical_plan_id.as_deref(),
+            Some("low-retention-layout")
+        );
+        assert_eq!(
+            crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan)
+                .selected_physical_plan_id
+                .as_deref(),
+            Some("low-retention-layout")
+        );
+    }
+
+    #[test]
     fn global_selection_compares_streaming_summary_and_raw_over_one_horizon() {
         let target = streaming_sum_query();
         let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
@@ -2152,6 +2487,74 @@ mod tests {
         assert_eq!(a, Some(Cost(5_264.0)));
         assert!(b.unwrap().0 > a.unwrap().0);
         assert_eq!(model.raw_query_recompute_total_cost(&target_a, 5.0), a);
+    }
+
+    #[test]
+    fn raw_validation_uses_reachable_nodes_and_allows_repeated_source_scans() {
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let scope = streaming_scope();
+        let mut raw = streaming_raw();
+        let first_scan = raw.physical_dag.nodes[0].clone();
+        let mut second_scan = first_scan.clone();
+        second_scan.id = "raw-scan-2".into();
+        let mut unreachable = first_scan.clone();
+        unreachable.id = "unreachable-per-evaluation".into();
+        unreachable.execution = ExecutionMultiplicity::PerEvaluation;
+        raw.physical_dag.nodes = vec![
+            first_scan,
+            second_scan,
+            unreachable,
+            PhysicalDagNode {
+                id: "raw-concat".into(),
+                operator: PhysicalOperator::Concat,
+                children: vec!["raw-scan".into(), "raw-scan-2".into()],
+                source_coverage: None,
+                output_buffer_bytes: 0,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::Once,
+            },
+        ];
+        raw.physical_dag.root = "raw-concat".into();
+        let scan_evidence = raw.physical_dag.evidence["raw-scan"].clone();
+        let mut second_scan_evidence = scan_evidence.clone();
+        second_scan_evidence.physical_id = "raw-scan-2".into();
+        raw.physical_dag
+            .evidence
+            .insert("raw-scan-2".into(), second_scan_evidence);
+        let mut unreachable_evidence = scan_evidence;
+        unreachable_evidence.physical_id = "unreachable-per-evaluation".into();
+        raw.physical_dag
+            .evidence
+            .insert("unreachable-per-evaluation".into(), unreachable_evidence);
+        raw.physical_dag.evidence.insert(
+            "raw-concat".into(),
+            PhysicalNodeEvidence {
+                physical_id: "raw-concat".into(),
+                statistics: OperatorStatistics::Concat {
+                    inputs: vec![
+                        EdgeStatistics {
+                            rows: 80,
+                            bytes: 5_120,
+                        },
+                        EdgeStatistics {
+                            rows: 80,
+                            bytes: 5_120,
+                        },
+                    ],
+                    output: EdgeStatistics {
+                        rows: 160,
+                        bytes: 10_240,
+                    },
+                    promql: None,
+                },
+                output_buffer_bytes: 0,
+            },
+        );
+        let mut model = streaming_model();
+        assert!(model
+            .bind_candidate_comparison(&target, &root, scope, raw)
+            .is_ok());
     }
 
     #[test]

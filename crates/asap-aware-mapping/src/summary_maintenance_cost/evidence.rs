@@ -329,3 +329,12 @@ pub struct StreamingRawInputEvidence {
     pub ingestion_rate_per_second: f64,
     pub physical_dag: EvidenceBackedPhysicalDag,
 }
+
+/// One complete provider-enumerated physical implementation of the selected
+/// streaming summary DAG. The identifier is stable provenance; concrete
+/// framework selection is performed by ranking these complete alternatives.
+#[derive(Debug, Clone)]
+pub struct StreamingPhysicalPlanAlternative {
+    pub physical_plan_id: String,
+    pub node_evidence: StreamingNodeEvidence,
+}
