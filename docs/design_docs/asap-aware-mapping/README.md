@@ -97,6 +97,9 @@ The design is split into focused documents:
 - [Physical plan integration](physical-plan-integration.md) defines how pre-ASAP and
   post-ASAP logical plans lower into the physical operator DAG consumed by statistics
   resolution and analytical costing.
+- [ASAPPlanner and downstream application boundaries](../asapplanner-downstream-boundary.md)
+  separates planner-owned search and selection from downstream physical
+  implementation, deployment, and execution.
 - [Query workloads, data workloads, and summary lifecycle maintenance](workload-demand-and-summary-lifecycle.md) separates
   query-workload properties from data-workload properties and defines ephemeral, prepared,
   shared, and continuously maintained summary-state alternatives.

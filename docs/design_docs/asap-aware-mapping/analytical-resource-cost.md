@@ -795,6 +795,11 @@ Physical evidence is alternative-specific: window fanout, retained state,
 operation costs, and source reads must describe that implementation as a
 whole. The planner does not mix individual nodes from different alternatives.
 
+The ownership of planner-visible realization selection versus downstream
+implementation and deployment is defined in
+[ASAPPlanner and downstream application boundaries](../asapplanner-downstream-boundary.md).
+This document defines only how complete alternatives are costed.
+
 A retained summary bootstraps every active window, consumes arriving rows, and
 serves later reads from state. For the simple build/update/readout shape:
 
