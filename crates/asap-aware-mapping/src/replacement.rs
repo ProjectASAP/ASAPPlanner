@@ -1591,11 +1591,7 @@ fn realize_exact_binary(
     else {
         return Ok(None);
     };
-    if !matches!(
-        op,
-        BinaryOpKind::Arithmetic(_) | BinaryOpKind::Pow | BinaryOpKind::Atan2
-    ) || vector_match.is_some()
-    {
+    if !matches!(op, BinaryOpKind::Arithmetic(_)) || vector_match.is_some() {
         return Ok(None);
     }
 
@@ -1637,7 +1633,7 @@ fn is_supported_exact_binary(root: &QueryExpr) -> bool {
     matches!(
         root,
         QueryExpr::BinaryOp {
-            op: BinaryOpKind::Arithmetic(_) | BinaryOpKind::Pow | BinaryOpKind::Atan2,
+            op: BinaryOpKind::Arithmetic(_),
             vector_match: None,
             ..
         }

@@ -37,7 +37,7 @@ use asap_frontend_promql::{lower_promql, PromqlError as LoweringError};
 use asap_types::pre_asap::schema::DataType;
 use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, MathFunc, QueryExpr,
-    Reduction, SampleKind, Source, TimeFunc,
+    Reduction, SampleKind, SetOpKind, Source, TimeFunc,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -798,11 +798,11 @@ fn scalar_arithmetic_scales_the_vector() {
 fn set_ops_lower_to_binaryop() {
     // SEMANTICS: or = union of label sets; and = intersection; unless = difference.
     assert!(matches!(&ok("up{job=\"a\"} or up{job=\"b\"}"),
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Or));
+        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Set(SetOpKind::Or)));
     assert!(matches!(&ok("node_network_mtu_bytes and node_up"),
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::And));
+        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Set(SetOpKind::And)));
     assert!(matches!(&ok("node_network_mtu_bytes unless node_down"),
-        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Unless));
+        QueryExpr::BinaryOp { op, .. } if *op == BinaryOpKind::Set(SetOpKind::Unless)));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1866,7 +1866,7 @@ fn vector_zero_is_a_vector_operand_of_a_set_op() {
     let QueryExpr::BinaryOp { rhs, op, .. } = &qe else {
         panic!("expected a BinaryOp, got {qe:?}");
     };
-    assert_eq!(*op, BinaryOpKind::Or);
+    assert_eq!(*op, BinaryOpKind::Set(SetOpKind::Or));
     assert!(matches!(rhs.as_ref(), QueryExpr::PromqlVectorFromScalar(_)));
 }
 

@@ -1024,15 +1024,16 @@ fn duration_millis(
 fn promql_binary_operation(
     operation: &asap_types::pre_asap::BinaryOpKind,
 ) -> PromqlBinaryOperation {
-    use asap_types::pre_asap::BinaryOpKind;
+    use asap_types::pre_asap::{BinaryOpKind, SetOpKind};
     match operation {
-        BinaryOpKind::And => PromqlBinaryOperation::And,
-        BinaryOpKind::Or => PromqlBinaryOperation::Or,
-        BinaryOpKind::Unless => PromqlBinaryOperation::Unless,
+        BinaryOpKind::Set(SetOpKind::And) => PromqlBinaryOperation::And,
+        BinaryOpKind::Set(SetOpKind::Or) => PromqlBinaryOperation::Or,
+        BinaryOpKind::Set(SetOpKind::Unless) => PromqlBinaryOperation::Unless,
         BinaryOpKind::Arithmetic(_)
         | BinaryOpKind::Compare(_)
-        | BinaryOpKind::Pow
-        | BinaryOpKind::Atan2 => PromqlBinaryOperation::ArithmeticOrComparison,
+        | BinaryOpKind::Set(SetOpKind::Union | SetOpKind::Intersect | SetOpKind::Except) => {
+            PromqlBinaryOperation::ArithmeticOrComparison
+        }
     }
 }
 

@@ -253,16 +253,8 @@ pub enum BinaryOpKind {
     /// Comparison — `Eq/Ne/Lt/Le/Gt/Ge` + `Like/ILike/Regex` family (shared
     /// with `QueryExpr::Compare`).
     Compare(CompareOpKind),
-    /// PromQL logical-set intersection (`and`).
-    And,
-    /// PromQL logical-set union (`or`).
-    Or,
-    /// PromQL logical-set complement (`unless`).
-    Unless,
-    /// Exponentiation (`^`) — PromQL vector op, no scalar-IR counterpart.
-    Pow,
-    /// `atan2` — PromQL vector op, no scalar-IR counterpart.
-    Atan2,
+    /// PromQL vector-set operation.
+    Set(SetOpKind),
 }
 
 impl std::fmt::Display for BinaryOpKind {
@@ -270,11 +262,12 @@ impl std::fmt::Display for BinaryOpKind {
         match self {
             BinaryOpKind::Arithmetic(op) => write!(f, "{op}"),
             BinaryOpKind::Compare(op) => write!(f, "{op}"),
-            BinaryOpKind::And => f.write_str("AND"),
-            BinaryOpKind::Or => f.write_str("OR"),
-            BinaryOpKind::Unless => f.write_str("unless"),
-            BinaryOpKind::Pow => f.write_str("^"),
-            BinaryOpKind::Atan2 => f.write_str("atan2"),
+            BinaryOpKind::Set(SetOpKind::And) => f.write_str("AND"),
+            BinaryOpKind::Set(SetOpKind::Or) => f.write_str("OR"),
+            BinaryOpKind::Set(SetOpKind::Unless) => f.write_str("unless"),
+            BinaryOpKind::Set(SetOpKind::Union) => f.write_str("UNION"),
+            BinaryOpKind::Set(SetOpKind::Intersect) => f.write_str("INTERSECT"),
+            BinaryOpKind::Set(SetOpKind::Except) => f.write_str("EXCEPT"),
         }
     }
 }
@@ -309,6 +302,9 @@ pub enum SetOpKind {
     Union,
     Intersect,
     Except,
+    And,
+    Or,
+    Unless,
 }
 
 /// SQL analytic window function (`fn(...) OVER (…)`). Distinct from a streaming
