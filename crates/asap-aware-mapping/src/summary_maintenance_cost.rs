@@ -5,6 +5,7 @@
 //! window counts, and per-operation CPU measurements or complexity estimates.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use asap_types::post_asap::{
     SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
@@ -182,6 +183,10 @@ pub struct StreamingRawInputEvidence {
 /// existing enums and legality checks remain authoritative.
 #[derive(Debug, Clone)]
 pub struct StreamingAnalyticalCostModel {
+    /// Exact logical summary identity to which the flat evidence applies.
+    pub summary: Rc<SummaryNode>,
+    /// Exact raw target identity to which `raw` applies.
+    pub raw_target: Rc<QueryExpr>,
     pub summary_inputs: StreamingSummaryInputs,
     pub raw: StreamingRawInputEvidence,
     pub cpu: SummaryOperationCpuEvidence,
@@ -252,19 +257,29 @@ impl CostModel for StreamingAnalyticalCostModel {
 
     fn summary_maintenance_lifecycle_cost_inputs(
         &self,
-        _summary: &SummaryNode,
+        summary: &SummaryNode,
     ) -> SummaryMaintenanceLifecycleCostInputs {
-        self.lifecycle_inputs().unwrap_or_default()
+        std::ptr::eq(self.summary.as_ref(), summary)
+            .then(|| self.lifecycle_inputs())
+            .flatten()
+            .unwrap_or_default()
     }
 
     fn summary_maintenance_capabilities(
         &self,
-        _summary: &SummaryNode,
+        summary: &SummaryNode,
     ) -> SummaryMaintenanceCapabilities {
-        self.capabilities
+        if std::ptr::eq(self.summary.as_ref(), summary) {
+            self.capabilities
+        } else {
+            SummaryMaintenanceCapabilities::default()
+        }
     }
 
-    fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
+    fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
+        if !std::ptr::eq(self.raw_target.as_ref(), target) {
+            return None;
+        }
         self.calibrated(estimate_streaming_raw_recompute(self.raw, 1).ok()?)
     }
 }
@@ -698,6 +713,8 @@ mod tests {
 
     #[test]
     fn existing_lifecycle_planner_selects_a_fully_costed_streaming_alternative() {
+        let root = summary_with_operations(false, false, false);
+        let raw_target = Rc::new(QueryExpr::promql_scalar(1.0));
         let inputs = StreamingSummaryInputs {
             data_arrival: DataArrival::ContinuouslyIngesting,
             initial_input_rows: 10,
@@ -713,6 +730,8 @@ mod tests {
             evaluation_count: 5,
         };
         let model = StreamingAnalyticalCostModel {
+            summary: single_summary_agg(&root),
+            raw_target: Rc::clone(&raw_target),
             summary_inputs: inputs,
             raw: StreamingRawInputEvidence {
                 per_evaluation: ResourceEstimate {
@@ -759,9 +778,8 @@ mod tests {
                 ..DataWorkload::default()
             }),
         };
-        let root = summary_with_operations(false, false, false);
         let plan = plan_summary_maintenance_lifecycles(
-            root,
+            Rc::clone(&root),
             WorkloadDemand::new(&workload, &[0]),
             0,
             Some(Horizon(5.0)),
@@ -784,8 +802,13 @@ mod tests {
         ));
         assert!(plan.summary_total_cost.is_some());
         assert_eq!(
-            model.raw_query_recompute_cost(&QueryExpr::promql_scalar(1.0)),
+            model.raw_query_recompute_cost(&raw_target),
             Some(Cost(1_640.0))
+        );
+        assert_eq!(
+            model.raw_query_recompute_cost(&QueryExpr::promql_scalar(1.0)),
+            None,
+            "structurally equal but independently allocated targets must not reuse evidence"
         );
     }
 
@@ -794,7 +817,18 @@ mod tests {
         let target = streaming_sum_query();
         let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
         let workload = streaming_workload();
-        let model = streaming_model();
+        let raw_target = Rc::clone(&space.roots[0].1);
+        let summary = space
+            .group_for(&raw_target)
+            .unwrap()
+            .candidates
+            .iter()
+            .find_map(|candidate| match &candidate.replacement {
+                crate::replacement::Replacement::Summary(summary) => Some(Rc::clone(summary)),
+                crate::replacement::Replacement::Rewrite(_) => None,
+            })
+            .unwrap();
+        let model = streaming_model(single_summary_agg(&summary), raw_target);
         let selection = global_selection_with_summary_maintenance_lifecycles(
             &space,
             &workload,
@@ -1338,8 +1372,13 @@ mod tests {
         }
     }
 
-    fn streaming_model() -> StreamingAnalyticalCostModel {
+    fn streaming_model(
+        summary: Rc<SummaryNode>,
+        raw_target: Rc<QueryExpr>,
+    ) -> StreamingAnalyticalCostModel {
         StreamingAnalyticalCostModel {
+            summary,
+            raw_target,
             summary_inputs: StreamingSummaryInputs {
                 data_arrival: DataArrival::ContinuouslyIngesting,
                 initial_input_rows: 10,
@@ -1377,6 +1416,14 @@ mod tests {
                 merge: false,
                 delete: false,
             },
+        }
+    }
+
+    fn single_summary_agg(root: &Rc<SummaryNode>) -> Rc<SummaryNode> {
+        match &root.expr {
+            SummaryExpr::SummaryAgg { .. } => Rc::clone(root),
+            SummaryExpr::SummaryEstimate { summary_input, .. } => single_summary_agg(summary_input),
+            other => panic!("expected one SummaryAgg, got {other:?}"),
         }
     }
 }
