@@ -351,8 +351,8 @@ use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource,
 use asap_types::post_asap::{
     ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm,
     SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams,
-    SummaryExpr, SummaryFamilyType, SummaryField, SummaryInput, SummaryKey, SummaryNode,
-    SummarySchema, SummaryValue, WaveletKind, WaveletParams,
+    SummaryArgument, SummaryArgumentRole, SummaryExpr, SummaryFamilyType, SummaryField,
+    SummaryInput, SummaryInputExpr, SummaryNode, SummarySchema, WaveletKind, WaveletParams,
 };
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
@@ -1868,9 +1868,9 @@ fn realize_keyed_additive_summary_input(
     else {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
-    let value = match measures.as_slice() {
-        [AggIntent::Count { .. }] => SummaryValue::Constant(1.0),
-        [AggIntent::Sum { col }] => SummaryValue::Column(match col {
+    let weight = match measures.as_slice() {
+        [AggIntent::Count { .. }] => SummaryInputExpr::Constant(1.0),
+        [AggIntent::Sum { col }] => SummaryInputExpr::Column(match col {
             None => ColumnRef::SampleValue,
             Some(index) => match schema_column_ref(raw_child, *index) {
                 Some(column) => column,
@@ -1883,22 +1883,22 @@ fn realize_keyed_additive_summary_input(
         }),
         _ => return PhysicalSummaryInputRuleResult::NotApplicable,
     };
-    if matches!(value, SummaryValue::Column(_))
+    if matches!(weight, SummaryInputExpr::Column(_))
         && matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
     {
         return PhysicalSummaryInputRuleResult::Unsupported(
             "value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values",
         );
     }
-    let key = match reduction {
-        Reduction::PerEntity => SummaryKey::SeriesIdentity,
+    let item = match reduction {
+        Reduction::PerEntity => SummaryInputExpr::SeriesIdentity,
         Reduction::Reduce(keys) if !keys.is_without() && keys.len() == 1 => {
             let Some(key) = schema_column_ref(raw_child, keys[0]) else {
                 return PhysicalSummaryInputRuleResult::Unsupported(
                     "Top-K grouping key is outside the raw input schema",
                 );
             };
-            SummaryKey::Column(key)
+            SummaryInputExpr::Column(key)
         }
         Reduction::Reduce(_) => {
             return PhysicalSummaryInputRuleResult::Unsupported(
@@ -1909,8 +1909,16 @@ fn realize_keyed_additive_summary_input(
     PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
         child: Rc::clone(raw_child),
         input: SummaryInput {
-            key: Some(key),
-            value,
+            arguments: vec![
+                SummaryArgument {
+                    role: SummaryArgumentRole::Item,
+                    expression: item,
+                },
+                SummaryArgument {
+                    role: SummaryArgumentRole::Weight,
+                    expression: weight,
+                },
+            ],
         },
     })
 }
@@ -2066,11 +2074,8 @@ fn readout(
         AggIntent::Cardinality { .. } => PostAsapSketchQuery::Cardinality,
         AggIntent::TopK { k, .. } => PostAsapSketchQuery::TopK { k: *k },
         AggIntent::Count { .. } => PostAsapSketchQuery::PointCount {
-            key: match input {
-                SummaryInput {
-                    key: None,
-                    value: SummaryValue::Column(col),
-                } => col.clone(),
+            key: match input.expression(SummaryArgumentRole::Observation) {
+                Some(SummaryInputExpr::Column(col)) => col.clone(),
                 _ => unreachable!("point count requires one column"),
             },
             value: None,
@@ -2080,13 +2085,14 @@ fn readout(
         // same `CostModel` that decided (via `realize_extension`) this
         // intent gets a summary realization at all. See `readout_extension`'s
         // doc for the invariant this depends on.
-        AggIntent::Extension { ext_kind, payload } => match input {
-            SummaryInput {
-                key: None,
-                value: SummaryValue::Column(col),
-            } => cost_model.readout_extension(ext_kind, payload, col),
-            _ => unreachable!("extension readout requires one column"),
-        },
+        AggIntent::Extension { ext_kind, payload } => {
+            match input.expression(SummaryArgumentRole::Observation) {
+                Some(SummaryInputExpr::Column(col)) => {
+                    cost_model.readout_extension(ext_kind, payload, col)
+                }
+                _ => unreachable!("extension readout requires one column"),
+            }
+        }
         other => {
             unreachable!("no summary realization for {other:?} (implementations_for_with)")
         }
@@ -6794,14 +6800,12 @@ mod tests {
     /// The single-column input of the first `SummaryAgg` in the tree.
     fn find_summary_col(node: &SummaryNode) -> Option<ColumnRef> {
         match &node.expr {
-            SummaryExpr::SummaryAgg {
-                input:
-                    SummaryInput {
-                        key: None,
-                        value: SummaryValue::Column(col),
-                    },
-                ..
-            } => Some(col.clone()),
+            SummaryExpr::SummaryAgg { input, .. } => input
+                .expression(SummaryArgumentRole::Observation)
+                .and_then(|expression| match expression {
+                    SummaryInputExpr::Column(col) => Some(col.clone()),
+                    _ => None,
+                }),
             SummaryExpr::SummaryEstimate { summary_input, .. } => find_summary_col(summary_input),
             _ => None,
         }
@@ -7004,12 +7008,13 @@ mod tests {
             panic!("expected fused summary aggregation")
         };
         assert!(matches!(
-            input,
-            SummaryInput {
-                key: Some(SummaryKey::Column(ColumnRef::Named(name))),
-                value: SummaryValue::Constant(1.0),
-            } if name == "service"
+            input.expression(SummaryArgumentRole::Item),
+            Some(SummaryInputExpr::Column(ColumnRef::Named(name))) if name == "service"
         ));
+        assert_eq!(
+            input.expression(SummaryArgumentRole::Weight),
+            Some(&SummaryInputExpr::Constant(1.0))
+        );
         assert!(matches!(
             family,
             SummaryFamilyType::Sketch(kind, _)
@@ -7063,12 +7068,13 @@ mod tests {
             panic!("expected fused summary aggregation")
         };
         assert!(matches!(
-            input,
-            SummaryInput {
-                key: Some(SummaryKey::Column(ColumnRef::Named(name))),
-                value: SummaryValue::Column(ColumnRef::SampleValue),
-            } if name == "service"
+            input.expression(SummaryArgumentRole::Item),
+            Some(SummaryInputExpr::Column(ColumnRef::Named(name))) if name == "service"
         ));
+        assert_eq!(
+            input.expression(SummaryArgumentRole::Weight),
+            Some(&SummaryInputExpr::Column(ColumnRef::SampleValue))
+        );
         assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(_)));
     }
 
@@ -7109,15 +7115,20 @@ mod tests {
             let SummaryExpr::SummaryAgg { input, .. } = &summary_input.expr else {
                 return None;
             };
-            input.key.is_some().then_some(input)
+            input
+                .expression(SummaryArgumentRole::Item)
+                .is_some()
+                .then_some(input)
         });
-        assert!(matches!(
-            input,
-            Some(SummaryInput {
-                key: Some(SummaryKey::SeriesIdentity),
-                value: SummaryValue::Column(ColumnRef::SampleValue),
-            })
-        ));
+        let input = input.expect("keyed summary input");
+        assert_eq!(
+            input.expression(SummaryArgumentRole::Item),
+            Some(&SummaryInputExpr::SeriesIdentity)
+        );
+        assert_eq!(
+            input.expression(SummaryArgumentRole::Weight),
+            Some(&SummaryInputExpr::Column(ColumnRef::SampleValue))
+        );
     }
 
     #[test]
@@ -7171,16 +7182,13 @@ mod tests {
         };
         let q = agg(vec![0], AggIntent::Sum { col: Some(1) }, scan);
         let root = realize(&q).unwrap();
-        let SummaryExpr::SummaryAgg {
-            input:
-                SummaryInput {
-                    key: None,
-                    value: SummaryValue::Column(col),
-                },
-            ..
-        } = &root.expr
-        else {
+        let SummaryExpr::SummaryAgg { input, .. } = &root.expr else {
             panic!("expected SummaryAgg, got {:?}", root.expr);
+        };
+        let Some(SummaryInputExpr::Column(col)) =
+            input.expression(SummaryArgumentRole::Observation)
+        else {
+            panic!("expected observation column")
         };
         assert_eq!(col, &ColumnRef::Named("bytes".into()));
     }

@@ -518,38 +518,50 @@ impl Default for GroupingStrategy {
 
 // ── Sketch read-out queries ───────────────────────────────────────────────────
 
-/// Inputs consumed by one summary update. `value` is the numeric contribution
-/// applied to the state. `key` is present for keyed summaries and absent for
-/// scalar summaries.
+/// Role-labelled arguments consumed by one summary update. The summary
+/// operator/family defines which roles it accepts; the shared IR does not
+/// impose a fixed key/value shape on every summary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SummaryInput {
-    pub key: Option<SummaryKey>,
-    pub value: SummaryValue,
+    pub arguments: Vec<SummaryArgument>,
 }
 
 impl SummaryInput {
     pub fn column(column: ColumnRef) -> Self {
         Self {
-            key: None,
-            value: SummaryValue::Column(column),
+            arguments: vec![SummaryArgument {
+                role: SummaryArgumentRole::Observation,
+                expression: SummaryInputExpr::Column(column),
+            }],
         }
+    }
+
+    pub fn expression(&self, role: SummaryArgumentRole) -> Option<&SummaryInputExpr> {
+        self.arguments
+            .iter()
+            .find(|argument| argument.role == role)
+            .map(|argument| &argument.expression)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SummaryKey {
-    /// A relational column identifies the updated key.
-    Column(ColumnRef),
-    /// The complete PromQL label set identifies the updated key.
-    SeriesIdentity,
+pub struct SummaryArgument {
+    pub role: SummaryArgumentRole,
+    pub expression: SummaryInputExpr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SummaryArgumentRole {
+    Observation,
+    Item,
+    Weight,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SummaryValue {
-    /// Add this constant weight for every input row/sample.
+pub enum SummaryInputExpr {
     Constant(f64),
-    /// Add the numeric value from this column for every input row/sample.
     Column(ColumnRef),
+    SeriesIdentity,
 }
 
 /// What to extract from a built summary. Carried by `SummaryEstimate`.
@@ -583,12 +595,28 @@ mod tests {
     fn keyed_summary_input_and_topk_readout_round_trip() {
         for input in [
             SummaryInput {
-                key: Some(SummaryKey::SeriesIdentity),
-                value: SummaryValue::Constant(1.0),
+                arguments: vec![
+                    SummaryArgument {
+                        role: SummaryArgumentRole::Item,
+                        expression: SummaryInputExpr::SeriesIdentity,
+                    },
+                    SummaryArgument {
+                        role: SummaryArgumentRole::Weight,
+                        expression: SummaryInputExpr::Constant(1.0),
+                    },
+                ],
             },
             SummaryInput {
-                key: Some(SummaryKey::Column(ColumnRef::Named("service".into()))),
-                value: SummaryValue::Column(ColumnRef::SampleValue),
+                arguments: vec![
+                    SummaryArgument {
+                        role: SummaryArgumentRole::Item,
+                        expression: SummaryInputExpr::Column(ColumnRef::Named("service".into())),
+                    },
+                    SummaryArgument {
+                        role: SummaryArgumentRole::Weight,
+                        expression: SummaryInputExpr::Column(ColumnRef::SampleValue),
+                    },
+                ],
             },
         ] {
             let input_json = serde_json::to_string(&input).unwrap();

@@ -20,8 +20,8 @@ use asap_aware_mapping::{
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
     CompositionOperator, ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind,
-    SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInput, SummaryKey,
-    SummaryNode, SummarySchema, SummaryValue,
+    SketchParams, SketchQuery, SummaryArgumentRole, SummaryExpr, SummaryFamilyType, SummaryInput,
+    SummaryInputExpr, SummaryNode, SummarySchema,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -83,12 +83,12 @@ fn temporal_topk_binds_constant_one_and_sample_value_weight_projections() {
     let cases = [
         (
             "topk by (service) (5, count_over_time(requests[1m]))",
-            SummaryValue::Constant(1.0),
+            SummaryInputExpr::Constant(1.0),
             "CmsWithHeap",
         ),
         (
             "topk(5, sum_over_time(requests[1m]))",
-            SummaryValue::Column(ColumnRef::SampleValue),
+            SummaryInputExpr::Column(ColumnRef::SampleValue),
             "CountSketchWithHeap",
         ),
     ];
@@ -135,11 +135,12 @@ fn temporal_topk_binds_constant_one_and_sample_value_weight_projections() {
             panic!("expected structured Top-K state input")
         };
         assert_eq!(
-            state_input,
-            &SummaryInput {
-                key: Some(SummaryKey::SeriesIdentity),
-                value: expected_update,
-            }
+            state_input.expression(SummaryArgumentRole::Item),
+            Some(&SummaryInputExpr::SeriesIdentity)
+        );
+        assert_eq!(
+            state_input.expression(SummaryArgumentRole::Weight),
+            Some(&expected_update)
         );
         assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(_)));
     }
