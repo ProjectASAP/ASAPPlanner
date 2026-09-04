@@ -183,9 +183,10 @@ file for its own `by`/`without` invariant. Concretely, this means:
 - `output_schema()` never has enough information to fabricate a discriminator
   on its own — it can only read one that a constructor already supplied.
 - Nothing prevents a caller from asserting a **wrong** discriminator (one
-  that isn't actually distinct per branch) — the type system enforces "you
-  named a column," not "you were right about it." That obligation is
-  documented on `ConcatDiscriminatorKey` itself and is the same shape of
+  that isn't actually distinct per branch), or an `inner_key` that is not
+  unique within every branch. The type system enforces "you named the
+  columns," not "the compound key is valid." Both obligations are
+  documented on `ConcatDiscriminatorKey` itself and have the same shape of
   unverified claim `QueryExpr::Dedup.cols` already carries elsewhere in this
   module (nothing checks a `Dedup`'s `cols` are actually a real key of its
   child either).
@@ -196,18 +197,13 @@ file for its own `by`/`without` invariant. Concretely, this means:
   `unique_keys: []`.
 
 **Caveat, stated precisely (review fix, see "Review fixes" below): this is a
-guarantee against *other Rust code*, not against arbitrary data.**
-`#[derive(Deserialize)]` on `ConcatDiscriminatorKey` generates same-module
-code that builds one directly from whatever `discriminator`/`inner_key`
-values are present in the input, bypassing `new()` and its
-naming-requirement entirely. A `Concat` node deserialized from untrusted JSON
-could therefore carry a `discriminator_unique_key` nobody's Rust call site
-ever named. This is not a reachable concern in the current repo — the only
-place a whole `QueryExpr` is deserialized at all is a same-file unit test —
-so no runtime hardening (a custom `Deserialize` impl, a post-deserialize
-validation pass) was added for it; if `QueryExpr` ever gains a real
-external-input deserialization path, this is the guarantee that would need
-revisiting there.
+guarantee against *other Rust code*, not against arbitrary data.** Derived
+deserialization builds the assertion directly from input values, bypassing
+`new()`. Deserialization must therefore be treated exactly like a direct
+caller assertion: an external `QueryExpr` boundary must reject this field or
+establish both obligations above before using it as uniqueness evidence.
+Rejecting unknown fields protects the assertion object from schema drift, but
+cannot prove facts about the underlying rows.
 
 ### Tests added (`crates/types/src/pre_asap/query_expr.rs`)
 
@@ -284,13 +280,10 @@ accuracy issue. All three are fixed on the same PR:
    proving is distinct" — true for other *Rust code*, but not for
    `#[derive(Deserialize)]`, which is same-module generated code that builds
    the struct directly from field values in arbitrary JSON, bypassing
-   `new()` entirely. Currently unreachable (the only place a whole
-   `QueryExpr` is deserialized in the repo is a same-file unit test, not an
-   external-input path), but the claim was factually incomplete as stated.
-   Fixed by narrowing both to "from other Rust code" and adding the
-   `Deserialize` caveat explicitly, rather than adding speculative runtime
-   hardening for a currently-unreachable path (per the review's preferred
-   option).
+   `new()` entirely. Fixed by narrowing both to "from other Rust code",
+   rejecting unknown assertion fields, and making the external boundary's
+   validation obligation explicit. Deserialization itself still cannot prove
+   data-level uniqueness.
 
 ## Future work (explicitly out of scope here)
 

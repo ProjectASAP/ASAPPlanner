@@ -569,16 +569,12 @@ impl<C> Reduction<C> {
 /// column as the discriminator, by name, at the call site.
 ///
 /// Caveat: this is a Rust-API-level guarantee, not a data-level one. The
-/// derived `Deserialize` impl below is same-module generated code, so it
-/// builds a `ConcatDiscriminatorKey` directly from field values found in
-/// arbitrary input, bypassing `new()` and its "name the discriminator"
-/// requirement entirely — untrusted JSON can put in place any `discriminator`
-/// / `inner_key` an attacker likes. This is not a reachable concern today:
-/// the only place a whole `QueryExpr` is ever deserialized in this repo is a
-/// same-file unit test, not an external input path. If `QueryExpr` (or a
-/// subtree of it) ever gains a real from-external-input deserialization call
-/// site, this guarantee would need revisiting there (a custom `Deserialize`
-/// impl, or a post-deserialize validation pass) — nothing here does that yet.
+/// derived `Deserialize` impl below builds a `ConcatDiscriminatorKey`
+/// directly from field values, bypassing `new()`. Deserialization is therefore
+/// equivalent to a caller supplying the assertion directly; it does not prove
+/// either fact below. An external boundary accepting `QueryExpr` data must
+/// reject this field or validate both obligations before treating it as
+/// uniqueness evidence.
 ///
 /// # Soundness
 ///
@@ -591,15 +587,17 @@ impl<C> Reduction<C> {
 /// `histogram_quantiles` branches keyed on `(host, le)` can both produce a
 /// `(host, le)` pair for different φ).
 ///
-/// Prepending `discriminator` is what restores it: if `discriminator`'s
-/// value is **guaranteed to differ per branch** — a literal the producer
-/// just tagged the branch with (PromQL φ riding along via
+/// Prepending `discriminator` restores a compound key only when two facts
+/// hold: `inner_key` uniquely identifies rows **within every branch**, and
+/// `discriminator`'s value is **guaranteed to differ between branches** — a
+/// literal the producer just tagged the branch with (PromQL φ riding along via
 /// [`QueryExpr::PromqlRelabel`], a Postgres-style synthetic `GROUPING()` id
 /// for `ROLLUP`/`CUBE`, …), never something inferred structurally from the
 /// branches' own data — then `discriminator` alone partitions rows into
 /// disjoint sets independent of what the branches actually contain, so
-/// `(discriminator, inner_key)` is sound regardless of whether `inner_key`
-/// values repeat across branches.
+/// `(discriminator, inner_key)` is sound even when otherwise-identical
+/// `inner_key` values occur in different branches. Neither fact is verified
+/// here; both are part of the caller-proven claim.
 ///
 /// This is a **caller-proven claim, not something `Concat` can verify**:
 /// nothing stops a caller from asserting a discriminator that in fact
@@ -609,6 +607,7 @@ impl<C> Reduction<C> {
 /// [`QueryExpr::Dedup`]'s `cols` or any other unverified `unique_keys`
 /// producer in this module.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(bound(serialize = "C: ColState", deserialize = "C: ColState"))]
 pub struct ConcatDiscriminatorKey<C: ColState = ColumnId> {
     discriminator: C,
@@ -1017,7 +1016,8 @@ impl<C: ColState> QueryExpr<C> {
     /// #228). See [`ConcatDiscriminatorKey`]'s doc for the soundness
     /// argument and the obligation this puts on the caller —
     /// `output_schema` trusts this claim without verifying it: nothing here
-    /// checks that `discriminator`'s value is actually distinct per branch.
+    /// checks that `inner_key` is unique within every branch or that
+    /// `discriminator`'s value is distinct between branches.
     pub fn concat_with_discriminator(
         children: Vec<QueryExpr<C>>,
         discriminator: C,
@@ -1927,6 +1927,12 @@ mod tests {
             2,
             "column shape is still the first branch's"
         );
+    }
+
+    #[test]
+    fn discriminator_assertion_rejects_unknown_wire_fields() {
+        let json = r#"{"discriminator":1,"inner_key":[0],"unverified":true}"#;
+        assert!(serde_json::from_str::<ConcatDiscriminatorKey>(json).is_err());
     }
 
     /// The override is opt-in: building a `Concat` without asserting a
