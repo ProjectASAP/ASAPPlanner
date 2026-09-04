@@ -30,10 +30,10 @@ use asap_types::workload::{
 };
 
 use crate::analytical_cost::AnalyticalCostError;
-use crate::analytical_statistics::evaluations_in_horizon;
 use crate::cost_model::{
     CompleteSummaryCandidateEstimate, Cost, CostModel, CostedSummaryDeployment,
 };
+use crate::physical_operator_statistics::evaluations_in_horizon;
 use crate::recurrence::{
     CostRate, EvaluationRate, Horizon, RecurrenceError, RecurrenceProfile, UpdateRate,
 };
