@@ -15,9 +15,7 @@ use asap_types::pre_asap::{agg_intent::AggIntent, QueryExpr};
 use asap_types::workload::{DataArrival, DataWorkload, QueryWorkloadEntry};
 use serde::{Deserialize, Serialize};
 
-use crate::analytical_cost::{
-    AnalyticalCostError, ResourceCalibration, ResourceEstimate,
-};
+use crate::analytical_cost::{AnalyticalCostError, ResourceCalibration, ResourceEstimate};
 use crate::cost_model::{Cost, CostModel, DefaultCostModel};
 use crate::physical_operator_statistics::evaluations_in_horizon;
 use crate::recurrence::CostRate;
@@ -182,7 +180,7 @@ pub struct StreamingRawInputEvidence {
 /// streaming costs. It does not define lifecycle policy: the planner's
 /// existing enums and legality checks remain authoritative.
 #[derive(Debug, Clone)]
-pub struct StreamingAnalyticalCostModel {
+pub struct SummaryMaintenanceCostModel {
     /// Exact logical summary identity to which the flat evidence applies.
     pub summary: Rc<SummaryNode>,
     /// Exact raw target identity to which `raw` applies.
@@ -194,7 +192,7 @@ pub struct StreamingAnalyticalCostModel {
     pub capabilities: SummaryMaintenanceCapabilities,
 }
 
-impl StreamingAnalyticalCostModel {
+impl SummaryMaintenanceCostModel {
     fn calibrated(&self, estimate: ResourceEstimate) -> Option<Cost> {
         estimate.calibrated_cost(&self.calibration).ok().map(Cost)
     }
@@ -242,7 +240,7 @@ impl StreamingAnalyticalCostModel {
     }
 }
 
-impl CostModel for StreamingAnalyticalCostModel {
+impl CostModel for SummaryMaintenanceCostModel {
     fn rank_candidates(
         &self,
         intent: &AggIntent,
@@ -729,7 +727,7 @@ mod tests {
             state_bytes_per_summary: 100,
             evaluation_count: 5,
         };
-        let model = StreamingAnalyticalCostModel {
+        let model = SummaryMaintenanceCostModel {
             summary: single_summary_agg(&root),
             raw_target: Rc::clone(&raw_target),
             summary_inputs: inputs,
@@ -1375,8 +1373,8 @@ mod tests {
     fn streaming_model(
         summary: Rc<SummaryNode>,
         raw_target: Rc<QueryExpr>,
-    ) -> StreamingAnalyticalCostModel {
-        StreamingAnalyticalCostModel {
+    ) -> SummaryMaintenanceCostModel {
+        SummaryMaintenanceCostModel {
             summary,
             raw_target,
             summary_inputs: StreamingSummaryInputs {
