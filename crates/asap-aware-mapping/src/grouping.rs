@@ -329,7 +329,7 @@ fn with_grouping(
         SummaryExpr::SummaryAgg {
             child,
             family,
-            col,
+            input,
             reduction,
             ..
         } => {
@@ -349,7 +349,7 @@ fn with_grouping(
                 expr: SummaryExpr::SummaryAgg {
                     child: Rc::clone(child),
                     family: grouped_family,
-                    col: col.clone(),
+                    input: input.clone(),
                     reduction: reduction.clone(),
                     grouping,
                 },

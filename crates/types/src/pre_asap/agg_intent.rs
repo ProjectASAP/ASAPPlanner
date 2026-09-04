@@ -532,68 +532,36 @@ fn quantile_suffix(q: f64) -> String {
 ///
 /// Sketchability follows the *additivity* of the ranking measure, not "count"
 /// per se: an additive per-key aggregate admits a single-pass heavy-hitter
-/// sketch (CMS-with-heap / SpaceSaving), a non-additive one does not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RankingMeasure {
-    /// Unweighted frequency — `count` of rows/samples per key. Additive, and the
-    /// one heavy-hitter measure **realised today** (→ `AggIntent::TopK`).
-    Frequency,
-    /// Weighted frequency — an additive `sum` of a per-row weight per key.
-    /// Sketchable in principle (weighted SpaceSaving), but no weighted
-    /// heavy-hitter sketch is realised yet, so a `sum`-ranked top-k currently
-    /// stays a generic `Sort + Limit`. Reserved so the axis is explicit; the
-    /// realisation is post-ASAP sketch selection (issues #6/#33).
-    WeightedSum,
-    /// A non-additive measure (`avg` / `quantile` / `min` / `max`) or a raw,
-    /// un-aggregated value. Never a heavy-hitter — always generic.
-    NonAdditive,
-}
+/// sketch, while a non-additive one does not. The physical family still
+/// depends on update-domain evidence: CMS requires non-negative weights,
+/// whereas CountSketch supports signed value updates.
+/// Definitions owned specifically by the [`AggIntent::TopK`] operator.
+/// Keeping them scoped prevents an operator-local classification from
+/// becoming a top-level IR axis.
+pub mod topk {
+    use super::AggIntent;
 
-impl RankingMeasure {
-    /// Whether a top-k ranked by this measure can be a heavy-hitter **with a
-    /// sketch that exists today**. Only [`Frequency`](Self::Frequency) is
-    /// realised; [`WeightedSum`](Self::WeightedSum) is additive (sketchable in
-    /// principle) but has no implemented sketch yet, so it stays generic until
-    /// one lands. This gate is the single knob to flip when that happens.
-    pub fn is_realised_heavy_hitter(self) -> bool {
-        matches!(self, RankingMeasure::Frequency)
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub enum Ranking {
+        #[default]
+        Frequency,
+        WeightedSum,
+        NonAdditive,
     }
-}
 
-/// Classify the aggregate a top-k ranks by into its [`RankingMeasure`] — the
-/// additivity axis heavy-hitter sketchability turns on.
-pub fn ranking_measure(agg: &AggIntent) -> RankingMeasure {
-    match agg {
-        AggIntent::Count { .. } => RankingMeasure::Frequency,
-        AggIntent::Sum { .. } => RankingMeasure::WeightedSum,
-        _ => RankingMeasure::NonAdditive,
+    impl Ranking {
+        pub fn from_aggregate(aggregate: &AggIntent) -> Self {
+            match aggregate {
+                AggIntent::Count { .. } => Self::Frequency,
+                AggIntent::Sum { .. } => Self::WeightedSum,
+                _ => Self::NonAdditive,
+            }
+        }
+
+        pub fn is_supported(self, descending: bool) -> bool {
+            descending && !matches!(self, Self::NonAdditive)
+        }
     }
-}
-
-/// The single rule that decides whether a top-k ranking is the frequency
-/// **heavy-hitter** that [`AggIntent::TopK`] represents, as opposed to a generic
-/// order-by-value `Sort + Limit`.
-///
-/// A ranking qualifies iff it takes the **top** k — `descending` (bottom-k, and
-/// any ascending `ORDER BY … LIMIT`, never do) — **and** ranks by a measure with
-/// a realised heavy-hitter sketch ([`RankingMeasure::is_realised_heavy_hitter`],
-/// i.e. unweighted [`Frequency`](RankingMeasure::Frequency) today). Both places
-/// that make this decision consult this one predicate so they cannot drift
-/// (issue #38):
-///
-/// - the PromQL front-end gate, on `topk(k, count_over_time(…))` — `descending`
-///   is the `topk`-vs-`bottomk` choice, `measure` is the inner range function
-///   (`count_over_time` → `Frequency`, else `NonAdditive`);
-/// - the shared canonicalize promotion, on a
-///   `Limit { Sort { … Aggregate([agg]) } }` — `descending` is the sort key's
-///   direction, `measure` is [`ranking_measure`] of the ranked aggregate.
-///
-/// The two detectors recognise different *shapes* (a per-series
-/// `count_over_time` vs. a cross-series `GROUP BY … COUNT`), which is why the
-/// shape-matching stays language-specific; only this heavy-hitter *decision* is
-/// shared.
-pub fn is_frequency_heavy_hitter(descending: bool, measure: RankingMeasure) -> bool {
-    descending && measure.is_realised_heavy_hitter()
 }
 
 /// Two instances of this aggregation can be merged
@@ -720,34 +688,41 @@ mod tests {
     }
 
     #[test]
-    fn frequency_heavy_hitter_rule() {
-        use RankingMeasure::*;
-        // Heavy-hitter iff descending AND a realised (Frequency) measure (#38).
-        // Frequency=count, NonAdditive=value measure, WeightedSum=sum (additive
-        // but not yet sketch-realised, so it stays generic like the rest).
-        assert!(is_frequency_heavy_hitter(true, Frequency));
-        assert!(!is_frequency_heavy_hitter(false, Frequency));
-        assert!(!is_frequency_heavy_hitter(true, NonAdditive));
-        assert!(!is_frequency_heavy_hitter(true, WeightedSum));
+    fn additive_heavy_hitter_rule() {
+        use topk::Ranking::*;
+        // Heavy-hitter iff descending and the ranking measure has a physical
+        // heap-sketch realization.
+        assert!(Frequency.is_supported(true));
+        assert!(!Frequency.is_supported(false));
+        assert!(!NonAdditive.is_supported(true));
+        assert!(WeightedSum.is_supported(true));
     }
 
     #[test]
-    fn ranking_measure_classifies_by_additivity() {
-        use RankingMeasure::*;
+    fn topk_ranking_classifies_aggregate_inputs() {
+        use topk::Ranking::*;
         assert_eq!(
-            ranking_measure(&AggIntent::Count {
+            topk::Ranking::from_aggregate(&AggIntent::Count {
                 accuracy: AccuracyTarget::Exact
             }),
             Frequency
         );
-        assert_eq!(ranking_measure(&AggIntent::Sum { col: None }), WeightedSum);
-        assert_eq!(ranking_measure(&AggIntent::Avg { col: None }), NonAdditive);
-        assert_eq!(ranking_measure(&AggIntent::Max { col: None }), NonAdditive);
-        // Only Frequency is a realised heavy-hitter today; the additive
-        // WeightedSum is reserved (sketchable, not yet implemented).
-        assert!(Frequency.is_realised_heavy_hitter());
-        assert!(!WeightedSum.is_realised_heavy_hitter());
-        assert!(!NonAdditive.is_realised_heavy_hitter());
+        assert_eq!(
+            topk::Ranking::from_aggregate(&AggIntent::Sum { col: None }),
+            WeightedSum
+        );
+        assert_eq!(
+            topk::Ranking::from_aggregate(&AggIntent::Avg { col: None }),
+            NonAdditive
+        );
+        assert_eq!(
+            topk::Ranking::from_aggregate(&AggIntent::Max { col: None }),
+            NonAdditive
+        );
+        // Both additive ranking measures have heap-sketch realizations.
+        assert!(Frequency.is_supported(true));
+        assert!(WeightedSum.is_supported(true));
+        assert!(!NonAdditive.is_supported(true));
     }
 
     #[test]
@@ -784,6 +759,10 @@ mod tests {
                 col: Some(2),
                 accuracy: AccuracyTarget::Exact,
             },
+            AggIntent::TopK {
+                k: 10,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
         ] {
             let json = serde_json::to_string(&v).unwrap();
             let back: AggIntent = serde_json::from_str(&json).unwrap();
@@ -802,6 +781,15 @@ mod tests {
                 col: None,
                 q: 0.99,
                 accuracy: AccuracyTarget::Exact
+            }
+        );
+
+        let legacy = r#"{"kind":"top_k","k":5,"accuracy":"Exact"}"#;
+        assert_eq!(
+            serde_json::from_str::<AggIntent>(legacy).unwrap(),
+            AggIntent::TopK {
+                k: 5,
+                accuracy: AccuracyTarget::Exact,
             }
         );
 

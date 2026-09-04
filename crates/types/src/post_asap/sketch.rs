@@ -518,8 +518,38 @@ impl Default for GroupingStrategy {
 
 // ── Sketch read-out queries ───────────────────────────────────────────────────
 
+/// One summary-state update. `item` identifies a keyed item when the family
+/// is keyed; `weight` is the observation/update expression applied to state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SummaryUpdate {
+    pub item: Option<SummaryInputExpr>,
+    pub weight: SummaryInputExpr,
+}
+
+impl SummaryUpdate {
+    pub fn column(column: ColumnRef) -> Self {
+        Self {
+            item: None,
+            weight: SummaryInputExpr::Column(column),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntityIdentity {
+    PromqlLabelSet { excluding: Vec<ColumnRef> },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SummaryInputExpr {
+    Constant(f64),
+    Column(ColumnRef),
+    Tuple(Vec<SummaryInputExpr>),
+    EntityIdentity(EntityIdentity),
+}
+
 /// What to extract from a built summary. Carried by `SummaryEstimate`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SketchQuery {
     /// Extract the value at quantile rank `q` ∈ (0, 1].
     Quantile { q: f64 },
@@ -537,13 +567,40 @@ pub enum SketchQuery {
     },
     /// Estimated number of distinct elements.
     Cardinality,
-    /// Top-k most frequent (key, count) pairs.
+    /// Read the top-k entries from a heap-backed summary.
     TopK { k: usize },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyed_summary_input_and_topk_readout_round_trip() {
+        for input in [
+            SummaryUpdate {
+                item: Some(SummaryInputExpr::EntityIdentity(
+                    EntityIdentity::PromqlLabelSet { excluding: vec![] },
+                )),
+                weight: SummaryInputExpr::Constant(1.0),
+            },
+            SummaryUpdate {
+                item: Some(SummaryInputExpr::Tuple(vec![SummaryInputExpr::Column(
+                    ColumnRef::Named("service".into()),
+                )])),
+                weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+            },
+        ] {
+            let input_json = serde_json::to_string(&input).unwrap();
+            assert_eq!(
+                serde_json::from_str::<SummaryUpdate>(&input_json).unwrap(),
+                input
+            );
+            let query = SketchQuery::TopK { k: 10 };
+            let json = serde_json::to_string(&query).unwrap();
+            assert_eq!(serde_json::from_str::<SketchQuery>(&json).unwrap(), query);
+        }
+    }
 
     #[test]
     fn sketch_kind_classifies_a_valid_algorithm_and_params_pair() {
