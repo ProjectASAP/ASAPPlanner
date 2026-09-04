@@ -474,6 +474,7 @@ macro_rules! define_summary_kind_tags {
 }
 
 define_summary_kind_tags! {
+    SummaryExpr::ExactBinary { .. } => "ExactBinary",
     SummaryExpr::SummaryAgg { .. } => "SummaryAgg",
     SummaryExpr::SummaryJoin { .. } => "SummaryJoin",
     SummaryExpr::SummarySubtract { .. } => "SummarySubtract",
@@ -487,6 +488,16 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
     match expr {
         SummaryExpr::KeepPreAsap(_) => {
             unreachable!("summary_shape's callers special-case KeepPreAsap before calling it")
+        }
+        SummaryExpr::ExactBinary {
+            op, vector_match, ..
+        } => {
+            let label = format!("ExactBinary({op:?})");
+            let detail = serde_json::json!({
+                "op": format!("{op:?}"),
+                "vector_match": vector_match,
+            });
+            (kind, label, detail)
         }
         SummaryExpr::SummaryAgg {
             family,
@@ -539,6 +550,7 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
 fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
     match expr {
         SummaryExpr::KeepPreAsap(_) => vec![],
+        SummaryExpr::ExactBinary { lhs, rhs, .. } => vec![lhs, rhs],
         SummaryExpr::SummaryAgg { child, .. } => vec![child],
         SummaryExpr::SummaryJoin { outer, inner, .. } => vec![outer, inner],
         SummaryExpr::SummarySubtract { left, right } => vec![left, right],

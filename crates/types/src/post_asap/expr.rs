@@ -3,7 +3,7 @@ use std::rc::Rc;
 use super::guarantee::ResultGuarantee;
 use super::schema::{SummaryFamilyType, SummarySchema};
 use super::sketch::{GroupingStrategy, SketchQuery};
-use crate::pre_asap::{ColumnRef, QueryExpr, Reduction};
+use crate::pre_asap::{BinaryOpKind, ColumnRef, QueryExpr, Reduction, VectorMatch};
 
 // ── Post-ASAP DAG node ───────────────────────────────────────────────────────
 
@@ -47,6 +47,19 @@ pub enum SummaryExpr {
     /// the inner node's schema, lifted to `SummarySchema` with all fields as
     /// `SummaryFamilyType::Plain`.
     KeepPreAsap(Rc<QueryExpr>),
+
+    /// Exact PromQL arithmetic whose operands were planned independently.
+    /// This keeps realizable summary/readout leaves visible instead of
+    /// hiding the complete expression inside `KeepPreAsap`.
+    ExactBinary {
+        lhs: Rc<SummaryNode>,
+        rhs: Rc<SummaryNode>,
+        op: BinaryOpKind,
+        /// `None` is the only currently supported vector/vector matching
+        /// mode. The field is retained so execution never has to recover
+        /// semantics by re-parsing PromQL.
+        vector_match: Option<VectorMatch>,
+    },
 
     /// Summary aggregation. Post-ASAP binding chose `family` — which
     /// summary family (exact accumulator, sketch, sample, wavelet, or

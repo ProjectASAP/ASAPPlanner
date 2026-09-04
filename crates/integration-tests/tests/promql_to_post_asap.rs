@@ -53,6 +53,63 @@ fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
         .dtype
 }
 
+fn lower_and_realize(query: &str) -> Rc<SummaryNode> {
+    let pre = lower_promql(query, AccuracyTarget::Exact).expect("lowering failed");
+    realize(&pre).expect("binding failed")
+}
+
+#[test]
+fn promql_binary_arithmetic_retains_two_summary_leaves() {
+    for op in ["+", "-", "*", "/", "%", "^"] {
+        let root = lower_and_realize(&format!("rate(a[1m]) {op} rate(b[1m])"));
+        let SummaryExpr::ExactBinary { lhs, rhs, .. } = &root.expr else {
+            panic!("expected ExactBinary for {op}, got {:?}", root.expr);
+        };
+        assert!(matches!(lhs.expr, SummaryExpr::SummaryAgg { .. }));
+        assert!(matches!(rhs.expr, SummaryExpr::SummaryAgg { .. }));
+    }
+}
+
+#[test]
+fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
+    for query in ["rate(a[1m]) / 2", "2 / rate(a[1m])"] {
+        let root = lower_and_realize(query);
+        let SummaryExpr::ExactBinary { lhs, rhs, .. } = &root.expr else {
+            panic!("expected ExactBinary for {query}, got {:?}", root.expr);
+        };
+        assert!(matches!(
+            lhs.expr,
+            SummaryExpr::SummaryAgg { .. } | SummaryExpr::KeepPreAsap(_)
+        ));
+        assert!(matches!(
+            rhs.expr,
+            SummaryExpr::SummaryAgg { .. } | SummaryExpr::KeepPreAsap(_)
+        ));
+        assert!(
+            matches!(lhs.expr, SummaryExpr::SummaryAgg { .. })
+                || matches!(rhs.expr, SummaryExpr::SummaryAgg { .. })
+        );
+    }
+}
+
+#[test]
+fn promql_binary_arithmetic_falls_back_as_a_whole_for_unsupported_arm() {
+    let root = lower_and_realize("rate(a[1m]) + avg_over_time(b[1m])");
+    assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
+}
+
+#[test]
+fn promql_binary_arithmetic_preserves_nested_structure_and_rejects_modifiers() {
+    let nested = lower_and_realize("(rate(a[1m]) + rate(b[1m])) / 2");
+    let SummaryExpr::ExactBinary { lhs, .. } = &nested.expr else {
+        panic!("expected outer ExactBinary, got {:?}", nested.expr);
+    };
+    assert!(matches!(lhs.expr, SummaryExpr::ExactBinary { .. }));
+
+    let modified = lower_and_realize("rate(a[1m]) + on(job) rate(b[1m])");
+    assert!(matches!(modified.expr, SummaryExpr::KeepPreAsap(_)));
+}
+
 /// `quantile(0.99, rate(http_requests_total[5m]))` at ε = 0.01:
 ///
 /// ```text

@@ -3131,6 +3131,11 @@ mod tests {
                     }
                 }
                 SummaryExpr::SummarySubtract { left, right }
+                | SummaryExpr::ExactBinary {
+                    lhs: left,
+                    rhs: right,
+                    ..
+                }
                 | SummaryExpr::SummaryJoin {
                     outer: left,
                     inner: right,
@@ -3306,6 +3311,11 @@ mod tests {
                                 }
                             }
                             SummaryExpr::SummarySubtract { left, right }
+                            | SummaryExpr::ExactBinary {
+                                lhs: left,
+                                rhs: right,
+                                ..
+                            }
                             | SummaryExpr::SummaryJoin {
                                 outer: left,
                                 inner: right,
@@ -3341,6 +3351,11 @@ mod tests {
                     }
                 }
                 SummaryExpr::SummarySubtract { left, right }
+                | SummaryExpr::ExactBinary {
+                    lhs: left,
+                    rhs: right,
+                    ..
+                }
                 | SummaryExpr::SummaryJoin {
                     outer: left,
                     inner: right,
