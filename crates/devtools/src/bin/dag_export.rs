@@ -49,21 +49,472 @@
 //       --post-asap --epsilon 0.01 \
 //       --sql "SELECT quantile(0.95, latency) FROM metrics" --name q1
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
+use asap_aware_mapping::analytical_cost::{
+    AnalyticalCostError, EvidenceBackedPhysicalDag as PhysicalDag, PhysicalNodeEvidence,
+    ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
+};
+#[cfg(test)]
 use asap_aware_mapping::cost_model::DefaultCostModel;
-use asap_aware_mapping::replacement::{search_workload, Replacement, ReplacementSubDAG};
+use asap_aware_mapping::cost_model::{Cost, CostModel};
+use asap_aware_mapping::physical_operator_statistics::ComparisonScope;
+use asap_aware_mapping::physical_plan_cost_model::{
+    PhysicalEvidenceSnapshot, PhysicalPlanCostModel, PlannerPhysicalPlanProvider,
+};
+use asap_aware_mapping::query_physical_lowering::PhysicalNodeRequest;
+use asap_aware_mapping::replacement::{
+    default_strategies_with_evidence, search_workload, search_workload_with, Replacement,
+    ReplacementSubDAG,
+};
+use asap_aware_mapping::{AccuracyEvidenceProvider, PropagationStats};
+use asap_types::cost::{BaselineRef, CostAnnotation, CostInput, CostSource, CostUnit};
 use asap_types::dag_export::{
     self, DagDecision, DagGraph, DagNote, NamedGraph, PostAsapSubstitution, TargetRejection,
     TargetReplacement, TargetReplacementAfter, WorkloadGraph,
 };
 use asap_types::post_asap::SummaryExpr;
+use asap_types::post_asap::SummaryNode;
+use asap_types::post_asap::{CompositionOperator, SketchQuery, SummaryFamilyType};
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlannerCostDocument {
+    /// Immutable catalog/runtime evidence generation shared by this file.
+    evidence_version: String,
+    calibration: ResourceCalibration,
+    targets: Vec<TargetPhysicalEvidence>,
+}
+
+fn parse_planner_cost_document(raw: &str) -> Result<PlannerCostDocument, String> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| format!("planner cost evidence is invalid JSON: {error}"))?;
+    if value.get("targets").is_none() {
+        return Err("the compact analytical-cost payload is no longer supported; migrate to complete per-operator physical DAG evidence".into());
+    }
+    let document: PlannerCostDocument = serde_json::from_value(value)
+        .map_err(|error| format!("planner cost evidence is invalid: {error}"))?;
+    if document.evidence_version.trim().is_empty() {
+        return Err("planner cost evidence_version must be non-empty".into());
+    }
+    Ok(document)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetPhysicalEvidence {
+    target: QueryExpr,
+    scope: ComparisonScopeEvidence,
+    candidates: Vec<CandidatePhysicalEvidence>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComparisonScopeEvidence {
+    data_arrival: asap_types::workload::DataArrival,
+    planning_time_ms: u64,
+    horizon_ms: u64,
+    evaluation_count: u64,
+    time_scope: String,
+    lookback_ms: Option<u64>,
+    as_of_ms: Option<u64>,
+    sources: Vec<asap_aware_mapping::physical_operator_statistics::SourceCoverage>,
+}
+
+impl ComparisonScopeEvidence {
+    fn resolve(&self) -> Result<ComparisonScope, AnalyticalCostError> {
+        use asap_types::workload::{
+            DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
+        };
+        let scope = match self.time_scope.as_str() {
+            "real_time" => QueryTimeScope::RealTime,
+            "longitudinal" => QueryTimeScope::Longitudinal,
+            "mixed" => QueryTimeScope::Mixed,
+            "unknown" => QueryTimeScope::Unknown,
+            _ => return Err(AnalyticalCostError::MissingComparisonScope("time_scope")),
+        };
+        let comparison = ComparisonScope {
+            data_arrival: self.data_arrival,
+            planning_time: TimestampMs(self.planning_time_ms),
+            horizon: DurationMs(self.horizon_ms),
+            recurrence: QueryRecurrence::OneTime {
+                invocations: self.evaluation_count,
+                execute_at: None,
+            },
+            time_selection: TimeSelection {
+                scope,
+                lookback: self.lookback_ms.map(DurationMs),
+                as_of: self.as_of_ms.map(TimestampMs),
+            },
+            sources: self.sources.clone(),
+        };
+        comparison.validate()?;
+        Ok(comparison)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryNodePhysicalEvidence {
+    logical_node: QueryExpr,
+    operator: asap_aware_mapping::analytical_cost::PhysicalOperator,
+    occurrence: usize,
+    synthetic: bool,
+    evidence: PhysicalNodeEvidence,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum CandidatePhysicalEvidence {
+    Rewrite {
+        plan: serde_json::Value,
+        query_nodes: Vec<QueryNodePhysicalEvidence>,
+    },
+    Summary {
+        plan: serde_json::Value,
+        query_nodes: Vec<QueryNodePhysicalEvidence>,
+        physical_dag: PhysicalDag,
+    },
+}
+
+impl CandidatePhysicalEvidence {
+    fn plan(&self) -> &serde_json::Value {
+        match self {
+            Self::Rewrite { plan, .. } | Self::Summary { plan, .. } => plan,
+        }
+    }
+
+    fn query_nodes(&self) -> &[QueryNodePhysicalEvidence] {
+        match self {
+            Self::Rewrite { query_nodes, .. } | Self::Summary { query_nodes, .. } => query_nodes,
+        }
+    }
+
+    fn matches(&self, candidate: &ReplacementSubDAG) -> bool {
+        let actual = match (self, &candidate.replacement) {
+            (Self::Summary { .. }, Replacement::Summary(summary)) => {
+                serde_json::to_value(dag_export::export_summary(summary))
+            }
+            (Self::Rewrite { .. }, Replacement::Rewrite(query)) => {
+                serde_json::to_value(dag_export::export(query))
+            }
+            _ => return false,
+        };
+        actual.is_ok_and(|actual| plan_values_match(&actual, self.plan()))
+    }
+
+    fn summary_dag(&self) -> Option<&PhysicalDag> {
+        match self {
+            Self::Summary { physical_dag, .. } => Some(physical_dag),
+            Self::Rewrite { .. } => None,
+        }
+    }
+}
+
+/// Compare complete exported-plan identity while tolerating the one-ULP
+/// decimal round trip that `serde_json::Value` can introduce for derived
+/// floating-point guarantees. Integer configuration and graph identity stay
+/// exact; no guarantee field is dropped or otherwise normalized away.
+fn plan_values_match(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    plan_values_match_inner(actual, expected, false)
+}
+
+fn plan_values_match_inner(
+    actual: &serde_json::Value,
+    expected: &serde_json::Value,
+    inside_guarantee: bool,
+) -> bool {
+    use serde_json::Value;
+    match (actual, expected) {
+        (Value::Object(actual), Value::Object(expected)) => {
+            actual.len() == expected.len()
+                && actual.iter().all(|(key, value)| {
+                    expected.get(key).is_some_and(|other| {
+                        plan_values_match_inner(
+                            value,
+                            other,
+                            inside_guarantee || key == "guarantee",
+                        )
+                    })
+                })
+        }
+        (Value::Array(actual), Value::Array(expected)) => {
+            actual.len() == expected.len()
+                && actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(value, other)| plan_values_match_inner(value, other, inside_guarantee))
+        }
+        (Value::Number(actual), Value::Number(expected)) => {
+            match (actual.as_i64(), expected.as_i64()) {
+                (Some(actual), Some(expected)) => actual == expected,
+                _ => match (actual.as_u64(), expected.as_u64()) {
+                    (Some(actual), Some(expected)) => actual == expected,
+                    _ => match (actual.as_f64(), expected.as_f64()) {
+                        (Some(actual), Some(expected)) => {
+                            actual == expected
+                                || (inside_guarantee
+                                    && actual.to_bits().abs_diff(expected.to_bits()) <= 1)
+                        }
+                        _ => false,
+                    },
+                },
+            }
+        }
+        _ => actual == expected,
+    }
+}
+
+struct ExportPhysicalProvider<'a> {
+    evidence_version: &'a str,
+    target: &'a TargetPhysicalEvidence,
+    candidate: &'a CandidatePhysicalEvidence,
+    used_query_nodes: RefCell<std::collections::HashSet<usize>>,
+}
+
+impl ExportPhysicalProvider<'_> {
+    fn all_query_evidence_used(&self) -> bool {
+        self.used_query_nodes.borrow().len() == self.candidate.query_nodes().len()
+    }
+}
+
+impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
+    fn capture_evidence_snapshot(
+        &self,
+        _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+    ) -> Result<PhysicalEvidenceSnapshot, AnalyticalCostError> {
+        Ok(PhysicalEvidenceSnapshot {
+            version: self.evidence_version.into(),
+            scope: self.target.scope.resolve()?,
+        })
+    }
+
+    fn query_node_evidence(
+        &self,
+        snapshot: &PhysicalEvidenceSnapshot,
+        request: PhysicalNodeRequest<'_>,
+    ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
+        if snapshot.scope != self.target.scope.resolve()? {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "planner evidence snapshot",
+            ));
+        }
+        let mut matches = self
+            .candidate
+            .query_nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.logical_node == *request.logical_node
+                    && entry.operator == request.operator
+                    && entry.occurrence == request.occurrence
+                    && entry.synthetic == request.synthetic
+            });
+        let (index, evidence) = matches.next().ok_or_else(|| {
+            AnalyticalCostError::MissingOperatorStatistics(format!(
+                "logical occurrence {}",
+                request.occurrence
+            ))
+        })?;
+        if matches.next().is_some() {
+            return Err(AnalyticalCostError::InvalidPhysicalDag(
+                "duplicate query-node evidence key",
+            ));
+        }
+        self.used_query_nodes.borrow_mut().insert(index);
+        Ok(evidence.evidence.clone())
+    }
+
+    fn summary_physical_dag(
+        &self,
+        snapshot: &PhysicalEvidenceSnapshot,
+        _summary: &Rc<SummaryNode>,
+        _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+    ) -> Result<PhysicalDag, AnalyticalCostError> {
+        if snapshot.scope != self.target.scope.resolve()? {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "planner evidence snapshot",
+            ));
+        }
+        self.candidate
+            .summary_dag()
+            .cloned()
+            .ok_or(AnalyticalCostError::InvalidPhysicalDag(
+                "summary candidate is missing its physical DAG",
+            ))
+    }
+}
+
+struct ExportPlannerCostModel<'a> {
+    document: &'a PlannerCostDocument,
+}
+
+impl ExportPlannerCostModel<'_> {
+    fn bound<'a>(
+        &'a self,
+        candidate: &ReplacementSubDAG,
+        target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+    ) -> Option<(ExportPhysicalProvider<'a>, &'a ResourceCalibration)> {
+        let mut targets = self
+            .document
+            .targets
+            .iter()
+            .filter(|entry| entry.target == **target.root);
+        let target_evidence = targets.next()?;
+        if targets.next().is_some() {
+            return None;
+        }
+        let mut candidates = target_evidence
+            .candidates
+            .iter()
+            .filter(|entry| entry.matches(candidate));
+        let candidate_evidence = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        Some((
+            ExportPhysicalProvider {
+                evidence_version: &self.document.evidence_version,
+                target: target_evidence,
+                candidate: candidate_evidence,
+                used_query_nodes: RefCell::new(std::collections::HashSet::new()),
+            },
+            &self.document.calibration,
+        ))
+    }
+
+    fn annotations(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &Rc<QueryExpr>,
+    ) -> (CostAnnotation, CostAnnotation, CostAnnotation) {
+        let target = asap_aware_mapping::replacement::TargetSubDAG::new(target);
+        let Some((provider, calibration)) = self.bound(candidate, &target) else {
+            return winner_cost_annotations();
+        };
+        let Ok(model) = PhysicalPlanCostModel::new(&provider, calibration.clone()) else {
+            return winner_cost_annotations();
+        };
+        let Ok(estimate) = model.estimate_candidate(candidate, &target) else {
+            return winner_cost_annotations();
+        };
+        if !provider.all_query_evidence_used() {
+            return winner_cost_annotations();
+        }
+        let version = format!("{}+{}", ANALYTICAL_COST_MODEL_VERSION, calibration.version);
+        let inputs = |resources: asap_aware_mapping::analytical_cost::ResourceEstimate| {
+            vec![
+                CostInput {
+                    name: "estimated_cpu_ops".into(),
+                    value: resources.cpu_ops,
+                    unit: Some("operations".into()),
+                },
+                CostInput {
+                    name: "estimated_peak_memory".into(),
+                    value: resources.peak_memory_bytes as f64,
+                    unit: Some("bytes".into()),
+                },
+                CostInput {
+                    name: "estimated_scan".into(),
+                    value: resources.scan_bytes as f64,
+                    unit: Some("bytes".into()),
+                },
+            ]
+        };
+        let baseline = CostAnnotation::modeled(
+            estimate.raw_cost.0,
+            CostUnit::CostUnits,
+            &version,
+            inputs(estimate.resources.raw),
+        )
+        .with_evidence_version(&self.document.evidence_version);
+        let selected = CostAnnotation::modeled(
+            estimate.candidate_cost.0,
+            CostUnit::CostUnits,
+            &version,
+            inputs(estimate.resources.candidate),
+        )
+        .with_baseline(BaselineRef::PreAsapRecomputation, estimate.raw_cost.0)
+        .with_evidence_version(&self.document.evidence_version);
+        let benefit = CostAnnotation {
+            value: selected.delta,
+            unit: CostUnit::CostUnits,
+            source: CostSource::Modeled,
+            baseline: Some(BaselineRef::PreAsapRecomputation),
+            delta: None,
+            benefit_ratio: selected.benefit_ratio,
+            model_version: Some(version),
+            evidence_version: Some(self.document.evidence_version.clone()),
+            benchmark_id: None,
+            inputs: Vec::new(),
+        };
+        (baseline, selected, benefit)
+    }
+}
+
+impl CostModel for ExportPlannerCostModel<'_> {
+    fn candidate_cost_covers_complete_plan(&self) -> bool {
+        true
+    }
+
+    fn candidate_cost(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+    ) -> Option<Cost> {
+        let (provider, calibration) = self.bound(candidate, target)?;
+        let cost = PhysicalPlanCostModel::new(&provider, calibration.clone())
+            .ok()?
+            .candidate_cost(candidate, target)?;
+        provider.all_query_evidence_used().then_some(cost)
+    }
+
+    fn rank_candidates(
+        &self,
+        _intent: &asap_types::pre_asap::AggIntent,
+        candidates: &[asap_types::post_asap::SketchAlgorithm],
+    ) -> Vec<asap_types::post_asap::SketchAlgorithm> {
+        // Candidate generation must not reintroduce the legacy structural
+        // cost model before complete physical alternatives are compared.
+        candidates.to_vec()
+    }
+
+    fn estimate_cost(
+        &self,
+        candidate: &ReplacementSubDAG,
+        target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
+    ) -> f64 {
+        self.candidate_cost(candidate, target)
+            .map_or(f64::NAN, |cost| cost.0)
+    }
+}
+
+/// Baseline/selected/benefit [`CostAnnotation`]s for one [`Winner`] — issue
+/// #286's "replacement-region baseline cost, selected cost, and benefit"
+/// granularity item, reused verbatim for [`TargetReplacement`] and for the
+/// [`DagDecision`] carried by every node the winning candidate produced or
+/// carried.
+///
+/// `dag_export` has no deployment-owned physical evidence provider. It must
+/// therefore expose costs as unavailable instead of guessing operator
+/// statistics or falling back to structural node counts. Callers that have
+/// complete evidence use `PhysicalPlanCostModel` before export and may
+/// attach its dimensional comparison to these fields.
+#[allow(dead_code)]
+fn winner_cost_annotations() -> (CostAnnotation, CostAnnotation, CostAnnotation) {
+    (
+        CostAnnotation::unavailable(CostUnit::CostUnits),
+        CostAnnotation::unavailable(CostUnit::CostUnits),
+        CostAnnotation::unavailable(CostUnit::CostUnits),
+    )
+}
 
 use asap_devtools::{lower_promql, lower_sql, SqlCatalog};
 
@@ -152,6 +603,53 @@ struct ParsedArgs {
     post_asap: bool,
     progress: bool,
     table_schemas: Vec<String>,
+    planner_cost: Option<PlannerCostDocument>,
+    topk_margin: Option<TopKMarginEvidence>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TopKMarginEvidence {
+    selected_lower_bound: f64,
+    excluded_upper_bound: f64,
+    interval_failure_probability: f64,
+}
+
+impl TopKMarginEvidence {
+    fn validate(&self) -> Result<(), &'static str> {
+        if !self.selected_lower_bound.is_finite() || !self.excluded_upper_bound.is_finite() {
+            return Err("Top-K bounds must be finite");
+        }
+        if self.selected_lower_bound <= self.excluded_upper_bound {
+            return Err("selected_lower_bound must exceed excluded_upper_bound");
+        }
+        if !(self.interval_failure_probability.is_finite()
+            && self.interval_failure_probability >= 0.0
+            && self.interval_failure_probability < 1.0)
+        {
+            return Err("interval_failure_probability must be in [0, 1)");
+        }
+        Ok(())
+    }
+}
+
+impl AccuracyEvidenceProvider for TopKMarginEvidence {
+    fn propagation_stats(
+        &self,
+        op: &CompositionOperator,
+        _family: &SummaryFamilyType,
+        _query: Option<&SketchQuery>,
+    ) -> PropagationStats {
+        if matches!(op, CompositionOperator::TopKSelection) {
+            PropagationStats {
+                topk_selected_lower_bound: Some(self.selected_lower_bound),
+                topk_excluded_upper_bound: Some(self.excluded_upper_bound),
+                topk_interval_failure_probability: Some(self.interval_failure_probability),
+                ..Default::default()
+            }
+        } else {
+            PropagationStats::default()
+        }
+    }
 }
 
 fn parse_args() -> ParsedArgs {
@@ -161,6 +659,8 @@ fn parse_args() -> ParsedArgs {
     let mut post_asap = false;
     let mut progress = false;
     let mut table_schemas = Vec::new();
+    let mut planner_cost_json = None;
+    let mut topk_margin_json = None;
     let mut args = std::env::args().skip(1);
 
     fn flush(entries: &mut Vec<(String, Lang, String)>, pending: &mut Option<(Lang, String)>) {
@@ -204,16 +704,40 @@ fn parse_args() -> ParsedArgs {
             "--table-schema" => {
                 table_schemas.push(args.next().expect("--table-schema requires JSON"));
             }
+            "--planner-cost-json" | "--analytical-cost-json" => {
+                planner_cost_json = Some(
+                    args.next()
+                        .expect("planner cost evidence requires a JSON document"),
+                );
+            }
+            "--topk-margin-json" => {
+                topk_margin_json = Some(
+                    args.next()
+                        .expect("--topk-margin-json requires a JSON object"),
+                );
+            }
             other => panic!("unrecognized argument: {other}"),
         }
     }
     flush(&mut entries, &mut pending);
+    let planner_cost = planner_cost_json
+        .map(|raw| parse_planner_cost_document(&raw).unwrap_or_else(|error| panic!("{error}")));
+    let topk_margin = topk_margin_json.map(|raw| {
+        let evidence: TopKMarginEvidence = serde_json::from_str(&raw)
+            .unwrap_or_else(|error| panic!("--topk-margin-json is invalid: {error}"));
+        evidence
+            .validate()
+            .unwrap_or_else(|error| panic!("invalid Top-K margin evidence: {error}"));
+        evidence
+    });
     ParsedArgs {
         entries,
         accuracy,
         post_asap,
         progress,
         table_schemas,
+        planner_cost,
+        topk_margin,
     }
 }
 
@@ -244,19 +768,21 @@ fn annotate_with_explanations(
 }
 
 /// One `MemoGroup`'s best-ranked candidate, kept alongside its own `target`
-/// and `cost` — the unit both [`PostAsapResults::replacements`] and
+/// — the unit both [`PostAsapResults::replacements`] and
 /// [`PostAsapResults::post_graphs`] are built from, so the two outputs can
 /// never disagree about which candidate won for a given target.
+#[allow(dead_code)]
 struct Winner<'a> {
     target: &'a Rc<QueryExpr>,
     candidate: &'a ReplacementSubDAG,
-    cost: f64,
+    costs: (CostAnnotation, CostAnnotation, CostAnnotation),
 }
 
 /// Short explanation intended for a selected winner in node-level UI. The
 /// candidate's full rationale remains available in pre-ASAP applicability
 /// notes; repeating that exhaustive prose on every post-ASAP region node
 /// obscures the actual decision.
+#[allow(dead_code)]
 fn decision_rationale(winner: &Winner<'_>) -> String {
     match winner.candidate.strategy {
         "AvgToSumOverCountStrategy" => {
@@ -306,6 +832,7 @@ fn decision_rationale(winner: &Winner<'_>) -> String {
 /// index rather than a `&Winner` directly so a caller can both use the
 /// match and record it (e.g. `matched[i] = true`) without juggling a second
 /// way to name the same winner.
+#[allow(dead_code)]
 fn lookup_winner(
     by_hash: &HashMap<u64, Vec<usize>>,
     winners: &[Winner<'_>],
@@ -320,8 +847,34 @@ fn lookup_winner(
         .find(|&i| expr == winners[i].target.as_ref())
 }
 
+/// One `(decision.id, baseline_cost, selected_cost)` triple per *distinct*
+/// [`DagDecision`] carried anywhere in `graph` — collapsing every node that
+/// shares one `decision.id` (a replacement region can span many nodes, all
+/// carrying an identical clone of the same decision) down to a single
+/// entry, so a caller summing these never counts one decision's cost once
+/// per node it happens to touch.
+fn decision_cost_entries(graph: &DagGraph) -> Vec<(u32, CostAnnotation, CostAnnotation)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    for node in &graph.nodes {
+        let Some(decision) = &node.decision else {
+            continue;
+        };
+        if !seen.insert(decision.id) {
+            continue;
+        }
+        let (Some(baseline), Some(selected)) = (&decision.baseline_cost, &decision.selected_cost)
+        else {
+            continue;
+        };
+        entries.push((decision.id, baseline.clone(), selected.clone()));
+    }
+    entries
+}
+
 /// Build a [`TargetReplacement`] for `winner`, matching this file's own
 /// per-target `before`/`after` construction.
+#[allow(dead_code)]
 fn target_replacement(
     decision_id: u32,
     target_pre_id: u32,
@@ -337,15 +890,22 @@ fn target_replacement(
             TargetReplacementAfter::Rewrite(dag_export::export(rewritten))
         }
     };
+    let (baseline_cost, selected_cost, benefit) = winner.costs.clone();
+    // Derived from `selected_cost` so the legacy scalar field and the
+    // structured annotation can never drift apart.
+    let cost = selected_cost.value.unwrap_or(f64::NAN);
     TargetReplacement {
         decision_id,
         target_pre_id,
         strategy,
         rationale: decision_rationale(winner),
         rank: 0,
-        cost: winner.cost,
+        cost,
         before,
         after,
+        baseline_cost: Some(baseline_cost),
+        selected_cost: Some(selected_cost),
+        benefit: Some(benefit),
     }
 }
 
@@ -366,6 +926,14 @@ struct PostAsapResults {
     /// the search refused (`MemoGroup::rejected`, issue #172) whose target
     /// node is found in that query's own exported graph.
     rejections: Vec<(String, TargetRejection)>,
+}
+
+fn raw_only_post_asap_results() -> PostAsapResults {
+    PostAsapResults {
+        replacements: Vec::new(),
+        post_graphs: Vec::new(),
+        rejections: Vec::new(),
+    }
 }
 
 /// Assign collision-free, explicit identities to structurally equal nodes
@@ -414,13 +982,17 @@ fn assign_workload_node_ids(graphs: &mut [&mut DagGraph]) {
 /// `default_strategies()` — which includes `AvgToSumOverCountStrategy` as of
 /// #282 — is exactly the strategy set this binary wants; no custom list
 /// needed) over every lowered query, rank each discovered `MemoGroup` via
-/// `PlanSpace::cost_sorted`, and build both `--post-asap` outputs from the
+/// `PlanSpace::global_selection`, and build both `--post-asap` outputs from the
 /// exact same set of winning candidates (see [`Winner`]), so the flat
 /// `replacements` list and the merged `post_graph` can never disagree about
 /// which candidate won for a given target.
+#[allow(dead_code)]
 fn run_post_asap_with_progress(
     lowered_queries: &[(String, String, QueryExpr)],
     progress: bool,
+    cost_model: &dyn CostModel,
+    export_model: Option<&ExportPlannerCostModel<'_>>,
+    evidence: Option<&dyn AccuracyEvidenceProvider>,
 ) -> PostAsapResults {
     let mapping_started = Instant::now();
     if progress {
@@ -430,8 +1002,14 @@ fn run_post_asap_with_progress(
         .iter()
         .map(|(name, _, qe)| (name.clone(), Rc::new(qe.clone())))
         .collect();
-    let space = search_workload(roots);
-    let ranked_groups = space.cost_sorted(&DefaultCostModel);
+    let strategies;
+    let space = if let Some(evidence) = evidence {
+        strategies = default_strategies_with_evidence(cost_model, evidence);
+        search_workload_with(roots, &strategies)
+    } else {
+        search_workload(roots)
+    };
+    let selection = space.global_selection(cost_model);
 
     // A group's top candidate can be `keep_pre_asap`'s own conservative
     // fallback — `Replacement::Summary(SummaryNode { expr:
@@ -455,10 +1033,10 @@ fn run_post_asap_with_progress(
     // winner again, forever. Treating this candidate as "no winner" (same
     // as an empty candidate list) avoids ever handing `export_post_asap` a
     // winner that can't help but recurse into itself.
-    let winners: Vec<Winner<'_>> = ranked_groups
-        .iter()
+    let winners: Vec<Winner<'_>> = selection
+        .groups()
         .filter_map(|group| {
-            let candidate = group.candidates.first()?;
+            let candidate = group.chosen?;
             if matches!(
                 &candidate.replacement,
                 Replacement::Summary(node) if matches!(node.expr, SummaryExpr::KeepPreAsap(_))
@@ -468,7 +1046,9 @@ fn run_post_asap_with_progress(
             Some(Winner {
                 target: group.target,
                 candidate,
-                cost: group.costs[0],
+                costs: export_model.map_or_else(winner_cost_annotations, |model| {
+                    model.annotations(candidate, group.target)
+                }),
             })
         })
         .collect();
@@ -511,13 +1091,20 @@ fn run_post_asap_with_progress(
     let mut find_winner = |expr: &QueryExpr| -> Option<PostAsapSubstitution> {
         let i = lookup_winner(&by_hash, &winners, &mut post_graph_cache, expr)?;
         let winner = &winners[i];
+        let (baseline_cost, selected_cost, benefit) = winner.costs.clone();
+        // Derived from `selected_cost`; see `target_replacement`'s identical
+        // derivation.
+        let cost = selected_cost.value.unwrap_or(f64::NAN);
         let decision = DagDecision {
             id: i as u32,
             strategy: winner.candidate.strategy.to_string(),
             rationale: decision_rationale(winner),
             rank: 0,
-            cost: winner.cost,
+            cost,
             role: "replacement_region",
+            baseline_cost: Some(baseline_cost),
+            selected_cost: Some(selected_cost),
+            benefit: Some(benefit),
         };
         Some(match &winners[i].candidate.replacement {
             Replacement::Rewrite(rc) => PostAsapSubstitution::Rewrite {
@@ -646,7 +1233,7 @@ fn run_post_asap_with_progress(
 
 #[cfg(test)]
 fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapResults {
-    run_post_asap_with_progress(lowered_queries, false)
+    run_post_asap_with_progress(lowered_queries, false, &DefaultCostModel, None, None)
 }
 
 #[tokio::main]
@@ -657,6 +1244,8 @@ async fn main() {
         post_asap,
         progress,
         table_schemas,
+        planner_cost,
+        topk_margin,
     } = parse_args();
     let sql_catalog = catalog(&table_schemas);
     let planner_started = Instant::now();
@@ -714,6 +1303,7 @@ async fn main() {
             graph,
             replacements: Vec::new(),
             post_graph: None,
+            workload_cost: None,
             rejections: Vec::new(),
         });
     }
@@ -733,7 +1323,23 @@ async fn main() {
     }
 
     if post_asap {
-        let results = run_post_asap_with_progress(&lowered_queries, progress);
+        let results = if let Some(document) = planner_cost.as_ref() {
+            let model = ExportPlannerCostModel { document };
+            run_post_asap_with_progress(
+                &lowered_queries,
+                progress,
+                &model,
+                Some(&model),
+                topk_margin
+                    .as_ref()
+                    .map(|evidence| evidence as &dyn AccuracyEvidenceProvider),
+            )
+        } else {
+            eprintln!(
+                "dag_export: --post-asap requires complete deployment-owned physical-plan evidence; exporting the raw plan only"
+            );
+            raw_only_post_asap_results()
+        };
         for (query_name, replacement) in results.replacements {
             if let Some(named) = queries.iter_mut().find(|q| q.name == query_name) {
                 named.replacements.push(replacement);
@@ -763,7 +1369,59 @@ async fn main() {
         assign_workload_node_ids(&mut post_graphs);
     }
 
-    let workload = WorkloadGraph { queries };
+    // Whole selected-workload cost/benefit (issue #286) — per query, and
+    // for the whole selected workload. `decision.id` (== the winning
+    // `Winner`'s own index — see `run_post_asap_with_progress`) is already
+    // a collision-free dedup key for a decision shared across multiple
+    // nodes (a replacement region spans several nodes, all carrying the
+    // same `decision.id`) and across multiple queries (a CSE-shared target
+    // reachable from more than one query's root) alike, so it's reused
+    // directly as `sum_workload_costs`'s dedup key — no separate lookup
+    // needed.
+    let mut workload_entries = Vec::new();
+    for query in &mut queries {
+        let Some(post_graph) = &query.post_graph else {
+            continue;
+        };
+        let entries = decision_cost_entries(post_graph);
+        if entries.is_empty() {
+            continue;
+        }
+        match asap_types::cost::workload_cost_summary(
+            entries
+                .iter()
+                .map(|(id, baseline, selected)| (Some(*id), baseline, selected)),
+            "dag_export-workload-cost-v1",
+        ) {
+            Ok(summary) => query.workload_cost = Some(summary),
+            Err(mismatch) => eprintln!(
+                "dag_export: workload cost aggregation for {:?} skipped — {mismatch}",
+                query.name
+            ),
+        }
+        workload_entries.extend(entries);
+    }
+    let workload_cost = if workload_entries.is_empty() {
+        None
+    } else {
+        match asap_types::cost::workload_cost_summary(
+            workload_entries
+                .iter()
+                .map(|(id, baseline, selected)| (Some(*id), baseline, selected)),
+            "dag_export-workload-cost-v1",
+        ) {
+            Ok(summary) => Some(summary),
+            Err(mismatch) => {
+                eprintln!("dag_export: workload-wide cost aggregation skipped — {mismatch}");
+                None
+            }
+        }
+    };
+
+    let workload = WorkloadGraph {
+        queries,
+        workload_cost,
+    };
     if progress {
         eprintln!(
             "Total planner time: {:.2} ms",
@@ -776,6 +1434,515 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use asap_aware_mapping::analytical_cost::{
+        ExecutionMultiplicity, PhysicalDagNode, PhysicalOperator,
+    };
+    use asap_aware_mapping::physical_operator_statistics::{
+        EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
+    };
+    use asap_aware_mapping::query_physical_lowering::lower_query_physical_dag;
+    use asap_types::pre_asap::{Column, DataType, Reduction, Schema, Source};
+
+    fn non_topk_query() -> QueryExpr {
+        QueryExpr::Aggregate {
+            reduction: Reduction::by(vec![]),
+            measures: vec![asap_types::pre_asap::AggIntent::Count {
+                accuracy: AccuracyTarget::Epsilon(0.1),
+            }],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(QueryExpr::Scan {
+                source: Source::Table {
+                    table_ref: "events".into(),
+                },
+                predicates: vec![],
+                schema: Schema::new(vec![Column::new("v", DataType::Int64, false)]),
+            }),
+        }
+    }
+
+    fn test_scope() -> ComparisonScopeEvidence {
+        ComparisonScopeEvidence {
+            data_arrival: asap_types::workload::DataArrival::AtRest,
+            planning_time_ms: 1_000,
+            horizon_ms: 10_000,
+            evaluation_count: 10,
+            time_scope: "longitudinal".into(),
+            lookback_ms: Some(10_000),
+            as_of_ms: Some(1_000),
+            sources: vec![SourceCoverage {
+                source: Source::Table {
+                    table_ref: "events".into(),
+                },
+                source_snapshot_id: "snapshot-1".into(),
+                predicates: vec![],
+                info_matchers: vec![],
+            }],
+        }
+    }
+
+    fn edge(rows: u64, bytes: u64) -> EdgeStatistics {
+        EdgeStatistics { rows, bytes }
+    }
+
+    fn query_evidence(query: &QueryExpr) -> Vec<QueryNodePhysicalEvidence> {
+        let entries = RefCell::new(Vec::new());
+        let scope = test_scope().resolve().unwrap();
+        let provider = |request: PhysicalNodeRequest<'_>| {
+            let (statistics, output_buffer_bytes) = match request.operator {
+                PhysicalOperator::Scan => (
+                    OperatorStatistics::Scan {
+                        edges: UnaryEdgeStatistics {
+                            input: edge(1_000, 64_000),
+                            output: edge(1_000, 64_000),
+                            promql: None,
+                        },
+                        source_read_bytes: 64_000,
+                    },
+                    64_000,
+                ),
+                PhysicalOperator::HashAggregate {
+                    grouping_key_count: 0,
+                    ..
+                } => (
+                    OperatorStatistics::HashAggregate {
+                        edges: UnaryEdgeStatistics {
+                            input: edge(1_000, 64_000),
+                            output: edge(1, 8),
+                            promql: None,
+                        },
+                        group_count: 1,
+                        key_bytes: 0,
+                        accumulator_bytes_per_group: 8,
+                    },
+                    8,
+                ),
+                _ => return Err(AnalyticalCostError::UnsupportedQueryOperator),
+            };
+            let evidence = PhysicalNodeEvidence {
+                physical_id: format!("{:?}-{}", request.operator, request.occurrence),
+                statistics,
+                output_buffer_bytes,
+            };
+            entries.borrow_mut().push(QueryNodePhysicalEvidence {
+                logical_node: request.logical_node.clone(),
+                operator: request.operator,
+                occurrence: request.occurrence,
+                synthetic: request.synthetic,
+                evidence: evidence.clone(),
+            });
+            Ok(evidence)
+        };
+        lower_query_physical_dag(&Rc::new(query.clone()), &scope, &provider).unwrap();
+        entries.into_inner()
+    }
+
+    fn cheap_candidate_dag() -> PhysicalDag {
+        let coverage = test_scope().sources[0].clone();
+        let statistics = OperatorStatistics::Scan {
+            edges: UnaryEdgeStatistics {
+                input: edge(100, 2_400),
+                output: edge(100, 2_400),
+                promql: None,
+            },
+            source_read_bytes: 64,
+        };
+        PhysicalDag {
+            nodes: vec![PhysicalDagNode {
+                id: "summary-read".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                source_coverage: Some(coverage),
+                output_buffer_bytes: 2_400,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            }],
+            root: "summary-read".into(),
+            evidence: [(
+                "summary-read".into(),
+                PhysicalNodeEvidence {
+                    physical_id: "summary-read".into(),
+                    statistics,
+                    output_buffer_bytes: 2_400,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    fn candidate_plan(candidate: &ReplacementSubDAG) -> serde_json::Value {
+        match &candidate.replacement {
+            Replacement::Summary(summary) => {
+                serde_json::to_value(dag_export::export_summary(summary)).unwrap()
+            }
+            Replacement::Rewrite(rewrite) => {
+                serde_json::to_value(dag_export::export(rewrite)).unwrap()
+            }
+        }
+    }
+
+    fn cost_fixture() -> (QueryExpr, ReplacementSubDAG, PlannerCostDocument) {
+        let query = non_topk_query();
+        let root = Rc::new(query.clone());
+        let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);
+        let group = space
+            .groups()
+            .find(|group| *group.target == query)
+            .expect("aggregate memo group");
+        let candidate = group
+            .candidates
+            .iter()
+            .find(|candidate| {
+                !matches!(
+                    &candidate.replacement,
+                    Replacement::Summary(node)
+                        if matches!(node.expr, SummaryExpr::KeepPreAsap(_))
+                )
+            })
+            .expect("summary candidate")
+            .clone();
+        let plan = match &candidate.replacement {
+            Replacement::Summary(summary) => {
+                serde_json::to_value(dag_export::export_summary(summary)).unwrap()
+            }
+            Replacement::Rewrite(rewrite) => {
+                serde_json::to_value(dag_export::export(rewrite)).unwrap()
+            }
+        };
+        let document = PlannerCostDocument {
+            evidence_version: "test-evidence-v1".into(),
+            calibration: ResourceCalibration {
+                cost_per_cpu_op: 1.0,
+                cost_per_scan_byte: 1.0,
+                cost_per_retained_byte: 1.0,
+                version: "test".into(),
+            },
+            targets: vec![TargetPhysicalEvidence {
+                target: query.clone(),
+                scope: test_scope(),
+                candidates: vec![match &candidate.replacement {
+                    Replacement::Summary(_) => CandidatePhysicalEvidence::Summary {
+                        plan,
+                        query_nodes: query_evidence(&query),
+                        physical_dag: cheap_candidate_dag(),
+                    },
+                    Replacement::Rewrite(_) => CandidatePhysicalEvidence::Rewrite {
+                        plan,
+                        query_nodes: query_evidence(&query),
+                    },
+                }],
+            }],
+        };
+        (query, candidate, document)
+    }
+
+    #[test]
+    fn planner_json_costs_and_exports_a_generic_non_topk_winner() {
+        let (query, candidate, document) = cost_fixture();
+        let json = serde_json::to_string(&document).unwrap();
+        let parsed = parse_planner_cost_document(&json).unwrap();
+        assert_eq!(parsed.targets[0].target, query);
+        assert!(parsed.targets[0].candidates[0].matches(&candidate));
+        let model = ExportPlannerCostModel { document: &parsed };
+        let target_rc = Rc::new(query.clone());
+        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
+        let (provider, calibration) = model.bound(&candidate, &target).expect("exact binding");
+        let estimate = PhysicalPlanCostModel::new(&provider, calibration.clone())
+            .unwrap()
+            .estimate_candidate(&candidate, &target)
+            .unwrap();
+        assert!(estimate.candidate_cost < estimate.raw_cost);
+        let (baseline, selected, benefit) = model.annotations(&candidate, &Rc::new(query));
+        assert!(baseline.value.is_some());
+        assert!(selected.value.is_some());
+        assert!(benefit.value.is_some());
+        for annotation in [&baseline, &selected, &benefit] {
+            assert_eq!(
+                annotation.evidence_version.as_deref(),
+                Some("test-evidence-v1")
+            );
+            assert!(annotation
+                .model_version
+                .as_deref()
+                .is_some_and(|version| version.starts_with(ANALYTICAL_COST_MODEL_VERSION)));
+        }
+        assert!(selected
+            .inputs
+            .iter()
+            .any(|input| input.name == "estimated_scan"));
+        assert!(!selected.inputs.iter().any(|input| input.name == "topk_k"));
+    }
+
+    #[test]
+    fn duplicate_target_candidate_and_query_evidence_each_fail_closed() {
+        let (query, candidate, document) = cost_fixture();
+        let target_rc = Rc::new(query);
+        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
+
+        let mut duplicate_target = document.clone();
+        duplicate_target
+            .targets
+            .push(duplicate_target.targets[0].clone());
+        assert!(ExportPlannerCostModel {
+            document: &duplicate_target
+        }
+        .candidate_cost(&candidate, &target)
+        .is_none());
+
+        let mut duplicate_candidate = document.clone();
+        let candidate_entry = duplicate_candidate.targets[0].candidates[0].clone();
+        duplicate_candidate.targets[0]
+            .candidates
+            .push(candidate_entry);
+        assert!(ExportPlannerCostModel {
+            document: &duplicate_candidate
+        }
+        .candidate_cost(&candidate, &target)
+        .is_none());
+
+        let mut duplicate_query = document;
+        let query_entry = duplicate_query.targets[0].candidates[0].query_nodes()[0].clone();
+        match &mut duplicate_query.targets[0].candidates[0] {
+            CandidatePhysicalEvidence::Rewrite { query_nodes, .. }
+            | CandidatePhysicalEvidence::Summary { query_nodes, .. } => {
+                query_nodes.push(query_entry)
+            }
+        }
+        assert!(ExportPlannerCostModel {
+            document: &duplicate_query
+        }
+        .candidate_cost(&candidate, &target)
+        .is_none());
+    }
+
+    #[test]
+    fn incomplete_or_unused_json_evidence_fails_closed() {
+        let (query, candidate, document) = cost_fixture();
+        let target_rc = Rc::new(query);
+        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
+
+        let mut missing = document.clone();
+        match &mut missing.targets[0].candidates[0] {
+            CandidatePhysicalEvidence::Rewrite { query_nodes, .. }
+            | CandidatePhysicalEvidence::Summary { query_nodes, .. } => {
+                query_nodes.pop();
+            }
+        }
+        let missing = parse_planner_cost_document(&serde_json::to_string(&missing).unwrap())
+            .expect("well-formed but incomplete evidence document");
+        assert!(ExportPlannerCostModel { document: &missing }
+            .candidate_cost(&candidate, &target)
+            .is_none());
+
+        let mut unused = document;
+        let mut extra = unused.targets[0].candidates[0].query_nodes()[0].clone();
+        extra.occurrence = usize::MAX;
+        match &mut unused.targets[0].candidates[0] {
+            CandidatePhysicalEvidence::Rewrite { query_nodes, .. }
+            | CandidatePhysicalEvidence::Summary { query_nodes, .. } => query_nodes.push(extra),
+        }
+        let unused = parse_planner_cost_document(&serde_json::to_string(&unused).unwrap())
+            .expect("well-formed document with unused evidence");
+        assert!(ExportPlannerCostModel { document: &unused }
+            .candidate_cost(&candidate, &target)
+            .is_none());
+    }
+
+    #[test]
+    fn invalid_candidate_dag_from_json_fails_closed() {
+        let (query, candidate, mut document) = cost_fixture();
+        let CandidatePhysicalEvidence::Summary { physical_dag, .. } =
+            &mut document.targets[0].candidates[0]
+        else {
+            panic!("fixture must use a summary candidate");
+        };
+        physical_dag.nodes.push(physical_dag.nodes[0].clone());
+        let document = parse_planner_cost_document(&serde_json::to_string(&document).unwrap())
+            .expect("invalid physical semantics are checked by the estimator");
+        let target_rc = Rc::new(query);
+        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
+        assert!(ExportPlannerCostModel {
+            document: &document
+        }
+        .candidate_cost(&candidate, &target)
+        .is_none());
+    }
+
+    #[test]
+    fn global_selection_uses_the_cheapest_complete_physical_candidate() {
+        let query = non_topk_query();
+        let root = Rc::new(query.clone());
+        let space = search_workload(vec![(String::from("q"), Rc::clone(&root))]);
+        let group = space
+            .groups()
+            .find(|group| *group.target == query)
+            .expect("aggregate memo group");
+        let candidates: Vec<_> = group
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                matches!(candidate.replacement, Replacement::Summary(ref node)
+                    if !matches!(node.expr, SummaryExpr::KeepPreAsap(_)))
+            })
+            .take(2)
+            .collect();
+        assert_eq!(
+            candidates.len(),
+            2,
+            "fixture needs two physical alternatives"
+        );
+
+        let mut first_dag = cheap_candidate_dag();
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = &mut first_dag
+            .evidence
+            .get_mut("summary-read")
+            .unwrap()
+            .statistics
+        else {
+            panic!("summary read fixture must be a scan")
+        };
+        *source_read_bytes = 1_024;
+        let second_dag = cheap_candidate_dag();
+        let document = PlannerCostDocument {
+            evidence_version: "test-evidence-v1".into(),
+            calibration: ResourceCalibration {
+                cost_per_cpu_op: 1.0,
+                cost_per_scan_byte: 1.0,
+                cost_per_retained_byte: 1.0,
+                version: "test".into(),
+            },
+            targets: vec![TargetPhysicalEvidence {
+                target: query.clone(),
+                scope: test_scope(),
+                candidates: vec![
+                    CandidatePhysicalEvidence::Summary {
+                        plan: candidate_plan(candidates[0]),
+                        query_nodes: query_evidence(&query),
+                        physical_dag: first_dag,
+                    },
+                    CandidatePhysicalEvidence::Summary {
+                        plan: candidate_plan(candidates[1]),
+                        query_nodes: query_evidence(&query),
+                        physical_dag: second_dag,
+                    },
+                ],
+            }],
+        };
+        let document = parse_planner_cost_document(&serde_json::to_string(&document).unwrap())
+            .expect("complete physical evidence");
+        let model = ExportPlannerCostModel {
+            document: &document,
+        };
+        let selection = space.global_selection(&model);
+        let chosen = selection
+            .groups()
+            .find(|selected| selected.target.as_ref() == &query)
+            .and_then(|selected| selected.chosen)
+            .expect("one complete physical candidate should win");
+        assert!(document.targets[0].candidates[1].matches(chosen));
+        assert!(!document.targets[0].candidates[0].matches(chosen));
+    }
+
+    #[test]
+    fn cost_annotations_fail_closed_without_physical_evidence() {
+        let (baseline, selected, benefit) = winner_cost_annotations();
+        for annotation in [baseline, selected, benefit] {
+            assert!(annotation.value.is_none());
+            assert_eq!(annotation.source, asap_types::cost::CostSource::Unavailable);
+            assert_eq!(annotation.unit, CostUnit::CostUnits);
+        }
+    }
+
+    #[test]
+    fn missing_physical_evidence_keeps_the_export_raw_only() {
+        let results = raw_only_post_asap_results();
+        assert!(results.replacements.is_empty());
+        assert!(results.post_graphs.is_empty());
+    }
+
+    #[test]
+    fn compact_analytical_payload_has_an_explicit_migration_error() {
+        let error = parse_planner_cost_document(r#"{"inputs":{"group_count":10}}"#)
+            .expect_err("legacy payload must fail");
+        assert!(error.contains("compact analytical-cost payload"));
+    }
+
+    #[test]
+    fn evidence_version_is_required_and_non_empty() {
+        let (_, _, mut document) = cost_fixture();
+        document.evidence_version.clear();
+        let error = parse_planner_cost_document(&serde_json::to_string(&document).unwrap())
+            .expect_err("an unnamed mutable evidence snapshot must be rejected");
+        assert!(error.contains("evidence_version"));
+    }
+
+    #[test]
+    fn exact_candidate_selector_does_not_confuse_the_same_strategy() {
+        let selected_query = lower_promql("up", AccuracyTarget::Exact).unwrap();
+        let other_query = lower_promql("process_cpu_seconds_total", AccuracyTarget::Exact).unwrap();
+        let selected = ReplacementSubDAG {
+            replacement: Replacement::Rewrite(Rc::new(selected_query.clone())),
+            strategy: "same-strategy",
+            provenance: asap_aware_mapping::replacement::ReplacementProvenance::LogicalRewrite,
+            rationale: String::new(),
+        };
+        let other = ReplacementSubDAG {
+            replacement: Replacement::Rewrite(Rc::new(other_query)),
+            strategy: "same-strategy",
+            provenance: asap_aware_mapping::replacement::ReplacementProvenance::LogicalRewrite,
+            rationale: String::new(),
+        };
+        let selector = CandidatePhysicalEvidence::Rewrite {
+            plan: serde_json::to_value(dag_export::export(&selected_query)).unwrap(),
+            query_nodes: Vec::new(),
+        };
+        assert!(selector.matches(&selected));
+        assert!(!selector.matches(&other));
+    }
+
+    #[test]
+    fn candidate_identity_includes_accuracy_guarantees() {
+        fn alter_guarantee(value: &mut serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    if fields.contains_key("guarantee") {
+                        fields.insert("guarantee".into(), serde_json::json!({"changed": true}));
+                        return true;
+                    }
+                    fields.values_mut().any(alter_guarantee)
+                }
+                serde_json::Value::Array(values) => values.iter_mut().any(alter_guarantee),
+                _ => false,
+            }
+        }
+
+        let (_, candidate, document) = cost_fixture();
+        let mut selector = document.targets[0].candidates[0].clone();
+        let plan = match &mut selector {
+            CandidatePhysicalEvidence::Rewrite { plan, .. }
+            | CandidatePhysicalEvidence::Summary { plan, .. } => plan,
+        };
+        assert!(alter_guarantee(plan), "fixture must contain a guarantee");
+        assert!(!selector.matches(&candidate));
+    }
+
+    #[test]
+    fn one_ulp_tolerance_is_limited_to_guarantee_values() {
+        let value = 0.1_f64;
+        let adjacent = f64::from_bits(value.to_bits() + 1);
+        assert!(plan_values_match(
+            &serde_json::json!({"guarantee": {"bound": {"value": value}}}),
+            &serde_json::json!({"guarantee": {"bound": {"value": adjacent}}}),
+        ));
+        assert!(!plan_values_match(
+            &serde_json::json!({"detail": {"literal": value}}),
+            &serde_json::json!({"detail": {"literal": adjacent}}),
+        ));
+    }
 
     #[test]
     fn workload_wide_explanations_annotate_cross_query_reuse() {

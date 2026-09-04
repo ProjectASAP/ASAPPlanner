@@ -7,7 +7,8 @@ ASAP-aware mapping should support several largely orthogonal dimensions of optim
 - (sketch, subpopulation) Use a subpopulation sketch (e.g. Hydra, OmniSketch) or maintain a sketch per subpopulation
 - (sketch, subpopulation) Single-level Hydra (what the paper talks about) or multi-level Hydra (e.g. CMS on top of CMS on top of CMS)
 - (sketch, time) Sliding window sketches (e.g. Promsketch) vs exact treatment of time
-- (sketch, time) Sliding window vs tumbling window computation (this is specific to ASAPCollector and ASAPQuery's precompute engine)
+- (sketch, time) Abstract sliding, tumbling, or exponential-histogram window
+  frameworks, with concrete runtime realization delegated downstream
 - (subpopulation) Hierarchy of summaries (AHA) vs treating hierarchical subpopulations independently
 - (sketch) Combining computation between part from the sketch, and part from the raw data to meet an accuracy target
 

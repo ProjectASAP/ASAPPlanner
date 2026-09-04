@@ -34,6 +34,7 @@ pub mod schema;
 pub mod sketch;
 pub mod summary_maintenance;
 pub mod summary_maintenance_lifecycle;
+pub mod summary_window;
 
 pub use expr::{SummaryExpr, SummaryNode};
 pub use guarantee::{
@@ -56,3 +57,4 @@ pub use summary_maintenance_lifecycle::{
     EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee,
 };
+pub use summary_window::SummaryWindowFramework;

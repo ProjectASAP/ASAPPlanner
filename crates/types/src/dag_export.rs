@@ -46,6 +46,7 @@ use std::rc::Rc;
 
 use serde::Serialize;
 
+use crate::cost::CostAnnotation;
 use crate::post_asap::{AccuracyError, ResultGuarantee, SummaryExpr, SummaryNode};
 use crate::pre_asap::cse::{structural_hash, HashCache};
 use crate::pre_asap::query_expr::{QueryExpr, Source};
@@ -152,6 +153,38 @@ pub struct DagDecision {
     /// `replacement_root` for the node replacing the pre-ASAP target;
     /// `replacement_region` for its generated or carried descendants.
     pub role: &'static str,
+    /// Structured counterpart of `cost` above — see [`CostAnnotation`]
+    /// (issue #286). `None` for the same reason `cost` can be `f64::NAN`:
+    /// the plugged-in cost model doesn't estimate a number for this
+    /// candidate shape. Additive: every existing reader of `cost` keeps
+    /// working unchanged; a reader that wants units, provenance, and an
+    /// explicit baseline comparison reads this instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_cost: Option<CostAnnotation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_cost: Option<CostAnnotation>,
+    /// `baseline_cost.value - selected_cost.value` under `baseline_cost`'s
+    /// own baseline — for a winning `SharedSubtreeStrategy`/`CseShare`
+    /// decision this *is* "avoided recomputation for a shared sub-DAG" (one
+    /// of `dag_export`'s issue #286 granularity items): the baseline is
+    /// exactly the cost of recomputing this subtree independently at every
+    /// consumer, so the benefit is exactly what sharing avoided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub benefit: Option<CostAnnotation>,
+}
+
+/// A cost/benefit annotation attributed to one specific graph edge (`from`
+/// -> `to`, in [`DagNode::children`]'s direction) rather than to a node —
+/// issue #286's "edge cost only when genuinely attributable to the edge"
+/// granularity item. Graph structure alone cannot determine transfer,
+/// materialization, or read cost. A higher layer may attach this annotation
+/// only when physical evidence attributes cost to this exact edge; this
+/// module never derives one from structural node counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct EdgeCostAnnotation {
+    pub from: u32,
+    pub to: u32,
+    pub cost: CostAnnotation,
 }
 
 /// One query's exported graph. `nodes[root as usize]` is the tree's root.
@@ -159,6 +192,13 @@ pub struct DagDecision {
 pub struct DagGraph {
     pub nodes: Vec<DagNode>,
     pub root: u32,
+    /// See [`EdgeCostAnnotation`]. Always empty unless a higher layer
+    /// explicitly populated it (same layering rule as [`DagNode::notes`]);
+    /// omitted from JSON entirely when empty, so every existing producer of
+    /// [`DagGraph`] (every call to [`export`]/[`export_summary`]) is
+    /// unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge_annotations: Vec<EdgeCostAnnotation>,
 }
 
 /// A single named query within a multi-query export.
@@ -199,6 +239,24 @@ pub struct NamedGraph {
     /// `NamedGraph` is unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_graph: Option<DagGraph>,
+    /// This query's own selected-workload cost/benefit — one of issue
+    /// #286's granularity items. Built by summing *this query's own*
+    /// `post_graph` decision-node cost annotations, deduplicated by
+    /// `decision.id` **within this one query only** (a decision spanning
+    /// several nodes in this query's own replacement region is still
+    /// counted once here). `None` unless a higher layer built one (same
+    /// `--post-asap`-gated pattern as `post_graph`); omitted from JSON when
+    /// absent.
+    ///
+    /// This does **not** dedupe across queries: a target shared by two
+    /// queries (e.g. a common `Scan` after workload-wide CSE) is counted
+    /// once in *each* query's own `workload_cost` — summing several
+    /// `NamedGraph.workload_cost` values by hand double-counts any decision
+    /// shared between them. For a cross-query total that dedupes correctly,
+    /// use [`WorkloadGraph::workload_cost`] instead, which is built
+    /// specifically to cover every query in one pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_cost: Option<crate::cost::WorkloadCostSummary>,
     /// Accuracy-illegal candidates a higher layer's search refused for
     /// targets in this query (issue #172) — see [`TargetRejection`]. Always
     /// empty coming out of this module; omitted from the JSON when empty,
@@ -214,6 +272,14 @@ pub struct NamedGraph {
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkloadGraph {
     pub queries: Vec<NamedGraph>,
+    /// The selected multi-query workload's own cost/benefit, deduplicated
+    /// across every query in `queries` (not just within one) — the
+    /// "Selecting ... multiple queries ... display correct Pre/Post-ASAP
+    /// annotations" / "workload totals count shared nodes once" acceptance
+    /// criteria for the batch/union case. `None` unless a higher layer
+    /// built one; omitted from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_cost: Option<crate::cost::WorkloadCostSummary>,
 }
 
 // ── Post-ASAP replacement export — a second, layering-seam-shaped feature ──
@@ -550,6 +616,19 @@ pub struct TargetReplacement {
     /// `export(target)` for the `MemoGroup`'s own `target`, reused as-is.
     pub before: DagGraph,
     pub after: TargetReplacementAfter,
+    /// Structured baseline/selected/benefit cost annotations for this one
+    /// replacement region — issue #286's "replacement-region baseline
+    /// cost, selected cost, and benefit" granularity item. Always
+    /// consistent with `cost` above: `selected_cost.value == Some(cost)`
+    /// whenever `cost` is finite, `None`/`Unavailable` whenever it is
+    /// `NaN`. Baseline and selected values require complete, scope-matched
+    /// physical evidence; neither is inferred from logical graph structure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_cost: Option<CostAnnotation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_cost: Option<CostAnnotation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub benefit: Option<CostAnnotation>,
 }
 
 /// What a [`TargetReplacement`] became — either a genuine post-ASAP binding
@@ -586,7 +665,11 @@ pub fn export(expr: &QueryExpr) -> DagGraph {
     // callback regardless (so `export_post_asap` can share this exact
     // per-variant traversal instead of duplicating it).
     let root = build(expr, &mut nodes, &mut cache, &mut |_| None);
-    DagGraph { nodes, root }
+    DagGraph {
+        nodes,
+        root,
+        edge_annotations: Vec::new(),
+    }
 }
 
 /// What a higher layer found for one specific pre-ASAP node when building a
@@ -665,7 +748,6 @@ fn deduplicate_pointer_shared_nodes(nodes: Vec<DagNode>, root: u32) -> DagGraph 
     let mut by_source_ptr = HashMap::<usize, u32>::new();
     let mut old_to_new = vec![0_u32; nodes.len()];
     let mut deduplicated = Vec::with_capacity(nodes.len());
-
     for mut node in nodes {
         node.children = node
             .children
@@ -692,6 +774,7 @@ fn deduplicate_pointer_shared_nodes(nodes: Vec<DagNode>, root: u32) -> DagGraph 
     DagGraph {
         nodes: deduplicated,
         root: old_to_new[root as usize],
+        edge_annotations: Vec::new(),
     }
 }
 
@@ -1122,13 +1205,18 @@ fn build_no_recheck(
                 vec![c],
             )
         }
-        QueryExpr::Concat { children } => {
+        QueryExpr::Concat {
+            children,
+            discriminator_unique_key,
+        } => {
             let ids: Vec<u32> = children
                 .iter()
                 .map(|c| build(c, nodes, cache, find_winner))
                 .collect();
             let label = format!("Concat({} branches)", ids.len());
-            push_node(nodes, expr, cache, label, serde_json::json!({}), ids)
+            let detail =
+                serde_json::json!({ "discriminator_unique_key": discriminator_unique_key });
+            push_node(nodes, expr, cache, label, detail, ids)
         }
         QueryExpr::Join {
             kind,
@@ -1324,6 +1412,7 @@ mod tests {
         assert!(graph.nodes[0].notes.is_empty());
         assert!(graph.nodes[0].decision.is_none());
         assert!(graph.nodes[0].schema.is_some());
+        assert!(graph.edge_annotations.is_empty());
         let json = serde_json::to_string(&graph.nodes[0]).unwrap();
         assert!(
             !json.contains("notes"),
@@ -1333,6 +1422,87 @@ mod tests {
             !json.contains("decision"),
             "empty `decision` must be skipped, not serialized as `null`: {json}"
         );
+        let graph_json = serde_json::to_string(&graph).unwrap();
+        assert!(
+            !graph_json.contains("edge_annotations"),
+            "empty `edge_annotations` must be skipped, not serialized as `[]`: {graph_json}"
+        );
+    }
+
+    #[test]
+    fn export_post_asap_does_not_invent_costs_for_shared_edges() {
+        // Two *distinct* parents (a Dedup and a Limit, each with their own
+        // single child slot) share the exact same `Rc` Scan —
+        // `export_post_asap` must merge them onto one node id. Sharing alone
+        // is not physical cost evidence, so no edge cost may be fabricated.
+        let shared_scan = Rc::new(scan("metrics", value_col()));
+        let left_branch = QueryExpr::Dedup {
+            cols: vec![0],
+            child: Rc::clone(&shared_scan),
+        };
+        let right_branch = QueryExpr::Limit {
+            n: 5,
+            offset: 0,
+            child: Rc::clone(&shared_scan),
+        };
+        let root = QueryExpr::Concat {
+            children: vec![left_branch, right_branch],
+            discriminator_unique_key: None,
+        };
+        let graph = export_post_asap(&root, &mut |_| None);
+
+        assert_eq!(
+            graph.nodes.iter().filter(|n| n.kind == "Scan").count(),
+            1,
+            "the shared Scan must be merged onto one node, not duplicated"
+        );
+        assert!(graph.edge_annotations.is_empty());
+    }
+
+    /// Regression test: a single parent referencing the same shared child
+    /// from two of its own operand slots at once (a `Join` whose left and
+    /// right sides are the exact same `Rc`, post pointer-dedup) is *one*
+    /// downstream consumer, not two — this must not inflate
+    /// produce an edge-cost annotation without explicit physical evidence.
+    #[test]
+    fn a_single_parent_referencing_a_shared_child_twice_is_one_consumer_not_two() {
+        let shared_scan = Rc::new(scan("metrics", value_col()));
+        let root = QueryExpr::Join {
+            kind: crate::pre_asap::query_expr::JoinKind::Inner,
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            left: Rc::clone(&shared_scan),
+            right: Rc::clone(&shared_scan),
+        };
+        let graph = export_post_asap(&root, &mut |_| None);
+
+        assert_eq!(
+            graph.nodes.iter().filter(|n| n.kind == "Scan").count(),
+            1,
+            "the shared Scan must be merged onto one node, not duplicated"
+        );
+        assert!(
+            graph.edge_annotations.is_empty(),
+            "a single parent referencing the same child twice is one consumer, not a genuine \
+             multi-consumer share — got: {:?}",
+            graph.edge_annotations
+        );
+    }
+
+    #[test]
+    fn export_never_produces_edge_annotations_since_it_never_shares_nodes() {
+        // Plain `export` (no `export_post_asap`) never deduplicates by `Rc`
+        // pointer identity — even a workload-level shared subtree renders as
+        // two independent tree nodes here, so there is nothing to annotate.
+        let shared_scan = Rc::new(scan("metrics", value_col()));
+        let root = QueryExpr::Join {
+            kind: crate::pre_asap::query_expr::JoinKind::Inner,
+            pred: Predicate(Rc::new(QueryExpr::Literal(ScalarValue::Boolean(true)))),
+            left: Rc::clone(&shared_scan),
+            right: Rc::clone(&shared_scan),
+        };
+        let graph = export(&root);
+        assert_eq!(graph.nodes.iter().filter(|n| n.kind == "Scan").count(), 2);
+        assert!(graph.edge_annotations.is_empty());
     }
 
     #[test]
@@ -1367,13 +1537,11 @@ mod tests {
 
     #[test]
     fn merge_keeps_every_branch_as_a_child() {
-        let expr = QueryExpr::Concat {
-            children: vec![
-                scan("a", value_col()),
-                scan("b", value_col()),
-                scan("c", value_col()),
-            ],
-        };
+        let expr = QueryExpr::concat(vec![
+            scan("a", value_col()),
+            scan("b", value_col()),
+            scan("c", value_col()),
+        ]);
         let graph = export(&expr);
         assert_eq!(graph.nodes.len(), 4, "3 branches + the Concat node");
         let merge = &graph.nodes[graph.root as usize];
@@ -1589,6 +1757,7 @@ mod tests {
             graph: export(&leaf),
             replacements: vec![],
             post_graph: None,
+            workload_cost: None,
             rejections: vec![TargetRejection {
                 target_pre_id: 0,
                 strategy: "SketchAlgorithmStrategy".into(),

@@ -20,7 +20,12 @@ cytoscape.use(window.cytoscapeDagre);
 // like "SummaryAgg" mixed in, and any such node has no `hash` — there's no
 // corresponding QueryExpr to hash) — left `undefined` when absent (omitted
 // whenever --post-asap wasn't set, or this query had zero replacements),
-// unlike `replacements` which always defaults to an array.
+// unlike `replacements` which always defaults to an array. `workload_cost`
+// is the optional per-query `NamedGraph.workload_cost` (issue #286), also
+// left `undefined` when absent. `sourceBatch` is a viewer-assigned integer
+// (never present in the JSON itself) shared by every query loaded from the
+// same document — see computeSelectionWorkloadCost's own doc for why it
+// exists and how it's used.
 let queries = [];
 let activeIndex = -1;
 let cy = null;
@@ -29,6 +34,13 @@ let zoom = 1;
 // The viewer has one Pre/Post-ASAP mode. One selected query renders its own
 // two DAGs; multiple selected queries union each stage into one workload DAG.
 let participants = new Set();
+// Every query pushed from the *same* loaded JSON document (one `dag_export`
+// process invocation) shares one `sourceBatch` id, assigned here. Needed
+// because `DagDecision.id` is only unique *within* one dag_export run, not
+// across independently-generated files — computeSelectionWorkloadCost below
+// dedups by `${sourceBatch}:${decision.id}`, never `decision.id` alone, so
+// two files that happen to reuse the same small integer id never collide.
+let nextSourceBatch = 0;
 
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
@@ -101,11 +113,14 @@ function loadFiles(fileList) {
           lifecycle_summary: lifecyclePlanSummary(parsed),
         }] : []);
         const existingNames = new Set(queries.map((q) => q.name));
+        // One batch id per *file* — every query this one dag_export
+        // invocation produced shares its decision.id numbering.
+        const sourceBatch = nextSourceBatch++;
         incoming.forEach((q) => {
           let name = q.name;
           if (existingNames.has(name)) name = `${q.name} (${file.name})`;
           existingNames.add(name);
-          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary });
+          queries.push({ name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, workload_cost: q.workload_cost, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary, sourceBatch });
         });
       } catch (err) {
         alert(`Failed to parse ${file.name}: ${err.message}`);
@@ -281,6 +296,26 @@ function buildCyStyle() {
       },
     },
     {
+      selector: 'node.costImprovement',
+      style: {
+        'border-color': '#15803d',
+        'border-width': 2.5,
+        'underlay-color': '#15803d',
+        'underlay-opacity': 0.1,
+        'underlay-padding': 4,
+      },
+    },
+    {
+      selector: 'node.costRegression',
+      style: {
+        'border-color': '#b91c1c',
+        'border-width': 2.5,
+        'underlay-color': '#b91c1c',
+        'underlay-opacity': 0.1,
+        'underlay-padding': 4,
+      },
+    },
+    {
       // Pre/Post-ASAP lane container (a compound parent node).
       selector: 'node.laneParent',
       style: {
@@ -321,6 +356,16 @@ function buildCyStyle() {
         'transition-property': 'opacity',
         'transition-duration': '260ms',
         'transition-timing-function': 'ease-in-out',
+      },
+    },
+    {
+      selector: 'edge.costAnnotated',
+      style: {
+        'width': 3,
+        'line-color': ringColor,
+        'target-arrow-color': ringColor,
+        'label': 'data(edgeCostLabel)',
+        'font-weight': 700,
       },
     },
   ];
@@ -437,14 +482,15 @@ function renderPrePostAsap() {
     ? `Pre/Post-ASAP: ${selected[0].name}`
     : `Pre/Post-ASAP workload union: ${selected.length} queries`;
 
+  const costSummary = selected.length === 1 ? selected[0].workload_cost : computeSelectionWorkloadCost(selected);
   const elements = selected.length === 1
     ? [
-        ...laneElements('pre-asap', `${selected[0].name} · pre-ASAP`, selected[0].graph, selected[0], 'pre'),
-        ...laneElements('post-asap', `${selected[0].name} · post-ASAP`, selected[0].post_graph, selected[0], 'post'),
+        ...laneElements('pre-asap', `${selected[0].name} · pre-ASAP`, selected[0].graph, selected[0], 'pre', costSummary && costSummary.baseline_cost),
+        ...laneElements('post-asap', `${selected[0].name} · post-ASAP`, selected[0].post_graph, selected[0], 'post', costSummary && costSummary.selected_cost),
       ]
     : [
-        ...unionStageLaneElements('pre', chosen),
-        ...unionStageLaneElements('post', chosen),
+        ...unionStageLaneElements('pre', chosen, costSummary && costSummary.baseline_cost),
+        ...unionStageLaneElements('post', chosen, costSummary && costSummary.selected_cost),
       ];
 
   buildCy(elements);
@@ -462,7 +508,7 @@ function renderPrePostAsap() {
   fitAndSyncZoom();
 }
 
-function unionStageLaneElements(stage, chosen) {
+function unionStageLaneElements(stage, chosen, laneCost) {
   // Workload merging is an exporter decision. `workload_node_id` is the
   // explicit JSON mapping; do not reconstruct identity from node content.
   const laneId = `${stage}-asap-union`;
@@ -488,7 +534,7 @@ function unionStageLaneElements(stage, chosen) {
   const entries = new Map();
   const edges = new Map();
   const elements = [
-    { data: { id: laneId, label: `${stage === 'pre' ? 'pre-ASAP' : 'post-ASAP'} · workload union`, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
+    { data: { id: laneId, label: laneCostLabel(`${stage === 'pre' ? 'pre-ASAP' : 'post-ASAP'} · workload union`, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
   ];
 
   chosen.forEach((qIdx) => {
@@ -548,18 +594,26 @@ function unionStageLaneElements(stage, chosen) {
 // both shapes carry id/kind/label/detail/children, which is all a lane
 // needs; SummaryDagNode's missing `hash`/`notes` fields are simply never
 // read by this function or by showPrePostDetail below.
-function laneElements(laneId, laneLabel, graph, query, stage) {
+function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
   const nodes = graph.nodes;
   const byId = new Map(nodes.map((node) => [node.id, node]));
+  // Keep the delimiter escaped in source. A literal NUL is replaced by the
+  // HTML tokenizer when viewer.js is embedded by render.py, which otherwise
+  // makes these keys differ from the lookup below.
+  const edgeCostByPair = new Map((graph.edge_annotations || []).map((edge) => [`${edge.from}\u0000${edge.to}`, edge.cost]));
   const elements = [
-    { data: { id: laneId, label: laneLabel, isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
+    { data: { id: laneId, label: laneCostLabel(laneLabel, laneCost, stage), isLane: true }, classes: 'laneParent', selectable: false, grabbable: false },
   ];
   for (const node of nodes) {
     elements.push({
       data: {
         id: `${laneId}-${node.id}`,
         parent: laneId,
-        label: node.label,
+        // On-graph label carries a concise cost/benefit badge (issue #286)
+        // when this node's decision has one; `node.label` itself (nested,
+        // used everywhere else — the sidebar, schema derivation, …) stays
+        // exactly the plain IR label.
+        label: node.label + nodeCostBadgeSuffix(node),
         node,
         // Flat (not nested under `node`) so buildCyStyle's
         // `node[kind = "KeepPreAsap"]` selector can actually match it —
@@ -575,6 +629,9 @@ function laneElements(laneId, laneLabel, graph, query, stage) {
         lifecycleSummary: query.lifecycle_summary,
         translations: translationsForNode(query, node, stage),
       },
+      classes: node.decision && typeof node.decision.benefit?.value === 'number'
+        ? (node.decision.benefit.value >= 0 ? 'costImprovement' : 'costRegression')
+        : '',
     });
   }
   for (const node of nodes) {
@@ -587,11 +644,191 @@ function laneElements(laneId, laneLabel, graph, query, stage) {
           source: `${laneId}-${childId}`,
           target: `${laneId}-${node.id}`,
           schemaLabel: formatSchema(byId.get(childId).schema),
+          // Optional edge cost supplied by a physical-evidence layer for
+          // this exact (child -> node) edge; `undefined` otherwise.
+          edgeCost: edgeCostByPair.get(`${childId}\u0000${node.id}`),
+          edgeCostLabel: edgeCostByPair.has(`${childId}\u0000${node.id}`)
+            ? `edge cost ${compactCost(edgeCostByPair.get(`${childId}\u0000${node.id}`))}`
+            : '',
         },
+        classes: edgeCostByPair.has(`${childId}\u0000${node.id}`) ? 'costAnnotated' : '',
       });
     }
   }
   return elements;
+}
+
+// ── Structured cost/benefit annotations ───────────────────────────────────
+// Renders only what a `dag_export` JSON export explicitly carries
+// (`CostAnnotation`/`WorkloadCostSummary`/`EdgeCostAnnotation` from
+// crates/types/src/cost.rs) — no client-side cost estimation. A value with
+// no `source: "Modeled"|"Measured"` (i.e. `Unavailable`, or the field
+// simply absent from an older export) always reads "Not estimated", never
+// a fabricated number.
+
+function formatCostUnit(unit) {
+  switch (unit) {
+    case 'CostUnitsPerSecond': return 'cost units/s';
+    case 'CostUnits': return 'cost units';
+    default: return unit || 'unknown unit';
+  }
+}
+
+function formatBaselineRef(baseline) {
+  if (!baseline) return '';
+  switch (baseline.kind) {
+    case 'PreAsapRecomputation': return 'pre-ASAP recomputation';
+    case 'HighestRankedNonSelectedCandidate':
+      return `best non-selected candidate (rank ${baseline.detail && baseline.detail.rank})`;
+    case 'Named': return String(baseline.detail || '');
+    default: return baseline.kind || '';
+  }
+}
+
+function formatCostNumber(value) {
+  // Trim display values to at most 3 decimals without trailing zeros. The
+  // complete modeled inputs and provenance remain available in the panel.
+  return Number(value.toFixed(3)).toString();
+}
+
+function compactCost(annotation) {
+  if (!annotation || annotation.value === null || annotation.value === undefined) return 'Not estimated';
+  return `${formatCostNumber(annotation.value)} ${formatCostUnit(annotation.unit)}`;
+}
+
+function laneCostLabel(label, annotation, stage) {
+  if (!annotation) return label;
+  return `${label}\n${stage === 'pre' ? 'Baseline' : 'Selected'} cost: ${compactCost(annotation)}`;
+}
+
+// One `<title, CostAnnotation>` block for the sidebar: value + unit +
+// Modeled/Measured/Unavailable badge, baseline/delta/ratio when present,
+// model/evidence/benchmark provenance, and the raw `inputs` the value was built
+// from. `annotation` may be `undefined` (an older export with no
+// annotation at all) or `null`/missing `value` (an explicit `Unavailable`)
+// — both render as "Not estimated", never a number.
+function renderCostAnnotation(title, annotation) {
+  if (!annotation) return '';
+  const source = annotation.source || 'Unavailable';
+  const badgeClass = source === 'Modeled' ? 'costBadge--modeled' : source === 'Measured' ? 'costBadge--measured' : 'costBadge--unavailable';
+  if (annotation.value === null || annotation.value === undefined) {
+    return `<div class="costRow"><span class="costLabel">${escapeHtml(title)}</span><span class="costValue">Not estimated</span><span class="costBadge ${badgeClass}">${escapeHtml(source)}</span></div>`;
+  }
+  const unit = formatCostUnit(annotation.unit);
+  const valueText = `${formatCostNumber(annotation.value)} ${unit}`;
+  const metaParts = [];
+  if (annotation.baseline) metaParts.push(`vs ${formatBaselineRef(annotation.baseline)}`);
+  if (typeof annotation.delta === 'number') metaParts.push(`Δ ${formatCostNumber(annotation.delta)} ${unit}`);
+  if (typeof annotation.benefit_ratio === 'number') metaParts.push(`ratio ${(annotation.benefit_ratio * 100).toFixed(1)}%`);
+  const provenanceParts = [];
+  if (annotation.model_version) provenanceParts.push(`model ${annotation.model_version}`);
+  if (annotation.evidence_version) provenanceParts.push(`evidence ${annotation.evidence_version}`);
+  if (annotation.benchmark_id) provenanceParts.push(`benchmark ${annotation.benchmark_id}`);
+  const inputsHtml = (annotation.inputs || []).length
+    ? `<ul class="costInputs">${annotation.inputs.map((input) => `<li><span>${escapeHtml(input.name)}</span><span>${escapeHtml(String(input.value))}${input.unit ? ' ' + escapeHtml(input.unit) : ''}</span></li>`).join('')}</ul>`
+    : '';
+  return `
+    <div class="costRow">
+      <span class="costLabel">${escapeHtml(title)}</span>
+      <span class="costValue">${escapeHtml(valueText)}</span>
+      <span class="costBadge ${badgeClass}">${escapeHtml(source)}</span>
+    </div>
+    ${metaParts.length ? `<div class="costMeta">${escapeHtml(metaParts.join(' · '))}</div>` : ''}
+    ${provenanceParts.length ? `<div class="costMeta">${escapeHtml(provenanceParts.join(' · '))}</div>` : ''}
+    ${inputsHtml}
+  `;
+}
+
+// Baseline/selected/benefit trio for one replacement decision, matching
+// `DagDecision.baseline_cost/selected_cost/benefit` (crates/types/src/dag_export.rs).
+function renderDecisionCostBlock(entry) {
+  if (!entry.baseline_cost && !entry.selected_cost && !entry.benefit) return '';
+  return `<div class="costBlock">
+    <h4>Cost / benefit</h4>
+    ${renderCostAnnotation('Baseline', entry.baseline_cost)}
+    ${renderCostAnnotation('Selected', entry.selected_cost)}
+    ${renderCostAnnotation('Benefit', entry.benefit)}
+  </div>`;
+}
+
+// Short, on-graph badge text for a post-ASAP node's own winning decision —
+// "concise on-graph benefit/cost badges" per issue #286; the full
+// breakdown only ever appears in the sidebar (`renderDecisionCostBlock`).
+// Empty string whenever there's nothing to show (no decision, or its
+// benefit is `Unavailable`) so an un-costed node's label is untouched.
+function nodeCostBadgeSuffix(node) {
+  const benefit = node.decision && node.decision.benefit;
+  if (!benefit || benefit.value === null || benefit.value === undefined) return '';
+  if (typeof benefit.benefit_ratio === 'number') {
+    const pct = Math.abs(benefit.benefit_ratio * 100);
+    return `\n${benefit.benefit_ratio >= 0 ? '▼' : '▲'}${pct >= 10 ? Math.round(pct) : pct.toFixed(1)}%`;
+  }
+  return `\n${benefit.value >= 0 ? '▼' : '▲'}${formatCostNumber(Math.abs(benefit.value))}`;
+}
+
+// Workload-wide baseline/selected/benefit for the currently selected
+// queries, deduplicated by `decision.id` *within one loaded document* — the
+// same collision-free key `crates/devtools/src/bin/dag_export.rs`'s own
+// `decision_cost_entries` dedupes by (a decision spans every node in its
+// replacement region, and a CSE-shared target can appear in more than one
+// selected query from the same dag_export run). `decision.id` is only
+// unique within the one `dag_export` process invocation that produced it,
+// never across independently-generated files — the viewer explicitly
+// supports loading and selecting across several files at once — so the
+// dedup key is `${query.sourceBatch}:${decision.id}`, not `decision.id`
+// alone; two files that happen to reuse the same small integer id must
+// never collide and silently drop one file's cost from the total.
+//
+// This aggregates explicit per-node `CostAnnotation`s already in the
+// export; it never estimates a cost itself. Returns `null` when nothing in
+// the selection carries a cost annotation, or when selected annotations
+// disagree on unit (unit-incompatible aggregation is refused, not mixed).
+function computeSelectionWorkloadCost(selected) {
+  const seenDecisions = new Set();
+  let unit = null;
+  let baselineSum = 0;
+  let selectedSum = 0;
+  let any = false;
+  let unavailable = false;
+  for (const query of selected) {
+    const nodes = (query.post_graph && query.post_graph.nodes) || [];
+    for (const node of nodes) {
+      const decision = node.decision;
+      if (!decision) continue;
+      const dedupKey = `${query.sourceBatch}:${decision.id}`;
+      if (seenDecisions.has(dedupKey)) continue;
+      seenDecisions.add(dedupKey);
+      const baseline = decision.baseline_cost;
+      const selectedCost = decision.selected_cost;
+      if (!baseline || !selectedCost) continue;
+      if (unit === null) unit = baseline.unit;
+      if (baseline.unit !== unit || selectedCost.unit !== unit) return null; // unit-incompatible aggregation is rejected
+      any = true;
+      if (baseline.value === null || baseline.value === undefined || selectedCost.value === null || selectedCost.value === undefined) {
+        unavailable = true;
+        continue;
+      }
+      baselineSum += baseline.value;
+      selectedSum += selectedCost.value;
+    }
+  }
+  if (!any) return null;
+  if (unavailable) {
+    const missing = { value: null, unit, source: 'Unavailable' };
+    return { baseline_cost: missing, selected_cost: missing, benefit: missing };
+  }
+  const delta = baselineSum - selectedSum;
+  return {
+    baseline_cost: { value: baselineSum, unit, source: 'Modeled' },
+    selected_cost: { value: selectedSum, unit, source: 'Modeled' },
+    benefit: {
+      value: delta,
+      unit,
+      source: 'Modeled',
+      baseline: { kind: 'PreAsapRecomputation' },
+      benefit_ratio: baselineSum > 0 ? delta / baselineSum : null,
+    },
+  };
 }
 
 function formatSchema(schema) {
@@ -641,6 +878,10 @@ function showEdgeDetail(edge) {
   const sourceNode = source.data('node') || {};
   const targetNode = target.data('node') || {};
   const edgeSchema = edge.data('schemaLabel') || formatSchema(sourceNode.schema);
+  const edgeCost = edge.data('edgeCost');
+  const edgeCostHtml = edgeCost
+    ? `<div class="costBlock"><h4>Edge cost</h4>${renderCostAnnotation('Materialization', edgeCost)}</div>`
+    : '';
   detailSection.innerHTML = `
     <h2>Selected edge</h2>
     <div class="translationBlock">
@@ -648,6 +889,7 @@ function showEdgeDetail(edge) {
       <div><strong>From:</strong> ${escapeHtml(sourceNode.label || source.id())}</div>
       <div><strong>To:</strong> ${escapeHtml(targetNode.label || target.id())}</div>
     </div>
+    ${edgeCostHtml}
     <h3 class="detailSubhead">Schema carried by this edge</h3>
     <pre>${escapeHtml(edgeSchema || '(schema unavailable)')}</pre>
     <h3 class="detailSubhead">How the schema is produced</h3>
@@ -667,7 +909,31 @@ function renderScopeSummary(selected) {
   }));
   const scope = selected.length === 1 ? 'Single query' : `Batch workload · ${selected.length} queries`;
   const strategyText = strategies.size ? `Winning strategies: ${Array.from(strategies).join(', ')}` : 'No selected replacements';
-  scopePickerEl.innerHTML = `<div class="scopeGroup"><div class="scopeGroupLabel">View scope</div><div class="scopeRow active"><span>${escapeHtml(scope)}</span><span class="scopeMeta">${escapeHtml(strategyText)}</span></div></div>`;
+  // Single query: use the exporter's own precomputed `NamedGraph.workload_cost`
+  // directly. Multiple queries: no single precomputed field covers exactly
+  // this subset, so aggregate the explicit per-decision annotations already
+  // in the export (dedup by `decision.id`) — see
+  // computeSelectionWorkloadCost's own doc for why this is aggregation, not
+  // client-side cost estimation.
+  const costSummary = selected.length === 1 ? selected[0].workload_cost : computeSelectionWorkloadCost(selected);
+  const benefitValue = costSummary && costSummary.benefit && costSummary.benefit.value;
+  const hasEdgeCosts = selected.some((query) => (query.post_graph?.edge_annotations || []).length > 0);
+  const outcomeLabel = typeof benefitValue !== 'number'
+    ? 'difference'
+    : benefitValue > 0 ? 'saved' : benefitValue < 0 ? 'additional cost' : 'no change';
+  const costHtml = costSummary
+    ? `<div class="scopeGroup costComparisonGroup">
+        <div class="scopeGroupLabel">Pre/post cost comparison</div>
+        <div class="costComparison">
+          <div class="costStage costStage--pre"><span>pre-ASAP baseline</span><strong>${escapeHtml(compactCost(costSummary.baseline_cost))}</strong></div>
+          <div class="costArrow" aria-label="rewritten to">→</div>
+          <div class="costStage costStage--post"><span>post-ASAP selected</span><strong>${escapeHtml(compactCost(costSummary.selected_cost))}</strong></div>
+          <div class="costSaving ${typeof benefitValue === 'number' && benefitValue < 0 ? 'costSaving--regression' : ''}"><span>${escapeHtml(outcomeLabel)}</span><strong>${escapeHtml(compactCost(costSummary.benefit))}${typeof costSummary.benefit?.benefit_ratio === 'number' ? ` (${(costSummary.benefit.benefit_ratio * 100).toFixed(1)}%)` : ''}</strong></div>
+        </div>
+        <div class="costComparisonHint">The same values are attached to the lane headers below. Green/red nodes show lower/higher replacement cost.${hasEdgeCosts ? ' Highlighted edges carry an explicitly supplied physical edge cost.' : ''}</div>
+      </div>`
+    : '';
+  scopePickerEl.innerHTML = `<div class="scopeGroup"><div class="scopeGroupLabel">View scope</div><div class="scopeRow active"><span>${escapeHtml(scope)}</span><span class="scopeMeta">${escapeHtml(strategyText)}</span></div></div>${costHtml}`;
 }
 
 function translationsForNode(query, node, stage) {
@@ -734,6 +1000,7 @@ function showPrePostDetail(data) {
         <div class="translationMeta">${entry.role === 'replacement_root' ? 'This node replaces the pre-ASAP target.' : 'This node is generated or carried inside the replacement region.'}</div>
         <div class="translationReason">${escapeHtml(entry.rationale || 'No rationale recorded.')}</div>
         <div class="translationTarget">${entry.target_pre_id === undefined ? `decision #${entry.id}` : `pre-ASAP target node #${entry.target_pre_id}`} · output ${escapeHtml(entry.output_kind || node.kind)}</div>
+        ${renderDecisionCostBlock(entry)}
       </div>`).join('');
     translationHtml = `<div class="translationBlock"><h3>Why this post-ASAP translation</h3>${cards}</div>`;
   } else if (data.stage === 'post') {
@@ -871,7 +1138,9 @@ document.getElementById('resetBtn').addEventListener('click', () => { zoom = 1; 
 
 function loadWorkload(parsed) {
   const incoming = (parsed && parsed.queries) || [];
-  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary }));
+  // One batch id for this whole document — see `sourceBatch`'s own doc above.
+  const sourceBatch = nextSourceBatch++;
+  incoming.forEach((q) => queries.push({ name: q.name, graph: q.graph, source: q.source, replacements: q.replacements || [], post_graph: q.post_graph, workload_cost: q.workload_cost, lifecycle_plan: q.lifecycle_plan, lifecycle_summary: q.lifecycle_summary, sourceBatch }));
   if (activeIndex === -1 && queries.length > 0) activeIndex = 0;
   if (participants.size === 0 && activeIndex >= 0) participants.add(activeIndex);
 }

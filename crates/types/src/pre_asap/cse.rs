@@ -301,8 +301,11 @@ pub fn structural_hash(node: &QueryExpr, cache: &mut HashCache) -> u64 {
             hash_own_fields(&mut hasher, &("Dedup", cols));
             child_hash(child, cache).hash(&mut hasher);
         }
-        Concat { children } => {
-            "Concat".hash(&mut hasher);
+        Concat {
+            children,
+            discriminator_unique_key,
+        } => {
+            hash_own_fields(&mut hasher, &("Concat", discriminator_unique_key));
             for c in children {
                 // Stored by value, not `Rc` — see `rebuild_children`'s
                 // `intern_owned` use for this variant — so there's no
@@ -505,7 +508,7 @@ fn count_unique(node: &QueryExpr, seen: &mut std::collections::HashSet<*const Qu
         // this variant), so a branch has no `Rc` identity of its own to
         // dedup on at this position; still recurse into each in case an
         // `Rc`-shared descendant appears further down.
-        Concat { children } => children.iter().map(|c| count_unique(c, seen)).sum(),
+        Concat { children, .. } => children.iter().map(|c| count_unique(c, seen)).sum(),
         Join { left, right, .. } | SetOp { left, right, .. } => {
             visit(left, seen) + visit(right, seen)
         }
@@ -620,11 +623,15 @@ fn rebuild_children(table: &mut InternTable, expr: QueryExpr) -> QueryExpr {
             cols,
             child: intern_child(table, child),
         },
-        Concat { children } => Concat {
+        Concat {
+            children,
+            discriminator_unique_key,
+        } => Concat {
             children: children
                 .into_iter()
                 .map(|c| intern_owned(table, c))
                 .collect(),
+            discriminator_unique_key,
         },
         Join {
             kind,

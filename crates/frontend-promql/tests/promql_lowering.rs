@@ -945,7 +945,7 @@ fn topk_over_bare_selector_ranks_raw_samples() {
 
 /// The `(label value, intent)` of each `histogram_quantiles` branch.
 fn quantile_branches(q: &QueryExpr) -> Vec<(String, AggIntent)> {
-    let QueryExpr::Concat { children } = q else {
+    let QueryExpr::Concat { children, .. } = q else {
         panic!("expected a Concat at the root, got {q:?}");
     };
     children
@@ -1003,7 +1003,7 @@ fn histogram_quantiles_branches_are_union_compatible() {
     // `Concat` derives its schema from the first child, so every branch must
     // agree on column names — the φ lives in the label, not the column name.
     let q = lower(r#"histogram_quantiles(testhistogram3, "q", 0.5, 0.9)"#);
-    let QueryExpr::Concat { children } = &q else {
+    let QueryExpr::Concat { children, .. } = &q else {
         panic!("expected Concat");
     };
     let shapes: Vec<Vec<String>> = children
@@ -1029,7 +1029,7 @@ fn histogram_quantiles_branches_are_union_compatible() {
 #[test]
 fn histogram_quantiles_uses_the_given_label_name() {
     let q = lower(r#"histogram_quantiles(h, "phi", 0.5)"#);
-    let QueryExpr::Concat { children } = &q else {
+    let QueryExpr::Concat { children, .. } = &q else {
         panic!("expected Concat");
     };
     let QueryExpr::PromqlRelabel { dst, .. } = &children[0] else {

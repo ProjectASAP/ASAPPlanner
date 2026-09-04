@@ -187,10 +187,14 @@ pub mod analytical_cost;
 pub mod cost_model;
 pub mod explanation;
 pub mod grouping;
+pub mod physical_operator_statistics;
+pub mod physical_plan_cost_model;
+pub mod query_physical_lowering;
 pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
+pub mod summary_maintenance_cost;
 pub mod summary_maintenance_dag_export;
 pub mod summary_maintenance_lifecycle;
 pub mod topk_reuse;
@@ -201,7 +205,7 @@ pub use accuracy::{
     PropagationStats, WorkloadAccuracyEvidence,
 };
 pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
-pub use cost_model::{CostModel, DefaultCostModel};
+pub use cost_model::{CompleteSummaryCandidateEstimate, CostModel, DefaultCostModel};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };

@@ -105,7 +105,7 @@ fn intents(e: &QueryExpr) -> Vec<AggIntent> {
                 go(lhs, out);
                 go(rhs, out);
             }
-            QueryExpr::Concat { children } => children.iter().for_each(|c| go(c, out)),
+            QueryExpr::Concat { children, .. } => children.iter().for_each(|c| go(c, out)),
             QueryExpr::PromqlVectorFromScalar(inner) | QueryExpr::PromqlScalarFromVector(inner) => {
                 go(inner, out)
             }

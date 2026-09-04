@@ -49,12 +49,14 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    GroupingStrategy, HydraParams, SketchAlgorithm, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryNode,
+    GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
+    SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
+    SummaryWindowFramework,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::types::AccuracyTarget;
 
 use crate::recurrence::{
     self, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
@@ -98,6 +100,38 @@ pub struct CseCandidate<'a> {
 /// already used as bare `f64`s, just wrapped.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Cost(pub f64);
+
+/// One physical summary state and the lifecycle selected for that exact DAG
+/// node. Node identity is preserved so whole-DAG models can bind per-state
+/// evidence without relying on traversal order.
+pub struct CostedSummaryDeployment<'a> {
+    pub summary: &'a SummaryNode,
+    pub guarantee: &'a SummaryMaintenanceLifecycleGuarantee,
+    pub selected_cost: Cost,
+}
+
+/// Complete candidate estimate returned to lifecycle and global plan search.
+///
+/// A deployment-aware model may compare abstract summary-window primitives
+/// using evidence supplied by downstream implementations. `window_frameworks`
+/// is planner IR: it records the selected semantic realization contract.
+/// `physical_plan_id` is separate provider-owned provenance for the concrete
+/// implementation whose evidence won; it is not interpreted as planner IR.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompleteSummaryCandidateEstimate {
+    pub cost: Cost,
+    /// Stable provider identity of the complete implementation whose evidence
+    /// produced this estimate.
+    pub physical_plan_id: Option<String>,
+    /// Window choice for each entry of the `deployments` slice passed to the
+    /// complete-cost hook. `None` explicitly means that deployment does not
+    /// use a summary-window framework.
+    pub window_frameworks: Vec<Option<SummaryWindowFramework>>,
+    /// End-to-end guarantee supplied by the selected window realization.
+    /// `None` means that the complete model supplied no window-specific
+    /// guarantee; `Some` may be exact or approximate.
+    pub window_accuracy_guarantee: Option<ResultGuarantee>,
+}
 
 impl Cost {
     /// The cost of an operation that costs nothing at all.
@@ -190,6 +224,18 @@ pub fn default_cse_shared_maintenance_cost(family: &SummaryFamilyType) -> Cost {
 /// `replacement::implementations_for_with` constructs every candidate in the
 /// resulting order.
 pub trait CostModel {
+    /// Whether [`Self::candidate_cost`] prices a complete physical
+    /// alternative, including its raw baseline, rather than a local
+    /// heuristic for one memo-group node.
+    ///
+    /// Complete-plan models make every CSE alternative available to final
+    /// ranking. Choosing a share/recompute arm first through the legacy
+    /// structural hooks would discard a physical alternative before its
+    /// evidence-backed cost was compared.
+    fn candidate_cost_covers_complete_plan(&self) -> bool {
+        false
+    }
+
     /// Candidate-level availability for final selection. The default keeps
     /// every candidate, including legacy models whose numeric estimate is a
     /// display-only placeholder. Models that require evidence override this
@@ -531,6 +577,17 @@ pub trait CostModel {
         SummaryMaintenanceLifecycleCostInputs::default()
     }
 
+    /// Horizon-aware form used by lifecycle planning. Models whose retention
+    /// objective is capacity rather than byte-seconds can normalize their
+    /// rate so the horizon integral equals one peak-capacity charge.
+    fn summary_maintenance_lifecycle_cost_inputs_for_horizon(
+        &self,
+        summary: &SummaryNode,
+        _horizon: Option<Horizon>,
+    ) -> SummaryMaintenanceLifecycleCostInputs {
+        self.summary_maintenance_lifecycle_cost_inputs(summary)
+    }
+
     /// Physical update/merge/delete support for one concrete summary. The
     /// conservative default advertises no long-lived maintenance capability.
     fn summary_maintenance_capabilities(
@@ -540,11 +597,80 @@ pub trait CostModel {
         SummaryMaintenanceCapabilities::default()
     }
 
+    /// Replace the sum of selected per-state lifecycle costs with a complete
+    /// root-DAG cost. The default preserves legacy models. Evidence-strict
+    /// models return `None` when any root operation is unavailable; callers
+    /// must not then reuse the partial per-state sum.
+    fn complete_summary_candidate_cost(
+        &self,
+        _root: &SummaryNode,
+        _target: Option<&QueryExpr>,
+        deployments: &[CostedSummaryDeployment<'_>],
+        _horizon: Option<Horizon>,
+        _expected_reads: Option<f64>,
+        _required_accuracy: &[AccuracyTarget],
+    ) -> Option<Cost> {
+        Some(Cost(
+            deployments
+                .iter()
+                .map(|deployment| deployment.selected_cost.0)
+                .sum(),
+        ))
+    }
+
+    /// Complete cost together with selected implementation provenance and
+    /// planner-visible window primitives. The default preserves cost models
+    /// that do not perform either decision.
+    fn complete_summary_candidate_estimate(
+        &self,
+        root: &SummaryNode,
+        target: Option<&QueryExpr>,
+        deployments: &[CostedSummaryDeployment<'_>],
+        horizon: Option<Horizon>,
+        expected_reads: Option<f64>,
+        required_accuracy: &[AccuracyTarget],
+    ) -> Option<CompleteSummaryCandidateEstimate> {
+        self.complete_summary_candidate_cost(
+            root,
+            target,
+            deployments,
+            horizon,
+            expected_reads,
+            required_accuracy,
+        )
+        .map(|cost| CompleteSummaryCandidateEstimate {
+            cost,
+            physical_plan_id: None,
+            window_frameworks: vec![None; deployments.len()],
+            window_accuracy_guarantee: None,
+        })
+    }
+
+    /// Whether the complete-candidate hook is authoritative for lifecycle
+    /// costs. When true, lifecycle alternatives rejected only because their
+    /// legacy per-state cost is missing remain eligible for complete-DAG
+    /// evaluation. Semantic and runtime-capability rejections still apply.
+    fn complete_summary_candidate_estimate_covers_lifecycle_costs(&self) -> bool {
+        false
+    }
+
     /// Cost of evaluating `target` directly from its logical/raw inputs once.
     /// When known, lifecycle-aware materialization compares this fallback with
     /// the aggregate cost of the selected summary deployments.
     fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
         None
+    }
+
+    /// Complete raw cost over the comparison context. The default preserves
+    /// per-read models; context-aware models override this when raw input
+    /// cardinality changes between evaluations.
+    fn raw_query_recompute_total_cost(
+        &self,
+        target: &QueryExpr,
+        expected_reads: f64,
+    ) -> Option<Cost> {
+        self.raw_query_recompute_cost(target)
+            .map(|per_read| Cost(per_read.0 * expected_reads))
     }
 }
 

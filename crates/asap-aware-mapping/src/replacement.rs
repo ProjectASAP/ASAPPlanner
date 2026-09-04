@@ -2346,9 +2346,21 @@ pub struct PlanSpace<Id> {
 #[derive(Default)]
 pub(crate) struct CandidateCostOverrides {
     costs: HashMap<(*const QueryExpr, *const ReplacementSubDAG), Cost>,
+    raw_costs: HashMap<*const QueryExpr, Cost>,
+    /// Targets for which the caller requested an atomic raw-vs-summary
+    /// decision. Other memo groups continue through ordinary CSE selection.
+    finalized_targets: HashSet<*const QueryExpr>,
 }
 
 impl CandidateCostOverrides {
+    pub(crate) fn finalize_target(&mut self, target: &Rc<QueryExpr>) {
+        self.finalized_targets.insert(Rc::as_ptr(target));
+    }
+
+    fn finalizes(&self, target: &Rc<QueryExpr>) -> bool {
+        self.finalized_targets.contains(&Rc::as_ptr(target))
+    }
+
     pub(crate) fn insert(
         &mut self,
         target: &Rc<QueryExpr>,
@@ -2363,6 +2375,14 @@ impl CandidateCostOverrides {
         self.costs
             .get(&(Rc::as_ptr(target), candidate as *const _))
             .copied()
+    }
+
+    pub(crate) fn insert_raw(&mut self, target: &Rc<QueryExpr>, cost: Cost) {
+        self.raw_costs.insert(Rc::as_ptr(target), cost);
+    }
+
+    fn raw(&self, target: &Rc<QueryExpr>) -> Option<Cost> {
+        self.raw_costs.get(&Rc::as_ptr(target)).copied()
     }
 }
 
@@ -3177,20 +3197,57 @@ impl<Id> PlanSpace<Id> {
             let effective = effective_uses.get(ptr).copied().unwrap_or(0);
             effective_uses.insert(*ptr, effective);
 
-            let lifecycle_choice = candidate_costs.and_then(|costs| {
-                group
+            let lifecycle_choice = candidate_costs
+                .filter(|costs| costs.finalizes(&group.target))
+                .map(|costs| {
+                    let summary = group
+                        .candidates
+                        .iter()
+                        .filter_map(|candidate| {
+                            costs
+                                .get(&group.target, candidate)
+                                .map(|cost| (candidate, cost))
+                        })
+                        .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0));
+                    match (summary, costs.raw(&group.target)) {
+                        (Some((_, summary_cost)), Some(raw)) if raw.0 <= summary_cost.0 => None,
+                        (Some((candidate, _)), _) => Some(candidate),
+                        (None, Some(_)) => None,
+                        (None, None) => None,
+                    }
+                });
+            let chosen = if let Some(lifecycle_choice) = lifecycle_choice {
+                lifecycle_choice
+            } else if cost_model.candidate_cost_covers_complete_plan() {
+                let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
+                let bound_physical = group
                     .candidates
                     .iter()
+                    // A logical CSE rewrite does not encode shared retained
+                    // state or independent execution multiplicity. Until it
+                    // is bound as a complete physical DAG, it must not enter
+                    // evidence-backed ranking as though those costs were
+                    // known.
+                    .filter(|candidate| !is_cse_candidate(candidate))
                     .filter_map(|candidate| {
-                        costs
-                            .get(&group.target, candidate)
+                        cost_model
+                            .candidate_cost(candidate, &effective_target)
                             .map(|cost| (candidate, cost))
                     })
-                    .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0))
-                    .map(|(candidate, _)| candidate)
-            });
-            let chosen = if lifecycle_choice.is_some() {
-                lifecycle_choice
+                    .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0))
+                    .map(|(candidate, _)| candidate);
+                bound_physical.or_else(|| {
+                    (effective >= 2)
+                        .then(|| {
+                            decide_with_effective_count(group, effective, cost_model).and_then(
+                                |decision| {
+                                    chosen_share.insert(*ptr, decision);
+                                    pick_shared_subtree_candidate(group, decision)
+                                },
+                            )
+                        })
+                        .flatten()
+                })
             } else if effective >= 2 && cse_candidate_pair(group).is_some() {
                 let decision = if let Some(profiles) = profiles {
                     decide_group_with_recurrence(
@@ -3588,6 +3645,7 @@ fn direct_child_counts(node: &QueryExpr) -> Vec<(*const QueryExpr, usize)> {
             }
             Concat {
                 children: concat_children,
+                ..
             } => {
                 for c in concat_children {
                     collect(c, children);
@@ -4174,7 +4232,7 @@ fn walk_children(
         | SQLWindowFunc { child, .. }
         | Sort { child, .. }
         | Limit { child, .. } => walk(child, order, nodes, counts),
-        Concat { children } => {
+        Concat { children, .. } => {
             for c in children {
                 walk_children(c, order, nodes, counts);
             }
@@ -5115,7 +5173,7 @@ mod tests {
                 | SQLWindowFunc { child, .. }
                 | Sort { child, .. }
                 | Limit { child, .. } => walk(child, counts),
-                Concat { children } => {
+                Concat { children, .. } => {
                     for c in children {
                         walk_children(c, counts);
                     }
@@ -5929,6 +5987,51 @@ mod tests {
             c_shares,
             "global_selection must flip c to Share once a's own recomputation is accounted for"
         );
+    }
+
+    #[test]
+    fn complete_plan_costs_reject_unbound_cse_arms() {
+        struct CompletePlanCost;
+        impl CostModel for CompletePlanCost {
+            fn candidate_cost_covers_complete_plan(&self) -> bool {
+                true
+            }
+
+            fn candidate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _target: &TargetSubDAG<'_>,
+            ) -> Option<Cost> {
+                assert!(!is_cse_candidate(candidate));
+                None
+            }
+
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+
+            fn cse_share_decision(&self, _candidate: &CseCandidate) -> ShareDecision {
+                ShareDecision::RecomputeIndependently
+            }
+        }
+
+        let shared = Rc::new(QueryExpr::Dedup {
+            cols: vec![0],
+            child: Rc::new(metric_scan(&["job"])),
+        });
+        let space = search_workload(vec![
+            ("left", Rc::clone(&shared)),
+            ("right", Rc::clone(&shared)),
+        ]);
+        let planned = &space.roots[0].1;
+
+        let selected = space.global_selection(&CompletePlanCost);
+        let chosen = selected.for_target(planned).unwrap().chosen.unwrap();
+        assert_eq!(chosen.provenance, ReplacementProvenance::CseRecompute);
     }
 
     #[test]

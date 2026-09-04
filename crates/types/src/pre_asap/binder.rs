@@ -163,7 +163,7 @@ fn leftmost_scan_name(tree: &UnresolvedQueryExpr) -> Option<&str> {
         | QE::TimeRange { child, .. }
         | QE::TimeShift { child, .. }
         | QE::SQLWindowFunc { child, .. } => leftmost_scan_name(child),
-        QE::Concat { children } => children.first().and_then(leftmost_scan_name),
+        QE::Concat { children, .. } => children.first().and_then(leftmost_scan_name),
         QE::Join { left, .. } | QE::SetOp { left, .. } | QE::BinaryOp { lhs: left, .. } => {
             leftmost_scan_name(left)
         }
@@ -310,7 +310,24 @@ pub(crate) fn collect_referenced_columns(tree: &UnresolvedQueryExpr) -> Vec<Stri
             | QE::PromqlSubquery { child, .. }
             | QE::TimeRange { child, .. }
             | QE::TimeShift { child, .. } => walk(child, out),
-            QE::Concat { children } => children.iter().for_each(|c| walk(c, out)),
+            QE::Concat {
+                children,
+                discriminator_unique_key,
+            } => {
+                // Same treatment as `Dedup.cols` above: an own-field
+                // `ColumnRef` must be seeded here too, or a discriminator
+                // column that isn't otherwise referenced anywhere else in
+                // the tree (plausible — a raw usage-derived label, not one a
+                // `Project`/relabel freshly created) is absent from the
+                // Binder's usage-derived fallback schema, and
+                // `resolve.rs`'s later `resolve_column_ref` call fails with
+                // `NotFound` for a column the caller correctly named.
+                if let Some(key) = discriminator_unique_key {
+                    push_ref_name(key.discriminator(), out);
+                    key.inner_key().iter().for_each(|c| push_ref_name(c, out));
+                }
+                children.iter().for_each(|c| walk(c, out));
+            }
             QE::SetOp { left, right, .. } => {
                 walk(left, out);
                 walk(right, out);
@@ -388,6 +405,29 @@ mod tests {
         };
         let schema = Binder::new().bind(&tree);
         assert!(schema.column_id("host").is_some());
+    }
+
+    /// Issue #228 review: a `Concat`'s `discriminator_unique_key` columns —
+    /// even one referenced nowhere else in the tree — must be seeded into
+    /// the usage-derived fallback schema, exactly like `Dedup.cols`, or
+    /// `resolve.rs`'s later `resolve_column_ref` fails `NotFound` for a
+    /// column the caller correctly named.
+    #[test]
+    fn concat_discriminator_key_is_seeded_into_the_binder_schema() {
+        let tree = UnresolvedQueryExpr::concat_with_discriminator(
+            vec![src("m")],
+            ColumnRef::Named("phi".into()),
+            vec![ColumnRef::Named("host".into())],
+        );
+        let schema = Binder::new().bind(&tree);
+        assert!(
+            schema.column_id("phi").is_some(),
+            "discriminator column must be seeded"
+        );
+        assert!(
+            schema.column_id("host").is_some(),
+            "inner_key column must be seeded"
+        );
     }
 
     #[test]

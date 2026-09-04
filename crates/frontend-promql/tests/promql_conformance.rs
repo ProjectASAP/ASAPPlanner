@@ -92,7 +92,7 @@ fn collect(e: &QueryExpr, out: &mut Vec<AggIntent>) {
             collect(left, out);
             collect(right, out);
         }
-        QueryExpr::Concat { children } => children.iter().for_each(|c| collect(c, out)),
+        QueryExpr::Concat { children, .. } => children.iter().for_each(|c| collect(c, out)),
         QueryExpr::PromqlVectorFromScalar(inner) | QueryExpr::PromqlScalarFromVector(inner) => {
             collect(inner, out)
         }
