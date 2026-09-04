@@ -2,36 +2,18 @@
 
 use std::rc::Rc;
 
-use serde::{Deserialize, Serialize};
-
-use crate::analytical_cost::{
-    validate_operator_semantics, AnalyticalCostError, ExecutionMultiplicity, HashJoinBuildSide,
-    PhysicalDagNode, PhysicalOperator, PromqlBinaryOperandMode, PromqlBinaryOperation,
-    PromqlPresenceKind, PromqlSeriesSampleKind, PromqlVectorCardinality,
-};
 use crate::analytical_statistics::{
-    ComparisonScope, EdgeStatistics, OperatorStatistics, OperatorStatisticsProvider, SourceCoverage,
+    ComparisonScope, EdgeStatistics, OperatorStatistics, SourceCoverage,
+};
+use crate::physical_resource_cost::{
+    validate_operator_semantics, AnalyticalCostError, EvidenceBackedPhysicalDag,
+    ExecutionMultiplicity, HashJoinBuildSide, PhysicalDagNode, PhysicalNodeEvidence,
+    PhysicalOperator, PromqlBinaryOperandMode, PromqlBinaryOperation, PromqlPresenceKind,
+    PromqlSeriesSampleKind, PromqlVectorCardinality,
 };
 
-/// A lowered physical DAG and the node whose output is the query result.
-/// Keeping the root beside its nodes prevents callers from accidentally
-/// estimating a valid node list from the wrong entry point.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PhysicalDag {
-    pub nodes: Vec<PhysicalDagNode>,
-    pub root: String,
-    pub evidence: std::collections::HashMap<String, PhysicalNodeEvidence>,
-}
-
-/// Atomic evidence for one lowered physical node. The statistics contract is
-/// reused unchanged; the separate buffer field is necessary because logical
-/// edge bytes cannot stand in for an allocation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PhysicalNodeEvidence {
-    pub physical_id: String,
-    pub statistics: OperatorStatistics,
-    pub output_buffer_bytes: u64,
-}
+/// The canonical evidenced DAG returned by query lowering.
+pub type PhysicalDag = EvidenceBackedPhysicalDag;
 
 pub struct PhysicalNodeRequest<'a> {
     pub logical_node: &'a asap_types::pre_asap::QueryExpr,
@@ -58,43 +40,6 @@ where
         request: PhysicalNodeRequest<'_>,
     ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
         self(request)
-    }
-}
-
-impl OperatorStatisticsProvider for std::collections::HashMap<String, PhysicalNodeEvidence> {
-    fn statistics(&self, node_id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
-        let evidence = self
-            .get(node_id)
-            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))?;
-        if evidence.physical_id != node_id {
-            return Err(AnalyticalCostError::InvalidPhysicalDag(
-                "evidence map key differs from embedded physical identity",
-            ));
-        }
-        Ok(evidence.statistics.clone())
-    }
-}
-
-impl OperatorStatisticsProvider for PhysicalDag {
-    fn statistics(&self, node_id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
-        let evidence = self
-            .evidence
-            .get(node_id)
-            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))?;
-        let node = self.nodes.iter().find(|node| node.id == node_id).ok_or(
-            AnalyticalCostError::InvalidPhysicalDag("evidence has no matching physical node"),
-        )?;
-        if evidence.physical_id != node_id {
-            return Err(AnalyticalCostError::InvalidPhysicalDag(
-                "evidence map key differs from embedded physical identity",
-            ));
-        }
-        if node.output_buffer_bytes != evidence.output_buffer_bytes {
-            return Err(AnalyticalCostError::InvalidPhysicalDag(
-                "physical node buffer differs from evidence snapshot",
-            ));
-        }
-        Ok(evidence.statistics.clone())
     }
 }
 
@@ -1313,12 +1258,12 @@ fn is_promql_scalar(query: &asap_types::pre_asap::QueryExpr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analytical_cost::{
-        estimate_physical_dag, estimate_physical_dag_comparison, PhysicalDagEstimateRequest,
-    };
     use crate::analytical_statistics::{
         validate_comparison_scopes, BinaryEdgeStatistics, PartitionStatistics,
         PromqlEdgeStatistics, PromqlUnaryEdgeStatistics, PromqlValueKind, UnaryEdgeStatistics,
+    };
+    use crate::physical_resource_cost::{
+        estimate_physical_dag, estimate_physical_dag_comparison, PhysicalDagEstimateRequest,
     };
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,

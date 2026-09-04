@@ -16,7 +16,7 @@ use crate::analytical_statistics::{
     OperatorStatisticsProvider, PromqlEdgeStatistics, PromqlValueKind, SourceCoverage,
 };
 
-pub const ANALYTICAL_MODEL_VERSION: &str = "analytical-resource-at-rest-v1";
+pub const PHYSICAL_RESOURCE_MODEL_VERSION: &str = "physical-resource-v1";
 
 /// Conversion from physical dimensions to one deployment-specific objective.
 /// Memory's coefficient means cost units per retained byte over this model's
@@ -201,6 +201,65 @@ pub struct PhysicalDagNode {
     /// streaming operators).
     pub retained_bytes: u64,
     pub execution: ExecutionMultiplicity,
+}
+
+/// Authoritative statistics and allocation evidence for one physical node.
+/// The identity is repeated so a map entry cannot be accidentally rebound to
+/// a different node while an estimate is in progress.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalNodeEvidence {
+    pub physical_id: String,
+    pub statistics: OperatorStatistics,
+    pub output_buffer_bytes: u64,
+}
+
+/// A complete physical DAG together with the evidence used to cost it.
+///
+/// This representation is shared by query lowering and summary-maintenance
+/// lowering. Keeping the root and evidence beside the nodes prevents callers
+/// from estimating a valid node list with a different entry point or snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceBackedPhysicalDag {
+    pub nodes: Vec<PhysicalDagNode>,
+    pub root: String,
+    pub evidence: HashMap<String, PhysicalNodeEvidence>,
+}
+
+impl OperatorStatisticsProvider for HashMap<String, PhysicalNodeEvidence> {
+    fn statistics(&self, node_id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
+        let evidence = self
+            .get(node_id)
+            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))?;
+        if evidence.physical_id != node_id {
+            return Err(AnalyticalCostError::InvalidPhysicalDag(
+                "evidence map key differs from embedded physical identity",
+            ));
+        }
+        Ok(evidence.statistics.clone())
+    }
+}
+
+impl OperatorStatisticsProvider for EvidenceBackedPhysicalDag {
+    fn statistics(&self, node_id: &str) -> Result<OperatorStatistics, AnalyticalCostError> {
+        let evidence = self
+            .evidence
+            .get(node_id)
+            .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(node_id.into()))?;
+        let node = self.nodes.iter().find(|node| node.id == node_id).ok_or(
+            AnalyticalCostError::InvalidPhysicalDag("evidence has no matching physical node"),
+        )?;
+        if evidence.physical_id != node_id {
+            return Err(AnalyticalCostError::InvalidPhysicalDag(
+                "evidence map key differs from embedded physical identity",
+            ));
+        }
+        if node.output_buffer_bytes != evidence.output_buffer_bytes {
+            return Err(AnalyticalCostError::InvalidPhysicalDag(
+                "physical node buffer differs from evidence snapshot",
+            ));
+        }
+        Ok(evidence.statistics.clone())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

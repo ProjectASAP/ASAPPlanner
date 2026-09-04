@@ -5,16 +5,16 @@ use std::{cell::RefCell, rc::Rc};
 use asap_types::post_asap::{SketchAlgorithm, SummaryExpr, SummaryNode};
 use asap_types::pre_asap::{AggIntent, QueryExpr};
 
-use crate::analytical_cost::{
-    estimate_physical_dag_comparison, AnalyticalCostError, PhysicalDagComparisonEstimate,
-    PhysicalDagEstimateRequest, ResourceCalibration,
-};
 use crate::analytical_lowering::{
-    lower_query_physical_dag, PhysicalDag, PhysicalNodeEvidence, PhysicalNodeEvidenceProvider,
-    PhysicalNodeRequest,
+    lower_query_physical_dag, PhysicalNodeEvidenceProvider, PhysicalNodeRequest,
 };
 use crate::analytical_statistics::ComparisonScope;
 use crate::cost_model::{Cost, CostModel, DefaultCostModel};
+use crate::physical_resource_cost::{
+    estimate_physical_dag_comparison, AnalyticalCostError,
+    EvidenceBackedPhysicalDag as PhysicalDag, PhysicalDagComparisonEstimate,
+    PhysicalDagEstimateRequest, PhysicalNodeEvidence, ResourceCalibration,
+};
 use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
 
 /// One immutable generation of deployment evidence for a planner target.
@@ -235,10 +235,10 @@ mod tests {
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
     };
 
-    use crate::analytical_cost::{ExecutionMultiplicity, PhysicalDagNode, PhysicalOperator};
     use crate::analytical_statistics::{
         EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
     };
+    use crate::physical_resource_cost::{ExecutionMultiplicity, PhysicalDagNode, PhysicalOperator};
     use crate::replacement::ReplacementStrategy;
 
     fn edge(rows: u64, bytes: u64) -> EdgeStatistics {
