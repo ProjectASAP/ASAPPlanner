@@ -596,7 +596,7 @@ windows, nested aggregates, Top-K, and shared sub-DAGs therefore use the same
 estimation path. The generic query lowerer recursively maps the supported raw
 query operators into that representation.
 
-`AnalyticalPlannerCostModel` is the final-selection adapter. For every
+`PhysicalPlanCostModel` is the final-selection adapter. For every
 candidate it obtains one canonical `ComparisonScope`, recursively lowers the
 actual raw target, and then lowers a logical rewrite or requests the fully
 bound physical DAG for a `SummaryExpr` candidate. The deployment implements
@@ -672,7 +672,7 @@ The intended end-to-end selection pipeline is:
 6. applies calibration and ranks candidates by ascending cost.
 
 The query lowerer and physical estimator cover the supported raw-query shapes
-listed above. `AnalyticalPlannerCostModel` executes this pipeline for every
+listed above. `PhysicalPlanCostModel` executes this pipeline for every
 candidate supplied to `PlanSpace::global_selection`. Logical rewrites are
 lowered recursively. Summary candidates participate only after the deployment
 has bound their complete `SummaryExpr` DAG; there is no optimistic generic

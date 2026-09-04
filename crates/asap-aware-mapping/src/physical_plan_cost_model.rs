@@ -24,7 +24,7 @@ use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
 /// this value for the target, so a caller that needs fresher evidence creates a
 /// new model instead of mixing generations in one ranking decision.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PlannerEvidenceSnapshot {
+pub struct PhysicalEvidenceSnapshot {
     pub version: String,
     pub scope: ComparisonScope,
 }
@@ -42,17 +42,17 @@ pub trait PlannerPhysicalPlanProvider {
     fn capture_evidence_snapshot(
         &self,
         target: &TargetSubDAG<'_>,
-    ) -> Result<PlannerEvidenceSnapshot, AnalyticalCostError>;
+    ) -> Result<PhysicalEvidenceSnapshot, AnalyticalCostError>;
 
     fn query_node_evidence(
         &self,
-        snapshot: &PlannerEvidenceSnapshot,
+        snapshot: &PhysicalEvidenceSnapshot,
         request: PhysicalNodeRequest<'_>,
     ) -> Result<PhysicalNodeEvidence, AnalyticalCostError>;
 
     fn summary_physical_dag(
         &self,
-        snapshot: &PlannerEvidenceSnapshot,
+        snapshot: &PhysicalEvidenceSnapshot,
         summary: &Rc<SummaryNode>,
         target: &TargetSubDAG<'_>,
     ) -> Result<PhysicalDag, AnalyticalCostError>;
@@ -60,7 +60,7 @@ pub trait PlannerPhysicalPlanProvider {
 
 /// Dimensional comparison retained for explanations and verification.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PlannerCandidateEstimate {
+pub struct PhysicalPlanComparison {
     pub resources: PhysicalDagComparisonEstimate,
     pub raw_cost: Cost,
     pub candidate_cost: Cost,
@@ -72,7 +72,7 @@ pub struct PlannerCandidateEstimate {
 /// to lower either alternative, missing statistics, an unknown physical
 /// algorithm, or invalid source/horizon evidence makes the candidate
 /// unavailable and leaves the target on its raw path.
-pub struct AnalyticalPlannerCostModel<'a> {
+pub struct PhysicalPlanCostModel<'a> {
     provider: &'a dyn PlannerPhysicalPlanProvider,
     calibration: ResourceCalibration,
     target_evidence: RefCell<Vec<CachedTargetEvidence>>,
@@ -81,11 +81,11 @@ pub struct AnalyticalPlannerCostModel<'a> {
 struct CachedTargetEvidence {
     root: Rc<QueryExpr>,
     consumer_count: usize,
-    snapshot: PlannerEvidenceSnapshot,
+    snapshot: PhysicalEvidenceSnapshot,
     raw: PhysicalDag,
 }
 
-impl<'a> AnalyticalPlannerCostModel<'a> {
+impl<'a> PhysicalPlanCostModel<'a> {
     pub fn new(
         provider: &'a dyn PlannerPhysicalPlanProvider,
         calibration: ResourceCalibration,
@@ -101,7 +101,7 @@ impl<'a> AnalyticalPlannerCostModel<'a> {
     fn target_evidence(
         &self,
         target: &TargetSubDAG<'_>,
-    ) -> Result<(PlannerEvidenceSnapshot, PhysicalDag), AnalyticalCostError> {
+    ) -> Result<(PhysicalEvidenceSnapshot, PhysicalDag), AnalyticalCostError> {
         if let Some(cached) = self.target_evidence.borrow().iter().find(|cached| {
             Rc::ptr_eq(&cached.root, target.root) && cached.consumer_count == target.consumer_count
         }) {
@@ -135,7 +135,7 @@ impl<'a> AnalyticalPlannerCostModel<'a> {
         &self,
         candidate: &ReplacementSubDAG,
         target: &TargetSubDAG<'_>,
-    ) -> Result<PlannerCandidateEstimate, AnalyticalCostError> {
+    ) -> Result<PhysicalPlanComparison, AnalyticalCostError> {
         let (snapshot, raw) = self.target_evidence(target)?;
         let scope = &snapshot.scope;
         let evidence = QueryEvidence {
@@ -169,7 +169,7 @@ impl<'a> AnalyticalPlannerCostModel<'a> {
         )?;
         let raw_cost = Cost(resources.raw.calibrated_cost(&self.calibration)?);
         let candidate_cost = Cost(resources.candidate.calibrated_cost(&self.calibration)?);
-        Ok(PlannerCandidateEstimate {
+        Ok(PhysicalPlanComparison {
             resources,
             raw_cost,
             candidate_cost,
@@ -179,7 +179,7 @@ impl<'a> AnalyticalPlannerCostModel<'a> {
 
 struct QueryEvidence<'a> {
     provider: &'a dyn PlannerPhysicalPlanProvider,
-    snapshot: &'a PlannerEvidenceSnapshot,
+    snapshot: &'a PhysicalEvidenceSnapshot,
 }
 
 impl PhysicalNodeEvidenceProvider for QueryEvidence<'_> {
@@ -191,7 +191,7 @@ impl PhysicalNodeEvidenceProvider for QueryEvidence<'_> {
     }
 }
 
-impl CostModel for AnalyticalPlannerCostModel<'_> {
+impl CostModel for PhysicalPlanCostModel<'_> {
     fn candidate_cost_covers_complete_plan(&self) -> bool {
         true
     }
@@ -408,9 +408,9 @@ mod tests {
         fn capture_evidence_snapshot(
             &self,
             _target: &TargetSubDAG<'_>,
-        ) -> Result<PlannerEvidenceSnapshot, AnalyticalCostError> {
+        ) -> Result<PhysicalEvidenceSnapshot, AnalyticalCostError> {
             self.snapshot_calls.set(self.snapshot_calls.get() + 1);
-            Ok(PlannerEvidenceSnapshot {
+            Ok(PhysicalEvidenceSnapshot {
                 version: "test-snapshot-1".into(),
                 scope: scope(),
             })
@@ -418,7 +418,7 @@ mod tests {
 
         fn query_node_evidence(
             &self,
-            snapshot: &PlannerEvidenceSnapshot,
+            snapshot: &PhysicalEvidenceSnapshot,
             request: PhysicalNodeRequest<'_>,
         ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
             assert_eq!(snapshot.version, "test-snapshot-1");
@@ -444,7 +444,7 @@ mod tests {
 
         fn summary_physical_dag(
             &self,
-            snapshot: &PlannerEvidenceSnapshot,
+            snapshot: &PhysicalEvidenceSnapshot,
             _summary: &Rc<SummaryNode>,
             _target: &TargetSubDAG<'_>,
         ) -> Result<PhysicalDag, AnalyticalCostError> {
@@ -473,7 +473,7 @@ mod tests {
         );
         let planned_root = Rc::clone(&space.roots[0].1);
         let provider = TestProvider::new(true, 800);
-        let model = AnalyticalPlannerCostModel::new(&provider, calibration()).unwrap();
+        let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
 
         let selected = space.global_selection(&model);
         assert!(
@@ -491,7 +491,7 @@ mod tests {
         );
         let planned_root = Rc::clone(&space.roots[0].1);
         let provider = TestProvider::new(false, 800);
-        let model = AnalyticalPlannerCostModel::new(&provider, calibration()).unwrap();
+        let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
 
         let selected = space.global_selection(&model);
         assert!(
@@ -507,13 +507,13 @@ mod tests {
             fn capture_evidence_snapshot(
                 &self,
                 target: &TargetSubDAG<'_>,
-            ) -> Result<PlannerEvidenceSnapshot, AnalyticalCostError> {
+            ) -> Result<PhysicalEvidenceSnapshot, AnalyticalCostError> {
                 self.0.capture_evidence_snapshot(target)
             }
 
             fn query_node_evidence(
                 &self,
-                snapshot: &PlannerEvidenceSnapshot,
+                snapshot: &PhysicalEvidenceSnapshot,
                 request: PhysicalNodeRequest<'_>,
             ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
                 self.0.query_node_evidence(snapshot, request)
@@ -521,7 +521,7 @@ mod tests {
 
             fn summary_physical_dag(
                 &self,
-                snapshot: &PlannerEvidenceSnapshot,
+                snapshot: &PhysicalEvidenceSnapshot,
                 summary: &Rc<SummaryNode>,
                 target: &TargetSubDAG<'_>,
             ) -> Result<PhysicalDag, AnalyticalCostError> {
@@ -539,7 +539,7 @@ mod tests {
         let candidates = crate::replacement::SketchAlgorithmStrategy::default_cost_model()
             .replacements(&TargetSubDAG::new(&root));
         let provider = WrongScope(TestProvider::new(true, 800));
-        let model = AnalyticalPlannerCostModel::new(&provider, calibration()).unwrap();
+        let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
         assert_eq!(
             model.candidate_cost(&candidates[0], &TargetSubDAG::new(&root)),
             None
@@ -555,7 +555,7 @@ mod tests {
         );
         let planned_root = Rc::clone(&space.roots[0].1);
         let provider = TestProvider::new(true, 100_000);
-        let model = AnalyticalPlannerCostModel::new(&provider, calibration()).unwrap();
+        let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
 
         let selected = space.global_selection(&model);
         assert!(selected.for_target(&planned_root).unwrap().chosen.is_none());
@@ -568,7 +568,7 @@ mod tests {
             .replacements(&TargetSubDAG::new(&root));
         assert!(candidates.len() >= 2);
         let provider = TestProvider::new(true, 800);
-        let model = AnalyticalPlannerCostModel::new(&provider, calibration()).unwrap();
+        let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
         let target = TargetSubDAG::new(&root);
 
         model.estimate_candidate(&candidates[0], &target).unwrap();
