@@ -638,6 +638,65 @@ structurally similar node or for multiple summary states. A complete
 multi-summary `SummaryExpr` DAG requires per-node physical evidence and
 physical-identity deduplication.
 
+### Complete bound streaming summary DAGs
+
+The multi-node streaming path accepts a complete, already-bound
+`SummaryExpr` DAG. It does not guess physical implementations. The binder must
+provide evidence for every reachable node:
+
+| Logical node | Required physical evidence |
+|---|---|
+| `KeepPreAsap` | One retained preprocessing operator with output edge, horizon CPU, workspace, and output buffer. |
+| `SummaryAgg` | Input/output edges, insert CPU, concrete state count and width, bootstrap/update window fanout, and explicit source-read ownership. |
+| `SummaryMerge` | Typed merge evidence with total CPU, workspace, output buffer, I/O, and execution multiplicity. |
+| `SummarySubtract` | Typed subtract evidence with the same resource dimensions. |
+| `SummaryDelete` | Typed delete evidence plus expiration/retraction rate, routing fanout, and the exact state owner. |
+| `SummaryEstimate` | Typed readout evidence with total resource use per execution. |
+| `SummaryJoin` | Ordered input/output edges and total physical join CPU, workspace, output buffer, I/O, and multiplicity. |
+
+The merge/subtract/delete/readout evidence is an enum structured by operation
+kind. Delete-only rate and routing fields therefore cannot be attached to a
+merge or readout. Join CPU is the total build, probe, match-production, and
+output work of the selected algorithm; matched output pairs alone are not a
+valid join cost.
+
+Every parent input edge must equal the corresponding child output edge.
+Provider-owned `physical_id` values deduplicate a shared operator only when
+its complete evidence and physical child identities also agree. The cost model
+holds owning `Rc` references for bound target and summary roots, so pointer
+keys cannot become stale and alias a later allocation.
+
+A `SummaryAgg` that reads storage declares `source_coverage_index = Some(i)`,
+a non-empty bootstrap-read identity, and positive physical source bytes. An
+aggregate over an already-materialized summary edge declares `None`, an empty
+read identity, and zero source bytes. Its logical input rows and bytes remain
+positive when the intermediate is non-empty. This prevents nested aggregates
+from charging the original source scan repeatedly.
+
+For streaming raw recomputation, `planning_time_input_rows`,
+`planning_time_input_bytes`, and `planning_time_source_scan_bytes` describe the
+initial snapshot. Logical bytes per arriving row and physical source bytes per
+arriving row are separate. The recurrence determines every evaluation offset;
+the provider supplies one once-counted physical DAG whose statistics aggregate
+those evolving evaluations over the complete horizon. Marking its nodes
+`PerEvaluation` would multiply the already-aggregated evidence again and is
+rejected.
+
+This raw-evolution contract currently supports exactly one distinct source
+coverage. A multi-source streaming target is unavailable until per-source
+arrival rates and widths are supplied. Target lineage includes ordinary
+predicates and PromQL info selectors; extra, missing, or mismatched source
+coverage makes both sides incomparable.
+
+Lifecycle enumeration considers only alternatives legal for the canonical
+workload and runtime. A `Prepared` state must cover every scheduled evaluation
+it serves. `Shared.retention` describes data/window coverage, not the planning
+horizon, so a shorter retention value is not rejected merely because the
+optimizer horizon is longer. Missing node evidence, zero required CPU,
+unknown I/O, inconsistent edges, or an unsupported lifecycle combination
+makes the complete candidate unavailable; partial per-state costs are never
+used as a fallback.
+
 A retained summary bootstraps every active window, consumes arriving rows, and
 serves later reads from state. For the simple build/update/readout shape:
 

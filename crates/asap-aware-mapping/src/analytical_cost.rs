@@ -1948,7 +1948,7 @@ pub enum AnalyticalCostError {
     IncompatibleLifecycleGuarantee,
     #[error("bootstrap row and byte evidence must either both be zero or both be non-zero")]
     InconsistentBootstrapEvidence,
-    #[error("summary operation cost {0} must be finite and non-negative, got {1}")]
+    #[error("required summary operation cost {0} must be finite and positive, got {1}")]
     InvalidOperationCost(&'static str, f64),
     #[error("required analytical input {0} is missing or zero")]
     MissingOrZero(&'static str),
