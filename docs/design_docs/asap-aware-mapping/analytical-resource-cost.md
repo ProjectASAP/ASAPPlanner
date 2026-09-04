@@ -700,6 +700,11 @@ The existing lifecycle model—not this adapter—enumerates `Ephemeral`,
 legality, and multiplies per-update and per-read terms by the normalized
 workload rates. Missing any required term leaves that alternative unavailable.
 
+`Ephemeral` is a direct build, not incremental maintenance. For every query
+evaluation, it rebuilds from the snapshot visible at that evaluation, charges
+that evaluation's complete source read, and releases its state afterward.
+Its state contributes to peak transient memory but not persistent retention.
+
 The raw side is supplied as a complete `ResourceEstimate` for one execution of
 the raw physical DAG. The lifecycle planner applies the same recurrence and
 horizon. This deliberately avoids reconstructing raw work with a special-case
@@ -754,7 +759,10 @@ arriving row are separate. The recurrence determines every evaluation offset;
 the provider supplies one once-counted physical DAG whose statistics aggregate
 those evolving evaluations over the complete horizon. Marking its nodes
 `PerEvaluation` would multiply the already-aggregated evidence again and is
-rejected.
+rejected. Validation follows only nodes reachable from the physical root. If
+the raw algorithm intentionally reads the same semantic source more than once,
+each reachable scan carries the same evolved source statistics and is charged
+separately; equal source coverage does not deduplicate physical I/O.
 
 This raw-evolution contract currently supports exactly one distinct source
 coverage. A multi-source streaming target is unavailable until per-source
@@ -771,12 +779,28 @@ unknown I/O, inconsistent edges, or an unsupported lifecycle combination
 makes the complete candidate unavailable; partial per-state costs are never
 used as a fallback.
 
+### Ranking complete physical implementations
+
+A logical summary candidate can be bound to more than one complete physical
+implementation. Each alternative has a non-empty, provider-owned identity and
+a complete `StreamingNodeEvidence` bundle. The planner evaluates every legal
+lifecycle combination against every bound physical implementation over the
+same `ComparisonScope`, excludes alternatives whose evidence is incomplete or
+invalid, and returns both the least calibrated cost and its physical-plan
+identity. Duplicate identities are rejected because they would make the
+selection result ambiguous. If no explicit alternatives are registered, the
+candidate's single canonical evidence bundle is used.
+
+Physical evidence is alternative-specific: window fanout, retained state,
+operation costs, and source reads must describe that implementation as a
+whole. The planner does not mix individual nodes from different alternatives.
+
 A retained summary bootstraps every active window, consumes arriving rows, and
 serves later reads from state. For the simple build/update/readout shape:
 
 ```text
-cpu_ops = (bootstrap_rows + arriving_rows)
-          × active_window_count × insert_ops(params)
+cpu_ops = bootstrap_rows × bootstrap_window_count × insert_ops(params)
+        + arriving_rows × active_window_count × insert_ops(params)
         + evaluation_count × physical_summary_count × read_ops(params)
 
 scan_bytes = source_read_bytes for the build

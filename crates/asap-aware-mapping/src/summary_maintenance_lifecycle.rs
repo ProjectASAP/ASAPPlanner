@@ -29,7 +29,11 @@ use asap_types::workload::{
     WorkloadError,
 };
 
-use crate::cost_model::{Cost, CostModel, CostedSummaryDeployment};
+use crate::analytical_cost::AnalyticalCostError;
+use crate::cost_model::{
+    CompleteSummaryCandidateEstimate, Cost, CostModel, CostedSummaryDeployment,
+};
+use crate::physical_operator_statistics::evaluations_in_horizon;
 use crate::recurrence::{
     CostRate, EvaluationRate, Horizon, RecurrenceError, RecurrenceProfile, UpdateRate,
 };
@@ -186,6 +190,9 @@ pub struct SummaryMaintenanceLifecyclePlan {
     /// Whether global costing preferred rebuilding the raw expression over all
     /// summary deployments.
     pub selected_raw_recompute: bool,
+    /// Provider-owned identity of the selected complete physical deployment
+    /// (for example a tumbling, sliding, or exponential-histogram plan).
+    pub selected_physical_plan_id: Option<String>,
     /// Cost of the selected set of summary deployments, when fully known.
     pub summary_total_cost: Option<Cost>,
     /// Cost of evaluating the original expression for the same demand, when
@@ -361,7 +368,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
             }
         })
         .collect();
-    let summary_total_cost = select_complete_lifecycle_combination(
+    let complete_estimate = select_complete_lifecycle_combination(
         &root,
         &mut deployments,
         &components,
@@ -371,6 +378,9 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         horizon,
         facts.reads,
     );
+    let summary_total_cost = complete_estimate.as_ref().map(|estimate| estimate.cost);
+    let selected_physical_plan_id =
+        complete_estimate.and_then(|estimate| estimate.physical_plan_id);
     let selected_raw_recompute = matches!(root.expr, SummaryExpr::KeepPreAsap(_));
     Ok(SummaryMaintenanceLifecyclePlan {
         root,
@@ -380,6 +390,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         update_rate: facts.update_rate,
         expected_reads: facts.reads,
         selected_raw_recompute,
+        selected_physical_plan_id,
         summary_total_cost,
         raw_recompute_total_cost: None,
     })
@@ -480,6 +491,7 @@ pub fn materialize_with_summary_maintenance_lifecycles(
                 plan.root = crate::replacement::keep_pre_asap(target)?;
                 plan.deployments.clear();
                 plan.selected_raw_recompute = true;
+                plan.selected_physical_plan_id = None;
                 plan.summary_total_cost = None;
             }
             Ok(plan)
@@ -605,7 +617,30 @@ fn workload_facts(
     let update_rate = data
         .and_then(|data| data.ingestion_rate.value_at(now_ms))
         .map(|rate| UpdateRate(rate.0));
-    let reads = recurring_known.then_some(one_time_invocations as f64 + recurring_reads);
+    let reads = if let Some(horizon) = horizon {
+        let horizon_ms = horizon.0 * 1_000.0;
+        if !horizon_ms.is_finite()
+            || horizon_ms <= 0.0
+            || horizon_ms > u64::MAX as f64
+            || horizon_ms.fract() != 0.0
+        {
+            None
+        } else {
+            workload_entry_indices
+                .iter()
+                .try_fold(0_u64, |total, index| {
+                    let entry = entries.get(*index)?;
+                    match evaluations_in_horizon(&entry.recurrence, now_ms, horizon_ms as u64) {
+                        Ok(count) => total.checked_add(count),
+                        Err(AnalyticalCostError::NoEvaluationsInHorizon) => Some(total),
+                        Err(_) => None,
+                    }
+                })
+                .map(|count| count as f64)
+        }
+    } else {
+        recurring_known.then_some(one_time_invocations as f64 + recurring_reads)
+    };
     Ok(SummaryMaintenanceWorkloadFacts {
         reads,
         one_time_invocations,
@@ -1002,7 +1037,7 @@ fn select_complete_lifecycle_combination(
     comparison_target: Option<&QueryExpr>,
     horizon: Option<Horizon>,
     expected_reads: Option<f64>,
-) -> Option<Cost> {
+) -> Option<CompleteSummaryCandidateEstimate> {
     const MAX_COMPLETE_LIFECYCLE_COMBINATIONS: usize = 4_096;
     if deployments.is_empty() {
         return None;
@@ -1039,7 +1074,10 @@ fn select_complete_lifecycle_combination(
         horizon: Option<Horizon>,
         expected_reads: Option<f64>,
         selected: &mut Vec<(usize, SummaryMaintenanceLifecycleGuarantee, Cost)>,
-        best: &mut Option<(Cost, Vec<(usize, SummaryMaintenanceLifecycleGuarantee)>)>,
+        best: &mut Option<(
+            CompleteSummaryCandidateEstimate,
+            Vec<(usize, SummaryMaintenanceLifecycleGuarantee)>,
+        )>,
     ) {
         if index == deployments.len() {
             if selected.iter().enumerate().any(|(left, (_, a, _))| {
@@ -1058,7 +1096,7 @@ fn select_complete_lifecycle_combination(
                     selected_cost: *cost,
                 })
                 .collect();
-            let Some(cost) = cost_model.complete_summary_candidate_cost(
+            let Some(estimate) = cost_model.complete_summary_candidate_estimate(
                 root,
                 comparison_target,
                 &costed,
@@ -1069,10 +1107,10 @@ fn select_complete_lifecycle_combination(
             };
             if best
                 .as_ref()
-                .is_none_or(|(best_cost, _)| cost.0 < best_cost.0)
+                .is_none_or(|(best_estimate, _)| estimate.cost.0 < best_estimate.cost.0)
             {
                 *best = Some((
-                    cost,
+                    estimate,
                     selected
                         .iter()
                         .map(|(index, guarantee, _)| (*index, guarantee.clone()))
@@ -1125,11 +1163,11 @@ fn select_complete_lifecycle_combination(
         &mut Vec::new(),
         &mut best,
     );
-    let (cost, guarantees) = best?;
+    let (estimate, guarantees) = best?;
     for (index, guarantee) in guarantees {
         deployments[index].summary_maintenance_lifecycle_guarantee = Some(guarantee);
     }
-    Some(cost)
+    Some(estimate)
 }
 
 pub(crate) fn maintenance_mode(
@@ -1545,6 +1583,17 @@ mod tests {
             .summary_maintenance_lifecycle_guarantee
             .as_ref()
             .map(|guarantee| &guarantee.summary_maintenance_lifecycle)
+    }
+
+    #[test]
+    fn fixed_interval_reads_use_the_physical_horizon_multiplicity() {
+        let mut query = repeating();
+        query.demand = RepeatedDemand::FixedInterval(RepetitionInterval(600));
+        let workload = workload(vec![], vec![query], at_rest());
+
+        let facts = workload_facts(&workload, &[0], 0, Some(Horizon(1.0))).unwrap();
+
+        assert_eq!(facts.reads, Some(1.0));
     }
 
     #[test]
@@ -1984,7 +2033,7 @@ mod tests {
             Some(2.0),
         );
 
-        assert_eq!(total, Some(Cost(1.0)));
+        assert_eq!(total.map(|estimate| estimate.cost), Some(Cost(1.0)));
         assert!(matches!(
             deployments[0]
                 .summary_maintenance_lifecycle_guarantee
