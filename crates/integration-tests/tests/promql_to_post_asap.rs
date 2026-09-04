@@ -60,7 +60,7 @@ fn lower_and_realize(query: &str) -> Rc<SummaryNode> {
 
 #[test]
 fn promql_binary_arithmetic_retains_two_summary_leaves() {
-    for op in ["+", "-", "*", "/", "%", "^"] {
+    for op in ["+", "-", "*", "/", "%", "^", "atan2"] {
         let root = lower_and_realize(&format!("rate(a[1m]) {op} rate(b[1m])"));
         let SummaryExpr::ExactBinary { lhs, rhs, .. } = &root.expr else {
             panic!("expected ExactBinary for {op}, got {:?}", root.expr);
