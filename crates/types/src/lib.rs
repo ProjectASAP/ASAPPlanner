@@ -19,6 +19,7 @@
 //!   runtime's readout path can call directly — see that module's docs
 //!   for the planning-time/execution-time boundary and why it's unwired
 //!   today.
+pub mod cost;
 pub mod dag_export;
 pub mod post_asap;
 pub mod pre_asap;
