@@ -109,7 +109,7 @@ impl<'a> PhysicalPlanCostModel<'a> {
         }
 
         let snapshot = self.provider.capture_evidence_snapshot(target)?;
-        if snapshot.version.is_empty() {
+        if snapshot.version.trim().is_empty() {
             return Err(AnalyticalCostError::MissingOrStale(
                 "planner_evidence_snapshot.version",
             ));
@@ -540,6 +540,48 @@ mod tests {
             .replacements(&TargetSubDAG::new(&root));
         let provider = WrongScope(TestProvider::new(true, 800));
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
+        assert_eq!(
+            model.candidate_cost(&candidates[0], &TargetSubDAG::new(&root)),
+            None
+        );
+    }
+
+    #[test]
+    fn blank_snapshot_version_is_unavailable_before_evidence_lookup() {
+        struct BlankVersionProvider;
+        impl PlannerPhysicalPlanProvider for BlankVersionProvider {
+            fn capture_evidence_snapshot(
+                &self,
+                _target: &TargetSubDAG<'_>,
+            ) -> Result<PhysicalEvidenceSnapshot, AnalyticalCostError> {
+                Ok(PhysicalEvidenceSnapshot {
+                    version: "  \t".into(),
+                    scope: scope(),
+                })
+            }
+
+            fn query_node_evidence(
+                &self,
+                _snapshot: &PhysicalEvidenceSnapshot,
+                _request: PhysicalNodeRequest<'_>,
+            ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
+                panic!("blank snapshot versions must fail before evidence lookup")
+            }
+
+            fn summary_physical_dag(
+                &self,
+                _snapshot: &PhysicalEvidenceSnapshot,
+                _summary: &Rc<SummaryNode>,
+                _target: &TargetSubDAG<'_>,
+            ) -> Result<PhysicalDag, AnalyticalCostError> {
+                panic!("blank snapshot versions must fail before summary binding")
+            }
+        }
+
+        let root = query();
+        let candidates = crate::replacement::SketchAlgorithmStrategy::default_cost_model()
+            .replacements(&TargetSubDAG::new(&root));
+        let model = PhysicalPlanCostModel::new(&BlankVersionProvider, calibration()).unwrap();
         assert_eq!(
             model.candidate_cost(&candidates[0], &TargetSubDAG::new(&root)),
             None
