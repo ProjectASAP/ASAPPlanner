@@ -54,17 +54,18 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
-use asap_aware_mapping::analytical_cost::{AnalyticalCostError, ResourceCalibration};
-use asap_aware_mapping::analytical_lowering::{
-    PhysicalDag, PhysicalNodeEvidence, PhysicalNodeRequest,
+use asap_aware_mapping::analytical_cost::{
+    AnalyticalCostError, EvidenceBackedPhysicalDag as PhysicalDag, PhysicalNodeEvidence,
+    ResourceCalibration,
 };
-use asap_aware_mapping::analytical_statistics::ComparisonScope;
 #[cfg(test)]
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::cost_model::{Cost, CostModel};
+use asap_aware_mapping::physical_operator_statistics::ComparisonScope;
 use asap_aware_mapping::physical_plan_cost_model::{
     PhysicalEvidenceSnapshot, PhysicalPlanCostModel, PlannerPhysicalPlanProvider,
 };
+use asap_aware_mapping::query_physical_lowering::PhysicalNodeRequest;
 use asap_aware_mapping::replacement::{
     default_strategies_with_evidence, search_workload, search_workload_with, Replacement,
     ReplacementSubDAG,
@@ -124,7 +125,7 @@ struct ComparisonScopeEvidence {
     time_scope: String,
     lookback_ms: Option<u64>,
     as_of_ms: Option<u64>,
-    sources: Vec<asap_aware_mapping::analytical_statistics::SourceCoverage>,
+    sources: Vec<asap_aware_mapping::physical_operator_statistics::SourceCoverage>,
 }
 
 impl ComparisonScopeEvidence {
@@ -1434,10 +1435,10 @@ mod tests {
     use asap_aware_mapping::analytical_cost::{
         ExecutionMultiplicity, PhysicalDagNode, PhysicalOperator,
     };
-    use asap_aware_mapping::analytical_lowering::lower_query_physical_dag;
-    use asap_aware_mapping::analytical_statistics::{
+    use asap_aware_mapping::physical_operator_statistics::{
         EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
     };
+    use asap_aware_mapping::query_physical_lowering::lower_query_physical_dag;
     use asap_types::pre_asap::{Column, DataType, Reduction, Schema, Source};
 
     fn non_topk_query() -> QueryExpr {
