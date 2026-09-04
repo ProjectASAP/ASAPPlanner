@@ -264,6 +264,11 @@ pub(super) fn estimate_heterogeneous_summary(
         }
         match &node.expr {
             SummaryExpr::ExactBinary { lhs, rhs, .. } => {
+                let operation = summary_operation_evidence(node, evidence)?.resource();
+                *cpu_ops += evaluation_count as f64
+                    * validated_operator_executions("exact_binary", operation)? as f64
+                    * validated_operator_cpu("exact_binary", operation.cpu_ops)?;
+                add_operator_io(io_bytes, operation, evaluation_count)?;
                 visit_ops(
                     lhs,
                     seen,
@@ -610,9 +615,6 @@ fn validate_summary_edges_and_physical_ids(
         evidence: &StreamingNodeEvidence,
     ) -> Result<(String, Vec<EdgeStatistics>, EdgeStatistics), AnalyticalCostError> {
         match &node.expr {
-            SummaryExpr::ExactBinary { .. } => Err(AnalyticalCostError::MissingOrStale(
-                "exact_binary_physical_evidence",
-            )),
             SummaryExpr::KeepPreAsap(_) => {
                 let retained = evidence
                     .retained_queries
@@ -801,9 +803,6 @@ pub(super) fn estimate_transient_liveness(
         evidence: &StreamingNodeEvidence,
     ) -> Result<(u64, u64), AnalyticalCostError> {
         match &node.expr {
-            SummaryExpr::ExactBinary { .. } => Err(AnalyticalCostError::MissingOrStale(
-                "exact_binary_physical_evidence",
-            )),
             SummaryExpr::KeepPreAsap(_) => evidence
                 .retained_queries
                 .get(&(node as *const _))
@@ -816,6 +815,7 @@ pub(super) fn estimate_transient_liveness(
                 .map(|value| (value.working_memory_bytes, value.output_buffer_bytes))
                 .ok_or(AnalyticalCostError::MissingOrStale("summary_join")),
             SummaryExpr::SummaryMerge { .. }
+            | SummaryExpr::ExactBinary { .. }
             | SummaryExpr::SummarySubtract { .. }
             | SummaryExpr::SummaryDelete { .. }
             | SummaryExpr::SummaryEstimate { .. } => {

@@ -1609,6 +1609,11 @@ fn realize_exact_binary(
         return Ok(None);
     }
 
+    let guarantee = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()]
+        .into_iter()
+        .all(|guarantee| guarantee.is_some_and(ResultGuarantee::is_exact))
+        .then(|| ResultGuarantee::exact("ExactBinary over exact operands"));
+
     Ok(Some(Rc::new(SummaryNode {
         expr: SummaryExpr::ExactBinary {
             lhs: lhs_node,
@@ -1617,7 +1622,10 @@ fn realize_exact_binary(
             vector_match: vector_match.clone(),
         },
         schema: lift(&root.output_schema()?),
-        guarantee: Some(ResultGuarantee::exact("ExactBinary")),
+        // Exact arithmetic does not erase approximation error. Until the
+        // accuracy algebra has an operator-specific rule (and any value-range
+        // evidence needed by multiplication/division), unknown stays unknown.
+        guarantee,
     })))
 }
 

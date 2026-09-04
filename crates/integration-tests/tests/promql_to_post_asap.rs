@@ -110,6 +110,25 @@ fn promql_binary_arithmetic_preserves_nested_structure_and_rejects_modifiers() {
     assert!(matches!(modified.expr, SummaryExpr::KeepPreAsap(_)));
 }
 
+#[test]
+fn promql_binary_arithmetic_never_relabels_approximate_children_as_exact() {
+    let pre = lower_promql(
+        "quantile_over_time(0.9, a[1m]) + quantile_over_time(0.9, b[1m])",
+        AccuracyTarget::Epsilon(0.01),
+    )
+    .expect("lowering failed");
+    let root = realize(&pre).expect("binding failed");
+    let SummaryExpr::ExactBinary { lhs, rhs, .. } = &root.expr else {
+        panic!("expected ExactBinary, got {:?}", root.expr);
+    };
+    assert!(lhs.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
+    assert!(rhs.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
+    assert!(
+        root.guarantee.is_none(),
+        "unknown composed error must fail closed"
+    );
+}
+
 /// `quantile(0.99, rate(http_requests_total[5m]))` at ε = 0.01:
 ///
 /// ```text
