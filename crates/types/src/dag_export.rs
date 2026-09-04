@@ -1447,6 +1447,7 @@ mod tests {
         };
         let root = QueryExpr::Concat {
             children: vec![left_branch, right_branch],
+            discriminator_unique_key: None,
         };
         let graph = export_post_asap(&root, &mut |_| None);
 

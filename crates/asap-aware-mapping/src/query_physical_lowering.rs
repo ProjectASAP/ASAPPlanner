@@ -693,7 +693,7 @@ pub fn lower_query_physical_dag(
                     }
                     self.lower_unary(query, occurrence, PhysicalOperator::PassThrough, child)
                 }
-                QueryExpr::Concat { children } => {
+                QueryExpr::Concat { children, .. } => {
                     let child_ids = children
                         .iter()
                         .map(|child| self.lower(child))
@@ -1979,6 +1979,7 @@ mod tests {
 
         let concat = Rc::new(QueryExpr::Concat {
             children: vec![scan("a"), scan("b")],
+            discriminator_unique_key: None,
         });
         let dag = lower_query_physical_dag(&concat, &scope, &scripted(&provided)).unwrap();
         assert_eq!(dag.nodes.last().unwrap().operator, PhysicalOperator::Concat);

@@ -87,7 +87,7 @@ pub(super) fn query_source_selections(
         | PromqlSeriesSample { child, .. }
         | Sort { child, .. }
         | Limit { child, .. } => query_source_selections(child, out)?,
-        Concat { children } => {
+        Concat { children, .. } => {
             for child in children {
                 query_source_selections(child, out)?;
             }
