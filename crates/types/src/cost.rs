@@ -117,6 +117,11 @@ pub struct CostAnnotation {
     pub benefit_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_version: Option<String>,
+    /// Immutable catalog/runtime evidence generation used by the model.
+    /// Kept separate from `model_version`: changing evidence must remain
+    /// visible even when the analytical formulas are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub benchmark_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -137,19 +142,29 @@ impl CostAnnotation {
             delta: None,
             benefit_ratio: None,
             model_version: None,
+            evidence_version: None,
             benchmark_id: None,
             inputs: Vec::new(),
         }
     }
 
     /// A modeled value with no baseline comparison attached yet — chain
-    /// [`with_baseline`](Self::with_baseline) to add one.
+    /// [`with_baseline`](Self::with_baseline) to add one. Non-finite values,
+    /// blank model versions, or non-finite inputs produce an unavailable
+    /// annotation rather than poisoned JSON.
     pub fn modeled(
         value: f64,
         unit: CostUnit,
         model_version: impl Into<String>,
         inputs: Vec<CostInput>,
     ) -> Self {
+        let model_version = model_version.into();
+        if !value.is_finite()
+            || model_version.trim().is_empty()
+            || inputs.iter().any(|input| !input.value.is_finite())
+        {
+            return Self::unavailable(unit);
+        }
         CostAnnotation {
             value: Some(value),
             unit,
@@ -157,7 +172,8 @@ impl CostAnnotation {
             baseline: None,
             delta: None,
             benefit_ratio: None,
-            model_version: Some(model_version.into()),
+            model_version: Some(model_version),
+            evidence_version: None,
             benchmark_id: None,
             inputs,
         }
@@ -172,10 +188,27 @@ impl CostAnnotation {
         let Some(value) = self.value else {
             return self;
         };
+        if !value.is_finite() || !baseline_value.is_finite() || baseline_value < 0.0 {
+            return Self::unavailable(self.unit);
+        }
         let delta = baseline_value - value;
         self.delta = Some(delta);
         self.benefit_ratio = benefit_ratio(baseline_value, delta);
         self.baseline = Some(baseline);
+        self
+    }
+
+    /// Bind a modeled annotation to the immutable evidence generation used
+    /// to produce it. Blank identities make the annotation unavailable.
+    pub fn with_evidence_version(mut self, evidence_version: impl Into<String>) -> Self {
+        if self.source != CostSource::Modeled || self.value.is_none() {
+            return self;
+        }
+        let evidence_version = evidence_version.into();
+        if evidence_version.trim().is_empty() {
+            return Self::unavailable(self.unit);
+        }
+        self.evidence_version = Some(evidence_version);
         self
     }
 }
@@ -184,7 +217,7 @@ impl CostAnnotation {
 /// issue's explicit "ratio unavailable" guard (a zero or negative baseline
 /// makes a ratio meaningless, not just numerically awkward).
 pub fn benefit_ratio(baseline_value: f64, delta: f64) -> Option<f64> {
-    if baseline_value > 0.0 {
+    if baseline_value.is_finite() && baseline_value > 0.0 && delta.is_finite() {
         Some(delta / baseline_value)
     } else {
         None
@@ -275,6 +308,7 @@ where
     let mut counted_any = false;
     let mut missing_any = false;
     let mut model_versions: Vec<String> = Vec::new();
+    let mut evidence_versions: Vec<String> = Vec::new();
 
     for (workload_node_id, annotation) in entries {
         if let Some(id) = workload_node_id {
@@ -292,17 +326,33 @@ where
             }
             _ => {}
         }
-        let Some(value) = annotation.value else {
+        let Some(value) = annotation.value.filter(|value| value.is_finite()) else {
             missing_any = true;
             continue;
         };
         total += value;
+        if !total.is_finite() {
+            missing_any = true;
+            continue;
+        }
         counted_any = true;
         if let Some(version) = &annotation.model_version {
             if !model_versions.contains(version) {
                 model_versions.push(version.clone());
             }
         }
+        if let Some(version) = &annotation.evidence_version {
+            if !evidence_versions.contains(version) {
+                evidence_versions.push(version.clone());
+            }
+        }
+    }
+
+    // One workload total must not silently combine different immutable
+    // catalog/runtime generations. Such a subtotal is not a comparable
+    // snapshot even though each component is individually numeric.
+    if evidence_versions.len() > 1 {
+        missing_any = true;
     }
 
     Ok(if counted_any && !missing_any {
@@ -315,6 +365,11 @@ where
             benefit_ratio: None,
             model_version: if model_versions.len() == 1 {
                 Some(model_versions.remove(0))
+            } else {
+                None
+            },
+            evidence_version: if evidence_versions.len() == 1 {
+                Some(evidence_versions.remove(0))
             } else {
                 None
             },
@@ -349,6 +404,7 @@ pub fn workload_cost_summary<'a, I>(
 where
     I: IntoIterator<Item = (Option<u32>, &'a CostAnnotation, &'a CostAnnotation)> + Clone,
 {
+    let model_version = model_version.into();
     let baseline_cost = sum_workload_costs(
         entries
             .clone()
@@ -360,7 +416,9 @@ where
 
     let benefit = match (baseline_cost.value, selected_cost.value) {
         (Some(baseline_value), Some(selected_value))
-            if baseline_cost.unit == selected_cost.unit =>
+            if baseline_cost.unit == selected_cost.unit
+                && baseline_cost.evidence_version == selected_cost.evidence_version
+                && !model_version.trim().is_empty() =>
         {
             let delta = baseline_value - selected_value;
             CostAnnotation {
@@ -370,17 +428,19 @@ where
                 baseline: Some(BaselineRef::PreAsapRecomputation),
                 delta: None,
                 benefit_ratio: benefit_ratio(baseline_value, delta),
-                model_version: Some(model_version.into()),
+                model_version: Some(model_version),
+                evidence_version: selected_cost.evidence_version.clone(),
                 benchmark_id: None,
                 inputs: Vec::new(),
             }
         }
-        (Some(_), Some(_)) => {
+        (Some(_), Some(_)) if baseline_cost.unit != selected_cost.unit => {
             return Err(UnitMismatch {
                 first: baseline_cost.unit,
                 second: selected_cost.unit,
             })
         }
+        (Some(_), Some(_)) => CostAnnotation::unavailable(selected_cost.unit),
         _ => CostAnnotation::unavailable(selected_cost.unit),
     };
 
@@ -412,10 +472,41 @@ mod tests {
     }
 
     #[test]
+    fn modeled_annotations_reject_non_finite_values_inputs_and_blank_versions() {
+        for annotation in [
+            CostAnnotation::modeled(f64::NAN, CostUnit::CostUnits, "v1", vec![]),
+            CostAnnotation::modeled(f64::INFINITY, CostUnit::CostUnits, "v1", vec![]),
+            CostAnnotation::modeled(1.0, CostUnit::CostUnits, "  ", vec![]),
+            CostAnnotation::modeled(
+                1.0,
+                CostUnit::CostUnits,
+                "v1",
+                vec![CostInput::new("rows", f64::NAN)],
+            ),
+        ] {
+            assert_eq!(annotation.source, CostSource::Unavailable);
+            assert_eq!(annotation.value, None);
+        }
+    }
+
+    #[test]
+    fn modeled_annotations_retain_evidence_generation_separately() {
+        let annotation = ann(3.0, CostUnit::CostUnits).with_evidence_version("catalog-42");
+        assert_eq!(annotation.model_version.as_deref(), Some("v1"));
+        assert_eq!(annotation.evidence_version.as_deref(), Some("catalog-42"));
+
+        let unavailable = ann(3.0, CostUnit::CostUnits).with_evidence_version(" \t");
+        assert_eq!(unavailable.source, CostSource::Unavailable);
+        assert_eq!(unavailable.value, None);
+    }
+
+    #[test]
     fn benefit_ratio_unavailable_when_baseline_not_positive() {
         assert_eq!(benefit_ratio(0.0, 5.0), None);
         assert_eq!(benefit_ratio(-1.0, 5.0), None);
         assert_eq!(benefit_ratio(2.0, 1.0), Some(0.5));
+        assert_eq!(benefit_ratio(f64::INFINITY, 1.0), None);
+        assert_eq!(benefit_ratio(2.0, f64::NAN), None);
     }
 
     #[test]
@@ -501,6 +592,21 @@ mod tests {
         let err = sum_workload_costs(vec![(None, &rate), (None, &total)]).unwrap_err();
         assert_eq!(err.first, CostUnit::CostUnitsPerSecond);
         assert_eq!(err.second, CostUnit::CostUnits);
+    }
+
+    #[test]
+    fn workload_totals_reject_mixed_evidence_generations() {
+        let first = ann(1.0, CostUnit::CostUnits).with_evidence_version("snapshot-a");
+        let second = ann(2.0, CostUnit::CostUnits).with_evidence_version("snapshot-b");
+        let total = sum_workload_costs(vec![(None, &first), (None, &second)]).unwrap();
+        assert_eq!(total.source, CostSource::Unavailable);
+        assert_eq!(total.value, None);
+
+        let baseline = ann(5.0, CostUnit::CostUnits).with_evidence_version("snapshot-a");
+        let selected = ann(2.0, CostUnit::CostUnits).with_evidence_version("snapshot-b");
+        let summary = workload_cost_summary(vec![(None, &baseline, &selected)], "v1").unwrap();
+        assert_eq!(summary.benefit.source, CostSource::Unavailable);
+        assert_eq!(summary.benefit.value, None);
     }
 
     #[test]

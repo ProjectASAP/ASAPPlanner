@@ -699,7 +699,7 @@ function laneCostLabel(label, annotation, stage) {
 
 // One `<title, CostAnnotation>` block for the sidebar: value + unit +
 // Modeled/Measured/Unavailable badge, baseline/delta/ratio when present,
-// model/benchmark provenance, and the raw `inputs` the value was built
+// model/evidence/benchmark provenance, and the raw `inputs` the value was built
 // from. `annotation` may be `undefined` (an older export with no
 // annotation at all) or `null`/missing `value` (an explicit `Unavailable`)
 // — both render as "Not estimated", never a number.
@@ -718,6 +718,7 @@ function renderCostAnnotation(title, annotation) {
   if (typeof annotation.benefit_ratio === 'number') metaParts.push(`ratio ${(annotation.benefit_ratio * 100).toFixed(1)}%`);
   const provenanceParts = [];
   if (annotation.model_version) provenanceParts.push(`model ${annotation.model_version}`);
+  if (annotation.evidence_version) provenanceParts.push(`evidence ${annotation.evidence_version}`);
   if (annotation.benchmark_id) provenanceParts.push(`benchmark ${annotation.benchmark_id}`);
   const inputsHtml = (annotation.inputs || []).length
     ? `<ul class="costInputs">${annotation.inputs.map((input) => `<li><span>${escapeHtml(input.name)}</span><span>${escapeHtml(String(input.value))}${input.unit ? ' ' + escapeHtml(input.unit) : ''}</span></li>`).join('')}</ul>`

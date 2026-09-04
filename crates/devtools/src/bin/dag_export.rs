@@ -56,7 +56,7 @@ use std::time::Instant;
 
 use asap_aware_mapping::analytical_cost::{
     AnalyticalCostError, EvidenceBackedPhysicalDag as PhysicalDag, PhysicalNodeEvidence,
-    ResourceCalibration,
+    ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
 };
 #[cfg(test)]
 use asap_aware_mapping::cost_model::DefaultCostModel;
@@ -408,7 +408,7 @@ impl ExportPlannerCostModel<'_> {
         if !provider.all_query_evidence_used() {
             return winner_cost_annotations();
         }
-        let version = format!("physical-dag+{}", calibration.version);
+        let version = format!("{}+{}", ANALYTICAL_COST_MODEL_VERSION, calibration.version);
         let inputs = |resources: asap_aware_mapping::analytical_cost::ResourceEstimate| {
             vec![
                 CostInput {
@@ -433,14 +433,16 @@ impl ExportPlannerCostModel<'_> {
             CostUnit::CostUnits,
             &version,
             inputs(estimate.resources.raw),
-        );
+        )
+        .with_evidence_version(&self.document.evidence_version);
         let selected = CostAnnotation::modeled(
             estimate.candidate_cost.0,
             CostUnit::CostUnits,
             &version,
             inputs(estimate.resources.candidate),
         )
-        .with_baseline(BaselineRef::PreAsapRecomputation, estimate.raw_cost.0);
+        .with_baseline(BaselineRef::PreAsapRecomputation, estimate.raw_cost.0)
+        .with_evidence_version(&self.document.evidence_version);
         let benefit = CostAnnotation {
             value: selected.delta,
             unit: CostUnit::CostUnits,
@@ -449,6 +451,7 @@ impl ExportPlannerCostModel<'_> {
             delta: None,
             benefit_ratio: selected.benefit_ratio,
             model_version: Some(version),
+            evidence_version: Some(self.document.evidence_version.clone()),
             benchmark_id: None,
             inputs: Vec::new(),
         };
@@ -1655,6 +1658,16 @@ mod tests {
         assert!(baseline.value.is_some());
         assert!(selected.value.is_some());
         assert!(benefit.value.is_some());
+        for annotation in [&baseline, &selected, &benefit] {
+            assert_eq!(
+                annotation.evidence_version.as_deref(),
+                Some("test-evidence-v1")
+            );
+            assert!(annotation
+                .model_version
+                .as_deref()
+                .is_some_and(|version| version.starts_with(ANALYTICAL_COST_MODEL_VERSION)));
+        }
         assert!(selected
             .inputs
             .iter()

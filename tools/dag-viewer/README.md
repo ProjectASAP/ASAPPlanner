@@ -109,7 +109,7 @@ a selected replacement directly contains:
     "rank": 0,
     "cost": 1.14001088,
     "role": "replacement_root",
-    "baseline_cost": { "value": 104.0032, "unit": "CostUnits", "source": "Modeled", "model_version": "analytical-resource-v1+example-calibration-v1" },
+    "baseline_cost": { "value": 104.0032, "unit": "CostUnits", "source": "Modeled", "model_version": "analytical-cost-v1+example-calibration-v1", "evidence_version": "example-evidence-v1" },
     "selected_cost": { "value": 1.14001088, "unit": "CostUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "delta": 102.86318912, "benefit_ratio": 0.9890386941940248 },
     "benefit": { "value": 102.86318912, "unit": "CostUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "benefit_ratio": 0.9890386941940248 }
   }
@@ -131,8 +131,11 @@ with IR text.
 `decision.baseline_cost` / `.selected_cost` / `.benefit` are structured
 [`CostAnnotation`](../../crates/types/src/cost.rs)s: `value` + `unit` +
 `source` (`Modeled` / `Measured` / `Unavailable`), optionally `baseline` +
-`delta` + `benefit_ratio`, and `model_version`/`benchmark_id`/`inputs` for
-provenance. A missing `value` (`source: "Unavailable"`) always renders as
+`delta` + `benefit_ratio`, and `model_version`/`evidence_version`/
+`benchmark_id`/`inputs` for provenance. `model_version` identifies the
+analytical formulas and calibration; `evidence_version` independently
+identifies the immutable catalog/runtime generation. A missing `value`
+(`source: "Unavailable"`) always renders as
 **Not estimated** — the viewer never fabricates a number. A complete physical
 planner export keeps CPU operations, peak memory, scan bytes, coefficients,
 and workload statistics in `inputs`. Without complete physical evidence, the
