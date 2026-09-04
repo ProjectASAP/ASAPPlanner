@@ -60,8 +60,7 @@ pub enum SummaryExpr {
         /// family's own `(kind, params)`. Never `SummaryFamilyType::Plain`
         /// — this node always produces summary state, not a plain value.
         family: SummaryFamilyType,
-        /// Values fed into the summary. Top-K carries item identity and update
-        /// value separately; other families consume one column.
+        /// Key and numeric value fed into each summary update.
         input: SummaryInput,
         /// How this aggregation's output rows relate to `child`'s — the
         /// same [`Reduction`] the pre-ASAP `Aggregate` node it was bound

@@ -518,36 +518,38 @@ impl Default for GroupingStrategy {
 
 // ── Sketch read-out queries ───────────────────────────────────────────────────
 
-/// Input semantics for one summary aggregation. Most summaries consume one
-/// value column. Heap-backed Top-K summaries instead need both an item
-/// identity and an update value; keeping those facts together prevents a
-/// value-weighted plan from silently degrading into occurrence counting.
+/// Inputs consumed by one summary update. `value` is the numeric contribution
+/// applied to the state. `key` is present for keyed summaries and absent for
+/// scalar summaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SummaryInput {
-    Column(ColumnRef),
-    TopK(TopKInput),
+pub struct SummaryInput {
+    pub key: Option<SummaryKey>,
+    pub value: SummaryValue,
+}
+
+impl SummaryInput {
+    pub fn column(column: ColumnRef) -> Self {
+        Self {
+            key: None,
+            value: SummaryValue::Column(column),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TopKInput {
-    pub item: TopKItem,
-    pub update: TopKUpdate,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum TopKItem {
-    /// A relational grouping-key column identifies the ranked item.
+pub enum SummaryKey {
+    /// A relational column identifies the updated key.
     Column(ColumnRef),
-    /// The complete PromQL label set identifies one input series.
+    /// The complete PromQL label set identifies the updated key.
     SeriesIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum TopKUpdate {
+pub enum SummaryValue {
     /// Add this constant weight for every input row/sample.
     Constant(f64),
     /// Add the numeric value from this column for every input row/sample.
-    Value(ColumnRef),
+    Column(ColumnRef),
 }
 
 /// What to extract from a built summary. Carried by `SummaryEstimate`.
@@ -569,10 +571,8 @@ pub enum SketchQuery {
     },
     /// Estimated number of distinct elements.
     Cardinality,
-    /// Read the top-k entries from a heap-backed summary. `input` repeats the
-    /// state update contract so a serialized readout never loses the numeric
-    /// weight projection used to build it.
-    TopK { k: usize, input: TopKInput },
+    /// Read the top-k entries from a heap-backed summary.
+    TopK { k: usize },
 }
 
 #[cfg(test)]
@@ -580,21 +580,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn topk_input_and_readout_round_trip_without_losing_update_semantics() {
+    fn keyed_summary_input_and_topk_readout_round_trip() {
         for input in [
-            TopKInput {
-                item: TopKItem::SeriesIdentity,
-                update: TopKUpdate::Constant(1.0),
+            SummaryInput {
+                key: Some(SummaryKey::SeriesIdentity),
+                value: SummaryValue::Constant(1.0),
             },
-            TopKInput {
-                item: TopKItem::Column(ColumnRef::Named("service".into())),
-                update: TopKUpdate::Value(ColumnRef::SampleValue),
+            SummaryInput {
+                key: Some(SummaryKey::Column(ColumnRef::Named("service".into()))),
+                value: SummaryValue::Column(ColumnRef::SampleValue),
             },
         ] {
-            let query = SketchQuery::TopK {
-                k: 10,
-                input: input.clone(),
-            };
+            let input_json = serde_json::to_string(&input).unwrap();
+            assert_eq!(
+                serde_json::from_str::<SummaryInput>(&input_json).unwrap(),
+                input
+            );
+            let query = SketchQuery::TopK { k: 10 };
             let json = serde_json::to_string(&query).unwrap();
             assert_eq!(serde_json::from_str::<SketchQuery>(&json).unwrap(), query);
         }

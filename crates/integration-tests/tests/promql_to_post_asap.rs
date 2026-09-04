@@ -20,8 +20,8 @@ use asap_aware_mapping::{
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
     CompositionOperator, ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind,
-    SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInput, SummaryNode,
-    SummarySchema, TopKInput, TopKItem, TopKUpdate,
+    SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInput, SummaryKey,
+    SummaryNode, SummarySchema, SummaryValue,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -83,12 +83,12 @@ fn temporal_topk_binds_constant_one_and_sample_value_weight_projections() {
     let cases = [
         (
             "topk by (service) (5, count_over_time(requests[1m]))",
-            TopKUpdate::Constant(1.0),
+            SummaryValue::Constant(1.0),
             "CmsWithHeap",
         ),
         (
             "topk(5, sum_over_time(requests[1m]))",
-            TopKUpdate::Value(ColumnRef::SampleValue),
+            SummaryValue::Column(ColumnRef::SampleValue),
             "CountSketchWithHeap",
         ),
     ];
@@ -121,25 +121,24 @@ fn temporal_topk_binds_constant_one_and_sample_value_weight_projections() {
             .expect("heap-backed temporal Top-K candidate");
         let SummaryExpr::SummaryEstimate {
             summary_input,
-            query: SketchQuery::TopK { input: readout, .. },
+            query: SketchQuery::TopK { .. },
         } = &candidate.expr
         else {
             panic!("expected Top-K estimate, got {:?}", candidate.expr)
         };
         let SummaryExpr::SummaryAgg {
-            input: SummaryInput::TopK(state_input),
+            input: state_input,
             child,
             ..
         } = &summary_input.expr
         else {
             panic!("expected structured Top-K state input")
         };
-        assert_eq!(state_input, readout);
         assert_eq!(
             state_input,
-            &TopKInput {
-                item: TopKItem::SeriesIdentity,
-                update: expected_update,
+            &SummaryInput {
+                key: Some(SummaryKey::SeriesIdentity),
+                value: expected_update,
             }
         );
         assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(_)));
@@ -204,7 +203,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
             GroupingStrategy::default()
         )
     );
-    assert_eq!(input, &SummaryInput::Column(ColumnRef::SampleValue));
+    assert_eq!(input, &SummaryInput::column(ColumnRef::SampleValue));
     assert_eq!(
         reduction,
         &Reduction::by(vec![]),

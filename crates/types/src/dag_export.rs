@@ -1515,7 +1515,7 @@ mod tests {
                     SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 40 }),
                     GroupingStrategy::default(),
                 ),
-                input: crate::post_asap::SummaryInput::Column(
+                input: crate::post_asap::SummaryInput::column(
                     crate::pre_asap::expr_ir::ColumnRef::Named("v".into()),
                 ),
                 reduction: Reduction::by(vec![]),

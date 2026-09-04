@@ -200,7 +200,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     );
     assert_eq!(
         input,
-        &SummaryInput::Column(ColumnRef::Qualified {
+        &SummaryInput::column(ColumnRef::Qualified {
             table: "metrics".into(),
             name: "latency".into(),
         }),
@@ -281,7 +281,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
     );
     assert_eq!(
         input,
-        &SummaryInput::Column(ColumnRef::Qualified {
+        &SummaryInput::column(ColumnRef::Qualified {
             table: "metrics".into(),
             name: "service".into(),
         })

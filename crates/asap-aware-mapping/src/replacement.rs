@@ -351,8 +351,8 @@ use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource,
 use asap_types::post_asap::{
     ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm,
     SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams,
-    SummaryExpr, SummaryFamilyType, SummaryField, SummaryInput, SummaryNode, SummarySchema,
-    TopKInput, TopKItem, TopKUpdate, WaveletKind, WaveletParams,
+    SummaryExpr, SummaryFamilyType, SummaryField, SummaryInput, SummaryKey, SummaryNode,
+    SummarySchema, SummaryValue, WaveletKind, WaveletParams,
 };
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
@@ -1749,7 +1749,7 @@ fn realize_physical_summary_input(
     }
     Ok(PhysicalSummaryInput {
         child: Rc::clone(child),
-        input: SummaryInput::Column(summarised_column(intent, &child_schema)),
+        input: SummaryInput::column(summarised_column(intent, &child_schema)),
     })
 }
 
@@ -1868,9 +1868,9 @@ fn realize_additive_ranked_topk_input(
     else {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
-    let update = match measures.as_slice() {
-        [AggIntent::Count { .. }] => TopKUpdate::Constant(1.0),
-        [AggIntent::Sum { col }] => TopKUpdate::Value(match col {
+    let value = match measures.as_slice() {
+        [AggIntent::Count { .. }] => SummaryValue::Constant(1.0),
+        [AggIntent::Sum { col }] => SummaryValue::Column(match col {
             None => ColumnRef::SampleValue,
             Some(index) => match schema_column_ref(raw_child, *index) {
                 Some(column) => column,
@@ -1883,22 +1883,22 @@ fn realize_additive_ranked_topk_input(
         }),
         _ => return PhysicalSummaryInputRuleResult::NotApplicable,
     };
-    if matches!(update, TopKUpdate::Value(_))
+    if matches!(value, SummaryValue::Column(_))
         && matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
     {
         return PhysicalSummaryInputRuleResult::Unsupported(
             "value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values",
         );
     }
-    let item = match reduction {
-        Reduction::PerEntity => TopKItem::SeriesIdentity,
+    let key = match reduction {
+        Reduction::PerEntity => SummaryKey::SeriesIdentity,
         Reduction::Reduce(keys) if !keys.is_without() && keys.len() == 1 => {
             let Some(key) = schema_column_ref(raw_child, keys[0]) else {
                 return PhysicalSummaryInputRuleResult::Unsupported(
                     "Top-K grouping key is outside the raw input schema",
                 );
             };
-            TopKItem::Column(key)
+            SummaryKey::Column(key)
         }
         Reduction::Reduce(_) => {
             return PhysicalSummaryInputRuleResult::Unsupported(
@@ -1908,7 +1908,10 @@ fn realize_additive_ranked_topk_input(
     };
     PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
         child: Rc::clone(raw_child),
-        input: SummaryInput::TopK(TopKInput { item, update }),
+        input: SummaryInput {
+            key: Some(key),
+            value,
+        },
     })
 }
 
@@ -2061,17 +2064,14 @@ fn readout(
     match intent {
         AggIntent::Quantile { q, .. } => PostAsapSketchQuery::Quantile { q: *q },
         AggIntent::Cardinality { .. } => PostAsapSketchQuery::Cardinality,
-        AggIntent::TopK { k, .. } => match input {
-            SummaryInput::TopK(input) => PostAsapSketchQuery::TopK {
-                k: *k,
-                input: input.clone(),
-            },
-            SummaryInput::Column(_) => unreachable!("Top-K requires structured input"),
-        },
+        AggIntent::TopK { k, .. } => PostAsapSketchQuery::TopK { k: *k },
         AggIntent::Count { .. } => PostAsapSketchQuery::PointCount {
             key: match input {
-                SummaryInput::Column(col) => col.clone(),
-                SummaryInput::TopK(_) => unreachable!("point count requires one column"),
+                SummaryInput {
+                    key: None,
+                    value: SummaryValue::Column(col),
+                } => col.clone(),
+                _ => unreachable!("point count requires one column"),
             },
             value: None,
         },
@@ -2081,8 +2081,11 @@ fn readout(
         // intent gets a summary realization at all. See `readout_extension`'s
         // doc for the invariant this depends on.
         AggIntent::Extension { ext_kind, payload } => match input {
-            SummaryInput::Column(col) => cost_model.readout_extension(ext_kind, payload, col),
-            SummaryInput::TopK(_) => unreachable!("extension readout requires one column"),
+            SummaryInput {
+                key: None,
+                value: SummaryValue::Column(col),
+            } => cost_model.readout_extension(ext_kind, payload, col),
+            _ => unreachable!("extension readout requires one column"),
         },
         other => {
             unreachable!("no summary realization for {other:?} (implementations_for_with)")
@@ -6349,7 +6352,7 @@ mod tests {
                 GroupingStrategy::default()
             )
         );
-        assert_eq!(input, &SummaryInput::Column(ColumnRef::SampleValue));
+        assert_eq!(input, &SummaryInput::column(ColumnRef::SampleValue));
         assert_eq!(reduction, &ReductionTy::by(vec![2]));
         // SummaryAgg edge: the state column carries the committed family.
         assert_eq!(
@@ -6689,7 +6692,11 @@ mod tests {
     fn find_summary_col(node: &SummaryNode) -> Option<ColumnRef> {
         match &node.expr {
             SummaryExpr::SummaryAgg {
-                input: SummaryInput::Column(col),
+                input:
+                    SummaryInput {
+                        key: None,
+                        value: SummaryValue::Column(col),
+                    },
                 ..
             } => Some(col.clone()),
             SummaryExpr::SummaryEstimate { summary_input, .. } => find_summary_col(summary_input),
@@ -6883,16 +6890,7 @@ mod tests {
         else {
             panic!("expected Top-K readout")
         };
-        assert!(matches!(
-            query,
-            PostAsapSketchQuery::TopK {
-                k: 10,
-                input: TopKInput {
-                    item: TopKItem::Column(ColumnRef::Named(name)),
-                    update: TopKUpdate::Constant(1.0),
-                }
-            } if name == "service"
-        ));
+        assert!(matches!(query, PostAsapSketchQuery::TopK { k: 10 }));
         let SummaryExpr::SummaryAgg {
             child,
             family,
@@ -6904,10 +6902,10 @@ mod tests {
         };
         assert!(matches!(
             input,
-            SummaryInput::TopK(TopKInput {
-                item: TopKItem::Column(ColumnRef::Named(name)),
-                update: TopKUpdate::Constant(1.0),
-            }) if name == "service"
+            SummaryInput {
+                key: Some(SummaryKey::Column(ColumnRef::Named(name))),
+                value: SummaryValue::Constant(1.0),
+            } if name == "service"
         ));
         assert!(matches!(
             family,
@@ -6957,25 +6955,16 @@ mod tests {
         else {
             panic!("expected Top-K readout")
         };
-        assert!(matches!(
-            query,
-            PostAsapSketchQuery::TopK {
-                k: 5,
-                input: TopKInput {
-                    item: TopKItem::Column(ColumnRef::Named(name)),
-                    update: TopKUpdate::Value(ColumnRef::SampleValue),
-                }
-            } if name == "service"
-        ));
+        assert!(matches!(query, PostAsapSketchQuery::TopK { k: 5 }));
         let SummaryExpr::SummaryAgg { child, input, .. } = &summary_input.expr else {
             panic!("expected fused summary aggregation")
         };
         assert!(matches!(
             input,
-            SummaryInput::TopK(TopKInput {
-                item: TopKItem::Column(ColumnRef::Named(name)),
-                update: TopKUpdate::Value(ColumnRef::SampleValue),
-            }) if name == "service"
+            SummaryInput {
+                key: Some(SummaryKey::Column(ColumnRef::Named(name))),
+                value: SummaryValue::Column(ColumnRef::SampleValue),
+            } if name == "service"
         ));
         assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(_)));
     }
@@ -7017,14 +7006,14 @@ mod tests {
             let SummaryExpr::SummaryAgg { input, .. } = &summary_input.expr else {
                 return None;
             };
-            matches!(input, SummaryInput::TopK(_)).then_some(input)
+            input.key.is_some().then_some(input)
         });
         assert!(matches!(
             input,
-            Some(SummaryInput::TopK(TopKInput {
-                item: TopKItem::SeriesIdentity,
-                update: TopKUpdate::Value(ColumnRef::SampleValue),
-            }))
+            Some(SummaryInput {
+                key: Some(SummaryKey::SeriesIdentity),
+                value: SummaryValue::Column(ColumnRef::SampleValue),
+            })
         ));
     }
 
@@ -7080,7 +7069,11 @@ mod tests {
         let q = agg(vec![0], AggIntent::Sum { col: Some(1) }, scan);
         let root = realize(&q).unwrap();
         let SummaryExpr::SummaryAgg {
-            input: SummaryInput::Column(col),
+            input:
+                SummaryInput {
+                    key: None,
+                    value: SummaryValue::Column(col),
+                },
             ..
         } = &root.expr
         else {
