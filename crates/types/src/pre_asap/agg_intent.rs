@@ -89,10 +89,6 @@ pub enum AggIntent<C = ColumnId> {
     // rather than a base column, so it carries no `col` — see #13 / #25.
     TopK {
         k: usize,
-        /// Additive measure being ranked. This remains explicit in canonical
-        /// IR so downstream planning never needs to re-parse source syntax.
-        #[serde(default)]
-        ranking: TopKRanking,
         accuracy: AccuracyTarget,
     },
     /// Distinct-value count of `col`. SQL `COUNT(DISTINCT col)`; PromQL
@@ -531,17 +527,6 @@ fn quantile_suffix(q: f64) -> String {
 
 // ── AggIntent helpers ────────────────────────────────────────────────────────
 
-/// The two additive ranking semantics a canonical [`AggIntent::TopK`] may
-/// carry. Non-additive rankings remain `Sort + Limit` and are unrepresentable
-/// here, so an invalid heavy-hitter intent cannot be constructed accidentally.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TopKRanking {
-    #[default]
-    Count,
-    Sum,
-}
-
 /// What a top-k ranks its groups by — the axis that decides whether the ranking
 /// is a sketchable **heavy-hitter** or a generic order-by-value `Sort + Limit`.
 ///
@@ -803,7 +788,6 @@ mod tests {
             },
             AggIntent::TopK {
                 k: 10,
-                ranking: TopKRanking::Sum,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             },
         ] {
@@ -832,7 +816,6 @@ mod tests {
             serde_json::from_str::<AggIntent>(legacy).unwrap(),
             AggIntent::TopK {
                 k: 5,
-                ranking: TopKRanking::Count,
                 accuracy: AccuracyTarget::Exact,
             }
         );

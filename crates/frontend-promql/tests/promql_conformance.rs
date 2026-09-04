@@ -846,11 +846,7 @@ fn topk_over_nested_sum_preserves_a_value_weighted_heavy_hitter() {
     assert!(matches!(reduction, Reduction::Reduce(keys) if keys.is_empty()));
     assert!(matches!(
         measures.as_slice(),
-        [AggIntent::TopK {
-            k: 3,
-            ranking: asap_types::pre_asap::TopKRanking::Sum,
-            ..
-        }]
+        [AggIntent::TopK { k: 3, .. }]
     ));
     // The inner `sum by (instance)` survives as a cross-series Aggregate over the
     // per-series rate — the nesting the old two-level template could not express.

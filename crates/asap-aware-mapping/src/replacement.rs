@@ -354,7 +354,7 @@ use asap_types::post_asap::{
     SummaryExpr, SummaryFamilyType, SummaryField, SummaryInput, SummaryNode, SummarySchema,
     TopKInput, TopKItem, TopKUpdate, WaveletKind, WaveletParams,
 };
-use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent, TopKRanking};
+use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
@@ -1888,19 +1888,6 @@ fn realize_additive_ranked_topk_input(
     {
         return PhysicalSummaryInputRuleResult::Unsupported(
             "value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values",
-        );
-    }
-    let AggIntent::TopK { ranking, .. } = intent else {
-        unreachable!("Top-K checked above")
-    };
-    let ranking_matches = match (ranking, &update) {
-        (TopKRanking::Count, TopKUpdate::Constant(weight)) => *weight == 1.0,
-        (TopKRanking::Sum, TopKUpdate::Value(_)) => true,
-        _ => false,
-    };
-    if !ranking_matches {
-        return PhysicalSummaryInputRuleResult::Unsupported(
-            "Top-K ranking basis disagrees with its additive child",
         );
     }
     let item = match reduction {
@@ -4285,7 +4272,6 @@ mod tests {
             (
                 A::TopK {
                     k: 10,
-                    ranking: TopKRanking::Count,
                     accuracy: eps(0.01),
                 },
                 Sketch(K::CmsWithHeap),
@@ -4315,7 +4301,6 @@ mod tests {
             (
                 A::TopK {
                     k: 10,
-                    ranking: TopKRanking::Count,
                     accuracy: AccuracyTarget::Exact,
                 },
                 Pass,
@@ -4489,7 +4474,6 @@ mod tests {
     fn topk_heap_size_tracks_k() {
         let intent = AggIntent::TopK {
             k: 25,
-            ranking: TopKRanking::Count,
             accuracy: eps(0.01),
         };
         match preferred(&intent) {
@@ -4527,7 +4511,6 @@ mod tests {
         assert_eq!(
             summary_candidates(&AggIntent::TopK {
                 k: 5,
-                ranking: TopKRanking::Count,
                 accuracy: eps(0.01)
             }),
             &[
@@ -4659,7 +4642,6 @@ mod tests {
     fn posterior_aware_sizing_does_not_apply_cms_l1_relaxation_to_count_sketch() {
         let cms_heap_intent = AggIntent::TopK {
             k: 7,
-            ranking: TopKRanking::Count,
             accuracy: eps(0.01),
         };
         let assumption = ExpectedCaseSizing {
@@ -6791,7 +6773,6 @@ mod tests {
             vec![2],
             AggIntent::TopK {
                 k: 5,
-                ranking: TopKRanking::Count,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             },
             metric_scan(&["job"]),
@@ -6838,7 +6819,6 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 5,
-                ranking: TopKRanking::Count,
                 accuracy: AccuracyTarget::EpsilonDelta {
                     epsilon: 0.0,
                     delta: 0.01,
@@ -6876,7 +6856,6 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 10,
-                ranking: TopKRanking::Count,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             },
             inner,
@@ -6949,7 +6928,6 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 5,
-                ranking: TopKRanking::Sum,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             },
             inner,
@@ -7018,7 +6996,6 @@ mod tests {
             vec![2],
             AggIntent::TopK {
                 k: 5,
-                ranking: TopKRanking::Sum,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             },
             inner,
@@ -7067,7 +7044,6 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 10,
-                ranking: TopKRanking::Count,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             },
             inner,
@@ -7424,7 +7400,6 @@ mod tests {
             vec![],
             AggIntent::TopK {
                 k: 10,
-                ranking: TopKRanking::Count,
                 accuracy: AccuracyTarget::Epsilon(0.01),
             },
             inner,

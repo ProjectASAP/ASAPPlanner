@@ -212,14 +212,7 @@ fn same_intent_except_accuracy(a: &AggIntent, b: &AggIntent) -> bool {
             AggIntent::Quantile { col: c1, q: q1, .. },
             AggIntent::Quantile { col: c2, q: q2, .. },
         ) => c1 == c2 && q1 == q2,
-        (
-            AggIntent::TopK {
-                k: k1, ranking: r1, ..
-            },
-            AggIntent::TopK {
-                k: k2, ranking: r2, ..
-            },
-        ) => k1 == k2 && r1 == r2,
+        (AggIntent::TopK { k: k1, .. }, AggIntent::TopK { k: k2, .. }) => k1 == k2,
         (AggIntent::Cardinality { col: c1, .. }, AggIntent::Cardinality { col: c2, .. }) => {
             c1 == c2
         }
@@ -619,18 +612,16 @@ mod tests {
     }
 
     #[test]
-    fn different_topk_ranking_bases_are_not_near_duplicates() {
-        let count_ranked = AggIntent::TopK {
+    fn topk_intents_differing_only_in_accuracy_are_near_duplicates() {
+        let tight = AggIntent::TopK {
             k: 10,
-            ranking: asap_types::pre_asap::TopKRanking::Count,
             accuracy: AccuracyTarget::Epsilon(0.01),
         };
-        let value_ranked = AggIntent::TopK {
+        let loose = AggIntent::TopK {
             k: 10,
-            ranking: asap_types::pre_asap::TopKRanking::Sum,
             accuracy: AccuracyTarget::Epsilon(0.02),
         };
-        assert!(!same_intent_except_accuracy(&count_ranked, &value_ranked));
+        assert!(same_intent_except_accuracy(&tight, &loose));
     }
 
     #[test]

@@ -122,7 +122,6 @@ async fn additive_sum_ranking_is_weighted_topk_but_raw_values_stay_generic() {
         &s,
         QueryExpr::Aggregate { measures, .. }
             if matches!(measures.as_slice(), [AggIntent::TopK {
-                ranking: asap_types::pre_asap::TopKRanking::Sum,
                 ..
             }])
     ));

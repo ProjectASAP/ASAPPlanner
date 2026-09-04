@@ -65,7 +65,7 @@ use promql_parser::parser::{
 };
 
 use asap_types::pre_asap::agg_intent::{
-    is_heavy_hitter_ranking, AggIntent, MathFunc, RankingMeasure, TimeFunc, TopKRanking,
+    is_heavy_hitter_ranking, AggIntent, MathFunc, RankingMeasure, TimeFunc,
 };
 use asap_types::pre_asap::query_expr::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, Reduction, SortKey, Source,
@@ -1473,13 +1473,6 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                     reduction: Reduction::Reduce(keys.into()),
                     measures: vec![AggIntent::TopK {
                         k: k as usize,
-                        ranking: match measure {
-                            RankingMeasure::Frequency => TopKRanking::Count,
-                            RankingMeasure::WeightedSum => TopKRanking::Sum,
-                            RankingMeasure::NonAdditive => {
-                                unreachable!("heavy-hitter gate rejected non-additive ranking")
-                            }
-                        },
                         accuracy: current_accuracy(),
                     }],
                     output_names: vec![],

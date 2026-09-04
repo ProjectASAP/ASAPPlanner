@@ -18,14 +18,12 @@
 //!             child: Aggregate { measures: [Count|Sum], … } }
 //! ```
 //!
-//! — an outer `TopK` whose explicit `ranking` agrees with the inner additive
-//! aggregate. Because the match is positional, aliases do not affect it.
+//! — an outer `TopK` over the inner additive aggregate. Because the match is
+//! positional, aliases do not affect it.
 
 use std::rc::Rc;
 
-use super::agg_intent::{
-    is_heavy_hitter_ranking, ranking_measure, AggIntent, RankingMeasure, TopKRanking,
-};
+use super::agg_intent::{is_heavy_hitter_ranking, ranking_measure, AggIntent};
 use super::expr_ir::{CompareOpKind, ScalarValue};
 use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
 use crate::types::AccuracyTarget;
@@ -194,11 +192,6 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     if !is_heavy_hitter_ranking(!ascending, ranking_measure(ranked_agg)) {
         return None;
     }
-    let ranking = match ranking_measure(ranked_agg) {
-        RankingMeasure::Frequency => TopKRanking::Count,
-        RankingMeasure::WeightedSum => TopKRanking::Sum,
-        RankingMeasure::NonAdditive => return None,
-    };
     let accuracy = match ranked_agg {
         AggIntent::Count { accuracy } => accuracy.clone(),
         // SUM carries no local approximation target. Workload-level accuracy
@@ -212,11 +205,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     // over the unchanged inner additive aggregate.
     Some(QueryExpr::Aggregate {
         reduction: Reduction::by(partition_by.to_vec()),
-        measures: vec![AggIntent::TopK {
-            k: *k,
-            ranking,
-            accuracy,
-        }],
+        measures: vec![AggIntent::TopK { k: *k, accuracy }],
         output_names: Vec::new(),
         having: None,
         child: Rc::new(agg_expr.clone()),
@@ -443,11 +432,7 @@ mod tests {
         let q = limit(5, 0, sort(desc(1), sum));
         assert!(matches!(canonicalize(q),
             QueryExpr::Aggregate { measures, child, .. }
-                if matches!(measures.as_slice(), [AggIntent::TopK {
-                    k: 5,
-                    ranking: TopKRanking::Sum,
-                    ..
-                }])
+                if matches!(measures.as_slice(), [AggIntent::TopK { k: 5, .. }])
                 && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
                     if matches!(measures.as_slice(), [AggIntent::Sum { .. }]))));
     }
