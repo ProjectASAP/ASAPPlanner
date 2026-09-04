@@ -554,7 +554,7 @@ impl RankingMeasure {
     /// Whether a top-k ranked by this measure can be a heavy-hitter **with a
     /// sketch that exists today**. Frequency uses unit updates and WeightedSum
     /// uses sample-value updates.
-    pub fn is_realised_heavy_hitter(self) -> bool {
+    pub fn is_additive(self) -> bool {
         matches!(
             self,
             RankingMeasure::Frequency | RankingMeasure::WeightedSum
@@ -573,12 +573,12 @@ pub fn ranking_measure(agg: &AggIntent) -> RankingMeasure {
 }
 
 /// The single rule that decides whether a top-k ranking is an additive
-/// **heavy-hitter** that [`AggIntent::TopK`] represents, as opposed to a generic
+/// additive ranking that [`AggIntent::TopK`] represents, as opposed to a generic
 /// order-by-value `Sort + Limit`.
 ///
 /// A ranking qualifies iff it takes the **top** k — `descending` (bottom-k, and
 /// any ascending `ORDER BY … LIMIT`, never do) — **and** ranks by a measure with
-/// a realised heavy-hitter sketch ([`RankingMeasure::is_realised_heavy_hitter`],
+/// an additive update ([`RankingMeasure::is_additive`],
 /// i.e. [`Frequency`](RankingMeasure::Frequency) or
 /// [`WeightedSum`](RankingMeasure::WeightedSum) today). Both places
 /// that make this decision consult this one predicate so they cannot drift
@@ -596,8 +596,8 @@ pub fn ranking_measure(agg: &AggIntent) -> RankingMeasure {
 /// temporal reduction vs. a cross-series `GROUP BY` aggregate), which is why the
 /// shape-matching stays language-specific; only this heavy-hitter *decision* is
 /// shared.
-pub fn is_heavy_hitter_ranking(descending: bool, measure: RankingMeasure) -> bool {
-    descending && measure.is_realised_heavy_hitter()
+pub fn is_additive_top_ranking(descending: bool, measure: RankingMeasure) -> bool {
+    descending && measure.is_additive()
 }
 
 /// Two instances of this aggregation can be merged
@@ -728,10 +728,10 @@ mod tests {
         use RankingMeasure::*;
         // Heavy-hitter iff descending and the ranking measure has a physical
         // heap-sketch realization.
-        assert!(is_heavy_hitter_ranking(true, Frequency));
-        assert!(!is_heavy_hitter_ranking(false, Frequency));
-        assert!(!is_heavy_hitter_ranking(true, NonAdditive));
-        assert!(is_heavy_hitter_ranking(true, WeightedSum));
+        assert!(is_additive_top_ranking(true, Frequency));
+        assert!(!is_additive_top_ranking(false, Frequency));
+        assert!(!is_additive_top_ranking(true, NonAdditive));
+        assert!(is_additive_top_ranking(true, WeightedSum));
     }
 
     #[test]
@@ -747,9 +747,9 @@ mod tests {
         assert_eq!(ranking_measure(&AggIntent::Avg { col: None }), NonAdditive);
         assert_eq!(ranking_measure(&AggIntent::Max { col: None }), NonAdditive);
         // Both additive ranking measures have heap-sketch realizations.
-        assert!(Frequency.is_realised_heavy_hitter());
-        assert!(WeightedSum.is_realised_heavy_hitter());
-        assert!(!NonAdditive.is_realised_heavy_hitter());
+        assert!(Frequency.is_additive());
+        assert!(WeightedSum.is_additive());
+        assert!(!NonAdditive.is_additive());
     }
 
     #[test]

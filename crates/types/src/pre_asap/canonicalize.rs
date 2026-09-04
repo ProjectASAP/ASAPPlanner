@@ -23,7 +23,7 @@
 
 use std::rc::Rc;
 
-use super::agg_intent::{is_heavy_hitter_ranking, ranking_measure, AggIntent};
+use super::agg_intent::{is_additive_top_ranking, ranking_measure, AggIntent};
 use super::expr_ir::{CompareOpKind, ScalarValue};
 use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
 use crate::types::AccuracyTarget;
@@ -39,7 +39,7 @@ fn canon(expr: &mut QueryExpr) {
     // A `Concat` asserting a caller-proven `discriminator_unique_key` (issue
     // #228) had that key's `ColumnId`s resolved, in `resolve.rs`, against
     // exactly the first branch's output schema *as it stood before this
-    // pass ran*. `try_promote_heavy_hitter`/`try_rewrite_rownumber_topk`
+    // pass ran*. `try_promote_additive_top_ranking`/`try_rewrite_rownumber_topk`
     // below can restructure that branch (anywhere within it — not only at
     // its own top level, since the same recursive walk can rewrite a node
     // nested under a pass-through wrapper too) into a shape with a
@@ -87,7 +87,7 @@ fn canon(expr: &mut QueryExpr) {
     // `Aggregate([TopK])`. Each rule strictly simplifies the node, so applying
     // them to a fixpoint terminates.
     while let Some(rewritten) =
-        try_rewrite_rownumber_topk(expr).or_else(|| try_promote_heavy_hitter(expr))
+        try_rewrite_rownumber_topk(expr).or_else(|| try_promote_additive_top_ranking(expr))
     {
         *expr = rewritten;
     }
@@ -163,7 +163,7 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
 /// Recognise a count-ranked `Limit { Sort { [Project] Aggregate([Count]) } }`
 /// and rewrite it to the canonical heavy-hitter `Aggregate([TopK])` over the
 /// explicit inner `Count`. Returns `None` when the shape does not match.
-fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
+fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     // Limit k, no offset (an OFFSET means "not the top k").
     let QueryExpr::Limit {
         n: k,
@@ -230,7 +230,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     // consult (issue #38). So an ascending additive-ranked limit
     // (`ORDER BY COUNT(*) ASC LIMIT k` = bottom-k) stays generic, exactly as
     // PromQL `bottomk(k, count_over_time(…))` does.
-    if !is_heavy_hitter_ranking(!ascending, ranking_measure(ranked_agg)) {
+    if !is_additive_top_ranking(!ascending, ranking_measure(ranked_agg)) {
         return None;
     }
     let accuracy = match ranked_agg {
@@ -257,7 +257,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
 /// `ROW_NUMBER() OVER (PARTITION BY p ORDER BY o)` — and rewrite it to the
 /// generic partitioned top-k `Limit{k} { Sort{ o, partition_by: p } }` (issue
 /// #24). The count-ranked case is then promoted to a heavy-hitter `TopK` by
-/// [`try_promote_heavy_hitter`], so a SQL `ROW_NUMBER` top-k and the PromQL
+/// [`try_promote_additive_top_ranking`], so a SQL `ROW_NUMBER` top-k and the PromQL
 /// `topk by (…)` it mirrors converge on the same canonical shape.
 fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
     // Filter { pred: `Column(rn) <= k` }.
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn does_not_promote_ascending_sort() {
-        // Ascending = bottom-k: the shared `is_heavy_hitter_ranking` rule
+        // Ascending = bottom-k: the shared `is_additive_top_ranking` rule
         // rejects it (needs descending), so it stays a generic Sort+Limit — the
         // same call PromQL `bottomk` makes (issue #38).
         let asc = vec![SortKey {

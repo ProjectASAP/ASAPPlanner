@@ -135,7 +135,7 @@ async fn additive_sum_ranking_is_weighted_topk_but_raw_values_stay_generic() {
 async fn ascending_count_ranked_topk_stays_generic_in_both_languages() {
     // The symmetric bottom-k case (issue #38): ranking by a count but taking the
     // *bottom* k is NOT a frequency heavy-hitter — the shared decision rule
-    // (`is_heavy_hitter_ranking`) requires descending. Both front ends must
+    // (`is_additive_top_ranking`) requires descending. Both front ends must
     // make the same call: SQL `ORDER BY COUNT(*) ASC LIMIT k` and PromQL
     // `bottomk(k, count_over_time(…))` both stay a generic Sort+Limit, never a
     // TopK. This pins the two count-ranked detectors to agree on direction.

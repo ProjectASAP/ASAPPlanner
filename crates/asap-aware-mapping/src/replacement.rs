@@ -1724,7 +1724,7 @@ type PhysicalSummaryInputRule =
 /// instead of adding query- or algorithm-specific branches to
 /// `construct_summary_agg`.
 const PHYSICAL_SUMMARY_INPUT_RULES: &[PhysicalSummaryInputRule] =
-    &[realize_additive_ranked_topk_input];
+    &[realize_keyed_additive_summary_input];
 
 fn realize_physical_summary_input(
     intent: &AggIntent,
@@ -1840,7 +1840,7 @@ fn construct_summary_agg(
 /// Realize the composite heavy-hitter implementation for
 /// `TopK(Count GROUP BY key)`. The heap sketch consumes the raw keyed stream;
 /// it does not consume an independently materialized Count result.
-fn realize_additive_ranked_topk_input(
+fn realize_keyed_additive_summary_input(
     intent: &AggIntent,
     family: &SummaryFamilyType,
     child: &Rc<QueryExpr>,

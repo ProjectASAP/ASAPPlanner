@@ -2528,7 +2528,7 @@ mod tests {
             expr: SummaryExpr::SummaryAgg {
                 child,
                 family: SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count),
-                col: ColumnRef::Wildcard,
+                input: asap_types::post_asap::SummaryInput::column(ColumnRef::Wildcard),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::PerSubpopulationInstance,
             },
@@ -2895,7 +2895,7 @@ mod tests {
             expr: SummaryExpr::SummaryAgg {
                 child: leaf,
                 family: state_type,
-                col: ColumnRef::Wildcard,
+                input: asap_types::post_asap::SummaryInput::column(ColumnRef::Wildcard),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::PerSubpopulationInstance,
             },

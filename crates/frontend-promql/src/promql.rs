@@ -65,7 +65,7 @@ use promql_parser::parser::{
 };
 
 use asap_types::pre_asap::agg_intent::{
-    is_heavy_hitter_ranking, AggIntent, MathFunc, RankingMeasure, TimeFunc,
+    is_additive_top_ranking, AggIntent, MathFunc, RankingMeasure, TimeFunc,
 };
 use asap_types::pre_asap::query_expr::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, Reduction, SortKey, Source,
@@ -1457,8 +1457,8 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                 Some(InnerFunc::Sum) => RankingMeasure::WeightedSum,
                 _ => RankingMeasure::NonAdditive,
             };
-            let heavy_hitter = is_heavy_hitter_ranking(descending, measure);
-            if heavy_hitter {
+            let additive_ranking = is_additive_top_ranking(descending, measure);
+            if additive_ranking {
                 // Preserve the ranked aggregate intent in the canonical tree so the
                 // intent algebra is explicit about what is being computed.
                 // Post-ASAP binding may fuse the Count and TopK into a
