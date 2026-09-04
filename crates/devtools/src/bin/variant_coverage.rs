@@ -88,7 +88,7 @@ fn walk(e: &QueryExpr, seen: &mut BTreeSet<&'static str>) {
             seen.insert("Dedup");
             walk(child, seen);
         }
-        QueryExpr::Concat { children } => {
+        QueryExpr::Concat { children, .. } => {
             seen.insert("Concat");
             children.iter().for_each(|c| walk(c, seen));
         }

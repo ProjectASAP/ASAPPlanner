@@ -865,7 +865,14 @@ impl<'a> SqlLowerer<'a> {
             })
             .collect::<Result<Vec<_>, LoweringError>>()?;
 
-        Ok(Unresolved::Concat { children: branches })
+        // No discriminator asserted here today (issue #228): DataFusion's own
+        // `__grouping_id` would be the natural one, but this front end
+        // already discards it (see above — `GROUPING()` itself is rejected),
+        // so there is no distinct-per-branch column available to name yet.
+        // `Unresolved::concat` keeps `output_schema`'s default (drop
+        // `unique_keys` entirely). See
+        // `docs/design_docs/concat-unique-keys-decision.md`.
+        Ok(Unresolved::concat(branches))
     }
 
     fn lower_sort(&self, sort: &logical_expr::Sort) -> Result<Unresolved, LoweringError> {

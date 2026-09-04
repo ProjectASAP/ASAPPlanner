@@ -59,8 +59,8 @@ use super::column_resolution::{
 };
 use super::expr_ir::ColumnRef;
 use super::query_expr::{
-    aggregate_output_schema, GroupKeys, Predicate, ProjectItem, QueryExprError, Reduction,
-    ResolvedQueryExpr, SortKey, UnresolvedQueryExpr,
+    aggregate_output_schema, ConcatDiscriminatorKey, GroupKeys, Predicate, ProjectItem,
+    QueryExprError, Reduction, ResolvedQueryExpr, SortKey, UnresolvedQueryExpr,
 };
 use super::schema::{ColumnId, Schema};
 
@@ -242,12 +242,40 @@ fn resolve(
             }
         }
 
-        QE::Concat { children } => QE::Concat {
-            children: children
+        QE::Concat {
+            children,
+            discriminator_unique_key,
+        } => {
+            let children: Vec<_> = children
                 .iter()
                 .map(|c| resolve(c, fallback))
-                .collect::<Result<Vec<_>, _>>()?,
-        },
+                .collect::<Result<Vec<_>, _>>()?;
+            // No front end asserts this today (issue #228 shipped the
+            // extension point ahead of a wired call site) — resolved here
+            // regardless, against the first resolved branch's own output
+            // schema, exactly the schema `output_schema`'s `Concat` arm
+            // derives the merged schema from, so a future direct
+            // `concat_with_discriminator` caller upstream of `resolve_root`
+            // gets a correctly positional `ConcatDiscriminatorKey` out the
+            // other side.
+            let discriminator_unique_key = discriminator_unique_key
+                .as_ref()
+                .map(|key| -> Result<_, ResolveTreeError> {
+                    let schema = children
+                        .first()
+                        .ok_or(QueryExprError::EmptyConcat)?
+                        .output_schema()?;
+                    Ok(ConcatDiscriminatorKey::new(
+                        resolve_column_ref(key.discriminator(), &schema)?,
+                        resolve_column_refs(key.inner_key(), &schema)?,
+                    ))
+                })
+                .transpose()?;
+            QE::Concat {
+                children,
+                discriminator_unique_key,
+            }
+        }
 
         QE::Join {
             kind,
@@ -619,6 +647,47 @@ mod tests {
         assert_eq!(
             resolved.output_schema().unwrap(),
             lhs.output_schema().unwrap()
+        );
+    }
+
+    /// Issue #228 review, end-to-end: `resolve_root` over a `Concat` whose
+    /// discriminator column is referenced *nowhere else* in the tree, with a
+    /// schema-less (usage-derived) leaf `Scan` in the first branch — exactly
+    /// the scenario the review flagged. Before the `binder.rs` fix, the
+    /// Binder's fallback schema wouldn't contain `phi` at all, and this
+    /// `resolve_column_ref` call would fail `NotFound` for a column the
+    /// caller correctly named. It must resolve cleanly, and the resolved
+    /// `ConcatDiscriminatorKey` must carry the *positional* `ColumnId`s of
+    /// the branch's own (usage-derived) schema.
+    #[test]
+    fn resolve_root_seeds_and_resolves_an_otherwise_unreferenced_discriminator_column() {
+        let branch = || UnresolvedQueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: None,
+        };
+        let unresolved = UnresolvedQueryExpr::concat_with_discriminator(
+            vec![branch(), branch()],
+            ColumnRef::Named("phi".into()),
+            vec![ColumnRef::Named("host".into())],
+        );
+
+        let resolved = resolve_root(&unresolved).expect("resolves");
+        let QueryExpr::Concat {
+            children,
+            discriminator_unique_key,
+        } = &resolved
+        else {
+            panic!("expected a resolved Concat, got {resolved:?}");
+        };
+        let schema = children[0].output_schema().unwrap();
+        let key = discriminator_unique_key
+            .as_ref()
+            .expect("discriminator key survives resolution");
+        assert_eq!(*key.discriminator(), schema.column_id("phi").unwrap());
+        assert_eq!(
+            key.inner_key().to_vec(),
+            vec![schema.column_id("host").unwrap()]
         );
     }
 }

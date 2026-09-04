@@ -290,7 +290,7 @@ fn visit(qe: &QueryExpr, f: &mut impl FnMut(&QueryExpr)) {
             visit(lhs, f);
             visit(rhs, f);
         }
-        QueryExpr::Concat { children } => {
+        QueryExpr::Concat { children, .. } => {
             for child in children {
                 visit(child, f);
             }

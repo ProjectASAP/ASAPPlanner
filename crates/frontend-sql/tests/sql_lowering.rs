@@ -1292,7 +1292,7 @@ async fn a_shared_expression_is_materialized_once() {
 fn merge_branches(qe: &QueryExpr) -> &Vec<QueryExpr> {
     fn find(qe: &QueryExpr) -> Option<&Vec<QueryExpr>> {
         match qe {
-            QueryExpr::Concat { children } => Some(children),
+            QueryExpr::Concat { children, .. } => Some(children),
             QueryExpr::Project { child, .. }
             | QueryExpr::Filter { child, .. }
             | QueryExpr::Sort { child, .. }
