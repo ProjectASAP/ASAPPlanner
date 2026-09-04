@@ -518,50 +518,34 @@ impl Default for GroupingStrategy {
 
 // ── Sketch read-out queries ───────────────────────────────────────────────────
 
-/// Role-labelled arguments consumed by one summary update. The summary
-/// operator/family defines which roles it accepts; the shared IR does not
-/// impose a fixed key/value shape on every summary.
+/// One summary-state update. `item` identifies a keyed item when the family
+/// is keyed; `weight` is the observation/update expression applied to state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SummaryInput {
-    pub arguments: Vec<SummaryArgument>,
+pub struct SummaryUpdate {
+    pub item: Option<SummaryInputExpr>,
+    pub weight: SummaryInputExpr,
 }
 
-impl SummaryInput {
+impl SummaryUpdate {
     pub fn column(column: ColumnRef) -> Self {
         Self {
-            arguments: vec![SummaryArgument {
-                role: SummaryArgumentRole::Observation,
-                expression: SummaryInputExpr::Column(column),
-            }],
+            item: None,
+            weight: SummaryInputExpr::Column(column),
         }
     }
-
-    pub fn expression(&self, role: SummaryArgumentRole) -> Option<&SummaryInputExpr> {
-        self.arguments
-            .iter()
-            .find(|argument| argument.role == role)
-            .map(|argument| &argument.expression)
-    }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SummaryArgument {
-    pub role: SummaryArgumentRole,
-    pub expression: SummaryInputExpr,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SummaryArgumentRole {
-    Observation,
-    Item,
-    Weight,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntityIdentity {
+    PromqlLabelSet { excluding: Vec<ColumnRef> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SummaryInputExpr {
     Constant(f64),
     Column(ColumnRef),
-    SeriesIdentity,
+    Tuple(Vec<SummaryInputExpr>),
+    EntityIdentity(EntityIdentity),
 }
 
 /// What to extract from a built summary. Carried by `SummaryEstimate`.
@@ -594,34 +578,22 @@ mod tests {
     #[test]
     fn keyed_summary_input_and_topk_readout_round_trip() {
         for input in [
-            SummaryInput {
-                arguments: vec![
-                    SummaryArgument {
-                        role: SummaryArgumentRole::Item,
-                        expression: SummaryInputExpr::SeriesIdentity,
-                    },
-                    SummaryArgument {
-                        role: SummaryArgumentRole::Weight,
-                        expression: SummaryInputExpr::Constant(1.0),
-                    },
-                ],
+            SummaryUpdate {
+                item: Some(SummaryInputExpr::EntityIdentity(
+                    EntityIdentity::PromqlLabelSet { excluding: vec![] },
+                )),
+                weight: SummaryInputExpr::Constant(1.0),
             },
-            SummaryInput {
-                arguments: vec![
-                    SummaryArgument {
-                        role: SummaryArgumentRole::Item,
-                        expression: SummaryInputExpr::Column(ColumnRef::Named("service".into())),
-                    },
-                    SummaryArgument {
-                        role: SummaryArgumentRole::Weight,
-                        expression: SummaryInputExpr::Column(ColumnRef::SampleValue),
-                    },
-                ],
+            SummaryUpdate {
+                item: Some(SummaryInputExpr::Tuple(vec![SummaryInputExpr::Column(
+                    ColumnRef::Named("service".into()),
+                )])),
+                weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
             },
         ] {
             let input_json = serde_json::to_string(&input).unwrap();
             assert_eq!(
-                serde_json::from_str::<SummaryInput>(&input_json).unwrap(),
+                serde_json::from_str::<SummaryUpdate>(&input_json).unwrap(),
                 input
             );
             let query = SketchQuery::TopK { k: 10 };

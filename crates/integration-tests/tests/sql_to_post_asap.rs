@@ -39,7 +39,7 @@ use asap_aware_mapping::{
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::post_asap::{
     ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInput, SummaryNode, SummarySchema,
+    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryNode, SummarySchema, SummaryUpdate,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -200,7 +200,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     );
     assert_eq!(
         input,
-        &SummaryInput::column(ColumnRef::Qualified {
+        &SummaryUpdate::column(ColumnRef::Qualified {
             table: "metrics".into(),
             name: "latency".into(),
         }),
@@ -281,7 +281,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
     );
     assert_eq!(
         input,
-        &SummaryInput::column(ColumnRef::Qualified {
+        &SummaryUpdate::column(ColumnRef::Qualified {
             table: "metrics".into(),
             name: "service".into(),
         })

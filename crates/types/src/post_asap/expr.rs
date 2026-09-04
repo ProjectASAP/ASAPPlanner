@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use super::guarantee::ResultGuarantee;
 use super::schema::{SummaryFamilyType, SummarySchema};
-use super::sketch::{GroupingStrategy, SketchQuery, SummaryInput};
+use super::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
 use crate::pre_asap::{ColumnRef, QueryExpr, Reduction};
 
 // ── Post-ASAP DAG node ───────────────────────────────────────────────────────
@@ -60,8 +60,10 @@ pub enum SummaryExpr {
         /// family's own `(kind, params)`. Never `SummaryFamilyType::Plain`
         /// — this node always produces summary state, not a plain value.
         family: SummaryFamilyType,
-        /// Key and numeric value fed into each summary update.
-        input: SummaryInput,
+        /// Optional multidimensional item identity and the observation/update
+        /// weight fed into each state update. Subpopulation semantics remain
+        /// on `reduction`; physical sharing remains on `grouping`.
+        input: SummaryUpdate,
         /// How this aggregation's output rows relate to `child`'s — the
         /// same [`Reduction`] the pre-ASAP `Aggregate` node it was bound
         /// from carried (issue #165), reused verbatim rather than

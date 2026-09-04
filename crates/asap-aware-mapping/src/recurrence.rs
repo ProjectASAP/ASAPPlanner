@@ -815,7 +815,7 @@ mod tests {
                     guarantee: Some(ResultGuarantee::exact("KeepPreAsap")),
                 }),
                 family: family.clone(),
-                input: asap_types::post_asap::SummaryInput::column(ColumnRef::Named(
+                input: asap_types::post_asap::SummaryUpdate::column(ColumnRef::Named(
                     "value".into(),
                 )),
                 reduction: Reduction::by(vec![]),

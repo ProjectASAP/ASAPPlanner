@@ -349,10 +349,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::post_asap::{
-    ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm,
-    SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams,
-    SummaryArgument, SummaryArgumentRole, SummaryExpr, SummaryFamilyType, SummaryField,
-    SummaryInput, SummaryInputExpr, SummaryNode, SummarySchema, WaveletKind, WaveletParams,
+    EntityIdentity, ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams,
+    SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
+    StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode,
+    SummarySchema, SummaryUpdate, WaveletKind, WaveletParams,
 };
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
@@ -1310,7 +1310,11 @@ impl<'a> SketchAlgorithmStrategy<'a> {
             let Some(child) = aggregate_child(root) else {
                 continue;
             };
-            let Ok(input) = realize_physical_summary_input(intent, &family, child) else {
+            let QueryExpr::Aggregate { reduction, .. } = root.as_ref() else {
+                continue;
+            };
+            let Ok(input) = realize_physical_summary_input(intent, &family, reduction, child)
+            else {
                 continue;
             };
             let readout_query = readout(intent, &input.input, models.cost);
@@ -1656,7 +1660,7 @@ pub(crate) fn construct_summary_with(
         // intent, no HAVING. (Multi-intent nodes and HAVING stay logical.)
         if bindable_intent(expr).is_some() {
             if let Some((family, estimate)) = summary_family(implementation) {
-                let input = realize_physical_summary_input(intent, &family, child)?;
+                let input = realize_physical_summary_input(intent, &family, reduction, child)?;
                 return construct_summary_agg(
                     expr,
                     reduction,
@@ -1707,7 +1711,7 @@ fn summary_family(implementation: Implementation) -> Option<(SummaryFamilyType, 
 /// logical sub-DAG and bind a different key or value.
 struct PhysicalSummaryInput {
     child: Rc<QueryExpr>,
-    input: SummaryInput,
+    input: SummaryUpdate,
 }
 
 enum PhysicalSummaryInputRuleResult {
@@ -1716,8 +1720,12 @@ enum PhysicalSummaryInputRuleResult {
     Unsupported(&'static str),
 }
 
-type PhysicalSummaryInputRule =
-    fn(&AggIntent, &SummaryFamilyType, &Rc<QueryExpr>) -> PhysicalSummaryInputRuleResult;
+type PhysicalSummaryInputRule = fn(
+    &AggIntent,
+    &SummaryFamilyType,
+    &Reduction,
+    &Rc<QueryExpr>,
+) -> PhysicalSummaryInputRuleResult;
 
 /// Ordered physical-realization rules for implementations that consume more
 /// than the immediate logical input. New composite primitives add a rule here
@@ -1729,10 +1737,11 @@ const PHYSICAL_SUMMARY_INPUT_RULES: &[PhysicalSummaryInputRule] =
 fn realize_physical_summary_input(
     intent: &AggIntent,
     family: &SummaryFamilyType,
+    reduction: &Reduction,
     child: &Rc<QueryExpr>,
 ) -> Result<PhysicalSummaryInput, ImplementError> {
     for rule in PHYSICAL_SUMMARY_INPUT_RULES {
-        match rule(intent, family, child) {
+        match rule(intent, family, reduction, child) {
             PhysicalSummaryInputRuleResult::NotApplicable => {}
             PhysicalSummaryInputRuleResult::Realized(input) => return Ok(input),
             PhysicalSummaryInputRuleResult::Unsupported(reason) => {
@@ -1749,7 +1758,7 @@ fn realize_physical_summary_input(
     }
     Ok(PhysicalSummaryInput {
         child: Rc::clone(child),
-        input: SummaryInput::column(summarised_column(intent, &child_schema)),
+        input: SummaryUpdate::column(summarised_column(intent, &child_schema)),
     })
 }
 
@@ -1843,6 +1852,7 @@ fn construct_summary_agg(
 fn realize_keyed_additive_summary_input(
     intent: &AggIntent,
     family: &SummaryFamilyType,
+    output_reduction: &Reduction,
     child: &Rc<QueryExpr>,
 ) -> PhysicalSummaryInputRuleResult {
     if !matches!(intent, AggIntent::TopK { .. }) {
@@ -1890,35 +1900,57 @@ fn realize_keyed_additive_summary_input(
             "value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values",
         );
     }
+    let subpopulation_columns = match output_reduction {
+        Reduction::PerEntity => vec![],
+        Reduction::Reduce(keys) => keys
+            .iter()
+            .filter_map(|index| schema_column_ref(child, *index))
+            .collect(),
+    };
     let item = match reduction {
-        Reduction::PerEntity => SummaryInputExpr::SeriesIdentity,
-        Reduction::Reduce(keys) if !keys.is_without() && keys.len() == 1 => {
-            let Some(key) = schema_column_ref(raw_child, keys[0]) else {
+        Reduction::PerEntity => SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet {
+            excluding: subpopulation_columns,
+        }),
+        Reduction::Reduce(keys) if !keys.is_without() && !keys.is_empty() => {
+            let Some(columns) = keys
+                .iter()
+                .map(|index| schema_column_ref(raw_child, *index))
+                .collect::<Option<Vec<_>>>()
+            else {
                 return PhysicalSummaryInputRuleResult::Unsupported(
-                    "Top-K grouping key is outside the raw input schema",
+                    "ranked item column is outside the raw input schema",
                 );
             };
-            SummaryInputExpr::Column(key)
+            let item_columns: Vec<_> = columns
+                .into_iter()
+                .filter(|column| !subpopulation_columns.contains(column))
+                .collect();
+            match item_columns.as_slice() {
+                [] => {
+                    return PhysicalSummaryInputRuleResult::Unsupported(
+                        "subpopulation columns consume the complete ranked item identity",
+                    )
+                }
+                [column] => SummaryInputExpr::Column(column.clone()),
+                _ => SummaryInputExpr::Tuple(
+                    item_columns
+                        .into_iter()
+                        .map(SummaryInputExpr::Column)
+                        .collect(),
+                ),
+            }
         }
         Reduction::Reduce(_) => {
             return PhysicalSummaryInputRuleResult::Unsupported(
-                "Top-K item tuples and without-group identity are not represented",
+                "an empty or without grouping does not identify ranked items",
             )
         }
     };
     PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
         child: Rc::clone(raw_child),
-        input: SummaryInput {
-            arguments: vec![
-                SummaryArgument {
-                    role: SummaryArgumentRole::Item,
-                    expression: item,
-                },
-                SummaryArgument {
-                    role: SummaryArgumentRole::Weight,
-                    expression: weight,
-                },
-            ],
+        input: SummaryUpdate {
+            item: Some(item),
+            weight,
         },
     })
 }
@@ -2066,7 +2098,7 @@ fn summarised_column(intent: &AggIntent, child_schema: &Schema) -> ColumnRef {
 /// The `SummaryEstimate` readout for a summary-bound intent.
 fn readout(
     intent: &AggIntent,
-    input: &SummaryInput,
+    input: &SummaryUpdate,
     cost_model: &dyn CostModel,
 ) -> PostAsapSketchQuery {
     match intent {
@@ -2074,8 +2106,8 @@ fn readout(
         AggIntent::Cardinality { .. } => PostAsapSketchQuery::Cardinality,
         AggIntent::TopK { k, .. } => PostAsapSketchQuery::TopK { k: *k },
         AggIntent::Count { .. } => PostAsapSketchQuery::PointCount {
-            key: match input.expression(SummaryArgumentRole::Observation) {
-                Some(SummaryInputExpr::Column(col)) => col.clone(),
+            key: match &input.weight {
+                SummaryInputExpr::Column(col) => col.clone(),
                 _ => unreachable!("point count requires one column"),
             },
             value: None,
@@ -2085,14 +2117,10 @@ fn readout(
         // same `CostModel` that decided (via `realize_extension`) this
         // intent gets a summary realization at all. See `readout_extension`'s
         // doc for the invariant this depends on.
-        AggIntent::Extension { ext_kind, payload } => {
-            match input.expression(SummaryArgumentRole::Observation) {
-                Some(SummaryInputExpr::Column(col)) => {
-                    cost_model.readout_extension(ext_kind, payload, col)
-                }
-                _ => unreachable!("extension readout requires one column"),
-            }
-        }
+        AggIntent::Extension { ext_kind, payload } => match &input.weight {
+            SummaryInputExpr::Column(col) => cost_model.readout_extension(ext_kind, payload, col),
+            _ => unreachable!("extension readout requires one column"),
+        },
         other => {
             unreachable!("no summary realization for {other:?} (implementations_for_with)")
         }
@@ -6461,7 +6489,7 @@ mod tests {
                 GroupingStrategy::default()
             )
         );
-        assert_eq!(input, &SummaryInput::column(ColumnRef::SampleValue));
+        assert_eq!(input, &SummaryUpdate::column(ColumnRef::SampleValue));
         assert_eq!(reduction, &ReductionTy::by(vec![2]));
         // SummaryAgg edge: the state column carries the committed family.
         assert_eq!(
@@ -6800,12 +6828,10 @@ mod tests {
     /// The single-column input of the first `SummaryAgg` in the tree.
     fn find_summary_col(node: &SummaryNode) -> Option<ColumnRef> {
         match &node.expr {
-            SummaryExpr::SummaryAgg { input, .. } => input
-                .expression(SummaryArgumentRole::Observation)
-                .and_then(|expression| match expression {
-                    SummaryInputExpr::Column(col) => Some(col.clone()),
-                    _ => None,
-                }),
+            SummaryExpr::SummaryAgg { input, .. } => match &input.weight {
+                SummaryInputExpr::Column(col) if input.item.is_none() => Some(col.clone()),
+                _ => None,
+            },
             SummaryExpr::SummaryEstimate { summary_input, .. } => find_summary_col(summary_input),
             _ => None,
         }
@@ -7008,13 +7034,10 @@ mod tests {
             panic!("expected fused summary aggregation")
         };
         assert!(matches!(
-            input.expression(SummaryArgumentRole::Item),
+            input.item.as_ref(),
             Some(SummaryInputExpr::Column(ColumnRef::Named(name))) if name == "service"
         ));
-        assert_eq!(
-            input.expression(SummaryArgumentRole::Weight),
-            Some(&SummaryInputExpr::Constant(1.0))
-        );
+        assert_eq!(input.weight, SummaryInputExpr::Constant(1.0));
         assert!(matches!(
             family,
             SummaryFamilyType::Sketch(kind, _)
@@ -7068,12 +7091,12 @@ mod tests {
             panic!("expected fused summary aggregation")
         };
         assert!(matches!(
-            input.expression(SummaryArgumentRole::Item),
+            input.item.as_ref(),
             Some(SummaryInputExpr::Column(ColumnRef::Named(name))) if name == "service"
         ));
         assert_eq!(
-            input.expression(SummaryArgumentRole::Weight),
-            Some(&SummaryInputExpr::Column(ColumnRef::SampleValue))
+            input.weight,
+            SummaryInputExpr::Column(ColumnRef::SampleValue)
         );
         assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(_)));
     }
@@ -7115,27 +7138,25 @@ mod tests {
             let SummaryExpr::SummaryAgg { input, .. } = &summary_input.expr else {
                 return None;
             };
-            input
-                .expression(SummaryArgumentRole::Item)
-                .is_some()
-                .then_some(input)
+            input.item.is_some().then_some(input)
         });
         let input = input.expect("keyed summary input");
         assert_eq!(
-            input.expression(SummaryArgumentRole::Item),
-            Some(&SummaryInputExpr::SeriesIdentity)
+            input.item.as_ref(),
+            Some(&SummaryInputExpr::EntityIdentity(
+                EntityIdentity::PromqlLabelSet {
+                    excluding: vec![ColumnRef::Named("service".into())]
+                }
+            ))
         );
         assert_eq!(
-            input.expression(SummaryArgumentRole::Weight),
-            Some(&SummaryInputExpr::Column(ColumnRef::SampleValue))
+            input.weight,
+            SummaryInputExpr::Column(ColumnRef::SampleValue)
         );
     }
 
     #[test]
-    fn unsupported_count_ranked_topk_key_shape_does_not_use_direct_binding() {
-        // A heap sketch needs one represented key. Until SummaryAgg can carry
-        // an encoded tuple key, a two-column GROUP BY must not fall through to
-        // the ordinary path and summarize the inner Count output instead.
+    fn multidimensional_ranked_item_is_a_structured_tuple() {
         let inner = agg(
             vec![2, 3],
             AggIntent::Count {
@@ -7158,7 +7179,86 @@ mod tests {
             &SeparatedTopKEvidence,
         );
 
-        assert!(strategy.replacements(&TargetSubDAG::new(&outer)).is_empty());
+        let update = strategy
+            .replacements(&TargetSubDAG::new(&outer))
+            .into_iter()
+            .find_map(|candidate| match candidate.replacement {
+                Replacement::Summary(node) => match &node.expr {
+                    SummaryExpr::SummaryEstimate { summary_input, .. } => {
+                        match &summary_input.expr {
+                            SummaryExpr::SummaryAgg { input, .. } => Some(input.clone()),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("tuple-keyed summary candidate");
+        assert!(matches!(
+            update.item,
+            Some(SummaryInputExpr::Tuple(ref items))
+                if items == &[
+                    SummaryInputExpr::Column(ColumnRef::Named("service".into())),
+                    SummaryInputExpr::Column(ColumnRef::Named("region".into())),
+                ]
+        ));
+        assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
+    }
+
+    #[test]
+    fn subpopulation_columns_are_not_part_of_the_ranked_item_tuple() {
+        let inner = agg(
+            vec![2, 3, 4],
+            AggIntent::Count {
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            metric_scan(&["service", "method", "region"]),
+        );
+        // The inner aggregate outputs its grouping keys first, so column 2 is
+        // `region`. Each region is a separate Top-K subpopulation.
+        let outer = Rc::new(agg(
+            vec![2],
+            AggIntent::TopK {
+                k: 10,
+                accuracy: AccuracyTarget::Epsilon(0.01),
+            },
+            inner,
+        ));
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &SeparatedTopKEvidence,
+        );
+        let (update, reduction) = strategy
+            .replacements(&TargetSubDAG::new(&outer))
+            .into_iter()
+            .find_map(|candidate| match candidate.replacement {
+                Replacement::Summary(node) => match &node.expr {
+                    SummaryExpr::SummaryEstimate { summary_input, .. } => {
+                        match &summary_input.expr {
+                            SummaryExpr::SummaryAgg {
+                                input, reduction, ..
+                            } => Some((input.clone(), reduction.clone())),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("subpopulation-aware summary candidate");
+        assert_eq!(reduction, ReductionTy::by(vec![2]));
+        assert!(matches!(
+            update.item,
+            Some(SummaryInputExpr::Tuple(ref items))
+                if items == &[
+                    SummaryInputExpr::Column(ColumnRef::Named("service".into())),
+                    SummaryInputExpr::Column(ColumnRef::Named("method".into())),
+                ]
+        ));
+        assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
     }
 
     #[test]
@@ -7185,9 +7285,7 @@ mod tests {
         let SummaryExpr::SummaryAgg { input, .. } = &root.expr else {
             panic!("expected SummaryAgg, got {:?}", root.expr);
         };
-        let Some(SummaryInputExpr::Column(col)) =
-            input.expression(SummaryArgumentRole::Observation)
-        else {
+        let SummaryInputExpr::Column(col) = &input.weight else {
             panic!("expected observation column")
         };
         assert_eq!(col, &ColumnRef::Named("bytes".into()));
