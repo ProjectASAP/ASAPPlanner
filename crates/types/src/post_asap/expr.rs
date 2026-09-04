@@ -48,17 +48,13 @@ pub enum SummaryExpr {
     /// `SummaryFamilyType::Plain`.
     KeepPreAsap(Rc<QueryExpr>),
 
-    /// Exact PromQL arithmetic whose operands were planned independently.
+    /// A PromQL binary operation whose operands were planned independently.
     /// This keeps realizable summary/readout leaves visible instead of
     /// hiding the complete expression inside `KeepPreAsap`.
-    ExactBinary {
+    BinaryOp {
         lhs: Rc<SummaryNode>,
         rhs: Rc<SummaryNode>,
-        op: BinaryOpKind,
-        /// `None` is the only currently supported vector/vector matching
-        /// mode. The field is retained so execution never has to recover
-        /// semantics by re-parsing PromQL.
-        vector_match: Option<VectorMatch>,
+        operator: BinaryOperator,
     },
 
     /// Summary aggregation. Post-ASAP binding chose `family` — which
@@ -149,4 +145,14 @@ pub enum SummaryExpr {
     /// allocator (not modeled in this crate) on cut edges.
     /// Output schema: one field (same family + params as inputs).
     SummaryMerge { children: Vec<Rc<SummaryNode>> },
+}
+
+/// All semantics owned by a post-ASAP binary operator.
+#[derive(Debug, Clone)]
+pub struct BinaryOperator {
+    pub kind: BinaryOpKind,
+    /// `None` is the only currently supported vector/vector matching mode.
+    /// The field is retained so execution never has to recover semantics by
+    /// re-parsing PromQL.
+    pub vector_match: Option<VectorMatch>,
 }

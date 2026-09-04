@@ -961,7 +961,7 @@ fn collect_summary_aggs(
             collect_summary_aggs(child, seen, output);
         }
         SummaryExpr::SummaryJoin { outer, inner, .. }
-        | SummaryExpr::ExactBinary {
+        | SummaryExpr::BinaryOp {
             lhs: outer,
             rhs: inner,
             ..

@@ -36,7 +36,7 @@ pub mod summary_maintenance;
 pub mod summary_maintenance_lifecycle;
 pub mod summary_window;
 
-pub use expr::{SummaryExpr, SummaryNode};
+pub use expr::{BinaryOperator, SummaryExpr, SummaryNode};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,

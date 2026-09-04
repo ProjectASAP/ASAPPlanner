@@ -294,7 +294,7 @@ pub(super) fn summary_operation_evidence<'a>(
     let matches = matches!(
         (&node.expr, operation),
         (
-            SummaryExpr::ExactBinary { .. },
+            SummaryExpr::BinaryOp { .. },
             StreamingSummaryOperatorEvidence::Binary(_)
         ) | (
             SummaryExpr::SummaryMerge { .. },

@@ -1616,14 +1616,16 @@ fn realize_exact_binary(
     let guarantee = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()]
         .into_iter()
         .all(|guarantee| guarantee.is_some_and(ResultGuarantee::is_exact))
-        .then(|| ResultGuarantee::exact("ExactBinary over exact operands"));
+        .then(|| ResultGuarantee::exact("BinaryOp over exact operands"));
 
     Ok(Some(Rc::new(SummaryNode {
-        expr: SummaryExpr::ExactBinary {
+        expr: SummaryExpr::BinaryOp {
             lhs: lhs_node,
             rhs: rhs_node,
-            op: op.clone(),
-            vector_match: vector_match.clone(),
+            operator: asap_types::post_asap::BinaryOperator {
+                kind: op.clone(),
+                vector_match: vector_match.clone(),
+            },
         },
         schema: lift(&root.output_schema()?),
         // Exact arithmetic does not erase approximation error. Until the

@@ -2989,13 +2989,15 @@ mod tests {
     fn summary_binary() -> Rc<SummaryNode> {
         let operand = summary_with_operations(false, false, false);
         Rc::new(SummaryNode {
-            expr: SummaryExpr::ExactBinary {
+            expr: SummaryExpr::BinaryOp {
                 lhs: Rc::clone(&operand),
                 rhs: operand,
-                op: asap_types::pre_asap::BinaryOpKind::Arithmetic(
-                    asap_types::pre_asap::ArithmeticOpKind::Add,
-                ),
-                vector_match: None,
+                operator: asap_types::post_asap::BinaryOperator {
+                    kind: asap_types::pre_asap::BinaryOpKind::Arithmetic(
+                        asap_types::pre_asap::ArithmeticOpKind::Add,
+                    ),
+                    vector_match: None,
+                },
             },
             schema: SummarySchema {
                 fields: vec![SummaryField {
@@ -3185,7 +3187,7 @@ mod tests {
                     }
                 }
                 SummaryExpr::SummarySubtract { left, right }
-                | SummaryExpr::ExactBinary {
+                | SummaryExpr::BinaryOp {
                     lhs: left,
                     rhs: right,
                     ..
@@ -3281,7 +3283,7 @@ mod tests {
                 return;
             }
             let operation = match &node.expr {
-                SummaryExpr::ExactBinary { .. } => cpu.readout_cpu_ops.map(|cpu_ops| {
+                SummaryExpr::BinaryOp { .. } => cpu.readout_cpu_ops.map(|cpu_ops| {
                     StreamingSummaryOperatorEvidence::Binary(SummaryOperatorResourceEvidence {
                         physical_id: format!("binary-{node:p}"),
                         inputs: vec![test_edge(), test_edge()],
@@ -3377,7 +3379,7 @@ mod tests {
                                 }
                             }
                             SummaryExpr::SummarySubtract { left, right }
-                            | SummaryExpr::ExactBinary {
+                            | SummaryExpr::BinaryOp {
                                 lhs: left,
                                 rhs: right,
                                 ..
@@ -3417,7 +3419,7 @@ mod tests {
                     }
                 }
                 SummaryExpr::SummarySubtract { left, right }
-                | SummaryExpr::ExactBinary {
+                | SummaryExpr::BinaryOp {
                     lhs: left,
                     rhs: right,
                     ..

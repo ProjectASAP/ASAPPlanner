@@ -67,8 +67,8 @@ fn lower_and_realize(query: &str) -> Rc<SummaryNode> {
 fn promql_binary_arithmetic_retains_two_summary_leaves() {
     for op in ["+", "-", "*", "/", "%", "^", "atan2"] {
         let root = lower_and_realize(&format!("rate(a[1m]) {op} rate(b[1m])"));
-        let SummaryExpr::ExactBinary { lhs, rhs, .. } = &root.expr else {
-            panic!("expected ExactBinary for {op}, got {:?}", root.expr);
+        let SummaryExpr::BinaryOp { lhs, rhs, .. } = &root.expr else {
+            panic!("expected BinaryOp for {op}, got {:?}", root.expr);
         };
         assert!(matches!(lhs.expr, SummaryExpr::SummaryAgg { .. }));
         assert!(matches!(rhs.expr, SummaryExpr::SummaryAgg { .. }));
@@ -99,8 +99,8 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
 fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
     for query in ["rate(a[1m]) / 2", "2 / rate(a[1m])"] {
         let root = lower_and_realize(query);
-        let SummaryExpr::ExactBinary { lhs, rhs, .. } = &root.expr else {
-            panic!("expected ExactBinary for {query}, got {:?}", root.expr);
+        let SummaryExpr::BinaryOp { lhs, rhs, .. } = &root.expr else {
+            panic!("expected BinaryOp for {query}, got {:?}", root.expr);
         };
         assert!(matches!(
             lhs.expr,
@@ -126,10 +126,10 @@ fn promql_binary_arithmetic_falls_back_as_a_whole_for_unsupported_arm() {
 #[test]
 fn promql_binary_arithmetic_preserves_nested_structure_and_rejects_modifiers() {
     let nested = lower_and_realize("(rate(a[1m]) + rate(b[1m])) / 2");
-    let SummaryExpr::ExactBinary { lhs, .. } = &nested.expr else {
-        panic!("expected outer ExactBinary, got {:?}", nested.expr);
+    let SummaryExpr::BinaryOp { lhs, .. } = &nested.expr else {
+        panic!("expected outer BinaryOp, got {:?}", nested.expr);
     };
-    assert!(matches!(lhs.expr, SummaryExpr::ExactBinary { .. }));
+    assert!(matches!(lhs.expr, SummaryExpr::BinaryOp { .. }));
 
     let modified = lower_and_realize("rate(a[1m]) + on(job) rate(b[1m])");
     assert!(matches!(modified.expr, SummaryExpr::KeepPreAsap(_)));
@@ -143,8 +143,8 @@ fn promql_binary_arithmetic_never_relabels_approximate_children_as_exact() {
     )
     .expect("lowering failed");
     let root = realize(&pre).expect("binding failed");
-    let SummaryExpr::ExactBinary { lhs, rhs, .. } = &root.expr else {
-        panic!("expected ExactBinary, got {:?}", root.expr);
+    let SummaryExpr::BinaryOp { lhs, rhs, .. } = &root.expr else {
+        panic!("expected BinaryOp, got {:?}", root.expr);
     };
     assert!(lhs.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
     assert!(rhs.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
