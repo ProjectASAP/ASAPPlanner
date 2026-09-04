@@ -34,11 +34,11 @@ pub struct StreamingPhysicalInputEvidence {
     pub active_window_count: u64,
     /// Completed windows retained for query coverage.
     pub retained_window_count: u64,
-    /// Independent state instances per window: one for shared
+    /// Independent summary-state instances per window: one for shared
     /// multi-subpopulation state, otherwise the resolved group count.
-    pub physical_sketch_count: u64,
+    pub physical_summary_count: u64,
     /// Resident bytes of one concrete state instance.
-    pub state_bytes_per_sketch: u64,
+    pub state_bytes_per_summary: u64,
 }
 
 /// Workload-normalized inputs for incremental maintenance over one finite
@@ -54,8 +54,8 @@ pub struct StreamingSummaryInputs {
     pub horizon_ms: u64,
     pub active_window_count: u64,
     pub retained_window_count: u64,
-    pub physical_sketch_count: u64,
-    pub state_bytes_per_sketch: u64,
+    pub physical_summary_count: u64,
+    pub state_bytes_per_summary: u64,
     pub evaluation_count: u64,
 }
 
@@ -101,8 +101,8 @@ impl StreamingSummaryInputs {
             horizon_ms,
             active_window_count: physical.active_window_count,
             retained_window_count: physical.retained_window_count,
-            physical_sketch_count: physical.physical_sketch_count,
-            state_bytes_per_sketch: physical.state_bytes_per_sketch,
+            physical_summary_count: physical.physical_summary_count,
+            state_bytes_per_summary: physical.state_bytes_per_summary,
             evaluation_count: evaluations_in_horizon(
                 &query.recurrence,
                 planning_time_ms,
@@ -119,18 +119,25 @@ impl StreamingSummaryInputs {
             ));
         }
         for (name, value) in [
-            ("initial_input_rows", self.initial_input_rows),
-            ("initial_input_bytes", self.initial_input_bytes),
             ("horizon_ms", self.horizon_ms),
             ("active_window_count", self.active_window_count),
-            ("retained_window_count", self.retained_window_count),
-            ("physical_sketch_count", self.physical_sketch_count),
-            ("state_bytes_per_sketch", self.state_bytes_per_sketch),
+            ("physical_summary_count", self.physical_summary_count),
+            ("state_bytes_per_summary", self.state_bytes_per_summary),
             ("evaluation_count", self.evaluation_count),
         ] {
             if value == 0 {
                 return Err(AnalyticalCostError::MissingOrZero(name));
             }
+        }
+        let bootstrap_is_consistent = if self.initial_input_rows == 0 {
+            self.initial_input_bytes == 0 && self.initial_source_scan_bytes == 0
+        } else {
+            self.initial_input_bytes > 0 && self.initial_source_scan_bytes > 0
+        };
+        if !bootstrap_is_consistent {
+            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
+                "streaming bootstrap rows, logical bytes, and source bytes disagree",
+            ));
         }
         if !self.ingestion_rate_per_second.is_finite() || self.ingestion_rate_per_second < 0.0 {
             return Err(AnalyticalCostError::InvalidIngestionRate(
@@ -176,7 +183,10 @@ pub fn estimate_incremental_summary_maintenance(
     validate_guarantee(guarantee, inputs.data_arrival)?;
     let arriving_input_rows = arriving_rows_for_lifecycle(inputs, guarantee)?;
     let counts = count_operations(root)?;
-    if counts.state_builds == 0 {
+    if counts.state_builds != 1 {
+        // One flat evidence record cannot safely describe several summary
+        // nodes with different inputs, state sizes, or algorithms. Complete
+        // multi-node streaming DAGs use per-node evidence instead.
         return Err(AnalyticalCostError::UnsupportedCandidate);
     }
 
@@ -200,19 +210,19 @@ pub fn estimate_incremental_summary_maintenance(
 
     let build_inserts = inputs
         .initial_input_rows
-        .checked_mul(counts.state_builds)
+        .checked_mul(inputs.active_window_count)
+        .and_then(|n| n.checked_mul(counts.state_builds))
         .ok_or(AnalyticalCostError::Overflow)?;
     let update_inserts = arriving_input_rows
         .checked_mul(inputs.active_window_count)
         .and_then(|n| n.checked_mul(counts.state_builds))
         .ok_or(AnalyticalCostError::Overflow)?;
-    let instances = inputs.physical_sketch_count as f64;
+    let instances = inputs.physical_summary_count as f64;
     let evaluations = inputs.evaluation_count as f64;
-    let updates = arriving_input_rows as f64;
     let cpu_ops = (build_inserts as f64 + update_inserts as f64) * insert
         + evaluations * counts.merges_per_read as f64 * instances * merge
         + evaluations * counts.subtracts_per_read as f64 * instances * subtract
-        + updates * counts.deletes_per_update as f64 * instances * delete
+        + update_inserts as f64 * counts.deletes_per_update as f64 * delete
         + evaluations * counts.readouts_per_read as f64 * instances * readout;
     if !cpu_ops.is_finite() {
         return Err(AnalyticalCostError::Overflow);
@@ -221,26 +231,30 @@ pub fn estimate_incremental_summary_maintenance(
     let state_instances = inputs
         .active_window_count
         .checked_add(inputs.retained_window_count)
-        .and_then(|n| n.checked_mul(inputs.physical_sketch_count))
+        .and_then(|n| n.checked_mul(inputs.physical_summary_count))
         .and_then(|n| n.checked_mul(counts.state_builds))
         .ok_or(AnalyticalCostError::Overflow)?;
     let retained_bytes = state_instances
-        .checked_mul(inputs.state_bytes_per_sketch)
+        .checked_mul(inputs.state_bytes_per_summary)
         .ok_or(AnalyticalCostError::Overflow)?;
     // Merge/subtract may stream over persistent inputs but still needs one
     // result state per physical instance. Persistent retained windows are
     // already included above and are not loaded a second time.
     let transient_bytes = if counts.merges_per_read > 0 || counts.subtracts_per_read > 0 {
         inputs
-            .physical_sketch_count
-            .checked_mul(inputs.state_bytes_per_sketch)
+            .physical_summary_count
+            .checked_mul(inputs.state_bytes_per_summary)
             .ok_or(AnalyticalCostError::Overflow)?
     } else {
         0
     };
-    let bootstrap_row_buffer = inputs
-        .initial_input_bytes
-        .div_ceil(inputs.initial_input_rows);
+    let bootstrap_row_buffer = if inputs.initial_input_rows == 0 {
+        0
+    } else {
+        inputs
+            .initial_input_bytes
+            .div_ceil(inputs.initial_input_rows)
+    };
     Ok(ResourceEstimate {
         cpu_ops,
         peak_memory_bytes: retained_bytes
@@ -269,14 +283,13 @@ fn arriving_rows_for_lifecycle(
             }
             let start = activate_at.0.max(inputs.planning_time_ms);
             let end = retire_at.0.min(horizon_end);
-            end.saturating_sub(start)
-        }
-        SummaryMaintenanceLifecycle::Shared { retention } => {
-            if retention.0 < inputs.horizon_ms {
+            let active_ms = end.saturating_sub(start);
+            if active_ms == 0 {
                 return Err(AnalyticalCostError::IncompatibleLifecycleGuarantee);
             }
-            inputs.horizon_ms
+            active_ms
         }
+        SummaryMaintenanceLifecycle::Shared { .. } => inputs.horizon_ms,
         SummaryMaintenanceLifecycle::ContinuouslyMaintained => inputs.horizon_ms,
         SummaryMaintenanceLifecycle::Ephemeral => {
             return Err(AnalyticalCostError::IncompatibleLifecycleGuarantee)
@@ -306,7 +319,7 @@ fn validate_guarantee(
 
 fn required_cpu(name: &'static str, value: Option<f64>) -> Result<f64, AnalyticalCostError> {
     let value = value.ok_or(AnalyticalCostError::MissingOrStale(name))?;
-    if !value.is_finite() || value < 0.0 {
+    if !value.is_finite() || value <= 0.0 {
         return Err(AnalyticalCostError::InvalidOperationCost(name, value));
     }
     Ok(value)
@@ -412,8 +425,8 @@ mod tests {
             initial_source_scan_bytes: 640,
             active_window_count: 2,
             retained_window_count: 3,
-            physical_sketch_count: 2,
-            state_bytes_per_sketch: 100,
+            physical_summary_count: 2,
+            state_bytes_per_summary: 100,
         }
     }
 
@@ -500,8 +513,8 @@ mod tests {
                 horizon_ms: 5_000,
                 active_window_count: 2,
                 retained_window_count: 3,
-                physical_sketch_count: 2,
-                state_bytes_per_sketch: 100,
+                physical_summary_count: 2,
+                state_bytes_per_summary: 100,
                 evaluation_count: 5,
             },
             SummaryOperationCpuEvidence {
@@ -511,8 +524,9 @@ mod tests {
             },
         )
         .unwrap();
-        // 10 bootstrap + 10 arrivals into two active windows; two states read 5 times.
-        assert_eq!(estimate.cpu_ops, 90.0);
+        // 10 bootstrap + 10 arrivals, each routed to two active windows;
+        // two physical summary instances are read 5 times.
+        assert_eq!(estimate.cpu_ops, 110.0);
         assert_eq!(estimate.peak_memory_bytes, 1_000);
         assert_eq!(estimate.scan_bytes, 640);
     }
@@ -532,8 +546,8 @@ mod tests {
                 horizon_ms: 1_000,
                 active_window_count: 1,
                 retained_window_count: 2,
-                physical_sketch_count: 2,
-                state_bytes_per_sketch: 10,
+                physical_summary_count: 2,
+                state_bytes_per_summary: 10,
                 evaluation_count: 3,
             },
             SummaryOperationCpuEvidence {
@@ -545,7 +559,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(estimate.cpu_ops, 5.0 + 40.0 + 12.0 + 18.0 + 42.0);
+        assert_eq!(estimate.cpu_ops, 5.0 + 12.0 + 18.0 + 20.0 + 42.0);
         // Three persistent windows plus one transient result, for two instances.
         assert_eq!(estimate.peak_memory_bytes, 80);
     }
@@ -568,8 +582,8 @@ mod tests {
                     horizon_ms: 1_000,
                     active_window_count: 1,
                     retained_window_count: 1,
-                    physical_sketch_count: 1,
-                    state_bytes_per_sketch: 8,
+                    physical_summary_count: 1,
+                    state_bytes_per_summary: 8,
                     evaluation_count: 1,
                 },
                 SummaryOperationCpuEvidence {
@@ -598,8 +612,8 @@ mod tests {
                     horizon_ms: 1_000,
                     active_window_count: 1,
                     retained_window_count: 1,
-                    physical_sketch_count: 1,
-                    state_bytes_per_sketch: 8,
+                    physical_summary_count: 1,
+                    state_bytes_per_summary: 8,
                     evaluation_count: 1,
                 },
                 SummaryOperationCpuEvidence {
@@ -632,8 +646,8 @@ mod tests {
                     horizon_ms: 1_000,
                     active_window_count: 1,
                     retained_window_count: 1,
-                    physical_sketch_count: 1,
-                    state_bytes_per_sketch: 8,
+                    physical_summary_count: 1,
+                    state_bytes_per_summary: 8,
                     evaluation_count: 1,
                 },
                 SummaryOperationCpuEvidence {
@@ -670,22 +684,22 @@ mod tests {
                 horizon_ms: 5_000,
                 active_window_count: 1,
                 retained_window_count: 1,
-                physical_sketch_count: 1,
-                state_bytes_per_sketch: 8,
+                physical_summary_count: 1,
+                state_bytes_per_summary: 8,
                 evaluation_count: 1,
             },
             SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(1.0),
-                readout_cpu_ops: Some(0.0),
+                readout_cpu_ops: Some(1.0),
                 ..SummaryOperationCpuEvidence::default()
             },
         )
         .unwrap();
-        assert_eq!(estimate.cpu_ops, 12.0); // 10 bootstrap + 2 updates in [1s, 2s].
+        assert_eq!(estimate.cpu_ops, 13.0); // 10 bootstrap + 2 updates + one read.
     }
 
     #[test]
-    fn shared_retention_must_cover_the_comparison_horizon() {
+    fn shared_retention_is_not_confused_with_the_planning_horizon() {
         let guarantee = SummaryMaintenanceLifecycleGuarantee {
             summary_maintenance_lifecycle: SummaryMaintenanceLifecycle::Shared {
                 retention: asap_types::workload::DurationMs(999),
@@ -694,32 +708,62 @@ mod tests {
             evaluation_schedule: EvaluationSchedule::PerUpdate,
             output_representation: OutputRepresentation::SummaryState,
         };
-        assert_eq!(
-            estimate_incremental_summary_maintenance(
-                &summary_with_operations(false, false, false),
-                &guarantee,
-                StreamingSummaryInputs {
-                    data_arrival: DataArrival::ContinuouslyIngesting,
-                    initial_input_rows: 1,
-                    initial_input_bytes: 8,
-                    initial_source_scan_bytes: 8,
-                    ingestion_rate_per_second: 1.0,
-                    planning_time_ms: 0,
-                    horizon_ms: 1_000,
-                    active_window_count: 1,
-                    retained_window_count: 1,
-                    physical_sketch_count: 1,
-                    state_bytes_per_sketch: 8,
-                    evaluation_count: 1,
-                },
-                SummaryOperationCpuEvidence {
-                    insert_cpu_ops: Some(1.0),
-                    readout_cpu_ops: Some(1.0),
-                    ..SummaryOperationCpuEvidence::default()
-                },
-            ),
-            Err(AnalyticalCostError::IncompatibleLifecycleGuarantee)
-        );
+        assert!(estimate_incremental_summary_maintenance(
+            &summary_with_operations(false, false, false),
+            &guarantee,
+            StreamingSummaryInputs {
+                data_arrival: DataArrival::ContinuouslyIngesting,
+                initial_input_rows: 1,
+                initial_input_bytes: 8,
+                initial_source_scan_bytes: 8,
+                ingestion_rate_per_second: 1.0,
+                planning_time_ms: 0,
+                horizon_ms: 1_000,
+                active_window_count: 1,
+                retained_window_count: 1,
+                physical_summary_count: 1,
+                state_bytes_per_summary: 8,
+                evaluation_count: 1,
+            },
+            SummaryOperationCpuEvidence {
+                insert_cpu_ops: Some(1.0),
+                readout_cpu_ops: Some(1.0),
+                ..SummaryOperationCpuEvidence::default()
+            },
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn an_empty_bootstrap_is_valid_for_a_new_stream() {
+        let estimate = estimate_incremental_summary_maintenance(
+            &summary_with_operations(false, false, false),
+            &continuous_guarantee(),
+            StreamingSummaryInputs {
+                data_arrival: DataArrival::ContinuouslyIngesting,
+                initial_input_rows: 0,
+                initial_input_bytes: 0,
+                initial_source_scan_bytes: 0,
+                ingestion_rate_per_second: 1.0,
+                planning_time_ms: 0,
+                horizon_ms: 1_000,
+                active_window_count: 1,
+                retained_window_count: 0,
+                physical_summary_count: 1,
+                state_bytes_per_summary: 8,
+                evaluation_count: 1,
+            },
+            SummaryOperationCpuEvidence {
+                insert_cpu_ops: Some(1.0),
+                readout_cpu_ops: Some(1.0),
+                ..SummaryOperationCpuEvidence::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(estimate.cpu_ops, 2.0);
+        assert_eq!(estimate.peak_memory_bytes, 8);
+        assert_eq!(estimate.scan_bytes, 0);
     }
 
     fn summary_with_operations(merge: bool, subtract: bool, delete: bool) -> Rc<SummaryNode> {

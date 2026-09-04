@@ -562,6 +562,47 @@ input.
 
 ## Summary operator formulas
 
+### Incremental single-summary foundation
+
+For `DataArrival::ContinuouslyIngesting`, the incremental estimator accepts
+one selected lifecycle and one unique logical `SummaryAgg`. This deliberately
+narrow contract prevents one flat evidence record from being reused across
+several summary nodes with different input cardinalities, algorithms, or state
+sizes. Complete multi-node streaming alternatives require per-node physical
+evidence.
+
+The canonical workload supplies fresh bootstrap cardinality, ingestion rate,
+query recurrence, planning time, and a finite horizon. Physical evidence adds
+logical/bootstrap bytes, physical bootstrap scan bytes, active and retained
+window counts, the number of concrete summary-state instances per window, and
+bytes per state instance. Names use `summary`, not `sketch`, because an exact
+aggregate or another non-sketch state is equally valid.
+
+For bootstrap rows `B`, arrivals `U`, simultaneously updated windows `A`,
+query evaluations `Q`, physical summary instances `P`, and state bytes `S`:
+
+```text
+insert invocations = (B + U) × A
+retained memory     = (A + retained_windows) × P × S
+```
+
+Each input row is routed to its matching summary instance; it is not inserted
+into every group. Merge, subtract, and readout work may operate over all `P`
+instances. Delete work follows the same routed window updates rather than
+multiplying every update by every possible group.
+
+An empty bootstrap is valid and has zero logical bytes and zero source reads.
+A non-empty bootstrap requires positive logical and physical source bytes.
+Active window count, summary-instance count, state width, horizon, and query
+evaluation count must be positive; retained-window count may be zero for a new
+stream. Required per-operation CPU evidence must be finite and positive.
+
+Lifecycle retention and the planning horizon are different quantities. A
+short retained window may be maintained throughout a much longer planning
+horizon, so the estimator does not require `retention >= horizon`. Lifecycle
+legality and query time-coverage checks establish whether the retained window
+can answer the query.
+
 A retained sketch performs one build and serves later reads from state:
 
 ```text
