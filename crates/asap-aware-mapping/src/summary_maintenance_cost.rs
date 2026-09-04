@@ -14,10 +14,10 @@ use asap_types::workload::{DataArrival, DataWorkload, QueryWorkloadEntry};
 use serde::{Deserialize, Serialize};
 
 use crate::analytical_cost::{AnalyticalCostError, ResourceEstimate};
-use crate::analytical_statistics::evaluations_in_horizon;
+use crate::physical_operator_statistics::evaluations_in_horizon;
 use crate::summary_maintenance_lifecycle::{evaluation_schedule, maintenance_mode};
 
-pub const ANALYTICAL_STREAMING_MODEL_VERSION: &str = "analytical-summary-incremental-v1";
+pub const SUMMARY_MAINTENANCE_COST_MODEL_VERSION: &str = "summary-maintenance-resource-v1";
 
 /// Physical evidence that is not represented by [`DataWorkload`] for one
 /// incrementally maintained summary deployment. Window counts describe the
