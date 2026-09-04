@@ -11,6 +11,8 @@ pub struct SummaryMaintenanceCostModel {
     candidate_comparisons: HashMap<CandidateComparisonKey, BoundCandidateIdentity>,
     physical_plan_alternatives:
         HashMap<CandidateComparisonKey, Vec<StreamingPhysicalPlanAlternative>>,
+    window_framework_candidates:
+        HashMap<CandidateComparisonKey, Vec<StreamingWindowFrameworkCandidate>>,
 }
 
 type CandidateComparisonKey = (*const QueryExpr, *const SummaryNode);
@@ -28,9 +30,9 @@ struct StreamingTargetComparison {
     raw: StreamingRawInputEvidence,
 }
 
-type LogicalSourceSelection = (Source, Vec<Predicate>, Vec<InfoMatcher>);
+pub(super) type LogicalSourceSelection = (Source, Vec<Predicate>, Vec<InfoMatcher>);
 
-fn deduplicate_source_selections(
+pub(super) fn deduplicate_source_selections(
     values: Vec<LogicalSourceSelection>,
 ) -> Vec<LogicalSourceSelection> {
     values.into_iter().fold(Vec::new(), |mut unique, value| {
@@ -57,7 +59,7 @@ fn info_source(selector: &[InfoMatcher]) -> Result<Source, AnalyticalCostError> 
     })
 }
 
-fn query_source_selections(
+pub(super) fn query_source_selections(
     query: &QueryExpr,
     out: &mut Vec<LogicalSourceSelection>,
 ) -> Result<(), AnalyticalCostError> {
@@ -327,7 +329,7 @@ fn validate_raw_snapshot_dimensions(
     Ok(())
 }
 
-fn ephemeral_rows_over_horizon(
+pub(super) fn ephemeral_rows_over_horizon(
     inputs: StreamingSummaryInputs,
     scope: &ComparisonScope,
 ) -> Result<u64, AnalyticalCostError> {
@@ -345,7 +347,7 @@ fn ephemeral_rows_over_horizon(
         })
 }
 
-fn ephemeral_scan_bytes_over_horizon(
+pub(super) fn ephemeral_scan_bytes_over_horizon(
     inputs: StreamingSummaryInputs,
     raw: &StreamingRawInputEvidence,
     scope: &ComparisonScope,
@@ -371,7 +373,9 @@ fn ephemeral_scan_bytes_over_horizon(
         })
 }
 
-fn evaluation_offsets_ms(scope: &ComparisonScope) -> Result<Vec<u64>, AnalyticalCostError> {
+pub(super) fn evaluation_offsets_ms(
+    scope: &ComparisonScope,
+) -> Result<Vec<u64>, AnalyticalCostError> {
     let count = scope.validate()?;
     match &scope.recurrence {
         QueryRecurrence::OneTime {
@@ -413,6 +417,7 @@ impl SummaryMaintenanceCostModel {
             target_comparisons: HashMap::new(),
             candidate_comparisons: HashMap::new(),
             physical_plan_alternatives: HashMap::new(),
+            window_framework_candidates: HashMap::new(),
         }
     }
 
@@ -480,6 +485,11 @@ impl SummaryMaintenanceCostModel {
         if alternative.physical_plan_id.trim().is_empty() {
             return Err(AnalyticalCostError::MissingOrZero("physical_plan_id"));
         }
+        if self.window_framework_candidates.contains_key(&key) {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "physical alternative binding mode",
+            ));
+        }
         let alternatives = self.physical_plan_alternatives.entry(key).or_default();
         if alternatives
             .iter()
@@ -490,6 +500,66 @@ impl SummaryMaintenanceCostModel {
             ));
         }
         alternatives.push(alternative);
+        Ok(())
+    }
+
+    /// Add one complete abstract window assignment to Planner candidate search.
+    ///
+    /// The provider may bind multiple executor-feasible implementations for
+    /// the same framework assignment; their stable identities and complete
+    /// evidence keep the implementations distinct during ranking.
+    pub fn bind_window_framework_candidate(
+        &mut self,
+        target: &Rc<QueryExpr>,
+        root: &Rc<SummaryNode>,
+        candidate: StreamingWindowFrameworkCandidate,
+    ) -> Result<(), AnalyticalCostError> {
+        let key = (Rc::as_ptr(target), Rc::as_ptr(root));
+        if !self.candidate_comparisons.contains_key(&key) {
+            return Err(AnalyticalCostError::MissingOrStale(
+                "candidate comparison binding",
+            ));
+        }
+        if candidate.physical_plan_id.trim().is_empty() {
+            return Err(AnalyticalCostError::MissingOrZero("physical_plan_id"));
+        }
+        if self.physical_plan_alternatives.contains_key(&key) {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "physical alternative binding mode",
+            ));
+        }
+        if candidate.assignments.is_empty() {
+            return Err(AnalyticalCostError::MissingOrZero(
+                "window framework assignments",
+            ));
+        }
+        let mut assigned = HashSet::new();
+        if candidate.assignments.iter().any(|assignment| {
+            !assigned.insert(Rc::as_ptr(&assignment.summary))
+                || matches!(
+                    &assignment.framework,
+                    Some(SummaryWindowFramework::Extension(name)) if name.trim().is_empty()
+                )
+        }) {
+            return Err(AnalyticalCostError::MissingOrZero(
+                "unique window framework assignments",
+            ));
+        }
+        if assigned != summary_aggregation_identities(root) {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "window framework assignments",
+            ));
+        }
+        let candidates = self.window_framework_candidates.entry(key).or_default();
+        if candidates
+            .iter()
+            .any(|existing| existing.physical_plan_id == candidate.physical_plan_id)
+        {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "window framework candidate",
+            ));
+        }
+        candidates.push(candidate);
         Ok(())
     }
 
@@ -534,6 +604,7 @@ impl SummaryMaintenanceCostModel {
         deployments: &[CostedSummaryDeployment<'_>],
         comparison: &StreamingTargetComparison,
         evidence: &StreamingNodeEvidence,
+        window_frameworks: &[Option<SummaryWindowFramework>],
     ) -> Option<Cost> {
         self.calibrated(
             estimate_heterogeneous_summary(
@@ -542,6 +613,7 @@ impl SummaryMaintenanceCostModel {
                 evidence,
                 &comparison.scope,
                 &comparison.raw,
+                window_frameworks,
             )
             .ok()?,
         )
@@ -660,24 +732,17 @@ impl CostModel for SummaryMaintenanceCostModel {
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
+        required_accuracy: &[AccuracyTarget],
     ) -> Option<Cost> {
-        let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
-        match self.physical_plan_alternatives.get(&key) {
-            Some(alternatives) => alternatives
-                .iter()
-                .filter_map(|alternative| {
-                    self.complete_cost_with_evidence(
-                        root,
-                        deployments,
-                        comparison,
-                        &alternative.node_evidence,
-                    )
-                })
-                .min_by(|left, right| left.0.total_cmp(&right.0)),
-            None => {
-                self.complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
-            }
-        }
+        self.complete_summary_candidate_estimate(
+            root,
+            target,
+            deployments,
+            horizon,
+            expected_reads,
+            required_accuracy,
+        )
+        .map(|estimate| estimate.cost)
     }
 
     fn complete_summary_candidate_estimate(
@@ -687,31 +752,104 @@ impl CostModel for SummaryMaintenanceCostModel {
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<crate::recurrence::Horizon>,
         expected_reads: Option<f64>,
+        required_accuracy: &[AccuracyTarget],
     ) -> Option<CompleteSummaryCandidateEstimate> {
         let (key, comparison) = self.comparison_context(root, target, horizon, expected_reads)?;
-        let Some(alternatives) = self.physical_plan_alternatives.get(&key) else {
-            return self
-                .complete_cost_with_evidence(root, deployments, comparison, &self.node_evidence)
-                .map(|cost| CompleteSummaryCandidateEstimate {
-                    cost,
-                    physical_plan_id: None,
-                });
-        };
-        alternatives
-            .iter()
-            .filter_map(|alternative| {
-                self.complete_cost_with_evidence(
-                    root,
-                    deployments,
-                    comparison,
-                    &alternative.node_evidence,
-                )
-                .map(|cost| CompleteSummaryCandidateEstimate {
-                    cost,
-                    physical_plan_id: Some(alternative.physical_plan_id.clone()),
+        if let Some(candidates) = self.window_framework_candidates.get(&key) {
+            return candidates
+                .iter()
+                .filter_map(|candidate| {
+                    if candidate.assignments.len() != deployments.len() {
+                        return None;
+                    }
+                    if !candidate
+                        .accuracy
+                        .matches_assignments(&candidate.assignments)
+                    {
+                        return None;
+                    }
+                    let window_frameworks = deployments
+                        .iter()
+                        .map(|deployment| {
+                            candidate
+                                .assignments
+                                .iter()
+                                .find(|assignment| {
+                                    std::ptr::eq(assignment.summary.as_ref(), deployment.summary)
+                                })
+                                .map(|assignment| assignment.framework.clone())
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    let uses_exponential_histogram = window_frameworks.iter().any(|framework| {
+                        matches!(
+                            framework,
+                            Some(SummaryWindowFramework::ExponentialHistogram)
+                        )
+                    });
+                    let window_accuracy_guarantee = candidate.accuracy.end_to_end_guarantee(
+                        uses_exponential_histogram,
+                        root.guarantee.as_ref(),
+                    )?;
+                    if !required_accuracy.iter().all(|target| {
+                        DefaultAccuracyModel.satisfies(&window_accuracy_guarantee, target)
+                    }) {
+                        return None;
+                    }
+                    self.complete_cost_with_evidence(
+                        root,
+                        deployments,
+                        comparison,
+                        &candidate.node_evidence,
+                        &window_frameworks,
+                    )
+                    .map(|cost| CompleteSummaryCandidateEstimate {
+                        cost,
+                        physical_plan_id: Some(candidate.physical_plan_id.clone()),
+                        window_frameworks,
+                        window_accuracy_guarantee: Some(window_accuracy_guarantee),
+                    })
                 })
-            })
-            .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0))
+                .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0));
+        }
+        if let Some(alternatives) = self.physical_plan_alternatives.get(&key) {
+            return alternatives
+                .iter()
+                .filter_map(|alternative| {
+                    let frameworks = vec![None; deployments.len()];
+                    self.complete_cost_with_evidence(
+                        root,
+                        deployments,
+                        comparison,
+                        &alternative.node_evidence,
+                        &frameworks,
+                    )
+                    .map(|cost| CompleteSummaryCandidateEstimate {
+                        cost,
+                        physical_plan_id: Some(alternative.physical_plan_id.clone()),
+                        window_frameworks: frameworks,
+                        window_accuracy_guarantee: None,
+                    })
+                })
+                .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0));
+        }
+        let frameworks = vec![None; deployments.len()];
+        self.complete_cost_with_evidence(
+            root,
+            deployments,
+            comparison,
+            &self.node_evidence,
+            &frameworks,
+        )
+        .map(|cost| CompleteSummaryCandidateEstimate {
+            cost,
+            physical_plan_id: None,
+            window_frameworks: frameworks,
+            window_accuracy_guarantee: None,
+        })
+    }
+
+    fn complete_summary_candidate_estimate_covers_lifecycle_costs(&self) -> bool {
+        true
     }
 
     fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
@@ -742,1177 +880,7 @@ impl CostModel for SummaryMaintenanceCostModel {
     }
 }
 
-fn estimate_heterogeneous_summary(
-    root: &SummaryNode,
-    deployments: &[CostedSummaryDeployment<'_>],
-    evidence: &StreamingNodeEvidence,
-    scope: &ComparisonScope,
-    raw: &StreamingRawInputEvidence,
-) -> Result<ResourceEstimate, AnalyticalCostError> {
-    validate_summary_edges_and_physical_ids(root, evidence)?;
-    fn summary_source_selections(
-        node: &SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
-        out: &mut Vec<LogicalSourceSelection>,
-    ) -> Result<(), AnalyticalCostError> {
-        if !seen.insert(node as *const _) {
-            return Ok(());
-        }
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(query) => query_source_selections(query, out)?,
-            SummaryExpr::SummaryAgg { child, .. } => summary_source_selections(child, seen, out)?,
-            SummaryExpr::SummaryMerge { children } => {
-                for child in children {
-                    summary_source_selections(child, seen, out)?;
-                }
-            }
-            SummaryExpr::SummarySubtract { left, right }
-            | SummaryExpr::SummaryJoin {
-                outer: left,
-                inner: right,
-                ..
-            } => {
-                summary_source_selections(left, seen, out)?;
-                summary_source_selections(right, seen, out)?;
-            }
-            SummaryExpr::SummaryDelete { summary_input, .. }
-            | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                summary_source_selections(summary_input, seen, out)?
-            }
-        }
-        Ok(())
-    }
-    let evaluation_count = scope.validate()?;
-    let by_node: HashMap<_, _> = deployments
-        .iter()
-        .map(|deployment| (deployment.summary as *const _, deployment))
-        .collect();
-    let mut cpu_ops = 0.0;
-    let mut persistent_bytes = 0_u64;
-    let mut ephemeral_state_bytes = 0_u64;
-    let mut scans = HashMap::<String, (usize, u64)>::new();
-    let mut physical_states = HashMap::<
-        String,
-        (
-            StreamingAggregateEvidence,
-            SummaryMaintenanceLifecycleGuarantee,
-        ),
-    >::new();
-    for deployment in deployments {
-        let node_evidence = evidence
-            .aggregation(deployment.summary)
-            .ok_or(AnalyticalCostError::MissingOrStale("summary_agg"))?;
-        let SummaryExpr::SummaryAgg { child, .. } = &deployment.summary.expr else {
-            return Err(AnalyticalCostError::UnsupportedCandidate);
-        };
-        let inputs = node_evidence.inputs.validate()?;
-        match node_evidence.source_coverage_index {
-            Some(index) => {
-                let declared =
-                    scope
-                        .sources
-                        .get(index)
-                        .ok_or(AnalyticalCostError::MissingComparisonScope(
-                            "summary source coverage",
-                        ))?;
-                if !matches!(&child.expr, SummaryExpr::KeepPreAsap(_))
-                    || inputs.initial_input_rows != raw.planning_time_input_rows
-                    || inputs.initial_input_bytes != raw.planning_time_input_bytes
-                    || inputs.initial_source_scan_bytes != raw.planning_time_source_scan_bytes
-                    || inputs.ingestion_rate_per_second != raw.ingestion_rate_per_second
-                {
-                    return Err(AnalyticalCostError::ComparisonScopeMismatch(
-                        "source-root bootstrap evolution",
-                    ));
-                }
-                let mut actual_selections = Vec::new();
-                summary_source_selections(child, &mut HashSet::new(), &mut actual_selections)?;
-                let actual_selections = deduplicate_source_selections(actual_selections);
-                let expected = (
-                    declared.source.clone(),
-                    declared.predicates.clone(),
-                    declared.info_matchers.clone(),
-                );
-                if actual_selections.as_slice() != [expected] {
-                    return Err(AnalyticalCostError::ComparisonScopeMismatch(
-                        "summary source lineage",
-                    ));
-                }
-            }
-            None => {
-                if matches!(&child.expr, SummaryExpr::KeepPreAsap(_))
-                    || inputs.initial_source_scan_bytes != 0
-                    || !node_evidence.bootstrap_read_identity.is_empty()
-                {
-                    return Err(AnalyticalCostError::ComparisonScopeMismatch(
-                        "intermediate bootstrap source ownership",
-                    ));
-                }
-            }
-        }
-        validate_guarantee(deployment.guarantee, scope.data_arrival)?;
-        match physical_states.entry(node_evidence.physical_id.clone()) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert((node_evidence.clone(), deployment.guarantee.clone()));
-            }
-            std::collections::hash_map::Entry::Occupied(entry)
-                if entry.get() != &(node_evidence.clone(), deployment.guarantee.clone()) =>
-            {
-                return Err(AnalyticalCostError::ComparisonScopeMismatch(
-                    "summary physical identity",
-                ));
-            }
-            std::collections::hash_map::Entry::Occupied(_) => continue,
-        }
-        let ephemeral = matches!(
-            deployment.guarantee.summary_maintenance_lifecycle,
-            SummaryMaintenanceLifecycle::Ephemeral
-        );
-        let (bootstrap, updates, source_scan_bytes) = if ephemeral {
-            (
-                ephemeral_rows_over_horizon(inputs, scope)?,
-                0,
-                ephemeral_scan_bytes_over_horizon(inputs, raw, scope)?,
-            )
-        } else {
-            let (bootstrap, updates, _) =
-                lifecycle_row_counts(inputs, deployment.guarantee, scope)?;
-            let bootstrap_extra_rows = bootstrap
-                .checked_sub(inputs.initial_input_rows)
-                .ok_or(AnalyticalCostError::Overflow)?;
-            let source_scan_bytes = if node_evidence.source_coverage_index.is_some() {
-                inputs
-                    .initial_source_scan_bytes
-                    .checked_add(
-                        bootstrap_extra_rows
-                            .checked_mul(raw.arriving_source_row_bytes)
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                    )
-                    .ok_or(AnalyticalCostError::Overflow)?
-            } else {
-                0
-            };
-            (bootstrap, updates, source_scan_bytes)
-        };
-        let insert = validated_operator_cpu("insert_cpu_ops", node_evidence.insert_cpu_ops)?;
-        let insert_calls = bootstrap
-            .checked_mul(inputs.bootstrap_window_count)
-            .and_then(|calls| {
-                updates
-                    .checked_mul(inputs.active_window_count)
-                    .and_then(|updates| calls.checked_add(updates))
-            })
-            .ok_or(AnalyticalCostError::Overflow)?;
-        cpu_ops += insert_calls as f64 * insert;
-        let live_window_count = if ephemeral {
-            inputs.bootstrap_window_count
-        } else {
-            inputs
-                .active_window_count
-                .checked_add(inputs.retained_window_count)
-                .ok_or(AnalyticalCostError::Overflow)?
-        };
-        let state_bytes = live_window_count
-            .checked_mul(inputs.physical_summary_count)
-            .and_then(|states| states.checked_mul(inputs.state_bytes_per_summary))
-            .ok_or(AnalyticalCostError::Overflow)?;
-        if ephemeral {
-            ephemeral_state_bytes = ephemeral_state_bytes
-                .checked_add(state_bytes)
-                .ok_or(AnalyticalCostError::Overflow)?;
-        } else {
-            persistent_bytes = persistent_bytes
-                .checked_add(state_bytes)
-                .ok_or(AnalyticalCostError::Overflow)?;
-        }
-        if let Some(source_index) = node_evidence.source_coverage_index {
-            if node_evidence.bootstrap_read_identity.is_empty() {
-                return Err(AnalyticalCostError::MissingOrStale(
-                    "bootstrap_read_identity",
-                ));
-            }
-            match scans.entry(node_evidence.bootstrap_read_identity.clone()) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert((source_index, source_scan_bytes));
-                }
-                std::collections::hash_map::Entry::Occupied(entry)
-                    if *entry.get() != (source_index, source_scan_bytes) =>
-                {
-                    return Err(AnalyticalCostError::ComparisonScopeMismatch(
-                        "bootstrap source bytes",
-                    ));
-                }
-                _ => {}
-            }
-        }
-    }
-    let covered_sources: HashSet<_> = scans.values().map(|(index, _)| *index).collect();
-    if covered_sources.len() != scope.sources.len()
-        || !(0..scope.sources.len()).all(|index| covered_sources.contains(&index))
-    {
-        return Err(AnalyticalCostError::ComparisonScopeMismatch("sources"));
-    }
-
-    #[expect(clippy::too_many_arguments, reason = "CPU and I/O traversal state")]
-    fn visit_ops(
-        node: &SummaryNode,
-        seen: &mut HashSet<String>,
-        by_node: &HashMap<*const SummaryNode, &CostedSummaryDeployment<'_>>,
-        evidence: &StreamingNodeEvidence,
-        scope: &ComparisonScope,
-        evaluation_count: u64,
-        cpu_ops: &mut f64,
-        io_bytes: &mut u64,
-    ) -> Result<(), AnalyticalCostError> {
-        let physical_id = summary_physical_id(node, evidence)?;
-        if !seen.insert(physical_id) {
-            return Ok(());
-        }
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => {
-                let retained = evidence
-                    .retained_queries
-                    .get(&(node as *const _))
-                    .ok_or(AnalyticalCostError::MissingOrStale("keep_pre_asap"))?;
-                if !retained.preprocessing_cpu_ops_over_horizon.is_finite()
-                    || retained.preprocessing_cpu_ops_over_horizon < 0.0
-                {
-                    return Err(AnalyticalCostError::InvalidOperationCost(
-                        "keep_pre_asap",
-                        retained.preprocessing_cpu_ops_over_horizon,
-                    ));
-                }
-                *cpu_ops += retained.preprocessing_cpu_ops_over_horizon;
-            }
-            SummaryExpr::SummaryAgg { child, .. } => {
-                visit_ops(
-                    child,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluation_count,
-                    cpu_ops,
-                    io_bytes,
-                )?;
-            }
-            SummaryExpr::SummaryMerge { children } => {
-                let operation = summary_operation_evidence(node, evidence)?.resource();
-                let merge = validated_operator_cpu("summary_merge", operation.cpu_ops)?;
-                *cpu_ops += evaluation_count as f64
-                    * validated_operator_executions("summary_merge", operation)? as f64
-                    * merge;
-                add_operator_io(io_bytes, operation, evaluation_count)?;
-                for child in children {
-                    visit_ops(
-                        child,
-                        seen,
-                        by_node,
-                        evidence,
-                        scope,
-                        evaluation_count,
-                        cpu_ops,
-                        io_bytes,
-                    )?;
-                }
-            }
-            SummaryExpr::SummarySubtract { left, right } => {
-                let operation = summary_operation_evidence(node, evidence)?.resource();
-                *cpu_ops += evaluation_count as f64
-                    * validated_operator_executions("summary_subtract", operation)? as f64
-                    * validated_operator_cpu("summary_subtract", operation.cpu_ops)?;
-                add_operator_io(io_bytes, operation, evaluation_count)?;
-                visit_ops(
-                    left,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluation_count,
-                    cpu_ops,
-                    io_bytes,
-                )?;
-                visit_ops(
-                    right,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluation_count,
-                    cpu_ops,
-                    io_bytes,
-                )?;
-            }
-            SummaryExpr::SummaryDelete { summary_input, .. } => {
-                let delete = summary_operation_evidence(node, evidence)?;
-                let StreamingSummaryOperatorEvidence::Delete {
-                    resource: operation,
-                    events_per_second,
-                    routing_fanout,
-                } = delete
-                else {
-                    unreachable!("operation kind was validated")
-                };
-                let state_ptr = evidence
-                    .operation_state_owners
-                    .get(&(node as *const _))
-                    .ok_or(AnalyticalCostError::MissingOrStale("summary_delete_owner"))?;
-                fn collect_aggs(
-                    node: &SummaryNode,
-                    seen: &mut HashSet<*const SummaryNode>,
-                    out: &mut Vec<*const SummaryNode>,
-                ) {
-                    if !seen.insert(node as *const _) {
-                        return;
-                    }
-                    match &node.expr {
-                        SummaryExpr::SummaryAgg { child, .. } => {
-                            out.push(node as *const _);
-                            collect_aggs(child, seen, out);
-                        }
-                        SummaryExpr::SummaryMerge { children } => {
-                            children
-                                .iter()
-                                .for_each(|child| collect_aggs(child, seen, out));
-                        }
-                        SummaryExpr::SummarySubtract { left, right }
-                        | SummaryExpr::SummaryJoin {
-                            outer: left,
-                            inner: right,
-                            ..
-                        } => {
-                            collect_aggs(left, seen, out);
-                            collect_aggs(right, seen, out);
-                        }
-                        SummaryExpr::SummaryDelete { summary_input, .. }
-                        | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                            collect_aggs(summary_input, seen, out)
-                        }
-                        SummaryExpr::KeepPreAsap(_) => {}
-                    }
-                }
-                let mut reachable = Vec::new();
-                collect_aggs(summary_input, &mut HashSet::new(), &mut reachable);
-                if reachable.as_slice() != [*state_ptr] {
-                    return Err(AnalyticalCostError::ComparisonScopeMismatch(
-                        "summary delete owner",
-                    ));
-                }
-                let deployment = by_node
-                    .get(state_ptr)
-                    .copied()
-                    .ok_or(AnalyticalCostError::MissingOrStale("summary_delete_owner"))?;
-                let state = evidence
-                    .aggregation(deployment.summary)
-                    .ok_or(AnalyticalCostError::MissingOrStale("summary_delete_owner"))?;
-                let (_, _, active_ms) =
-                    lifecycle_row_counts(state.inputs, deployment.guarantee, scope)?;
-                if !events_per_second.is_finite() || *events_per_second < 0.0 {
-                    return Err(AnalyticalCostError::InvalidIngestionRate(
-                        *events_per_second,
-                    ));
-                }
-                if *routing_fanout == 0 {
-                    return Err(AnalyticalCostError::MissingOrZero("delete_routing_fanout"));
-                }
-                let delete_events = (events_per_second * active_ms as f64 / 1_000.0).ceil()
-                    * *routing_fanout as f64;
-                if !delete_events.is_finite() || delete_events > u64::MAX as f64 {
-                    return Err(AnalyticalCostError::Overflow);
-                }
-                let delete_events = delete_events as u64;
-                *cpu_ops += delete_events as f64
-                    * validated_operator_executions("summary_delete", operation)? as f64
-                    * validated_operator_cpu("summary_delete", operation.cpu_ops)?;
-                add_operator_io(io_bytes, operation, delete_events)?;
-                visit_ops(
-                    summary_input,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluation_count,
-                    cpu_ops,
-                    io_bytes,
-                )?;
-            }
-            SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                let operation = summary_operation_evidence(node, evidence)?.resource();
-                *cpu_ops += evaluation_count as f64
-                    * validated_operator_executions("summary_readout", operation)? as f64
-                    * validated_operator_cpu("summary_readout", operation.cpu_ops)?;
-                add_operator_io(io_bytes, operation, evaluation_count)?;
-                visit_ops(
-                    summary_input,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluation_count,
-                    cpu_ops,
-                    io_bytes,
-                )?;
-            }
-            SummaryExpr::SummaryJoin { outer, inner, .. } => {
-                let join = evidence
-                    .joins
-                    .get(&(node as *const _))
-                    .ok_or(AnalyticalCostError::MissingOrStale("summary_join"))?;
-                if !join.cpu_ops_per_execution.is_finite()
-                    || join.cpu_ops_per_execution <= 0.0
-                    || join.working_memory_bytes == 0
-                    || join.executions_per_evaluation == 0
-                {
-                    return Err(AnalyticalCostError::MissingOrStale("summary_join"));
-                }
-                *cpu_ops += evaluation_count as f64
-                    * join.executions_per_evaluation as f64
-                    * join.cpu_ops_per_execution;
-                let join_io = join
-                    .io_bytes_per_execution
-                    .ok_or(AnalyticalCostError::MissingOrStale("summary_join_io"))?;
-                *io_bytes = io_bytes
-                    .checked_add(
-                        join_io
-                            .checked_mul(join.executions_per_evaluation)
-                            .and_then(|bytes| bytes.checked_mul(evaluation_count))
-                            .ok_or(AnalyticalCostError::Overflow)?,
-                    )
-                    .ok_or(AnalyticalCostError::Overflow)?;
-                visit_ops(
-                    outer,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluation_count,
-                    cpu_ops,
-                    io_bytes,
-                )?;
-                visit_ops(
-                    inner,
-                    seen,
-                    by_node,
-                    evidence,
-                    scope,
-                    evaluation_count,
-                    cpu_ops,
-                    io_bytes,
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    let mut operator_io_bytes = 0;
-    visit_ops(
-        root,
-        &mut HashSet::new(),
-        &by_node,
-        evidence,
-        scope,
-        evaluation_count,
-        &mut cpu_ops,
-        &mut operator_io_bytes,
-    )?;
-    let transient_bytes = estimate_transient_liveness(root, evidence)?;
-    if !cpu_ops.is_finite() {
-        return Err(AnalyticalCostError::Overflow);
-    }
-    Ok(ResourceEstimate {
-        cpu_ops,
-        peak_memory_bytes: persistent_bytes
-            .checked_add(transient_bytes)
-            .and_then(|bytes| bytes.checked_add(ephemeral_state_bytes))
-            .ok_or(AnalyticalCostError::Overflow)?,
-        scan_bytes: scans
-            .values()
-            .try_fold(operator_io_bytes, |sum, (_, bytes)| {
-                sum.checked_add(*bytes).ok_or(AnalyticalCostError::Overflow)
-            })?,
-    })
-}
-
-fn add_operator_io(
-    total: &mut u64,
-    operation: &SummaryOperatorResourceEvidence,
-    execution_units: u64,
-) -> Result<(), AnalyticalCostError> {
-    let bytes = operation
-        .io_bytes_per_execution
-        .ok_or(AnalyticalCostError::MissingOrStale("summary operator io"))?;
-    if operation.executions_per_evaluation == 0 {
-        return Err(AnalyticalCostError::MissingOrStale(
-            "summary operator executions",
-        ));
-    }
-    *total = total
-        .checked_add(
-            bytes
-                .checked_mul(operation.executions_per_evaluation)
-                .and_then(|value| value.checked_mul(execution_units))
-                .ok_or(AnalyticalCostError::Overflow)?,
-        )
-        .ok_or(AnalyticalCostError::Overflow)?;
-    Ok(())
-}
-
-fn validate_summary_edges_and_physical_ids(
-    root: &SummaryNode,
-    evidence: &StreamingNodeEvidence,
-) -> Result<(), AnalyticalCostError> {
-    fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => vec![],
-            SummaryExpr::SummaryAgg { child, .. } => vec![child],
-            SummaryExpr::SummaryMerge { children } => {
-                children.iter().map(|child| child.as_ref()).collect()
-            }
-            SummaryExpr::SummarySubtract { left, right }
-            | SummaryExpr::SummaryJoin {
-                outer: left,
-                inner: right,
-                ..
-            } => vec![left, right],
-            SummaryExpr::SummaryDelete { summary_input, .. }
-            | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
-        }
-    }
-    fn metadata(
-        node: &SummaryNode,
-        evidence: &StreamingNodeEvidence,
-    ) -> Result<(String, Vec<EdgeStatistics>, EdgeStatistics), AnalyticalCostError> {
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => {
-                let retained = evidence
-                    .retained_queries
-                    .get(&(node as *const _))
-                    .ok_or(AnalyticalCostError::MissingOrStale("keep_pre_asap"))?;
-                Ok((retained.physical_id.clone(), vec![], retained.output))
-            }
-            SummaryExpr::SummaryAgg { .. } => {
-                let value = evidence
-                    .aggregations
-                    .get(&(node as *const _))
-                    .ok_or(AnalyticalCostError::MissingOrStale("summary_agg"))?;
-                Ok((value.physical_id.clone(), vec![value.input], value.output))
-            }
-            SummaryExpr::SummaryJoin { .. } => {
-                let value = evidence
-                    .joins
-                    .get(&(node as *const _))
-                    .ok_or(AnalyticalCostError::MissingOrStale("summary_join"))?;
-                Ok((
-                    value.physical_id.clone(),
-                    value.inputs.clone(),
-                    value.output,
-                ))
-            }
-            _ => {
-                let value = summary_operation_evidence(node, evidence)?.resource();
-                Ok((
-                    value.physical_id.clone(),
-                    value.inputs.clone(),
-                    value.output,
-                ))
-            }
-        }
-    }
-    fn visit(
-        node: &SummaryNode,
-        evidence: &StreamingNodeEvidence,
-        seen: &mut HashSet<*const SummaryNode>,
-        physical: &mut HashMap<String, (Vec<EdgeStatistics>, EdgeStatistics, String)>,
-    ) -> Result<EdgeStatistics, AnalyticalCostError> {
-        if !seen.insert(node as *const _) {
-            return metadata(node, evidence).map(|(_, _, output)| output);
-        }
-        let child_nodes = children(node);
-        let child_outputs = child_nodes
-            .iter()
-            .map(|child| visit(child, evidence, seen, physical))
-            .collect::<Result<Vec<_>, _>>()?;
-        let child_physical_ids = child_nodes
-            .iter()
-            .map(|child| summary_physical_id(child, evidence))
-            .collect::<Result<Vec<_>, _>>()?;
-        let (id, inputs, output) = metadata(node, evidence)?;
-        let local_fingerprint = match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => {
-                format!("{:?}", evidence.retained_queries.get(&(node as *const _)))
-            }
-            SummaryExpr::SummaryAgg { .. } => {
-                format!("{:?}", evidence.aggregations.get(&(node as *const _)))
-            }
-            SummaryExpr::SummaryJoin { .. } => {
-                format!("{:?}", evidence.joins.get(&(node as *const _)))
-            }
-            _ => format!("{:?}", evidence.operations.get(&(node as *const _))),
-        };
-        // A provider identity names the complete physical operator, including
-        // its inputs. Equal local widths/costs do not make operators consuming
-        // different physical children the same deployment.
-        let fingerprint = format!("{local_fingerprint}|children={child_physical_ids:?}");
-        if id.is_empty()
-            || inputs != child_outputs
-            || !output.is_consistent()
-            || inputs.iter().any(|edge| !edge.is_consistent())
-        {
-            return Err(AnalyticalCostError::ComparisonScopeMismatch(
-                "summary physical edge statistics",
-            ));
-        }
-        match physical.entry(id) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert((inputs, output, fingerprint));
-            }
-            std::collections::hash_map::Entry::Occupied(entry)
-                if entry.get() != &(inputs, output, fingerprint) =>
-            {
-                return Err(AnalyticalCostError::ComparisonScopeMismatch(
-                    "summary physical identity",
-                ));
-            }
-            _ => {}
-        }
-        Ok(output)
-    }
-    visit(root, evidence, &mut HashSet::new(), &mut HashMap::new()).map(|_| ())
-}
-
-fn summary_physical_id(
-    node: &SummaryNode,
-    evidence: &StreamingNodeEvidence,
-) -> Result<String, AnalyticalCostError> {
-    match &node.expr {
-        SummaryExpr::KeepPreAsap(_) => evidence
-            .retained_queries
-            .get(&(node as *const _))
-            .map(|value| value.physical_id.clone()),
-        SummaryExpr::SummaryAgg { .. } => evidence
-            .aggregations
-            .get(&(node as *const _))
-            .map(|value| value.physical_id.clone()),
-        SummaryExpr::SummaryJoin { .. } => evidence
-            .joins
-            .get(&(node as *const _))
-            .map(|value| value.physical_id.clone()),
-        _ => summary_operation_evidence(node, evidence)
-            .ok()
-            .map(|value| value.resource().physical_id.clone()),
-    }
-    .ok_or(AnalyticalCostError::MissingOrStale(
-        "summary physical identity",
-    ))
-}
-
-/// Simulate a deterministic child-before-parent physical schedule. Completed
-/// child output buffers remain live until their final consumer executes;
-/// operator workspace and its output buffer coexist during that execution.
-fn estimate_transient_liveness(
-    root: &SummaryNode,
-    evidence: &StreamingNodeEvidence,
-) -> Result<u64, AnalyticalCostError> {
-    fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => vec![],
-            SummaryExpr::SummaryAgg { child, .. } => vec![child],
-            SummaryExpr::SummaryMerge { children } => {
-                children.iter().map(|child| child.as_ref()).collect()
-            }
-            SummaryExpr::SummarySubtract { left, right }
-            | SummaryExpr::SummaryJoin {
-                outer: left,
-                inner: right,
-                ..
-            } => vec![left, right],
-            SummaryExpr::SummaryDelete { summary_input, .. }
-            | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
-        }
-    }
-    fn visit<'a>(
-        node: &'a SummaryNode,
-        evidence: &StreamingNodeEvidence,
-        seen: &mut HashSet<String>,
-        uses: &mut HashMap<String, usize>,
-        order: &mut Vec<&'a SummaryNode>,
-    ) -> Result<(), AnalyticalCostError> {
-        if !seen.insert(summary_physical_id(node, evidence)?) {
-            return Ok(());
-        }
-        for child in children(node) {
-            *uses
-                .entry(summary_physical_id(child, evidence)?)
-                .or_default() += 1;
-            visit(child, evidence, seen, uses, order)?;
-        }
-        order.push(node);
-        Ok(())
-    }
-    fn memory(
-        node: &SummaryNode,
-        evidence: &StreamingNodeEvidence,
-    ) -> Result<(u64, u64), AnalyticalCostError> {
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => evidence
-                .retained_queries
-                .get(&(node as *const _))
-                .map(|value| (value.working_memory_bytes, value.output_buffer_bytes))
-                .ok_or(AnalyticalCostError::MissingOrStale("keep_pre_asap")),
-            SummaryExpr::SummaryAgg { .. } => Ok((0, 0)),
-            SummaryExpr::SummaryJoin { .. } => evidence
-                .joins
-                .get(&(node as *const _))
-                .map(|value| (value.working_memory_bytes, value.output_buffer_bytes))
-                .ok_or(AnalyticalCostError::MissingOrStale("summary_join")),
-            SummaryExpr::SummaryMerge { .. }
-            | SummaryExpr::SummarySubtract { .. }
-            | SummaryExpr::SummaryDelete { .. }
-            | SummaryExpr::SummaryEstimate { .. } => {
-                let value = summary_operation_evidence(node, evidence)?.resource();
-                Ok((value.working_memory_bytes, value.output_buffer_bytes))
-            }
-        }
-    }
-
-    let mut uses = HashMap::new();
-    let mut order = Vec::new();
-    visit(root, evidence, &mut HashSet::new(), &mut uses, &mut order)?;
-    let outputs: HashMap<_, _> = order
-        .iter()
-        .map(|node| {
-            memory(node, evidence)
-                .and_then(|(_, output)| summary_physical_id(node, evidence).map(|id| (id, output)))
-        })
-        .collect::<Result<_, _>>()?;
-    let mut live = 0_u64;
-    let mut peak = 0_u64;
-    for node in order {
-        let (workspace, output) = memory(node, evidence)?;
-        peak = peak.max(
-            live.checked_add(workspace)
-                .and_then(|bytes| bytes.checked_add(output))
-                .ok_or(AnalyticalCostError::Overflow)?,
-        );
-        live = live
-            .checked_add(output)
-            .ok_or(AnalyticalCostError::Overflow)?;
-        for child in children(node) {
-            let child_id = summary_physical_id(child, evidence)?;
-            let remaining =
-                uses.get_mut(&child_id)
-                    .ok_or(AnalyticalCostError::InvalidPhysicalDag(
-                        "missing summary consumer count",
-                    ))?;
-            *remaining -= 1;
-            if *remaining == 0 {
-                live = live
-                    .checked_sub(outputs[&child_id])
-                    .ok_or(AnalyticalCostError::Overflow)?;
-            }
-        }
-    }
-    Ok(peak)
-}
-
-#[cfg(test)]
-fn evidence_nodes(root: &SummaryNode) -> (Vec<&SummaryNode>, Vec<&SummaryNode>) {
-    fn visit<'a>(
-        node: &'a SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
-        aggregations: &mut Vec<&'a SummaryNode>,
-        joins: &mut Vec<&'a SummaryNode>,
-    ) {
-        if !seen.insert(node as *const _) {
-            return;
-        }
-        match &node.expr {
-            SummaryExpr::SummaryAgg { child, .. } => {
-                aggregations.push(node);
-                visit(child, seen, aggregations, joins);
-            }
-            SummaryExpr::SummaryMerge { children } => {
-                for child in children {
-                    visit(child, seen, aggregations, joins);
-                }
-            }
-            SummaryExpr::SummarySubtract { left, right }
-            | SummaryExpr::SummaryJoin {
-                outer: left,
-                inner: right,
-                ..
-            } => {
-                if matches!(&node.expr, SummaryExpr::SummaryJoin { .. }) {
-                    joins.push(node);
-                }
-                visit(left, seen, aggregations, joins);
-                visit(right, seen, aggregations, joins);
-            }
-            SummaryExpr::SummaryDelete { summary_input, .. }
-            | SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                visit(summary_input, seen, aggregations, joins);
-            }
-            SummaryExpr::KeepPreAsap(_) => {}
-        }
-    }
-    let mut aggregations = Vec::new();
-    let mut joins = Vec::new();
-    visit(root, &mut HashSet::new(), &mut aggregations, &mut joins);
-    (aggregations, joins)
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[cfg(test)]
-struct SummaryOperationCounts {
-    state_builds: u64,
-    merges_per_read: u64,
-    subtracts_per_read: u64,
-    deletes_per_update: u64,
-    readouts_per_read: u64,
-    joins_per_read: u64,
-}
-
-/// Low-level diagnostic for a homogeneous deployment. Final planner ranking
-/// uses the per-node whole-DAG estimator above. Shared `Rc` nodes are visited
-/// once; explicit delete frequency comes from deletion evidence.
-#[cfg(test)]
-fn estimate_incremental_summary_maintenance(
-    root: &SummaryNode,
-    guarantee: &SummaryMaintenanceLifecycleGuarantee,
-    inputs: StreamingSummaryInputs,
-    cpu: SummaryOperationCpuEvidence,
-    scope: &ComparisonScope,
-) -> Result<ResourceEstimate, AnalyticalCostError> {
-    estimate_incremental_summary_maintenance_with_join(root, guarantee, inputs, cpu, None, scope)
-}
-
-#[cfg(test)]
-fn estimate_incremental_summary_maintenance_with_join(
-    root: &SummaryNode,
-    guarantee: &SummaryMaintenanceLifecycleGuarantee,
-    inputs: StreamingSummaryInputs,
-    cpu: SummaryOperationCpuEvidence,
-    join: Option<SummaryJoinEvidence>,
-    scope: &ComparisonScope,
-) -> Result<ResourceEstimate, AnalyticalCostError> {
-    let inputs = inputs.validate()?;
-    let evaluation_count = scope.validate()?;
-    validate_guarantee(guarantee, scope.data_arrival)?;
-    let (bootstrap_input_rows, arriving_input_rows, active_ms) =
-        lifecycle_row_counts(inputs, guarantee, scope)?;
-    let counts = count_operations(root)?;
-    if counts.state_builds == 0 {
-        return Err(AnalyticalCostError::UnsupportedCandidate);
-    }
-
-    let insert = required_cpu("insert_cpu_ops", cpu.insert_cpu_ops)?;
-    let merge = required_cpu_when(counts.merges_per_read, "merge_cpu_ops", cpu.merge_cpu_ops)?;
-    let subtract = required_cpu_when(
-        counts.subtracts_per_read,
-        "subtract_cpu_ops",
-        cpu.subtract_cpu_ops,
-    )?;
-    let delete = required_cpu_when(
-        counts.deletes_per_update,
-        "delete_cpu_ops",
-        cpu.delete_cpu_ops,
-    )?;
-    let delete_events = if counts.deletes_per_update == 0 {
-        0_u64
-    } else {
-        let rate = cpu
-            .delete_events_per_second
-            .filter(|rate| rate.is_finite() && *rate >= 0.0)
-            .ok_or(AnalyticalCostError::MissingOrStale(
-                "delete_events_per_second",
-            ))?;
-        let fanout = cpu
-            .delete_routing_fanout
-            .filter(|fanout| *fanout > 0)
-            .ok_or(AnalyticalCostError::MissingOrStale("delete_routing_fanout"))?;
-        let events = (rate * active_ms as f64 / 1_000.0).ceil();
-        if !events.is_finite() || events > u64::MAX as f64 {
-            return Err(AnalyticalCostError::Overflow);
-        }
-        (events as u64)
-            .checked_mul(fanout)
-            .ok_or(AnalyticalCostError::Overflow)?
-    };
-    let readout = required_cpu_when(
-        counts.readouts_per_read,
-        "readout_cpu_ops",
-        cpu.readout_cpu_ops,
-    )?;
-    let join_cpu = match (counts.joins_per_read, join.as_ref()) {
-        (0, _) => 0.0,
-        (_, Some(evidence))
-            if evidence.cpu_ops_per_execution.is_finite()
-                && evidence.cpu_ops_per_execution > 0.0
-                && evidence.working_memory_bytes > 0 =>
-        {
-            evidence.cpu_ops_per_execution
-        }
-        (_, Some(evidence))
-            if !evidence.cpu_ops_per_execution.is_finite()
-                || evidence.cpu_ops_per_execution <= 0.0 =>
-        {
-            return Err(AnalyticalCostError::InvalidOperationCost(
-                "summary_join_cpu_ops_per_execution",
-                evidence.cpu_ops_per_execution,
-            ));
-        }
-        _ => return Err(AnalyticalCostError::MissingOrStale("summary_join")),
-    };
-
-    let build_inserts = bootstrap_input_rows
-        .checked_mul(inputs.bootstrap_window_count)
-        .ok_or(AnalyticalCostError::Overflow)?
-        .checked_mul(counts.state_builds)
-        .ok_or(AnalyticalCostError::Overflow)?;
-    let update_inserts = arriving_input_rows
-        .checked_mul(inputs.active_window_count)
-        .and_then(|n| n.checked_mul(counts.state_builds))
-        .ok_or(AnalyticalCostError::Overflow)?;
-    let instances = inputs.physical_summary_count as f64;
-    let evaluations = evaluation_count as f64;
-    let cpu_ops = (build_inserts as f64 + update_inserts as f64) * insert
-        + evaluations * counts.merges_per_read as f64 * instances * merge
-        + evaluations * counts.subtracts_per_read as f64 * instances * subtract
-        + delete_events as f64 * counts.deletes_per_update as f64 * delete
-        + evaluations * counts.readouts_per_read as f64 * instances * readout
-        + evaluations * counts.joins_per_read as f64 * join_cpu;
-    if !cpu_ops.is_finite() {
-        return Err(AnalyticalCostError::Overflow);
-    }
-
-    let state_instances = inputs
-        .active_window_count
-        .checked_add(inputs.retained_window_count)
-        .and_then(|n| n.checked_mul(inputs.physical_summary_count))
-        .and_then(|n| n.checked_mul(counts.state_builds))
-        .ok_or(AnalyticalCostError::Overflow)?;
-    let retained_bytes = state_instances
-        .checked_mul(inputs.state_bytes_per_summary)
-        .ok_or(AnalyticalCostError::Overflow)?;
-    // Merge/subtract may stream over persistent inputs but still needs one
-    // result state per physical instance. Persistent retained windows are
-    // already included above and are not loaded a second time.
-    let transient_bytes = if counts.merges_per_read > 0 || counts.subtracts_per_read > 0 {
-        inputs
-            .physical_summary_count
-            .checked_mul(inputs.state_bytes_per_summary)
-            .ok_or(AnalyticalCostError::Overflow)?
-    } else {
-        0
-    };
-    let join_bytes = match (counts.joins_per_read, join.as_ref()) {
-        (0, _) => 0,
-        (_, Some(evidence)) => evidence.working_memory_bytes,
-        _ => return Err(AnalyticalCostError::MissingOrStale("summary_join")),
-    };
-    let bootstrap_row_buffer = if inputs.initial_input_rows == 0 {
-        0
-    } else {
-        inputs
-            .initial_input_bytes
-            .div_ceil(inputs.initial_input_rows)
-    };
-    Ok(ResourceEstimate {
-        cpu_ops,
-        peak_memory_bytes: retained_bytes
-            .checked_add(transient_bytes)
-            .and_then(|bytes| bytes.checked_add(join_bytes))
-            .ok_or(AnalyticalCostError::Overflow)?
-            .max(bootstrap_row_buffer),
-        scan_bytes: inputs.initial_source_scan_bytes,
-    })
-}
-
-fn lifecycle_row_counts(
-    inputs: StreamingSummaryInputs,
-    guarantee: &SummaryMaintenanceLifecycleGuarantee,
-    scope: &ComparisonScope,
-) -> Result<(u64, u64, u64), AnalyticalCostError> {
-    let horizon_end = scope
-        .planning_time
-        .0
-        .checked_add(scope.horizon.0)
-        .ok_or(AnalyticalCostError::Overflow)?;
-    let (bootstrap_extra_ms, active_ms) = match guarantee.summary_maintenance_lifecycle {
-        SummaryMaintenanceLifecycle::Prepared {
-            activate_at,
-            retire_at,
-        } => {
-            if activate_at.0 >= retire_at.0 {
-                return Err(AnalyticalCostError::IncompatibleLifecycleGuarantee);
-            }
-            let covers_every_evaluation = evaluation_offsets_ms(scope)?.into_iter().all(|offset| {
-                scope
-                    .planning_time
-                    .0
-                    .checked_add(offset)
-                    .is_some_and(|at| at >= activate_at.0 && at < retire_at.0)
-            });
-            if !covers_every_evaluation {
-                return Err(AnalyticalCostError::IncompatibleLifecycleGuarantee);
-            }
-            let activation = activate_at.0.max(scope.planning_time.0).min(horizon_end);
-            let bootstrap_extra_ms = activation.saturating_sub(scope.planning_time.0);
-            let start = activation;
-            let end = retire_at.0.min(horizon_end);
-            (bootstrap_extra_ms, end.saturating_sub(start))
-        }
-        SummaryMaintenanceLifecycle::Shared { .. } => (0, scope.horizon.0),
-        SummaryMaintenanceLifecycle::ContinuouslyMaintained => (0, scope.horizon.0),
-        SummaryMaintenanceLifecycle::Ephemeral => {
-            return Err(AnalyticalCostError::IncompatibleLifecycleGuarantee)
-        }
-    };
-    let bootstrap_extra = inputs.ingestion_rate_per_second * bootstrap_extra_ms as f64 / 1000.0;
-    let updates = inputs.ingestion_rate_per_second * active_ms as f64 / 1000.0;
-    if !bootstrap_extra.is_finite()
-        || !updates.is_finite()
-        || bootstrap_extra > u64::MAX as f64
-        || updates > u64::MAX as f64
-    {
-        return Err(AnalyticalCostError::Overflow);
-    }
-    Ok((
-        inputs
-            .initial_input_rows
-            .checked_add(bootstrap_extra.ceil() as u64)
-            .ok_or(AnalyticalCostError::Overflow)?,
-        updates.ceil() as u64,
-        active_ms,
-    ))
-}
-
-fn validate_guarantee(
-    guarantee: &SummaryMaintenanceLifecycleGuarantee,
-    arrival: DataArrival,
-) -> Result<(), AnalyticalCostError> {
-    if guarantee.output_representation != asap_types::post_asap::OutputRepresentation::SummaryState
-        || guarantee.summary_maintenance_mode
-            != maintenance_mode(&guarantee.summary_maintenance_lifecycle, arrival)
-        || guarantee.evaluation_schedule
-            != evaluation_schedule(&guarantee.summary_maintenance_lifecycle, arrival)
-    {
-        return Err(AnalyticalCostError::IncompatibleLifecycleGuarantee);
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn required_cpu(name: &'static str, value: Option<f64>) -> Result<f64, AnalyticalCostError> {
-    let value = value.ok_or(AnalyticalCostError::MissingOrStale(name))?;
-    if !value.is_finite() || value <= 0.0 {
-        return Err(AnalyticalCostError::InvalidOperationCost(name, value));
-    }
-    Ok(value)
-}
-
-fn validated_operator_cpu(name: &'static str, value: f64) -> Result<f64, AnalyticalCostError> {
-    if !value.is_finite() || value <= 0.0 {
-        Err(AnalyticalCostError::InvalidOperationCost(name, value))
-    } else {
-        Ok(value)
-    }
-}
-
-fn validated_operator_executions(
-    name: &'static str,
-    evidence: &SummaryOperatorResourceEvidence,
-) -> Result<u64, AnalyticalCostError> {
-    if evidence.executions_per_evaluation == 0 {
-        return Err(AnalyticalCostError::MissingOrZero(name));
-    }
-    Ok(evidence.executions_per_evaluation)
-}
-
-#[cfg(test)]
-fn required_cpu_when(
-    count: u64,
-    name: &'static str,
-    value: Option<f64>,
-) -> Result<f64, AnalyticalCostError> {
-    if count == 0 {
-        return Ok(0.0);
-    }
-    required_cpu(name, value)
-}
-
-#[cfg(test)]
-fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, AnalyticalCostError> {
-    fn visit(
-        node: &SummaryNode,
-        seen: &mut HashSet<*const SummaryNode>,
-        counts: &mut SummaryOperationCounts,
-    ) -> Result<(), AnalyticalCostError> {
-        if !seen.insert(node as *const SummaryNode) {
-            return Ok(());
-        }
-        match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => {}
-            SummaryExpr::SummaryAgg { child, .. } => {
-                counts.state_builds = counts
-                    .state_builds
-                    .checked_add(1)
-                    .ok_or(AnalyticalCostError::Overflow)?;
-                visit(child, seen, counts)?;
-            }
-            SummaryExpr::SummaryMerge { children } => {
-                if children.is_empty() {
-                    return Err(AnalyticalCostError::InvalidPhysicalDag(
-                        "summary merge has no children",
-                    ));
-                }
-                counts.merges_per_read = counts
-                    .merges_per_read
-                    .checked_add(children.len().saturating_sub(1) as u64)
-                    .ok_or(AnalyticalCostError::Overflow)?;
-                for child in children {
-                    visit(child, seen, counts)?;
-                }
-            }
-            SummaryExpr::SummarySubtract { left, right } => {
-                counts.subtracts_per_read = counts
-                    .subtracts_per_read
-                    .checked_add(1)
-                    .ok_or(AnalyticalCostError::Overflow)?;
-                visit(left, seen, counts)?;
-                visit(right, seen, counts)?;
-            }
-            SummaryExpr::SummaryDelete { summary_input, .. } => {
-                counts.deletes_per_update = counts
-                    .deletes_per_update
-                    .checked_add(1)
-                    .ok_or(AnalyticalCostError::Overflow)?;
-                visit(summary_input, seen, counts)?;
-            }
-            SummaryExpr::SummaryEstimate { summary_input, .. } => {
-                counts.readouts_per_read = counts
-                    .readouts_per_read
-                    .checked_add(1)
-                    .ok_or(AnalyticalCostError::Overflow)?;
-                visit(summary_input, seen, counts)?;
-            }
-            SummaryExpr::SummaryJoin { outer, inner, .. } => {
-                counts.joins_per_read = counts
-                    .joins_per_read
-                    .checked_add(1)
-                    .ok_or(AnalyticalCostError::Overflow)?;
-                visit(outer, seen, counts)?;
-                visit(inner, seen, counts)?;
-            }
-        }
-        Ok(())
-    }
-
-    let mut counts = SummaryOperationCounts::default();
-    visit(root, &mut HashSet::new(), &mut counts)?;
-    Ok(counts)
-}
-
+use super::estimator::*;
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
@@ -2660,7 +1628,7 @@ mod tests {
             .insert(delete_ptr, unrelated_agg);
 
         let plan = plan_summary_maintenance_lifecycles(
-            root,
+            Rc::clone(&root),
             WorkloadDemand::new(&workload, &[0]),
             0,
             Some(Horizon(5.0)),
@@ -3068,6 +2036,414 @@ mod tests {
             larger_workspace.summary_total_cost.unwrap().0 - shared.summary_total_cost.unwrap().0,
             640.0
         );
+    }
+
+    #[test]
+    fn planner_selects_an_abstract_window_framework_from_downstream_evidence() {
+        let mut workload = streaming_workload();
+        workload.repeating_queries.as_mut().unwrap()[0]
+            .requirements
+            .accuracy =
+            asap_types::workload::AccuracyRequirement::Explicit(AccuracyTarget::EpsilonDelta {
+                epsilon: 0.10,
+                delta: 0.01,
+            });
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            unreachable!();
+        };
+        let windowed_summary = Rc::clone(summary_input);
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+
+        let mut tumbling = model.node_evidence.clone();
+        for aggregate in tumbling.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 1;
+            aggregate.inputs.retained_window_count = 20;
+        }
+        let mut sliding = model.node_evidence.clone();
+        for aggregate in sliding.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 10;
+            aggregate.inputs.retained_window_count = 10;
+        }
+        let mut exponential_histogram = model.node_evidence.clone();
+        for aggregate in exponential_histogram.aggregations.values_mut() {
+            aggregate.inputs.active_window_count = 2;
+            aggregate.inputs.retained_window_count = 2;
+        }
+        for candidate in [
+            StreamingWindowFrameworkCandidate {
+                physical_plan_id: "tumbling-v1".into(),
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::Tumbling),
+                }],
+                accuracy: StreamingWindowAccuracyEvidence::Exact,
+                node_evidence: tumbling,
+            },
+            StreamingWindowFrameworkCandidate {
+                physical_plan_id: "sliding-v1".into(),
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::Sliding),
+                }],
+                accuracy: StreamingWindowAccuracyEvidence::Exact,
+                node_evidence: sliding,
+            },
+            StreamingWindowFrameworkCandidate {
+                physical_plan_id: "eh-v1".into(),
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::ExponentialHistogram),
+                }],
+                accuracy: StreamingWindowAccuracyEvidence::ExponentialHistogram(
+                    ExponentialHistogramAccuracyEvidence::UniversalGsum {
+                        epsilon: 0.05,
+                        failure_probability: 0.01,
+                        range: ExponentialHistogramQueryRange::MostRecentWindow,
+                    },
+                ),
+                node_evidence: exponential_histogram,
+            },
+        ] {
+            model
+                .bind_window_framework_candidate(&target, &root, candidate)
+                .unwrap();
+        }
+        // Framework candidates are authoritative. Selection must not depend
+        // on duplicating one arbitrary implementation into the legacy global
+        // evidence map.
+        model.node_evidence = StreamingNodeEvidence::default();
+
+        let plan = plan_summary_maintenance_lifecycles(
+            Rc::clone(&root),
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: false,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: true,
+            },
+            &model,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.deployments[0].selected_window_framework,
+            Some(SummaryWindowFramework::ExponentialHistogram)
+        );
+        assert_eq!(plan.selected_physical_plan_id.as_deref(), Some("eh-v1"));
+        let guarantee = plan.window_accuracy_guarantee.as_ref().unwrap();
+        assert_eq!(guarantee.metric, ErrorMetric::RelativeValue);
+        assert!((guarantee.bound.evaluate().unwrap() - 0.05).abs() < f64::EPSILON);
+        let exported =
+            crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan);
+        assert_eq!(
+            exported.deployments[0].selected_window_framework,
+            Some(SummaryWindowFramework::ExponentialHistogram)
+        );
+        assert_eq!(exported.selected_physical_plan_id.as_deref(), Some("eh-v1"));
+        assert_eq!(
+            exported.window_accuracy_guarantee.unwrap().metric,
+            ErrorMetric::RelativeValue
+        );
+
+        workload.repeating_queries.as_mut().unwrap()[0]
+            .requirements
+            .accuracy =
+            asap_types::workload::AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(0.01));
+        let stricter = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: false,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: true,
+            },
+            &model,
+        )
+        .unwrap();
+        assert_ne!(
+            stricter.deployments[0].selected_window_framework,
+            Some(SummaryWindowFramework::ExponentialHistogram)
+        );
+        assert!(stricter.window_accuracy_guarantee.unwrap().is_exact());
+    }
+
+    #[test]
+    fn window_framework_candidates_require_unique_nonempty_planner_primitives() {
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            unreachable!();
+        };
+        let windowed_summary = Rc::clone(summary_input);
+        let mut model = streaming_model();
+        bind_comparison(&mut model, &target, &root);
+
+        let empty = model.bind_window_framework_candidate(
+            &target,
+            &root,
+            StreamingWindowFrameworkCandidate {
+                physical_plan_id: "invalid-extension".into(),
+                assignments: vec![StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&windowed_summary),
+                    framework: Some(SummaryWindowFramework::Extension("  ".into())),
+                }],
+                accuracy: StreamingWindowAccuracyEvidence::Exact,
+                node_evidence: model.node_evidence.clone(),
+            },
+        );
+        assert!(matches!(empty, Err(AnalyticalCostError::MissingOrZero(_))));
+
+        let candidate = StreamingWindowFrameworkCandidate {
+            physical_plan_id: "tumbling-v1".into(),
+            assignments: vec![StreamingWindowFrameworkAssignment {
+                summary: windowed_summary,
+                framework: Some(SummaryWindowFramework::Tumbling),
+            }],
+            accuracy: StreamingWindowAccuracyEvidence::Exact,
+            node_evidence: model.node_evidence.clone(),
+        };
+        model
+            .bind_window_framework_candidate(&target, &root, candidate.clone())
+            .unwrap();
+        assert!(matches!(
+            model.bind_window_framework_candidate(&target, &root, candidate),
+            Err(AnalyticalCostError::ComparisonScopeMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn one_physical_identity_cannot_alias_different_window_frameworks() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_join();
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            unreachable!();
+        };
+        let SummaryExpr::SummaryJoin { outer, inner, .. } = &summary_input.expr else {
+            unreachable!();
+        };
+        let aggregation_nodes = [Rc::clone(outer), Rc::clone(inner)];
+        let (aggregations, joins) = evidence_nodes(&root);
+        model.node_evidence.joins.insert(
+            joins[0] as *const _,
+            SummaryJoinEvidence {
+                physical_id: "joined-readout".into(),
+                inputs: vec![test_edge(), test_edge()],
+                output: test_edge(),
+                cpu_ops_per_execution: 1.0,
+                working_memory_bytes: 8,
+                output_buffer_bytes: 0,
+                executions_per_evaluation: 1,
+                io_bytes_per_execution: Some(0),
+            },
+        );
+
+        let mut shared_aggregation =
+            model.node_evidence.aggregations[&(aggregations[0] as *const _)].clone();
+        shared_aggregation.physical_id = "shared-window-state".into();
+        model
+            .node_evidence
+            .aggregations
+            .insert(aggregations[0] as *const _, shared_aggregation.clone());
+        model
+            .node_evidence
+            .aggregations
+            .insert(aggregations[1] as *const _, shared_aggregation);
+
+        let retained_children: Vec<_> = aggregation_nodes
+            .iter()
+            .map(|aggregate| match &aggregate.expr {
+                SummaryExpr::SummaryAgg { child, .. } => Rc::clone(child),
+                _ => unreachable!(),
+            })
+            .collect();
+        let mut shared_retained =
+            model.node_evidence.retained_queries[&Rc::as_ptr(&retained_children[0])].clone();
+        shared_retained.physical_id = "shared-retained-input".into();
+        for child in &retained_children {
+            model
+                .node_evidence
+                .retained_queries
+                .insert(Rc::as_ptr(child), shared_retained.clone());
+        }
+
+        let candidate = StreamingWindowFrameworkCandidate {
+            physical_plan_id: "mixed-framework-join".into(),
+            assignments: vec![
+                StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&aggregation_nodes[0]),
+                    framework: Some(SummaryWindowFramework::Tumbling),
+                },
+                StreamingWindowFrameworkAssignment {
+                    summary: Rc::clone(&aggregation_nodes[1]),
+                    framework: Some(SummaryWindowFramework::Sliding),
+                },
+            ],
+            accuracy: StreamingWindowAccuracyEvidence::Exact,
+            node_evidence: model.node_evidence.clone(),
+        };
+        model
+            .bind_window_framework_candidate(&target, &root, candidate)
+            .unwrap();
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(plan.summary_total_cost, None);
+    }
+
+    #[test]
+    fn promsketch_eh_accuracy_composes_registered_full_and_subwindow_bounds() {
+        let full = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::KllRank {
+                eh_epsilon: 0.01,
+                kll_epsilon: 0.02,
+                failure_probability: 0.01,
+                range: ExponentialHistogramQueryRange::MostRecentWindow,
+            },
+        )
+        .guarantee(true)
+        .unwrap();
+        assert_eq!(full.metric, ErrorMetric::Rank);
+        assert!((full.bound.evaluate().unwrap() - 0.04).abs() < f64::EPSILON);
+
+        let subwindow = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::KllRank {
+                eh_epsilon: 0.01,
+                kll_epsilon: 0.02,
+                failure_probability: 0.01,
+                range: ExponentialHistogramQueryRange::SubWindow {
+                    suffix_rows: 100,
+                    query_rows: 25,
+                },
+            },
+        )
+        .guarantee(true)
+        .unwrap();
+        assert!((subwindow.bound.evaluate().unwrap() - 0.10).abs() < f64::EPSILON);
+
+        let gsum = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::UniversalGsum {
+                epsilon: 0.05,
+                failure_probability: 0.30,
+                range: ExponentialHistogramQueryRange::SubWindow {
+                    suffix_rows: 100,
+                    query_rows: 25,
+                },
+            },
+        )
+        .guarantee(true)
+        .unwrap();
+        assert_eq!(gsum.metric, ErrorMetric::RelativeValue);
+        assert!((gsum.bound.evaluate().unwrap() - 0.20).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn eh_accuracy_rejects_negative_components_and_mismatched_summary_guarantees() {
+        let evidence = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::KllRank {
+                eh_epsilon: -0.01,
+                kll_epsilon: 0.03,
+                failure_probability: 0.01,
+                range: ExponentialHistogramQueryRange::MostRecentWindow,
+            },
+        );
+        assert!(evidence.guarantee(true).is_none());
+
+        let evidence = StreamingWindowAccuracyEvidence::ExponentialHistogram(
+            ExponentialHistogramAccuracyEvidence::KllRank {
+                eh_epsilon: 0.01,
+                kll_epsilon: 0.02,
+                failure_probability: 0.01,
+                range: ExponentialHistogramQueryRange::MostRecentWindow,
+            },
+        );
+        let actual_summary = ResultGuarantee {
+            metric: ErrorMetric::Rank,
+            bound: BoundExpr::Constant { value: 0.03 },
+            failure_probability: ProbabilityExpr::Constant { value: 0.01 },
+            provenance: vec![],
+        };
+        assert!(evidence
+            .end_to_end_guarantee(true, Some(&actual_summary))
+            .is_none());
+    }
+
+    #[test]
+    fn exponential_histogram_without_registered_accuracy_composition_fails_closed() {
+        let mut workload = streaming_workload();
+        workload.repeating_queries.as_mut().unwrap()[0]
+            .requirements
+            .accuracy =
+            asap_types::workload::AccuracyRequirement::Explicit(AccuracyTarget::Epsilon(1.0));
+        let target = streaming_sum_query();
+        let root = summary_with_operations(false, false, false);
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &root.expr else {
+            unreachable!();
+        };
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+        model
+            .bind_window_framework_candidate(
+                &target,
+                &root,
+                StreamingWindowFrameworkCandidate {
+                    physical_plan_id: "invalid-eh".into(),
+                    assignments: vec![StreamingWindowFrameworkAssignment {
+                        summary: Rc::clone(summary_input),
+                        framework: Some(SummaryWindowFramework::ExponentialHistogram),
+                    }],
+                    accuracy: StreamingWindowAccuracyEvidence::Exact,
+                    node_evidence: model.node_evidence.clone(),
+                },
+            )
+            .unwrap();
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        assert_eq!(plan.summary_total_cost, None);
     }
 
     #[test]
@@ -3565,7 +2941,7 @@ mod tests {
                 },
             },
             schema,
-            guarantee: None,
+            guarantee: Some(ResultGuarantee::exact("exact count readout")),
         })
     }
 

@@ -49,12 +49,14 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    GroupingStrategy, HydraParams, SketchAlgorithm, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
+    GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
+    SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
+    SummaryWindowFramework,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::QueryExpr;
+use asap_types::types::AccuracyTarget;
 
 use crate::recurrence::{
     self, Horizon, RecurrenceCostExplanation, RecurrenceError, RecurrenceProfile,
@@ -108,14 +110,27 @@ pub struct CostedSummaryDeployment<'a> {
     pub selected_cost: Cost,
 }
 
-/// Complete physical-plan result for one lifecycle combination. Models that
-/// enumerate multiple deployment implementations can expose the stable
-/// provider-owned identity of the winning alternative without adding a
-/// closed window-framework enum to the planner.
+/// Complete candidate estimate returned to lifecycle and global plan search.
+///
+/// A deployment-aware model may compare abstract summary-window primitives
+/// using evidence supplied by downstream implementations. `window_frameworks`
+/// is planner IR: it records the selected semantic realization contract.
+/// `physical_plan_id` is separate provider-owned provenance for the concrete
+/// implementation whose evidence won; it is not interpreted as planner IR.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompleteSummaryCandidateEstimate {
     pub cost: Cost,
+    /// Stable provider identity of the complete implementation whose evidence
+    /// produced this estimate.
     pub physical_plan_id: Option<String>,
+    /// Window choice for each entry of the `deployments` slice passed to the
+    /// complete-cost hook. `None` explicitly means that deployment does not
+    /// use a summary-window framework.
+    pub window_frameworks: Vec<Option<SummaryWindowFramework>>,
+    /// End-to-end guarantee supplied by the selected window realization.
+    /// `None` means that the complete model supplied no window-specific
+    /// guarantee; `Some` may be exact or approximate.
+    pub window_accuracy_guarantee: Option<ResultGuarantee>,
 }
 
 impl Cost {
@@ -593,6 +608,7 @@ pub trait CostModel {
         deployments: &[CostedSummaryDeployment<'_>],
         _horizon: Option<Horizon>,
         _expected_reads: Option<f64>,
+        _required_accuracy: &[AccuracyTarget],
     ) -> Option<Cost> {
         Some(Cost(
             deployments
@@ -602,8 +618,9 @@ pub trait CostModel {
         ))
     }
 
-    /// Complete-plan estimate plus the identity of the selected physical
-    /// implementation, when the model searched more than one implementation.
+    /// Complete cost together with selected implementation provenance and
+    /// planner-visible window primitives. The default preserves cost models
+    /// that do not perform either decision.
     fn complete_summary_candidate_estimate(
         &self,
         root: &SummaryNode,
@@ -611,12 +628,30 @@ pub trait CostModel {
         deployments: &[CostedSummaryDeployment<'_>],
         horizon: Option<Horizon>,
         expected_reads: Option<f64>,
+        required_accuracy: &[AccuracyTarget],
     ) -> Option<CompleteSummaryCandidateEstimate> {
-        self.complete_summary_candidate_cost(root, target, deployments, horizon, expected_reads)
-            .map(|cost| CompleteSummaryCandidateEstimate {
-                cost,
-                physical_plan_id: None,
-            })
+        self.complete_summary_candidate_cost(
+            root,
+            target,
+            deployments,
+            horizon,
+            expected_reads,
+            required_accuracy,
+        )
+        .map(|cost| CompleteSummaryCandidateEstimate {
+            cost,
+            physical_plan_id: None,
+            window_frameworks: vec![None; deployments.len()],
+            window_accuracy_guarantee: None,
+        })
+    }
+
+    /// Whether the complete-candidate hook is authoritative for lifecycle
+    /// costs. When true, lifecycle alternatives rejected only because their
+    /// legacy per-state cost is missing remain eligible for complete-DAG
+    /// evaluation. Semantic and runtime-capability rejections still apply.
+    fn complete_summary_candidate_estimate_covers_lifecycle_costs(&self) -> bool {
+        false
     }
 
     /// Cost of evaluating `target` directly from its logical/raw inputs once.

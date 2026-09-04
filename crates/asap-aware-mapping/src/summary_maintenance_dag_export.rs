@@ -12,8 +12,9 @@ use serde::Serialize;
 
 use asap_types::dag_export::{self, SummaryDagGraph};
 use asap_types::post_asap::{
-    EvaluationSchedule, OutputRepresentation, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
+    EvaluationSchedule, OutputRepresentation, ResultGuarantee, SummaryExpr,
+    SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
+    SummaryNode, SummaryWindowFramework,
 };
 
 use crate::summary_maintenance_lifecycle::{
@@ -32,12 +33,16 @@ pub struct SummaryMaintenanceDagExport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_physical_plan_id: Option<String>,
     pub summary_total_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_accuracy_guarantee: Option<ResultGuarantee>,
     pub raw_recompute_total_cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryMaintenanceDeploymentExport {
     pub summary_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_window_framework: Option<SummaryWindowFramework>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<SummaryMaintenanceLifecycleGuaranteeExport>,
     pub alternatives: Vec<SummaryMaintenanceLifecycleAlternativeExport>,
@@ -119,6 +124,7 @@ pub fn export_summary_maintenance_plan(
         .iter()
         .map(|deployment| SummaryMaintenanceDeploymentExport {
             summary_index: deployment.summary_index,
+            selected_window_framework: deployment.selected_window_framework.clone(),
             selected: deployment
                 .summary_maintenance_lifecycle_guarantee
                 .as_ref()
@@ -160,6 +166,7 @@ pub fn export_summary_maintenance_plan(
         selected_raw_recompute: plan.selected_raw_recompute,
         selected_physical_plan_id: plan.selected_physical_plan_id.clone(),
         summary_total_cost: plan.summary_total_cost.map(|cost| cost.0),
+        window_accuracy_guarantee: plan.window_accuracy_guarantee.clone(),
         raw_recompute_total_cost: plan.raw_recompute_total_cost.map(|cost| cost.0),
     }
 }

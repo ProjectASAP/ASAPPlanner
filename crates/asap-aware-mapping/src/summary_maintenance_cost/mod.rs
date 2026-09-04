@@ -8,15 +8,18 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryNode,
+    BoundExpr, ErrorMetric, ExactKind, GuaranteeSource, ProbabilityExpr, ResultGuarantee,
+    SketchAlgorithm, SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
 };
 use asap_types::pre_asap::{
     agg_intent::AggIntent, CompareOpKind, InfoMatcher, Predicate, QueryExpr, Source,
 };
+use asap_types::types::AccuracyTarget;
 use asap_types::workload::{DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand};
 use serde::{Deserialize, Serialize};
 
+use crate::accuracy::{AccuracyModel, DefaultAccuracyModel};
 use crate::analytical_cost::ExecutionMultiplicity;
 #[cfg(test)]
 use crate::analytical_cost::PhysicalNodeEvidence;
@@ -39,8 +42,11 @@ use crate::summary_maintenance_lifecycle::{
 
 pub const SUMMARY_MAINTENANCE_COST_MODEL_VERSION: &str = "summary-maintenance-resource-v1";
 
+mod estimator;
 mod evidence;
 mod model;
+mod window;
 
 pub use evidence::*;
 pub use model::*;
+pub use window::*;
