@@ -10,11 +10,17 @@ plans. These are separate concerns:
 - the **analytical estimation layer** applies algorithmic formulas to that
   evidence to estimate CPU work, peak memory, and source/disk I/O.
 
-The model version implemented here is explicitly for `DataArrival::AtRest`.
-It replaces dimensionless plan-node counts with estimates derived from
-operator complexity, cardinality, row width, and concrete summary parameters.
-The estimates are predictions; they are not measurements reported by a
-physical executor.
+There are two arrival-specific entry points. The complete physical-DAG
+comparison currently models `DataArrival::AtRest`. The streaming summary
+extension models `DataArrival::ContinuouslyIngesting` over a finite horizon,
+including bootstrap, arriving updates, retained state, and query readout.
+Evidence from one arrival mode must not be reused for the other. `Mixed` and
+`Unknown` remain unavailable until their distinct data regions are modeled.
+
+Both entry points replace dimensionless plan-node counts with estimates
+derived from operator complexity, cardinality, row width, and concrete summary
+parameters. The estimates are predictions; they are not measurements reported
+by a physical executor.
 
 The model does not decide semantic or accuracy legality. Candidate generation
 and guarantee composition run first; costing ranks only the candidates that
@@ -137,7 +143,7 @@ costed.
 ## Workload horizon and lifecycle
 
 Every alternative must cover the same source data and query horizon. The
-implemented `DataArrival::AtRest` comparison is build-once, read-many:
+`DataArrival::AtRest` physical-DAG comparison is build-once, read-many:
 
 ```text
 retained-summary builds = 1
@@ -153,12 +159,11 @@ An at-rest estimate must not be reused for `unknown`, `mixed`, or
 `continuously_ingesting` data. Callers fail closed instead of pretending that
 incremental updates are a one-time snapshot build.
 
-The sketch alternative scans the selected source snapshot once and retains
-state. The raw alternative recomputes from that snapshot for every query
-read. Continuously ingesting data, rebuilds, deletions, expiration, and
-retention duration belong to the summary-maintenance lifecycle model. They
-must contribute update/build/delete work before a continuously maintained
-plan is compared with raw execution.
+The at-rest summary alternative scans the selected source snapshot once and
+retains state. Its raw alternative recomputes from that snapshot for every
+query read. The continuously-ingesting entry point separately charges
+bootstrap, updates, summary operations, retained state, and raw evaluations;
+its lifecycle rules are defined below.
 
 ### Comparable source and workload scope
 
