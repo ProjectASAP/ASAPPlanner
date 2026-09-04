@@ -536,13 +536,10 @@ fn quantile_suffix(q: f64) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RankingMeasure {
     /// Unweighted frequency — `count` of rows/samples per key. Additive, and the
-    /// one heavy-hitter measure **realised today** (→ `AggIntent::TopK`).
+    /// unweighted heavy-hitter measure (→ `AggIntent::TopK`).
     Frequency,
     /// Weighted frequency — an additive `sum` of a per-row weight per key.
-    /// Sketchable in principle (weighted SpaceSaving), but no weighted
-    /// heavy-hitter sketch is realised yet, so a `sum`-ranked top-k currently
-    /// stays a generic `Sort + Limit`. Reserved so the axis is explicit; the
-    /// realisation is post-ASAP sketch selection (issues #6/#33).
+    /// Served by the same heap-bearing family with value-weighted updates.
     WeightedSum,
     /// A non-additive measure (`avg` / `quantile` / `min` / `max`) or a raw,
     /// un-aggregated value. Never a heavy-hitter — always generic.
@@ -551,12 +548,13 @@ pub enum RankingMeasure {
 
 impl RankingMeasure {
     /// Whether a top-k ranked by this measure can be a heavy-hitter **with a
-    /// sketch that exists today**. Only [`Frequency`](Self::Frequency) is
-    /// realised; [`WeightedSum`](Self::WeightedSum) is additive (sketchable in
-    /// principle) but has no implemented sketch yet, so it stays generic until
-    /// one lands. This gate is the single knob to flip when that happens.
+    /// sketch that exists today**. Frequency uses unit updates and WeightedSum
+    /// uses sample-value updates.
     pub fn is_realised_heavy_hitter(self) -> bool {
-        matches!(self, RankingMeasure::Frequency)
+        matches!(
+            self,
+            RankingMeasure::Frequency | RankingMeasure::WeightedSum
+        )
     }
 }
 
@@ -577,7 +575,8 @@ pub fn ranking_measure(agg: &AggIntent) -> RankingMeasure {
 /// A ranking qualifies iff it takes the **top** k — `descending` (bottom-k, and
 /// any ascending `ORDER BY … LIMIT`, never do) — **and** ranks by a measure with
 /// a realised heavy-hitter sketch ([`RankingMeasure::is_realised_heavy_hitter`],
-/// i.e. unweighted [`Frequency`](RankingMeasure::Frequency) today). Both places
+/// i.e. [`Frequency`](RankingMeasure::Frequency) or
+/// [`WeightedSum`](RankingMeasure::WeightedSum) today). Both places
 /// that make this decision consult this one predicate so they cannot drift
 /// (issue #38):
 ///
@@ -728,7 +727,7 @@ mod tests {
         assert!(is_frequency_heavy_hitter(true, Frequency));
         assert!(!is_frequency_heavy_hitter(false, Frequency));
         assert!(!is_frequency_heavy_hitter(true, NonAdditive));
-        assert!(!is_frequency_heavy_hitter(true, WeightedSum));
+        assert!(is_frequency_heavy_hitter(true, WeightedSum));
     }
 
     #[test]
@@ -743,10 +742,9 @@ mod tests {
         assert_eq!(ranking_measure(&AggIntent::Sum { col: None }), WeightedSum);
         assert_eq!(ranking_measure(&AggIntent::Avg { col: None }), NonAdditive);
         assert_eq!(ranking_measure(&AggIntent::Max { col: None }), NonAdditive);
-        // Only Frequency is a realised heavy-hitter today; the additive
-        // WeightedSum is reserved (sketchable, not yet implemented).
+        // Both additive ranking measures have heap-sketch realizations.
         assert!(Frequency.is_realised_heavy_hitter());
-        assert!(!WeightedSum.is_realised_heavy_hitter());
+        assert!(WeightedSum.is_realised_heavy_hitter());
         assert!(!NonAdditive.is_realised_heavy_hitter());
     }
 

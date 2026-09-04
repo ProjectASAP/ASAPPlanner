@@ -865,7 +865,7 @@ impl AccuracyBudgetAllocator for EqualSplitAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asap_types::post_asap::{GroupingStrategy, SketchKind};
+    use asap_types::post_asap::{GroupingStrategy, SketchKind, TopKWeight};
     use asap_types::workload::{DataDistribution, DataWorkload, Evidence, EvidenceSource};
 
     fn abs(bound: f64, delta: f64) -> ResultGuarantee {
@@ -1279,7 +1279,10 @@ mod tests {
                     SketchKind::new(SketchAlgorithm::CmsWithHeap, cms_heap),
                     GroupingStrategy::default(),
                 ),
-                &SketchQuery::TopK { k: 10 },
+                &SketchQuery::TopK {
+                    k: 10,
+                    weight: TopKWeight::Count,
+                },
             )
             .expect("heap sketch still provides per-key frequency intervals");
         assert_eq!(topk_frequency.metric, ErrorMetric::Frequency);

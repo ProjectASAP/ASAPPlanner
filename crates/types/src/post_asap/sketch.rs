@@ -537,8 +537,15 @@ pub enum SketchQuery {
     },
     /// Estimated number of distinct elements.
     Cardinality,
-    /// Top-k most frequent (key, count) pairs.
-    TopK { k: usize },
+    /// Top-k keyed values. The weighting is explicit because heap-bearing
+    /// sketches can rank event counts or summed sample values.
+    TopK { k: usize, weight: TopKWeight },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopKWeight {
+    Count,
+    Value,
 }
 
 #[cfg(test)]
