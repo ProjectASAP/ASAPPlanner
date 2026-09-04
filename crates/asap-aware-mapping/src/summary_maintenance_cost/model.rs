@@ -815,20 +815,19 @@ impl CostModel for SummaryMaintenanceCostModel {
                 .min_by(|left, right| left.cost.0.total_cmp(&right.cost.0));
         }
         let frameworks = vec![None; deployments.len()];
-        self
-            .complete_cost_with_evidence(
-                root,
-                deployments,
-                comparison,
-                &self.node_evidence,
-                &frameworks,
-            )
-            .map(|cost| CompleteSummaryCandidateEstimate {
-                cost,
-                physical_plan_id: None,
-                window_frameworks: frameworks,
-                window_accuracy_guarantee: None,
-            })
+        self.complete_cost_with_evidence(
+            root,
+            deployments,
+            comparison,
+            &self.node_evidence,
+            &frameworks,
+        )
+        .map(|cost| CompleteSummaryCandidateEstimate {
+            cost,
+            physical_plan_id: None,
+            window_frameworks: frameworks,
+            window_accuracy_guarantee: None,
+        })
     }
 
     fn complete_summary_candidate_estimate_covers_lifecycle_costs(&self) -> bool {
@@ -3448,8 +3447,7 @@ mod tests {
                 physical_id: "joined-readout".into(),
                 inputs: vec![test_edge(), test_edge()],
                 output: test_edge(),
-                matched_state_pairs_per_evaluation: 1,
-                cpu_ops_per_matched_pair: 1.0,
+                cpu_ops_per_execution: 1.0,
                 working_memory_bytes: 8,
                 output_buffer_bytes: 0,
                 executions_per_evaluation: 1,
@@ -3487,6 +3485,7 @@ mod tests {
         }
 
         let candidate = StreamingWindowFrameworkCandidate {
+            physical_plan_id: "mixed-framework-join".into(),
             assignments: vec![
                 StreamingWindowFrameworkAssignment {
                     summary: Rc::clone(&aggregation_nodes[0]),
@@ -3618,6 +3617,7 @@ mod tests {
                 &target,
                 &root,
                 StreamingWindowFrameworkCandidate {
+                    physical_plan_id: "invalid-eh".into(),
                     assignments: vec![StreamingWindowFrameworkAssignment {
                         summary: Rc::clone(summary_input),
                         framework: Some(SummaryWindowFramework::ExponentialHistogram),
