@@ -58,13 +58,13 @@ use asap_aware_mapping::analytical_cost::{AnalyticalCostError, ResourceCalibrati
 use asap_aware_mapping::analytical_lowering::{
     PhysicalDag, PhysicalNodeEvidence, PhysicalNodeRequest,
 };
-use asap_aware_mapping::analytical_planner::{
-    AnalyticalPlannerCostModel, PlannerEvidenceSnapshot, PlannerPhysicalPlanProvider,
-};
 use asap_aware_mapping::analytical_statistics::ComparisonScope;
 #[cfg(test)]
 use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::cost_model::{Cost, CostModel};
+use asap_aware_mapping::physical_plan_cost_model::{
+    PhysicalEvidenceSnapshot, PhysicalPlanCostModel, PlannerPhysicalPlanProvider,
+};
 use asap_aware_mapping::replacement::{
     default_strategies_with_evidence, search_workload, search_workload_with, Replacement,
     ReplacementSubDAG,
@@ -288,8 +288,8 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
     fn capture_evidence_snapshot(
         &self,
         _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
-    ) -> Result<PlannerEvidenceSnapshot, AnalyticalCostError> {
-        Ok(PlannerEvidenceSnapshot {
+    ) -> Result<PhysicalEvidenceSnapshot, AnalyticalCostError> {
+        Ok(PhysicalEvidenceSnapshot {
             version: self.evidence_version.into(),
             scope: self.target.scope.resolve()?,
         })
@@ -297,7 +297,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
 
     fn query_node_evidence(
         &self,
-        snapshot: &PlannerEvidenceSnapshot,
+        snapshot: &PhysicalEvidenceSnapshot,
         request: PhysicalNodeRequest<'_>,
     ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
         if snapshot.scope != self.target.scope.resolve()? {
@@ -333,7 +333,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
 
     fn summary_physical_dag(
         &self,
-        snapshot: &PlannerEvidenceSnapshot,
+        snapshot: &PhysicalEvidenceSnapshot,
         _summary: &Rc<SummaryNode>,
         _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
     ) -> Result<PhysicalDag, AnalyticalCostError> {
@@ -398,7 +398,7 @@ impl ExportPlannerCostModel<'_> {
         let Some((provider, calibration)) = self.bound(candidate, &target) else {
             return winner_cost_annotations();
         };
-        let Ok(model) = AnalyticalPlannerCostModel::new(&provider, calibration.clone()) else {
+        let Ok(model) = PhysicalPlanCostModel::new(&provider, calibration.clone()) else {
             return winner_cost_annotations();
         };
         let Ok(estimate) = model.estimate_candidate(candidate, &target) else {
@@ -466,7 +466,7 @@ impl CostModel for ExportPlannerCostModel<'_> {
         target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
     ) -> Option<Cost> {
         let (provider, calibration) = self.bound(candidate, target)?;
-        let cost = AnalyticalPlannerCostModel::new(&provider, calibration.clone())
+        let cost = PhysicalPlanCostModel::new(&provider, calibration.clone())
             .ok()?
             .candidate_cost(candidate, target)?;
         provider.all_query_evidence_used().then_some(cost)
@@ -501,7 +501,7 @@ impl CostModel for ExportPlannerCostModel<'_> {
 /// `dag_export` has no deployment-owned physical evidence provider. It must
 /// therefore expose costs as unavailable instead of guessing operator
 /// statistics or falling back to structural node counts. Callers that have
-/// complete evidence use `AnalyticalPlannerCostModel` before export and may
+/// complete evidence use `PhysicalPlanCostModel` before export and may
 /// attach its dimensional comparison to these fields.
 #[allow(dead_code)]
 fn winner_cost_annotations() -> (CostAnnotation, CostAnnotation, CostAnnotation) {
@@ -1645,7 +1645,7 @@ mod tests {
         let target_rc = Rc::new(query.clone());
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
         let (provider, calibration) = model.bound(&candidate, &target).expect("exact binding");
-        let estimate = AnalyticalPlannerCostModel::new(&provider, calibration.clone())
+        let estimate = PhysicalPlanCostModel::new(&provider, calibration.clone())
             .unwrap()
             .estimate_candidate(&candidate, &target)
             .unwrap();
