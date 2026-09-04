@@ -682,6 +682,36 @@ horizon, so the estimator does not require `retention >= horizon`. Lifecycle
 legality and query time-coverage checks establish whether the retained window
 can answer the query.
 
+### Comparing single-summary lifecycle alternatives
+
+For one logical `SummaryAgg`, the analytical lifecycle adapter converts the
+same physical evidence into the existing lifecycle planner's five cost terms:
+
+| Lifecycle term | Resource basis |
+|---|---|
+| Initial build | Bootstrap rows routed to every bootstrap-active window, plus the bootstrap source read. |
+| Maintenance per update | One arriving row routed to every currently active window. |
+| Summary read | Readout of every physical summary instance needed by one query evaluation. |
+| Retention rate | All active and retained state bytes calibrated over the finite comparison horizon. |
+| Retirement | Zero only for releasing modeled memory; an actual delete, expiration, or rebuild requires explicit operation evidence. |
+
+The existing lifecycle model—not this adapter—enumerates `Ephemeral`,
+`Prepared`, `Shared`, and `ContinuouslyMaintained`, checks workload and runtime
+legality, and multiplies per-update and per-read terms by the normalized
+workload rates. Missing any required term leaves that alternative unavailable.
+
+The raw side is supplied as a complete `ResourceEstimate` for one execution of
+the raw physical DAG. The lifecycle planner applies the same recurrence and
+horizon. This deliberately avoids reconstructing raw work with a special-case
+`input_rows × cpu_per_row` formula that would omit joins, windows, sorts, or
+other operators.
+
+Flat single-summary evidence is bound to the exact `SummaryNode` and raw
+`QueryExpr` identities for which it was produced. It cannot be reused for a
+structurally similar node or for multiple summary states. A complete
+multi-summary `SummaryExpr` DAG requires per-node physical evidence and
+physical-identity deduplication.
+
 A retained summary bootstraps every active window, consumes arriving rows, and
 serves later reads from state. For the simple build/update/readout shape:
 

@@ -5,17 +5,25 @@
 //! window counts, and per-operation CPU measurements or complexity estimates.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use asap_types::post_asap::{
-    SummaryExpr, SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee,
-    SummaryMaintenanceMode, SummaryNode,
+    SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
 };
+use asap_types::pre_asap::{agg_intent::AggIntent, QueryExpr};
 use asap_types::workload::{DataArrival, DataWorkload, QueryWorkloadEntry};
 use serde::{Deserialize, Serialize};
 
-use crate::analytical_cost::{AnalyticalCostError, ResourceEstimate};
+use crate::analytical_cost::{AnalyticalCostError, ResourceCalibration, ResourceEstimate};
+use crate::cost_model::{Cost, CostModel, DefaultCostModel};
 use crate::physical_operator_statistics::evaluations_in_horizon;
-use crate::summary_maintenance_lifecycle::{evaluation_schedule, maintenance_mode};
+use crate::recurrence::CostRate;
+use crate::replacement::{ReplacementSubDAG, TargetSubDAG};
+use crate::summary_maintenance_lifecycle::{
+    evaluation_schedule, maintenance_mode, SummaryMaintenanceCapabilities,
+    SummaryMaintenanceLifecycleCostInputs,
+};
 
 pub const SUMMARY_MAINTENANCE_COST_MODEL_VERSION: &str = "summary-maintenance-resource-v1";
 
@@ -135,9 +143,7 @@ impl StreamingSummaryInputs {
             self.initial_input_bytes > 0 && self.initial_source_scan_bytes > 0
         };
         if !bootstrap_is_consistent {
-            return Err(AnalyticalCostError::InconsistentOperatorStatistics(
-                "streaming bootstrap rows, logical bytes, and source bytes disagree",
-            ));
+            return Err(AnalyticalCostError::InconsistentBootstrapEvidence);
         }
         if !self.ingestion_rate_per_second.is_finite() || self.ingestion_rate_per_second < 0.0 {
             return Err(AnalyticalCostError::InvalidIngestionRate(
@@ -160,6 +166,122 @@ pub struct SummaryOperationCpuEvidence {
     pub readout_cpu_ops: Option<f64>,
 }
 
+/// Complete physical work for one raw evaluation. It is deliberately
+/// per-evaluation so the same normalized query recurrence/horizon can multiply
+/// both raw and summary alternatives. The estimate comes from the complete raw
+/// physical DAG; it is not reconstructed here from a query-shape-specific
+/// rows-times-CPU shortcut.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StreamingRawInputEvidence {
+    pub per_evaluation: ResourceEstimate,
+}
+
+/// Adapter that supplies the existing lifecycle planner with analytical
+/// streaming costs. It does not define lifecycle policy: the planner's
+/// existing enums and legality checks remain authoritative.
+#[derive(Debug, Clone)]
+pub struct SummaryMaintenanceCostModel {
+    /// Exact logical summary identity to which the flat evidence applies.
+    pub summary: Rc<SummaryNode>,
+    /// Exact raw target identity to which `raw` applies.
+    pub raw_target: Rc<QueryExpr>,
+    pub summary_inputs: StreamingSummaryInputs,
+    pub raw: StreamingRawInputEvidence,
+    pub cpu: SummaryOperationCpuEvidence,
+    pub calibration: ResourceCalibration,
+    pub capabilities: SummaryMaintenanceCapabilities,
+}
+
+impl SummaryMaintenanceCostModel {
+    fn calibrated(&self, estimate: ResourceEstimate) -> Option<Cost> {
+        estimate.calibrated_cost(&self.calibration).ok().map(Cost)
+    }
+
+    fn lifecycle_inputs(&self) -> Option<SummaryMaintenanceLifecycleCostInputs> {
+        let inputs = self.summary_inputs.validate().ok()?;
+        let insert = required_cpu("insert_cpu_ops", self.cpu.insert_cpu_ops).ok()?;
+        let readout = required_cpu("readout_cpu_ops", self.cpu.readout_cpu_ops).ok()?;
+        let build = self.calibrated(ResourceEstimate {
+            cpu_ops: inputs.initial_input_rows as f64 * inputs.active_window_count as f64 * insert,
+            peak_memory_bytes: 0,
+            scan_bytes: inputs.initial_source_scan_bytes,
+        })?;
+        let maintenance = self.calibrated(ResourceEstimate {
+            cpu_ops: inputs.active_window_count as f64 * insert,
+            peak_memory_bytes: 0,
+            scan_bytes: 0,
+        })?;
+        let read = self.calibrated(ResourceEstimate {
+            cpu_ops: inputs.physical_summary_count as f64 * readout,
+            peak_memory_bytes: 0,
+            scan_bytes: 0,
+        })?;
+        let retained = inputs
+            .active_window_count
+            .checked_add(inputs.retained_window_count)?
+            .checked_mul(inputs.physical_summary_count)?
+            .checked_mul(inputs.state_bytes_per_summary)?;
+        let horizon_seconds = inputs.horizon_ms as f64 / 1_000.0;
+        let retention_total = self.calibrated(ResourceEstimate {
+            cpu_ops: 0.0,
+            peak_memory_bytes: retained,
+            scan_bytes: 0,
+        })?;
+        Some(SummaryMaintenanceLifecycleCostInputs {
+            build_cost: Some(build),
+            maintenance_cost_per_update: Some(maintenance),
+            summary_read_cost: Some(read),
+            retention_cost_rate: Some(CostRate(retention_total.0 / horizon_seconds)),
+            // Releasing memory has no modeled CPU or I/O. This is not an
+            // implicit expiration/rebuild policy; those require an explicit
+            // SummaryDelete or future authoritative lifecycle evidence.
+            retirement_cost: Some(Cost::ZERO),
+        })
+    }
+}
+
+impl CostModel for SummaryMaintenanceCostModel {
+    fn rank_candidates(
+        &self,
+        intent: &AggIntent,
+        candidates: &[SketchAlgorithm],
+    ) -> Vec<SketchAlgorithm> {
+        DefaultCostModel.rank_candidates(intent, candidates)
+    }
+
+    fn estimate_cost(&self, candidate: &ReplacementSubDAG, target: &TargetSubDAG<'_>) -> f64 {
+        DefaultCostModel.estimate_cost(candidate, target)
+    }
+
+    fn summary_maintenance_lifecycle_cost_inputs(
+        &self,
+        summary: &SummaryNode,
+    ) -> SummaryMaintenanceLifecycleCostInputs {
+        std::ptr::eq(self.summary.as_ref(), summary)
+            .then(|| self.lifecycle_inputs())
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    fn summary_maintenance_capabilities(
+        &self,
+        summary: &SummaryNode,
+    ) -> SummaryMaintenanceCapabilities {
+        if std::ptr::eq(self.summary.as_ref(), summary) {
+            self.capabilities
+        } else {
+            SummaryMaintenanceCapabilities::default()
+        }
+    }
+
+    fn raw_query_recompute_cost(&self, target: &QueryExpr) -> Option<Cost> {
+        if !std::ptr::eq(self.raw_target.as_ref(), target) {
+            return None;
+        }
+        self.calibrated(estimate_streaming_raw_recompute(self.raw, 1).ok()?)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct SummaryOperationCounts {
     state_builds: u64,
@@ -167,6 +289,34 @@ struct SummaryOperationCounts {
     subtracts_per_read: u64,
     deletes_per_update: u64,
     readouts_per_read: u64,
+}
+
+pub fn estimate_streaming_raw_recompute(
+    evidence: StreamingRawInputEvidence,
+    evaluation_count: u64,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
+    if evaluation_count == 0 {
+        return Err(AnalyticalCostError::MissingOrZero("evaluation_count"));
+    }
+    if !evidence.per_evaluation.cpu_ops.is_finite() || evidence.per_evaluation.cpu_ops < 0.0 {
+        return Err(AnalyticalCostError::InvalidOperationCost(
+            "raw_cpu_ops_per_evaluation",
+            evidence.per_evaluation.cpu_ops,
+        ));
+    }
+    let cpu_ops = evidence.per_evaluation.cpu_ops * evaluation_count as f64;
+    if !cpu_ops.is_finite() {
+        return Err(AnalyticalCostError::Overflow);
+    }
+    Ok(ResourceEstimate {
+        cpu_ops,
+        peak_memory_bytes: evidence.per_evaluation.peak_memory_bytes,
+        scan_bytes: evidence
+            .per_evaluation
+            .scan_bytes
+            .checked_mul(evaluation_count)
+            .ok_or(AnalyticalCostError::Overflow)?,
+    })
 }
 
 /// Cost a selected incremental deployment without changing its lifecycle
@@ -207,7 +357,6 @@ pub fn estimate_incremental_summary_maintenance(
         "readout_cpu_ops",
         cpu.readout_cpu_ops,
     )?;
-
     let build_inserts = inputs
         .initial_input_rows
         .checked_mul(inputs.active_window_count)
@@ -411,13 +560,22 @@ mod tests {
         SummaryExpr, SummaryFamilyType, SummaryField, SummaryMaintenanceLifecycle,
         SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummarySchema,
     };
-    use asap_types::pre_asap::{ColumnRef, QueryExpr, Reduction};
+    use asap_types::pre_asap::{
+        agg_intent::AggIntent, Column, ColumnRef, DataType, QueryExpr, Reduction, Schema, Source,
+    };
     use asap_types::workload::{
-        DataWorkload, Evidence, EvidenceSource, Predictability, Query, QueryRecurrence,
-        QueryRequirements, QueryTimeScope, Rate, RepeatedDemand, RepetitionInterval, TimeSelection,
+        DataWorkload, Evidence, EvidenceSource, Predictability, Query, QueryLanguage,
+        QueryRecurrence, QueryRequirements, QueryTimeScope, QueryWorkload, Rate, RepeatedDemand,
+        RepeatingEntry, RepetitionInterval, TimeSelection,
     };
 
     use super::*;
+    use crate::recurrence::Horizon;
+    use crate::summary_maintenance_lifecycle::{
+        global_selection_with_summary_maintenance_lifecycles,
+        materialize_with_summary_maintenance_lifecycles, plan_summary_maintenance_lifecycles,
+        SummaryMaintenanceLifecycleCapabilities, WorkloadDemand,
+    };
 
     fn physical() -> StreamingPhysicalInputEvidence {
         StreamingPhysicalInputEvidence {
@@ -482,6 +640,248 @@ mod tests {
             10
         );
         assert_eq!(inputs.evaluation_count, 5);
+    }
+
+    #[test]
+    fn pure_streaming_can_bootstrap_from_an_empty_state() {
+        let data = DataWorkload {
+            arrival: DataArrival::ContinuouslyIngesting,
+            ingestion_rate: Evidence {
+                value: Some(Rate(2.0)),
+                source: EvidenceSource::Declared,
+                observed_at_ms: None,
+                valid_for_ms: None,
+            },
+            input_cardinality: Evidence {
+                value: Some(0),
+                source: EvidenceSource::Declared,
+                observed_at_ms: None,
+                valid_for_ms: None,
+            },
+            ..DataWorkload::default()
+        };
+        let mut empty = physical();
+        empty.initial_input_bytes = 0;
+        empty.initial_source_scan_bytes = 0;
+        let inputs =
+            StreamingSummaryInputs::from_workload(empty, &data, &query(), 0, 5_000).unwrap();
+        let estimate = estimate_incremental_summary_maintenance(
+            &summary_with_operations(false, false, false),
+            &continuous_guarantee(),
+            inputs,
+            SummaryOperationCpuEvidence {
+                insert_cpu_ops: Some(2.0),
+                readout_cpu_ops: Some(1.0),
+                ..SummaryOperationCpuEvidence::default()
+            },
+        )
+        .unwrap();
+        // 10 arrivals * 2 active windows * 2 insert ops + 5 evaluations * 2 summaries.
+        assert_eq!(estimate.cpu_ops, 50.0);
+        assert_eq!(estimate.scan_bytes, 0);
+    }
+
+    #[test]
+    fn bootstrap_rows_and_bytes_must_be_present_together() {
+        let mut inputs = StreamingSummaryInputs {
+            data_arrival: DataArrival::ContinuouslyIngesting,
+            initial_input_rows: 0,
+            initial_input_bytes: 8,
+            initial_source_scan_bytes: 0,
+            ingestion_rate_per_second: 1.0,
+            planning_time_ms: 0,
+            horizon_ms: 1_000,
+            active_window_count: 1,
+            retained_window_count: 1,
+            physical_summary_count: 1,
+            state_bytes_per_summary: 8,
+            evaluation_count: 1,
+        };
+        assert_eq!(
+            inputs.validate(),
+            Err(AnalyticalCostError::InconsistentBootstrapEvidence)
+        );
+        inputs.initial_input_rows = 1;
+        inputs.initial_input_bytes = 0;
+        assert_eq!(
+            inputs.validate(),
+            Err(AnalyticalCostError::InconsistentBootstrapEvidence)
+        );
+    }
+
+    #[test]
+    fn existing_lifecycle_planner_selects_a_fully_costed_streaming_alternative() {
+        let root = summary_with_operations(false, false, false);
+        let raw_target = Rc::new(QueryExpr::promql_scalar(1.0));
+        let inputs = StreamingSummaryInputs {
+            data_arrival: DataArrival::ContinuouslyIngesting,
+            initial_input_rows: 10,
+            initial_input_bytes: 640,
+            initial_source_scan_bytes: 640,
+            ingestion_rate_per_second: 2.0,
+            planning_time_ms: 0,
+            horizon_ms: 5_000,
+            active_window_count: 2,
+            retained_window_count: 3,
+            physical_summary_count: 2,
+            state_bytes_per_summary: 100,
+            evaluation_count: 5,
+        };
+        let model = SummaryMaintenanceCostModel {
+            summary: single_summary_agg(&root),
+            raw_target: Rc::clone(&raw_target),
+            summary_inputs: inputs,
+            raw: StreamingRawInputEvidence {
+                per_evaluation: ResourceEstimate {
+                    cpu_ops: 40.0,
+                    peak_memory_bytes: 320,
+                    scan_bytes: 1_280,
+                },
+            },
+            cpu: SummaryOperationCpuEvidence {
+                insert_cpu_ops: Some(2.0),
+                readout_cpu_ops: Some(3.0),
+                ..SummaryOperationCpuEvidence::default()
+            },
+            calibration: ResourceCalibration {
+                cost_per_cpu_op: 1.0,
+                cost_per_scan_byte: 1.0,
+                cost_per_retained_byte: 1.0,
+                version: "test".into(),
+            },
+            capabilities: SummaryMaintenanceCapabilities {
+                incremental_update: true,
+                merge: false,
+                delete: false,
+            },
+        };
+        let workload = QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: None,
+            repeating_queries: Some(vec![RepeatingEntry {
+                query: Query("streaming count".into()),
+                demand: RepeatedDemand::FixedInterval(RepetitionInterval(1_000)),
+                requirements: QueryRequirements::default(),
+                predictability: Predictability::Predictable { known_at: None },
+                time_selection: TimeSelection::default(),
+            }]),
+            data_workload: Some(DataWorkload {
+                arrival: DataArrival::ContinuouslyIngesting,
+                ingestion_rate: Evidence {
+                    value: Some(Rate(2.0)),
+                    source: EvidenceSource::Declared,
+                    observed_at_ms: None,
+                    valid_for_ms: None,
+                },
+                ..DataWorkload::default()
+            }),
+        };
+        let plan = plan_summary_maintenance_lifecycles(
+            Rc::clone(&root),
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        let selected = plan.deployments[0]
+            .summary_maintenance_lifecycle_guarantee
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            selected.summary_maintenance_mode,
+            SummaryMaintenanceMode::Incremental
+        );
+        assert!(matches!(
+            selected.summary_maintenance_lifecycle,
+            SummaryMaintenanceLifecycle::Shared { .. }
+                | SummaryMaintenanceLifecycle::ContinuouslyMaintained
+        ));
+        assert!(plan.summary_total_cost.is_some());
+        assert_eq!(
+            model.raw_query_recompute_cost(&raw_target),
+            Some(Cost(1_640.0))
+        );
+        assert_eq!(
+            model.raw_query_recompute_cost(&QueryExpr::promql_scalar(1.0)),
+            None,
+            "structurally equal but independently allocated targets must not reuse evidence"
+        );
+    }
+
+    #[test]
+    fn global_selection_compares_streaming_summary_and_raw_over_one_horizon() {
+        let target = streaming_sum_query();
+        let space = crate::replacement::search_workload(vec![("q", Rc::clone(&target))]);
+        let workload = streaming_workload();
+        let raw_target = Rc::clone(&space.roots[0].1);
+        let summary = space
+            .group_for(&raw_target)
+            .unwrap()
+            .candidates
+            .iter()
+            .find_map(|candidate| match &candidate.replacement {
+                crate::replacement::Replacement::Summary(summary) => Some(Rc::clone(summary)),
+                crate::replacement::Replacement::Rewrite(_) => None,
+            })
+            .unwrap();
+        let model = streaming_model(single_summary_agg(&summary), raw_target);
+        let selection = global_selection_with_summary_maintenance_lifecycles(
+            &space,
+            &workload,
+            &[0],
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap();
+        let plan = materialize_with_summary_maintenance_lifecycles(
+            &selection,
+            &space.roots[0].1,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &model,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!plan.selected_raw_recompute);
+        assert_eq!(plan.raw_recompute_total_cost, Some(Cost(8_200.0)));
+
+        let mut raw_cheaper = model;
+        raw_cheaper.raw = StreamingRawInputEvidence {
+            per_evaluation: ResourceEstimate {
+                cpu_ops: 0.0,
+                peak_memory_bytes: 1,
+                scan_bytes: 0,
+            },
+        };
+        let cheap_selection = global_selection_with_summary_maintenance_lifecycles(
+            &space,
+            &workload,
+            &[0],
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &raw_cheaper,
+        )
+        .unwrap();
+        let cheap_plan = materialize_with_summary_maintenance_lifecycles(
+            &cheap_selection,
+            &space.roots[0].1,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities::ALL,
+            &raw_cheaper,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(cheap_plan.selected_raw_recompute);
+        assert_eq!(cheap_plan.raw_recompute_total_cost, Some(Cost(5.0)));
     }
 
     #[test]
@@ -766,6 +1166,52 @@ mod tests {
         assert_eq!(estimate.scan_bytes, 0);
     }
 
+    #[test]
+    fn raw_recompute_uses_the_same_evaluation_horizon() {
+        let estimate = estimate_streaming_raw_recompute(
+            StreamingRawInputEvidence {
+                per_evaluation: ResourceEstimate {
+                    cpu_ops: 200.0,
+                    peak_memory_bytes: 800,
+                    scan_bytes: 6_400,
+                },
+            },
+            5,
+        )
+        .unwrap();
+        assert_eq!(estimate.cpu_ops, 1_000.0);
+        assert_eq!(estimate.scan_bytes, 32_000);
+        assert_eq!(estimate.peak_memory_bytes, 800);
+    }
+
+    #[test]
+    fn flat_summary_evidence_rejects_summary_join() {
+        let joined = summary_join();
+        let inputs = StreamingSummaryInputs {
+            data_arrival: DataArrival::ContinuouslyIngesting,
+            initial_input_rows: 1,
+            initial_input_bytes: 8,
+            initial_source_scan_bytes: 8,
+            ingestion_rate_per_second: 1.0,
+            planning_time_ms: 0,
+            horizon_ms: 1_000,
+            active_window_count: 1,
+            retained_window_count: 1,
+            physical_summary_count: 1,
+            state_bytes_per_summary: 8,
+            evaluation_count: 2,
+        };
+        let cpu = SummaryOperationCpuEvidence {
+            insert_cpu_ops: Some(1.0),
+            readout_cpu_ops: Some(1.0),
+            ..SummaryOperationCpuEvidence::default()
+        };
+        assert_eq!(
+            estimate_incremental_summary_maintenance(&joined, &continuous_guarantee(), inputs, cpu,),
+            Err(AnalyticalCostError::UnsupportedSummaryOperation("join"))
+        );
+    }
+
     fn summary_with_operations(merge: bool, subtract: bool, delete: bool) -> Rc<SummaryNode> {
         let state_type = SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count);
         let schema = SummarySchema {
@@ -833,5 +1279,149 @@ mod tests {
             schema,
             guarantee: None,
         })
+    }
+
+    fn summary_join() -> Rc<SummaryNode> {
+        let left = summary_with_operations(false, false, false);
+        let right = summary_with_operations(false, false, false);
+        let SummaryExpr::SummaryEstimate {
+            summary_input: left,
+            ..
+        } = &left.expr
+        else {
+            unreachable!()
+        };
+        let SummaryExpr::SummaryEstimate {
+            summary_input: right,
+            ..
+        } = &right.expr
+        else {
+            unreachable!()
+        };
+        let schema = left.schema.clone();
+        let join = Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryJoin {
+                outer: Rc::clone(left),
+                inner: Rc::clone(right),
+                key: ColumnRef::Wildcard,
+                family: SummaryFamilyType::ExactAggregate(ExactKind::Count, ExactParams::Count),
+            },
+            schema: schema.clone(),
+            guarantee: None,
+        });
+        Rc::new(SummaryNode {
+            expr: SummaryExpr::SummaryEstimate {
+                summary_input: join,
+                query: asap_types::post_asap::SketchQuery::PointCount {
+                    key: ColumnRef::Wildcard,
+                    value: None,
+                },
+            },
+            schema,
+            guarantee: None,
+        })
+    }
+
+    fn streaming_sum_query() -> Rc<QueryExpr> {
+        let scan = Rc::new(QueryExpr::Scan {
+            source: Source::TimeSeries {
+                metric: "metrics".into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Column::new("ts", DataType::Timestamp, false),
+                    Column::new("value", DataType::Float64, false),
+                ],
+                0,
+                vec![],
+            ),
+        });
+        Rc::new(QueryExpr::Aggregate {
+            reduction: Reduction::by(vec![]),
+            measures: vec![AggIntent::Sum { col: None }],
+            output_names: vec![],
+            having: None,
+            child: scan,
+        })
+    }
+
+    fn streaming_workload() -> QueryWorkload {
+        QueryWorkload {
+            language: QueryLanguage::PromQL,
+            query_batch: None,
+            repeating_queries: Some(vec![RepeatingEntry {
+                query: Query("sum(metrics)".into()),
+                demand: RepeatedDemand::FixedInterval(RepetitionInterval(1_000)),
+                requirements: QueryRequirements::default(),
+                predictability: Predictability::Predictable { known_at: None },
+                time_selection: TimeSelection::default(),
+            }]),
+            data_workload: Some(DataWorkload {
+                arrival: DataArrival::ContinuouslyIngesting,
+                ingestion_rate: Evidence {
+                    value: Some(Rate(2.0)),
+                    source: EvidenceSource::Declared,
+                    observed_at_ms: None,
+                    valid_for_ms: None,
+                },
+                ..DataWorkload::default()
+            }),
+        }
+    }
+
+    fn streaming_model(
+        summary: Rc<SummaryNode>,
+        raw_target: Rc<QueryExpr>,
+    ) -> SummaryMaintenanceCostModel {
+        SummaryMaintenanceCostModel {
+            summary,
+            raw_target,
+            summary_inputs: StreamingSummaryInputs {
+                data_arrival: DataArrival::ContinuouslyIngesting,
+                initial_input_rows: 10,
+                initial_input_bytes: 640,
+                initial_source_scan_bytes: 640,
+                ingestion_rate_per_second: 2.0,
+                planning_time_ms: 0,
+                horizon_ms: 5_000,
+                active_window_count: 2,
+                retained_window_count: 3,
+                physical_summary_count: 2,
+                state_bytes_per_summary: 100,
+                evaluation_count: 5,
+            },
+            raw: StreamingRawInputEvidence {
+                per_evaluation: ResourceEstimate {
+                    cpu_ops: 40.0,
+                    peak_memory_bytes: 320,
+                    scan_bytes: 1_280,
+                },
+            },
+            cpu: SummaryOperationCpuEvidence {
+                insert_cpu_ops: Some(2.0),
+                readout_cpu_ops: Some(3.0),
+                ..SummaryOperationCpuEvidence::default()
+            },
+            calibration: ResourceCalibration {
+                cost_per_cpu_op: 1.0,
+                cost_per_scan_byte: 1.0,
+                cost_per_retained_byte: 1.0,
+                version: "test".into(),
+            },
+            capabilities: SummaryMaintenanceCapabilities {
+                incremental_update: true,
+                merge: false,
+                delete: false,
+            },
+        }
+    }
+
+    fn single_summary_agg(root: &Rc<SummaryNode>) -> Rc<SummaryNode> {
+        match &root.expr {
+            SummaryExpr::SummaryAgg { .. } => Rc::clone(root),
+            SummaryExpr::SummaryEstimate { summary_input, .. } => single_summary_agg(summary_input),
+            other => panic!("expected one SummaryAgg, got {other:?}"),
+        }
     }
 }
