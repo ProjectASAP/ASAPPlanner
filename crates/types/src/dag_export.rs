@@ -46,9 +46,9 @@ use std::rc::Rc;
 
 use serde::Serialize;
 
-use crate::cost::{CostAnnotation, CostInput, CostUnit};
+use crate::cost::CostAnnotation;
 use crate::post_asap::{AccuracyError, ResultGuarantee, SummaryExpr, SummaryNode};
-use crate::pre_asap::cse::{dag_node_count, structural_hash, HashCache};
+use crate::pre_asap::cse::{structural_hash, HashCache};
 use crate::pre_asap::query_expr::{QueryExpr, Source};
 
 /// One flattened IR node. `detail` holds this node's own scalar fields
@@ -176,13 +176,10 @@ pub struct DagDecision {
 /// A cost/benefit annotation attributed to one specific graph edge (`from`
 /// -> `to`, in [`DagNode::children`]'s direction) rather than to a node —
 /// issue #286's "edge cost only when genuinely attributable to the edge"
-/// granularity item. `dag_export`'s own producer
-/// ([`crates/devtools/src/bin/dag_export.rs`](../../../devtools/src/bin/dag_export.rs))
-/// only ever populates this for a `post_graph` edge whose target node is a
-/// genuine DAG merge point (in-degree > 1, from
-/// `deduplicate_pointer_shared_nodes`) — the materialization/read cost of
-/// consuming an already-shared result along that one specific edge, never a
-/// guessed multi-hop path cost (explicitly out of scope per the issue).
+/// granularity item. Graph structure alone cannot determine transfer,
+/// materialization, or read cost. A higher layer may attach this annotation
+/// only when physical evidence attributes cost to this exact edge; this
+/// module never derives one from structural node counts.
 #[derive(Debug, Clone, Serialize)]
 pub struct EdgeCostAnnotation {
     pub from: u32,
@@ -599,11 +596,9 @@ pub struct TargetReplacement {
     /// replacement region — issue #286's "replacement-region baseline
     /// cost, selected cost, and benefit" granularity item. Always
     /// consistent with `cost` above: `selected_cost.value == Some(cost)`
-    /// whenever `cost` is finite, `None`/`Unavailable` whenever it's
-    /// `NaN`. `baseline_cost` is always populated (the pre-ASAP
-    /// independent-recomputation baseline is computable from the target
-    /// alone, unlike a candidate's own estimated cost); `benefit` is
-    /// `Unavailable` exactly when `selected_cost` is.
+    /// whenever `cost` is finite, `None`/`Unavailable` whenever it is
+    /// `NaN`. Baseline and selected values require complete, scope-matched
+    /// physical evidence; neither is inferred from logical graph structure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline_cost: Option<CostAnnotation>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -729,19 +724,6 @@ fn deduplicate_pointer_shared_nodes(nodes: Vec<DagNode>, root: u32) -> DagGraph 
     let mut by_source_ptr = HashMap::<usize, u32>::new();
     let mut old_to_new = vec![0_u32; nodes.len()];
     let mut deduplicated = Vec::with_capacity(nodes.len());
-    // Built in the same pass as `deduplicated` itself, rather than by a
-    // second full walk over `deduplicated` afterward (see
-    // `shared_node_edge_annotations`'s own doc for why one pass suffices):
-    // `HashSet`, not `Vec`, per child — a *distinct* consuming node is what
-    // "consumer" means here. A single parent can reference the same shared
-    // child from two of its own operand slots at once (e.g. a `Join` whose
-    // left and right are the same `Rc` post pointer-dedup) — that's one
-    // downstream consumer reading the child twice, structurally, not two
-    // separate consumers, and it must not inflate `consumer_count` (which
-    // would understate `per_edge_cost`) or produce two colliding `(from,
-    // to)` `EdgeCostAnnotation` entries for the exact same edge.
-    let mut parents_of: HashMap<u32, std::collections::HashSet<u32>> = HashMap::new();
-
     for mut node in nodes {
         node.children = node
             .children
@@ -762,88 +744,14 @@ fn deduplicate_pointer_shared_nodes(nodes: Vec<DagNode>, root: u32) -> DagGraph 
             by_source_ptr.insert(source_ptr, new_id);
         }
         old_to_new[old_id as usize] = new_id;
-        // `node.children` is already remapped to final new-id space above,
-        // and post-order guarantees every child was already pushed (with
-        // its own final id) before this parent is reached — so this is safe
-        // to record right here, once, rather than re-deriving it from
-        // `deduplicated` in a later pass. A node this loop *doesn't* push
-        // (the dedup-hit `continue` above) never reaches this line, but that
-        // never loses information: its first-pushed duplicate already had
-        // its own (identical) children recorded when *it* was processed.
-        for &child_new_id in &node.children {
-            parents_of.entry(child_new_id).or_default().insert(new_id);
-        }
         deduplicated.push(node);
     }
 
-    let edge_annotations = shared_node_edge_annotations(&deduplicated, &parents_of);
     DagGraph {
         nodes: deduplicated,
         root: old_to_new[root as usize],
-        edge_annotations,
+        edge_annotations: Vec::new(),
     }
-}
-
-/// One [`EdgeCostAnnotation`] per edge running *into* a genuine DAG merge
-/// point in `nodes` — a node id referenced as a child by more than one
-/// parent, the exact shape [`deduplicate_pointer_shared_nodes`] produces
-/// for a subtree two or more consumers share by `Rc` pointer identity
-/// (whether or not a `SharedSubtreeStrategy` decision is what caused it —
-/// ordinary `Rc`-shared pre-ASAP structure merges here too). This is the
-/// "edge cost only when genuinely attributable to the edge" granularity
-/// item from issue #286: the materialization/read cost of one consumer
-/// reading the already-computed shared result along its own specific edge,
-/// evenly divided across every consuming edge — never a guessed multi-hop
-/// path cost (explicitly out of scope per the issue).
-///
-/// `parents_of` is [`deduplicate_pointer_shared_nodes`]'s own
-/// already-built child -> distinct-parents map, passed in rather than
-/// rebuilt here by a second walk over `nodes`'s edges — that caller has
-/// already visited every edge exactly once while assigning final node ids,
-/// so redoing the same walk here would just re-derive what it already
-/// knows.
-///
-/// Uses [`dag_node_count`] (the same structural-size proxy
-/// `asap_aware_mapping::cost_model::default_cse_recompute_cost` computes;
-/// duplicated here in plain terms since `asap_types` may not depend on that
-/// higher crate) rather than a real per-byte transfer cost — honestly
-/// unit-tagged [`CostUnit::RelativeStructuralUnits`], not a rate.
-fn shared_node_edge_annotations(
-    nodes: &[DagNode],
-    parents_of: &HashMap<u32, std::collections::HashSet<u32>>,
-) -> Vec<EdgeCostAnnotation> {
-    let mut annotations = Vec::new();
-    for (child_id, parents) in parents_of {
-        if parents.len() < 2 {
-            continue;
-        }
-        let Some(child) = nodes.get(*child_id as usize) else {
-            continue;
-        };
-        let Some(source_expr) = child.source_expr.as_ref() else {
-            continue; // no QueryExpr to size (e.g. a post-ASAP-originated node)
-        };
-        let consumer_count = parents.len();
-        let materialized_size = dag_node_count(source_expr) as f64;
-        let per_edge_cost = materialized_size / consumer_count as f64;
-        for &parent in parents {
-            annotations.push(EdgeCostAnnotation {
-                from: *child_id,
-                to: parent,
-                cost: CostAnnotation::modeled(
-                    per_edge_cost,
-                    CostUnit::RelativeStructuralUnits,
-                    "dag_export-shared-edge-v1",
-                    vec![
-                        CostInput::new("materialized_subtree_size", materialized_size),
-                        CostInput::new("consumer_count", consumer_count as f64),
-                    ],
-                ),
-            });
-        }
-    }
-    annotations.sort_by_key(|edge| (edge.from, edge.to));
-    annotations
 }
 
 /// Push one flattened node for `expr`. `expr` is the *whole* subtree this
@@ -1495,15 +1403,12 @@ mod tests {
         );
     }
 
-    // ── Issue #286: edge cost annotations for genuine DAG merge points ────
-
     #[test]
-    fn export_post_asap_annotates_edges_into_a_genuinely_shared_node() {
+    fn export_post_asap_does_not_invent_costs_for_shared_edges() {
         // Two *distinct* parents (a Dedup and a Limit, each with their own
         // single child slot) share the exact same `Rc` Scan —
-        // `export_post_asap`'s `deduplicate_pointer_shared_nodes` must merge
-        // them onto one node id, and (issue #286) attach an
-        // `EdgeCostAnnotation` on each of the two edges running into it.
+        // `export_post_asap` must merge them onto one node id. Sharing alone
+        // is not physical cost evidence, so no edge cost may be fabricated.
         let shared_scan = Rc::new(scan("metrics", value_col()));
         let left_branch = QueryExpr::Dedup {
             cols: vec![0],
@@ -1524,48 +1429,14 @@ mod tests {
             1,
             "the shared Scan must be merged onto one node, not duplicated"
         );
-        let scan_id = graph.nodes.iter().find(|n| n.kind == "Scan").unwrap().id;
-        let edges_into_scan: Vec<_> = graph
-            .edge_annotations
-            .iter()
-            .filter(|edge| edge.from == scan_id)
-            .collect();
-        assert_eq!(
-            edges_into_scan.len(),
-            2,
-            "one annotation per distinct consuming parent"
-        );
-        let distinct_parents: std::collections::HashSet<_> =
-            edges_into_scan.iter().map(|edge| edge.to).collect();
-        assert_eq!(
-            distinct_parents.len(),
-            2,
-            "the two parents (Dedup, Limit) must be distinct"
-        );
-        for edge in &edges_into_scan {
-            assert_eq!(
-                edge.cost.value,
-                Some(0.5),
-                "1 unique node / 2 distinct consumers"
-            );
-            assert_eq!(
-                edge.cost.unit,
-                crate::cost::CostUnit::RelativeStructuralUnits
-            );
-            assert_eq!(edge.cost.source, crate::cost::CostSource::Modeled);
-        }
+        assert!(graph.edge_annotations.is_empty());
     }
 
     /// Regression test: a single parent referencing the same shared child
     /// from two of its own operand slots at once (a `Join` whose left and
     /// right sides are the exact same `Rc`, post pointer-dedup) is *one*
     /// downstream consumer, not two — this must not inflate
-    /// `consumer_count`, must not halve the reported per-edge cost, and
-    /// must not produce two colliding `(from, to)` `EdgeCostAnnotation`
-    /// entries for what is structurally a single edge. Since there is only
-    /// one *distinct* consumer here, this shape isn't "genuinely shared" at
-    /// all in the `>= 2 distinct consumers` sense `shared_node_edge_annotations`
-    /// requires, so no annotation should be produced for it.
+    /// produce an edge-cost annotation without explicit physical evidence.
     #[test]
     fn a_single_parent_referencing_a_shared_child_twice_is_one_consumer_not_two() {
         let shared_scan = Rc::new(scan("metrics", value_col()));

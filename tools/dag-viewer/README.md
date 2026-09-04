@@ -63,12 +63,16 @@ cargo run -p asap-devtools --bin dag_export -- \
 ```
 
 Load the JSON with the page's file picker. `--planner-cost-json` is a complete
-physical-evidence document: calibration plus target records containing the
-exact target `QueryExpr`, comparison scope, exact logical query nodes with
-`PhysicalNodeEvidence`, and exact exported replacement DAGs with their bound
-`PhysicalDag`. Matching uses full structural equality, never a hash or strategy
-name. Duplicate, conflicting, or missing records fail closed. Without this
-document, `--post-asap` exports the raw graph only. The old
+physical-evidence document: an immutable `evidence_version`, calibration, and
+target records containing the exact target `QueryExpr` and comparison scope.
+Each exact replacement candidate owns its complete logical-node
+`PhysicalNodeEvidence`; summary candidates additionally own their bound
+`PhysicalDag`. Candidate-local evidence prevents statistics for one physical
+alternative from satisfying another. Candidate matching includes the complete
+exported plan, including accuracy guarantees, and never uses a hash or strategy
+name; derived floating constants allow only a one-ULP JSON round-trip tolerance.
+Duplicate, conflicting, unused, or missing records fail closed. Without
+this document, `--post-asap` exports the raw graph only. The old
 `--analytical-cost-json` spelling accepts the new document as an alias; its old
 compact aggregation payload is rejected with a migration error.
 
@@ -103,11 +107,11 @@ a selected replacement directly contains:
     "strategy": "SketchAlgorithmStrategy",
     "rationale": "count realizes as a Cms sketch",
     "rank": 0,
-    "cost": 5.64051088,
+    "cost": 1.14001088,
     "role": "replacement_root",
-    "baseline_cost": { "value": 164.000000016, "unit": "CostUnits", "source": "Modeled", "model_version": "analytical-resource-v1+demo-calibration-v1" },
-    "selected_cost": { "value": 5.64051088, "unit": "CostUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "delta": 158.359489136, "benefit_ratio": 0.965606640979 },
-    "benefit": { "value": 158.359489136, "unit": "CostUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "benefit_ratio": 0.965606640979 }
+    "baseline_cost": { "value": 104.0032, "unit": "CostUnits", "source": "Modeled", "model_version": "analytical-resource-v1+example-calibration-v1" },
+    "selected_cost": { "value": 1.14001088, "unit": "CostUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "delta": 102.86318912, "benefit_ratio": 0.9890386941940248 },
+    "benefit": { "value": 102.86318912, "unit": "CostUnits", "source": "Modeled", "baseline": {"kind": "PreAsapRecomputation"}, "benefit_ratio": 0.9890386941940248 }
   }
 }
 ```
@@ -135,12 +139,25 @@ and workload statistics in `inputs`. Without complete physical evidence, the
 annotation is `Unavailable`; structural node counts are never substituted.
 See the [analytical model design](../../docs/design_docs/asap-aware-mapping/analytical-resource-cost.md).
 
+The checked-in viewer fixture makes its illustrative comparison reproducible.
+It models 100 evaluations of 100 million 64-byte rows with 100,000 groups.
+The raw path charges one scan plus three hash/key/accumulator operations per
+row, so CPU is `100 × 100,000,000 × 4 = 40 billion` operations; it reads
+`100 × 6.4 GB = 640 GB` and retains
+`100,000 × (8-byte key + 8-byte accumulator + 16-byte hash metadata) = 3.2 MB`.
+One incrementally built depth-5 CMS charges
+`100,000,000 × 5 = 500 million` counter updates, reads the 6.4 GB source once,
+and retains `272 × 5 × 8 = 10,880` bytes. With coefficients `1e-9` per CPU
+operation, `1e-10` per scan byte, and `1e-9` per peak-memory byte, the displayed totals are
+`104.0032` and `1.14001088` cost units. These are explicit fixture assumptions,
+not statistics inferred by the viewer.
+
 The same three fields also appear on `TargetReplacement`
 (replacement-region baseline/selected/benefit), `NamedGraph.workload_cost` /
 `WorkloadGraph.workload_cost` (whole selected-workload cost/benefit, shared
-nodes counted once via `decision.id` dedup), and `DagGraph.edge_annotations`
-(materialization/read cost on an edge into a genuine DAG merge point — never
-a guessed multi-hop path cost). The sidebar shows the full breakdown
+decisions counted once via `decision.id` dedup). `DagGraph.edge_annotations`
+is reserved for a higher layer that has physical evidence for a particular
+edge; graph sharing alone never creates an edge cost. The sidebar shows the full breakdown
 (value, unit, provenance, baseline, ratio, inputs) on node/edge click and in
 the workload-scope summary; a post-ASAP node with a costed decision also
 gets a concise on-graph `▼NN%`/`▲NN%` badge next to its label.

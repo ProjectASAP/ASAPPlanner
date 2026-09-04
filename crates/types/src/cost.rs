@@ -1,55 +1,24 @@
-//! Structured cost/benefit annotations for [`dag_export`](crate::dag_export)
-//! output — issue #286.
+//! Unit- and provenance-aware cost annotations for exported DAGs.
 //!
-//! The issue's cost/benefit semantics are defined in **cost units per
-//! second** for recurring costs:
+//! This crate defines the interchange schema; it does not estimate costs.
+//! Producers may report a horizon total, a recurring rate, or no value.
+//! Values with different [`CostUnit`]s are
+//! never combined. A missing estimate is represented by
+//! [`CostAnnotation::unavailable`], never by zero.
 //!
-//! ```text
-//! maintained_cost_rate =
-//!     update_rate * maintenance_cost_per_update
-//!   + evaluation_rate * summary_read_cost
-//!
-//! recompute_cost_rate = evaluation_rate * raw_recompute_cost
-//! evaluation_rate = sum(1 / query_interval_i)
-//!
-//! estimated_benefit_rate = baseline_cost_rate - selected_cost_rate
-//! estimated_benefit_ratio = estimated_benefit_rate / baseline_cost_rate
-//! ```
-//!
-//! Today's cost model (`asap_aware_mapping::cost_model`) has no notion of
-//! `update_rate`/`evaluation_rate`/`query_interval` at all — issue #287
-//! ("recurrence-aware modeled inputs") is what's expected to supply those.
-//! Rather than inventing rate numbers this crate has no basis for, every
-//! annotation this module produces from today's cost model is honestly
-//! unit-tagged [`CostUnit::RelativeStructuralUnits`] — the *same* underlying
-//! numbers `asap_aware_mapping::cost_model::CostModel::estimate_cost` and
-//! `default_cse_recompute_cost`/`default_cse_shared_maintenance_cost`
-//! already compute (a structural-size proxy, not a real cost-per-second
-//! rate) — so a renderer can never mistake a structural proxy for a
-//! measured or rate-modeled cost. The formulas above still hold shape for
-//! shape (`benefit = baseline - selected`, `ratio = benefit / baseline`
-//! guarded at `baseline <= 0`), just over whichever [`CostUnit`] the inputs
-//! actually carry; when #287 lands real rates, a caller can construct a
-//! [`CostAnnotation`] with `unit: CostUnit::CostUnitsPerSecond` through the
-//! exact same type with no further plumbing change needed here.
-//!
-//! Nothing in this module ever fabricates a number: a hook with no basis to
-//! estimate returns [`CostAnnotation::unavailable`] (`value: None,  source:
-//! CostSource::Unavailable`), never `0.0` or another synthetic placeholder.
+//! A baseline comparison uses `delta = baseline_value - selected_value` and,
+//! when `baseline_value > 0`, `benefit_ratio = delta / baseline_value`.
+//! Model inputs and a model version (or a benchmark identifier for measured
+//! values) keep every emitted number auditable.
 
 use serde::{Deserialize, Serialize};
 
 /// The unit one [`CostAnnotation::value`] (and its `delta`) is expressed in.
-/// See the module doc for why today's `dag_export` output uses
-/// [`RelativeStructuralUnits`](CostUnit::RelativeStructuralUnits) rather than
-/// claiming a real rate it can't back up.
+/// Producers and consumers must not compare or aggregate different units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CostUnit {
     /// A recurring cost expressed per second (`cost_units / s`) — the
-    /// `*_cost_rate` quantities in the issue's formulas. Only a
-    /// [`CostSource::Modeled`] annotation backed by real recurrence inputs
-    /// (issue #287) or a [`CostSource::Measured`] benchmark (issue #288)
-    /// may use this unit.
+    /// recurring costs. It requires an explicit recurrence interval/rate.
     CostUnitsPerSecond,
     /// A finite-run or one-shot total at some horizon `H` — `total_cost(H)`
     /// in the issue's formulas, or a standalone one-shot addend. Never
@@ -57,16 +26,6 @@ pub enum CostUnit {
     /// except through [`total_cost`], which keeps the two terms explicit
     /// rather than silently adding a rate to a total.
     CostUnits,
-    /// A dimensionless structural-size proxy (e.g. unique-DAG-node count,
-    /// the same magnitude
-    /// `asap_aware_mapping::cost_model::default_cse_recompute_cost` already
-    /// returns) — used wherever the underlying cost model has no rate or
-    /// absolute-cost estimate at all yet (issue #287). Never comparable to
-    /// [`CostUnitsPerSecond`](CostUnit::CostUnitsPerSecond) or
-    /// [`CostUnits`](CostUnit::CostUnits): a renderer must show it as its
-    /// own kind of number, and [`sum_workload_costs`] refuses to aggregate
-    /// mismatched units rather than silently mixing them.
-    RelativeStructuralUnits,
 }
 
 impl std::fmt::Display for CostUnit {
@@ -74,7 +33,6 @@ impl std::fmt::Display for CostUnit {
         match self {
             CostUnit::CostUnitsPerSecond => write!(f, "cost units/s"),
             CostUnit::CostUnits => write!(f, "cost units"),
-            CostUnit::RelativeStructuralUnits => write!(f, "relative structural units"),
         }
     }
 }
@@ -146,8 +104,7 @@ pub struct CostAnnotation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline: Option<BaselineRef>,
     /// `baseline_value - value` under `baseline`, when both are known — the
-    /// issue's `estimated_benefit_rate` (or its non-rate structural
-    /// analogue; see the module doc).
+    /// corresponding benefit in this annotation's declared unit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta: Option<f64>,
     /// `delta / baseline_value`, when `baseline_value > 0` — the issue's
@@ -365,7 +322,7 @@ where
             inputs: Vec::new(),
         }
     } else {
-        CostAnnotation::unavailable(unit.unwrap_or(CostUnit::RelativeStructuralUnits))
+        CostAnnotation::unavailable(unit.unwrap_or(CostUnit::CostUnits))
     })
 }
 
@@ -440,14 +397,14 @@ mod tests {
 
     #[test]
     fn unavailable_has_no_value_and_no_synthetic_number() {
-        let a = CostAnnotation::unavailable(CostUnit::RelativeStructuralUnits);
+        let a = CostAnnotation::unavailable(CostUnit::CostUnits);
         assert_eq!(a.value, None);
         assert_eq!(a.source, CostSource::Unavailable);
     }
 
     #[test]
     fn with_baseline_computes_delta_and_ratio() {
-        let a = CostAnnotation::modeled(3.0, CostUnit::RelativeStructuralUnits, "v1", vec![])
+        let a = CostAnnotation::modeled(3.0, CostUnit::CostUnits, "v1", vec![])
             .with_baseline(BaselineRef::PreAsapRecomputation, 10.0);
         assert_eq!(a.delta, Some(7.0));
         assert_eq!(a.benefit_ratio, Some(0.7));
@@ -511,9 +468,9 @@ mod tests {
 
     #[test]
     fn sum_workload_costs_counts_a_shared_node_once() {
-        let a = ann(5.0, CostUnit::RelativeStructuralUnits);
-        let b = ann(5.0, CostUnit::RelativeStructuralUnits);
-        let c = ann(2.0, CostUnit::RelativeStructuralUnits);
+        let a = ann(5.0, CostUnit::CostUnits);
+        let b = ann(5.0, CostUnit::CostUnits);
+        let c = ann(2.0, CostUnit::CostUnits);
         // Node id 1 shared by two queries (same decision, same cost) must
         // only be counted once; node id 2 is a distinct contribution.
         let total = sum_workload_costs(vec![(Some(1), &a), (Some(1), &b), (Some(2), &c)]).unwrap();
@@ -522,16 +479,16 @@ mod tests {
 
     #[test]
     fn sum_workload_costs_never_deduplicates_entries_with_no_workload_id() {
-        let a = ann(3.0, CostUnit::RelativeStructuralUnits);
-        let b = ann(3.0, CostUnit::RelativeStructuralUnits);
+        let a = ann(3.0, CostUnit::CostUnits);
+        let b = ann(3.0, CostUnit::CostUnits);
         let total = sum_workload_costs(vec![(None, &a), (None, &b)]).unwrap();
         assert_eq!(total.value, Some(6.0));
     }
 
     #[test]
     fn sum_workload_costs_is_unavailable_when_any_distinct_entry_is_unavailable() {
-        let known = ann(4.0, CostUnit::RelativeStructuralUnits);
-        let unavailable = CostAnnotation::unavailable(CostUnit::RelativeStructuralUnits);
+        let known = ann(4.0, CostUnit::CostUnits);
+        let unavailable = CostAnnotation::unavailable(CostUnit::CostUnits);
         let total = sum_workload_costs(vec![(None, &known), (None, &unavailable)]).unwrap();
         assert_eq!(total.value, None);
         assert_eq!(total.source, CostSource::Unavailable);
@@ -540,20 +497,20 @@ mod tests {
     #[test]
     fn sum_workload_costs_rejects_mismatched_units() {
         let rate = ann(1.0, CostUnit::CostUnitsPerSecond);
-        let structural = ann(1.0, CostUnit::RelativeStructuralUnits);
-        let err = sum_workload_costs(vec![(None, &rate), (None, &structural)]).unwrap_err();
+        let total = ann(1.0, CostUnit::CostUnits);
+        let err = sum_workload_costs(vec![(None, &rate), (None, &total)]).unwrap_err();
         assert_eq!(err.first, CostUnit::CostUnitsPerSecond);
-        assert_eq!(err.second, CostUnit::RelativeStructuralUnits);
+        assert_eq!(err.second, CostUnit::CostUnits);
     }
 
     #[test]
     fn workload_cost_summary_computes_benefit_from_deduplicated_totals() {
-        let baseline1 = ann(10.0, CostUnit::RelativeStructuralUnits);
-        let selected1 = ann(3.0, CostUnit::RelativeStructuralUnits);
-        let baseline2 = ann(10.0, CostUnit::RelativeStructuralUnits); // same shared node
-        let selected2 = ann(3.0, CostUnit::RelativeStructuralUnits);
-        let baseline3 = ann(4.0, CostUnit::RelativeStructuralUnits);
-        let selected3 = ann(1.0, CostUnit::RelativeStructuralUnits);
+        let baseline1 = ann(10.0, CostUnit::CostUnits);
+        let selected1 = ann(3.0, CostUnit::CostUnits);
+        let baseline2 = ann(10.0, CostUnit::CostUnits); // same shared node
+        let selected2 = ann(3.0, CostUnit::CostUnits);
+        let baseline3 = ann(4.0, CostUnit::CostUnits);
+        let selected3 = ann(1.0, CostUnit::CostUnits);
 
         let entries = vec![
             (Some(1_u32), &baseline1, &selected1),

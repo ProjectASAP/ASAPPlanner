@@ -640,10 +640,8 @@ function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
           source: `${laneId}-${childId}`,
           target: `${laneId}-${node.id}`,
           schemaLabel: formatSchema(byId.get(childId).schema),
-          // Issue #286 edge cost — only ever present when the exporter
-          // found this exact (child -> node) edge genuinely attributable
-          // (a real DAG merge point); `undefined` otherwise, read by
-          // showEdgeDetail.
+          // Optional edge cost supplied by a physical-evidence layer for
+          // this exact (child -> node) edge; `undefined` otherwise.
           edgeCost: edgeCostByPair.get(`${childId}\u0000${node.id}`),
           edgeCostLabel: edgeCostByPair.has(`${childId}\u0000${node.id}`)
             ? `edge cost ${compactCost(edgeCostByPair.get(`${childId}\u0000${node.id}`))}`
@@ -656,7 +654,7 @@ function laneElements(laneId, laneLabel, graph, query, stage, laneCost) {
   return elements;
 }
 
-// ── Issue #286: structured cost/benefit annotations ───────────────────────
+// ── Structured cost/benefit annotations ───────────────────────────────────
 // Renders only what a `dag_export` JSON export explicitly carries
 // (`CostAnnotation`/`WorkloadCostSummary`/`EdgeCostAnnotation` from
 // crates/types/src/cost.rs) — no client-side cost estimation. A value with
@@ -668,7 +666,6 @@ function formatCostUnit(unit) {
   switch (unit) {
     case 'CostUnitsPerSecond': return 'cost units/s';
     case 'CostUnits': return 'cost units';
-    case 'RelativeStructuralUnits': return 'relative structural units';
     default: return unit || 'unknown unit';
   }
 }
@@ -685,9 +682,8 @@ function formatBaselineRef(baseline) {
 }
 
 function formatCostNumber(value) {
-  // Trim to at most 3 decimals without trailing zeros — these are
-  // structural-proxy magnitudes today (see cost.rs's module doc), not
-  // precision-sensitive measurements.
+  // Trim display values to at most 3 decimals without trailing zeros. The
+  // complete modeled inputs and provenance remain available in the panel.
   return Number(value.toFixed(3)).toString();
 }
 
@@ -916,6 +912,7 @@ function renderScopeSummary(selected) {
   // client-side cost estimation.
   const costSummary = selected.length === 1 ? selected[0].workload_cost : computeSelectionWorkloadCost(selected);
   const benefitValue = costSummary && costSummary.benefit && costSummary.benefit.value;
+  const hasEdgeCosts = selected.some((query) => (query.post_graph?.edge_annotations || []).length > 0);
   const outcomeLabel = typeof benefitValue !== 'number'
     ? 'difference'
     : benefitValue > 0 ? 'saved' : benefitValue < 0 ? 'additional cost' : 'no change';
@@ -928,7 +925,7 @@ function renderScopeSummary(selected) {
           <div class="costStage costStage--post"><span>post-ASAP selected</span><strong>${escapeHtml(compactCost(costSummary.selected_cost))}</strong></div>
           <div class="costSaving ${typeof benefitValue === 'number' && benefitValue < 0 ? 'costSaving--regression' : ''}"><span>${escapeHtml(outcomeLabel)}</span><strong>${escapeHtml(compactCost(costSummary.benefit))}${typeof costSummary.benefit?.benefit_ratio === 'number' ? ` (${(costSummary.benefit.benefit_ratio * 100).toFixed(1)}%)` : ''}</strong></div>
         </div>
-        <div class="costComparisonHint">The same values are attached to the lane headers below. Green/red nodes show lower/higher replacement cost; highlighted edges carry inspectable materialization cost.</div>
+        <div class="costComparisonHint">The same values are attached to the lane headers below. Green/red nodes show lower/higher replacement cost.${hasEdgeCosts ? ' Highlighted edges carry an explicitly supplied physical edge cost.' : ''}</div>
       </div>`
     : '';
   scopePickerEl.innerHTML = `<div class="scopeGroup"><div class="scopeGroupLabel">View scope</div><div class="scopeRow active"><span>${escapeHtml(scope)}</span><span class="scopeMeta">${escapeHtml(strategyText)}</span></div></div>${costHtml}`;

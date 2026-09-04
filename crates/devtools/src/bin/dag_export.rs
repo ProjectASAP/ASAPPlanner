@@ -84,7 +84,10 @@ use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PlannerCostDocument {
+    /// Immutable catalog/runtime evidence generation shared by this file.
+    evidence_version: String,
     calibration: ResourceCalibration,
     targets: Vec<TargetPhysicalEvidence>,
 }
@@ -95,45 +98,24 @@ fn parse_planner_cost_document(raw: &str) -> Result<PlannerCostDocument, String>
     if value.get("targets").is_none() {
         return Err("the compact analytical-cost payload is no longer supported; migrate to complete per-operator physical DAG evidence".into());
     }
-    let mut document: PlannerCostDocument = serde_json::from_value(value)
+    let document: PlannerCostDocument = serde_json::from_value(value)
         .map_err(|error| format!("planner cost evidence is invalid: {error}"))?;
-    for target in &mut document.targets {
-        for candidate in &mut target.candidates {
-            normalize_replacement_identity(candidate.plan_mut());
-        }
+    if document.evidence_version.trim().is_empty() {
+        return Err("planner cost evidence_version must be non-empty".into());
     }
     Ok(document)
 }
 
-fn normalize_replacement_identity(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            // Accuracy guarantees are derived from the selected summary and
-            // target and may round-trip through decimal JSON by one ULP. They
-            // are validated before costing, but are not physical identity.
-            fields.remove("guarantee");
-            for child in fields.values_mut() {
-                normalize_replacement_identity(child);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for child in values {
-                normalize_replacement_identity(child);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TargetPhysicalEvidence {
     target: QueryExpr,
     scope: ComparisonScopeEvidence,
-    query_nodes: Vec<QueryNodePhysicalEvidence>,
     candidates: Vec<CandidatePhysicalEvidence>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ComparisonScopeEvidence {
     data_arrival: asap_types::workload::DataArrival,
     planning_time_ms: u64,
@@ -178,6 +160,7 @@ impl ComparisonScopeEvidence {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct QueryNodePhysicalEvidence {
     logical_node: QueryExpr,
     operator: asap_aware_mapping::analytical_cost::PhysicalOperator,
@@ -191,9 +174,11 @@ struct QueryNodePhysicalEvidence {
 enum CandidatePhysicalEvidence {
     Rewrite {
         plan: serde_json::Value,
+        query_nodes: Vec<QueryNodePhysicalEvidence>,
     },
     Summary {
         plan: serde_json::Value,
+        query_nodes: Vec<QueryNodePhysicalEvidence>,
         physical_dag: PhysicalDag,
     },
 }
@@ -201,13 +186,13 @@ enum CandidatePhysicalEvidence {
 impl CandidatePhysicalEvidence {
     fn plan(&self) -> &serde_json::Value {
         match self {
-            Self::Rewrite { plan } | Self::Summary { plan, .. } => plan,
+            Self::Rewrite { plan, .. } | Self::Summary { plan, .. } => plan,
         }
     }
 
-    fn plan_mut(&mut self) -> &mut serde_json::Value {
+    fn query_nodes(&self) -> &[QueryNodePhysicalEvidence] {
         match self {
-            Self::Rewrite { plan } | Self::Summary { plan, .. } => plan,
+            Self::Rewrite { query_nodes, .. } | Self::Summary { query_nodes, .. } => query_nodes,
         }
     }
 
@@ -221,10 +206,7 @@ impl CandidatePhysicalEvidence {
             }
             _ => return false,
         };
-        actual.is_ok_and(|mut actual| {
-            normalize_replacement_identity(&mut actual);
-            actual == *self.plan()
-        })
+        actual.is_ok_and(|actual| plan_values_match(&actual, self.plan()))
     }
 
     fn summary_dag(&self) -> Option<&PhysicalDag> {
@@ -235,7 +217,62 @@ impl CandidatePhysicalEvidence {
     }
 }
 
+/// Compare complete exported-plan identity while tolerating the one-ULP
+/// decimal round trip that `serde_json::Value` can introduce for derived
+/// floating-point guarantees. Integer configuration and graph identity stay
+/// exact; no guarantee field is dropped or otherwise normalized away.
+fn plan_values_match(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    plan_values_match_inner(actual, expected, false)
+}
+
+fn plan_values_match_inner(
+    actual: &serde_json::Value,
+    expected: &serde_json::Value,
+    inside_guarantee: bool,
+) -> bool {
+    use serde_json::Value;
+    match (actual, expected) {
+        (Value::Object(actual), Value::Object(expected)) => {
+            actual.len() == expected.len()
+                && actual.iter().all(|(key, value)| {
+                    expected.get(key).is_some_and(|other| {
+                        plan_values_match_inner(
+                            value,
+                            other,
+                            inside_guarantee || key == "guarantee",
+                        )
+                    })
+                })
+        }
+        (Value::Array(actual), Value::Array(expected)) => {
+            actual.len() == expected.len()
+                && actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(value, other)| plan_values_match_inner(value, other, inside_guarantee))
+        }
+        (Value::Number(actual), Value::Number(expected)) => {
+            match (actual.as_i64(), expected.as_i64()) {
+                (Some(actual), Some(expected)) => actual == expected,
+                _ => match (actual.as_u64(), expected.as_u64()) {
+                    (Some(actual), Some(expected)) => actual == expected,
+                    _ => match (actual.as_f64(), expected.as_f64()) {
+                        (Some(actual), Some(expected)) => {
+                            actual == expected
+                                || (inside_guarantee
+                                    && actual.to_bits().abs_diff(expected.to_bits()) <= 1)
+                        }
+                        _ => false,
+                    },
+                },
+            }
+        }
+        _ => actual == expected,
+    }
+}
+
 struct ExportPhysicalProvider<'a> {
+    evidence_version: &'a str,
     target: &'a TargetPhysicalEvidence,
     candidate: &'a CandidatePhysicalEvidence,
     used_query_nodes: RefCell<std::collections::HashSet<usize>>,
@@ -243,7 +280,7 @@ struct ExportPhysicalProvider<'a> {
 
 impl ExportPhysicalProvider<'_> {
     fn all_query_evidence_used(&self) -> bool {
-        self.used_query_nodes.borrow().len() == self.target.query_nodes.len()
+        self.used_query_nodes.borrow().len() == self.candidate.query_nodes().len()
     }
 }
 
@@ -253,7 +290,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
         _target: &asap_aware_mapping::replacement::TargetSubDAG<'_>,
     ) -> Result<PlannerEvidenceSnapshot, AnalyticalCostError> {
         Ok(PlannerEvidenceSnapshot {
-            version: "dag-export-evidence-v1".into(),
+            version: self.evidence_version.into(),
             scope: self.target.scope.resolve()?,
         })
     }
@@ -269,8 +306,8 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
             ));
         }
         let mut matches = self
-            .target
-            .query_nodes
+            .candidate
+            .query_nodes()
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
@@ -343,6 +380,7 @@ impl ExportPlannerCostModel<'_> {
         }
         Some((
             ExportPhysicalProvider {
+                evidence_version: &self.document.evidence_version,
                 target: target_evidence,
                 candidate: candidate_evidence,
                 used_query_nodes: RefCell::new(std::collections::HashSet::new()),
@@ -1190,7 +1228,6 @@ fn run_post_asap_with_progress(
 }
 
 #[cfg(test)]
-#[cfg(test)]
 fn run_post_asap(lowered_queries: &[(String, String, QueryExpr)]) -> PostAsapResults {
     run_post_asap_with_progress(lowered_queries, false, &DefaultCostModel, None, None)
 }
@@ -1399,7 +1436,7 @@ mod tests {
     };
     use asap_aware_mapping::analytical_lowering::lower_query_physical_dag;
     use asap_aware_mapping::analytical_statistics::{
-        EdgeStatistics, OperatorStatistics, SourceCoverage,
+        EdgeStatistics, OperatorStatistics, SourceCoverage, UnaryEdgeStatistics,
     };
     use asap_types::pre_asap::{Column, DataType, Reduction, Schema, Source};
 
@@ -1434,8 +1471,9 @@ mod tests {
                 source: Source::Table {
                     table_ref: "events".into(),
                 },
-                snapshot_id: "snapshot-1".into(),
+                source_snapshot_id: "snapshot-1".into(),
                 predicates: vec![],
+                info_matchers: vec![],
             }],
         }
     }
@@ -1450,36 +1488,31 @@ mod tests {
         let provider = |request: PhysicalNodeRequest<'_>| {
             let (statistics, output_buffer_bytes) = match request.operator {
                 PhysicalOperator::Scan => (
-                    OperatorStatistics {
-                        source_scan_bytes: 64_000,
-                        inputs: vec![edge(1_000, 64_000)],
-                        output: edge(1_000, 64_000),
-                        group_count: None,
-                        key_bytes: None,
-                        aggregate_value_bytes: None,
-                        k: None,
-                        topk_output_offset: None,
-                        limit_rows_consumed: None,
-                        hash_join_build_side: None,
-                        promql: None,
+                    OperatorStatistics::Scan {
+                        edges: UnaryEdgeStatistics {
+                            input: edge(1_000, 64_000),
+                            output: edge(1_000, 64_000),
+                            promql: None,
+                        },
+                        source_read_bytes: 64_000,
                     },
                     64_000,
                 ),
-                PhysicalOperator::HashAggregate => (
-                    OperatorStatistics {
-                        source_scan_bytes: 0,
-                        inputs: vec![edge(1_000, 64_000)],
-                        output: edge(100, 2_400),
-                        group_count: Some(100),
-                        key_bytes: Some(8),
-                        aggregate_value_bytes: Some(8),
-                        k: None,
-                        topk_output_offset: None,
-                        limit_rows_consumed: None,
-                        hash_join_build_side: None,
-                        promql: None,
+                PhysicalOperator::HashAggregate {
+                    grouping_key_count: 0,
+                    ..
+                } => (
+                    OperatorStatistics::HashAggregate {
+                        edges: UnaryEdgeStatistics {
+                            input: edge(1_000, 64_000),
+                            output: edge(1, 8),
+                            promql: None,
+                        },
+                        group_count: 1,
+                        key_bytes: 0,
+                        accumulator_bytes_per_group: 8,
                     },
-                    2_400,
+                    8,
                 ),
                 _ => return Err(AnalyticalCostError::UnsupportedQueryOperator),
             };
@@ -1503,18 +1536,13 @@ mod tests {
 
     fn cheap_candidate_dag() -> PhysicalDag {
         let coverage = test_scope().sources[0].clone();
-        let statistics = OperatorStatistics {
-            source_scan_bytes: 64,
-            inputs: vec![edge(100, 2_400)],
-            output: edge(100, 2_400),
-            group_count: None,
-            key_bytes: None,
-            aggregate_value_bytes: None,
-            k: None,
-            topk_output_offset: None,
-            limit_rows_consumed: None,
-            hash_join_build_side: None,
-            promql: None,
+        let statistics = OperatorStatistics::Scan {
+            edges: UnaryEdgeStatistics {
+                input: edge(100, 2_400),
+                output: edge(100, 2_400),
+                promql: None,
+            },
+            source_read_bytes: 64,
         };
         PhysicalDag {
             nodes: vec![PhysicalDagNode {
@@ -1580,6 +1608,7 @@ mod tests {
             }
         };
         let document = PlannerCostDocument {
+            evidence_version: "test-evidence-v1".into(),
             calibration: ResourceCalibration {
                 cost_per_cpu_op: 1.0,
                 cost_per_scan_byte: 1.0,
@@ -1589,13 +1618,16 @@ mod tests {
             targets: vec![TargetPhysicalEvidence {
                 target: query.clone(),
                 scope: test_scope(),
-                query_nodes: query_evidence(&query),
                 candidates: vec![match &candidate.replacement {
                     Replacement::Summary(_) => CandidatePhysicalEvidence::Summary {
                         plan,
+                        query_nodes: query_evidence(&query),
                         physical_dag: cheap_candidate_dag(),
                     },
-                    Replacement::Rewrite(_) => CandidatePhysicalEvidence::Rewrite { plan },
+                    Replacement::Rewrite(_) => CandidatePhysicalEvidence::Rewrite {
+                        plan,
+                        query_nodes: query_evidence(&query),
+                    },
                 }],
             }],
         };
@@ -1657,8 +1689,13 @@ mod tests {
         .is_none());
 
         let mut duplicate_query = document;
-        let query_entry = duplicate_query.targets[0].query_nodes[0].clone();
-        duplicate_query.targets[0].query_nodes.push(query_entry);
+        let query_entry = duplicate_query.targets[0].candidates[0].query_nodes()[0].clone();
+        match &mut duplicate_query.targets[0].candidates[0] {
+            CandidatePhysicalEvidence::Rewrite { query_nodes, .. }
+            | CandidatePhysicalEvidence::Summary { query_nodes, .. } => {
+                query_nodes.push(query_entry)
+            }
+        }
         assert!(ExportPlannerCostModel {
             document: &duplicate_query
         }
@@ -1673,7 +1710,12 @@ mod tests {
         let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
 
         let mut missing = document.clone();
-        missing.targets[0].query_nodes.pop();
+        match &mut missing.targets[0].candidates[0] {
+            CandidatePhysicalEvidence::Rewrite { query_nodes, .. }
+            | CandidatePhysicalEvidence::Summary { query_nodes, .. } => {
+                query_nodes.pop();
+            }
+        }
         let missing = parse_planner_cost_document(&serde_json::to_string(&missing).unwrap())
             .expect("well-formed but incomplete evidence document");
         assert!(ExportPlannerCostModel { document: &missing }
@@ -1681,9 +1723,12 @@ mod tests {
             .is_none());
 
         let mut unused = document;
-        let mut extra = unused.targets[0].query_nodes[0].clone();
+        let mut extra = unused.targets[0].candidates[0].query_nodes()[0].clone();
         extra.occurrence = usize::MAX;
-        unused.targets[0].query_nodes.push(extra);
+        match &mut unused.targets[0].candidates[0] {
+            CandidatePhysicalEvidence::Rewrite { query_nodes, .. }
+            | CandidatePhysicalEvidence::Summary { query_nodes, .. } => query_nodes.push(extra),
+        }
         let unused = parse_planner_cost_document(&serde_json::to_string(&unused).unwrap())
             .expect("well-formed document with unused evidence");
         assert!(ExportPlannerCostModel { document: &unused }
@@ -1736,14 +1781,20 @@ mod tests {
         );
 
         let mut first_dag = cheap_candidate_dag();
-        first_dag
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = &mut first_dag
             .evidence
             .get_mut("summary-read")
             .unwrap()
             .statistics
-            .source_scan_bytes = 1_024;
+        else {
+            panic!("summary read fixture must be a scan")
+        };
+        *source_read_bytes = 1_024;
         let second_dag = cheap_candidate_dag();
         let document = PlannerCostDocument {
+            evidence_version: "test-evidence-v1".into(),
             calibration: ResourceCalibration {
                 cost_per_cpu_op: 1.0,
                 cost_per_scan_byte: 1.0,
@@ -1753,14 +1804,15 @@ mod tests {
             targets: vec![TargetPhysicalEvidence {
                 target: query.clone(),
                 scope: test_scope(),
-                query_nodes: query_evidence(&query),
                 candidates: vec![
                     CandidatePhysicalEvidence::Summary {
                         plan: candidate_plan(candidates[0]),
+                        query_nodes: query_evidence(&query),
                         physical_dag: first_dag,
                     },
                     CandidatePhysicalEvidence::Summary {
                         plan: candidate_plan(candidates[1]),
+                        query_nodes: query_evidence(&query),
                         physical_dag: second_dag,
                     },
                 ],
@@ -1806,6 +1858,15 @@ mod tests {
     }
 
     #[test]
+    fn evidence_version_is_required_and_non_empty() {
+        let (_, _, mut document) = cost_fixture();
+        document.evidence_version.clear();
+        let error = parse_planner_cost_document(&serde_json::to_string(&document).unwrap())
+            .expect_err("an unnamed mutable evidence snapshot must be rejected");
+        assert!(error.contains("evidence_version"));
+    }
+
+    #[test]
     fn exact_candidate_selector_does_not_confuse_the_same_strategy() {
         let selected_query = lower_promql("up", AccuracyTarget::Exact).unwrap();
         let other_query = lower_promql("process_cpu_seconds_total", AccuracyTarget::Exact).unwrap();
@@ -1823,9 +1884,50 @@ mod tests {
         };
         let selector = CandidatePhysicalEvidence::Rewrite {
             plan: serde_json::to_value(dag_export::export(&selected_query)).unwrap(),
+            query_nodes: Vec::new(),
         };
         assert!(selector.matches(&selected));
         assert!(!selector.matches(&other));
+    }
+
+    #[test]
+    fn candidate_identity_includes_accuracy_guarantees() {
+        fn alter_guarantee(value: &mut serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    if fields.contains_key("guarantee") {
+                        fields.insert("guarantee".into(), serde_json::json!({"changed": true}));
+                        return true;
+                    }
+                    fields.values_mut().any(alter_guarantee)
+                }
+                serde_json::Value::Array(values) => values.iter_mut().any(alter_guarantee),
+                _ => false,
+            }
+        }
+
+        let (_, candidate, document) = cost_fixture();
+        let mut selector = document.targets[0].candidates[0].clone();
+        let plan = match &mut selector {
+            CandidatePhysicalEvidence::Rewrite { plan, .. }
+            | CandidatePhysicalEvidence::Summary { plan, .. } => plan,
+        };
+        assert!(alter_guarantee(plan), "fixture must contain a guarantee");
+        assert!(!selector.matches(&candidate));
+    }
+
+    #[test]
+    fn one_ulp_tolerance_is_limited_to_guarantee_values() {
+        let value = 0.1_f64;
+        let adjacent = f64::from_bits(value.to_bits() + 1);
+        assert!(plan_values_match(
+            &serde_json::json!({"guarantee": {"bound": {"value": value}}}),
+            &serde_json::json!({"guarantee": {"bound": {"value": adjacent}}}),
+        ));
+        assert!(!plan_values_match(
+            &serde_json::json!({"detail": {"literal": value}}),
+            &serde_json::json!({"detail": {"literal": adjacent}}),
+        ));
     }
 
     #[test]
