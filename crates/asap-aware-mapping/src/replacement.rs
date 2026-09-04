@@ -1869,7 +1869,7 @@ fn realize_additive_ranked_topk_input(
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
     let update = match measures.as_slice() {
-        [AggIntent::Count { .. }] => TopKUpdate::Count,
+        [AggIntent::Count { .. }] => TopKUpdate::Constant(1.0),
         [AggIntent::Sum { col }] => TopKUpdate::Value(match col {
             None => ColumnRef::SampleValue,
             Some(index) => match schema_column_ref(raw_child, *index) {
@@ -1893,10 +1893,12 @@ fn realize_additive_ranked_topk_input(
     let AggIntent::TopK { ranking, .. } = intent else {
         unreachable!("Top-K checked above")
     };
-    if !matches!(
-        (ranking, &update),
-        (TopKRanking::Count, TopKUpdate::Count) | (TopKRanking::Sum, TopKUpdate::Value(_))
-    ) {
+    let ranking_matches = match (ranking, &update) {
+        (TopKRanking::Count, TopKUpdate::Constant(weight)) => *weight == 1.0,
+        (TopKRanking::Sum, TopKUpdate::Value(_)) => true,
+        _ => false,
+    };
+    if !ranking_matches {
         return PhysicalSummaryInputRuleResult::Unsupported(
             "Top-K ranking basis disagrees with its additive child",
         );
@@ -6908,7 +6910,7 @@ mod tests {
                 k: 10,
                 input: TopKInput {
                     item: TopKItem::Column(ColumnRef::Named(name)),
-                    update: TopKUpdate::Count,
+                    update: TopKUpdate::Constant(1.0),
                 }
             } if name == "service"
         ));
@@ -6925,7 +6927,7 @@ mod tests {
             input,
             SummaryInput::TopK(TopKInput {
                 item: TopKItem::Column(ColumnRef::Named(name)),
-                update: TopKUpdate::Count,
+                update: TopKUpdate::Constant(1.0),
             }) if name == "service"
         ));
         assert!(matches!(

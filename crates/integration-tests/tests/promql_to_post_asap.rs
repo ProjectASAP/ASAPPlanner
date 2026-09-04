@@ -79,11 +79,11 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
 }
 
 #[test]
-fn temporal_topk_lowers_and_binds_distinct_count_and_value_updates() {
+fn temporal_topk_binds_constant_one_and_sample_value_weight_projections() {
     let cases = [
         (
             "topk by (service) (5, count_over_time(requests[1m]))",
-            TopKUpdate::Count,
+            TopKUpdate::Constant(1.0),
             "CmsWithHeap",
         ),
         (

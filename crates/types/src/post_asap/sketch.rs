@@ -544,9 +544,9 @@ pub enum TopKItem {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TopKUpdate {
-    /// Add one for every input row/sample.
-    Count,
-    /// Add the value from this column for every input row/sample.
+    /// Add this constant weight for every input row/sample.
+    Constant(f64),
+    /// Add the numeric value from this column for every input row/sample.
     Value(ColumnRef),
 }
 
@@ -570,8 +570,8 @@ pub enum SketchQuery {
     /// Estimated number of distinct elements.
     Cardinality,
     /// Read the top-k entries from a heap-backed summary. `input` repeats the
-    /// state update contract so a serialized readout never loses whether the
-    /// result ranks occurrence counts or summed values.
+    /// state update contract so a serialized readout never loses the numeric
+    /// weight projection used to build it.
     TopK { k: usize, input: TopKInput },
 }
 
@@ -584,7 +584,7 @@ mod tests {
         for input in [
             TopKInput {
                 item: TopKItem::SeriesIdentity,
-                update: TopKUpdate::Count,
+                update: TopKUpdate::Constant(1.0),
             },
             TopKInput {
                 item: TopKItem::Column(ColumnRef::Named("service".into())),

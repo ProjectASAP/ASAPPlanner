@@ -1283,7 +1283,7 @@ mod tests {
                     k: 10,
                     input: TopKInput {
                         item: TopKItem::SeriesIdentity,
-                        update: TopKUpdate::Count,
+                        update: TopKUpdate::Constant(1.0),
                     },
                 },
             )
