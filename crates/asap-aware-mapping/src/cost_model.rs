@@ -113,8 +113,10 @@ pub struct CostedSummaryDeployment<'a> {
 /// Complete candidate estimate returned to lifecycle and global plan search.
 ///
 /// A deployment-aware model may compare abstract summary-window primitives
-/// using evidence supplied by downstream implementations. The selected value
-/// is planner IR, not an opaque runtime implementation or deployment ID.
+/// using evidence supplied by downstream implementations. `window_frameworks`
+/// is planner IR: it records the selected semantic realization contract.
+/// `physical_plan_id` is separate provider-owned provenance for the concrete
+/// implementation whose evidence won; it is not interpreted as planner IR.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompleteSummaryCandidateEstimate {
     pub cost: Cost,
