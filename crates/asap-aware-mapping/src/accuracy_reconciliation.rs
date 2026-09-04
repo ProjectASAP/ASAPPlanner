@@ -200,7 +200,7 @@ fn bindable_accuracy_aggregate(node: &QueryExpr) -> Option<BindableAccuracyAggre
 }
 
 /// Are `a` and `b` the identical [`AggIntent`] apart from `accuracy` —
-/// same variant, same `col`/`q`/`k`? Only ever called with two
+/// same variant, same `col`/`q`/`k`/ranking basis? Only ever called with two
 /// accuracy-bearing intents (both `bindable_accuracy_aggregate`-gated
 /// first), but written as a full match rather than assuming that, the same
 /// defensive-completeness style [`crate::replacement::describe_intent`]
@@ -212,7 +212,14 @@ fn same_intent_except_accuracy(a: &AggIntent, b: &AggIntent) -> bool {
             AggIntent::Quantile { col: c1, q: q1, .. },
             AggIntent::Quantile { col: c2, q: q2, .. },
         ) => c1 == c2 && q1 == q2,
-        (AggIntent::TopK { k: k1, .. }, AggIntent::TopK { k: k2, .. }) => k1 == k2,
+        (
+            AggIntent::TopK {
+                k: k1, ranking: r1, ..
+            },
+            AggIntent::TopK {
+                k: k2, ranking: r2, ..
+            },
+        ) => k1 == k2 && r1 == r2,
         (AggIntent::Cardinality { col: c1, .. }, AggIntent::Cardinality { col: c2, .. }) => {
             c1 == c2
         }
@@ -609,6 +616,21 @@ mod tests {
         );
         let strategy = AccuracyReconciliationStrategy::new(&[Rc::clone(&a), Rc::clone(&b)]);
         assert!(!strategy.matches(&TargetSubDAG::new(&b)));
+    }
+
+    #[test]
+    fn different_topk_ranking_bases_are_not_near_duplicates() {
+        let count_ranked = AggIntent::TopK {
+            k: 10,
+            ranking: asap_types::pre_asap::TopKRanking::Count,
+            accuracy: AccuracyTarget::Epsilon(0.01),
+        };
+        let value_ranked = AggIntent::TopK {
+            k: 10,
+            ranking: asap_types::pre_asap::TopKRanking::Sum,
+            accuracy: AccuracyTarget::Epsilon(0.02),
+        };
+        assert!(!same_intent_except_accuracy(&count_ranked, &value_ranked));
     }
 
     #[test]

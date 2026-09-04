@@ -511,8 +511,13 @@ fn resolve_agg_intent(
             q: *q,
             accuracy: accuracy.clone(),
         },
-        AggIntent::TopK { k, accuracy } => AggIntent::TopK {
+        AggIntent::TopK {
+            k,
+            ranking,
+            accuracy,
+        } => AggIntent::TopK {
             k: *k,
+            ranking: *ranking,
             accuracy: accuracy.clone(),
         },
         AggIntent::Cardinality { col: c, accuracy } => AggIntent::Cardinality {

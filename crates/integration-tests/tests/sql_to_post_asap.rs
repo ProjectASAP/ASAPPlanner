@@ -39,7 +39,7 @@ use asap_aware_mapping::{
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::post_asap::{
     ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryNode, SummarySchema,
+    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInput, SummaryNode, SummarySchema,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -143,7 +143,7 @@ async fn sql_full_query_root_stays_logical_under_the_identity_projection() {
 ///
 /// ```text
 /// SummaryEstimate { query: Quantile{0.99} }            → {…: Float64}
-/// └─ SummaryAgg { Kll{k:269}, col: metrics.latency }    → {…: Sketch(Kll, {k:269})}
+/// └─ SummaryAgg { Kll{k:269}, input: metrics.latency }  → {…: Sketch(Kll, {k:269})}
 ///    └─ KeepPreAsap(Scan)                                → {ts, service, latency, bytes}
 /// ```
 ///
@@ -184,7 +184,7 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
     let SummaryExpr::SummaryAgg {
         child,
         family,
-        col,
+        input,
         reduction,
         ..
     } = &summary_input.expr
@@ -199,11 +199,11 @@ async fn sql_quantile_binds_kll_sketch_over_named_column() {
         )
     );
     assert_eq!(
-        col,
-        &ColumnRef::Qualified {
+        input,
+        &SummaryInput::Column(ColumnRef::Qualified {
             table: "metrics".into(),
             name: "latency".into(),
-        },
+        }),
         "SQL binds the intent's own named input column, not a synthetic sample value"
     );
     assert_eq!(
@@ -265,7 +265,7 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
 
     let SummaryExpr::SummaryAgg {
         family,
-        col,
+        input,
         reduction,
         ..
     } = &summary_input.expr
@@ -280,11 +280,11 @@ async fn sql_count_distinct_with_epsilon_binds_hll_rse_over_named_column() {
         )
     );
     assert_eq!(
-        col,
-        &ColumnRef::Qualified {
+        input,
+        &SummaryInput::Column(ColumnRef::Qualified {
             table: "metrics".into(),
             name: "service".into(),
-        }
+        })
     );
     assert_eq!(reduction, &Reduction::by(vec![]));
 }

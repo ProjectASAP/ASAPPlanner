@@ -828,20 +828,30 @@ fn bottomk_is_generic_sort_limit() {
 }
 
 #[test]
-fn topk_over_nested_aggregate_is_generic_sort_limit() {
+fn topk_over_nested_sum_preserves_a_value_weighted_heavy_hitter() {
     // SEMANTICS (PromQL): `topk(3, sum by(x)(rate(...)))` is extremely common.
-    // The argument is a nested aggregate (not the heavy-hitter `count` shape),
-    // so it ranks by sample value → generic `Sort{value desc} → Limit{k}` over
-    // the fully-lowered inner aggregate (issue #27: arbitrary function nesting).
+    // `sum` is additive, so the canonical IR records a value-weighted Top-K
+    // over the fully-lowered inner aggregate. The physical planner can then
+    // choose a signed-update heap sketch without re-parsing PromQL syntax.
     let qe = ok("topk(3, sum by(instance) (rate(node_cpu_seconds_total[5m])))");
-    let QueryExpr::Limit { n, child, .. } = &qe else {
-        panic!("expected outer Limit, got {qe:?}");
+    let QueryExpr::Aggregate {
+        measures,
+        child,
+        reduction,
+        ..
+    } = &qe
+    else {
+        panic!("expected outer Top-K Aggregate, got {qe:?}");
     };
-    assert_eq!(*n, 3);
-    let QueryExpr::Sort { keys, child, .. } = child.as_ref() else {
-        panic!("expected Sort under Limit, got {child:?}");
-    };
-    assert!(!keys[0].ascending, "topk ranks descending by value");
+    assert!(matches!(reduction, Reduction::Reduce(keys) if keys.is_empty()));
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::TopK {
+            k: 3,
+            ranking: asap_types::pre_asap::TopKRanking::Sum,
+            ..
+        }]
+    ));
     // The inner `sum by (instance)` survives as a cross-series Aggregate over the
     // per-series rate — the nesting the old two-level template could not express.
     assert!(

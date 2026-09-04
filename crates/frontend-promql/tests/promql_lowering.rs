@@ -396,7 +396,11 @@ fn topk_over_count_is_heavy_hitter_topk() {
     assert_eq!(reduction.expect_reduce().len(), 1);
     assert!(matches!(
         measures.as_slice(),
-        [AggIntent::TopK { k: 10, .. }]
+        [AggIntent::TopK {
+            k: 10,
+            ranking: asap_types::pre_asap::TopKRanking::Count,
+            ..
+        }]
     ));
     // The count_over_time under the TopK is a TimeRange-backed aggregate.
     let QueryExpr::Aggregate {
@@ -428,7 +432,11 @@ fn topk_over_sum_is_value_weighted_heavy_hitter_topk() {
     assert_eq!(reduction.expect_reduce().len(), 1);
     assert!(matches!(
         measures.as_slice(),
-        [AggIntent::TopK { k: 5, .. }]
+        [AggIntent::TopK {
+            k: 5,
+            ranking: asap_types::pre_asap::TopKRanking::Sum,
+            ..
+        }]
     ));
     let QueryExpr::Aggregate {
         measures, child, ..

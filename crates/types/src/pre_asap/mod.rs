@@ -42,7 +42,8 @@ pub mod schema;
 
 pub use agg_intent::{
     agg_accuracy, agg_is_exact, agg_is_mergeable, default_cardinality, default_quantile,
-    is_frequency_heavy_hitter, ranking_measure, AggIntent, MathFunc, RankingMeasure, TimeFunc,
+    is_heavy_hitter_ranking, ranking_measure, AggIntent, MathFunc, RankingMeasure, TimeFunc,
+    TopKRanking,
 };
 pub use binder::{Binder, SchemaCatalog, UsageDerivedCatalog};
 pub use canonicalize::canonicalize;

@@ -65,7 +65,7 @@ use promql_parser::parser::{
 };
 
 use asap_types::pre_asap::agg_intent::{
-    is_frequency_heavy_hitter, AggIntent, MathFunc, RankingMeasure, TimeFunc,
+    is_heavy_hitter_ranking, AggIntent, MathFunc, RankingMeasure, TimeFunc, TopKRanking,
 };
 use asap_types::pre_asap::query_expr::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, Reduction, SortKey, Source,
@@ -1451,7 +1451,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                 Some(InnerFunc::Sum) => RankingMeasure::WeightedSum,
                 _ => RankingMeasure::NonAdditive,
             };
-            let heavy_hitter = is_frequency_heavy_hitter(descending, measure);
+            let heavy_hitter = is_heavy_hitter_ranking(descending, measure);
             if heavy_hitter {
                 // Preserve the ranked aggregate intent in the canonical tree so the
                 // intent algebra is explicit about what is being computed.
@@ -1473,6 +1473,13 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                     reduction: Reduction::Reduce(keys.into()),
                     measures: vec![AggIntent::TopK {
                         k: k as usize,
+                        ranking: match measure {
+                            RankingMeasure::Frequency => TopKRanking::Count,
+                            RankingMeasure::WeightedSum => TopKRanking::Sum,
+                            RankingMeasure::NonAdditive => {
+                                unreachable!("heavy-hitter gate rejected non-additive ranking")
+                            }
+                        },
                         accuracy: current_accuracy(),
                     }],
                     output_names: vec![],

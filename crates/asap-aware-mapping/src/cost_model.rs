@@ -883,7 +883,9 @@ mod tests {
                     guarantee: None,
                 }),
                 family: family.clone(),
-                col: asap_types::pre_asap::expr_ir::ColumnRef::Named("value".into()),
+                input: asap_types::post_asap::SummaryInput::Column(
+                    asap_types::pre_asap::expr_ir::ColumnRef::Named("value".into()),
+                ),
                 reduction: asap_types::pre_asap::query_expr::Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },

@@ -48,8 +48,8 @@ pub use schema::{SummaryFamilyType, SummaryField, SummarySchema};
 pub use sketch::{
     default_hydra_params, hydra_kind_for, ExactKind, ExactParams, GroupingStrategy, HydraKind,
     HydraParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory, SketchKind,
-    SketchParams, SketchQuery, StatModelKind, StatModelParams, TopKWeight, WaveletKind,
-    WaveletParams,
+    SketchParams, SketchQuery, StatModelKind, StatModelParams, SummaryInput, TopKInput, TopKItem,
+    TopKUpdate, WaveletKind, WaveletParams,
 };
 pub use summary_maintenance::SummaryMaintenanceMode;
 pub use summary_maintenance_lifecycle::{

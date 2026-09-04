@@ -1324,7 +1324,9 @@ mod tests {
             expr: SummaryExpr::SummaryAgg {
                 child,
                 family: family.clone(),
-                col: ColumnRef::Named("value".into()),
+                input: asap_types::post_asap::SummaryInput::Column(ColumnRef::Named(
+                    "value".into(),
+                )),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },
@@ -1347,7 +1349,9 @@ mod tests {
             expr: SummaryExpr::SummaryAgg {
                 child,
                 family: family.clone(),
-                col: ColumnRef::Named("state".into()),
+                input: asap_types::post_asap::SummaryInput::Column(ColumnRef::Named(
+                    "state".into(),
+                )),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },

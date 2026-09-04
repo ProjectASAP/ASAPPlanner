@@ -518,8 +518,40 @@ impl Default for GroupingStrategy {
 
 // ── Sketch read-out queries ───────────────────────────────────────────────────
 
+/// Input semantics for one summary aggregation. Most summaries consume one
+/// value column. Heap-backed Top-K summaries instead need both an item
+/// identity and an update value; keeping those facts together prevents a
+/// value-weighted plan from silently degrading into occurrence counting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SummaryInput {
+    Column(ColumnRef),
+    TopK(TopKInput),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TopKInput {
+    pub item: TopKItem,
+    pub update: TopKUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TopKItem {
+    /// A relational grouping-key column identifies the ranked item.
+    Column(ColumnRef),
+    /// The complete PromQL label set identifies one input series.
+    SeriesIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TopKUpdate {
+    /// Add one for every input row/sample.
+    Count,
+    /// Add the value from this column for every input row/sample.
+    Value(ColumnRef),
+}
+
 /// What to extract from a built summary. Carried by `SummaryEstimate`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SketchQuery {
     /// Extract the value at quantile rank `q` ∈ (0, 1].
     Quantile { q: f64 },
@@ -537,20 +569,36 @@ pub enum SketchQuery {
     },
     /// Estimated number of distinct elements.
     Cardinality,
-    /// Top-k keyed values. The weighting is explicit because heap-bearing
-    /// sketches can rank event counts or summed sample values.
-    TopK { k: usize, weight: TopKWeight },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TopKWeight {
-    Count,
-    Value,
+    /// Read the top-k entries from a heap-backed summary. `input` repeats the
+    /// state update contract so a serialized readout never loses whether the
+    /// result ranks occurrence counts or summed values.
+    TopK { k: usize, input: TopKInput },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn topk_input_and_readout_round_trip_without_losing_update_semantics() {
+        for input in [
+            TopKInput {
+                item: TopKItem::SeriesIdentity,
+                update: TopKUpdate::Count,
+            },
+            TopKInput {
+                item: TopKItem::Column(ColumnRef::Named("service".into())),
+                update: TopKUpdate::Value(ColumnRef::SampleValue),
+            },
+        ] {
+            let query = SketchQuery::TopK {
+                k: 10,
+                input: input.clone(),
+            };
+            let json = serde_json::to_string(&query).unwrap();
+            assert_eq!(serde_json::from_str::<SketchQuery>(&json).unwrap(), query);
+        }
+    }
 
     #[test]
     fn sketch_kind_classifies_a_valid_algorithm_and_params_pair() {
