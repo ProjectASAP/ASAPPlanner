@@ -29,6 +29,49 @@ pub struct StreamingWindowFrameworkCandidate {
     pub node_evidence: StreamingNodeEvidence,
 }
 
+pub(super) fn summary_aggregation_identities(
+    root: &SummaryNode,
+) -> HashSet<*const SummaryNode> {
+    fn visit(
+        node: &SummaryNode,
+        seen: &mut HashSet<*const SummaryNode>,
+        out: &mut HashSet<*const SummaryNode>,
+    ) {
+        if !seen.insert(node as *const _) {
+            return;
+        }
+        match &node.expr {
+            SummaryExpr::KeepPreAsap(_) => {}
+            SummaryExpr::SummaryAgg { child, .. } => {
+                out.insert(node as *const _);
+                visit(child, seen, out);
+            }
+            SummaryExpr::SummaryMerge { children } => {
+                for child in children {
+                    visit(child, seen, out);
+                }
+            }
+            SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::SummaryJoin {
+                outer: left,
+                inner: right,
+                ..
+            } => {
+                visit(left, seen, out);
+                visit(right, seen, out);
+            }
+            SummaryExpr::SummaryDelete { summary_input, .. }
+            | SummaryExpr::SummaryEstimate { summary_input, .. } => {
+                visit(summary_input, seen, out);
+            }
+        }
+    }
+
+    let mut out = HashSet::new();
+    visit(root, &mut HashSet::new(), &mut out);
+    out
+}
+
 /// Cardinality normalization used by the PromSketch EH bounds. The paper's
 /// sub-window error is stated relative to the suffix beginning at the query's
 /// left endpoint, so a query-relative bound needs `suffix_rows/query_rows`.

@@ -483,6 +483,11 @@ impl SummaryMaintenanceCostModel {
         if alternative.physical_plan_id.trim().is_empty() {
             return Err(AnalyticalCostError::MissingOrZero("physical_plan_id"));
         }
+        if self.window_framework_candidates.contains_key(&key) {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "physical alternative binding mode",
+            ));
+        }
         let alternatives = self.physical_plan_alternatives.entry(key).or_default();
         if alternatives
             .iter()
@@ -516,6 +521,11 @@ impl SummaryMaintenanceCostModel {
         if candidate.physical_plan_id.trim().is_empty() {
             return Err(AnalyticalCostError::MissingOrZero("physical_plan_id"));
         }
+        if self.physical_plan_alternatives.contains_key(&key) {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "physical alternative binding mode",
+            ));
+        }
         if candidate.assignments.is_empty() {
             return Err(AnalyticalCostError::MissingOrZero(
                 "window framework assignments",
@@ -531,6 +541,11 @@ impl SummaryMaintenanceCostModel {
         }) {
             return Err(AnalyticalCostError::MissingOrZero(
                 "unique window framework assignments",
+            ));
+        }
+        if assigned != summary_aggregation_identities(root) {
+            return Err(AnalyticalCostError::ComparisonScopeMismatch(
+                "window framework assignments",
             ));
         }
         let candidates = self.window_framework_candidates.entry(key).or_default();
@@ -798,17 +813,18 @@ impl CostModel for SummaryMaintenanceCostModel {
             return alternatives
                 .iter()
                 .filter_map(|alternative| {
+                    let frameworks = vec![None; deployments.len()];
                     self.complete_cost_with_evidence(
                         root,
                         deployments,
                         comparison,
                         &alternative.node_evidence,
-                        &vec![None; deployments.len()],
+                        &frameworks,
                     )
                     .map(|cost| CompleteSummaryCandidateEstimate {
                         cost,
                         physical_plan_id: Some(alternative.physical_plan_id.clone()),
-                        window_frameworks: vec![None; deployments.len()],
+                        window_frameworks: frameworks,
                         window_accuracy_guarantee: None,
                     })
                 })
@@ -3337,6 +3353,7 @@ mod tests {
             plan.deployments[0].selected_window_framework,
             Some(SummaryWindowFramework::ExponentialHistogram)
         );
+        assert_eq!(plan.selected_physical_plan_id.as_deref(), Some("eh-v1"));
         let guarantee = plan.window_accuracy_guarantee.as_ref().unwrap();
         assert_eq!(guarantee.metric, ErrorMetric::RelativeValue);
         assert!((guarantee.bound.evaluate().unwrap() - 0.05).abs() < f64::EPSILON);
@@ -3346,6 +3363,7 @@ mod tests {
             exported.deployments[0].selected_window_framework,
             Some(SummaryWindowFramework::ExponentialHistogram)
         );
+        assert_eq!(exported.selected_physical_plan_id.as_deref(), Some("eh-v1"));
         assert_eq!(
             exported.window_accuracy_guarantee.unwrap().metric,
             ErrorMetric::RelativeValue
