@@ -3143,6 +3143,36 @@ impl<Id> PlanSpace<Id> {
             });
             let chosen = if lifecycle_choice.is_some() {
                 lifecycle_choice
+            } else if cost_model.candidate_cost_covers_complete_plan() {
+                let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
+                let bound_physical = group
+                    .candidates
+                    .iter()
+                    // A logical CSE rewrite does not encode shared retained
+                    // state or independent execution multiplicity. Until it
+                    // is bound as a complete physical DAG, it must not enter
+                    // evidence-backed ranking as though those costs were
+                    // known.
+                    .filter(|candidate| !is_cse_candidate(candidate))
+                    .filter_map(|candidate| {
+                        cost_model
+                            .candidate_cost(candidate, &effective_target)
+                            .map(|cost| (candidate, cost))
+                    })
+                    .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0))
+                    .map(|(candidate, _)| candidate);
+                bound_physical.or_else(|| {
+                    (effective >= 2)
+                        .then(|| {
+                            decide_with_effective_count(group, effective, cost_model).and_then(
+                                |decision| {
+                                    chosen_share.insert(*ptr, decision);
+                                    pick_shared_subtree_candidate(group, decision)
+                                },
+                            )
+                        })
+                        .flatten()
+                })
             } else if effective >= 2 && cse_candidate_pair(group).is_some() {
                 let decision = if let Some(profiles) = profiles {
                     decide_group_with_recurrence(
@@ -5881,6 +5911,51 @@ mod tests {
             c_shares,
             "global_selection must flip c to Share once a's own recomputation is accounted for"
         );
+    }
+
+    #[test]
+    fn complete_plan_costs_reject_unbound_cse_arms() {
+        struct CompletePlanCost;
+        impl CostModel for CompletePlanCost {
+            fn candidate_cost_covers_complete_plan(&self) -> bool {
+                true
+            }
+
+            fn candidate_cost(
+                &self,
+                candidate: &ReplacementSubDAG,
+                _target: &TargetSubDAG<'_>,
+            ) -> Option<Cost> {
+                assert!(!is_cse_candidate(candidate));
+                None
+            }
+
+            fn rank_candidates(
+                &self,
+                _intent: &AggIntent,
+                candidates: &[SketchAlgorithm],
+            ) -> Vec<SketchAlgorithm> {
+                candidates.to_vec()
+            }
+
+            fn cse_share_decision(&self, _candidate: &CseCandidate) -> ShareDecision {
+                ShareDecision::RecomputeIndependently
+            }
+        }
+
+        let shared = Rc::new(QueryExpr::Dedup {
+            cols: vec![0],
+            child: Rc::new(metric_scan(&["job"])),
+        });
+        let space = search_workload(vec![
+            ("left", Rc::clone(&shared)),
+            ("right", Rc::clone(&shared)),
+        ]);
+        let planned = &space.roots[0].1;
+
+        let selected = space.global_selection(&CompletePlanCost);
+        let chosen = selected.for_target(planned).unwrap().chosen.unwrap();
+        assert_eq!(chosen.provenance, ReplacementProvenance::CseRecompute);
     }
 
     #[test]
