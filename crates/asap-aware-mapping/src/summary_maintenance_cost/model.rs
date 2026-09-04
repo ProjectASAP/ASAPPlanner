@@ -1,385 +1,4 @@
-//! Analytical resource cost for incrementally maintained summary deployments.
-//!
-//! The canonical workload and lifecycle types own deployment semantics. This
-//! module only adds physical evidence absent from those schemas: state size,
-//! window counts, and per-operation CPU measurements or complexity estimates.
-
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-
-use asap_types::post_asap::{
-    SketchAlgorithm, SummaryExpr, SummaryMaintenanceLifecycle,
-    SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode, SummaryNode,
-};
-use asap_types::pre_asap::{
-    agg_intent::AggIntent, CompareOpKind, InfoMatcher, Predicate, QueryExpr, Source,
-};
-use asap_types::workload::{DataArrival, DataWorkload, QueryRecurrence, RepeatedDemand};
-use serde::{Deserialize, Serialize};
-
-use crate::analytical_cost::ExecutionMultiplicity;
-use crate::analytical_cost::{
-    estimate_physical_dag, AnalyticalCostError, PhysicalDagNode, PhysicalOperator,
-    ResourceCalibration, ResourceEstimate,
-};
-#[cfg(test)]
-use crate::physical_operator_statistics::UnaryEdgeStatistics;
-use crate::physical_operator_statistics::{ComparisonScope, EdgeStatistics, OperatorStatistics};
-use crate::cost_model::CostedSummaryDeployment;
-use crate::cost_model::{Cost, CostModel, DefaultCostModel};
-use crate::recurrence::CostRate;
-use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
-use crate::summary_maintenance_lifecycle::{
-    evaluation_schedule, maintenance_mode, SummaryMaintenanceCapabilities,
-    SummaryMaintenanceLifecycleCostInputs,
-};
-
-pub const SUMMARY_MAINTENANCE_COST_MODEL_VERSION: &str = "summary-maintenance-resource-v1";
-
-/// Owned, immutable evidence for one fully lowered physical DAG.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StreamingPhysicalDagEvidence {
-    pub nodes: Vec<PhysicalDagNode>,
-    pub root: String,
-    pub statistics: HashMap<String, OperatorStatistics>,
-}
-
-impl StreamingPhysicalDagEvidence {
-    fn estimate(&self, scope: &ComparisonScope) -> Result<ResourceEstimate, AnalyticalCostError> {
-        estimate_physical_dag(&self.nodes, &self.root, scope, &self.statistics)
-    }
-}
-
-/// Physical evidence that is not represented by [`DataWorkload`] for one
-/// incrementally maintained summary deployment. Window counts describe the
-/// already-selected physical deployment; this layer does not define another
-/// tumbling/sliding policy enum.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct StreamingPhysicalInputEvidence {
-    /// Logical bytes in the snapshot used to bootstrap the state.
-    pub initial_input_bytes: u64,
-    /// Source bytes read while bootstrapping. Arriving stream bytes are not a
-    /// disk scan and are therefore excluded.
-    pub initial_source_scan_bytes: u64,
-    /// Simultaneously open windows receiving each arriving item.
-    pub active_window_count: u64,
-    /// Window/state partitions receiving each bootstrap row.
-    pub bootstrap_window_count: u64,
-    /// Completed windows retained for query coverage.
-    pub retained_window_count: u64,
-    /// Independent state instances per window: one for shared
-    /// multi-subpopulation state, otherwise the resolved group count.
-    pub physical_summary_count: u64,
-    /// Resident bytes of one concrete state instance.
-    pub state_bytes_per_summary: u64,
-}
-
-/// Workload-normalized inputs for incremental maintenance over one finite
-/// comparison horizon.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct StreamingSummaryInputs {
-    pub initial_input_rows: u64,
-    pub initial_input_bytes: u64,
-    pub initial_source_scan_bytes: u64,
-    pub ingestion_rate_per_second: f64,
-    pub active_window_count: u64,
-    pub bootstrap_window_count: u64,
-    pub retained_window_count: u64,
-    pub physical_summary_count: u64,
-    pub state_bytes_per_summary: u64,
-}
-
-impl StreamingSummaryInputs {
-    /// Resolve snapshot size, arriving rows, and reads from the canonical
-    /// workload. Positive fractional expected work rounds up conservatively.
-    ///
-    /// `Mixed` fails closed because today's workload schema cannot distinguish
-    /// its at-rest backlog from its continuing-arrival cardinality.
-    pub fn from_workload(
-        physical: StreamingPhysicalInputEvidence,
-        data: &DataWorkload,
-        scope: &ComparisonScope,
-    ) -> Result<Self, AnalyticalCostError> {
-        let _ = scope.validate()?;
-        if data.arrival != DataArrival::ContinuouslyIngesting || scope.data_arrival != data.arrival
-        {
-            return Err(AnalyticalCostError::UnsupportedDataArrival(data.arrival));
-        }
-        let initial_input_rows = data
-            .input_cardinality
-            .value_at(scope.planning_time.0)
-            .copied()
-            .ok_or(AnalyticalCostError::MissingOrStale("input_cardinality"))?;
-        let ingestion_rate = data
-            .ingestion_rate
-            .value_at(scope.planning_time.0)
-            .copied()
-            .ok_or(AnalyticalCostError::MissingOrStale("ingestion_rate"))?;
-        if !ingestion_rate.0.is_finite() || ingestion_rate.0 < 0.0 {
-            return Err(AnalyticalCostError::InvalidIngestionRate(ingestion_rate.0));
-        }
-        Self {
-            initial_input_rows,
-            initial_input_bytes: physical.initial_input_bytes,
-            initial_source_scan_bytes: physical.initial_source_scan_bytes,
-            ingestion_rate_per_second: ingestion_rate.0,
-            active_window_count: physical.active_window_count,
-            bootstrap_window_count: physical.bootstrap_window_count,
-            retained_window_count: physical.retained_window_count,
-            physical_summary_count: physical.physical_summary_count,
-            state_bytes_per_summary: physical.state_bytes_per_summary,
-        }
-        .validate()
-    }
-
-    pub fn validate(self) -> Result<Self, AnalyticalCostError> {
-        for (name, value) in [
-            ("active_window_count", self.active_window_count),
-            ("bootstrap_window_count", self.bootstrap_window_count),
-            ("physical_summary_count", self.physical_summary_count),
-            ("state_bytes_per_summary", self.state_bytes_per_summary),
-        ] {
-            if value == 0 {
-                return Err(AnalyticalCostError::MissingOrZero(name));
-            }
-        }
-        if (self.initial_input_rows == 0) != (self.initial_input_bytes == 0)
-            || (self.initial_input_rows == 0 && self.initial_source_scan_bytes != 0)
-        {
-            return Err(AnalyticalCostError::InconsistentBootstrapEvidence);
-        }
-        if !self.ingestion_rate_per_second.is_finite() || self.ingestion_rate_per_second < 0.0 {
-            return Err(AnalyticalCostError::InvalidIngestionRate(
-                self.ingestion_rate_per_second,
-            ));
-        }
-        Ok(self)
-    }
-}
-
-/// CPU operations for one concrete state operation on one state instance.
-/// Missing evidence is legal only when the selected summary DAG does not use
-/// that operation.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-pub struct SummaryOperationCpuEvidence {
-    pub insert_cpu_ops: Option<f64>,
-    pub merge_cpu_ops: Option<f64>,
-    pub subtract_cpu_ops: Option<f64>,
-    pub delete_cpu_ops: Option<f64>,
-    /// Expirations/retractions routed to this DAG per second. Required only
-    /// when an explicit `SummaryDelete` is present.
-    pub delete_events_per_second: Option<f64>,
-    /// Concrete state instances touched by one delete event.
-    pub delete_routing_fanout: Option<u64>,
-    pub readout_cpu_ops: Option<f64>,
-}
-
-/// Physical evidence for one `SummaryJoin` implementation. Total work,
-/// cardinality, and memory cannot be inferred from the logical join key alone.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SummaryJoinEvidence {
-    pub physical_id: String,
-    pub inputs: Vec<EdgeStatistics>,
-    pub output: EdgeStatistics,
-    /// Total build, probe, match-production, and output CPU for one complete
-    /// execution of the selected physical join algorithm.
-    pub cpu_ops_per_execution: f64,
-    pub working_memory_bytes: u64,
-    pub output_buffer_bytes: u64,
-    pub executions_per_evaluation: u64,
-    pub io_bytes_per_execution: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct StreamingAggregateEvidence {
-    pub physical_id: String,
-    pub input: EdgeStatistics,
-    pub output: EdgeStatistics,
-    /// Index into `ComparisonScope.sources` when this state bootstraps directly
-    /// from storage. `None` means its input is an already-materialized child
-    /// edge and therefore has no additional source read.
-    pub source_coverage_index: Option<usize>,
-    /// Provider-owned identity of the physical bootstrap read. Equal source
-    /// coverage alone does not prove two independent builds share I/O.
-    pub bootstrap_read_identity: String,
-    pub inputs: StreamingSummaryInputs,
-    /// CPU operations to insert one routed row into one state instance.
-    pub insert_cpu_ops: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SummaryOperatorResourceEvidence {
-    pub physical_id: String,
-    pub inputs: Vec<EdgeStatistics>,
-    pub output: EdgeStatistics,
-    pub cpu_ops: f64,
-    pub working_memory_bytes: u64,
-    pub output_buffer_bytes: u64,
-    /// Executions of this physical operator for one query evaluation.
-    /// This is provider evidence, not inferred from a descendant state.
-    pub executions_per_evaluation: u64,
-    pub io_bytes_per_execution: Option<u64>,
-}
-
-/// Evidence is structured by logical summary operation so delete-only facts
-/// cannot be attached to merge, subtract, or readout nodes.
-#[derive(Debug, Clone, PartialEq)]
-pub enum StreamingSummaryOperatorEvidence {
-    Merge(SummaryOperatorResourceEvidence),
-    Subtract(SummaryOperatorResourceEvidence),
-    Delete {
-        resource: SummaryOperatorResourceEvidence,
-        events_per_second: f64,
-        routing_fanout: u64,
-    },
-    Readout(SummaryOperatorResourceEvidence),
-}
-
-impl StreamingSummaryOperatorEvidence {
-    fn resource(&self) -> &SummaryOperatorResourceEvidence {
-        match self {
-            Self::Merge(resource)
-            | Self::Subtract(resource)
-            | Self::Delete { resource, .. }
-            | Self::Readout(resource) => resource,
-        }
-    }
-
-    #[cfg(test)]
-    fn resource_mut(&mut self) -> &mut SummaryOperatorResourceEvidence {
-        match self {
-            Self::Merge(resource)
-            | Self::Subtract(resource)
-            | Self::Delete { resource, .. }
-            | Self::Readout(resource) => resource,
-        }
-    }
-}
-
-/// Non-aggregation work for a retained pre-ASAP subtree over the comparison
-/// horizon. Bootstrap/source I/O belongs exclusively to the owning aggregate,
-/// and summary insertion belongs exclusively to its insert evidence.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StreamingRetainedQueryEvidence {
-    pub physical_id: String,
-    /// Logical output edge consumed by the parent summary operator.
-    pub output: EdgeStatistics,
-    pub preprocessing_cpu_ops_over_horizon: f64,
-    /// Execution workspace, excluding the separately declared output buffer.
-    pub working_memory_bytes: u64,
-    pub output_buffer_bytes: u64,
-}
-
-/// Physical evidence bound to the selected DAG's `Rc` identity. A copied,
-/// structurally equal node is not silently treated as the same deployment.
-#[derive(Debug, Clone, Default)]
-pub struct StreamingNodeEvidence {
-    aggregations: HashMap<*const SummaryNode, StreamingAggregateEvidence>,
-    joins: HashMap<*const SummaryNode, SummaryJoinEvidence>,
-    operations: HashMap<*const SummaryNode, StreamingSummaryOperatorEvidence>,
-    operation_state_owners: HashMap<*const SummaryNode, *const SummaryNode>,
-    retained_queries: HashMap<*const SummaryNode, StreamingRetainedQueryEvidence>,
-}
-
-impl StreamingNodeEvidence {
-    pub fn insert_aggregation(
-        &mut self,
-        node: &Rc<SummaryNode>,
-        evidence: StreamingAggregateEvidence,
-    ) {
-        self.aggregations.insert(Rc::as_ptr(node), evidence);
-    }
-
-    pub fn insert_join(&mut self, node: &Rc<SummaryNode>, evidence: SummaryJoinEvidence) {
-        self.joins.insert(Rc::as_ptr(node), evidence);
-    }
-
-    pub fn insert_operation(
-        &mut self,
-        node: &Rc<SummaryNode>,
-        evidence: StreamingSummaryOperatorEvidence,
-    ) {
-        self.operations.insert(Rc::as_ptr(node), evidence);
-    }
-
-    /// Bind a stateful operation (currently `SummaryDelete`) to the exact
-    /// aggregation deployment whose active interval it follows.
-    pub fn insert_state_operation(
-        &mut self,
-        node: &Rc<SummaryNode>,
-        state: &Rc<SummaryNode>,
-        evidence: StreamingSummaryOperatorEvidence,
-    ) {
-        self.operations.insert(Rc::as_ptr(node), evidence);
-        self.operation_state_owners
-            .insert(Rc::as_ptr(node), Rc::as_ptr(state));
-    }
-
-    pub fn insert_retained_query(
-        &mut self,
-        node: &Rc<SummaryNode>,
-        evidence: StreamingRetainedQueryEvidence,
-    ) {
-        self.retained_queries.insert(Rc::as_ptr(node), evidence);
-    }
-
-    fn aggregation(&self, node: &SummaryNode) -> Option<StreamingAggregateEvidence> {
-        self.aggregations.get(&(node as *const _)).cloned()
-    }
-}
-
-fn summary_operation_evidence<'a>(
-    node: &SummaryNode,
-    evidence: &'a StreamingNodeEvidence,
-) -> Result<&'a StreamingSummaryOperatorEvidence, AnalyticalCostError> {
-    let operation = evidence
-        .operations
-        .get(&(node as *const _))
-        .ok_or(AnalyticalCostError::MissingOrStale("summary operation"))?;
-    let matches = matches!(
-        (&node.expr, operation),
-        (
-            SummaryExpr::SummaryMerge { .. },
-            StreamingSummaryOperatorEvidence::Merge(_)
-        ) | (
-            SummaryExpr::SummarySubtract { .. },
-            StreamingSummaryOperatorEvidence::Subtract(_)
-        ) | (
-            SummaryExpr::SummaryDelete { .. },
-            StreamingSummaryOperatorEvidence::Delete { .. }
-        ) | (
-            SummaryExpr::SummaryEstimate { .. },
-            StreamingSummaryOperatorEvidence::Readout(_)
-        )
-    );
-    if matches {
-        Ok(operation)
-    } else {
-        Err(AnalyticalCostError::InconsistentOperatorStatistics(
-            "summary operation evidence kind does not match SummaryExpr",
-        ))
-    }
-}
-
-/// Evidence for recomputing the raw target over the full comparison horizon.
-/// Planning-time dimensions describe the initial snapshot. Each scheduled
-/// evaluation adds arrivals since planning time; `physical_dag` is therefore
-/// a once-counted DAG whose edge statistics already aggregate all evaluations.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StreamingRawInputEvidence {
-    pub planning_time_input_rows: u64,
-    pub planning_time_input_bytes: u64,
-    pub planning_time_source_scan_bytes: u64,
-    /// Decoded logical bytes added to operator edges by one arriving row.
-    pub arriving_logical_row_bytes: u64,
-    /// Physical storage bytes read for one arriving row. Kept separate from
-    /// logical width so compression and encoding are not silently conflated.
-    pub arriving_source_row_bytes: u64,
-    pub ingestion_rate_per_second: f64,
-    pub physical_dag: StreamingPhysicalDagEvidence,
-}
-
+use super::*;
 /// Adapter that supplies the existing lifecycle planner with analytical
 /// streaming costs. It does not define lifecycle policy: the planner's
 /// existing enums and legality checks remain authoritative.
@@ -532,7 +151,7 @@ fn validate_query_scope(
 }
 
 fn validate_physical_scope_coverage(
-    physical: &StreamingPhysicalDagEvidence,
+    physical: &EvidenceBackedPhysicalDag,
     scope: &ComparisonScope,
 ) -> Result<(), AnalyticalCostError> {
     let mut declared = scope.sources.clone();
@@ -638,11 +257,12 @@ fn validate_raw_snapshot_dimensions(
             "single raw scan evolution",
         ));
     }
-    let statistics = raw
+    let evidence = raw
         .physical_dag
-        .statistics
+        .evidence
         .get(&scan_node.id)
         .ok_or_else(|| AnalyticalCostError::MissingOperatorStatistics(scan_node.id.clone()))?;
+    let statistics = &evidence.statistics;
     let OperatorStatistics::Scan {
         edges,
         source_read_bytes,
@@ -720,7 +340,12 @@ impl SummaryMaintenanceCostModel {
         validate_query_scope(target, &scope)?;
         validate_physical_scope_coverage(&raw.physical_dag, &scope)?;
         validate_raw_snapshot_dimensions(&raw, &scope)?;
-        raw.physical_dag.estimate(&scope)?;
+        estimate_physical_dag(
+            &raw.physical_dag.nodes,
+            &raw.physical_dag.root,
+            &scope,
+            &raw.physical_dag,
+        )?;
         let target_ptr = Rc::as_ptr(target);
         if let Some(existing) = self.target_comparisons.get(&target_ptr) {
             if existing.scope != scope || existing.raw != raw {
@@ -916,11 +541,13 @@ impl CostModel for SummaryMaintenanceCostModel {
             return None;
         }
         self.calibrated(
-            comparison
-                .raw
-                .physical_dag
-                .estimate(&comparison.scope)
-                .ok()?,
+            estimate_physical_dag(
+                &comparison.raw.physical_dag.nodes,
+                &comparison.raw.physical_dag.root,
+                &comparison.scope,
+                &comparison.raw.physical_dag,
+            )
+            .ok()?,
         )
     }
 }
@@ -2117,7 +1744,7 @@ mod tests {
             query,
             asap_types::workload::TimestampMs(planning_time_ms),
             asap_types::workload::DurationMs(horizon_ms),
-            vec![crate::analytical_statistics::SourceCoverage {
+            vec![crate::physical_operator_statistics::SourceCoverage {
                 source: Source::TimeSeries {
                     metric: "metrics".into(),
                 },
@@ -2417,7 +2044,7 @@ mod tests {
             .unwrap()
             .raw
             .physical_dag
-            .statistics
+            .evidence
             .clear();
         let unavailable = global_selection_with_summary_maintenance_lifecycles(
             &space,
@@ -2498,7 +2125,12 @@ mod tests {
             .raw = {
             let mut raw = streaming_raw();
             raw.ingestion_rate_per_second = 4.0;
-            let statistics = raw.physical_dag.statistics.get_mut("raw-scan").unwrap();
+            let statistics = &mut raw
+                .physical_dag
+                .evidence
+                .get_mut("raw-scan")
+                .unwrap()
+                .statistics;
             let OperatorStatistics::Scan {
                 edges,
                 source_read_bytes,
@@ -2556,7 +2188,7 @@ mod tests {
         let mut extra = streaming_scope();
         extra
             .sources
-            .push(crate::analytical_statistics::SourceCoverage {
+            .push(crate::physical_operator_statistics::SourceCoverage {
                 source: Source::TimeSeries {
                     metric: "unused".into(),
                 },
@@ -2583,7 +2215,7 @@ mod tests {
         let mut info_scope = streaming_scope();
         info_scope
             .sources
-            .push(crate::analytical_statistics::SourceCoverage {
+            .push(crate::physical_operator_statistics::SourceCoverage {
                 source: Source::TimeSeries {
                     metric: "target_info".into(),
                 },
@@ -3669,10 +3301,17 @@ mod tests {
             arriving_logical_row_bytes: 64,
             arriving_source_row_bytes: 64,
             ingestion_rate_per_second: 2.0,
-            physical_dag: StreamingPhysicalDagEvidence {
+            physical_dag: EvidenceBackedPhysicalDag {
                 nodes: vec![node],
                 root: "raw-scan".into(),
-                statistics: HashMap::from([("raw-scan".into(), statistics)]),
+                evidence: HashMap::from([(
+                    "raw-scan".into(),
+                    PhysicalNodeEvidence {
+                        physical_id: "raw-scan".into(),
+                        statistics,
+                        output_buffer_bytes: 0,
+                    },
+                )]),
             },
         }
     }
@@ -3949,7 +3588,7 @@ mod tests {
             &entry,
             asap_types::workload::TimestampMs(0),
             asap_types::workload::DurationMs(5_000),
-            vec![crate::analytical_statistics::SourceCoverage {
+            vec![crate::physical_operator_statistics::SourceCoverage {
                 source: Source::TimeSeries {
                     metric: "metrics".into(),
                 },
