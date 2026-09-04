@@ -167,25 +167,14 @@ pub struct SummaryOperationCpuEvidence {
     pub readout_cpu_ops: Option<f64>,
 }
 
-/// Physical evidence for one `SummaryJoin` implementation. Cardinality and
-/// working memory cannot be inferred from the logical join key alone.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct SummaryJoinEvidence {
-    pub matched_state_pairs_per_evaluation: u64,
-    pub cpu_ops_per_matched_pair: f64,
-    pub working_memory_bytes: u64,
-}
-
 /// Complete physical work for one raw evaluation. It is deliberately
 /// per-evaluation so the same normalized query recurrence/horizon can multiply
-/// both raw and summary alternatives.
+/// both raw and summary alternatives. The estimate comes from the complete raw
+/// physical DAG; it is not reconstructed here from a query-shape-specific
+/// rows-times-CPU shortcut.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StreamingRawInputEvidence {
-    pub input_rows_per_evaluation: u64,
-    pub input_bytes_per_evaluation: u64,
-    pub source_scan_bytes_per_evaluation: u64,
-    pub cpu_ops_per_row: f64,
-    pub peak_memory_bytes: u64,
+    pub per_evaluation: ResourceEstimate,
 }
 
 /// Adapter that supplies the existing lifecycle planner with analytical
@@ -210,7 +199,7 @@ impl StreamingAnalyticalCostModel {
         let insert = required_cpu("insert_cpu_ops", self.cpu.insert_cpu_ops).ok()?;
         let readout = required_cpu("readout_cpu_ops", self.cpu.readout_cpu_ops).ok()?;
         let build = self.calibrated(ResourceEstimate {
-            cpu_ops: inputs.initial_input_rows as f64 * insert,
+            cpu_ops: inputs.initial_input_rows as f64 * inputs.active_window_count as f64 * insert,
             peak_memory_bytes: 0,
             scan_bytes: inputs.initial_source_scan_bytes,
         })?;
@@ -220,15 +209,15 @@ impl StreamingAnalyticalCostModel {
             scan_bytes: 0,
         })?;
         let read = self.calibrated(ResourceEstimate {
-            cpu_ops: inputs.physical_sketch_count as f64 * readout,
+            cpu_ops: inputs.physical_summary_count as f64 * readout,
             peak_memory_bytes: 0,
             scan_bytes: 0,
         })?;
         let retained = inputs
             .active_window_count
             .checked_add(inputs.retained_window_count)?
-            .checked_mul(inputs.physical_sketch_count)?
-            .checked_mul(inputs.state_bytes_per_sketch)?;
+            .checked_mul(inputs.physical_summary_count)?
+            .checked_mul(inputs.state_bytes_per_summary)?;
         let horizon_seconds = inputs.horizon_ms as f64 / 1_000.0;
         let retention_total = self.calibrated(ResourceEstimate {
             cpu_ops: 0.0,
@@ -287,46 +276,31 @@ struct SummaryOperationCounts {
     subtracts_per_read: u64,
     deletes_per_update: u64,
     readouts_per_read: u64,
-    joins_per_read: u64,
 }
 
 pub fn estimate_streaming_raw_recompute(
     evidence: StreamingRawInputEvidence,
     evaluation_count: u64,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
-    for (name, value) in [
-        (
-            "raw_input_rows_per_evaluation",
-            evidence.input_rows_per_evaluation,
-        ),
-        (
-            "raw_input_bytes_per_evaluation",
-            evidence.input_bytes_per_evaluation,
-        ),
-        ("raw_peak_memory_bytes", evidence.peak_memory_bytes),
-        ("evaluation_count", evaluation_count),
-    ] {
-        if value == 0 {
-            return Err(AnalyticalCostError::MissingOrZero(name));
-        }
+    if evaluation_count == 0 {
+        return Err(AnalyticalCostError::MissingOrZero("evaluation_count"));
     }
-    if !evidence.cpu_ops_per_row.is_finite() || evidence.cpu_ops_per_row < 0.0 {
+    if !evidence.per_evaluation.cpu_ops.is_finite() || evidence.per_evaluation.cpu_ops < 0.0 {
         return Err(AnalyticalCostError::InvalidOperationCost(
-            "raw_cpu_ops_per_row",
-            evidence.cpu_ops_per_row,
+            "raw_cpu_ops_per_evaluation",
+            evidence.per_evaluation.cpu_ops,
         ));
     }
-    let cpu_ops = evidence.input_rows_per_evaluation as f64
-        * evidence.cpu_ops_per_row
-        * evaluation_count as f64;
+    let cpu_ops = evidence.per_evaluation.cpu_ops * evaluation_count as f64;
     if !cpu_ops.is_finite() {
         return Err(AnalyticalCostError::Overflow);
     }
     Ok(ResourceEstimate {
         cpu_ops,
-        peak_memory_bytes: evidence.peak_memory_bytes,
+        peak_memory_bytes: evidence.per_evaluation.peak_memory_bytes,
         scan_bytes: evidence
-            .source_scan_bytes_per_evaluation
+            .per_evaluation
+            .scan_bytes
             .checked_mul(evaluation_count)
             .ok_or(AnalyticalCostError::Overflow)?,
     })
@@ -341,16 +315,6 @@ pub fn estimate_incremental_summary_maintenance(
     guarantee: &SummaryMaintenanceLifecycleGuarantee,
     inputs: StreamingSummaryInputs,
     cpu: SummaryOperationCpuEvidence,
-) -> Result<ResourceEstimate, AnalyticalCostError> {
-    estimate_incremental_summary_maintenance_with_join(root, guarantee, inputs, cpu, None)
-}
-
-pub fn estimate_incremental_summary_maintenance_with_join(
-    root: &SummaryNode,
-    guarantee: &SummaryMaintenanceLifecycleGuarantee,
-    inputs: StreamingSummaryInputs,
-    cpu: SummaryOperationCpuEvidence,
-    join: Option<SummaryJoinEvidence>,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
     let inputs = inputs.validate()?;
     validate_guarantee(guarantee, inputs.data_arrival)?;
@@ -380,28 +344,6 @@ pub fn estimate_incremental_summary_maintenance_with_join(
         "readout_cpu_ops",
         cpu.readout_cpu_ops,
     )?;
-    let join_cpu = match (counts.joins_per_read, join) {
-        (0, _) => 0.0,
-        (_, Some(evidence))
-            if evidence.matched_state_pairs_per_evaluation > 0
-                && evidence.cpu_ops_per_matched_pair.is_finite()
-                && evidence.cpu_ops_per_matched_pair >= 0.0
-                && evidence.working_memory_bytes > 0 =>
-        {
-            evidence.matched_state_pairs_per_evaluation as f64 * evidence.cpu_ops_per_matched_pair
-        }
-        (_, Some(evidence))
-            if !evidence.cpu_ops_per_matched_pair.is_finite()
-                || evidence.cpu_ops_per_matched_pair < 0.0 =>
-        {
-            return Err(AnalyticalCostError::InvalidOperationCost(
-                "summary_join_cpu_ops_per_matched_pair",
-                evidence.cpu_ops_per_matched_pair,
-            ));
-        }
-        _ => return Err(AnalyticalCostError::MissingOrStale("summary_join")),
-    };
-
     let build_inserts = inputs
         .initial_input_rows
         .checked_mul(inputs.active_window_count)
@@ -417,8 +359,7 @@ pub fn estimate_incremental_summary_maintenance_with_join(
         + evaluations * counts.merges_per_read as f64 * instances * merge
         + evaluations * counts.subtracts_per_read as f64 * instances * subtract
         + update_inserts as f64 * counts.deletes_per_update as f64 * delete
-        + evaluations * counts.readouts_per_read as f64 * instances * readout
-        + evaluations * counts.joins_per_read as f64 * join_cpu;
+        + evaluations * counts.readouts_per_read as f64 * instances * readout;
     if !cpu_ops.is_finite() {
         return Err(AnalyticalCostError::Overflow);
     }
@@ -443,11 +384,6 @@ pub fn estimate_incremental_summary_maintenance_with_join(
     } else {
         0
     };
-    let join_bytes = match (counts.joins_per_read, join) {
-        (0, _) => 0,
-        (_, Some(evidence)) => evidence.working_memory_bytes,
-        _ => return Err(AnalyticalCostError::MissingOrStale("summary_join")),
-    };
     let bootstrap_row_buffer = if inputs.initial_input_rows == 0 {
         0
     } else {
@@ -459,7 +395,6 @@ pub fn estimate_incremental_summary_maintenance_with_join(
         cpu_ops,
         peak_memory_bytes: retained_bytes
             .checked_add(transient_bytes)
-            .and_then(|bytes| bytes.checked_add(join_bytes))
             .ok_or(AnalyticalCostError::Overflow)?
             .max(bootstrap_row_buffer),
         scan_bytes: inputs.initial_source_scan_bytes,
@@ -591,13 +526,8 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
                     .ok_or(AnalyticalCostError::Overflow)?;
                 visit(summary_input, seen, counts)?;
             }
-            SummaryExpr::SummaryJoin { outer, inner, .. } => {
-                counts.joins_per_read = counts
-                    .joins_per_read
-                    .checked_add(1)
-                    .ok_or(AnalyticalCostError::Overflow)?;
-                visit(outer, seen, counts)?;
-                visit(inner, seen, counts)?;
+            SummaryExpr::SummaryJoin { .. } => {
+                return Err(AnalyticalCostError::UnsupportedSummaryOperation("join"));
             }
         }
         Ok(())
@@ -728,12 +658,13 @@ mod tests {
             inputs,
             SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(2.0),
-                readout_cpu_ops: Some(0.0),
+                readout_cpu_ops: Some(1.0),
                 ..SummaryOperationCpuEvidence::default()
             },
         )
         .unwrap();
-        assert_eq!(estimate.cpu_ops, 40.0); // 10 arrivals * 2 active windows * 2 ops.
+        // 10 arrivals * 2 active windows * 2 insert ops + 5 evaluations * 2 summaries.
+        assert_eq!(estimate.cpu_ops, 50.0);
         assert_eq!(estimate.scan_bytes, 0);
     }
 
@@ -749,8 +680,8 @@ mod tests {
             horizon_ms: 1_000,
             active_window_count: 1,
             retained_window_count: 1,
-            physical_sketch_count: 1,
-            state_bytes_per_sketch: 8,
+            physical_summary_count: 1,
+            state_bytes_per_summary: 8,
             evaluation_count: 1,
         };
         assert_eq!(
@@ -777,18 +708,18 @@ mod tests {
             horizon_ms: 5_000,
             active_window_count: 2,
             retained_window_count: 3,
-            physical_sketch_count: 2,
-            state_bytes_per_sketch: 100,
+            physical_summary_count: 2,
+            state_bytes_per_summary: 100,
             evaluation_count: 5,
         };
         let model = StreamingAnalyticalCostModel {
             summary_inputs: inputs,
             raw: StreamingRawInputEvidence {
-                input_rows_per_evaluation: 20,
-                input_bytes_per_evaluation: 1_280,
-                source_scan_bytes_per_evaluation: 1_280,
-                cpu_ops_per_row: 2.0,
-                peak_memory_bytes: 320,
+                per_evaluation: ResourceEstimate {
+                    cpu_ops: 40.0,
+                    peak_memory_bytes: 320,
+                    scan_bytes: 1_280,
+                },
             },
             cpu: SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(2.0),
@@ -890,11 +821,11 @@ mod tests {
 
         let mut raw_cheaper = model;
         raw_cheaper.raw = StreamingRawInputEvidence {
-            input_rows_per_evaluation: 1,
-            input_bytes_per_evaluation: 1,
-            source_scan_bytes_per_evaluation: 0,
-            cpu_ops_per_row: 0.0,
-            peak_memory_bytes: 1,
+            per_evaluation: ResourceEstimate {
+                cpu_ops: 0.0,
+                peak_memory_bytes: 1,
+                scan_bytes: 0,
+            },
         };
         let cheap_selection = global_selection_with_summary_maintenance_lifecycles(
             &space,
@@ -1207,11 +1138,11 @@ mod tests {
     fn raw_recompute_uses_the_same_evaluation_horizon() {
         let estimate = estimate_streaming_raw_recompute(
             StreamingRawInputEvidence {
-                input_rows_per_evaluation: 100,
-                input_bytes_per_evaluation: 6_400,
-                source_scan_bytes_per_evaluation: 6_400,
-                cpu_ops_per_row: 2.0,
-                peak_memory_bytes: 800,
+                per_evaluation: ResourceEstimate {
+                    cpu_ops: 200.0,
+                    peak_memory_bytes: 800,
+                    scan_bytes: 6_400,
+                },
             },
             5,
         )
@@ -1222,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_join_requires_cardinality_and_working_memory_evidence() {
+    fn flat_summary_evidence_rejects_summary_join() {
         let joined = summary_join();
         let inputs = StreamingSummaryInputs {
             data_arrival: DataArrival::ContinuouslyIngesting,
@@ -1234,8 +1165,8 @@ mod tests {
             horizon_ms: 1_000,
             active_window_count: 1,
             retained_window_count: 1,
-            physical_sketch_count: 1,
-            state_bytes_per_sketch: 8,
+            physical_summary_count: 1,
+            state_bytes_per_summary: 8,
             evaluation_count: 2,
         };
         let cpu = SummaryOperationCpuEvidence {
@@ -1244,29 +1175,9 @@ mod tests {
             ..SummaryOperationCpuEvidence::default()
         };
         assert_eq!(
-            estimate_incremental_summary_maintenance_with_join(
-                &joined,
-                &continuous_guarantee(),
-                inputs,
-                cpu,
-                None,
-            ),
-            Err(AnalyticalCostError::MissingOrStale("summary_join"))
+            estimate_incremental_summary_maintenance(&joined, &continuous_guarantee(), inputs, cpu,),
+            Err(AnalyticalCostError::UnsupportedSummaryOperation("join"))
         );
-        let estimate = estimate_incremental_summary_maintenance_with_join(
-            &joined,
-            &continuous_guarantee(),
-            inputs,
-            cpu,
-            Some(SummaryJoinEvidence {
-                matched_state_pairs_per_evaluation: 3,
-                cpu_ops_per_matched_pair: 4.0,
-                working_memory_bytes: 32,
-            }),
-        )
-        .unwrap();
-        assert_eq!(estimate.cpu_ops, 30.0); // 2 inserts + 4 readouts + 24 join ops.
-        assert_eq!(estimate.peak_memory_bytes, 64); // 4 persistent states + join memory.
     }
 
     fn summary_with_operations(merge: bool, subtract: bool, delete: bool) -> Rc<SummaryNode> {
@@ -1439,16 +1350,16 @@ mod tests {
                 horizon_ms: 5_000,
                 active_window_count: 2,
                 retained_window_count: 3,
-                physical_sketch_count: 2,
-                state_bytes_per_sketch: 100,
+                physical_summary_count: 2,
+                state_bytes_per_summary: 100,
                 evaluation_count: 5,
             },
             raw: StreamingRawInputEvidence {
-                input_rows_per_evaluation: 20,
-                input_bytes_per_evaluation: 1_280,
-                source_scan_bytes_per_evaluation: 1_280,
-                cpu_ops_per_row: 2.0,
-                peak_memory_bytes: 320,
+                per_evaluation: ResourceEstimate {
+                    cpu_ops: 40.0,
+                    peak_memory_bytes: 320,
+                    scan_bytes: 1_280,
+                },
             },
             cpu: SummaryOperationCpuEvidence {
                 insert_cpu_ops: Some(2.0),
