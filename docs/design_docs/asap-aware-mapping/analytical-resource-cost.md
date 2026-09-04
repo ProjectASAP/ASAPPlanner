@@ -608,15 +608,19 @@ horizon, so the estimator does not require `retention >= horizon`. Lifecycle
 legality and query time-coverage checks establish whether the retained window
 can answer the query.
 
-A retained sketch performs one build and serves later reads from state:
+A retained summary bootstraps every active window, consumes arriving rows, and
+serves later reads from state. For the simple build/update/readout shape:
 
 ```text
-cpu_ops = input_rows                         // build scan
-        + input_rows × update_ops(params)
+cpu_ops = (bootstrap_rows + arriving_rows)
+          × active_window_count × insert_ops(params)
         + evaluation_count × physical_summary_count × read_ops(params)
 
 scan_bytes = source_read_bytes for the build
 ```
+
+Merge, subtract, and delete add their own invocation counts described above;
+they are never folded into the simple formula implicitly.
 
 Concrete accuracy-sized parameters determine state and work:
 
