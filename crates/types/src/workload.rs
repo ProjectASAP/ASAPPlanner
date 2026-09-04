@@ -27,21 +27,26 @@ pub struct DurationMs(pub u64);
 /// SQL dialect variant — different dialects have different syntax and
 /// function sets that affect how the query string is parsed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum SqlDialect {
+    #[serde(rename = "datafusion_sql")]
     DataFusionSQL,
+    #[serde(rename = "clickhouse_sql")]
     ClickhouseSQL,
+    #[serde(rename = "elastic_sql")]
     ElasticSQL,
 }
 
 /// Source language of every query in the workload.
 /// All queries in a single `QueryWorkload` share the same language.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum QueryLanguage {
+    #[serde(rename = "promql")]
     PromQL,
+    #[serde(rename = "sql")]
     SQL(SqlDialect),
+    #[serde(rename = "datafusion")]
     DataFusion,
+    #[serde(rename = "elastic_dsl")]
     ElasticDSL,
 }
 
@@ -111,7 +116,7 @@ impl Default for QueryRequirements {
 /// let exploration = Predictability::AdHoc;
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Predictability {
     AdHoc,
     Predictable {
@@ -278,7 +283,7 @@ pub enum RepeatedDemand {
 /// );
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum QueryRecurrence {
     OneTime {
         invocations: u64,
@@ -805,6 +810,43 @@ mod tests {
 
         let with_unknown = json.replacen("{", "{\"unknown\":true,", 1);
         assert!(serde_json::from_str::<QueryWorkload>(&with_unknown).is_err());
+    }
+
+    #[test]
+    fn query_language_wire_names_do_not_split_acronyms() {
+        let cases = [
+            (QueryLanguage::PromQL, serde_json::json!("promql")),
+            (
+                QueryLanguage::SQL(SqlDialect::DataFusionSQL),
+                serde_json::json!({"sql": "datafusion_sql"}),
+            ),
+            (
+                QueryLanguage::SQL(SqlDialect::ClickhouseSQL),
+                serde_json::json!({"sql": "clickhouse_sql"}),
+            ),
+            (QueryLanguage::ElasticDSL, serde_json::json!("elastic_dsl")),
+        ];
+        for (language, expected) in cases {
+            assert_eq!(serde_json::to_value(language).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn struct_enum_variants_reject_unknown_fields() {
+        assert!(
+            serde_json::from_value::<QueryRecurrence>(serde_json::json!({
+                "one_time": {"invocations": 1, "execute_at": null, "typo": true}
+            }))
+            .is_err()
+        );
+        assert!(serde_json::from_value::<Predictability>(serde_json::json!({
+            "predictable": {"known_at": null, "typo": true}
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<AccuracyTarget>(serde_json::json!({
+            "EpsilonDelta": {"epsilon": 0.1, "delta": 0.01, "typo": true}
+        }))
+        .is_err());
     }
 
     #[test]

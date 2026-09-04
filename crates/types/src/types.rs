@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Accuracy requirement that a query result must satisfy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum AccuracyTarget {
     /// Additive error bound ε: |estimate − true| ≤ ε · (domain size).
     Epsilon(f64),
