@@ -414,6 +414,33 @@ fn topk_over_count_is_heavy_hitter_topk() {
 }
 
 #[test]
+fn topk_over_sum_is_value_weighted_heavy_hitter_topk() {
+    let qe = lower(r#"topk by (service) (5, sum_over_time(requests{env="prod"}[1m]))"#);
+    let QueryExpr::Aggregate {
+        reduction,
+        measures,
+        child,
+        ..
+    } = &qe
+    else {
+        panic!("expected Aggregate with TopK, got {qe:?}");
+    };
+    assert_eq!(reduction.expect_reduce().len(), 1);
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::TopK { k: 5, .. }]
+    ));
+    let QueryExpr::Aggregate {
+        measures, child, ..
+    } = child.as_ref()
+    else {
+        panic!("expected Aggregate (sum_over_time) under TopK, got {child:?}");
+    };
+    assert!(matches!(measures.as_slice(), [AggIntent::Sum { .. }]));
+    assert!(matches!(child.as_ref(), QueryExpr::TimeRange { .. }));
+}
+
+#[test]
 fn topk_over_avg_is_generic_sort_limit() {
     let qe = lower("topk by (host) (5, avg_over_time(cpu[5m]))");
     let QueryExpr::Limit { n, offset, child } = &qe else {
@@ -445,16 +472,14 @@ fn topk_over_avg_is_generic_sort_limit() {
 }
 
 #[test]
-fn topk_over_sum_is_generic_sort_limit() {
-    // Only `count_over_time` triggers the heavy-hitter path; `sum_over_time`
-    // falls back to generic sort + limit.
+fn ungrouped_topk_over_sum_is_heavy_hitter() {
     let qe = lower("topk(5, sum_over_time(m[5m]))");
-    assert!(
-        matches!(&qe, QueryExpr::Limit { .. }),
-        "expected Limit (generic sort), got {qe:?}"
-    );
+    assert!(matches!(&qe, QueryExpr::Aggregate { .. }));
     assert!(has_intent(&qe, |i| matches!(i, AggIntent::Sum { .. })));
-    assert!(!has_intent(&qe, |i| matches!(i, AggIntent::TopK { .. })));
+    assert!(has_intent(&qe, |i| matches!(
+        i,
+        AggIntent::TopK { k: 5, .. }
+    )));
 }
 
 #[test]

@@ -200,7 +200,7 @@ fn bindable_accuracy_aggregate(node: &QueryExpr) -> Option<BindableAccuracyAggre
 }
 
 /// Are `a` and `b` the identical [`AggIntent`] apart from `accuracy` —
-/// same variant, same `col`/`q`/`k`? Only ever called with two
+/// same variant, same `col`/`q`/`k`/ranking basis? Only ever called with two
 /// accuracy-bearing intents (both `bindable_accuracy_aggregate`-gated
 /// first), but written as a full match rather than assuming that, the same
 /// defensive-completeness style [`crate::replacement::describe_intent`]
@@ -609,6 +609,19 @@ mod tests {
         );
         let strategy = AccuracyReconciliationStrategy::new(&[Rc::clone(&a), Rc::clone(&b)]);
         assert!(!strategy.matches(&TargetSubDAG::new(&b)));
+    }
+
+    #[test]
+    fn topk_intents_differing_only_in_accuracy_are_near_duplicates() {
+        let tight = AggIntent::TopK {
+            k: 10,
+            accuracy: AccuracyTarget::Epsilon(0.01),
+        };
+        let loose = AggIntent::TopK {
+            k: 10,
+            accuracy: AccuracyTarget::Epsilon(0.02),
+        };
+        assert!(same_intent_except_accuracy(&tight, &loose));
     }
 
     #[test]

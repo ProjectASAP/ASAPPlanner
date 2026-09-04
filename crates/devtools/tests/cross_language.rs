@@ -110,24 +110,24 @@ async fn sql_aliased_and_inline_count_topk_are_identical() {
 }
 
 #[tokio::test]
-async fn non_count_ranked_topk_stays_generic_in_both_languages() {
-    // Ranking by a non-count (SUM / a raw value) is NOT a frequency heavy-hitter
-    // in either language — it must stay a generic Sort+Limit, never a TopK.
+async fn additive_sum_ranking_is_weighted_topk_but_raw_values_stay_generic() {
+    // SUM is additive and becomes an explicitly value-weighted heavy hitter.
+    // A bare PromQL value has no additive child and remains Sort + Limit.
     let s = sql(
         "SELECT service, SUM(bytes) FROM metrics GROUP BY service ORDER BY SUM(bytes) DESC LIMIT 5",
     )
     .await;
     let p = promql("topk(5, http_requests_total)");
-    assert!(
-        heavy_hitter(&s).is_none(),
-        "SUM-ranked is not a heavy-hitter: {s:?}"
-    );
-    assert!(
-        !matches!(&s, QueryExpr::Aggregate { measures, .. } if matches!(measures.as_slice(), [AggIntent::TopK { .. }])),
-    );
+    assert!(matches!(
+        &s,
+        QueryExpr::Aggregate { measures, .. }
+            if matches!(measures.as_slice(), [AggIntent::TopK {
+                ..
+            }])
+    ));
     assert!(
         heavy_hitter(&p).is_none(),
-        "value-ranked topk is not a count heavy-hitter: {p:?}"
+        "a raw value has no additive heavy-hitter input: {p:?}"
     );
 }
 
@@ -135,7 +135,7 @@ async fn non_count_ranked_topk_stays_generic_in_both_languages() {
 async fn ascending_count_ranked_topk_stays_generic_in_both_languages() {
     // The symmetric bottom-k case (issue #38): ranking by a count but taking the
     // *bottom* k is NOT a frequency heavy-hitter — the shared decision rule
-    // (`is_frequency_heavy_hitter`) requires descending. Both front ends must
+    // The Top-K operator's additive-ranking rule requires descending. Both front ends must
     // make the same call: SQL `ORDER BY COUNT(*) ASC LIMIT k` and PromQL
     // `bottomk(k, count_over_time(…))` both stay a generic Sort+Limit, never a
     // TopK. This pins the two count-ranked detectors to agree on direction.

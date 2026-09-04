@@ -48,7 +48,7 @@
 //! | `count by (d) (…)` | `Aggregate{[Cardinality], …}` |
 //! | `group(v)` / `count_values("l", v)` | `Aggregate{[Group]}` (constant 1) / `Aggregate{[CountValues{l}]}` (group-by-value + count, new label `l`) — issue #49 |
 //! | `limitk(k, v)` / `limit_ratio(r, v)` | `PromqlSeriesSample{LimitK(k) \| LimitRatio(r)}` — series-sampling selection, whole series kept unchanged (issue #86) |
-//! | `topk(k, count_over_time(…))` | `Aggregate{[TopK{k}]}` (heavy-hitter intent) over the explicit inner `Aggregate{[Count]}` |
+//! | `topk(k, count_over_time(…))` / `topk(k, sum_over_time(…))` | `Aggregate{[TopK{k}]}` (heavy-hitter intent) over the explicit inner `Aggregate{[Count/Sum]}` |
 //! | `topk(k, <other>)` / `bottomk(k, …)` | `Sort{value} → Limit{k}` |
 //! | `m{f}` | `Scan{predicates}` |
 //! | `a OP b` | `BinaryOp{vector_match}` |
@@ -64,9 +64,7 @@ use promql_parser::parser::{
     LabelModifier, Offset, VectorMatchCardinality, VectorSelector,
 };
 
-use asap_types::pre_asap::agg_intent::{
-    is_frequency_heavy_hitter, AggIntent, MathFunc, RankingMeasure, TimeFunc,
-};
+use asap_types::pre_asap::agg_intent::{topk, AggIntent, MathFunc, TimeFunc};
 use asap_types::pre_asap::query_expr::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, Reduction, SortKey, Source,
     TimeShift, UnresolvedQueryExpr as Unresolved, VectorGrouping, VectorMatch, VectorMatchKind,
@@ -1445,25 +1443,34 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             })
         }
         Outer::TopK { k, descending } => {
-            // Heavy-hitter only when ranking by frequency (`count`): that is a
+            // Heavy-hitter only when ranking by an additive measure (`count`
+            // or `sum`): that is a
             // first-class aggregate intent → `TopK`. Any other ranking (topk
             // over avg/quantile/rate, a bare selector's raw value, all bottomk)
             // is a generic order-by-value + limit and stays as the `Sort + Limit`
             // operator pair. The descending-plus-measure rule is shared with the
             // canonicalize-pass promotion so the two cannot drift (issue #38).
             let measure = match inner.func {
-                Some(InnerFunc::Count) => RankingMeasure::Frequency,
-                _ => RankingMeasure::NonAdditive,
+                Some(InnerFunc::Count) => topk::Ranking::Frequency,
+                Some(InnerFunc::Sum) => topk::Ranking::WeightedSum,
+                _ => topk::Ranking::NonAdditive,
             };
-            let heavy_hitter = is_frequency_heavy_hitter(descending, measure);
-            if heavy_hitter {
-                // Preserve the Count intent in the canonical tree so the
+            let additive_ranking = measure.is_supported(descending);
+            if additive_ranking {
+                // Preserve the ranked aggregate intent in the canonical tree so the
                 // intent algebra is explicit about what is being computed.
                 // Post-ASAP binding may fuse the Count and TopK into a
                 // single-pass heavy-hitter sketch (SpaceSaving /
                 // CMS-with-heap), but that is a cost-model decision, not a
                 // canonical-IR concern.
-                let count_agg = windowed_aggregate(inner, vec![], inner_intent(&InnerFunc::Count));
+                let ranked = match measure {
+                    topk::Ranking::Frequency => InnerFunc::Count,
+                    topk::Ranking::WeightedSum => InnerFunc::Sum,
+                    topk::Ranking::NonAdditive => {
+                        unreachable!("heavy-hitter gate rejected non-additive ranking")
+                    }
+                };
+                let ranked_agg = windowed_aggregate(inner, vec![], inner_intent(&ranked));
                 Ok(Unresolved::Aggregate {
                     // A ranking always reduces (a `by`-empty TopK ranks the
                     // whole input into one ordering, never per-entity).
@@ -1474,7 +1481,7 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                     }],
                     output_names: vec![],
                     having: None,
-                    child: Rc::new(count_agg),
+                    child: Rc::new(ranked_agg),
                 })
             } else {
                 // The base over which we rank. A range-vector-function argument

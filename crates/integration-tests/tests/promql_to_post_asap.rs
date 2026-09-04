@@ -8,6 +8,10 @@
 
 use std::rc::Rc;
 
+use asap_aware_mapping::accuracy::{
+    AccuracyEvidenceProvider, DefaultAccuracyModel, EqualSplitAllocator, PropagationStats,
+};
+use asap_aware_mapping::cost_model::DefaultCostModel;
 use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
     search_workload, Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy,
@@ -15,8 +19,9 @@ use asap_aware_mapping::{
 };
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
-    ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryNode, SummarySchema,
+    CompositionOperator, EntityIdentity, ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm,
+    SketchKind, SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
+    SummaryNode, SummarySchema, SummaryUpdate,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -53,12 +58,103 @@ fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
         .dtype
 }
 
+struct SeparatedTopK;
+
+impl AccuracyEvidenceProvider for SeparatedTopK {
+    fn propagation_stats(
+        &self,
+        op: &CompositionOperator,
+        _family: &SummaryFamilyType,
+        _query: Option<&SketchQuery>,
+    ) -> PropagationStats {
+        matches!(op, CompositionOperator::TopKSelection)
+            .then_some(PropagationStats {
+                topk_selected_lower_bound: Some(101.0),
+                topk_excluded_upper_bound: Some(100.0),
+                topk_interval_failure_probability: Some(0.001),
+                ..Default::default()
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[test]
+fn temporal_topk_binds_constant_one_and_sample_value_weight_projections() {
+    let cases = [
+        (
+            "topk by (service) (5, count_over_time(requests[1m]))",
+            SummaryInputExpr::Constant(1.0),
+            "CmsWithHeap",
+            vec![ColumnRef::Named("service".into())],
+        ),
+        (
+            "topk(5, sum_over_time(requests[1m]))",
+            SummaryInputExpr::Column(ColumnRef::SampleValue),
+            "CountSketchWithHeap",
+            vec![],
+        ),
+    ];
+    for (source, expected_update, expected_family, excluded_labels) in cases {
+        let pre = Rc::new(
+            lower_promql(
+                source,
+                AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                },
+            )
+            .expect("lower temporal Top-K"),
+        );
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &SeparatedTopK,
+        );
+        let candidate = strategy
+            .replacements(&TargetSubDAG::new(&pre))
+            .into_iter()
+            .find_map(|candidate| match candidate.replacement {
+                Replacement::Summary(node) if candidate.rationale.contains(expected_family) => {
+                    Some(node)
+                }
+                _ => None,
+            })
+            .expect("heap-backed temporal Top-K candidate");
+        let SummaryExpr::SummaryEstimate {
+            summary_input,
+            query: SketchQuery::TopK { .. },
+        } = &candidate.expr
+        else {
+            panic!("expected Top-K estimate, got {:?}", candidate.expr)
+        };
+        let SummaryExpr::SummaryAgg {
+            input: state_input,
+            child,
+            ..
+        } = &summary_input.expr
+        else {
+            panic!("expected structured Top-K state input")
+        };
+        assert_eq!(
+            state_input.item.as_ref(),
+            Some(&SummaryInputExpr::EntityIdentity(
+                EntityIdentity::PromqlLabelSet {
+                    excluding: excluded_labels
+                }
+            ))
+        );
+        assert_eq!(state_input.weight, expected_update);
+        assert!(matches!(child.expr, SummaryExpr::KeepPreAsap(_)));
+    }
+}
+
 /// `quantile(0.99, rate(http_requests_total[5m]))` at ε = 0.01:
 ///
 /// ```text
 /// SummaryEstimate { query: Quantile{0.99} }          → {quantile_0_99: Float64}
-/// └─ SummaryAgg { Kll{k:269}, col: SampleValue }     → {quantile_0_99: Sketch(Kll, {k:269})}
-///    └─ SummaryAgg { Rate, col: SampleValue }        → {ts, value: ExactAggregate(Rate), …}
+/// └─ SummaryAgg { Kll{k:269}, input: SampleValue }   → {quantile_0_99: Sketch(Kll, {k:269})}
+///    └─ SummaryAgg { Rate, input: SampleValue }      → {ts, value: ExactAggregate(Rate), …}
 ///       └─ KeepPreAsap(TimeRange{5m} → Scan)         → {ts, value}
 /// ```
 ///
@@ -97,7 +193,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
     let SummaryExpr::SummaryAgg {
         child,
         family,
-        col,
+        input,
         reduction,
         ..
     } = &summary_input.expr
@@ -111,7 +207,7 @@ fn promql_quantile_of_rate_binds_kll_over_rate_accumulator() {
             GroupingStrategy::default()
         )
     );
-    assert_eq!(col, &ColumnRef::SampleValue);
+    assert_eq!(input, &SummaryUpdate::column(ColumnRef::SampleValue));
     assert_eq!(
         reduction,
         &Reduction::by(vec![]),

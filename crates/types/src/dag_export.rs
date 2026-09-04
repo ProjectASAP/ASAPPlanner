@@ -490,7 +490,7 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
         }
         SummaryExpr::SummaryAgg {
             family,
-            col,
+            input,
             reduction,
             grouping,
             ..
@@ -498,7 +498,7 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
             let label = format!("SummaryAgg({})", family_label(family));
             let detail = serde_json::json!({
                 "family": format!("{family:?}"),
-                "col": col,
+                "input": input,
                 "reduction": reduction,
                 "grouping": format!("{grouping:?}"),
             });
@@ -1683,7 +1683,9 @@ mod tests {
                     SketchKind::new(SketchAlgorithm::Kll, SketchParams::Kll { k: 40 }),
                     GroupingStrategy::default(),
                 ),
-                col: crate::pre_asap::expr_ir::ColumnRef::Named("v".into()),
+                input: crate::post_asap::SummaryUpdate::column(
+                    crate::pre_asap::expr_ir::ColumnRef::Named("v".into()),
+                ),
                 reduction: Reduction::by(vec![]),
                 grouping: GroupingStrategy::default(),
             },

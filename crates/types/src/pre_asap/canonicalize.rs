@@ -8,27 +8,25 @@
 //!
 //! ## Heavy-hitter promotion
 //!
-//! A count-ranked "order by the count, take the top k" is the frequency
-//! heavy-hitter the [`AggIntent::TopK`] intent represents. Front ends emit it as
-//! an ordinary `Limit { Sort { … Aggregate([Count]) } }` (SQL, and PromQL's
-//! generic `topk` path); this pass promotes that shape to the canonical
+//! A count- or sum-ranked "order by the aggregate, take the top k" is an
+//! additive heavy-hitter represented by [`AggIntent::TopK`]. Front ends may
+//! emit it as an ordinary `Limit { Sort { … Aggregate } }`; this pass promotes
+//! that shape to the canonical
 //!
 //! ```text
 //! Aggregate { reduction: Reduce(<partition>), measures: [TopK{k}],
-//!             child: Aggregate { measures: [Count], … } }
+//!             child: Aggregate { measures: [Count|Sum], … } }
 //! ```
 //!
-//! — an outer `TopK` over the *explicit* inner `Count` (the shape PromQL's
-//! `topk(k, count_over_time(…))` already produces). Because the match is
-//! **positional** (it checks that the DESC sort key lands on the count's output
-//! column) it is oblivious to whether the count was aliased in the source, which
-//! is exactly the SQL alias gap (#20) the old front-end gate missed.
+//! — an outer `TopK` over the inner additive aggregate. Because the match is
+//! positional, aliases do not affect it.
 
 use std::rc::Rc;
 
-use super::agg_intent::{is_frequency_heavy_hitter, ranking_measure, AggIntent};
+use super::agg_intent::{topk, AggIntent};
 use super::expr_ir::{CompareOpKind, ScalarValue};
 use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
+use crate::types::AccuracyTarget;
 
 /// Rewrite `expr` into its canonical form (bottom-up). Idempotent: a tree that
 /// is already canonical is returned unchanged.
@@ -41,7 +39,7 @@ fn canon(expr: &mut QueryExpr) {
     // A `Concat` asserting a caller-proven `discriminator_unique_key` (issue
     // #228) had that key's `ColumnId`s resolved, in `resolve.rs`, against
     // exactly the first branch's output schema *as it stood before this
-    // pass ran*. `try_promote_heavy_hitter`/`try_rewrite_rownumber_topk`
+    // pass ran*. `try_promote_additive_top_ranking`/`try_rewrite_rownumber_topk`
     // below can restructure that branch (anywhere within it — not only at
     // its own top level, since the same recursive walk can rewrite a node
     // nested under a pass-through wrapper too) into a shape with a
@@ -89,7 +87,7 @@ fn canon(expr: &mut QueryExpr) {
     // `Aggregate([TopK])`. Each rule strictly simplifies the node, so applying
     // them to a fixpoint terminates.
     while let Some(rewritten) =
-        try_rewrite_rownumber_topk(expr).or_else(|| try_promote_heavy_hitter(expr))
+        try_rewrite_rownumber_topk(expr).or_else(|| try_promote_additive_top_ranking(expr))
     {
         *expr = rewritten;
     }
@@ -165,7 +163,7 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
 /// Recognise a count-ranked `Limit { Sort { [Project] Aggregate([Count]) } }`
 /// and rewrite it to the canonical heavy-hitter `Aggregate([TopK])` over the
 /// explicit inner `Count`. Returns `None` when the shape does not match.
-fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
+fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     // Limit k, no offset (an OFFSET means "not the top k").
     let QueryExpr::Limit {
         n: k,
@@ -229,30 +227,26 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
     }
     // The heavy-hitter decision — descending, over a measure with a realised
     // heavy-hitter sketch — is the shared rule both front ends' promotions
-    // consult (issue #38). So an ascending count-ranked limit
+    // consult (issue #38). So an ascending additive-ranked limit
     // (`ORDER BY COUNT(*) ASC LIMIT k` = bottom-k) stays generic, exactly as
-    // PromQL `bottomk(k, count_over_time(…))` does; and a `sum`-ranked limit
-    // stays generic too (`WeightedSum` is additive but not yet sketch-realised),
-    // matching today's behaviour until a weighted heavy-hitter lands.
-    if !is_frequency_heavy_hitter(!ascending, ranking_measure(ranked_agg)) {
+    // PromQL `bottomk(k, count_over_time(…))` does.
+    if !topk::Ranking::from_aggregate(ranked_agg).is_supported(!ascending) {
         return None;
     }
-    // The only realised heavy-hitter measure is unweighted `Frequency`, so the
-    // ranked aggregate is a `Count`; carry its accuracy onto the `TopK`. (When a
-    // weighted-sum heavy-hitter lands, this widens alongside `RankingMeasure`.)
-    let AggIntent::Count { accuracy } = ranked_agg else {
-        return None;
+    let accuracy = match ranked_agg {
+        AggIntent::Count { accuracy } => accuracy.clone(),
+        // SUM carries no local approximation target. Workload-level accuracy
+        // allocation can relax this exact default when choosing a summary.
+        AggIntent::Sum { .. } => AccuracyTarget::Exact,
+        _ => return None,
     };
 
     // Outer heavy-hitter `TopK`, grouped by the ranking's partition (empty for a
     // global `ORDER BY … LIMIT k`; the `by` labels for a partitioned `topk by`),
-    // over the *unchanged* inner `Count` aggregate.
+    // over the unchanged inner additive aggregate.
     Some(QueryExpr::Aggregate {
         reduction: Reduction::by(partition_by.to_vec()),
-        measures: vec![AggIntent::TopK {
-            k: *k,
-            accuracy: accuracy.clone(),
-        }],
+        measures: vec![AggIntent::TopK { k: *k, accuracy }],
         output_names: Vec::new(),
         having: None,
         child: Rc::new(agg_expr.clone()),
@@ -263,7 +257,7 @@ fn try_promote_heavy_hitter(expr: &QueryExpr) -> Option<QueryExpr> {
 /// `ROW_NUMBER() OVER (PARTITION BY p ORDER BY o)` — and rewrite it to the
 /// generic partitioned top-k `Limit{k} { Sort{ o, partition_by: p } }` (issue
 /// #24). The count-ranked case is then promoted to a heavy-hitter `TopK` by
-/// [`try_promote_heavy_hitter`], so a SQL `ROW_NUMBER` top-k and the PromQL
+/// [`try_promote_additive_top_ranking`], so a SQL `ROW_NUMBER` top-k and the PromQL
 /// `topk by (…)` it mirrors converge on the same canonical shape.
 fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
     // Filter { pred: `Column(rn) <= k` }.
@@ -506,7 +500,7 @@ mod tests {
 
     #[test]
     fn does_not_promote_ascending_sort() {
-        // Ascending = bottom-k: the shared `is_frequency_heavy_hitter` rule
+        // Ascending = bottom-k: the Top-K operator's ranking rule
         // rejects it (needs descending), so it stays a generic Sort+Limit — the
         // same call PromQL `bottomk` makes (issue #38).
         let asc = vec![SortKey {
@@ -533,12 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_promote_non_count_aggregate() {
-        // A `sum`-ranked descending limit classifies as `RankingMeasure::
-        // WeightedSum` — additive, so a weighted heavy-hitter sketch is possible
-        // in principle, but none is realised yet, so it stays a generic
-        // Sort+Limit (issue #38). This pins the reserved-but-not-promoted
-        // contract: flipping it on is a future weighted-sketch change.
+    fn promotes_sum_ranked_limit_sort_with_explicit_ranking_basis() {
         let sum = QueryExpr::Aggregate {
             reduction: Reduction::by(vec![1]),
             measures: vec![AggIntent::Sum { col: None }],
@@ -547,7 +536,11 @@ mod tests {
             child: Rc::new(scan()),
         };
         let q = limit(5, 0, sort(desc(1), sum));
-        assert!(!is_topk_over_count(&canonicalize(q)));
+        assert!(matches!(canonicalize(q),
+            QueryExpr::Aggregate { measures, child, .. }
+                if matches!(measures.as_slice(), [AggIntent::TopK { k: 5, .. }])
+                && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+                    if matches!(measures.as_slice(), [AggIntent::Sum { .. }]))));
     }
 
     // ── ROW_NUMBER() partitioned top-k (issue #24) ──────────────────────────
