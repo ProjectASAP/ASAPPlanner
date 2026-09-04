@@ -64,9 +64,7 @@ use promql_parser::parser::{
     LabelModifier, Offset, VectorMatchCardinality, VectorSelector,
 };
 
-use asap_types::pre_asap::agg_intent::{
-    is_additive_top_ranking, AggIntent, MathFunc, RankingMeasure, TimeFunc,
-};
+use asap_types::pre_asap::agg_intent::{topk, AggIntent, MathFunc, TimeFunc};
 use asap_types::pre_asap::query_expr::{
     AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, Reduction, SortKey, Source,
     TimeShift, UnresolvedQueryExpr as Unresolved, VectorGrouping, VectorMatch, VectorMatchKind,
@@ -1453,11 +1451,11 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
             // operator pair. The descending-plus-measure rule is shared with the
             // canonicalize-pass promotion so the two cannot drift (issue #38).
             let measure = match inner.func {
-                Some(InnerFunc::Count) => RankingMeasure::Frequency,
-                Some(InnerFunc::Sum) => RankingMeasure::WeightedSum,
-                _ => RankingMeasure::NonAdditive,
+                Some(InnerFunc::Count) => topk::Ranking::Frequency,
+                Some(InnerFunc::Sum) => topk::Ranking::WeightedSum,
+                _ => topk::Ranking::NonAdditive,
             };
-            let additive_ranking = is_additive_top_ranking(descending, measure);
+            let additive_ranking = measure.is_supported(descending);
             if additive_ranking {
                 // Preserve the ranked aggregate intent in the canonical tree so the
                 // intent algebra is explicit about what is being computed.
@@ -1466,9 +1464,9 @@ fn build(inner: Inner, keys: Vec<ColumnRef>, outer: Outer) -> Result<Unresolved>
                 // CMS-with-heap), but that is a cost-model decision, not a
                 // canonical-IR concern.
                 let ranked = match measure {
-                    RankingMeasure::Frequency => InnerFunc::Count,
-                    RankingMeasure::WeightedSum => InnerFunc::Sum,
-                    RankingMeasure::NonAdditive => {
+                    topk::Ranking::Frequency => InnerFunc::Count,
+                    topk::Ranking::WeightedSum => InnerFunc::Sum,
+                    topk::Ranking::NonAdditive => {
                         unreachable!("heavy-hitter gate rejected non-additive ranking")
                     }
                 };

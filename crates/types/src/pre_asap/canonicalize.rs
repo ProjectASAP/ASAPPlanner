@@ -23,7 +23,7 @@
 
 use std::rc::Rc;
 
-use super::agg_intent::{is_additive_top_ranking, ranking_measure, AggIntent};
+use super::agg_intent::{topk, AggIntent};
 use super::expr_ir::{CompareOpKind, ScalarValue};
 use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
 use crate::types::AccuracyTarget;
@@ -230,7 +230,7 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     // consult (issue #38). So an ascending additive-ranked limit
     // (`ORDER BY COUNT(*) ASC LIMIT k` = bottom-k) stays generic, exactly as
     // PromQL `bottomk(k, count_over_time(…))` does.
-    if !is_additive_top_ranking(!ascending, ranking_measure(ranked_agg)) {
+    if !topk::Ranking::from_aggregate(ranked_agg).is_supported(!ascending) {
         return None;
     }
     let accuracy = match ranked_agg {
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn does_not_promote_ascending_sort() {
-        // Ascending = bottom-k: the shared `is_additive_top_ranking` rule
+        // Ascending = bottom-k: the Top-K operator's ranking rule
         // rejects it (needs descending), so it stays a generic Sort+Limit — the
         // same call PromQL `bottomk` makes (issue #38).
         let asc = vec![SortKey {

@@ -535,69 +535,33 @@ fn quantile_suffix(q: f64) -> String {
 /// sketch, while a non-additive one does not. The physical family still
 /// depends on update-domain evidence: CMS requires non-negative weights,
 /// whereas CountSketch supports signed value updates.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RankingMeasure {
-    /// Unweighted frequency — `count` of rows/samples per key. Additive, and the
-    /// unweighted heavy-hitter measure (→ `AggIntent::TopK`).
-    #[default]
-    Frequency,
-    /// Weighted frequency — an additive `sum` of a per-row weight per key.
-    /// Served by the same heap-bearing family with value-weighted updates.
-    WeightedSum,
-    /// A non-additive measure (`avg` / `quantile` / `min` / `max`) or a raw,
-    /// un-aggregated value. Never a heavy-hitter — always generic.
-    NonAdditive,
-}
+/// Definitions owned specifically by the [`AggIntent::TopK`] operator.
+/// Keeping them scoped prevents an operator-local classification from
+/// becoming a top-level IR axis.
+pub mod topk {
+    use super::AggIntent;
 
-impl RankingMeasure {
-    /// Whether a top-k ranked by this measure can be a heavy-hitter **with a
-    /// sketch that exists today**. Frequency uses unit updates and WeightedSum
-    /// uses sample-value updates.
-    pub fn is_additive(self) -> bool {
-        matches!(
-            self,
-            RankingMeasure::Frequency | RankingMeasure::WeightedSum
-        )
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub enum Ranking {
+        #[default]
+        Frequency,
+        WeightedSum,
+        NonAdditive,
     }
-}
 
-/// Classify the aggregate a top-k ranks by into its [`RankingMeasure`] — the
-/// additivity axis heavy-hitter sketchability turns on.
-pub fn ranking_measure(agg: &AggIntent) -> RankingMeasure {
-    match agg {
-        AggIntent::Count { .. } => RankingMeasure::Frequency,
-        AggIntent::Sum { .. } => RankingMeasure::WeightedSum,
-        _ => RankingMeasure::NonAdditive,
+    impl Ranking {
+        pub fn from_aggregate(aggregate: &AggIntent) -> Self {
+            match aggregate {
+                AggIntent::Count { .. } => Self::Frequency,
+                AggIntent::Sum { .. } => Self::WeightedSum,
+                _ => Self::NonAdditive,
+            }
+        }
+
+        pub fn is_supported(self, descending: bool) -> bool {
+            descending && !matches!(self, Self::NonAdditive)
+        }
     }
-}
-
-/// The single rule that decides whether a top-k ranking is an additive
-/// additive ranking that [`AggIntent::TopK`] represents, as opposed to a generic
-/// order-by-value `Sort + Limit`.
-///
-/// A ranking qualifies iff it takes the **top** k — `descending` (bottom-k, and
-/// any ascending `ORDER BY … LIMIT`, never do) — **and** ranks by a measure with
-/// an additive update ([`RankingMeasure::is_additive`],
-/// i.e. [`Frequency`](RankingMeasure::Frequency) or
-/// [`WeightedSum`](RankingMeasure::WeightedSum) today). Both places
-/// that make this decision consult this one predicate so they cannot drift
-/// (issue #38):
-///
-/// - the PromQL front-end gate, on `topk(k, count_over_time(…))` and
-///   `topk(k, sum_over_time(…))` — `descending`
-///   is the `topk`-vs-`bottomk` choice, `measure` is the inner range function
-///   (`count_over_time` → `Frequency`, `sum_over_time` → `WeightedSum`);
-/// - the shared canonicalize promotion, on a
-///   `Limit { Sort { … Aggregate([agg]) } }` — `descending` is the sort key's
-///   direction, `measure` is [`ranking_measure`] of the ranked aggregate.
-///
-/// The two detectors recognise different *shapes* (a per-series
-/// temporal reduction vs. a cross-series `GROUP BY` aggregate), which is why the
-/// shape-matching stays language-specific; only this heavy-hitter *decision* is
-/// shared.
-pub fn is_additive_top_ranking(descending: bool, measure: RankingMeasure) -> bool {
-    descending && measure.is_additive()
 }
 
 /// Two instances of this aggregation can be merged
@@ -725,31 +689,40 @@ mod tests {
 
     #[test]
     fn additive_heavy_hitter_rule() {
-        use RankingMeasure::*;
+        use topk::Ranking::*;
         // Heavy-hitter iff descending and the ranking measure has a physical
         // heap-sketch realization.
-        assert!(is_additive_top_ranking(true, Frequency));
-        assert!(!is_additive_top_ranking(false, Frequency));
-        assert!(!is_additive_top_ranking(true, NonAdditive));
-        assert!(is_additive_top_ranking(true, WeightedSum));
+        assert!(Frequency.is_supported(true));
+        assert!(!Frequency.is_supported(false));
+        assert!(!NonAdditive.is_supported(true));
+        assert!(WeightedSum.is_supported(true));
     }
 
     #[test]
-    fn ranking_measure_classifies_by_additivity() {
-        use RankingMeasure::*;
+    fn topk_ranking_classifies_aggregate_inputs() {
+        use topk::Ranking::*;
         assert_eq!(
-            ranking_measure(&AggIntent::Count {
+            topk::Ranking::from_aggregate(&AggIntent::Count {
                 accuracy: AccuracyTarget::Exact
             }),
             Frequency
         );
-        assert_eq!(ranking_measure(&AggIntent::Sum { col: None }), WeightedSum);
-        assert_eq!(ranking_measure(&AggIntent::Avg { col: None }), NonAdditive);
-        assert_eq!(ranking_measure(&AggIntent::Max { col: None }), NonAdditive);
+        assert_eq!(
+            topk::Ranking::from_aggregate(&AggIntent::Sum { col: None }),
+            WeightedSum
+        );
+        assert_eq!(
+            topk::Ranking::from_aggregate(&AggIntent::Avg { col: None }),
+            NonAdditive
+        );
+        assert_eq!(
+            topk::Ranking::from_aggregate(&AggIntent::Max { col: None }),
+            NonAdditive
+        );
         // Both additive ranking measures have heap-sketch realizations.
-        assert!(Frequency.is_additive());
-        assert!(WeightedSum.is_additive());
-        assert!(!NonAdditive.is_additive());
+        assert!(Frequency.is_supported(true));
+        assert!(WeightedSum.is_supported(true));
+        assert!(!NonAdditive.is_supported(true));
     }
 
     #[test]
