@@ -50,7 +50,7 @@ use std::rc::Rc;
 
 use asap_types::post_asap::{
     GroupingStrategy, HydraParams, SketchAlgorithm, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryNode,
+    SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -98,6 +98,15 @@ pub struct CseCandidate<'a> {
 /// already used as bare `f64`s, just wrapped.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Cost(pub f64);
+
+/// One physical summary state and the lifecycle selected for that exact DAG
+/// node. Node identity is preserved so whole-DAG models can bind per-state
+/// evidence without relying on traversal order.
+pub struct CostedSummaryDeployment<'a> {
+    pub summary: &'a SummaryNode,
+    pub guarantee: &'a SummaryMaintenanceLifecycleGuarantee,
+    pub selected_cost: Cost,
+}
 
 impl Cost {
     /// The cost of an operation that costs nothing at all.
@@ -543,6 +552,17 @@ pub trait CostModel {
         SummaryMaintenanceLifecycleCostInputs::default()
     }
 
+    /// Horizon-aware form used by lifecycle planning. Models whose retention
+    /// objective is capacity rather than byte-seconds can normalize their
+    /// rate so the horizon integral equals one peak-capacity charge.
+    fn summary_maintenance_lifecycle_cost_inputs_for_horizon(
+        &self,
+        summary: &SummaryNode,
+        _horizon: Option<Horizon>,
+    ) -> SummaryMaintenanceLifecycleCostInputs {
+        self.summary_maintenance_lifecycle_cost_inputs(summary)
+    }
+
     /// Physical update/merge/delete support for one concrete summary. The
     /// conservative default advertises no long-lived maintenance capability.
     fn summary_maintenance_capabilities(
@@ -552,11 +572,43 @@ pub trait CostModel {
         SummaryMaintenanceCapabilities::default()
     }
 
+    /// Replace the sum of selected per-state lifecycle costs with a complete
+    /// root-DAG cost. The default preserves legacy models. Evidence-strict
+    /// models return `None` when any root operation is unavailable; callers
+    /// must not then reuse the partial per-state sum.
+    fn complete_summary_candidate_cost(
+        &self,
+        _root: &SummaryNode,
+        _target: Option<&QueryExpr>,
+        deployments: &[CostedSummaryDeployment<'_>],
+        _horizon: Option<Horizon>,
+        _expected_reads: Option<f64>,
+    ) -> Option<Cost> {
+        Some(Cost(
+            deployments
+                .iter()
+                .map(|deployment| deployment.selected_cost.0)
+                .sum(),
+        ))
+    }
+
     /// Cost of evaluating `target` directly from its logical/raw inputs once.
     /// When known, lifecycle-aware materialization compares this fallback with
     /// the aggregate cost of the selected summary deployments.
     fn raw_query_recompute_cost(&self, _target: &QueryExpr) -> Option<Cost> {
         None
+    }
+
+    /// Complete raw cost over the comparison context. The default preserves
+    /// per-read models; context-aware models override this when raw input
+    /// cardinality changes between evaluations.
+    fn raw_query_recompute_total_cost(
+        &self,
+        target: &QueryExpr,
+        expected_reads: f64,
+    ) -> Option<Cost> {
+        self.raw_query_recompute_cost(target)
+            .map(|per_read| Cost(per_read.0 * expected_reads))
     }
 }
 

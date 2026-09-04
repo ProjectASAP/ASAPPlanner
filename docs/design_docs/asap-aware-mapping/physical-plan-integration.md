@@ -115,6 +115,22 @@ already exists. Until lowering introduces an explicit physical operator,
 statistics contract, validation rule, and resource formula for an operation,
 a candidate containing it is unavailable.
 
+The streaming integration can consume a complete binding through
+`StreamingNodeEvidence`. That binding is keyed to exact `SummaryNode`
+identities and uses structured evidence for aggregate state, join, merge,
+subtract, delete, readout, and retained pre-ASAP work. It is a physical
+evidence boundary, not automatic physical lowering: a deployment must still
+select each concrete implementation and provide all edges, resource facts,
+multiplicities, source ownership, and stable physical identities. The planner
+fails closed when any reachable `SummaryExpr` node lacks that binding.
+
+The raw/query portion of a streaming comparison remains a `PhysicalDag` using
+the canonical `PhysicalOperator` and `OperatorStatistics` pairing. Summary
+evidence is kept separate only where lifecycle-driven update, retention, and
+expiration multiplicities require facts beyond the query-DAG
+`Once`/`PerEvaluation` schedule. It must not redefine workload, lifecycle, or
+summary-family semantics.
+
 Lifecycle choice affects the physical DAG but does not replace it. Ephemeral,
 prepared, shared, and continuously maintained alternatives determine when
 build, update, readout, merge, subtract, or delete nodes execute. The physical
