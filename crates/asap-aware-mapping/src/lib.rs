@@ -194,6 +194,7 @@ pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;
 pub mod rollup;
+pub mod summary_maintenance_cost;
 pub mod summary_maintenance_dag_export;
 pub mod summary_maintenance_lifecycle;
 pub mod topk_reuse;

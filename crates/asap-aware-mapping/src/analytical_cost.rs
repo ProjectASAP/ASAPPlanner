@@ -1940,8 +1940,14 @@ impl ResourceEstimate {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AnalyticalCostError {
-    #[error("analytical resource model v1 supports only DataArrival::AtRest, got {0:?}")]
+    #[error("data arrival {0:?} is unsupported by the selected analytical adapter")]
     UnsupportedDataArrival(DataArrival),
+    #[error("ingestion rate must be finite and non-negative, got {0}")]
+    InvalidIngestionRate(f64),
+    #[error("summary lifecycle, maintenance mode, and evaluation schedule are inconsistent")]
+    IncompatibleLifecycleGuarantee,
+    #[error("summary operation cost {0} must be finite and non-negative, got {1}")]
+    InvalidOperationCost(&'static str, f64),
     #[error("required analytical input {0} is missing or zero")]
     MissingOrZero(&'static str),
     #[error("required analytical evidence {0} is missing or stale")]

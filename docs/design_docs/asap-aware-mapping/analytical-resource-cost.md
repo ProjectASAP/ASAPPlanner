@@ -10,11 +10,17 @@ plans. These are separate concerns:
 - the **analytical estimation layer** applies algorithmic formulas to that
   evidence to estimate CPU work, peak memory, and source/disk I/O.
 
-The model version implemented here is explicitly for `DataArrival::AtRest`.
-It replaces dimensionless plan-node counts with estimates derived from
-operator complexity, cardinality, row width, and concrete summary parameters.
-The estimates are predictions; they are not measurements reported by a
-physical executor.
+There are two arrival-specific entry points. The complete physical-DAG
+comparison currently models `DataArrival::AtRest`. The streaming summary
+extension models `DataArrival::ContinuouslyIngesting` over a finite horizon,
+including bootstrap, arriving updates, retained state, and query readout.
+Evidence from one arrival mode must not be reused for the other. `Mixed` and
+`Unknown` remain unavailable until their distinct data regions are modeled.
+
+Both entry points replace dimensionless plan-node counts with estimates
+derived from operator complexity, cardinality, row width, and concrete summary
+parameters. The estimates are predictions; they are not measurements reported
+by a physical executor.
 
 The model does not decide semantic or accuracy legality. Candidate generation
 and guarantee composition run first; costing ranks only the candidates that
@@ -211,7 +217,7 @@ costed.
 ## Workload horizon and lifecycle
 
 Every alternative must cover the same source data and query horizon. The
-implemented `DataArrival::AtRest` comparison is build-once, read-many:
+`DataArrival::AtRest` physical-DAG comparison is build-once, read-many:
 
 ```text
 retained-summary builds = 1
@@ -227,12 +233,11 @@ An at-rest estimate must not be reused for `unknown`, `mixed`, or
 `continuously_ingesting` data. Callers fail closed instead of pretending that
 incremental updates are a one-time snapshot build.
 
-The sketch alternative scans the selected source snapshot once and retains
-state. The raw alternative recomputes from that snapshot for every query
-read. Continuously ingesting data, rebuilds, deletions, expiration, and
-retention duration belong to the summary-maintenance lifecycle model. They
-must contribute update/build/delete work before a continuously maintained
-plan is compared with raw execution.
+The at-rest summary alternative scans the selected source snapshot once and
+retains state. Its raw alternative recomputes from that snapshot for every
+query read. The continuously-ingesting entry point separately charges
+bootstrap, updates, summary operations, retained state, and raw evaluations;
+its lifecycle rules are defined below.
 
 ### Comparable source and workload scope
 
@@ -636,15 +641,60 @@ input.
 
 ## Summary operator formulas
 
-A retained sketch performs one build and serves later reads from state:
+### Incremental single-summary foundation
+
+For `DataArrival::ContinuouslyIngesting`, the incremental estimator accepts
+one selected lifecycle and one unique logical `SummaryAgg`. This deliberately
+narrow contract prevents one flat evidence record from being reused across
+several summary nodes with different input cardinalities, algorithms, or state
+sizes. Complete multi-node streaming alternatives require per-node physical
+evidence.
+
+The canonical workload supplies fresh bootstrap cardinality, ingestion rate,
+query recurrence, planning time, and a finite horizon. Physical evidence adds
+logical/bootstrap bytes, physical bootstrap scan bytes, active and retained
+window counts, the number of concrete summary-state instances per window, and
+bytes per state instance. Names use `summary`, not `sketch`, because an exact
+aggregate or another non-sketch state is equally valid.
+
+For bootstrap rows `B`, arrivals `U`, simultaneously updated windows `A`,
+query evaluations `Q`, physical summary instances `P`, and state bytes `S`:
 
 ```text
-cpu_ops = input_rows                         // build scan
-        + input_rows × update_ops(params)
+insert invocations = (B + U) × A
+retained memory     = (A + retained_windows) × P × S
+```
+
+Each input row is routed to its matching summary instance; it is not inserted
+into every group. Merge, subtract, and readout work may operate over all `P`
+instances. Delete work follows the same routed window updates rather than
+multiplying every update by every possible group.
+
+An empty bootstrap is valid and has zero logical bytes and zero source reads.
+A non-empty bootstrap requires positive logical and physical source bytes.
+Active window count, summary-instance count, state width, horizon, and query
+evaluation count must be positive; retained-window count may be zero for a new
+stream. Required per-operation CPU evidence must be finite and positive.
+
+Lifecycle retention and the planning horizon are different quantities. A
+short retained window may be maintained throughout a much longer planning
+horizon, so the estimator does not require `retention >= horizon`. Lifecycle
+legality and query time-coverage checks establish whether the retained window
+can answer the query.
+
+A retained summary bootstraps every active window, consumes arriving rows, and
+serves later reads from state. For the simple build/update/readout shape:
+
+```text
+cpu_ops = (bootstrap_rows + arriving_rows)
+          × active_window_count × insert_ops(params)
         + evaluation_count × physical_summary_count × read_ops(params)
 
 scan_bytes = source_read_bytes for the build
 ```
+
+Merge, subtract, and delete add their own invocation counts described above;
+they are never folded into the simple formula implicitly.
 
 Concrete accuracy-sized parameters determine state and work:
 

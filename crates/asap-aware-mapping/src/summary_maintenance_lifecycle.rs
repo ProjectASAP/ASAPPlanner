@@ -919,7 +919,7 @@ fn collect_summary_aggs(
     }
 }
 
-fn evaluation_schedule(
+pub(crate) fn evaluation_schedule(
     lifecycle: &SummaryMaintenanceLifecycle,
     arrival: DataArrival,
 ) -> EvaluationSchedule {
@@ -1053,7 +1053,7 @@ fn select_compatible_lifecycles(
     }
 }
 
-fn maintenance_mode(
+pub(crate) fn maintenance_mode(
     lifecycle: &SummaryMaintenanceLifecycle,
     arrival: DataArrival,
 ) -> SummaryMaintenanceMode {
