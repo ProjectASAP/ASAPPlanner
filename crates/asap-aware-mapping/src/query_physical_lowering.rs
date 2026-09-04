@@ -1,19 +1,16 @@
-//! Recursive lowering from the canonical query IR to analytical physical DAGs.
+//! Recursive lowering from the canonical query IR to evidenced physical DAGs.
 
 use std::rc::Rc;
 
-use crate::analytical_statistics::{
-    ComparisonScope, EdgeStatistics, OperatorStatistics, SourceCoverage,
-};
-use crate::physical_resource_cost::{
+use crate::analytical_cost::{
     validate_operator_semantics, AnalyticalCostError, EvidenceBackedPhysicalDag,
     ExecutionMultiplicity, HashJoinBuildSide, PhysicalDagNode, PhysicalNodeEvidence,
     PhysicalOperator, PromqlBinaryOperandMode, PromqlBinaryOperation, PromqlPresenceKind,
     PromqlSeriesSampleKind, PromqlVectorCardinality,
 };
-
-/// The canonical evidenced DAG returned by query lowering.
-pub type PhysicalDag = EvidenceBackedPhysicalDag;
+use crate::physical_operator_statistics::{
+    ComparisonScope, EdgeStatistics, OperatorStatistics, SourceCoverage,
+};
 
 pub struct PhysicalNodeRequest<'a> {
     pub logical_node: &'a asap_types::pre_asap::QueryExpr,
@@ -52,7 +49,7 @@ pub fn lower_query_physical_dag(
     root: &Rc<asap_types::pre_asap::QueryExpr>,
     scope: &ComparisonScope,
     evidence: &dyn PhysicalNodeEvidenceProvider,
-) -> Result<PhysicalDag, AnalyticalCostError> {
+) -> Result<EvidenceBackedPhysicalDag, AnalyticalCostError> {
     use std::collections::HashMap;
 
     use asap_types::pre_asap::{GroupKeys, QueryExpr, SetOpKind};
@@ -822,7 +819,7 @@ pub fn lower_query_physical_dag(
     };
     let root = lowerer.lower(root)?;
     validate_source_consumption(&lowerer.nodes, scope)?;
-    Ok(PhysicalDag {
+    Ok(EvidenceBackedPhysicalDag {
         nodes: lowerer.nodes,
         root,
         evidence: lowerer.evidence,
@@ -1258,12 +1255,12 @@ fn is_promql_scalar(query: &asap_types::pre_asap::QueryExpr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analytical_statistics::{
+    use crate::analytical_cost::{
+        estimate_physical_dag, estimate_physical_dag_comparison, PhysicalDagEstimateRequest,
+    };
+    use crate::physical_operator_statistics::{
         validate_comparison_scopes, BinaryEdgeStatistics, PartitionStatistics,
         PromqlEdgeStatistics, PromqlUnaryEdgeStatistics, PromqlValueKind, UnaryEdgeStatistics,
-    };
-    use crate::physical_resource_cost::{
-        estimate_physical_dag, estimate_physical_dag_comparison, PhysicalDagEstimateRequest,
     };
     use asap_types::workload::{
         DataArrival, DurationMs, QueryRecurrence, QueryTimeScope, TimeSelection, TimestampMs,
@@ -2459,10 +2456,12 @@ mod tests {
                     edges: BinaryEdgeStatistics {
                         inputs: [left_edge, right_edge],
                         output: output_edge,
-                        promql: Some(crate::analytical_statistics::PromqlBinaryEdgeStatistics {
-                            inputs: [left_promql, right_promql],
-                            output: output_promql,
-                        }),
+                        promql: Some(
+                            crate::physical_operator_statistics::PromqlBinaryEdgeStatistics {
+                                inputs: [left_promql, right_promql],
+                                output: output_promql,
+                            },
+                        ),
                     },
                     matching_key_bytes: 16,
                 }),

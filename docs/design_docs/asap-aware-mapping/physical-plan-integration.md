@@ -3,7 +3,7 @@
 ## Purpose
 
 This document defines the boundary between ASAPPlanner's logical plans,
-physical lowering, statistics resolution, and analytical resource costing.
+physical lowering, statistics resolution, and analytical resource estimation.
 It answers which representation is authoritative at each stage and prevents
 the cost model from being coupled directly to either logical IR.
 

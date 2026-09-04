@@ -2,23 +2,33 @@
 
 ## Purpose and boundaries
 
-The analytical resource cost model version implemented here is explicitly for
-`DataArrival::AtRest`. It compares legal physical plans using CPU work, peak
-memory, and source/disk I/O. It replaces dimensionless plan-node counts with
-estimates derived from operator complexity, cardinality, row width, and
-concrete summary parameters.
+This document defines an analytical estimation method over evidenced physical
+plans. These are separate concerns:
+
+- the **physical input layer** names the physical operators and DAG edges being
+  estimated and supplies catalog or observed statistics for them; and
+- the **analytical estimation layer** applies algorithmic formulas to that
+  evidence to estimate CPU work, peak memory, and source/disk I/O.
+
+The model version implemented here is explicitly for `DataArrival::AtRest`.
+It replaces dimensionless plan-node counts with estimates derived from
+operator complexity, cardinality, row width, and concrete summary parameters.
+The estimates are predictions; they are not measurements reported by a
+physical executor.
 
 The model does not decide semantic or accuracy legality. Candidate generation
 and guarantee composition run first; costing ranks only the candidates that
 survive. Missing evidence produces an unavailable estimate, never an assumed
 zero or a structural-cost fallback.
 
-This document distinguishes four implementation layers:
+The implementation keeps five layers distinct:
 
-- the physical-DAG estimator, which can compose any DAG whose nodes have
-  supported physical operators and complete `OperatorStatistics`; and
-- query-DAG lowering, which recursively maps supported resolved `QueryExpr`
-  operators to that physical representation; and
+- physical query lowering (`query_physical_lowering`), which recursively maps
+  supported resolved `QueryExpr` operators to the physical representation;
+- physical evidence (`physical_operator_statistics`), which pairs every
+  physical operator with the statistics required by its formula;
+- analytical estimation (`analytical_cost`), which composes any evidenced DAG
+  whose operators have supported formulas;
 - the deployment summary binder, which maps a selected `SummaryExpr` DAG to
   physical summary operators and snapshots their evidence; and
 - the planner-ranking adapter, which compares the complete raw and replacement
@@ -410,9 +420,9 @@ deduplicated by physical identity.
 ### Query-DAG lowering and statistics contract
 
 `lower_query_physical_dag` recursively lowers a resolved `Rc<QueryExpr>` and
-returns a `PhysicalDag` containing both its nodes and root ID. It consumes the
-existing query and physical-operator enums; it does not introduce a parallel
-logical operator vocabulary. For every occurrence, the lowerer sends a
+returns an `EvidenceBackedPhysicalDag` containing both its nodes and root ID.
+It consumes the existing query and physical-operator enums; it does not
+introduce a parallel logical operator vocabulary. For every occurrence, the lowerer sends a
 `PhysicalNodeRequest` containing the logical node, selected existing
 `PhysicalOperator`, occurrence and synthetic-role metadata, already-lowered
 child physical IDs, and any source coverage to a
@@ -420,7 +430,7 @@ child physical IDs, and any source coverage to a
 `physical_id`, the authoritative `OperatorStatistics`, and explicit
 `output_buffer_bytes`; logical edge bytes are never substituted for an
 allocation. Missing evidence makes the entire query unavailable. The returned
-`PhysicalDag` snapshots this evidence so costing does not re-read a live
+`EvidenceBackedPhysicalDag` snapshots this evidence so costing does not re-read a live
 catalog after lowering.
 
 Each lowered Scan is bound to exactly one `SourceCoverage` in the comparison
@@ -602,7 +612,7 @@ actual raw target, and then lowers a logical rewrite or requests the fully
 bound physical DAG for a `SummaryExpr` candidate. The deployment implements
 `PlannerPhysicalPlanProvider`: query-node evidence is consumed atomically by
 the generic query lowerer, while summary binding returns a complete
-`PhysicalDag`, including embedded raw work, build/read operators, retained
+`EvidenceBackedPhysicalDag`, including embedded raw work, build/read operators, retained
 state, execution multiplicity, and source coverage. The adapter calls
 `estimate_physical_dag_comparison`; it never calls `DefaultCostModel` or a
 structural-node-count fallback for final cost.

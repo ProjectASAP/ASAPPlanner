@@ -183,13 +183,13 @@
 
 pub mod accuracy;
 pub mod accuracy_reconciliation;
-pub mod analytical_lowering;
-pub mod analytical_statistics;
+pub mod analytical_cost;
 pub mod cost_model;
 pub mod explanation;
 pub mod grouping;
+pub mod physical_operator_statistics;
 pub mod physical_plan_cost_model;
-pub mod physical_resource_cost;
+pub mod query_physical_lowering;
 pub mod recurrence;
 pub mod replacement;
 pub mod rewrite;

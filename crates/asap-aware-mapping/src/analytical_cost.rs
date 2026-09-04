@@ -11,12 +11,16 @@ use asap_types::post_asap::{SketchAlgorithm, SketchParams};
 use asap_types::workload::DataArrival;
 use serde::{Deserialize, Serialize};
 
-use crate::analytical_statistics::{
+use crate::physical_operator_statistics::{
     validate_comparison_scopes, ComparisonScope, EdgeStatistics, OperatorStatistics,
     OperatorStatisticsProvider, PromqlEdgeStatistics, PromqlValueKind, SourceCoverage,
 };
 
-pub const PHYSICAL_RESOURCE_MODEL_VERSION: &str = "physical-resource-v1";
+/// Version of the analytical formulas applied to evidenced physical plans.
+///
+/// This identifies the estimation method, not a physical executor or runtime
+/// implementation version.
+pub const ANALYTICAL_COST_MODEL_VERSION: &str = "analytical-cost-v1";
 
 /// Conversion from physical dimensions to one deployment-specific objective.
 /// Memory's coefficient means cost units per retained byte over this model's
@@ -726,7 +730,7 @@ fn checked_cpu_product(rows: u64, operations_per_row: u64) -> Result<f64, Analyt
 }
 
 fn partitioned_order_estimate(
-    partitioning: &crate::analytical_statistics::PartitionStatistics,
+    partitioning: &crate::physical_operator_statistics::PartitionStatistics,
     comparison_operations: u64,
     row_operations: u64,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
@@ -751,7 +755,7 @@ fn partitioned_order_estimate(
 
 fn validate_partitioning(
     input: EdgeStatistics,
-    partitioning: &crate::analytical_statistics::PartitionStatistics,
+    partitioning: &crate::physical_operator_statistics::PartitionStatistics,
     partitioned: bool,
 ) -> Result<(), AnalyticalCostError> {
     let inconsistent = |reason| Err(AnalyticalCostError::InconsistentOperatorStatistics(reason));
@@ -1654,8 +1658,8 @@ pub(crate) fn validate_operator_semantics(
 }
 
 fn require_promql_unary(
-    edges: &crate::analytical_statistics::UnaryEdgeStatistics,
-) -> Result<crate::analytical_statistics::PromqlUnaryEdgeStatistics, AnalyticalCostError> {
+    edges: &crate::physical_operator_statistics::UnaryEdgeStatistics,
+) -> Result<crate::physical_operator_statistics::PromqlUnaryEdgeStatistics, AnalyticalCostError> {
     let promql = edges.promql.ok_or(AnalyticalCostError::MissingOrStale(
         "promql_edge_statistics",
     ))?;
@@ -1665,8 +1669,8 @@ fn require_promql_unary(
 }
 
 fn require_promql_binary(
-    edges: &crate::analytical_statistics::BinaryEdgeStatistics,
-) -> Result<crate::analytical_statistics::PromqlBinaryEdgeStatistics, AnalyticalCostError> {
+    edges: &crate::physical_operator_statistics::BinaryEdgeStatistics,
+) -> Result<crate::physical_operator_statistics::PromqlBinaryEdgeStatistics, AnalyticalCostError> {
     let promql = edges.promql.ok_or(AnalyticalCostError::MissingOrStale(
         "promql_edge_statistics",
     ))?;
@@ -1677,7 +1681,7 @@ fn require_promql_binary(
 }
 
 fn validate_promql_cardinality_preserving_shape(
-    promql: crate::analytical_statistics::PromqlUnaryEdgeStatistics,
+    promql: crate::physical_operator_statistics::PromqlUnaryEdgeStatistics,
 ) -> Result<(), AnalyticalCostError> {
     validate_promql_edge(promql.input)?;
     validate_promql_edge(promql.output)?;
@@ -1691,7 +1695,7 @@ fn validate_promql_cardinality_preserving_shape(
 }
 
 fn validate_promql_filter_shape(
-    promql: crate::analytical_statistics::PromqlUnaryEdgeStatistics,
+    promql: crate::physical_operator_statistics::PromqlUnaryEdgeStatistics,
 ) -> Result<(), AnalyticalCostError> {
     validate_promql_edge(promql.input)?;
     validate_promql_edge(promql.output)?;
@@ -1757,7 +1761,7 @@ fn validate_promql_edge_shape(
 
 fn validate_promql_bridge(
     operator: PhysicalOperator,
-    edges: &crate::analytical_statistics::UnaryEdgeStatistics,
+    edges: &crate::physical_operator_statistics::UnaryEdgeStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let promql = require_promql_unary(edges)?;
     let valid = match operator {
@@ -1791,7 +1795,7 @@ fn validate_promql_binary(
     cardinality: PromqlVectorCardinality,
     build_side: Option<HashJoinBuildSide>,
     matching_key_bytes: u64,
-    edges: &crate::analytical_statistics::BinaryEdgeStatistics,
+    edges: &crate::physical_operator_statistics::BinaryEdgeStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let promql = require_promql_binary(edges)?;
     validate_instant_vector_rows(edges.output, promql.output)?;
@@ -1882,7 +1886,7 @@ fn validate_promql_series_sample(
     grouping_key_count: u64,
     group_count: u64,
     key_bytes: u64,
-    edges: &crate::analytical_statistics::UnaryEdgeStatistics,
+    edges: &crate::physical_operator_statistics::UnaryEdgeStatistics,
 ) -> Result<(), AnalyticalCostError> {
     let promql = require_promql_unary(edges)?;
     validate_instant_vector_rows(edges.output, promql.output)?;
@@ -1998,7 +2002,7 @@ fn checked_bytes(parts: &[u64]) -> Result<u64, AnalyticalCostError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analytical_statistics::{
+    use crate::physical_operator_statistics::{
         validate_comparison_scopes, BinaryEdgeStatistics, ComparisonScope, EdgeStatistics,
         OperatorStatistics, PartitionStatistics, PromqlBinaryEdgeStatistics, PromqlEdgeStatistics,
         PromqlUnaryEdgeStatistics, PromqlValueKind, SourceCoverage, UnaryEdgeStatistics,
