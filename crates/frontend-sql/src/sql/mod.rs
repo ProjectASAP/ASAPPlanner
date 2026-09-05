@@ -57,7 +57,7 @@ use asap_types::pre_asap::query_expr::{
 };
 use asap_types::pre_asap::schema::{DataType, Schema};
 use asap_types::pre_asap::{
-    ColumnRef, CompareOpKind, JoinKind, ScalarValue, SetOpKind, WindowFuncKind,
+    ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind, ScalarValue, WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
@@ -263,7 +263,7 @@ impl<'a> SqlLowerer<'a> {
                 let first_expr = self.lower_plan(first)?;
                 iter.try_fold(first_expr, |left, right_plan| {
                     Ok(Unresolved::SetOp {
-                        kind: SetOpKind::Union,
+                        kind: RelationalSetOpKind::Union,
                         all: true,
                         left: Rc::new(left),
                         right: Rc::new(self.lower_plan(right_plan)?),

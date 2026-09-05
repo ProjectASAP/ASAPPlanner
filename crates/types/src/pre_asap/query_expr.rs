@@ -243,9 +243,8 @@ impl Source {
 }
 
 /// Operator on the query-level `BinaryOp` node. Reuses the scalar IR's
-/// [`ArithmeticOpKind`] / [`CompareOpKind`] so every arithmetic/comparison operator has
-/// exactly one representation (and one `Display`) across the IR; the remaining
-/// variants are PromQL vector-set / power ops with no scalar-IR counterpart.
+/// [`ArithmeticOpKind`] / [`CompareOpKind`] so every arithmetic/comparison
+/// operator has exactly one representation (and one `Display`) across the IR.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinaryOpKind {
     /// Arithmetic — `Add/Sub/Mul/Div/Mod` (shared with `QueryExpr::Arithmetic`).
@@ -254,7 +253,7 @@ pub enum BinaryOpKind {
     /// with `QueryExpr::Compare`).
     Compare(CompareOpKind),
     /// PromQL vector-set operation.
-    Set(SetOpKind),
+    Set(PromQLVectorSetOpKind),
 }
 
 impl std::fmt::Display for BinaryOpKind {
@@ -262,12 +261,9 @@ impl std::fmt::Display for BinaryOpKind {
         match self {
             BinaryOpKind::Arithmetic(op) => write!(f, "{op}"),
             BinaryOpKind::Compare(op) => write!(f, "{op}"),
-            BinaryOpKind::Set(SetOpKind::And) => f.write_str("AND"),
-            BinaryOpKind::Set(SetOpKind::Or) => f.write_str("OR"),
-            BinaryOpKind::Set(SetOpKind::Unless) => f.write_str("unless"),
-            BinaryOpKind::Set(SetOpKind::Union) => f.write_str("UNION"),
-            BinaryOpKind::Set(SetOpKind::Intersect) => f.write_str("INTERSECT"),
-            BinaryOpKind::Set(SetOpKind::Except) => f.write_str("EXCEPT"),
+            BinaryOpKind::Set(PromQLVectorSetOpKind::And) => f.write_str("AND"),
+            BinaryOpKind::Set(PromQLVectorSetOpKind::Or) => f.write_str("OR"),
+            BinaryOpKind::Set(PromQLVectorSetOpKind::Unless) => f.write_str("unless"),
         }
     }
 }
@@ -298,10 +294,15 @@ pub enum JoinKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SetOpKind {
+pub enum RelationalSetOpKind {
     Union,
     Intersect,
     Except,
+}
+
+/// PromQL vector-set operator used by [`BinaryOpKind::Set`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromQLVectorSetOpKind {
     And,
     Or,
     Unless,
@@ -819,7 +820,7 @@ pub enum QueryExpr<C: ColState = ColumnId> {
         right: Rc<QueryExpr<C>>,
     },
     SetOp {
-        kind: SetOpKind,
+        kind: RelationalSetOpKind,
         all: bool,
         left: Rc<QueryExpr<C>>,
         right: Rc<QueryExpr<C>>,
@@ -1863,7 +1864,7 @@ mod tests {
         };
         let merged = QueryExpr::concat(vec![branch(), branch()]);
         let setop = QueryExpr::SetOp {
-            kind: SetOpKind::Union,
+            kind: RelationalSetOpKind::Union,
             all: true,
             left: Rc::new(branch()),
             right: Rc::new(branch()),
@@ -2358,7 +2359,7 @@ mod tests {
             vec![vec![0]],
         );
         let q = QueryExpr::SetOp {
-            kind: SetOpKind::Union,
+            kind: RelationalSetOpKind::Union,
             all: false,
             left: Rc::new(left),
             right: Rc::new(right),
