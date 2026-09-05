@@ -2986,6 +2986,62 @@ mod tests {
         })
     }
 
+    fn summary_binary() -> Rc<SummaryNode> {
+        let operand = summary_with_operations(false, false, false);
+        Rc::new(SummaryNode {
+            expr: SummaryExpr::BinaryOp {
+                lhs: Rc::clone(&operand),
+                rhs: operand,
+                operator: asap_types::post_asap::BinaryOperator {
+                    kind: asap_types::pre_asap::BinaryOpKind::Arithmetic(
+                        asap_types::pre_asap::ArithmeticOpKind::Add,
+                    ),
+                    vector_match: None,
+                },
+            },
+            schema: SummarySchema {
+                fields: vec![SummaryField {
+                    name: "value".into(),
+                    dtype: SummaryFamilyType::Plain(DataType::Float64),
+                    nullable: false,
+                }],
+                time_index: None,
+            },
+            guarantee: Some(ResultGuarantee::exact("test binary")),
+        })
+    }
+
+    #[test]
+    fn exact_binary_is_costable_with_explicit_physical_evidence() {
+        let workload = streaming_workload();
+        let target = streaming_sum_query();
+        let root = summary_binary();
+        let mut model = streaming_model();
+        bind_aggregations(
+            &mut model,
+            &target,
+            &root,
+            streaming_inputs(),
+            streaming_cpu(),
+        );
+
+        let plan = plan_summary_maintenance_lifecycles(
+            root,
+            WorkloadDemand::new(&workload, &[0]),
+            0,
+            Some(Horizon(5.0)),
+            SummaryMaintenanceLifecycleCapabilities {
+                supports_ephemeral: true,
+                supports_prepared: false,
+                supports_shared: false,
+                supports_continuously_maintained: false,
+            },
+            &model,
+        )
+        .expect("binary physical evidence should produce a complete cost");
+        assert!(plan.summary_total_cost.is_some());
+    }
+
     fn streaming_sum_query() -> Rc<QueryExpr> {
         let scan = Rc::new(QueryExpr::Scan {
             source: Source::TimeSeries {
@@ -3131,6 +3187,11 @@ mod tests {
                     }
                 }
                 SummaryExpr::SummarySubtract { left, right }
+                | SummaryExpr::BinaryOp {
+                    lhs: left,
+                    rhs: right,
+                    ..
+                }
                 | SummaryExpr::SummaryJoin {
                     outer: left,
                     inner: right,
@@ -3222,6 +3283,18 @@ mod tests {
                 return;
             }
             let operation = match &node.expr {
+                SummaryExpr::BinaryOp { .. } => cpu.readout_cpu_ops.map(|cpu_ops| {
+                    StreamingSummaryOperatorEvidence::Binary(SummaryOperatorResourceEvidence {
+                        physical_id: format!("binary-{node:p}"),
+                        inputs: vec![test_edge(), test_edge()],
+                        output: test_edge(),
+                        cpu_ops,
+                        working_memory_bytes: 0,
+                        output_buffer_bytes: 0,
+                        executions_per_evaluation: 1,
+                        io_bytes_per_execution: Some(0),
+                    })
+                }),
                 SummaryExpr::SummaryMerge { .. } => cpu.merge_cpu_ops.map(|cpu_ops| {
                     StreamingSummaryOperatorEvidence::Merge(SummaryOperatorResourceEvidence {
                         physical_id: format!("merge-{node:p}"),
@@ -3306,6 +3379,11 @@ mod tests {
                                 }
                             }
                             SummaryExpr::SummarySubtract { left, right }
+                            | SummaryExpr::BinaryOp {
+                                lhs: left,
+                                rhs: right,
+                                ..
+                            }
                             | SummaryExpr::SummaryJoin {
                                 outer: left,
                                 inner: right,
@@ -3341,6 +3419,11 @@ mod tests {
                     }
                 }
                 SummaryExpr::SummarySubtract { left, right }
+                | SummaryExpr::BinaryOp {
+                    lhs: left,
+                    rhs: right,
+                    ..
+                }
                 | SummaryExpr::SummaryJoin {
                     outer: left,
                     inner: right,

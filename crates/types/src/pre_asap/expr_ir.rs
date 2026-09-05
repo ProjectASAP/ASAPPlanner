@@ -103,6 +103,8 @@ pub enum ArithmeticOpKind {
     Mul,
     Div,
     Mod,
+    Pow,
+    Atan2,
 }
 
 impl std::fmt::Display for ArithmeticOpKind {
@@ -113,6 +115,8 @@ impl std::fmt::Display for ArithmeticOpKind {
             ArithmeticOpKind::Mul => "*",
             ArithmeticOpKind::Div => "/",
             ArithmeticOpKind::Mod => "%",
+            ArithmeticOpKind::Pow => "^",
+            ArithmeticOpKind::Atan2 => "atan2",
         })
     }
 }

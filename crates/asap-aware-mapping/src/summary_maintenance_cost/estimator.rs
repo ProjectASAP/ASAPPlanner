@@ -36,6 +36,11 @@ pub(super) fn estimate_heterogeneous_summary(
                 }
             }
             SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::BinaryOp {
+                lhs: left,
+                rhs: right,
+                ..
+            }
             | SummaryExpr::SummaryJoin {
                 outer: left,
                 inner: right,
@@ -258,6 +263,33 @@ pub(super) fn estimate_heterogeneous_summary(
             return Ok(());
         }
         match &node.expr {
+            SummaryExpr::BinaryOp { lhs, rhs, .. } => {
+                let operation = summary_operation_evidence(node, evidence)?.resource();
+                *cpu_ops += evaluation_count as f64
+                    * validated_operator_executions("exact_binary", operation)? as f64
+                    * validated_operator_cpu("exact_binary", operation.cpu_ops)?;
+                add_operator_io(io_bytes, operation, evaluation_count)?;
+                visit_ops(
+                    lhs,
+                    seen,
+                    by_node,
+                    evidence,
+                    scope,
+                    evaluation_count,
+                    cpu_ops,
+                    io_bytes,
+                )?;
+                visit_ops(
+                    rhs,
+                    seen,
+                    by_node,
+                    evidence,
+                    scope,
+                    evaluation_count,
+                    cpu_ops,
+                    io_bytes,
+                )?;
+            }
             SummaryExpr::KeepPreAsap(_) => {
                 let retained = evidence
                     .retained_queries
@@ -365,6 +397,11 @@ pub(super) fn estimate_heterogeneous_summary(
                                 .for_each(|child| collect_aggs(child, seen, out));
                         }
                         SummaryExpr::SummarySubtract { left, right }
+                        | SummaryExpr::BinaryOp {
+                            lhs: left,
+                            rhs: right,
+                            ..
+                        }
                         | SummaryExpr::SummaryJoin {
                             outer: left,
                             inner: right,
@@ -559,6 +596,11 @@ fn validate_summary_edges_and_physical_ids(
                 children.iter().map(|child| child.as_ref()).collect()
             }
             SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::BinaryOp {
+                lhs: left,
+                rhs: right,
+                ..
+            }
             | SummaryExpr::SummaryJoin {
                 outer: left,
                 inner: right,
@@ -723,6 +765,11 @@ pub(super) fn estimate_transient_liveness(
                 children.iter().map(|child| child.as_ref()).collect()
             }
             SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::BinaryOp {
+                lhs: left,
+                rhs: right,
+                ..
+            }
             | SummaryExpr::SummaryJoin {
                 outer: left,
                 inner: right,
@@ -768,6 +815,7 @@ pub(super) fn estimate_transient_liveness(
                 .map(|value| (value.working_memory_bytes, value.output_buffer_bytes))
                 .ok_or(AnalyticalCostError::MissingOrStale("summary_join")),
             SummaryExpr::SummaryMerge { .. }
+            | SummaryExpr::BinaryOp { .. }
             | SummaryExpr::SummarySubtract { .. }
             | SummaryExpr::SummaryDelete { .. }
             | SummaryExpr::SummaryEstimate { .. } => {
@@ -838,6 +886,11 @@ pub(super) fn evidence_nodes(root: &SummaryNode) -> (Vec<&SummaryNode>, Vec<&Sum
                 }
             }
             SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::BinaryOp {
+                lhs: left,
+                rhs: right,
+                ..
+            }
             | SummaryExpr::SummaryJoin {
                 outer: left,
                 inner: right,
@@ -1184,6 +1237,10 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
                     .ok_or(AnalyticalCostError::Overflow)?;
                 visit(left, seen, counts)?;
                 visit(right, seen, counts)?;
+            }
+            SummaryExpr::BinaryOp { lhs, rhs, .. } => {
+                visit(lhs, seen, counts)?;
+                visit(rhs, seen, counts)?;
             }
             SummaryExpr::SummaryDelete { summary_input, .. } => {
                 counts.deletes_per_update = counts

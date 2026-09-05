@@ -58,6 +58,23 @@ fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
         .dtype
 }
 
+fn lower_and_realize(query: &str) -> Rc<SummaryNode> {
+    let pre = lower_promql(query, AccuracyTarget::Exact).expect("lowering failed");
+    realize(&pre).expect("binding failed")
+}
+
+#[test]
+fn promql_binary_arithmetic_retains_two_summary_leaves() {
+    for op in ["+", "-", "*", "/", "%", "^", "atan2"] {
+        let root = lower_and_realize(&format!("rate(a[1m]) {op} rate(b[1m])"));
+        let SummaryExpr::BinaryOp { lhs, rhs, .. } = &root.expr else {
+            panic!("expected BinaryOp for {op}, got {:?}", root.expr);
+        };
+        assert!(matches!(lhs.expr, SummaryExpr::SummaryAgg { .. }));
+        assert!(matches!(rhs.expr, SummaryExpr::SummaryAgg { .. }));
+    }
+}
+
 struct SeparatedTopK;
 
 impl AccuracyEvidenceProvider for SeparatedTopK {
@@ -76,6 +93,65 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
             })
             .unwrap_or_default()
     }
+}
+
+#[test]
+fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
+    for query in ["rate(a[1m]) / 2", "2 / rate(a[1m])"] {
+        let root = lower_and_realize(query);
+        let SummaryExpr::BinaryOp { lhs, rhs, .. } = &root.expr else {
+            panic!("expected BinaryOp for {query}, got {:?}", root.expr);
+        };
+        assert!(matches!(
+            lhs.expr,
+            SummaryExpr::SummaryAgg { .. } | SummaryExpr::KeepPreAsap(_)
+        ));
+        assert!(matches!(
+            rhs.expr,
+            SummaryExpr::SummaryAgg { .. } | SummaryExpr::KeepPreAsap(_)
+        ));
+        assert!(
+            matches!(lhs.expr, SummaryExpr::SummaryAgg { .. })
+                || matches!(rhs.expr, SummaryExpr::SummaryAgg { .. })
+        );
+    }
+}
+
+#[test]
+fn promql_binary_arithmetic_falls_back_as_a_whole_for_unsupported_arm() {
+    let root = lower_and_realize("rate(a[1m]) + avg_over_time(b[1m])");
+    assert!(matches!(root.expr, SummaryExpr::KeepPreAsap(_)));
+}
+
+#[test]
+fn promql_binary_arithmetic_preserves_nested_structure_and_rejects_modifiers() {
+    let nested = lower_and_realize("(rate(a[1m]) + rate(b[1m])) / 2");
+    let SummaryExpr::BinaryOp { lhs, .. } = &nested.expr else {
+        panic!("expected outer BinaryOp, got {:?}", nested.expr);
+    };
+    assert!(matches!(lhs.expr, SummaryExpr::BinaryOp { .. }));
+
+    let modified = lower_and_realize("rate(a[1m]) + on(job) rate(b[1m])");
+    assert!(matches!(modified.expr, SummaryExpr::KeepPreAsap(_)));
+}
+
+#[test]
+fn promql_binary_arithmetic_never_relabels_approximate_children_as_exact() {
+    let pre = lower_promql(
+        "quantile_over_time(0.9, a[1m]) + quantile_over_time(0.9, b[1m])",
+        AccuracyTarget::Epsilon(0.01),
+    )
+    .expect("lowering failed");
+    let root = realize(&pre).expect("binding failed");
+    let SummaryExpr::BinaryOp { lhs, rhs, .. } = &root.expr else {
+        panic!("expected BinaryOp, got {:?}", root.expr);
+    };
+    assert!(lhs.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
+    assert!(rhs.guarantee.as_ref().is_some_and(|g| !g.is_exact()));
+    assert!(
+        root.guarantee.is_none(),
+        "unknown composed error must fail closed"
+    );
 }
 
 #[test]

@@ -52,7 +52,7 @@ pub fn lower_query_physical_dag(
 ) -> Result<EvidenceBackedPhysicalDag, AnalyticalCostError> {
     use std::collections::HashMap;
 
-    use asap_types::pre_asap::{GroupKeys, QueryExpr, SetOpKind};
+    use asap_types::pre_asap::{GroupKeys, QueryExpr, RelationalSetOpKind};
 
     scope.validate()?;
 
@@ -701,7 +701,7 @@ pub fn lower_query_physical_dag(
                     self.lower_concat(query, occurrence, child_ids)
                 }
                 QueryExpr::SetOp {
-                    kind: SetOpKind::Union,
+                    kind: RelationalSetOpKind::Union,
                     all: true,
                     left,
                     right,
@@ -1024,15 +1024,14 @@ fn duration_millis(
 fn promql_binary_operation(
     operation: &asap_types::pre_asap::BinaryOpKind,
 ) -> PromqlBinaryOperation {
-    use asap_types::pre_asap::BinaryOpKind;
+    use asap_types::pre_asap::{BinaryOpKind, PromQLVectorSetOpKind};
     match operation {
-        BinaryOpKind::And => PromqlBinaryOperation::And,
-        BinaryOpKind::Or => PromqlBinaryOperation::Or,
-        BinaryOpKind::Unless => PromqlBinaryOperation::Unless,
-        BinaryOpKind::Arithmetic(_)
-        | BinaryOpKind::Compare(_)
-        | BinaryOpKind::Pow
-        | BinaryOpKind::Atan2 => PromqlBinaryOperation::ArithmeticOrComparison,
+        BinaryOpKind::Set(PromQLVectorSetOpKind::And) => PromqlBinaryOperation::And,
+        BinaryOpKind::Set(PromQLVectorSetOpKind::Or) => PromqlBinaryOperation::Or,
+        BinaryOpKind::Set(PromQLVectorSetOpKind::Unless) => PromqlBinaryOperation::Unless,
+        BinaryOpKind::Arithmetic(_) | BinaryOpKind::Compare(_) => {
+            PromqlBinaryOperation::ArithmeticOrComparison
+        }
     }
 }
 
@@ -1918,7 +1917,7 @@ mod tests {
     #[test]
     fn query_lowering_maps_concat_and_union_all_but_rejects_distinct_set_ops() {
         use asap_types::pre_asap::{Column, DataType, Schema};
-        use asap_types::pre_asap::{QueryExpr, SetOpKind, Source};
+        use asap_types::pre_asap::{QueryExpr, RelationalSetOpKind, Source};
         use std::rc::Rc;
 
         let scan = |name: &str| QueryExpr::Scan {
@@ -1929,7 +1928,7 @@ mod tests {
             schema: Schema::new(vec![Column::new("id", DataType::Int64, false)]),
         };
         let union = Rc::new(QueryExpr::SetOp {
-            kind: SetOpKind::Union,
+            kind: RelationalSetOpKind::Union,
             all: true,
             left: Rc::new(scan("a")),
             right: Rc::new(scan("b")),
@@ -1985,7 +1984,7 @@ mod tests {
         assert_eq!(dag.nodes.last().unwrap().operator, PhysicalOperator::Concat);
 
         let distinct_union = Rc::new(QueryExpr::SetOp {
-            kind: SetOpKind::Union,
+            kind: RelationalSetOpKind::Union,
             all: false,
             left: Rc::new(scan("a")),
             right: Rc::new(scan("b")),

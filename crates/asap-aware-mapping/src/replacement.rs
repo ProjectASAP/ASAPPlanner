@@ -357,7 +357,7 @@ use asap_types::post_asap::{
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::query_expr::{QueryExpr, QueryExprError, Reduction};
+use asap_types::pre_asap::query_expr::{BinaryOpKind, QueryExpr, QueryExprError, Reduction};
 use asap_types::pre_asap::schema::Schema;
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{QueryRecurrence, QueryWorkload, RepeatedDemand};
@@ -1263,6 +1263,17 @@ impl<'a> SketchAlgorithmStrategy<'a> {
     /// differs — see [`realize_child_with`]).
     fn propose_with(&self, root: &Rc<QueryExpr>, intent_override: Option<&AggIntent>) -> Proposals {
         let mut proposals = Proposals::default();
+        if intent_override.is_none() && is_supported_exact_binary(root) {
+            if let Ok(Some(node)) = realize_binary(root, self.models, None) {
+                proposals.candidates.push(ReplacementSubDAG {
+                    replacement: Replacement::Summary(node),
+                    strategy: "SketchAlgorithmStrategy",
+                    provenance: ReplacementProvenance::SummaryImplementation,
+                    rationale: "preserve exact PromQL arithmetic over independently realized summary operands".into(),
+                });
+            }
+            return proposals;
+        }
         let Some(declared) = bindable_intent(root) else {
             return proposals;
         };
@@ -1416,7 +1427,7 @@ fn aggregate_child(node: &QueryExpr) -> Option<&Rc<QueryExpr>> {
 
 impl ReplacementStrategy for SketchAlgorithmStrategy<'_> {
     fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
-        bindable_intent(target.root).is_some()
+        bindable_intent(target.root).is_some() || is_supported_exact_binary(target.root)
     }
 
     fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
@@ -1531,6 +1542,9 @@ pub(crate) fn realize_child_with(
     models: Models<'_>,
     end_to_end_target: Option<&AccuracyTarget>,
 ) -> Result<Rc<SummaryNode>, ImplementError> {
+    if let Some(composed) = realize_binary(root, models, end_to_end_target)? {
+        return Ok(composed);
+    }
     let overridden = end_to_end_target.and_then(|target| {
         let declared = bindable_intent(root)?;
         match accuracy_target(declared) {
@@ -1562,6 +1576,146 @@ pub(crate) fn realize_child_with(
         // pre-ASAP subtree, executed exactly.
         None => keep_pre_asap(root),
     }
+}
+
+/// Preserve an exact arithmetic root while allowing each vector operand to
+/// select its own summary implementation. If either vector arm cannot be
+/// accelerated, return `None` so the caller keeps the whole query exact;
+/// mixed raw/summary snapshots are never constructed.
+fn realize_binary(
+    root: &Rc<QueryExpr>,
+    models: Models<'_>,
+    end_to_end_target: Option<&AccuracyTarget>,
+) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
+    let QueryExpr::BinaryOp {
+        op,
+        lhs,
+        rhs,
+        vector_match,
+    } = root.as_ref()
+    else {
+        return Ok(None);
+    };
+    if !matches!(op, BinaryOpKind::Arithmetic(_)) || vector_match.is_some() {
+        return Ok(None);
+    }
+
+    let lhs_scalar = is_promql_scalar(lhs);
+    let rhs_scalar = is_promql_scalar(rhs);
+    if lhs_scalar && rhs_scalar {
+        return Ok(None);
+    }
+
+    let mut lhs_node = realize_binary_operand(lhs, models, None)?;
+    let mut rhs_node = realize_binary_operand(rhs, models, None)?;
+
+    if let Some(target) = end_to_end_target {
+        let operand_guarantees = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()];
+        if operand_guarantees.iter().any(Option::is_none) {
+            return Ok(None);
+        }
+        let approximate = operand_guarantees
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, guarantee)| {
+                guarantee
+                    .filter(|guarantee| !guarantee.is_exact())
+                    .map(|guarantee| (index, guarantee.metric))
+            })
+            .collect::<Vec<_>>();
+        if !approximate.is_empty() {
+            let metric = approximate[0].1;
+            if approximate
+                .iter()
+                .any(|(_, candidate)| *candidate != metric)
+            {
+                return Ok(None);
+            }
+            let shape = CompositionShape {
+                metric,
+                approximate_layer_count: approximate.len(),
+            };
+            let Some(allocation) = models
+                .allocator
+                .allocations(target, &shape)
+                .into_iter()
+                .next()
+            else {
+                return Ok(None);
+            };
+            for ((operand_index, _), local_target) in
+                approximate.into_iter().zip(allocation.layers.iter())
+            {
+                if operand_index == 0 {
+                    lhs_node = realize_binary_operand(lhs, models, Some(local_target))?;
+                } else {
+                    rhs_node = realize_binary_operand(rhs, models, Some(local_target))?;
+                }
+            }
+        }
+    }
+    let lhs_accelerated = lhs_scalar || !matches!(lhs_node.expr, SummaryExpr::KeepPreAsap(_));
+    let rhs_accelerated = rhs_scalar || !matches!(rhs_node.expr, SummaryExpr::KeepPreAsap(_));
+    if !lhs_accelerated || !rhs_accelerated {
+        return Ok(None);
+    }
+
+    let guarantee = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()]
+        .into_iter()
+        .all(|guarantee| guarantee.is_some_and(ResultGuarantee::is_exact))
+        .then(|| ResultGuarantee::exact("BinaryOp over exact operands"));
+
+    Ok(Some(Rc::new(SummaryNode {
+        expr: SummaryExpr::BinaryOp {
+            lhs: lhs_node,
+            rhs: rhs_node,
+            operator: asap_types::post_asap::BinaryOperator {
+                kind: op.clone(),
+                vector_match: vector_match.clone(),
+            },
+        },
+        schema: lift(&root.output_schema()?),
+        // Exact arithmetic does not erase approximation error. Until the
+        // accuracy algebra has an operator-specific rule (and any value-range
+        // evidence needed by multiplication/division), unknown stays unknown.
+        guarantee,
+    })))
+}
+
+fn is_supported_exact_binary(root: &QueryExpr) -> bool {
+    matches!(
+        root,
+        QueryExpr::BinaryOp {
+            op: BinaryOpKind::Arithmetic(_),
+            vector_match: None,
+            ..
+        }
+    )
+}
+
+fn is_promql_scalar(expr: &QueryExpr) -> bool {
+    matches!(
+        expr,
+        QueryExpr::PromqlScalarBridge(_) | QueryExpr::Literal(_)
+    )
+}
+
+fn realize_binary_operand(
+    operand: &Rc<QueryExpr>,
+    models: Models<'_>,
+    end_to_end_target: Option<&AccuracyTarget>,
+) -> Result<Rc<SummaryNode>, ImplementError> {
+    if is_promql_scalar(operand) {
+        return Ok(Rc::new(SummaryNode {
+            expr: SummaryExpr::KeepPreAsap(Rc::clone(operand)),
+            schema: SummarySchema {
+                fields: Vec::new(),
+                time_index: None,
+            },
+            guarantee: Some(ResultGuarantee::exact("PromQL scalar")),
+        }));
+    }
+    realize_child_with(operand, models, end_to_end_target)
 }
 
 /// `intent` with its `AccuracyTarget` replaced by `target` — a no-op for an

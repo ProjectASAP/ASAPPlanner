@@ -3,7 +3,7 @@ use std::rc::Rc;
 use super::guarantee::ResultGuarantee;
 use super::schema::{SummaryFamilyType, SummarySchema};
 use super::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
-use crate::pre_asap::{ColumnRef, QueryExpr, Reduction};
+use crate::pre_asap::{BinaryOpKind, ColumnRef, QueryExpr, Reduction, VectorMatch};
 
 // ── Post-ASAP DAG node ───────────────────────────────────────────────────────
 
@@ -47,6 +47,15 @@ pub enum SummaryExpr {
     /// the inner node's schema, lifted to `SummarySchema` with all fields as
     /// `SummaryFamilyType::Plain`.
     KeepPreAsap(Rc<QueryExpr>),
+
+    /// A PromQL binary operation whose operands were planned independently.
+    /// This keeps realizable summary/readout leaves visible instead of
+    /// hiding the complete expression inside `KeepPreAsap`.
+    BinaryOp {
+        lhs: Rc<SummaryNode>,
+        rhs: Rc<SummaryNode>,
+        operator: BinaryOperator,
+    },
 
     /// Summary aggregation. Post-ASAP binding chose `family` — which
     /// summary family (exact accumulator, sketch, sample, wavelet, or
@@ -136,4 +145,14 @@ pub enum SummaryExpr {
     /// allocator (not modeled in this crate) on cut edges.
     /// Output schema: one field (same family + params as inputs).
     SummaryMerge { children: Vec<Rc<SummaryNode>> },
+}
+
+/// All semantics owned by a post-ASAP binary operator.
+#[derive(Debug, Clone)]
+pub struct BinaryOperator {
+    pub kind: BinaryOpKind,
+    /// `None` is the only currently supported vector/vector matching mode.
+    /// The field is retained so execution never has to recover semantics by
+    /// re-parsing PromQL.
+    pub vector_match: Option<VectorMatch>,
 }

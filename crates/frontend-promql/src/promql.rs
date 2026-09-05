@@ -66,8 +66,9 @@ use promql_parser::parser::{
 
 use asap_types::pre_asap::agg_intent::{topk, AggIntent, MathFunc, TimeFunc};
 use asap_types::pre_asap::query_expr::{
-    AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, Reduction, SortKey, Source,
-    TimeShift, UnresolvedQueryExpr as Unresolved, VectorGrouping, VectorMatch, VectorMatchKind,
+    AtModifier, BinaryOpKind, GroupKeys, GroupSide, Predicate, PromQLVectorSetOpKind, Reduction,
+    SortKey, Source, TimeShift, UnresolvedQueryExpr as Unresolved, VectorGrouping, VectorMatch,
+    VectorMatchKind,
 };
 use asap_types::pre_asap::{
     ArithmeticOpKind, ColumnRef, CompareOpKind, InfoMatcher, SampleKind, ScalarValue,
@@ -1995,9 +1996,9 @@ fn binop(id: token::TokenId) -> Result<BinaryOpKind> {
     } else if id == token::T_MOD {
         BinaryOpKind::Arithmetic(ArithmeticOpKind::Mod)
     } else if id == token::T_POW {
-        BinaryOpKind::Pow
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Pow)
     } else if id == token::T_ATAN2 {
-        BinaryOpKind::Atan2
+        BinaryOpKind::Arithmetic(ArithmeticOpKind::Atan2)
     } else if id == token::T_EQLC {
         BinaryOpKind::Compare(CompareOpKind::Eq)
     } else if id == token::T_NEQ {
@@ -2011,11 +2012,11 @@ fn binop(id: token::TokenId) -> Result<BinaryOpKind> {
     } else if id == token::T_GTE {
         BinaryOpKind::Compare(CompareOpKind::Ge)
     } else if id == token::T_LAND {
-        BinaryOpKind::And
+        BinaryOpKind::Set(PromQLVectorSetOpKind::And)
     } else if id == token::T_LOR {
-        BinaryOpKind::Or
+        BinaryOpKind::Set(PromQLVectorSetOpKind::Or)
     } else if id == token::T_LUNLESS {
-        BinaryOpKind::Unless
+        BinaryOpKind::Set(PromQLVectorSetOpKind::Unless)
     } else {
         return Err(LoweringError::UnsupportedFeature(format!(
             "binary operator token {id}"

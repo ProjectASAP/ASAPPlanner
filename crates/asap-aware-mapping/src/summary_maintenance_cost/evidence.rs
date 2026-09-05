@@ -176,6 +176,8 @@ pub struct SummaryOperatorResourceEvidence {
 /// cannot be attached to merge, subtract, or readout nodes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamingSummaryOperatorEvidence {
+    /// Exact query-time arithmetic over two independently realized operands.
+    Binary(SummaryOperatorResourceEvidence),
     Merge(SummaryOperatorResourceEvidence),
     Subtract(SummaryOperatorResourceEvidence),
     Delete {
@@ -189,7 +191,8 @@ pub enum StreamingSummaryOperatorEvidence {
 impl StreamingSummaryOperatorEvidence {
     pub(super) fn resource(&self) -> &SummaryOperatorResourceEvidence {
         match self {
-            Self::Merge(resource)
+            Self::Binary(resource)
+            | Self::Merge(resource)
             | Self::Subtract(resource)
             | Self::Delete { resource, .. }
             | Self::Readout(resource) => resource,
@@ -199,7 +202,8 @@ impl StreamingSummaryOperatorEvidence {
     #[cfg(test)]
     pub(super) fn resource_mut(&mut self) -> &mut SummaryOperatorResourceEvidence {
         match self {
-            Self::Merge(resource)
+            Self::Binary(resource)
+            | Self::Merge(resource)
             | Self::Subtract(resource)
             | Self::Delete { resource, .. }
             | Self::Readout(resource) => resource,
@@ -290,6 +294,9 @@ pub(super) fn summary_operation_evidence<'a>(
     let matches = matches!(
         (&node.expr, operation),
         (
+            SummaryExpr::BinaryOp { .. },
+            StreamingSummaryOperatorEvidence::Binary(_)
+        ) | (
             SummaryExpr::SummaryMerge { .. },
             StreamingSummaryOperatorEvidence::Merge(_)
         ) | (

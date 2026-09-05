@@ -15,7 +15,8 @@ use asap_frontend_promql::lower_promql;
 use asap_integration_tests::fixtures::metric_schema;
 use asap_types::pre_asap::{
     AggIntent, ArithmeticOpKind, AtModifier, BinaryOpKind, CompareOpKind, GroupKeys, Predicate,
-    QueryExpr, Reduction, ScalarValue, Source, TimeShift, VectorMatch, VectorMatchKind,
+    PromQLVectorSetOpKind, QueryExpr, Reduction, ScalarValue, Source, TimeShift, VectorMatch,
+    VectorMatchKind,
 };
 use asap_types::types::AccuracyTarget;
 
@@ -234,7 +235,7 @@ fn q52_outer_name_label_over_binary_op() {
         vec![3], // __name__
         AggIntent::Sum { col: None },
         QueryExpr::BinaryOp {
-            op: BinaryOpKind::Or,
+            op: BinaryOpKind::Set(PromQLVectorSetOpKind::Or),
             lhs: Rc::new(side("metric_a", "1")),
             rhs: Rc::new(side("metric_b", "2")),
             vector_match: Some(VectorMatch {
