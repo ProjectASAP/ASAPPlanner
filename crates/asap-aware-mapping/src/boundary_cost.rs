@@ -63,6 +63,15 @@ pub struct BoundaryProfile {
     pub observed_at_ms: u64,
     pub valid_until_ms: u64,
     pub calibration: BoundaryCalibration,
+    pub plans: Vec<BoundaryPlanEvidence>,
+}
+
+/// Boundaries belong to a complete alternative: a producer's consumers may
+/// differ between plans even when its physical identity is unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoundaryPlanEvidence {
+    pub root: String,
     pub nodes: HashMap<String, BoundaryNodeEvidence>,
 }
 
@@ -151,6 +160,28 @@ pub fn estimate_boundaries(
     {
         return Err(AnalyticalCostError::MissingOrStale("boundary profile"));
     }
+    let mut matching_plans = profile.plans.iter().filter(|plan| {
+        plan.root == dag.root
+            && plan.nodes.len() == dag.nodes.len()
+            && dag.nodes.iter().all(|node| {
+                plan.nodes.get(&node.id).is_some_and(|evidence| {
+                    evidence.node == *node
+                        && dag.evidence.get(&node.id).is_some_and(|physical| {
+                            physical.physical_id == node.id
+                                && physical.output_buffer_bytes == node.output_buffer_bytes
+                                && evidence.statistics == physical.statistics
+                        })
+                })
+            })
+    });
+    let plan = matching_plans
+        .next()
+        .ok_or(AnalyticalCostError::MissingOrStale(
+            "boundary physical plan",
+        ))?;
+    if matching_plans.next().is_some() {
+        return Err(invalid("ambiguous boundary physical plan"));
+    }
     let by_id: HashMap<_, _> = dag
         .nodes
         .iter()
@@ -168,14 +199,7 @@ pub fn estimate_boundaries(
     let mut per_boundary = HashMap::new();
     for id in &reachable {
         let node = by_id[id];
-        let evidence = profile.nodes.get(*id).ok_or_else(|| {
-            AnalyticalCostError::MissingOperatorStatistics(format!("boundary:{id}"))
-        })?;
-        if evidence.node != *node || evidence.statistics != dag.evidence[*id].statistics {
-            return Err(invalid(
-                "boundary evidence differs from physical node snapshot",
-            ));
-        }
+        let evidence = &plan.nodes[*id];
         let mut local = BoundaryResources::default();
         for boundary in &evidence.boundaries {
             if boundary.id.trim().is_empty() || per_boundary.contains_key(&boundary.id) {

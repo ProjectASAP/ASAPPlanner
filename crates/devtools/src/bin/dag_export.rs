@@ -1824,21 +1824,28 @@ mod tests {
                 cost_per_network_byte: 1.0,
                 cost_per_materialization_byte: 1.0,
             },
-            nodes: std::collections::HashMap::new(),
+            plans: vec![],
         };
         for dag in [&raw, &candidate_dag] {
-            for node in &dag.nodes {
-                profile.nodes.insert(
-                    node.id.clone(),
-                    BoundaryNodeEvidence {
-                        node: node.clone(),
-                        statistics: dag.evidence[&node.id].statistics.clone(),
-                        boundaries: vec![],
-                    },
-                );
-            }
+            profile.plans.push(BoundaryPlanEvidence {
+                root: dag.root.clone(),
+                nodes: dag
+                    .nodes
+                    .iter()
+                    .map(|node| {
+                        (
+                            node.id.clone(),
+                            BoundaryNodeEvidence {
+                                node: node.clone(),
+                                statistics: dag.evidence[&node.id].statistics.clone(),
+                                boundaries: vec![],
+                            },
+                        )
+                    })
+                    .collect(),
+            });
         }
-        profile
+        profile.plans[1]
             .nodes
             .get_mut("summary-read")
             .unwrap()
@@ -1894,6 +1901,25 @@ mod tests {
             selected.evidence_version.as_deref(),
             Some("test-evidence-v1")
         );
+        let mut boundary_only = parsed.clone();
+        boundary_only.calibration.cost_per_cpu_op = 0.0;
+        boundary_only.calibration.cost_per_scan_byte = 0.0;
+        boundary_only.calibration.cost_per_retained_byte = 0.0;
+        let (baseline, selected, _) = ExportPlannerCostModel {
+            document: &boundary_only,
+        }
+        .annotations(&candidate, &root);
+        assert_eq!(baseline.value, Some(0.0));
+        assert_eq!(selected.value, Some(12_000.0));
+
+        let mut ambiguous = parsed.clone();
+        let plans = &mut ambiguous.boundaries.as_mut().unwrap().plans;
+        plans.push(plans[0].clone());
+        let model = ExportPlannerCostModel {
+            document: &ambiguous,
+        };
+        assert!(model.candidate_cost(&candidate, &target).is_none());
+        assert!(model.annotations(&candidate, &root).0.value.is_none());
         document
             .boundaries
             .as_mut()
@@ -1905,10 +1931,7 @@ mod tests {
         }
         .candidate_cost(&candidate, &target)
         .is_none());
-        document
-            .boundaries
-            .as_mut()
-            .unwrap()
+        document.boundaries.as_mut().unwrap().plans[0]
             .nodes
             .remove(&raw.root);
         assert!(ExportPlannerCostModel {

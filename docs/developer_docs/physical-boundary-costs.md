@@ -5,12 +5,15 @@ immutable `PhysicalEvidenceSnapshot`. `dag_export --planner-cost-json` accepts
 the same profile in a top-level `boundaries` field. With no profile, these
 dimensions remain unestimated and the existing resource objective is preserved.
 
-The profile is supplementary physical-plan binding: each entry supplies the
-complete physical node, its authoritative statistics, and an explicit list of
-boundary actions on its output. Every reachable node needs an entry; an empty
-list declares ordinary in-memory dataflow with no boundary traffic. The full
-node/statistics match prevents rebinding evidence to a different operator with
-the same ID. Additional entries may describe other candidate plans. Evidence
+The profile's `plans` list binds boundaries to complete physical alternatives.
+Each plan supplies its `root` and a `nodes` map containing every physical node,
+its authoritative statistics, and an explicit list of boundary actions on its
+output. An empty boundary list declares ordinary in-memory dataflow with no
+boundary traffic. Exactly one plan must match the root, complete node set, and
+node/statistics snapshot; missing or ambiguous matches fail closed. This lets
+alternatives reuse a producer identity while declaring different transfers to
+their respective consumers. All alternatives share the profile's immutable
+evidence generation and calibration. Evidence
 must match the immutable snapshot version and be current at planning time:
 `observed_at_ms <= planning_time < valid_until_ms`.
 
@@ -52,6 +55,9 @@ A `BoundaryCalibration` supplies finite, nonnegative cost coefficients in the
 same cost units as the base resource model, and a nonempty version. Both
 alternatives use that profile when ranking. This models byte work, not transfer
 latency, bandwidth contention, memory lifetime, or storage requests.
+Base CPU, scan, and retained-memory coefficients may all be zero when at least
+one boundary coefficient is positive. An absent boundary profile or an entirely
+zero objective remains unavailable for ranking.
 
 Annotations expose totals in `bytes`, plus terms named
 `physical_node:<id>:<dimension>` and `boundary:<id>:<dimension>`. The existing

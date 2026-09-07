@@ -148,20 +148,23 @@ fn profile(dag: &EvidenceBackedPhysicalDag) -> BoundaryProfile {
             cost_per_network_byte: 2.0,
             cost_per_materialization_byte: 3.0,
         },
-        nodes: dag
-            .nodes
-            .iter()
-            .map(|node| {
-                (
-                    node.id.clone(),
-                    BoundaryNodeEvidence {
-                        node: node.clone(),
-                        statistics: dag.evidence[&node.id].statistics.clone(),
-                        boundaries: vec![],
-                    },
-                )
-            })
-            .collect(),
+        plans: vec![BoundaryPlanEvidence {
+            root: dag.root.clone(),
+            nodes: dag
+                .nodes
+                .iter()
+                .map(|node| {
+                    (
+                        node.id.clone(),
+                        BoundaryNodeEvidence {
+                            node: node.clone(),
+                            statistics: dag.evidence[&node.id].statistics.clone(),
+                            boundaries: vec![],
+                        },
+                    )
+                })
+                .collect(),
+        }],
     }
 }
 
@@ -179,6 +182,86 @@ fn transfer(id: &str, consumer: Option<&str>) -> PhysicalBoundary {
     }
 }
 
+fn profiles_for_alternatives(dags: &[&EvidenceBackedPhysicalDag]) -> BoundaryProfile {
+    let mut combined = profile(dags[0]);
+    combined.plans.clear();
+    for dag in dags {
+        let mut alternative = profile(dag);
+        alternative.plans[0]
+            .nodes
+            .get_mut("scan")
+            .unwrap()
+            .boundaries = vec![transfer(&format!("wire-{}", dag.root), Some(&dag.root))];
+        combined.plans.extend(alternative.plans);
+    }
+    combined
+}
+
+// Alternative consumers may share a producer identity without sharing transfers.
+#[test]
+fn shared_producer_boundaries_are_scoped_to_each_alternative() {
+    let (dag, scope) = fixture();
+    let alternative = |root: &str| {
+        let mut value = dag.clone();
+        value.root = root.into();
+        value
+            .nodes
+            .retain(|node| node.id == "scan" || node.id == root);
+        value.evidence.retain(|id, _| id == "scan" || id == root);
+        value
+    };
+    let raw = alternative("left");
+    let candidate = alternative("right");
+    let profile = profiles_for_alternatives(&[&raw, &candidate]);
+    for plan in [&raw, &candidate] {
+        let estimate = estimate_boundaries(plan, &scope, &profile, "evidence-v1").unwrap();
+        assert_eq!(estimate.total.network_bytes, 240);
+        assert_eq!(estimate.per_boundary.len(), 1);
+        assert!(estimate
+            .per_boundary
+            .contains_key(&format!("wire-{}", plan.root)));
+    }
+}
+
+// A boundary binding must identify exactly one complete physical alternative.
+#[test]
+fn missing_ambiguous_and_mismatched_plan_bindings_are_rejected() {
+    let (dag, scope) = fixture();
+    for case in 0..6 {
+        let mut profile = profile(&dag);
+        match case {
+            0 => profile.plans.clear(),
+            1 => profile.plans.push(profile.plans[0].clone()),
+            2 => profile.plans[0].root = "left".into(),
+            3 => {
+                profile.plans[0].nodes.remove("left");
+            }
+            4 => {
+                profile.plans[0]
+                    .nodes
+                    .get_mut("scan")
+                    .unwrap()
+                    .node
+                    .execution = ExecutionMultiplicity::Once
+            }
+            5 => {
+                let OperatorStatistics::Scan {
+                    source_read_bytes, ..
+                } = &mut profile.plans[0].nodes.get_mut("scan").unwrap().statistics
+                else {
+                    unreachable!()
+                };
+                *source_read_bytes += 1;
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            estimate_boundaries(&dag, &scope, &profile, "evidence-v1").is_err(),
+            "case {case}"
+        );
+    }
+}
+
 // Ordinary in-memory edges contribute no traffic; shared transfers count once.
 #[test]
 fn memory_edges_are_free_and_shared_transfer_is_counted_once() {
@@ -190,7 +273,7 @@ fn memory_edges_are_free_and_shared_transfer_is_counted_once() {
             .total,
         BoundaryResources::default()
     );
-    profile
+    profile.plans[0]
         .nodes
         .get_mut("scan")
         .unwrap()
@@ -216,7 +299,7 @@ fn materialization_once_and_transfers_per_consumer_have_distinct_multiplicity() 
         medium: MaterializationMedium::Disk,
     };
     materialize.copies = 1;
-    profile.nodes.get_mut("scan").unwrap().boundaries = vec![
+    profile.plans[0].nodes.get_mut("scan").unwrap().boundaries = vec![
         materialize,
         transfer("left-wire", Some("left")),
         transfer("right-wire", Some("right")),
@@ -246,7 +329,7 @@ fn incompatible_boundary_evidence_is_rejected() {
                 }
             }
             5 => boundary.copies = u64::MAX,
-            6 => profile
+            6 => profile.plans[0]
                 .nodes
                 .get_mut("scan")
                 .unwrap()
@@ -254,7 +337,7 @@ fn incompatible_boundary_evidence_is_rejected() {
                 .push(boundary.clone()),
             _ => unreachable!(),
         }
-        profile
+        profile.plans[0]
             .nodes
             .get_mut("scan")
             .unwrap()
@@ -272,7 +355,7 @@ fn incompatible_boundary_evidence_is_rejected() {
 fn missing_stale_and_non_finite_evidence_is_rejected() {
     let (dag, scope) = fixture();
     let mut evidence = profile(&dag);
-    evidence.nodes.remove("left");
+    evidence.plans[0].nodes.remove("left");
     assert!(estimate_boundaries(&dag, &scope, &evidence, "evidence-v1").is_err());
     evidence = profile(&dag);
     evidence.valid_until_ms = 100;
