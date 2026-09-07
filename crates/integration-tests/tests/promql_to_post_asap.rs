@@ -243,6 +243,140 @@ fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() 
     }
 }
 
+/// Execute the ungrouped temporal TopK subset with exact state. This tests
+/// the emitted update contract, not sketch approximation or backend execution.
+fn execute_topk_reference(plan: &SummaryNode) -> Vec<(String, f64)> {
+    use std::collections::BTreeMap;
+    let SummaryExpr::SummaryEstimate {
+        summary_input,
+        query: SketchQuery::TopK { k },
+    } = &plan.expr
+    else {
+        panic!("expected TopK readout")
+    };
+    let SummaryExpr::SummaryAgg {
+        input,
+        child,
+        reduction,
+        ..
+    } = &summary_input.expr
+    else {
+        panic!("expected summary updates")
+    };
+    assert_eq!(reduction, &Reduction::by(vec![]));
+    let SummaryExpr::KeepPreAsap(raw) = &child.expr else {
+        panic!("expected fused raw input")
+    };
+    let QueryExpr::TimeRange { range, child } = raw.as_ref() else {
+        panic!("expected temporal input")
+    };
+    let QueryExpr::Scan {
+        source: asap_types::pre_asap::Source::TimeSeries { metric },
+        predicates,
+        ..
+    } = child.as_ref()
+    else {
+        panic!("expected metric scan")
+    };
+    assert!(
+        predicates.is_empty(),
+        "fixture executor does not support filters"
+    );
+    let Some(SummaryInputExpr::EntityIdentity(EntityIdentity::PromqlLabelSet { excluding })) =
+        &input.item
+    else {
+        panic!("expected PromQL item identity")
+    };
+    // api wins by sample count; worker wins by sum. Negative updates must
+    // subtract, and samples outside (evaluation - range, evaluation] cannot rank.
+    let samples = [
+        ("requests", "api", 10, 1.0),
+        ("requests", "api", 20, 2.0),
+        ("requests", "api", 30, 3.0),
+        ("requests", "api", 60, 4.0),
+        ("requests", "worker", 10, 150.0),
+        ("requests", "worker", 20, -50.0),
+        ("requests", "cron", 10, 10.0),
+        ("requests", "cron", 20, 10.0),
+        ("requests", "cron", 30, 10.0),
+        ("requests", "expired", 0, 10000.0),
+        ("requests", "future", 61, 10000.0),
+        ("other", "unrelated", 30, 10000.0),
+    ];
+    let mut totals = BTreeMap::<String, f64>::new();
+    for (name, job, timestamp, value) in samples {
+        if name != metric || timestamp <= 60_i64 - range.as_secs() as i64 || timestamp > 60 {
+            continue;
+        }
+        let labels = [("__name__", name), ("job", job)]
+            .into_iter()
+            .filter(|(label, _)| !excluding.contains(&ColumnRef::Named((*label).into())))
+            .map(|(label, value)| format!("{label}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let weight = match &input.weight {
+            SummaryInputExpr::Constant(weight) => *weight,
+            SummaryInputExpr::Column(ColumnRef::SampleValue) => value,
+            unsupported => panic!("unsupported fixture update: {unsupported:?}"),
+        };
+        *totals.entry(labels).or_default() += weight;
+    }
+    let mut ranked: Vec<_> = totals.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.truncate(*k);
+    ranked
+}
+
+#[test]
+fn planner_topk_reference_execution_matches_ground_truth() {
+    // Pin numeric results independently of the emitted IR: swapping weights,
+    // losing identity, changing the window, or dropping k changes the answer.
+    for (query, expected) in [
+        ("topk(1, count_over_time(requests[1m]))", vec![("api", 4.0)]),
+        (
+            "topk(2, count_over_time(requests[1m]))",
+            vec![("api", 4.0), ("cron", 3.0)],
+        ),
+        (
+            "topk(1, sum_over_time(requests[1m]))",
+            vec![("worker", 100.0)],
+        ),
+        (
+            "topk(2, sum_over_time(requests[1m]))",
+            vec![("worker", 100.0), ("cron", 30.0)],
+        ),
+    ] {
+        let pre = Rc::new(
+            lower_promql(
+                query,
+                AccuracyTarget::EpsilonDelta {
+                    epsilon: 0.01,
+                    delta: 0.01,
+                },
+            )
+            .unwrap(),
+        );
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &SeparatedTopK,
+        );
+        let candidates = strategy.replacements(&TargetSubDAG::new(&pre));
+        assert!(!candidates.is_empty(), "no plan for {query}");
+        for candidate in candidates {
+            let Replacement::Summary(plan) = candidate.replacement else {
+                panic!("expected summary plan for {query}")
+            };
+            let expected: Vec<_> = expected
+                .iter()
+                .map(|(job, score)| (format!("__name__=requests,job={job}"), *score))
+                .collect();
+            assert_eq!(execute_topk_reference(&plan), expected, "{query}");
+        }
+    }
+}
+
 /// `quantile(0.99, rate(http_requests_total[5m]))` at ε = 0.01:
 ///
 /// ```text
