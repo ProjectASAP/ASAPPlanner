@@ -46,7 +46,8 @@ pub struct CacheEvidence {
     pub result_cache: CacheCapacityEvidence,
     pub buffer_cache: CacheCapacityEvidence,
     /// Fraction of otherwise-resident result entries invalidated by arriving
-    /// data. Required for continuously ingesting data; ignored for `AtRest`.
+    /// data. Required for continuously ingesting data; `AtRest` permits only
+    /// zero or omitted invalidation evidence.
     pub result_invalidation_ratio: Option<f64>,
 }
 
@@ -59,7 +60,7 @@ pub struct CacheCapacityEvidence {
 
 #[derive(Debug, Clone, Copy)]
 struct ResolvedCacheProfile {
-    no_cache: bool,
+    integer_executions: Option<u64>,
     cpu_execution_factor: f64,
     scan_execution_factor: f64,
     result_hit_ratio: f64,
@@ -92,7 +93,7 @@ impl CacheProfile {
         }
         let Self::Evidence(evidence) = self else {
             return Ok(ResolvedCacheProfile {
-                no_cache: true,
+                integer_executions: Some(evaluation_count),
                 cpu_execution_factor: evaluation_count as f64,
                 scan_execution_factor: evaluation_count as f64,
                 result_hit_ratio: 0.0,
@@ -103,9 +104,9 @@ impl CacheProfile {
             .distinct_evaluations
             .checked_add(evidence.repeated_identical_evaluations)
             .ok_or(AnalyticalCostError::Overflow)?;
-        if declared != evaluation_count {
+        if declared != evaluation_count || evidence.distinct_evaluations == 0 {
             return Err(AnalyticalCostError::InvalidCacheEvidence(
-                "cache demand split does not equal evaluation count",
+                "cache demand requires an initial distinct evaluation and must sum to evaluation count",
             ));
         }
         fn residency(value: CacheCapacityEvidence) -> Result<f64, AnalyticalCostError> {
@@ -116,8 +117,26 @@ impl CacheProfile {
             }
             Ok((value.capacity_bytes as f64 / value.working_set_bytes as f64).min(1.0))
         }
+        if evidence
+            .result_invalidation_ratio
+            .is_some_and(|ratio| !ratio.is_finite() || !(0.0..=1.0).contains(&ratio))
+        {
+            return Err(AnalyticalCostError::InvalidCacheEvidence(
+                "result-cache invalidation ratio must be finite and in [0, 1]",
+            ));
+        }
         let invalidation = match data_arrival {
-            DataArrival::AtRest => 0.0,
+            DataArrival::AtRest => {
+                if evidence
+                    .result_invalidation_ratio
+                    .is_some_and(|ratio| ratio != 0.0)
+                {
+                    return Err(AnalyticalCostError::InvalidCacheEvidence(
+                        "at-rest data cannot invalidate cached results",
+                    ));
+                }
+                0.0
+            }
             DataArrival::ContinuouslyIngesting => evidence.result_invalidation_ratio.ok_or(
                 AnalyticalCostError::InvalidCacheEvidence(
                     "continuous ingestion requires result-cache invalidation evidence",
@@ -129,17 +148,22 @@ impl CacheProfile {
                 ));
             }
         };
-        if !invalidation.is_finite() || !(0.0..=1.0).contains(&invalidation) {
-            return Err(AnalyticalCostError::InvalidCacheEvidence(
-                "result-cache invalidation ratio must be finite and in [0, 1]",
-            ));
-        }
         let result_hit_ratio = residency(evidence.result_cache)? * (1.0 - invalidation);
         let buffer_hit_ratio = residency(evidence.buffer_cache)?;
         let cpu_execution_factor = evidence.distinct_evaluations as f64
             + evidence.repeated_identical_evaluations as f64 * (1.0 - result_hit_ratio);
         Ok(ResolvedCacheProfile {
-            no_cache: false,
+            integer_executions: if evidence.result_cache.capacity_bytes == 0 || invalidation == 1.0
+            {
+                Some(evaluation_count)
+            } else if evidence.result_cache.capacity_bytes
+                >= evidence.result_cache.working_set_bytes
+                && invalidation == 0.0
+            {
+                Some(evidence.distinct_evaluations)
+            } else {
+                None
+            },
             cpu_execution_factor,
             scan_execution_factor: cpu_execution_factor * (1.0 - buffer_hit_ratio),
             result_hit_ratio,
@@ -652,23 +676,28 @@ pub fn estimate_physical_dag_with_cache(
         let node = by_id[id];
         let local = estimate_operator(node.operator, resolved_statistics[id].clone())?;
         let (cpu_executions, scan_executions) = match node.execution {
-            ExecutionMultiplicity::Once => (1.0, 1.0),
+            ExecutionMultiplicity::Once => (1.0, 1.0 - cache.buffer_hit_ratio),
             ExecutionMultiplicity::PerEvaluation => {
                 (cache.cpu_execution_factor, cache.scan_execution_factor)
             }
         };
         cpu_ops += local.cpu_ops() * cpu_executions;
-        let local_scan = if cache.no_cache {
+        let integer_executions = match node.execution {
+            ExecutionMultiplicity::Once => Some(1),
+            ExecutionMultiplicity::PerEvaluation => cache.integer_executions,
+        };
+        let local_scan = if let Some(executions) =
+            integer_executions.filter(|_| cache.buffer_hit_ratio == 0.0)
+        {
             local
                 .scan_bytes()
-                .checked_mul(match node.execution {
-                    ExecutionMultiplicity::Once => 1,
-                    ExecutionMultiplicity::PerEvaluation => evaluation_count,
-                })
+                .checked_mul(executions)
                 .ok_or(AnalyticalCostError::Overflow)?
         } else {
             let adjusted = local.scan_bytes() as f64 * scan_executions;
-            if !adjusted.is_finite() || adjusted > u64::MAX as f64 {
+            // u64::MAX rounds up to 2^64 in f64. Equality is already outside
+            // the integer domain; casting it would silently saturate.
+            if !adjusted.is_finite() || adjusted >= u64::MAX as f64 {
                 return Err(AnalyticalCostError::Overflow);
             }
             adjusted.ceil() as u64
@@ -3768,5 +3797,103 @@ mod tests {
             profile.hit_ratios(6, DataArrival::ContinuouslyIngesting),
             Err(AnalyticalCostError::InvalidCacheEvidence(_))
         ));
+    }
+
+    // Cache-enabled I/O must keep exact integers and reject unrepresentable totals.
+    #[test]
+    fn cache_io_preserves_large_integer_bytes_and_detects_overflow() {
+        let (mut nodes, mut evidence) = cache_test_scan();
+        let mut scope = comparison_scope();
+        scope.horizon.0 = 20_000;
+        let mut cache = cache_profile(0, 0);
+        let CacheProfile::Evidence(inputs) = &mut cache else {
+            unreachable!()
+        };
+        inputs.distinct_evaluations = 1;
+        inputs.repeated_identical_evaluations = 1;
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = evidence.get_mut("scan").unwrap()
+        else {
+            unreachable!()
+        };
+        *source_read_bytes = 1_u64 << 63;
+        assert_eq!(
+            estimate_physical_dag_with_cache(&nodes, "scan", &scope, &evidence, &cache),
+            Err(AnalyticalCostError::Overflow)
+        );
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = evidence.get_mut("scan").unwrap()
+        else {
+            unreachable!()
+        };
+        *source_read_bytes = (1_u64 << 53) + 1;
+        nodes[0].execution = ExecutionMultiplicity::Once;
+        assert_eq!(
+            estimate_physical_dag_with_cache(&nodes, "scan", &scope, &evidence, &cache)
+                .unwrap()
+                .scan_bytes(),
+            (1_u64 << 53) + 1
+        );
+    }
+
+    // Repeated demand needs an initial evaluation; contradictory AtRest evidence is invalid.
+    #[test]
+    fn cache_evidence_rejects_impossible_demand_and_invalid_at_rest_invalidation() {
+        let mut cache = cache_profile(100, 0);
+        let CacheProfile::Evidence(inputs) = &mut cache else {
+            unreachable!()
+        };
+        inputs.distinct_evaluations = 0;
+        inputs.repeated_identical_evaluations = 6;
+        assert!(cache.hit_ratios(6, DataArrival::AtRest).is_err());
+        for ratio in [f64::NAN, f64::INFINITY, -1.0, 0.5] {
+            let mut cache = cache_profile(100, 0);
+            let CacheProfile::Evidence(inputs) = &mut cache else {
+                unreachable!()
+            };
+            inputs.result_invalidation_ratio = Some(ratio);
+            assert!(cache.hit_ratios(6, DataArrival::AtRest).is_err());
+        }
+    }
+
+    // Buffer residency affects source reads equally for raw scans and summary builds.
+    #[test]
+    fn buffer_cache_applies_to_build_once_scans_without_reducing_cpu() {
+        let (mut nodes, evidence) = cache_test_scan();
+        nodes[0].execution = ExecutionMultiplicity::Once;
+        let scope = comparison_scope();
+        let estimate = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(100, 50),
+        )
+        .unwrap();
+        assert_eq!(estimate.cpu_ops(), 100.0);
+        assert_eq!(estimate.scan_bytes(), 500);
+    }
+
+    // Declared invalidations bound otherwise-resident results under ingestion.
+    #[test]
+    fn streaming_invalidation_bounds_result_hits_and_changes_physical_work() {
+        let (nodes, evidence) = cache_test_scan();
+        let mut scope = comparison_scope();
+        scope.data_arrival = DataArrival::ContinuouslyIngesting;
+        let mut profile = cache_profile(100, 50);
+        let CacheProfile::Evidence(inputs) = &mut profile else {
+            unreachable!()
+        };
+        inputs.result_invalidation_ratio = Some(0.5);
+        let estimate =
+            estimate_physical_dag_with_cache(&nodes, "scan", &scope, &evidence, &profile).unwrap();
+        assert_eq!(
+            profile.hit_ratios(6, scope.data_arrival).unwrap(),
+            (0.5, 0.5)
+        );
+        assert_eq!(estimate.cpu_ops(), 400.0);
+        assert_eq!(estimate.scan_bytes(), 2_000);
     }
 }

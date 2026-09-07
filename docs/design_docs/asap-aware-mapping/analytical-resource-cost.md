@@ -118,11 +118,15 @@ already represented by the operator's local formula; active-window fan-out and
 the number of physical summary instances are separate inputs.
 
 Every evidence snapshot carries a named, versioned `CacheProfile`. The
-`no_cache_v1` profile preserves the original formulas exactly. A modeled
+`no-cache-v1` profile preserves the original formulas exactly. A modeled
 profile splits demand into distinct parameterizations and repeated-identical
 evaluations, and supplies working-set and capacity evidence independently for
-the result cache and buffer/page cache. Missing, zero, non-finite, or
-inconsistent evidence makes the estimate unavailable.
+the result cache and buffer/page cache. Working sets must be nonzero; zero
+capacity explicitly disables that cache. Missing, non-finite, or inconsistent
+evidence makes the estimate unavailable. At least one distinct evaluation is
+required: the result cache is filled by evaluations in this horizon. Buffer
+residency is a steady-state capacity/working-set model; it does not model
+cold-start warming or access order.
 
 Define `R = min(1, result_capacity / result_working_set)` and
 `B = min(1, buffer_capacity / buffer_working_set)`. For at-rest data the
@@ -136,7 +140,8 @@ scan_executions  = cpu_executions * (1 - B)
 ```
 
 Thus a result-cache hit elides both CPU and scans, while a buffer-cache hit
-elides only storage bytes. `Once` nodes remain one execution: retained summary
+elides only storage bytes, including scans used to build a summary. `Once`
+nodes remain one CPU execution: retained summary
 state is already in memory and is not charged a per-evaluation storage read.
 Raw and candidate plans must use the same cache profile. Its version is
 exported in `CostAnnotation.cache_profile` alongside formula and evidence
@@ -147,11 +152,11 @@ For physical node `n`, define:
 ```text
 cpu_executions(n)  = 1                    if n.execution = Once
                    = cache-adjusted CPU demand otherwise
-scan_executions(n) = 1                    if n.execution = Once
+scan_executions(n) = 1 - B                if n.execution = Once
                    = cache-adjusted scan demand otherwise
 
-total_cpu_ops  = sum(local_cpu_ops(n) * executions(n))
-total_scan     = sum(local_scan_bytes(n) * executions(n))
+total_cpu_ops  = sum(local_cpu_ops(n) * cpu_executions(n))
+total_scan     = sum(local_scan_bytes(n) * scan_executions(n))
 ```
 
 Memory is not multiplied by `executions(n)`. `peak_memory_bytes` is the maximum

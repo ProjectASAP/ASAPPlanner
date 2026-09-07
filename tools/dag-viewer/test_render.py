@@ -1,9 +1,5 @@
-"""Unit tests for render.py's data-merging and HTML-assembly logic --
-deliberately exercised without py_mini_racer or a browser (see render.py's
-own ad hoc py_mini_racer validation, not committed here, and PR #249's
-description for how the shared viewer.js/node-style.js logic itself was
-checked). These tests only cover what render.py adds on top of index.html:
-merging input files and correctly inlining/embedding into one HTML page.
+"""Tests for render.py's data merging and HTML assembly, plus viewer cache
+provenance checks executed with optional py_mini_racer (no browser required).
 
 Run with (from the repo root): python3 -m unittest discover -s tools/dag-viewer -p 'test_render.py'
 (or `cd tools/dag-viewer && python3 -m unittest test_render`, or
@@ -31,6 +27,11 @@ from pathlib import Path
 from render import _json_script, _semantic_label, load_workload, prepare_workload, render
 
 HERE = Path(__file__).resolve().parent
+
+try:
+    from py_mini_racer import py_mini_racer
+except ImportError:
+    py_mini_racer = None
 
 
 def named_graph(name: str, source: str = "SELECT 1") -> dict:
@@ -313,6 +314,70 @@ class MainCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("isn't valid JSON", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+
+
+@unittest.skipIf(py_mini_racer is None, "viewer tests require py_mini_racer")
+class ViewerCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.js = py_mini_racer.MiniRacer()
+        source = (HERE / "viewer.js").read_text()
+        for name in ["escapeHtml", "formatCostUnit", "formatBaselineRef",
+                     "formatCostNumber", "renderCostAnnotation",
+                     "computeSelectionWorkloadCost"]:
+            function = re.search(r"^function " + name + r"\(.*?^}", source, re.M | re.S)
+            self.assertIsNotNone(function, name)
+            self.js.eval(function.group(0))
+
+    @staticmethod
+    def query(profile, selected_profile=None, batch=0):
+        def annotation(value, cache):
+            result = {"value": value, "unit": "CostUnits", "source": "Modeled"}
+            if cache is not None:
+                result["cache_profile"] = cache
+            return result
+
+        return {"sourceBatch": batch, "post_graph": {"nodes": [{"decision": {
+            "id": 1,
+            "baseline_cost": annotation(10, profile),
+            "selected_cost": annotation(4, selected_profile or profile),
+        }}]}}
+
+    def test_cache_profile_and_inputs_are_rendered(self):
+        """The sidebar exposes the assumptions behind a cache-adjusted cost."""
+        annotation = self.query("warm-cache-v1")["post_graph"]["nodes"][0]["decision"]["baseline_cost"]
+        annotation["inputs"] = [{"name": "result_cache_hit_ratio", "value": 0.5, "unit": "ratio"}]
+        html = self.js.call("renderCostAnnotation", "Baseline", annotation)
+        self.assertIn("cache warm-cache-v1", html)
+        self.assertIn("result_cache_hit_ratio", html)
+        self.assertIn("0.5 ratio", html)
+
+    def test_same_cache_profile_aggregates_and_preserves_provenance(self):
+        """Comparable decisions total normally and retain their common profile."""
+        result = self.js.call("computeSelectionWorkloadCost", [self.query("warm-v1"), self.query("warm-v1", batch=1)])
+        self.assertEqual(result["baseline_cost"]["value"], 20)
+        self.assertEqual(result["benefit"]["value"], 12)
+        self.assertEqual(result["benefit"]["cache_profile"], "warm-v1")
+
+    def test_legacy_profiles_preserve_existing_totals(self):
+        """Models without cache provenance retain their existing aggregation."""
+        result = self.js.call("computeSelectionWorkloadCost", [self.query(None), self.query(None, batch=1)])
+        self.assertEqual(result["benefit"]["value"], 12)
+        self.assertIsNone(result["benefit"]["cache_profile"])
+
+    def test_different_or_mixed_cache_profiles_make_totals_unavailable(self):
+        """Selection totals cannot claim benefits across incompatible assumptions."""
+        cases = [
+            [self.query("cold-v1"), self.query("warm-v1", batch=1)],
+            [self.query("cold-v1", selected_profile="warm-v1")],
+            [self.query("warm-v1"), self.query(None, batch=1)],
+            [self.query(None), self.query("warm-v1", batch=1)],
+        ]
+        for queries in cases:
+            with self.subTest(queries=queries):
+                result = self.js.call("computeSelectionWorkloadCost", queries)
+                for annotation in result.values():
+                    self.assertIsNone(annotation["value"])
+                    self.assertEqual(annotation["source"], "Unavailable")
 
 
 if __name__ == "__main__":

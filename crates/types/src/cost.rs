@@ -326,7 +326,7 @@ where
     let mut missing_any = false;
     let mut model_versions: Vec<String> = Vec::new();
     let mut evidence_versions: Vec<String> = Vec::new();
-    let mut cache_profiles: Vec<String> = Vec::new();
+    let mut cache_profiles: Vec<Option<String>> = Vec::new();
 
     for (workload_node_id, annotation) in entries {
         if let Some(id) = workload_node_id {
@@ -364,10 +364,8 @@ where
                 evidence_versions.push(version.clone());
             }
         }
-        if let Some(profile) = &annotation.cache_profile {
-            if !cache_profiles.contains(profile) {
-                cache_profiles.push(profile.clone());
-            }
+        if !cache_profiles.contains(&annotation.cache_profile) {
+            cache_profiles.push(annotation.cache_profile.clone());
         }
     }
 
@@ -397,7 +395,7 @@ where
                 None
             },
             cache_profile: if cache_profiles.len() == 1 {
-                Some(cache_profiles.remove(0))
+                cache_profiles.remove(0)
             } else {
                 None
             },
@@ -446,6 +444,7 @@ where
         (Some(baseline_value), Some(selected_value))
             if baseline_cost.unit == selected_cost.unit
                 && baseline_cost.evidence_version == selected_cost.evidence_version
+                && baseline_cost.cache_profile == selected_cost.cache_profile
                 && !model_version.trim().is_empty() =>
         {
             let delta = baseline_value - selected_value;
@@ -540,6 +539,33 @@ mod tests {
 
         let unavailable = ann(3.0, CostUnit::CostUnits).with_cache_profile(" \t");
         assert_eq!(unavailable.source, CostSource::Unavailable);
+    }
+
+    // Totals and benefits must not combine known and incompatible/unknown cache assumptions.
+    #[test]
+    fn workload_cache_provenance_must_be_complete_and_equal() {
+        let raw = ann(10.0, CostUnit::CostUnits).with_cache_profile("no-cache-v1");
+        let warm = ann(1.0, CostUnit::CostUnits).with_cache_profile("warm-v1");
+        let unknown = ann(2.0, CostUnit::CostUnits);
+        assert_eq!(
+            sum_workload_costs([(None, &raw), (None, &unknown)])
+                .unwrap()
+                .value,
+            None
+        );
+        assert_eq!(
+            workload_cost_summary([(None, &raw, &warm)], "v1")
+                .unwrap()
+                .benefit
+                .value,
+            None
+        );
+        assert_eq!(
+            sum_workload_costs([(None, &raw), (None, &raw)])
+                .unwrap()
+                .cache_profile,
+            raw.cache_profile
+        );
     }
 
     #[test]

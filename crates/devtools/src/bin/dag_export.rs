@@ -126,6 +126,7 @@ struct ComparisonScopeEvidence {
     lookback_ms: Option<u64>,
     as_of_ms: Option<u64>,
     sources: Vec<asap_aware_mapping::physical_operator_statistics::SourceCoverage>,
+    #[serde(default = "CacheProfile::no_cache")]
     cache_profile: CacheProfile,
 }
 
@@ -411,8 +412,66 @@ impl ExportPlannerCostModel<'_> {
             return winner_cost_annotations();
         }
         let version = format!("{}+{}", ANALYTICAL_COST_MODEL_VERSION, calibration.version);
+        let scope = &provider.target.scope;
+        let Ok((result_hits, buffer_hits)) = scope
+            .cache_profile
+            .hit_ratios(scope.evaluation_count, scope.data_arrival)
+        else {
+            return winner_cost_annotations();
+        };
+        let input = |name: &str, value: f64, unit: &str| CostInput {
+            name: name.into(),
+            value,
+            unit: Some(unit.into()),
+        };
+        let mut cache_inputs = vec![
+            input(
+                "evaluation_count",
+                scope.evaluation_count as f64,
+                "evaluations",
+            ),
+            input("result_cache_hit_ratio", result_hits, "ratio"),
+            input("buffer_cache_hit_ratio", buffer_hits, "ratio"),
+        ];
+        if let CacheProfile::Evidence(evidence) = &scope.cache_profile {
+            cache_inputs.extend([
+                input(
+                    "distinct_evaluations",
+                    evidence.distinct_evaluations as f64,
+                    "evaluations",
+                ),
+                input(
+                    "repeated_identical_evaluations",
+                    evidence.repeated_identical_evaluations as f64,
+                    "evaluations",
+                ),
+                input(
+                    "result_cache_working_set",
+                    evidence.result_cache.working_set_bytes as f64,
+                    "bytes",
+                ),
+                input(
+                    "result_cache_capacity",
+                    evidence.result_cache.capacity_bytes as f64,
+                    "bytes",
+                ),
+                input(
+                    "buffer_cache_working_set",
+                    evidence.buffer_cache.working_set_bytes as f64,
+                    "bytes",
+                ),
+                input(
+                    "buffer_cache_capacity",
+                    evidence.buffer_cache.capacity_bytes as f64,
+                    "bytes",
+                ),
+            ]);
+            if let Some(ratio) = evidence.result_invalidation_ratio {
+                cache_inputs.push(input("result_cache_invalidation_ratio", ratio, "ratio"));
+            }
+        }
         let inputs = |resources: asap_aware_mapping::analytical_cost::ResourceEstimate| {
-            vec![
+            let mut inputs = vec![
                 CostInput {
                     name: "estimated_cpu_ops".into(),
                     value: resources.cpu_ops(),
@@ -428,7 +487,9 @@ impl ExportPlannerCostModel<'_> {
                     value: resources.scan_bytes() as f64,
                     unit: Some("bytes".into()),
                 },
-            ]
+            ];
+            inputs.extend(cache_inputs.iter().cloned());
+            inputs
         };
         let baseline = CostAnnotation::modeled(
             estimate.raw_cost.0,
@@ -1684,6 +1745,121 @@ mod tests {
             .iter()
             .any(|input| input.name == "estimated_scan"));
         assert!(!selected.inputs.iter().any(|input| input.name == "topk_k"));
+    }
+
+    #[test]
+    fn legacy_cache_json_defaults_to_named_no_cache_but_malformed_profiles_fail() {
+        // Existing evidence files keep their costs and acquire explicit provenance.
+        let (query, candidate, document) = cost_fixture();
+        let mut json = serde_json::to_value(&document).unwrap();
+        json["targets"][0]["scope"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_profile");
+        let parsed = parse_planner_cost_document(&json.to_string()).unwrap();
+        let target = Rc::new(query);
+        let legacy = ExportPlannerCostModel { document: &parsed }.annotations(&candidate, &target);
+        let explicit = ExportPlannerCostModel {
+            document: &document,
+        }
+        .annotations(&candidate, &target);
+        assert_eq!(legacy, explicit);
+        assert_eq!(legacy.0.cache_profile.as_deref(), Some("no-cache-v1"));
+        let exported = serde_json::to_value(legacy.0).unwrap();
+        assert_eq!(exported["cache_profile"], "no-cache-v1");
+
+        json["targets"][0]["scope"]["cache_profile"] = serde_json::json!({"profile": "evidence"});
+        assert!(parse_planner_cost_document(&json.to_string()).is_err());
+        json["targets"][0]["scope"]["cache_profile"] = serde_json::Value::Null;
+        assert!(parse_planner_cost_document(&json.to_string()).is_err());
+    }
+
+    #[test]
+    fn cache_json_affects_ranking_and_exports_declared_evidence() {
+        // Identical repeats hit the result cache; distinct evaluations still execute.
+        let (query, candidate, document) = cost_fixture();
+        let target_rc = Rc::new(query);
+        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&target_rc);
+        let no_cache = ExportPlannerCostModel {
+            document: &document,
+        }
+        .annotations(&candidate, &target_rc);
+        let mut json = serde_json::to_value(&document).unwrap();
+        json["targets"][0]["scope"]["cache_profile"] = serde_json::json!({
+            "profile": "evidence",
+            "version": "warm-cache-v1",
+            "distinct_evaluations": 2,
+            "repeated_identical_evaluations": 8,
+            "result_cache": {"working_set_bytes": 100, "capacity_bytes": 100},
+            "buffer_cache": {"working_set_bytes": 1000, "capacity_bytes": 500},
+            "result_invalidation_ratio": null
+        });
+        let parsed = parse_planner_cost_document(&json.to_string()).unwrap();
+        let model = ExportPlannerCostModel { document: &parsed };
+        let (baseline, selected, _) = model.annotations(&candidate, &target_rc);
+        let value = |annotation: &CostAnnotation, name: &str| {
+            annotation
+                .inputs
+                .iter()
+                .find(|input| input.name == name)
+                .unwrap()
+                .value
+        };
+        assert_eq!(
+            value(&baseline, "estimated_cpu_ops"),
+            value(&no_cache.0, "estimated_cpu_ops") * 0.2
+        );
+        assert_eq!(
+            value(&baseline, "estimated_scan"),
+            value(&no_cache.0, "estimated_scan") * 0.1
+        );
+        assert_eq!(value(&baseline, "result_cache_hit_ratio"), 1.0);
+        assert_eq!(value(&baseline, "buffer_cache_hit_ratio"), 0.5);
+        assert_eq!(value(&baseline, "distinct_evaluations"), 2.0);
+        assert_eq!(value(&baseline, "repeated_identical_evaluations"), 8.0);
+        assert_eq!(value(&baseline, "result_cache_working_set"), 100.0);
+        assert_eq!(value(&baseline, "buffer_cache_capacity"), 500.0);
+        assert_eq!(baseline.cache_profile.as_deref(), Some("warm-cache-v1"));
+        assert!(selected.value.unwrap() < no_cache.1.value.unwrap());
+        assert_eq!(
+            model.candidate_cost(&candidate, &target).unwrap().0,
+            selected.value.unwrap()
+        );
+        let exported = serde_json::to_value(&selected).unwrap();
+        assert_eq!(exported["cache_profile"], "warm-cache-v1");
+        assert!(exported["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|input| { input["name"] == "buffer_cache_capacity" && input["unit"] == "bytes" }));
+
+        json["targets"][0]["scope"]["cache_profile"]["distinct_evaluations"] = 10.into();
+        json["targets"][0]["scope"]["cache_profile"]["repeated_identical_evaluations"] = 0.into();
+        json["targets"][0]["scope"]["cache_profile"]["buffer_cache"]["capacity_bytes"] = 0.into();
+        let distinct = parse_planner_cost_document(&json.to_string()).unwrap();
+        let distinct = ExportPlannerCostModel {
+            document: &distinct,
+        }
+        .annotations(&candidate, &target_rc);
+        assert_eq!(distinct.0.value, no_cache.0.value);
+        assert_eq!(
+            value(&distinct.0, "estimated_cpu_ops"),
+            value(&no_cache.0, "estimated_cpu_ops")
+        );
+        assert_eq!(
+            value(&distinct.0, "estimated_scan"),
+            value(&no_cache.0, "estimated_scan")
+        );
+
+        json["targets"][0]["scope"]["cache_profile"]["distinct_evaluations"] = 9.into();
+        let invalid = parse_planner_cost_document(&json.to_string()).unwrap();
+        let invalid = ExportPlannerCostModel { document: &invalid };
+        assert!(invalid.candidate_cost(&candidate, &target).is_none());
+        assert!(invalid
+            .annotations(&candidate, &target_rc)
+            .0
+            .value
+            .is_none());
     }
 
     #[test]

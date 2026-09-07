@@ -723,6 +723,7 @@ function renderCostAnnotation(title, annotation) {
   const provenanceParts = [];
   if (annotation.model_version) provenanceParts.push(`model ${annotation.model_version}`);
   if (annotation.evidence_version) provenanceParts.push(`evidence ${annotation.evidence_version}`);
+  if (annotation.cache_profile) provenanceParts.push(`cache ${annotation.cache_profile}`);
   if (annotation.benchmark_id) provenanceParts.push(`benchmark ${annotation.benchmark_id}`);
   const inputsHtml = (annotation.inputs || []).length
     ? `<ul class="costInputs">${annotation.inputs.map((input) => `<li><span>${escapeHtml(input.name)}</span><span>${escapeHtml(String(input.value))}${input.unit ? ' ' + escapeHtml(input.unit) : ''}</span></li>`).join('')}</ul>`
@@ -790,6 +791,8 @@ function computeSelectionWorkloadCost(selected) {
   let selectedSum = 0;
   let any = false;
   let unavailable = false;
+  let cacheProfile = null;
+  let hasCacheProfile = false;
   for (const query of selected) {
     const nodes = (query.post_graph && query.post_graph.nodes) || [];
     for (const node of nodes) {
@@ -804,6 +807,17 @@ function computeSelectionWorkloadCost(selected) {
       if (unit === null) unit = baseline.unit;
       if (baseline.unit !== unit || selectedCost.unit !== unit) return null; // unit-incompatible aggregation is rejected
       any = true;
+      // Preserve legacy models without cache provenance, but never mix them
+      // with cache-aware estimates (matching Rust workload aggregation).
+      const profile = baseline.cache_profile ?? null;
+      if ((profile !== null && (typeof profile !== 'string' || !profile.trim()))
+          || (selectedCost.cache_profile ?? null) !== profile
+          || (hasCacheProfile && cacheProfile !== profile)) {
+        unavailable = true;
+      } else {
+        cacheProfile = profile;
+        hasCacheProfile = true;
+      }
       if (baseline.value === null || baseline.value === undefined || selectedCost.value === null || selectedCost.value === undefined) {
         unavailable = true;
         continue;
@@ -819,12 +833,13 @@ function computeSelectionWorkloadCost(selected) {
   }
   const delta = baselineSum - selectedSum;
   return {
-    baseline_cost: { value: baselineSum, unit, source: 'Modeled' },
-    selected_cost: { value: selectedSum, unit, source: 'Modeled' },
+    baseline_cost: { value: baselineSum, unit, source: 'Modeled', cache_profile: cacheProfile },
+    selected_cost: { value: selectedSum, unit, source: 'Modeled', cache_profile: cacheProfile },
     benefit: {
       value: delta,
       unit,
       source: 'Modeled',
+      cache_profile: cacheProfile,
       baseline: { kind: 'PreAsapRecomputation' },
       benefit_ratio: baselineSum > 0 ? delta / baselineSum : null,
     },
