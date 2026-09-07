@@ -1174,6 +1174,11 @@ request counts using the optional storage profile. See
 [storage operation estimates](../../developer_docs/storage-operation-costs.md)
 for units, formulas, evidence requirements, and calibration.
 
+The physical-plan adapter supports explicit network and materialization
+boundaries through optional deployment evidence. See
+[physical boundary estimates](../../developer_docs/physical-boundary-costs.md)
+for kinds, execution multiplicity, evidence, and calibration.
+
 An estimate is unavailable when required evidence, a physical formula, or a
 finite horizon is missing. Structural node counts are never substituted.
 
@@ -1181,7 +1186,7 @@ The current scalar includes CPU, retained memory, and source/disk reads. A
 complete deployment model may additionally require:
 
 - source and spill writes;
-- network transfer;
+- latency and contention at network boundaries;
 - parallelism and contention;
 - allocator fragmentation;
 - wall-clock critical-path latency;

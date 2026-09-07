@@ -30,6 +30,7 @@ pub struct PhysicalEvidenceSnapshot {
     pub scope: ComparisonScope,
     pub cache_profile: CacheProfile,
     pub storage_io: Option<crate::storage_io::StorageIoProfile>,
+    pub boundaries: Option<crate::boundary_cost::BoundaryProfile>,
 }
 
 /// Deployment evidence needed to price one planner alternative.
@@ -70,6 +71,10 @@ pub struct PhysicalPlanComparison {
     pub storage_io: Option<(
         crate::storage_io::StorageEstimate,
         crate::storage_io::StorageEstimate,
+    )>,
+    pub boundaries: Option<(
+        crate::boundary_cost::BoundaryEstimate,
+        crate::boundary_cost::BoundaryEstimate,
     )>,
 }
 
@@ -218,6 +223,26 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 ))
             })
             .transpose()?;
+        let boundaries = snapshot
+            .boundaries
+            .as_ref()
+            .map(|profile| {
+                Ok((
+                    crate::boundary_cost::estimate_boundaries(
+                        &raw,
+                        scope,
+                        profile,
+                        &snapshot.version,
+                    )?,
+                    crate::boundary_cost::estimate_boundaries(
+                        &replacement,
+                        scope,
+                        profile,
+                        &snapshot.version,
+                    )?,
+                ))
+            })
+            .transpose()?;
         let (mut raw_cost, mut candidate_cost) = match self.calibration.validate() {
             Ok(()) => (
                 Cost(resources.raw.calibrated_cost(&self.calibration)?),
@@ -248,6 +273,10 @@ impl<'a> PhysicalPlanCostModel<'a> {
             raw_cost.0 += raw.cost;
             candidate_cost.0 += candidate.cost;
         }
+        if let Some((raw, candidate)) = &boundaries {
+            raw_cost.0 += raw.cost;
+            candidate_cost.0 += candidate.cost;
+        }
         if !raw_cost.0.is_finite() || !candidate_cost.0.is_finite() {
             return Err(AnalyticalCostError::Overflow);
         }
@@ -256,6 +285,7 @@ impl<'a> PhysicalPlanCostModel<'a> {
             raw_cost,
             candidate_cost,
             storage_io,
+            boundaries,
         })
     }
 }
@@ -500,6 +530,7 @@ mod tests {
                 scope: scope(),
                 cache_profile: CacheProfile::no_cache(),
                 storage_io: self.storage_io.clone(),
+                boundaries: None,
             })
         }
 
@@ -862,6 +893,7 @@ mod tests {
                     scope: scope(),
                     cache_profile: CacheProfile::no_cache(),
                     storage_io: None,
+                    boundaries: None,
                 })
             }
 

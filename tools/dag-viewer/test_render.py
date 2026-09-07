@@ -56,6 +56,29 @@ def named_graph(name: str, source: str = "SELECT 1") -> dict:
 
 
 class LoadWorkloadTests(unittest.TestCase):
+    def test_boundary_terms_and_provenance_survive_standalone_export(self):
+        """The standalone viewer retains byte totals, physical terms, and provenance."""
+        graph = named_graph("boundary-example")
+        annotation = {
+            "value": 1080.0,
+            "unit": "CostUnits",
+            "source": "Modeled",
+            "model_version": "physical-boundary-bytes-v1+bytes-v1",
+            "evidence_version": "evidence-v1",
+            "inputs": [
+                {"name": "network_bytes", "value": 480, "unit": "bytes"},
+                {"name": "materialization_bytes", "value": 40, "unit": "bytes"},
+                {"name": "physical_node:scan:network_bytes", "value": 480, "unit": "bytes"},
+                {"name": "boundary:persist:materialization_bytes", "value": 40, "unit": "bytes"},
+            ],
+        }
+        graph["graph"]["nodes"][0]["selected_cost"] = annotation
+        html = render({"queries": [graph]})
+        for term in annotation["inputs"]:
+            self.assertIn(term["name"], html)
+        self.assertIn(annotation["model_version"], html)
+        self.assertIn(annotation["evidence_version"], html)
+
     def test_loads_summary_maintenance_export_as_a_lifecycle_plan(self):
         graph = named_graph("unused")["graph"]
         summary = {

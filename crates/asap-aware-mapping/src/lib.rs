@@ -184,6 +184,7 @@
 pub mod accuracy;
 pub mod accuracy_reconciliation;
 pub mod analytical_cost;
+pub mod boundary_cost;
 pub mod cost_model;
 pub mod empirical_comparison;
 pub mod empirical_cost;
