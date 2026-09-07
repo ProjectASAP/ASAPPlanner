@@ -29,6 +29,7 @@ pub struct PhysicalEvidenceSnapshot {
     pub version: String,
     pub scope: ComparisonScope,
     pub cache_profile: CacheProfile,
+    pub storage_io: Option<crate::storage_io::StorageIoProfile>,
 }
 
 /// Deployment evidence needed to price one planner alternative.
@@ -61,11 +62,15 @@ pub trait PlannerPhysicalPlanProvider {
 }
 
 /// Dimensional comparison retained for explanations and verification.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PhysicalPlanComparison {
     pub resources: PhysicalDagComparisonEstimate,
     pub raw_cost: Cost,
     pub candidate_cost: Cost,
+    pub storage_io: Option<(
+        crate::storage_io::StorageEstimate,
+        crate::storage_io::StorageEstimate,
+    )>,
 }
 
 /// Planner cost model that admits only complete, cheaper physical plans.
@@ -176,12 +181,40 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 cache_profile: &snapshot.cache_profile,
             },
         )?;
-        let raw_cost = Cost(resources.raw.calibrated_cost(&self.calibration)?);
-        let candidate_cost = Cost(resources.candidate.calibrated_cost(&self.calibration)?);
+        let storage_io = snapshot
+            .storage_io
+            .as_ref()
+            .map(|profile| {
+                Ok((
+                    crate::storage_io::estimate_storage_io(
+                        &raw,
+                        scope,
+                        profile,
+                        &snapshot.version,
+                    )?,
+                    crate::storage_io::estimate_storage_io(
+                        &replacement,
+                        scope,
+                        profile,
+                        &snapshot.version,
+                    )?,
+                ))
+            })
+            .transpose()?;
+        let mut raw_cost = Cost(resources.raw.calibrated_cost(&self.calibration)?);
+        let mut candidate_cost = Cost(resources.candidate.calibrated_cost(&self.calibration)?);
+        if let Some((raw, candidate)) = &storage_io {
+            raw_cost.0 += raw.cost;
+            candidate_cost.0 += candidate.cost;
+        }
+        if !raw_cost.0.is_finite() || !candidate_cost.0.is_finite() {
+            return Err(AnalyticalCostError::Overflow);
+        }
         Ok(PhysicalPlanComparison {
             resources,
             raw_cost,
             candidate_cost,
+            storage_io,
         })
     }
 }
@@ -423,6 +456,7 @@ mod tests {
                 version: "test-snapshot-1".into(),
                 scope: scope(),
                 cache_profile: CacheProfile::no_cache(),
+                storage_io: None,
             })
         }
 
@@ -661,6 +695,7 @@ mod tests {
                     version: "  \t".into(),
                     scope: scope(),
                     cache_profile: CacheProfile::no_cache(),
+                    storage_io: None,
                 })
             }
 
