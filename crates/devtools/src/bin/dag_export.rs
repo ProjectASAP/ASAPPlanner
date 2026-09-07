@@ -55,8 +55,8 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use asap_aware_mapping::analytical_cost::{
-    AnalyticalCostError, EvidenceBackedPhysicalDag as PhysicalDag, PhysicalNodeEvidence,
-    ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
+    AnalyticalCostError, CacheProfile, EvidenceBackedPhysicalDag as PhysicalDag,
+    PhysicalNodeEvidence, ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
 };
 #[cfg(test)]
 use asap_aware_mapping::cost_model::DefaultCostModel;
@@ -126,6 +126,7 @@ struct ComparisonScopeEvidence {
     lookback_ms: Option<u64>,
     as_of_ms: Option<u64>,
     sources: Vec<asap_aware_mapping::physical_operator_statistics::SourceCoverage>,
+    cache_profile: CacheProfile,
 }
 
 impl ComparisonScopeEvidence {
@@ -293,6 +294,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
         Ok(PhysicalEvidenceSnapshot {
             version: self.evidence_version.into(),
             scope: self.target.scope.resolve()?,
+            cache_profile: self.target.scope.cache_profile.clone(),
         })
     }
 
@@ -434,7 +436,8 @@ impl ExportPlannerCostModel<'_> {
             &version,
             inputs(estimate.resources.raw),
         )
-        .with_evidence_version(&self.document.evidence_version);
+        .with_evidence_version(&self.document.evidence_version)
+        .with_cache_profile(snapshot_cache_version(&provider));
         let selected = CostAnnotation::modeled(
             estimate.candidate_cost.0,
             CostUnit::CostUnits,
@@ -442,7 +445,8 @@ impl ExportPlannerCostModel<'_> {
             inputs(estimate.resources.candidate),
         )
         .with_baseline(BaselineRef::PreAsapRecomputation, estimate.raw_cost.0)
-        .with_evidence_version(&self.document.evidence_version);
+        .with_evidence_version(&self.document.evidence_version)
+        .with_cache_profile(snapshot_cache_version(&provider));
         let benefit = CostAnnotation {
             value: selected.delta,
             unit: CostUnit::CostUnits,
@@ -452,11 +456,16 @@ impl ExportPlannerCostModel<'_> {
             benefit_ratio: selected.benefit_ratio,
             model_version: Some(version),
             evidence_version: Some(self.document.evidence_version.clone()),
+            cache_profile: Some(snapshot_cache_version(&provider).into()),
             benchmark_id: None,
             inputs: Vec::new(),
         };
         (baseline, selected, benefit)
     }
+}
+
+fn snapshot_cache_version<'a>(provider: &'a ExportPhysicalProvider<'_>) -> &'a str {
+    provider.target.scope.cache_profile.version()
 }
 
 impl CostModel for ExportPlannerCostModel<'_> {
@@ -1479,6 +1488,7 @@ mod tests {
                 predicates: vec![],
                 info_matchers: vec![],
             }],
+            cache_profile: CacheProfile::no_cache(),
         }
     }
 
@@ -1663,6 +1673,7 @@ mod tests {
                 annotation.evidence_version.as_deref(),
                 Some("test-evidence-v1")
             );
+            assert_eq!(annotation.cache_profile.as_deref(), Some("no-cache-v1"));
             assert!(annotation
                 .model_version
                 .as_deref()

@@ -21,7 +21,141 @@ use crate::physical_operator_statistics::{
 ///
 /// This identifies the estimation method, not a physical executor or runtime
 /// implementation version.
-pub const ANALYTICAL_COST_MODEL_VERSION: &str = "analytical-cost-v1";
+pub const ANALYTICAL_COST_MODEL_VERSION: &str = "analytical-cost-v2-cache-aware";
+
+/// Versioned deployment evidence describing query-result and buffer caching.
+/// `NoCache` preserves the v1 formulas exactly, while `Evidence` fails closed
+/// unless every value needed to derive a hit ratio is present and finite.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "profile", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CacheProfile {
+    NoCache { version: String },
+    Evidence(CacheEvidence),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheEvidence {
+    pub version: String,
+    /// Evaluations whose parameterization is not identical to a preceding
+    /// evaluation and therefore cannot use the result cache.
+    pub distinct_evaluations: u64,
+    /// Evaluations identical to a preceding evaluation and eligible for a
+    /// result-cache hit.
+    pub repeated_identical_evaluations: u64,
+    pub result_cache: CacheCapacityEvidence,
+    pub buffer_cache: CacheCapacityEvidence,
+    /// Fraction of otherwise-resident result entries invalidated by arriving
+    /// data. Required for continuously ingesting data; ignored for `AtRest`.
+    pub result_invalidation_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheCapacityEvidence {
+    pub working_set_bytes: u64,
+    pub capacity_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedCacheProfile {
+    no_cache: bool,
+    cpu_execution_factor: f64,
+    scan_execution_factor: f64,
+    result_hit_ratio: f64,
+    buffer_hit_ratio: f64,
+}
+
+impl CacheProfile {
+    pub fn no_cache() -> Self {
+        Self::NoCache {
+            version: "no-cache-v1".into(),
+        }
+    }
+
+    pub fn version(&self) -> &str {
+        match self {
+            Self::NoCache { version } => version,
+            Self::Evidence(evidence) => &evidence.version,
+        }
+    }
+
+    fn resolve(
+        &self,
+        evaluation_count: u64,
+        data_arrival: DataArrival,
+    ) -> Result<ResolvedCacheProfile, AnalyticalCostError> {
+        if self.version().trim().is_empty() {
+            return Err(AnalyticalCostError::InvalidCacheEvidence(
+                "blank cache profile version",
+            ));
+        }
+        let Self::Evidence(evidence) = self else {
+            return Ok(ResolvedCacheProfile {
+                no_cache: true,
+                cpu_execution_factor: evaluation_count as f64,
+                scan_execution_factor: evaluation_count as f64,
+                result_hit_ratio: 0.0,
+                buffer_hit_ratio: 0.0,
+            });
+        };
+        let declared = evidence
+            .distinct_evaluations
+            .checked_add(evidence.repeated_identical_evaluations)
+            .ok_or(AnalyticalCostError::Overflow)?;
+        if declared != evaluation_count {
+            return Err(AnalyticalCostError::InvalidCacheEvidence(
+                "cache demand split does not equal evaluation count",
+            ));
+        }
+        fn residency(value: CacheCapacityEvidence) -> Result<f64, AnalyticalCostError> {
+            if value.working_set_bytes == 0 {
+                return Err(AnalyticalCostError::InvalidCacheEvidence(
+                    "cache working set must be non-zero",
+                ));
+            }
+            Ok((value.capacity_bytes as f64 / value.working_set_bytes as f64).min(1.0))
+        }
+        let invalidation = match data_arrival {
+            DataArrival::AtRest => 0.0,
+            DataArrival::ContinuouslyIngesting => evidence.result_invalidation_ratio.ok_or(
+                AnalyticalCostError::InvalidCacheEvidence(
+                    "continuous ingestion requires result-cache invalidation evidence",
+                ),
+            )?,
+            DataArrival::Mixed | DataArrival::Unknown => {
+                return Err(AnalyticalCostError::InvalidCacheEvidence(
+                    "cache invalidation cannot be derived for mixed or unknown data arrival",
+                ));
+            }
+        };
+        if !invalidation.is_finite() || !(0.0..=1.0).contains(&invalidation) {
+            return Err(AnalyticalCostError::InvalidCacheEvidence(
+                "result-cache invalidation ratio must be finite and in [0, 1]",
+            ));
+        }
+        let result_hit_ratio = residency(evidence.result_cache)? * (1.0 - invalidation);
+        let buffer_hit_ratio = residency(evidence.buffer_cache)?;
+        let cpu_execution_factor = evidence.distinct_evaluations as f64
+            + evidence.repeated_identical_evaluations as f64 * (1.0 - result_hit_ratio);
+        Ok(ResolvedCacheProfile {
+            no_cache: false,
+            cpu_execution_factor,
+            scan_execution_factor: cpu_execution_factor * (1.0 - buffer_hit_ratio),
+            result_hit_ratio,
+            buffer_hit_ratio,
+        })
+    }
+
+    pub fn hit_ratios(
+        &self,
+        evaluation_count: u64,
+        data_arrival: DataArrival,
+    ) -> Result<(f64, f64), AnalyticalCostError> {
+        let resolved = self.resolve(evaluation_count, data_arrival)?;
+        Ok((resolved.result_hit_ratio, resolved.buffer_hit_ratio))
+    }
+}
 
 /// Conversion from physical dimensions to one deployment-specific objective.
 /// Memory's coefficient means cost units per retained byte over this model's
@@ -342,6 +476,7 @@ pub struct PhysicalDagEstimateRequest<'a> {
     pub root: &'a str,
     pub scope: &'a ComparisonScope,
     pub statistics: &'a dyn OperatorStatisticsProvider,
+    pub cache_profile: &'a CacheProfile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -357,13 +492,25 @@ pub fn estimate_physical_dag_comparison(
     candidate: PhysicalDagEstimateRequest<'_>,
 ) -> Result<PhysicalDagComparisonEstimate, AnalyticalCostError> {
     validate_comparison_scopes(raw.scope, candidate.scope)?;
+    if raw.cache_profile != candidate.cache_profile {
+        return Err(AnalyticalCostError::ComparisonScopeMismatch(
+            "cache profile",
+        ));
+    }
     Ok(PhysicalDagComparisonEstimate {
-        raw: estimate_physical_dag(raw.nodes, raw.root, raw.scope, raw.statistics)?,
-        candidate: estimate_physical_dag(
+        raw: estimate_physical_dag_with_cache(
+            raw.nodes,
+            raw.root,
+            raw.scope,
+            raw.statistics,
+            raw.cache_profile,
+        )?,
+        candidate: estimate_physical_dag_with_cache(
             candidate.nodes,
             candidate.root,
             candidate.scope,
             candidate.statistics,
+            candidate.cache_profile,
         )?,
     })
 }
@@ -377,7 +524,18 @@ pub fn estimate_physical_dag(
     scope: &ComparisonScope,
     statistics: &(impl OperatorStatisticsProvider + ?Sized),
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
+    estimate_physical_dag_with_cache(nodes, root, scope, statistics, &CacheProfile::no_cache())
+}
+
+pub fn estimate_physical_dag_with_cache(
+    nodes: &[PhysicalDagNode],
+    root: &str,
+    scope: &ComparisonScope,
+    statistics: &(impl OperatorStatisticsProvider + ?Sized),
+    cache_profile: &CacheProfile,
+) -> Result<ResourceEstimate, AnalyticalCostError> {
     let evaluation_count = scope.validate()?;
+    let cache = cache_profile.resolve(evaluation_count, scope.data_arrival)?;
     let by_id: HashMap<&str, &PhysicalDagNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     if by_id.len() != nodes.len() {
         return Err(AnalyticalCostError::InvalidPhysicalDag("duplicate node id"));
@@ -493,18 +651,30 @@ pub fn estimate_physical_dag(
     for id in order {
         let node = by_id[id];
         let local = estimate_operator(node.operator, resolved_statistics[id].clone())?;
-        let executions = match node.execution {
-            ExecutionMultiplicity::Once => 1,
-            ExecutionMultiplicity::PerEvaluation => evaluation_count,
+        let (cpu_executions, scan_executions) = match node.execution {
+            ExecutionMultiplicity::Once => (1.0, 1.0),
+            ExecutionMultiplicity::PerEvaluation => {
+                (cache.cpu_execution_factor, cache.scan_execution_factor)
+            }
         };
-        cpu_ops += local.cpu_ops() * executions as f64;
+        cpu_ops += local.cpu_ops() * cpu_executions;
+        let local_scan = if cache.no_cache {
+            local
+                .scan_bytes()
+                .checked_mul(match node.execution {
+                    ExecutionMultiplicity::Once => 1,
+                    ExecutionMultiplicity::PerEvaluation => evaluation_count,
+                })
+                .ok_or(AnalyticalCostError::Overflow)?
+        } else {
+            let adjusted = local.scan_bytes() as f64 * scan_executions;
+            if !adjusted.is_finite() || adjusted > u64::MAX as f64 {
+                return Err(AnalyticalCostError::Overflow);
+            }
+            adjusted.ceil() as u64
+        };
         scan_bytes = scan_bytes
-            .checked_add(
-                local
-                    .scan_bytes()
-                    .checked_mul(executions)
-                    .ok_or(AnalyticalCostError::Overflow)?,
-            )
+            .checked_add(local_scan)
             .ok_or(AnalyticalCostError::Overflow)?;
         peak_memory_bytes = peak_memory_bytes.max(
             live_bytes
@@ -2010,6 +2180,8 @@ pub enum AnalyticalCostError {
     InvalidCalibration(&'static str, f64),
     #[error("at least one calibration coefficient must be positive")]
     ZeroCalibration,
+    #[error("invalid or incomplete cache evidence: {0}")]
+    InvalidCacheEvidence(&'static str),
     #[error("algorithm {0:?} does not match parameters {1:?}")]
     ParameterMismatch(SketchAlgorithm, SketchParams),
     #[error("{0} needs a value-range/bin-count model before it can be estimated")]
@@ -3256,6 +3428,7 @@ mod tests {
         )]);
         let raw_scope = comparison_scope();
         let mut candidate_scope = raw_scope.clone();
+        let no_cache = CacheProfile::no_cache();
         candidate_scope.sources[0].source_snapshot_id = "catalog-version-43".into();
 
         assert_eq!(
@@ -3265,12 +3438,14 @@ mod tests {
                     root: "scan",
                     scope: &raw_scope,
                     statistics: &provided,
+                    cache_profile: &no_cache,
                 },
                 PhysicalDagEstimateRequest {
                     nodes: &nodes,
                     root: "scan",
                     scope: &candidate_scope,
                     statistics: &provided,
+                    cache_profile: &no_cache,
                 },
             ),
             Err(AnalyticalCostError::ComparisonScopeMismatch("sources"))
@@ -3454,5 +3629,144 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    fn cache_test_scan() -> (Vec<PhysicalDagNode>, HashMap<String, OperatorStatistics>) {
+        let edge = EdgeStatistics {
+            rows: 100,
+            bytes: 1_000,
+        };
+        (
+            vec![PhysicalDagNode {
+                id: "scan".into(),
+                operator: PhysicalOperator::Scan,
+                children: vec![],
+                source_coverage: Some(comparison_scope().sources[0].clone()),
+                output_buffer_bytes: 0,
+                retained_bytes: 0,
+                execution: ExecutionMultiplicity::PerEvaluation,
+            }],
+            HashMap::from([(
+                "scan".into(),
+                OperatorStatistics::Scan {
+                    edges: unary_edges(edge, edge),
+                    source_read_bytes: 1_000,
+                },
+            )]),
+        )
+    }
+
+    fn cache_profile(result_capacity: u64, buffer_capacity: u64) -> CacheProfile {
+        CacheProfile::Evidence(CacheEvidence {
+            version: "cache-evidence-7".into(),
+            distinct_evaluations: 2,
+            repeated_identical_evaluations: 4,
+            result_cache: CacheCapacityEvidence {
+                working_set_bytes: 100,
+                capacity_bytes: result_capacity,
+            },
+            buffer_cache: CacheCapacityEvidence {
+                working_set_bytes: 100,
+                capacity_bytes: buffer_capacity,
+            },
+            result_invalidation_ratio: None,
+        })
+    }
+
+    #[test]
+    fn no_cache_reproduces_legacy_estimate_and_cache_effects_are_distinct() {
+        let (nodes, evidence) = cache_test_scan();
+        let scope = comparison_scope();
+        let legacy = estimate_physical_dag(&nodes, "scan", &scope, &evidence).unwrap();
+        let explicit_no_cache = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &CacheProfile::no_cache(),
+        )
+        .unwrap();
+        assert_eq!(legacy, explicit_no_cache);
+        assert_eq!(legacy.cpu_ops(), 600.0);
+        assert_eq!(legacy.scan_bytes(), 6_000);
+
+        let result_only = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(100, 0),
+        )
+        .unwrap();
+        assert_eq!(result_only.cpu_ops(), 200.0);
+        assert_eq!(result_only.scan_bytes(), 2_000);
+
+        let result_and_buffer = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(100, 50),
+        )
+        .unwrap();
+        assert_eq!(result_and_buffer.cpu_ops(), result_only.cpu_ops());
+        assert_eq!(result_and_buffer.scan_bytes(), 1_000);
+    }
+
+    #[test]
+    fn cache_hits_are_monotone_and_reduce_summary_benefit() {
+        let (nodes, evidence) = cache_test_scan();
+        let scope = comparison_scope();
+        let low = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(0, 0),
+        )
+        .unwrap();
+        let high = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(100, 0),
+        )
+        .unwrap();
+        assert!(high.cpu_ops() <= low.cpu_ops());
+        assert!(high.scan_bytes() <= low.scan_bytes());
+
+        // A build-once summary has fixed work; as exact result-cache hits
+        // rise, the raw-minus-summary advantage cannot increase.
+        let mut summary_nodes = nodes.clone();
+        summary_nodes[0].execution = ExecutionMultiplicity::Once;
+        let summary = estimate_physical_dag_with_cache(
+            &summary_nodes,
+            "scan",
+            &scope,
+            &evidence,
+            &cache_profile(0, 0),
+        )
+        .unwrap();
+        assert!(high.cpu_ops() - summary.cpu_ops() <= low.cpu_ops() - summary.cpu_ops());
+    }
+
+    #[test]
+    fn cache_evidence_fails_closed_for_bad_demand_and_streaming_invalidation() {
+        let mut profile = cache_profile(100, 100);
+        let CacheProfile::Evidence(evidence) = &mut profile else {
+            unreachable!()
+        };
+        evidence.distinct_evaluations = 1;
+        assert!(matches!(
+            profile.hit_ratios(6, DataArrival::AtRest),
+            Err(AnalyticalCostError::InvalidCacheEvidence(_))
+        ));
+
+        let profile = cache_profile(100, 100);
+        assert!(matches!(
+            profile.hit_ratios(6, DataArrival::ContinuouslyIngesting),
+            Err(AnalyticalCostError::InvalidCacheEvidence(_))
+        ));
     }
 }

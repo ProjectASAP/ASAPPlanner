@@ -6,7 +6,7 @@ use asap_types::post_asap::{SketchAlgorithm, SummaryExpr, SummaryNode};
 use asap_types::pre_asap::{AggIntent, QueryExpr};
 
 use crate::analytical_cost::{
-    estimate_physical_dag_comparison, AnalyticalCostError,
+    estimate_physical_dag_comparison, AnalyticalCostError, CacheProfile,
     EvidenceBackedPhysicalDag as PhysicalDag, PhysicalDagComparisonEstimate,
     PhysicalDagEstimateRequest, PhysicalNodeEvidence, ResourceCalibration,
 };
@@ -27,6 +27,7 @@ use crate::replacement::{Replacement, ReplacementSubDAG, TargetSubDAG};
 pub struct PhysicalEvidenceSnapshot {
     pub version: String,
     pub scope: ComparisonScope,
+    pub cache_profile: CacheProfile,
 }
 
 /// Deployment evidence needed to price one planner alternative.
@@ -159,12 +160,14 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 root: &raw.root,
                 scope,
                 statistics: &raw,
+                cache_profile: &snapshot.cache_profile,
             },
             PhysicalDagEstimateRequest {
                 nodes: &replacement.nodes,
                 root: &replacement.root,
                 scope,
                 statistics: &replacement,
+                cache_profile: &snapshot.cache_profile,
             },
         )?;
         let raw_cost = Cost(resources.raw.calibrated_cost(&self.calibration)?);
@@ -413,6 +416,7 @@ mod tests {
             Ok(PhysicalEvidenceSnapshot {
                 version: "test-snapshot-1".into(),
                 scope: scope(),
+                cache_profile: CacheProfile::no_cache(),
             })
         }
 
@@ -557,6 +561,7 @@ mod tests {
                 Ok(PhysicalEvidenceSnapshot {
                     version: "  \t".into(),
                     scope: scope(),
+                    cache_profile: CacheProfile::no_cache(),
                 })
             }
 
