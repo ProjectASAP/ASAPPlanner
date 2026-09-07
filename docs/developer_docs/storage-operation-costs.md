@@ -43,6 +43,13 @@ profile and coefficients before ranking. Scan read extents must add up to the
 scan's authoritative `source_read_bytes`; explicit additional storage actions
 can be bound to other physical nodes.
 
+A request-only objective may set all base CPU, scan-byte, and memory
+coefficients to zero if the snapshot supplies valid storage evidence and at
+least one positive storage coefficient. With a zero base objective, missing
+storage evidence or an all-zero storage calibration makes the comparison
+unavailable. This check occurs when the target snapshot is available;
+standalone base-resource calibration still rejects an all-zero objective.
+
 `StorageEstimate` returns totals and per-node terms with model, evidence, and
 calibration versions. DAG annotations expose counts as `CostInput`s with
 `operations` units. Per-node terms use `physical_node:<id>:<dimension>`;

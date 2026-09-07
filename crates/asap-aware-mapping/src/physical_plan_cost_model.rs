@@ -102,7 +102,12 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 "resource_calibration.version",
             ));
         }
-        calibration.validate()?;
+        // A zero base objective may be supplemented by storage coefficients;
+        // that check needs the target's immutable evidence snapshot.
+        match calibration.validate() {
+            Ok(()) | Err(AnalyticalCostError::ZeroCalibration) => {}
+            Err(error) => return Err(error),
+        }
         Ok(Self {
             provider,
             calibration,
@@ -201,8 +206,32 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 ))
             })
             .transpose()?;
-        let mut raw_cost = Cost(resources.raw.calibrated_cost(&self.calibration)?);
-        let mut candidate_cost = Cost(resources.candidate.calibrated_cost(&self.calibration)?);
+        let (mut raw_cost, mut candidate_cost) = match self.calibration.validate() {
+            Ok(()) => (
+                Cost(resources.raw.calibrated_cost(&self.calibration)?),
+                Cost(resources.candidate.calibrated_cost(&self.calibration)?),
+            ),
+            Err(AnalyticalCostError::ZeroCalibration) => {
+                // Storage estimation above validates the coefficients and
+                // evidence. At least one priced dimension must remain.
+                let has_storage_objective = snapshot.storage_io.as_ref().is_some_and(|profile| {
+                    let calibration = &profile.calibration;
+                    [
+                        calibration.cost_per_disk_read,
+                        calibration.cost_per_disk_write,
+                        calibration.cost_per_object_get,
+                        calibration.cost_per_object_put,
+                    ]
+                    .into_iter()
+                    .any(|coefficient| coefficient > 0.0)
+                });
+                if !has_storage_objective {
+                    return Err(AnalyticalCostError::ZeroCalibration);
+                }
+                (Cost(0.0), Cost(0.0))
+            }
+            Err(error) => return Err(error),
+        };
         if let Some((raw, candidate)) = &storage_io {
             raw_cost.0 += raw.cost;
             candidate_cost.0 += candidate.cost;
@@ -361,6 +390,7 @@ mod tests {
     }
 
     struct TestProvider {
+        storage_io: Option<crate::storage_io::StorageIoProfile>,
         summary_available: bool,
         candidate_scan_bytes: u64,
         snapshot_calls: Cell<u64>,
@@ -370,6 +400,7 @@ mod tests {
     impl TestProvider {
         fn new(summary_available: bool, candidate_scan_bytes: u64) -> Self {
             Self {
+                storage_io: None,
                 summary_available,
                 candidate_scan_bytes,
                 snapshot_calls: Cell::new(0),
@@ -456,7 +487,7 @@ mod tests {
                 version: "test-snapshot-1".into(),
                 scope: scope(),
                 cache_profile: CacheProfile::no_cache(),
-                storage_io: None,
+                storage_io: self.storage_io.clone(),
             })
         }
 
@@ -506,6 +537,92 @@ mod tests {
             cost_per_retained_byte: 1.0,
             version: "test-v1".into(),
         }
+    }
+
+    // A request-only objective ranks complete evidence and rejects absent,
+    // zero, or invalid supplemental calibration.
+    #[test]
+    fn storage_only_objective_requires_positive_valid_storage_calibration() {
+        use crate::storage_io::*;
+        let root = query();
+        let target = TargetSubDAG::new(&root);
+        let mut provider = TestProvider::new(true, 800);
+        let snapshot = provider.capture_evidence_snapshot(&target).unwrap();
+        let raw = lower_query_physical_dag(
+            &root,
+            &snapshot.scope,
+            &QueryEvidence {
+                provider: &provider,
+                snapshot: &snapshot,
+            },
+        )
+        .unwrap();
+        let mut profile = StorageIoProfile {
+            evidence_version: snapshot.version,
+            observed_at_ms: 900,
+            valid_until_ms: 2000,
+            calibration: StorageCalibration {
+                version: "requests-v1".into(),
+                cost_per_disk_read: 0.0,
+                cost_per_disk_write: 0.0,
+                cost_per_object_get: 1.0,
+                cost_per_object_put: 0.0,
+            },
+            nodes: HashMap::new(),
+        };
+        for dag in [raw, provider.summary_dag(&snapshot.scope)] {
+            for node in dag.nodes {
+                let statistics = dag.evidence[&node.id].statistics.clone();
+                let accesses = match statistics {
+                    OperatorStatistics::Scan {
+                        source_read_bytes, ..
+                    } => vec![StorageAccess {
+                        operation: StorageOperation::ObjectGet,
+                        extent_bytes: vec![source_read_bytes],
+                        bytes_per_request: 400,
+                    }],
+                    _ => vec![],
+                };
+                profile.nodes.insert(
+                    node.id.clone(),
+                    StorageNodeEvidence {
+                        node,
+                        statistics,
+                        accesses,
+                    },
+                );
+            }
+        }
+        let base = ResourceCalibration {
+            cost_per_cpu_op: 0.0,
+            cost_per_scan_byte: 0.0,
+            cost_per_retained_byte: 0.0,
+            version: "unused-base-v1".into(),
+        };
+        let candidates =
+            crate::replacement::SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        provider.storage_io = Some(profile.clone());
+        let model = PhysicalPlanCostModel::new(&provider, base.clone()).unwrap();
+        let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
+        assert_eq!(estimate.raw_cost.0, 20.0);
+        assert_eq!(estimate.candidate_cost.0, 2.0);
+        assert_eq!(
+            model.candidate_cost(&candidates[0], &target),
+            Some(Cost(2.0))
+        );
+        drop(model);
+        for coefficient in [0.0, -1.0, f64::NAN] {
+            profile.calibration.cost_per_object_get = coefficient;
+            provider.storage_io = Some(profile.clone());
+            let model = PhysicalPlanCostModel::new(&provider, base.clone()).unwrap();
+            assert!(model.estimate_candidate(&candidates[0], &target).is_err());
+        }
+        provider.storage_io = None;
+        let model = PhysicalPlanCostModel::new(&provider, base).unwrap();
+        assert_eq!(
+            model.estimate_candidate(&candidates[0], &target),
+            Err(AnalyticalCostError::ZeroCalibration)
+        );
     }
 
     #[test]

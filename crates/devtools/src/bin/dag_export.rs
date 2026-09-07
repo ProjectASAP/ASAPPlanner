@@ -1679,6 +1679,20 @@ mod tests {
             selected.evidence_version.as_deref(),
             Some("test-evidence-v1")
         );
+        // JSON evidence also supports an objective priced only by requests.
+        let mut requests_only = parsed.clone();
+        requests_only.calibration.cost_per_cpu_op = 0.0;
+        requests_only.calibration.cost_per_scan_byte = 0.0;
+        requests_only.calibration.cost_per_retained_byte = 0.0;
+        let requests_only =
+            parse_planner_cost_document(&serde_json::to_string(&requests_only).unwrap()).unwrap();
+        let model = ExportPlannerCostModel {
+            document: &requests_only,
+        };
+        assert_eq!(model.candidate_cost(&candidate, &target), Some(Cost(10.0)));
+        let (baseline, selected, _) = model.annotations(&candidate, &root);
+        assert_eq!(baseline.value, Some(160.0));
+        assert_eq!(selected.value, Some(10.0));
         document
             .storage_io
             .as_mut()
