@@ -155,7 +155,10 @@ fn promql_binary_arithmetic_never_relabels_approximate_children_as_exact() {
 }
 
 #[test]
-fn temporal_topk_binds_constant_one_and_sample_value_weight_projections() {
+fn planner_only_e2e_temporal_topk_preserves_query_update_and_readout_contract() {
+    // Self-contained Planner E2E: each case starts from PromQL text and ends
+    // at the executable post-ASAP summary DAG. No controller/backend types,
+    // fixtures, configuration, or runtime are involved.
     let cases = [
         (
             "topk by (service) (5, count_over_time(requests[1m]))",
@@ -199,19 +202,34 @@ fn temporal_topk_binds_constant_one_and_sample_value_weight_projections() {
             .expect("heap-backed temporal Top-K candidate");
         let SummaryExpr::SummaryEstimate {
             summary_input,
-            query: SketchQuery::TopK { .. },
+            query: SketchQuery::TopK { k, .. },
         } = &candidate.expr
         else {
             panic!("expected Top-K estimate, got {:?}", candidate.expr)
         };
+        assert_eq!(
+            *k, 5,
+            "the requested Top-K cardinality must survive binding"
+        );
         let SummaryExpr::SummaryAgg {
             input: state_input,
+            family,
             child,
             ..
         } = &summary_input.expr
         else {
             panic!("expected structured Top-K state input")
         };
+        let SummaryFamilyType::Sketch(kind, _) = family else {
+            panic!("expected a heap-backed sketch family, got {family:?}")
+        };
+        assert_eq!(format!("{:?}", kind.algorithm()), expected_family);
+        let heap_size = match kind.params() {
+            SketchParams::CmsWithHeap { heap_size, .. }
+            | SketchParams::CountSketchWithHeap { heap_size, .. } => *heap_size,
+            params => panic!("expected heap-bearing Top-K parameters, got {params:?}"),
+        };
+        assert_eq!(heap_size, *k as u32);
         assert_eq!(
             state_input.item.as_ref(),
             Some(&SummaryInputExpr::EntityIdentity(
