@@ -43,7 +43,7 @@ pub enum SummaryFamilyType {
 
 // ── Post-ASAP schema ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SummaryField {
     pub name: String,
     pub dtype: SummaryFamilyType,
@@ -55,7 +55,7 @@ pub struct SummaryField {
 /// separate types so a pre-ASAP node structurally cannot carry a
 /// summary-state-typed column — any attempt to do so is a compile-time type
 /// error.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SummarySchema {
     pub fields: Vec<SummaryField>,
     /// Index into `fields` for the time axis, if any (same semantics as the

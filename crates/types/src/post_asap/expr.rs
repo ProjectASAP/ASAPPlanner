@@ -11,7 +11,7 @@ use crate::pre_asap::{BinaryOpKind, ColumnRef, QueryExpr, Reduction, VectorMatch
 /// schema so every edge carries a typed schema. `SummarySchema` may contain
 /// summary-state-typed columns (`SummaryFamilyType`'s non-`Plain` variants);
 /// the pre-ASAP `Schema` cannot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SummaryNode {
     pub expr: SummaryExpr,
     /// Output schema of `expr` — the schema of the data flowing on the edge
@@ -40,7 +40,7 @@ pub struct SummaryNode {
 ///
 /// Traversing from the root node yields a DAG; shared sub-expressions appear
 /// as multiple `Rc` references to the same `SummaryNode`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SummaryExpr {
     /// A pre-ASAP subtree kept as-is — no binding rule rewrote it into
     /// post-ASAP form (e.g. `Filter`, `Project`, `Sort`). Output schema is
@@ -148,7 +148,7 @@ pub enum SummaryExpr {
 }
 
 /// All semantics owned by a post-ASAP binary operator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BinaryOperator {
     pub kind: BinaryOpKind,
     /// `None` is the only currently supported vector/vector matching mode.

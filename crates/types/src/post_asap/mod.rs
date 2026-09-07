@@ -27,6 +27,7 @@
 //! alongside `reduction` and on sketch-valued edge types
 //! — see `asap_aware_mapping::grouping`'s module docs for why.
 
+pub mod cse;
 pub mod expr;
 pub mod guarantee;
 pub mod query_time;
@@ -36,6 +37,7 @@ pub mod summary_maintenance;
 pub mod summary_maintenance_lifecycle;
 pub mod summary_window;
 
+pub use cse::share_common_summary_subtrees;
 pub use expr::{BinaryOperator, SummaryExpr, SummaryNode};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
