@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "benchmark_version": "synthetic-fixture-v1",
+  "model_version": "empirical-update-cpu-v1",
+  "records": [
+    {
+      "id": "synthetic-test-cms",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 272,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "synthetic-test-uniform",
+        "family": "uniform",
+        "sample_count": 1000,
+        "distinct_count": 100,
+        "parameters": {
+          "seed": 42
+        }
+      },
+      "environment": {
+        "id": "synthetic-test-machine",
+        "cpu": "synthetic CPU",
+        "os": "synthetic OS",
+        "runtime": "synthetic runtime",
+        "implementation": "SYNTHETIC TEST FIXTURE, NOT MEASURED",
+        "implementation_version": "test-v1"
+      },
+      "measured_at_unix_seconds": 100,
+      "valid_until_unix_seconds": 200,
+      "provenance": {
+        "command": "synthetic fixture; no benchmark was run",
+        "dataset": "synthetic fixture",
+        "source_revision": "test-fixture-v1",
+        "repetitions": 3
+      },
+      "metrics": {
+        "build_cpu_ns": null,
+        "update_cpu_ns": {
+          "value": 20,
+          "stddev": 1,
+          "samples": 3,
+          "method": "fabricated values for schema/integration tests only"
+        },
+        "merge_cpu_ns": null,
+        "read_cpu_ns": null,
+        "retained_bytes": null,
+        "peak_bytes": null,
+        "serialized_bytes": null,
+        "disk_bytes": null
+      },
+      "error": {
+        "metric": "absolute relative frequency error (dimensionless)",
+        "mean": 0.001,
+        "max": null,
+        "trials": 3,
+        "ground_truth_method": "synthetic fixture only",
+        "query": {
+          "kind": "point_frequency"
+        }
+      }
+    }
+  ]
+}

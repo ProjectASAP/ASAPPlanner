@@ -23,5 +23,6 @@ pub mod cost;
 pub mod dag_export;
 pub mod post_asap;
 pub mod pre_asap;
+pub mod resources;
 pub mod types;
 pub mod workload;
