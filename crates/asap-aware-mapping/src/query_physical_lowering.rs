@@ -1632,7 +1632,7 @@ mod tests {
         let estimate =
             estimate_physical_dag(&dag.nodes, &dag.root, &independent_scope, &dag.evidence)
                 .unwrap();
-        assert_eq!(estimate.scan_bytes, 1_600);
+        assert_eq!(estimate.scan_bytes(), 1_600);
 
         let shared_provider = |request: PhysicalNodeRequest<'_>| {
             let (physical_id, statistics) = match request.operator {
@@ -1668,8 +1668,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(comparison.raw.scan_bytes, 1_600);
-        assert_eq!(comparison.candidate.scan_bytes, 800);
+        assert_eq!(comparison.raw.scan_bytes(), 1_600);
+        assert_eq!(comparison.candidate.scan_bytes(), 800);
 
         let mut drifted_buffer = shared_dag.clone();
         drifted_buffer.nodes[0].output_buffer_bytes += 1;
@@ -2167,8 +2167,8 @@ mod tests {
         ]);
         let dag = lower_query_physical_dag(&root, &scope, &scripted(&provided)).unwrap();
         let estimate = estimate_physical_dag(&dag.nodes, &dag.root, &scope, &dag.evidence).unwrap();
-        assert_eq!(estimate.cpu_ops, 200.0);
-        assert_eq!(estimate.scan_bytes, 800);
+        assert_eq!(estimate.cpu_ops(), 200.0);
+        assert_eq!(estimate.scan_bytes(), 800);
     }
 
     #[test]
