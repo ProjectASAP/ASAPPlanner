@@ -1,111 +1,135 @@
-# 离线 sketch 证据接入与 o11y 规划评估
+# Offline Sketch Evidence Integration and o11y Planning Evaluation
 
-> 本文保留第一轮实验的历史状态（包括当时未提交、24/27 绑定以及未测构造／磁盘）。
-> 后续实现、最终结果和交付状态以 [最终报告](offline-o11y-final-2026-09-08.md) 为准。
+> This document preserves the historical state of the first experiment, including
+> its uncommitted changes, 24/27 binding result, and unmeasured construction/disk costs.
+> See the [final report](offline-o11y-final-2026-09-08.md) for subsequent implementation,
+> final results, and delivery status.
 
-## 执行结果
+## Execution Results
 
-三个 agent 并行完成了离线证据 provider、真实 sketch-bench 测量和
-planner replay；主 agent 完成 control-plane 接入、版本兼容和集成验证。
-完整步骤见 [执行计划](design_docs/empirical-o11y-execution-plan.md)。
+Three agents worked in parallel on the offline evidence provider, real sketch-bench
+measurements, and planner replay. The main agent completed control-plane integration,
+version compatibility, and integration validation. See the
+[execution plan](design_docs/empirical-o11y-execution-plan.md) for the full sequence.
 
-实现与测量使用独立 worktree，原有工作区的冲突和修改未动：
+Implementation and measurements used isolated worktrees. Existing conflicts and
+changes in the original workspace were left untouched:
 
-- Planner：`/mydata/asapplanner-empirical-o11y`，基线 `378a754`。
-- Control plane：`/mydata/ASAPQuery-backend/.worktrees/empirical-o11y-322`，基线 `95131d8`。
-- sketch-bench：`/mydata/sketch-bench-empirical-322`，固定 `87f619e843fd2e4da784160d4e205a0d0d55f032`，源码未修改。
+- Planner: `/mydata/asapplanner-empirical-o11y`, baseline `378a754`.
+- Control plane: `/mydata/ASAPQuery-backend/.worktrees/empirical-o11y-322`, baseline `95131d8`.
+- sketch-bench: `/mydata/sketch-bench-empirical-322`, pinned to `87f619e843fd2e4da784160d4e205a0d0d55f032`, with no source changes.
 
-没有提交、推送、发布 PR 或关闭 issue。两个产品 worktree 的改动仍可本地审查。
+No commits, pushes, PRs, or issue closures had been made at this stage. Changes in
+both product worktrees remained available for local review.
 
-## #322 已实现的路径
+## Implemented Path for #322
 
-1. 版本化 JSON artifact、JSON Schema、显式标注的合成测试 fixture，以及真实测量文件。
-2. 离线误差、CPU、内存、分布、精确参数、运行环境、样本数、离散程度、有效期和来源信息。
-3. 公共 `CostModel` 的测量排序接口，以及 control plane 对其实际 sizing 参数的证据查找。
-4. 全部候选都有匹配的 update CPU 证据时按该指标排序；缺失、过期、配置／环境／分布不匹配或歧义时保留默认顺序。
-5. 测试证明改变兼容证据会改变真实绑定结果，同时保持参数与准确率保证；实际测量支持默认 CMS 优先，未人为制造收益或决策变化。
+1. A versioned JSON artifact, JSON Schema, explicitly labeled synthetic test fixture, and real measurement files.
+2. Offline error, CPU, memory, distribution, exact parameters, environment, sample counts, variability, validity periods, and provenance.
+3. An evidence-based ranking interface on the public `CostModel`, plus control-plane evidence lookup using its actual sizing parameters.
+4. Ranking by update CPU when all candidates have compatible measurements; default ordering is preserved for missing, expired, ambiguous, or configuration/environment/distribution-incompatible evidence.
+5. Tests showing that changing compatible evidence changes actual binding while preserving parameters and accuracy guarantees. Real measurements support the default CMS preference; no benefit or decision change was manufactured.
 
-这次排序目标是单次更新 CPU，不是 CPU、内存、磁盘的综合最优目标。
-离线误差保留为对应查询的观测，不升级为形式化保证，也不直接用来缩小 sketch。
-生命周期接口只提供有依据的部分成本；缺少语义匹配的 readout、retention、retirement
-或 raw/residual 成本时，完整方案仍不可估计。实时 ground truth、自估误差和在线反馈均不在本次范围内。
+This ranking minimizes per-update CPU, rather than a combined CPU/memory/disk
+objective. Offline errors remain observations for their corresponding queries;
+they are neither promoted to formal guarantees nor used directly to shrink sketches.
+The lifecycle interface exposes only supported partial costs. A complete plan
+remains unestimable when semantically matched readout, retention, retirement, or
+raw/residual costs are missing. Realtime ground truth, self-estimated error, and
+online feedback are outside this experiment's scope.
 
-## 数据与测量
+## Data and Measurements
 
-使用真正的 sketch-bench，比较 CMS、CountSketch 和 Polars group-by + HashMap
-精确频率索引。每个数据集有 20,000 个 i64 key，生成 key 空间为 1,000，seed=42；
-uniform 实际 1,000 个 distinct key，Zipf（指数 1.1）实际 952 个。
-CPU 每项 5 次测量、2 次预热；误差来自每个固定数据集的一次离线准确率实验。
+The real sketch-bench compares CMS, CountSketch, and an exact Polars group-by +
+HashMap frequency index. Each dataset contains 20,000 i64 keys drawn from a
+key-space of 1,000 with seed 42. Uniform contains 1,000 distinct keys; Zipf
+(exponent 1.1) contains 952. Each CPU measurement has five runs after two warmups.
+Errors come from one offline accuracy experiment on each fixed dataset.
 
-| 分布／算法 | 更新 CPU（ns/item） | 读 CPU（ns/key） | retained／peak requested heap | 平均绝对相对频率误差 |
+| Distribution / algorithm | Update CPU (ns/item) | Read CPU (ns/key) | Retained / peak requested heap | Mean absolute relative frequency error |
 | --- | ---: | ---: | ---: | ---: |
 | Uniform CMS | 36.64 | 49.80 | 5,440 B | 163.47% |
-| Uniform CountSketch | 1,179.19 | 3,813.40 | 9,960,000 B | 0（该离线样本） |
+| Uniform CountSketch | 1,179.19 | 3,813.40 | 9,960,000 B | 0 (this offline sample) |
 | Zipf CMS | 35.68 | 44.33 | 5,440 B | 231.65% |
-| Zipf CountSketch | 948.19 | 3,911.34 | 9,960,000 B | 0（该离线样本） |
+| Zipf CountSketch | 948.19 | 3,911.34 | 9,960,000 B | 0 (this offline sample) |
 
-CMS 参数为 272 × 5，CountSketch 为 30,000 × 83。CMS 的 additive epsilon
-约束以流量总量为基准，并非每个 key 的 1% 相对误差约束，不能把上表误差解释为满足后者。
-CountSketch 的零观测误差也不保证其他数据上的误差为零。
+CMS uses parameters 272 × 5; CountSketch uses 30,000 × 83. CMS's additive epsilon
+bound is relative to total stream mass, not a 1% relative-error bound for each key.
+The errors above must not be interpreted as satisfying the latter. CountSketch's
+zero observed error does not guarantee zero error on other data.
 
-内存由独立存活对象探针测量，统计申请的堆字节，不包含输入数据、分配器页开销或整个进程 RSS。
-CPU 与内存探针的分配器差异有单独说明。磁盘、序列化大小和空 sketch 构造 CPU 未测量，保持 null。
+Memory is measured with an independent live-object probe that counts requested
+heap bytes, excluding input data, allocator page overhead, and whole-process RSS.
+Allocator differences between the CPU and memory probes are documented separately.
+Disk usage, serialized size, and empty-sketch construction CPU were unmeasured
+at this stage and remain null in this historical run.
 
-对加载这些数据后执行 1,000 次 point-frequency 查询，已测 CPU 分项之和如下：
+For 1,000 point-frequency queries after loading these datasets, the measured CPU
+components sum to:
 
-| 数据 | CMS | 精确索引 | CountSketch |
+| Dataset | CMS | Exact index | CountSketch |
 | --- | ---: | ---: | ---: |
 | Uniform | 0.783 ms | 0.741 ms | 27.397 ms |
 | Zipf | 0.758 ms | 0.799 ms | 22.875 ms |
 
-这是含精确索引 prepare 的离线分项估算，未包含未测量的 sketch 构造。
-因此不能报告完整 break-even 或部署后的加速比。精确索引的状态大小 290,816 B
-来自上游公式，也不能与 requested heap 的差额称作实测整体内存节省。
-详见 [测量报告及原始数据](../tools/empirical-bench/results/MEASUREMENTS.md)。
+These are offline component estimates that include exact-index preparation but
+exclude unmeasured sketch construction. They therefore cannot establish a complete
+break-even point or deployed speedup. The exact index's 290,816 B state footprint
+comes from an upstream formula; its difference from requested heap must not be
+called a measured reduction in total memory. See the
+[measurement report and raw data](../tools/empirical-bench/results/MEASUREMENTS.md).
 
-## o11y 结果
+## o11y Results
 
-使用仓库已有的 27 条 PromQL fixture；这是 2026-07-17 的 vendored snapshot，
-Git blob 为 `ea2eee98d78c5c9354363dc378303d98ac141672`，没有可证实的上游 commit。
-这次没有运行上游 LLM-agent 评分，也没有测量 o11y 真实数据分布。
+The evaluation uses the repository's existing 27 PromQL fixtures: a vendored
+snapshot from 2026-07-17, Git blob `ea2eee98d78c5c9354363dc378303d98ac141672`,
+without a verifiable upstream commit. This experiment did not run the upstream
+LLM-agent scoring benchmark or measure a real o11y data distribution.
 
-| 检查层 | 结果 |
+| Evaluation layer | Result |
 | --- | --- |
-| Planner 查询候选覆盖 | 26/27 有精确摘要候选，1/27 原始回退；0/27 有近似 sketch 候选 |
-| Planner 完整生命周期选择 | 27/27 保守 raw 回退，完整物理成本证据不足 |
-| Control-plane parser + typed binder | exact/default/empirical 各 24/27 绑定成功、3/27 拒绝 |
-| 独立补充查询 | 两条 quantile、一条 count_over_time；default/empirical 均可产生 sketch 候选 |
-| 测量匹配 | count_over_time 的 CMS／CountSketch 配置匹配更新成本；quantile 缺少测量 |
+| Planner query candidate coverage | 26/27 have exact-summary candidates; 1/27 falls back to raw; 0/27 have approximate-sketch candidates |
+| Planner complete lifecycle selection | 27/27 conservatively fall back to raw because complete physical-cost evidence is missing |
+| Control-plane parser + typed binder | Each of exact/default/empirical binds 24/27 and rejects 3/27 |
+| Separate supplemental queries | Two quantile queries and one count_over_time query; both default and empirical modes can produce sketch candidates |
+| Measurement applicability | CMS/CountSketch configurations for count_over_time match update-cost measurements; quantile measurements are missing |
 
-Control-plane 拒绝的三种形式是裸指标选择、`sort_desc(...)` 和 `... > 0`。
-它们不是 parser 失败；当前 typed binder 没有对应可绑定的根候选。
-成功绑定也不等于可部署执行，部分绑定结果仍是原始查询回退。
-为接通新版 Planner，补充了 Concat 元数据处理和 Summary BinaryOp 兼容；
-warm tier 尚不能执行的二元运算保持显式 fallback。
+The three forms rejected by the control plane are a bare metric selector,
+`sort_desc(...)`, and `... > 0`. These are not parser failures: the typed binder
+at this stage has no corresponding bindable root candidate. Successful binding
+also does not establish deployable execution; some bound results still fall back
+to raw queries. Concat metadata handling and Summary BinaryOp compatibility were
+added to connect the newer Planner. Binary operations unsupported by the warm tier
+retain an explicit fallback.
 
-实测证据没有改变 o11y 选择，因为这些查询没有对应 sketch 候选。
-补充查询的 CMS update CPU 明显较低，测量排序保持 CMS 在前。
-离线 point-frequency 误差不被当作 count_over_time 或 o11y 结果误差。
+Measured evidence did not change o11y selection because these queries have no
+corresponding sketch candidates. CMS update CPU is substantially lower for the
+supplemental query, so empirical ranking preserves CMS first. Offline point-frequency
+error is not treated as count_over_time or o11y result error.
 
-完整查询 CPU／内存收益均为 null。下一阶段要量化 o11y 收益，需要精确摘要及 raw/residual
-算子在对应 metric 数据、group cardinality、窗口和执行频率下的测量，随后接入完整物理成本比较。
-仅增加 sketch 算法测量不能填补这些输入。
+Complete-query CPU and memory benefits are null. Quantifying o11y benefits in the
+next stage requires measurements of exact-summary and raw/residual operators on
+the corresponding metric data, group cardinalities, windows, and execution
+frequencies, followed by complete physical-cost comparison. Adding only more
+sketch-algorithm measurements cannot supply those missing inputs.
 
-## 验证与复现
+## Validation and Reproduction
 
-- Planner mapping 单元测试：342 项通过。
-- Planner replay：4 项通过；导出归一化测试见 benchmark README。
-- Control-plane 全部 library 单元测试：633 项通过。
-- 新增 control-plane 集成测试：3 项通过，覆盖改变绑定、保守回退和二元运算 fallback。
-- Provider、replay、control-plane 接入与 benchmark 测量口径经过其他 agent 交叉检查。
+- Planner mapping unit tests: 342 passed.
+- Planner replay: four passed; see the benchmark README for export normalization tests.
+- All control-plane library unit tests: 633 passed.
+- New control-plane integration tests: three passed, covering changed binding, conservative fallback, and binary-operation fallback.
+- Other agents cross-checked the provider, replay, control-plane integration, and benchmark measurement semantics.
 
-复现入口：
+Reproduction entry points:
 
-- [真实 benchmark 命令与测量方法](../tools/empirical-bench/README.md)
-- [Planner replay 命令](user-guide/o11y-replay.md)
-- Control plane：其 worktree 的 `tools/run-offline-planner-replay.py` 和
-  `control_plane/docs/offline-sketch-evidence.md`。
-- 输出目录：`tools/empirical-bench/results/`，包含 uniform／Zipf 的 evidence、context、
-  planner replay 和 control-plane replay；控制面报告记录了实际命令和两仓库版本。
+- [Real benchmark commands and measurement methods](../tools/empirical-bench/README.md)
+- [Planner replay commands](user-guide/o11y-replay.md)
+- Control plane: `tools/run-offline-planner-replay.py` and
+  `control_plane/docs/offline-sketch-evidence.md` in its worktree.
+- Output directory: `tools/empirical-bench/results/`, containing Uniform/Zipf
+  evidence, contexts, planner replay, and control-plane replay. Control-plane
+  reports record the actual commands and both repository revisions.
 
-这些结果是离线可复现实验与规划覆盖报告，不是线上端到端性能结论。
+These results are reproducible offline experiments and a planning-coverage report,
+not conclusions about online end-to-end performance.
