@@ -1912,6 +1912,87 @@ mod tests {
         assert_eq!(baseline.value, Some(0.0));
         assert_eq!(selected.value, Some(12_000.0));
 
+        // Independent supplemental objectives add once, and either one can
+        // price a zero-base plan while retaining both sets of export evidence.
+        {
+            use asap_aware_mapping::storage_io::*;
+            let mut joint = boundary_only.clone();
+            let mut storage = StorageIoProfile {
+                evidence_version: joint.evidence_version.clone(),
+                observed_at_ms: 900,
+                valid_until_ms: 2000,
+                calibration: StorageCalibration {
+                    version: "joint-requests-v1".into(),
+                    cost_per_disk_read: 1.0,
+                    cost_per_disk_write: 1.0,
+                    cost_per_object_get: 1.0,
+                    cost_per_object_put: 1.0,
+                },
+                nodes: std::collections::HashMap::new(),
+            };
+            for dag in [&raw, &candidate_dag] {
+                for node in &dag.nodes {
+                    let statistics = dag.evidence[&node.id].statistics.clone();
+                    let accesses = match &statistics {
+                        OperatorStatistics::Scan {
+                            source_read_bytes, ..
+                        } => vec![StorageAccess {
+                            operation: StorageOperation::ObjectGet,
+                            extent_bytes: vec![*source_read_bytes],
+                            bytes_per_request: 4096,
+                        }],
+                        _ => vec![],
+                    };
+                    storage.nodes.insert(
+                        node.id.clone(),
+                        StorageNodeEvidence {
+                            node: node.clone(),
+                            statistics,
+                            accesses,
+                        },
+                    );
+                }
+            }
+            joint.storage_io = Some(storage);
+            let joint =
+                parse_planner_cost_document(&serde_json::to_string(&joint).unwrap()).unwrap();
+            let (raw_cost, candidate_cost, _) =
+                ExportPlannerCostModel { document: &joint }.annotations(&candidate, &root);
+            assert_eq!(raw_cost.value, Some(160.0));
+            assert_eq!(candidate_cost.value, Some(12_010.0));
+            for annotation in [&raw_cost, &candidate_cost] {
+                let version = annotation.model_version.as_ref().unwrap();
+                assert!(version.contains(STORAGE_IO_MODEL_VERSION));
+                assert!(version.contains(BOUNDARY_MODEL_VERSION));
+                assert!(version.contains("joint-requests-v1"));
+                assert_eq!(annotation.cache_profile.as_deref(), Some("no-cache-v1"));
+                assert!(annotation
+                    .inputs
+                    .iter()
+                    .any(|term| term.name == "object_get_operations"));
+                assert!(annotation
+                    .inputs
+                    .iter()
+                    .any(|term| term.name == "network_bytes"));
+            }
+            let mut storage_only = joint.clone();
+            storage_only.boundaries = None;
+            assert_eq!(
+                ExportPlannerCostModel {
+                    document: &storage_only
+                }
+                .candidate_cost(&candidate, &target),
+                Some(Cost(10.0))
+            );
+            let mut neither = storage_only;
+            neither.storage_io = None;
+            assert!(ExportPlannerCostModel { document: &neither }
+                .annotations(&candidate, &root)
+                .0
+                .value
+                .is_none());
+        }
+
         // Explicit boundaries have no post-cache execution-count evidence.
         // A nontrivial cache profile must fail closed instead of combining
         // discounted CPU with pre-cache transfer multiplicity.
