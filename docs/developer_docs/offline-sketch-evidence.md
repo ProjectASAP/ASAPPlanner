@@ -4,8 +4,8 @@ This document is for developers integrating sketch-bench with the planner. The
 Rust schema is `asap_aware_mapping::empirical_cost::EvidenceArtifact`; its JSON
 schema version is `1`. Required artifact-level `benchmark_version` and
 `model_version` identify the producer and cost interpretation independently of
-the serialization schema. The benchmark adapter in `tools/empirical-bench` produces
-artifacts from actual offline runs.
+the serialization schema. Producers export offline benchmark measurements using
+this contract; benchmark tooling is delivered separately from the core provider.
 
 The checked-in [JSON Schema](offline-sketch-evidence.schema.json) describes the
 wire format. `crates/asap-aware-mapping/tests/data/offline-evidence-synthetic.json`
