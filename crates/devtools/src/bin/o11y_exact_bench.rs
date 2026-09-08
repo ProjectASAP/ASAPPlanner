@@ -277,10 +277,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let rows: Vec<_> = CORPUS.lines().map(str::trim).filter(|q|!q.is_empty()&&!q.starts_with('#')).map(|q|
         fixture(q).map_or_else(||json!({"query":q,"status":"unavailable","reason":"no complete reference kernel for this query; no borrowed costs"}), |f|run(&f,series,evaluations))).collect();
-    let cpu = std::fs::read_to_string("/proc/cpuinfo").ok().and_then(|text|
-        text.lines().find(|line|line.starts_with("model name")).map(str::to_owned));
-    let revision = std::process::Command::new("git").args(["rev-parse","HEAD"]).output().ok()
-        .filter(|out|out.status.success()).map(|out|String::from_utf8_lossy(&out.stdout).trim().to_owned());
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find(|line| line.starts_with("model name"))
+                .map(str::to_owned)
+        });
+    let revision = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned());
     serde_json::to_writer_pretty(
         std::io::stdout(),
         &json!({"schema_version":1,
