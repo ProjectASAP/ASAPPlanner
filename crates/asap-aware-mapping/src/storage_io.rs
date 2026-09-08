@@ -4,6 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+// Keep the original public import path while sharing the sole type definition.
+pub use asap_types::resources::StorageResources;
+
 use crate::analytical_cost::{
     estimate_physical_dag, AnalyticalCostError, EvidenceBackedPhysicalDag, ExecutionMultiplicity,
     PhysicalDagNode, PhysicalOperator,
@@ -29,44 +32,6 @@ pub struct StorageAccess {
     pub operation: StorageOperation,
     pub extent_bytes: Vec<u64>,
     pub bytes_per_request: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StorageResources {
-    pub disk_reads: u64,
-    pub disk_writes: u64,
-    pub object_gets: u64,
-    pub object_puts: u64,
-}
-
-impl StorageResources {
-    pub fn terms(self) -> [(&'static str, u64); 4] {
-        [
-            ("disk_read_operations", self.disk_reads),
-            ("disk_write_operations", self.disk_writes),
-            ("object_get_operations", self.object_gets),
-            ("object_put_operations", self.object_puts),
-        ]
-    }
-    fn add(&mut self, other: Self) -> Result<(), AnalyticalCostError> {
-        self.disk_reads = self
-            .disk_reads
-            .checked_add(other.disk_reads)
-            .ok_or(AnalyticalCostError::Overflow)?;
-        self.disk_writes = self
-            .disk_writes
-            .checked_add(other.disk_writes)
-            .ok_or(AnalyticalCostError::Overflow)?;
-        self.object_gets = self
-            .object_gets
-            .checked_add(other.object_gets)
-            .ok_or(AnalyticalCostError::Overflow)?;
-        self.object_puts = self
-            .object_puts
-            .checked_add(other.object_puts)
-            .ok_or(AnalyticalCostError::Overflow)?;
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -217,7 +182,9 @@ pub fn estimate_storage_io(
                         .ok_or(AnalyticalCostError::Overflow)?;
                 }
             }
-            local.add(term)?;
+            local = local
+                .checked_add(term)
+                .ok_or(AnalyticalCostError::Overflow)?;
         }
         if node.operator == PhysicalOperator::Scan {
             let OperatorStatistics::Scan {
@@ -232,7 +199,9 @@ pub fn estimate_storage_io(
                 ));
             }
         }
-        total.add(local)?;
+        total = total
+            .checked_add(local)
+            .ok_or(AnalyticalCostError::Overflow)?;
         per_node.insert(id.into(), local);
     }
     Ok(StorageEstimate {

@@ -43,6 +43,14 @@ profile and coefficients before ranking. Scan read extents must add up to the
 scan's authoritative `source_read_bytes`; explicit additional storage actions
 can be bound to other physical nodes.
 
+Their sole data type is `asap_types::resources::StorageResources`, defined in
+the shared resources module alongside CPU and byte dimensions. The mapping
+crate re-exports it at `asap_aware_mapping::storage_io::StorageResources` for
+source compatibility; the four integer JSON fields are unchanged. Pure term
+enumeration and checked addition live with the shared type. Access profiles,
+request-count estimation, calibration, and ranking remain in the mapping
+crate. An omitted profile still means unavailable operation counts, not zero.
+
 A request-only objective may set all base CPU, scan-byte, and memory
 coefficients to zero if the snapshot supplies valid storage evidence and at
 least one positive storage coefficient. With a zero base objective, missing

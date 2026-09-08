@@ -138,6 +138,27 @@ fn fixture() -> (EvidenceBackedPhysicalDag, ComparisonScope) {
 
 use asap_aware_mapping::storage_io::*;
 
+// The compatibility import and shared resource namespace expose one Rust type.
+#[test]
+fn storage_estimates_use_the_shared_resource_type_without_wire_changes() {
+    let (dag, scope) = fixture();
+    let estimate = estimate_storage_io(&dag, &scope, &profile(&dag), "evidence-v1").unwrap();
+    let shared: asap_types::resources::StorageResources = estimate.total;
+    let legacy: asap_aware_mapping::storage_io::StorageResources = shared;
+    assert_eq!(shared, legacy);
+    let wire = serde_json::to_value(&estimate).unwrap();
+    assert_eq!(
+        wire["total"],
+        serde_json::json!({
+            "disk_reads": 0, "disk_writes": 0, "object_gets": 12, "object_puts": 0,
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<StorageEstimate>(wire).unwrap(),
+        estimate
+    );
+}
+
 fn profile(dag: &EvidenceBackedPhysicalDag) -> StorageIoProfile {
     StorageIoProfile {
         evidence_version: "evidence-v1".into(),

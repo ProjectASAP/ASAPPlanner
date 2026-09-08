@@ -651,6 +651,19 @@ mod tests {
         );
     }
 
+    /// Shared count defaults must not turn an omitted profile into measured zero I/O.
+    #[test]
+    fn missing_storage_profile_remains_unestimated() {
+        let root = query();
+        let target = TargetSubDAG::new(&root);
+        let candidates =
+            crate::replacement::SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        let provider = TestProvider::new(true, 800);
+        let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
+        let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
+        assert!(estimate.storage_io.is_none());
+    }
+
     #[test]
     fn global_selection_uses_complete_physical_comparison() {
         let root = query();
