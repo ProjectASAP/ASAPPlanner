@@ -1912,6 +1912,42 @@ mod tests {
         assert_eq!(baseline.value, Some(0.0));
         assert_eq!(selected.value, Some(12_000.0));
 
+        // Explicit boundaries have no post-cache execution-count evidence.
+        // A nontrivial cache profile must fail closed instead of combining
+        // discounted CPU with pre-cache transfer multiplicity.
+        let mut combined = serde_json::to_value(&parsed).unwrap();
+        combined["targets"][0]["scope"]["cache_profile"] = serde_json::json!({
+            "profile": "evidence", "version": "combined-cache-v1",
+            "distinct_evaluations": 2, "repeated_identical_evaluations": 8,
+            "result_cache": {"working_set_bytes": 100, "capacity_bytes": 100},
+            "buffer_cache": {"working_set_bytes": 1000, "capacity_bytes": 500},
+            "result_invalidation_ratio": null
+        });
+        let combined = parse_planner_cost_document(&combined.to_string()).unwrap();
+        let combined_model = ExportPlannerCostModel {
+            document: &combined,
+        };
+        assert!(combined_model.candidate_cost(&candidate, &target).is_none());
+        assert!(combined_model
+            .annotations(&candidate, &root)
+            .0
+            .value
+            .is_none());
+        let (uncached_raw, uncached_selected, _) =
+            ExportPlannerCostModel { document: &parsed }.annotations(&candidate, &root);
+        for annotation in [&uncached_raw, &uncached_selected] {
+            assert_eq!(annotation.cache_profile.as_deref(), Some("no-cache-v1"));
+            assert_eq!(
+                annotation.evidence_version.as_deref(),
+                Some("test-evidence-v1")
+            );
+            assert!(annotation
+                .model_version
+                .as_ref()
+                .unwrap()
+                .contains(BOUNDARY_MODEL_VERSION));
+        }
+
         let mut ambiguous = parsed.clone();
         let plans = &mut ambiguous.boundaries.as_mut().unwrap().plans;
         plans.push(plans[0].clone());

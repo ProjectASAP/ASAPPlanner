@@ -52,6 +52,13 @@ reachable parent of the producer; multiplicity comes from that consumer.
 `Once` means one execution; `PerEvaluation` uses the comparison scope's demand.
 Shared producers are traversed once regardless of fan-out. Duplicate boundary
 IDs fail closed instead of being ambiguously counted or silently dropped.
+Boundary profiles currently require `CacheProfile::NoCache`. Cache evidence does
+not identify which physical transfers or materializations are skipped on a hit,
+and boundary execution counts derive from the comparison scope rather than a
+post-cache schedule. Combining a boundary profile with `CacheProfile::Evidence`
+therefore fails closed until cache-aware boundary execution evidence exists.
+Supported exports retain the no-cache profile provenance alongside boundary
+model/calibration versions.
 
 Example: a retained producer materializes 40 encoded bytes once. Two consumers
 each receive two copies of those 40 bytes over three evaluations. The totals

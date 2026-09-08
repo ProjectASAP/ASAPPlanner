@@ -171,6 +171,15 @@ impl<'a> PhysicalPlanCostModel<'a> {
             ));
         }
         let scope = &snapshot.scope;
+        if snapshot.boundaries.is_some()
+            && matches!(snapshot.cache_profile, CacheProfile::Evidence(_))
+        {
+            // Scope-based boundary multiplicity does not describe which actions
+            // cache hits skip; do not mix pre-cache byte work with discounted CPU.
+            return Err(AnalyticalCostError::MissingOrStale(
+                "cache-aware boundary execution evidence",
+            ));
+        }
         let evidence = QueryEvidence {
             provider: self.provider,
             snapshot: &snapshot,
