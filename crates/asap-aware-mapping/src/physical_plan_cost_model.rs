@@ -156,6 +156,16 @@ impl<'a> PhysicalPlanCostModel<'a> {
         target: &TargetSubDAG<'_>,
     ) -> Result<PhysicalPlanComparison, AnalyticalCostError> {
         let (snapshot, raw) = self.target_evidence(target)?;
+        // Aggregate cache hit ratios do not identify which independently rounded
+        // extents issue requests. Do not mix cache-adjusted bytes/CPU with
+        // uncached request counts until cache-aware extent evidence is available.
+        if snapshot.storage_io.is_some()
+            && matches!(&snapshot.cache_profile, CacheProfile::Evidence(_))
+        {
+            return Err(AnalyticalCostError::InvalidCacheEvidence(
+                "storage operation costs require an explicit no-cache profile; cache-aware extent evidence is unavailable",
+            ));
+        }
         let scope = &snapshot.scope;
         let evidence = QueryEvidence {
             provider: self.provider,

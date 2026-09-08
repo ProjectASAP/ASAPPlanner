@@ -72,8 +72,13 @@ Missing entries, expired/future evidence, incompatible node snapshots, zero
 request sizes, invalid calibration, and overflow return typed analytical
 errors. When used by plan ranking/export they make that comparison unavailable.
 This profile extends the physical-plan adapter; the separate summary-maintenance
-lifecycle estimator retains its existing dimensions. Cache behavior is a
-separate model input and is not inferred here.
+lifecycle estimator retains its existing dimensions. Combined physical-plan
+ranking currently supports storage profiles only with an explicit `NoCache`
+profile. `CacheProfile::Evidence` together with storage evidence makes the
+comparison unavailable: aggregate cache hit ratios cannot identify which
+independently rounded extents issue requests. Supporting that combination
+requires cache-aware extent/request evidence; the adapter does not mix
+cache-adjusted bytes and CPU with uncached operation counts.
 
 Verification:
 

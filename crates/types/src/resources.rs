@@ -11,8 +11,8 @@ pub mod cpu;
 pub mod measurement;
 pub mod physical;
 pub mod storage;
-pub use storage::StorageResources;
 pub use cache::{CacheCapacityEvidence, CacheEvidence, CacheProfile};
+pub use storage::StorageResources;
 
 pub use cpu::{MeasuredCpu, ModeledCpu};
 pub use measurement::Measurement;

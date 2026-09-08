@@ -1675,6 +1675,18 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains(STORAGE_IO_MODEL_VERSION));
+        assert_eq!(selected.cache_profile.as_deref(), Some("no-cache-v1"));
+        for name in ["result_cache_hit_ratio", "buffer_cache_hit_ratio"] {
+            assert_eq!(
+                selected
+                    .inputs
+                    .iter()
+                    .find(|term| term.name == name)
+                    .unwrap()
+                    .value,
+                0.0
+            );
+        }
         assert_eq!(
             selected.evidence_version.as_deref(),
             Some("test-evidence-v1")
@@ -1693,6 +1705,24 @@ mod tests {
         let (baseline, selected, _) = model.annotations(&candidate, &root);
         assert_eq!(baseline.value, Some(160.0));
         assert_eq!(selected.value, Some(10.0));
+        // Aggregate cache hit assumptions cannot locate cached extents or
+        // reconstruct independently rounded physical storage requests.
+        let mut cached = serde_json::to_value(&requests_only).unwrap();
+        cached["targets"][0]["scope"]["cache_profile"] = serde_json::json!({
+            "profile": "evidence", "version": "cached-with-storage-v1",
+            "distinct_evaluations": 1, "repeated_identical_evaluations": 9,
+            "result_cache": {"working_set_bytes": 100, "capacity_bytes": 100},
+            "buffer_cache": {"working_set_bytes": 100, "capacity_bytes": 100},
+            "result_invalidation_ratio": null,
+        });
+        let cached = parse_planner_cost_document(&cached.to_string()).unwrap();
+        let cached_model = ExportPlannerCostModel { document: &cached };
+        assert!(cached_model.candidate_cost(&candidate, &target).is_none());
+        assert!(cached_model
+            .annotations(&candidate, &root)
+            .0
+            .value
+            .is_none());
         document
             .storage_io
             .as_mut()
