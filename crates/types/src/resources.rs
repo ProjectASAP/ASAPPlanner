@@ -6,20 +6,19 @@
 //! Cache assumptions share this schema namespace but are not additive resource
 //! consumption; their numerical interpretation belongs to an estimator.
 
+pub mod boundary;
 pub mod cache;
 pub mod cpu;
 pub mod measurement;
 pub mod physical;
 pub mod storage;
+pub use boundary::{BoundaryKind, BoundaryResources, MaterializationMedium};
 pub use cache::{CacheCapacityEvidence, CacheEvidence, CacheProfile};
 pub use storage::StorageResources;
 
 pub use cpu::{MeasuredCpu, ModeledCpu};
 pub use measurement::Measurement;
 pub use physical::{MeasuredResources, PhysicalResources};
-pub mod boundary;
-pub use boundary::{BoundaryKind, BoundaryResources, MaterializationMedium};
-
 #[cfg(test)]
 mod tests {
     use super::*;
