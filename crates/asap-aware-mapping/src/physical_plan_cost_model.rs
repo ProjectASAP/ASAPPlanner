@@ -30,6 +30,7 @@ pub struct PhysicalEvidenceSnapshot {
     pub scope: ComparisonScope,
     pub cache_profile: CacheProfile,
     pub storage_io: Option<crate::storage_io::StorageIoProfile>,
+    pub boundaries: Option<crate::boundary_cost::BoundaryProfile>,
 }
 
 /// Deployment evidence needed to price one planner alternative.
@@ -71,6 +72,10 @@ pub struct PhysicalPlanComparison {
         crate::storage_io::StorageEstimate,
         crate::storage_io::StorageEstimate,
     )>,
+    pub boundaries: Option<(
+        crate::boundary_cost::BoundaryEstimate,
+        crate::boundary_cost::BoundaryEstimate,
+    )>,
 }
 
 /// Planner cost model that admits only complete, cheaper physical plans.
@@ -104,8 +109,7 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 "resource_calibration.version",
             ));
         }
-        // A zero base objective may be supplemented by storage coefficients;
-        // that check needs the target's immutable evidence snapshot.
+        // Supplemental storage or boundary pricing may supply a zero-base objective.
         match calibration.validate() {
             Ok(()) | Err(AnalyticalCostError::ZeroCalibration) => {}
             Err(error) => return Err(error),
@@ -167,6 +171,15 @@ impl<'a> PhysicalPlanCostModel<'a> {
             ));
         }
         let scope = &snapshot.scope;
+        if snapshot.boundaries.is_some()
+            && matches!(snapshot.cache_profile, CacheProfile::Evidence(_))
+        {
+            // Scope-based boundary multiplicity does not describe which actions
+            // cache hits skip; do not mix pre-cache byte work with discounted CPU.
+            return Err(AnalyticalCostError::MissingOrStale(
+                "cache-aware boundary execution evidence",
+            ));
+        }
         let evidence = QueryEvidence {
             provider: self.provider,
             snapshot: &snapshot,
@@ -218,6 +231,26 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 ))
             })
             .transpose()?;
+        let boundaries = snapshot
+            .boundaries
+            .as_ref()
+            .map(|profile| {
+                Ok((
+                    crate::boundary_cost::estimate_boundaries(
+                        &raw,
+                        scope,
+                        profile,
+                        &snapshot.version,
+                    )?,
+                    crate::boundary_cost::estimate_boundaries(
+                        &replacement,
+                        scope,
+                        profile,
+                        &snapshot.version,
+                    )?,
+                ))
+            })
+            .transpose()?;
         let (mut raw_cost, mut candidate_cost) = match self.calibration.validate() {
             Ok(()) => (
                 Cost(resources.raw.calibrated_cost(&self.calibration)?),
@@ -237,7 +270,13 @@ impl<'a> PhysicalPlanCostModel<'a> {
                     .into_iter()
                     .any(|coefficient| coefficient > 0.0)
                 });
-                if !has_storage_objective {
+                // Boundary estimation above validates evidence and pricing.
+                // At least one dimension must have a positive coefficient.
+                let has_boundary_objective = snapshot.boundaries.as_ref().is_some_and(|profile| {
+                    profile.calibration.cost_per_network_byte > 0.0
+                        || profile.calibration.cost_per_materialization_byte > 0.0
+                });
+                if !has_storage_objective && !has_boundary_objective {
                     return Err(AnalyticalCostError::ZeroCalibration);
                 }
                 (Cost(0.0), Cost(0.0))
@@ -245,6 +284,10 @@ impl<'a> PhysicalPlanCostModel<'a> {
             Err(error) => return Err(error),
         };
         if let Some((raw, candidate)) = &storage_io {
+            raw_cost.0 += raw.cost;
+            candidate_cost.0 += candidate.cost;
+        }
+        if let Some((raw, candidate)) = &boundaries {
             raw_cost.0 += raw.cost;
             candidate_cost.0 += candidate.cost;
         }
@@ -256,6 +299,7 @@ impl<'a> PhysicalPlanCostModel<'a> {
             raw_cost,
             candidate_cost,
             storage_io,
+            boundaries,
         })
     }
 }
@@ -405,6 +449,7 @@ mod tests {
         storage_io: Option<crate::storage_io::StorageIoProfile>,
         summary_available: bool,
         candidate_scan_bytes: u64,
+        boundaries: Option<crate::boundary_cost::BoundaryProfile>,
         snapshot_calls: Cell<u64>,
         raw_evidence_calls: Cell<u64>,
     }
@@ -415,6 +460,7 @@ mod tests {
                 storage_io: None,
                 summary_available,
                 candidate_scan_bytes,
+                boundaries: None,
                 snapshot_calls: Cell::new(0),
                 raw_evidence_calls: Cell::new(0),
             }
@@ -500,6 +546,7 @@ mod tests {
                 scope: scope(),
                 cache_profile: CacheProfile::no_cache(),
                 storage_io: self.storage_io.clone(),
+                boundaries: self.boundaries.clone(),
             })
         }
 
@@ -672,6 +719,131 @@ mod tests {
         let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
         let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
         assert!(estimate.storage_io.is_none());
+    }
+
+    // Combined objectives must identify the base calibration even when its
+    // coefficients are zero and boundaries supply the entire objective.
+    #[test]
+    fn blank_base_calibration_version_is_rejected() {
+        let provider = TestProvider::new(true, 800);
+        for version in ["", " \t\n"] {
+            for boundary_only in [false, true] {
+                let mut calibration = calibration();
+                calibration.version = version.into();
+                if boundary_only {
+                    calibration.cost_per_cpu_op = 0.0;
+                    calibration.cost_per_scan_byte = 0.0;
+                    calibration.cost_per_retained_byte = 0.0;
+                }
+                assert!(
+                    PhysicalPlanCostModel::new(&provider, calibration).is_err(),
+                    "blank base provenance accepted (boundary_only={boundary_only})"
+                );
+            }
+        }
+    }
+
+    // Explicit byte pricing can rank complete plans without pricing CPU or scans.
+    #[test]
+    fn boundary_only_objective_ranks_complete_plans() {
+        use crate::boundary_cost::*;
+        let root = query();
+        let target = TargetSubDAG::new(&root);
+        let mut provider = TestProvider::new(true, 800);
+        let raw = PhysicalPlanCostModel::new(&provider, calibration())
+            .unwrap()
+            .target_evidence(&target)
+            .unwrap()
+            .1;
+        let candidate = provider.summary_dag(&scope());
+        provider.boundaries = Some(BoundaryProfile {
+            evidence_version: "test-snapshot-1".into(),
+            observed_at_ms: 900,
+            valid_until_ms: 2000,
+            calibration: BoundaryCalibration {
+                version: "network-only-v1".into(),
+                cost_per_network_byte: 1.0,
+                cost_per_materialization_byte: 0.0,
+            },
+            plans: [&raw, &candidate]
+                .into_iter()
+                .map(|dag| BoundaryPlanEvidence {
+                    root: dag.root.clone(),
+                    nodes: dag
+                        .nodes
+                        .iter()
+                        .map(|node| {
+                            let statistics = dag.evidence[&node.id].statistics.clone();
+                            let bytes = statistics.output().bytes;
+                            let boundaries = if matches!(node.operator, PhysicalOperator::Scan) {
+                                vec![PhysicalBoundary {
+                                    id: "scan-transfer".into(),
+                                    consumer: None,
+                                    kind: BoundaryKind::Network {
+                                        source_location: "edge".into(),
+                                        destination_location: "backend".into(),
+                                    },
+                                    logical_bytes: bytes,
+                                    encoded_bytes: bytes,
+                                    copies: 1,
+                                }]
+                            } else {
+                                vec![]
+                            };
+                            (
+                                node.id.clone(),
+                                BoundaryNodeEvidence {
+                                    node: node.clone(),
+                                    statistics,
+                                    boundaries,
+                                },
+                            )
+                        })
+                        .collect(),
+                })
+                .collect(),
+        });
+        let zero_base = ResourceCalibration {
+            cost_per_cpu_op: 0.0,
+            cost_per_scan_byte: 0.0,
+            cost_per_retained_byte: 0.0,
+            version: "boundary-only-v1".into(),
+        };
+        let space = crate::replacement::search_workload_with(
+            vec![("q", Rc::clone(&root))],
+            &crate::replacement::default_strategies(),
+        );
+        let model = PhysicalPlanCostModel::new(&provider, zero_base.clone()).unwrap();
+        let selected = space.global_selection(&model);
+        assert!(selected
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_some());
+        drop(model);
+        for coefficient in [0.0, -1.0, f64::NAN] {
+            provider
+                .boundaries
+                .as_mut()
+                .unwrap()
+                .calibration
+                .cost_per_network_byte = coefficient;
+            let model = PhysicalPlanCostModel::new(&provider, zero_base.clone()).unwrap();
+            assert!(space
+                .global_selection(&model)
+                .for_target(&space.roots[0].1)
+                .unwrap()
+                .chosen
+                .is_none());
+        }
+        provider.boundaries = None;
+        let model = PhysicalPlanCostModel::new(&provider, zero_base).unwrap();
+        assert!(space
+            .global_selection(&model)
+            .for_target(&space.roots[0].1)
+            .unwrap()
+            .chosen
+            .is_none());
     }
 
     #[test]
@@ -862,6 +1034,7 @@ mod tests {
                     scope: scope(),
                     cache_profile: CacheProfile::no_cache(),
                     storage_io: None,
+                    boundaries: None,
                 })
             }
 

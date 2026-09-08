@@ -90,6 +90,8 @@ use asap_types::types::AccuracyTarget;
 struct PlannerCostDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_io: Option<asap_aware_mapping::storage_io::StorageIoProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boundaries: Option<asap_aware_mapping::boundary_cost::BoundaryProfile>,
     /// Immutable catalog/runtime evidence generation shared by this file.
     evidence_version: String,
     calibration: ResourceCalibration,
@@ -279,6 +281,7 @@ fn plan_values_match_inner(
 
 struct ExportPhysicalProvider<'a> {
     storage_io: Option<&'a asap_aware_mapping::storage_io::StorageIoProfile>,
+    boundaries: Option<&'a asap_aware_mapping::boundary_cost::BoundaryProfile>,
     evidence_version: &'a str,
     target: &'a TargetPhysicalEvidence,
     candidate: &'a CandidatePhysicalEvidence,
@@ -301,6 +304,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
             scope: self.target.scope.resolve()?,
             cache_profile: self.target.scope.cache_profile.clone(),
             storage_io: self.storage_io.cloned(),
+            boundaries: self.boundaries.cloned(),
         })
     }
 
@@ -390,6 +394,7 @@ impl ExportPlannerCostModel<'_> {
         Some((
             ExportPhysicalProvider {
                 storage_io: self.document.storage_io.as_ref(),
+                boundaries: self.document.boundaries.as_ref(),
                 evidence_version: &self.document.evidence_version,
                 target: target_evidence,
                 candidate: candidate_evidence,
@@ -422,6 +427,12 @@ impl ExportPlannerCostModel<'_> {
             version.push_str(&format!(
                 "+{}+{}",
                 storage.model_version, storage.calibration_version
+            ));
+        }
+        if let Some((boundary, _)) = &estimate.boundaries {
+            version.push_str(&format!(
+                "+{}+{}",
+                boundary.model_version, boundary.calibration_version
             ));
         }
         let scope = &provider.target.scope;
@@ -536,6 +547,40 @@ impl ExportPlannerCostModel<'_> {
         if let Some((raw, candidate)) = &estimate.storage_io {
             raw_inputs.extend(storage_inputs(raw));
             candidate_inputs.extend(storage_inputs(candidate));
+        }
+        let boundary_inputs =
+            |estimate: &asap_aware_mapping::boundary_cost::BoundaryEstimate| {
+                let mut terms: Vec<_> = estimate
+                    .total
+                    .terms()
+                    .into_iter()
+                    .map(|(name, value)| CostInput {
+                        name: name.into(),
+                        value: value as f64,
+                        unit: Some("bytes".into()),
+                    })
+                    .collect();
+                for (prefix, entries) in [
+                    ("physical_node", &estimate.per_node),
+                    ("boundary", &estimate.per_boundary),
+                ] {
+                    let mut ids: Vec<_> = entries.keys().collect();
+                    ids.sort();
+                    for id in ids {
+                        terms.extend(entries[id].terms().into_iter().map(|(name, value)| {
+                            CostInput {
+                                name: format!("{prefix}:{id}:{name}"),
+                                value: value as f64,
+                                unit: Some("bytes".into()),
+                            }
+                        }));
+                    }
+                }
+                terms
+            };
+        if let Some((raw, candidate)) = &estimate.boundaries {
+            raw_inputs.extend(boundary_inputs(raw));
+            candidate_inputs.extend(boundary_inputs(candidate));
         }
         let baseline = CostAnnotation::modeled(
             estimate.raw_cost.0,
@@ -1756,6 +1801,265 @@ mod tests {
         .is_none());
     }
 
+    // Declared boundaries survive JSON and affect the selected physical plan.
+    #[test]
+    fn boundary_bytes_export_and_change_plan_selection() {
+        use asap_aware_mapping::boundary_cost::*;
+        let (query, candidate, mut document) = cost_fixture();
+        let raw = fixture_raw_dag(&query, &candidate, &document);
+        let candidate_dag = cheap_candidate_dag();
+        let root = Rc::new(query.clone());
+        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
+        assert!(ExportPlannerCostModel {
+            document: &document
+        }
+        .candidate_cost(&candidate, &target)
+        .is_some());
+        let mut profile = BoundaryProfile {
+            evidence_version: document.evidence_version.clone(),
+            observed_at_ms: 900,
+            valid_until_ms: 2000,
+            calibration: BoundaryCalibration {
+                version: "bytes-v1".into(),
+                cost_per_network_byte: 1.0,
+                cost_per_materialization_byte: 1.0,
+            },
+            plans: vec![],
+        };
+        for dag in [&raw, &candidate_dag] {
+            profile.plans.push(BoundaryPlanEvidence {
+                root: dag.root.clone(),
+                nodes: dag
+                    .nodes
+                    .iter()
+                    .map(|node| {
+                        (
+                            node.id.clone(),
+                            BoundaryNodeEvidence {
+                                node: node.clone(),
+                                statistics: dag.evidence[&node.id].statistics.clone(),
+                                boundaries: vec![],
+                            },
+                        )
+                    })
+                    .collect(),
+            });
+        }
+        profile.plans[1]
+            .nodes
+            .get_mut("summary-read")
+            .unwrap()
+            .boundaries
+            .push(PhysicalBoundary {
+                id: "summary-transfer".into(),
+                consumer: None,
+                kind: BoundaryKind::Network {
+                    source_location: "edge".into(),
+                    destination_location: "backend".into(),
+                },
+                logical_bytes: 2400,
+                encoded_bytes: 1200,
+                copies: 1,
+            });
+        document.boundaries = Some(profile);
+        let parsed =
+            parse_planner_cost_document(&serde_json::to_string(&document).unwrap()).unwrap();
+        let model = ExportPlannerCostModel { document: &parsed };
+        let (baseline, selected, _) = model.annotations(&candidate, &root);
+        assert_eq!(
+            baseline
+                .inputs
+                .iter()
+                .find(|term| term.name == "network_bytes")
+                .unwrap()
+                .value,
+            0.0
+        );
+        assert_eq!(
+            selected
+                .inputs
+                .iter()
+                .find(|term| term.name == "network_bytes")
+                .unwrap()
+                .value,
+            12_000.0
+        );
+        assert!(selected
+            .inputs
+            .iter()
+            .any(|term| term.name == "physical_node:summary-read:network_bytes"));
+        assert!(selected
+            .inputs
+            .iter()
+            .any(|term| term.name == "boundary:summary-transfer:network_bytes"));
+        assert!(selected
+            .model_version
+            .as_ref()
+            .unwrap()
+            .contains(BOUNDARY_MODEL_VERSION));
+        assert_eq!(
+            selected.evidence_version.as_deref(),
+            Some("test-evidence-v1")
+        );
+        let mut boundary_only = parsed.clone();
+        boundary_only.calibration.cost_per_cpu_op = 0.0;
+        boundary_only.calibration.cost_per_scan_byte = 0.0;
+        boundary_only.calibration.cost_per_retained_byte = 0.0;
+        let (baseline, selected, _) = ExportPlannerCostModel {
+            document: &boundary_only,
+        }
+        .annotations(&candidate, &root);
+        assert_eq!(baseline.value, Some(0.0));
+        assert_eq!(selected.value, Some(12_000.0));
+
+        // Independent supplemental objectives add once, and either one can
+        // price a zero-base plan while retaining both sets of export evidence.
+        {
+            use asap_aware_mapping::storage_io::*;
+            let mut joint = boundary_only.clone();
+            let mut storage = StorageIoProfile {
+                evidence_version: joint.evidence_version.clone(),
+                observed_at_ms: 900,
+                valid_until_ms: 2000,
+                calibration: StorageCalibration {
+                    version: "joint-requests-v1".into(),
+                    cost_per_disk_read: 1.0,
+                    cost_per_disk_write: 1.0,
+                    cost_per_object_get: 1.0,
+                    cost_per_object_put: 1.0,
+                },
+                nodes: std::collections::HashMap::new(),
+            };
+            for dag in [&raw, &candidate_dag] {
+                for node in &dag.nodes {
+                    let statistics = dag.evidence[&node.id].statistics.clone();
+                    let accesses = match &statistics {
+                        OperatorStatistics::Scan {
+                            source_read_bytes, ..
+                        } => vec![StorageAccess {
+                            operation: StorageOperation::ObjectGet,
+                            extent_bytes: vec![*source_read_bytes],
+                            bytes_per_request: 4096,
+                        }],
+                        _ => vec![],
+                    };
+                    storage.nodes.insert(
+                        node.id.clone(),
+                        StorageNodeEvidence {
+                            node: node.clone(),
+                            statistics,
+                            accesses,
+                        },
+                    );
+                }
+            }
+            joint.storage_io = Some(storage);
+            let joint =
+                parse_planner_cost_document(&serde_json::to_string(&joint).unwrap()).unwrap();
+            let (raw_cost, candidate_cost, _) =
+                ExportPlannerCostModel { document: &joint }.annotations(&candidate, &root);
+            assert_eq!(raw_cost.value, Some(160.0));
+            assert_eq!(candidate_cost.value, Some(12_010.0));
+            for annotation in [&raw_cost, &candidate_cost] {
+                let version = annotation.model_version.as_ref().unwrap();
+                assert!(version.contains(STORAGE_IO_MODEL_VERSION));
+                assert!(version.contains(BOUNDARY_MODEL_VERSION));
+                assert!(version.contains("joint-requests-v1"));
+                assert_eq!(annotation.cache_profile.as_deref(), Some("no-cache-v1"));
+                assert!(annotation
+                    .inputs
+                    .iter()
+                    .any(|term| term.name == "object_get_operations"));
+                assert!(annotation
+                    .inputs
+                    .iter()
+                    .any(|term| term.name == "network_bytes"));
+            }
+            let mut storage_only = joint.clone();
+            storage_only.boundaries = None;
+            assert_eq!(
+                ExportPlannerCostModel {
+                    document: &storage_only
+                }
+                .candidate_cost(&candidate, &target),
+                Some(Cost(10.0))
+            );
+            let mut neither = storage_only;
+            neither.storage_io = None;
+            assert!(ExportPlannerCostModel { document: &neither }
+                .annotations(&candidate, &root)
+                .0
+                .value
+                .is_none());
+        }
+
+        // Explicit boundaries have no post-cache execution-count evidence.
+        // A nontrivial cache profile must fail closed instead of combining
+        // discounted CPU with pre-cache transfer multiplicity.
+        let mut combined = serde_json::to_value(&parsed).unwrap();
+        combined["targets"][0]["scope"]["cache_profile"] = serde_json::json!({
+            "profile": "evidence", "version": "combined-cache-v1",
+            "distinct_evaluations": 2, "repeated_identical_evaluations": 8,
+            "result_cache": {"working_set_bytes": 100, "capacity_bytes": 100},
+            "buffer_cache": {"working_set_bytes": 1000, "capacity_bytes": 500},
+            "result_invalidation_ratio": null
+        });
+        let combined = parse_planner_cost_document(&combined.to_string()).unwrap();
+        let combined_model = ExportPlannerCostModel {
+            document: &combined,
+        };
+        assert!(combined_model.candidate_cost(&candidate, &target).is_none());
+        assert!(combined_model
+            .annotations(&candidate, &root)
+            .0
+            .value
+            .is_none());
+        let (uncached_raw, uncached_selected, _) =
+            ExportPlannerCostModel { document: &parsed }.annotations(&candidate, &root);
+        for annotation in [&uncached_raw, &uncached_selected] {
+            assert_eq!(annotation.cache_profile.as_deref(), Some("no-cache-v1"));
+            assert_eq!(
+                annotation.evidence_version.as_deref(),
+                Some("test-evidence-v1")
+            );
+            assert!(annotation
+                .model_version
+                .as_ref()
+                .unwrap()
+                .contains(BOUNDARY_MODEL_VERSION));
+        }
+
+        let mut ambiguous = parsed.clone();
+        let plans = &mut ambiguous.boundaries.as_mut().unwrap().plans;
+        plans.push(plans[0].clone());
+        let model = ExportPlannerCostModel {
+            document: &ambiguous,
+        };
+        assert!(model.candidate_cost(&candidate, &target).is_none());
+        assert!(model.annotations(&candidate, &root).0.value.is_none());
+        document
+            .boundaries
+            .as_mut()
+            .unwrap()
+            .calibration
+            .cost_per_network_byte = 1000.0;
+        assert!(ExportPlannerCostModel {
+            document: &document
+        }
+        .candidate_cost(&candidate, &target)
+        .is_none());
+        document.boundaries.as_mut().unwrap().plans[0]
+            .nodes
+            .remove(&raw.root);
+        assert!(ExportPlannerCostModel {
+            document: &document
+        }
+        .annotations(&candidate, &root)
+        .0
+        .value
+        .is_none());
+    }
+
     fn test_scope() -> ComparisonScopeEvidence {
         ComparisonScopeEvidence {
             data_arrival: asap_types::workload::DataArrival::AtRest,
@@ -1908,6 +2212,7 @@ mod tests {
         };
         let document = PlannerCostDocument {
             storage_io: None,
+            boundaries: None,
             evidence_version: "test-evidence-v1".into(),
             calibration: ResourceCalibration {
                 cost_per_cpu_op: 1.0,
@@ -2221,6 +2526,7 @@ mod tests {
         let second_dag = cheap_candidate_dag();
         let document = PlannerCostDocument {
             storage_io: None,
+            boundaries: None,
             evidence_version: "test-evidence-v1".into(),
             calibration: ResourceCalibration {
                 cost_per_cpu_op: 1.0,
