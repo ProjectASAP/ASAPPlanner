@@ -128,6 +128,13 @@ required: the result cache is filled by evaluations in this horizon. Buffer
 residency is a steady-state capacity/working-set model; it does not model
 cold-start warming or access order.
 
+Uncovered buffer bytes are subtracted before converting to floating point, so
+near-full residency cannot erase a nonzero miss. With an integral number of
+executions, buffer-adjusted scan bytes use exact integer arithmetic and round
+up only after scaling; large byte counts do not lose precision above `2^53`.
+The physical-ranking entry point also rejects blank calibration versions,
+keeping every admitted comparison bound to a named coefficient generation.
+
 Define `R = min(1, result_capacity / result_working_set)` and
 `B = min(1, buffer_capacity / buffer_working_set)`. For at-rest data the
 result invalidation ratio is zero. Continuously ingesting data must declare an

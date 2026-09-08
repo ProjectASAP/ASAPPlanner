@@ -65,6 +65,8 @@ struct ResolvedCacheProfile {
     scan_execution_factor: f64,
     result_hit_ratio: f64,
     buffer_hit_ratio: f64,
+    buffer_miss_bytes: u64,
+    buffer_working_set_bytes: u64,
 }
 
 impl CacheProfile {
@@ -98,6 +100,8 @@ impl CacheProfile {
                 scan_execution_factor: evaluation_count as f64,
                 result_hit_ratio: 0.0,
                 buffer_hit_ratio: 0.0,
+                buffer_miss_bytes: 1,
+                buffer_working_set_bytes: 1,
             });
         };
         let declared = evidence
@@ -109,13 +113,16 @@ impl CacheProfile {
                 "cache demand requires an initial distinct evaluation and must sum to evaluation count",
             ));
         }
-        fn residency(value: CacheCapacityEvidence) -> Result<f64, AnalyticalCostError> {
+        fn miss_fraction(value: CacheCapacityEvidence) -> Result<f64, AnalyticalCostError> {
             if value.working_set_bytes == 0 {
                 return Err(AnalyticalCostError::InvalidCacheEvidence(
                     "cache working set must be non-zero",
                 ));
             }
-            Ok((value.capacity_bytes as f64 / value.working_set_bytes as f64).min(1.0))
+            Ok(
+                value.working_set_bytes.saturating_sub(value.capacity_bytes) as f64
+                    / value.working_set_bytes as f64,
+            )
         }
         if evidence
             .result_invalidation_ratio
@@ -148,10 +155,15 @@ impl CacheProfile {
                 ));
             }
         };
-        let result_hit_ratio = residency(evidence.result_cache)? * (1.0 - invalidation);
-        let buffer_hit_ratio = residency(evidence.buffer_cache)?;
+        // Subtract integer byte counts before conversion: 1 - residency can
+        // round a nonempty uncovered working set to zero near full capacity.
+        let result_miss_ratio =
+            invalidation + miss_fraction(evidence.result_cache)? * (1.0 - invalidation);
+        let buffer_miss_ratio = miss_fraction(evidence.buffer_cache)?;
+        let result_hit_ratio = 1.0 - result_miss_ratio;
+        let buffer_hit_ratio = 1.0 - buffer_miss_ratio;
         let cpu_execution_factor = evidence.distinct_evaluations as f64
-            + evidence.repeated_identical_evaluations as f64 * (1.0 - result_hit_ratio);
+            + evidence.repeated_identical_evaluations as f64 * result_miss_ratio;
         Ok(ResolvedCacheProfile {
             integer_executions: if evidence.result_cache.capacity_bytes == 0 || invalidation == 1.0
             {
@@ -165,9 +177,14 @@ impl CacheProfile {
                 None
             },
             cpu_execution_factor,
-            scan_execution_factor: cpu_execution_factor * (1.0 - buffer_hit_ratio),
+            scan_execution_factor: cpu_execution_factor * buffer_miss_ratio,
             result_hit_ratio,
             buffer_hit_ratio,
+            buffer_miss_bytes: evidence
+                .buffer_cache
+                .working_set_bytes
+                .saturating_sub(evidence.buffer_cache.capacity_bytes),
+            buffer_working_set_bytes: evidence.buffer_cache.working_set_bytes,
         })
     }
 
@@ -676,7 +693,10 @@ pub fn estimate_physical_dag_with_cache(
         let node = by_id[id];
         let local = estimate_operator(node.operator, resolved_statistics[id].clone())?;
         let (cpu_executions, scan_executions) = match node.execution {
-            ExecutionMultiplicity::Once => (1.0, 1.0 - cache.buffer_hit_ratio),
+            ExecutionMultiplicity::Once => (
+                1.0,
+                cache.buffer_miss_bytes as f64 / cache.buffer_working_set_bytes as f64,
+            ),
             ExecutionMultiplicity::PerEvaluation => {
                 (cache.cpu_execution_factor, cache.scan_execution_factor)
             }
@@ -686,13 +706,15 @@ pub fn estimate_physical_dag_with_cache(
             ExecutionMultiplicity::Once => Some(1),
             ExecutionMultiplicity::PerEvaluation => cache.integer_executions,
         };
-        let local_scan = if let Some(executions) =
-            integer_executions.filter(|_| cache.buffer_hit_ratio == 0.0)
-        {
-            local
-                .scan_bytes()
-                .checked_mul(executions)
-                .ok_or(AnalyticalCostError::Overflow)?
+        let local_scan = if let Some(executions) = integer_executions {
+            let total = u128::from(local.scan_bytes()) * u128::from(executions);
+            let denominator = u128::from(cache.buffer_working_set_bytes);
+            let numerator = u128::from(cache.buffer_miss_bytes);
+            // Split the product before scaling. Both products fit u128 because
+            // numerator <= denominator; retain exact bytes even above 2^53.
+            let adjusted = (total / denominator) * numerator
+                + ((total % denominator) * numerator).div_ceil(denominator);
+            u64::try_from(adjusted).map_err(|_| AnalyticalCostError::Overflow)?
         } else {
             let adjusted = local.scan_bytes() as f64 * scan_executions;
             // u64::MAX rounds up to 2^64 in f64. Equality is already outside
@@ -3874,6 +3896,84 @@ mod tests {
         .unwrap();
         assert_eq!(estimate.cpu_ops(), 100.0);
         assert_eq!(estimate.scan_bytes(), 500);
+    }
+
+    // A sub-ULP uncovered fraction must not become a fabricated full cache hit.
+    #[test]
+    fn partial_cache_preserves_tiny_buffer_misses() {
+        let (mut nodes, mut evidence) = cache_test_scan();
+        nodes[0].execution = ExecutionMultiplicity::Once;
+        let working_set = 1_u64 << 63;
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = evidence.get_mut("scan").unwrap()
+        else {
+            unreachable!()
+        };
+        *source_read_bytes = working_set;
+        let mut profile = cache_profile(0, 0);
+        let CacheProfile::Evidence(inputs) = &mut profile else {
+            unreachable!()
+        };
+        inputs.buffer_cache = CacheCapacityEvidence {
+            working_set_bytes: working_set,
+            capacity_bytes: working_set - 1,
+        };
+        let estimate = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &comparison_scope(),
+            &evidence,
+            &profile,
+        )
+        .unwrap();
+        assert_eq!(estimate.scan_bytes(), 1);
+    }
+
+    // A result-cache miss remains chargeable even when the displayed hit rounds to one.
+    #[test]
+    fn partial_cache_preserves_tiny_result_misses() {
+        let working_set = 1_u64 << 63;
+        let mut profile = cache_profile(0, 0);
+        let CacheProfile::Evidence(inputs) = &mut profile else {
+            unreachable!()
+        };
+        inputs.distinct_evaluations = 1;
+        inputs.repeated_identical_evaluations = working_set;
+        inputs.result_cache = CacheCapacityEvidence {
+            working_set_bytes: working_set,
+            capacity_bytes: working_set - 1,
+        };
+        assert_eq!(
+            profile
+                .resolve(working_set + 1, DataArrival::AtRest)
+                .unwrap()
+                .cpu_execution_factor,
+            2.0
+        );
+    }
+
+    // Byte accounting remains exact above f64 integer precision after cache scaling.
+    #[test]
+    fn partial_buffer_cache_rounds_integer_bytes_without_precision_loss() {
+        let (mut nodes, mut evidence) = cache_test_scan();
+        nodes[0].execution = ExecutionMultiplicity::Once;
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = evidence.get_mut("scan").unwrap()
+        else {
+            unreachable!()
+        };
+        *source_read_bytes = (1_u64 << 54) + 2;
+        let estimate = estimate_physical_dag_with_cache(
+            &nodes,
+            "scan",
+            &comparison_scope(),
+            &evidence,
+            &cache_profile(0, 50),
+        )
+        .unwrap();
+        assert_eq!(estimate.scan_bytes(), (1_u64 << 53) + 1);
     }
 
     // Declared invalidations bound otherwise-resident results under ingestion.

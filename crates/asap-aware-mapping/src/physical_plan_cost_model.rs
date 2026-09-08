@@ -91,6 +91,11 @@ impl<'a> PhysicalPlanCostModel<'a> {
         provider: &'a dyn PlannerPhysicalPlanProvider,
         calibration: ResourceCalibration,
     ) -> Result<Self, AnalyticalCostError> {
+        if calibration.version.trim().is_empty() {
+            return Err(AnalyticalCostError::MissingOrStale(
+                "resource_calibration.version",
+            ));
+        }
         calibration.validate()?;
         Ok(Self {
             provider,
@@ -484,6 +489,99 @@ mod tests {
             selected.for_target(&planned_root).unwrap().chosen.is_some(),
             "a fully bound build-once summary cheaper than ten raw scans must be selected"
         );
+    }
+
+    // Ranking must retain the uncovered byte of a nearly resident buffer cache.
+    #[test]
+    fn tiny_buffer_misses_still_affect_global_selection() {
+        use crate::analytical_cost::{CacheCapacityEvidence, CacheEvidence};
+        const WORKING_SET: u64 = 1_u64 << 63;
+        struct AlmostResident(TestProvider);
+        impl PlannerPhysicalPlanProvider for AlmostResident {
+            fn capture_evidence_snapshot(
+                &self,
+                target: &TargetSubDAG<'_>,
+            ) -> Result<PhysicalEvidenceSnapshot, AnalyticalCostError> {
+                let mut snapshot = self.0.capture_evidence_snapshot(target)?;
+                snapshot.cache_profile = CacheProfile::Evidence(CacheEvidence {
+                    version: "almost-resident-v1".into(),
+                    distinct_evaluations: 10,
+                    repeated_identical_evaluations: 0,
+                    result_invalidation_ratio: None,
+                    result_cache: CacheCapacityEvidence {
+                        working_set_bytes: 1,
+                        capacity_bytes: 0,
+                    },
+                    buffer_cache: CacheCapacityEvidence {
+                        working_set_bytes: WORKING_SET,
+                        capacity_bytes: WORKING_SET - 1,
+                    },
+                });
+                Ok(snapshot)
+            }
+            fn query_node_evidence(
+                &self,
+                snapshot: &PhysicalEvidenceSnapshot,
+                request: PhysicalNodeRequest<'_>,
+            ) -> Result<PhysicalNodeEvidence, AnalyticalCostError> {
+                let mut evidence = self.0.query_node_evidence(snapshot, request)?;
+                if let OperatorStatistics::Scan {
+                    source_read_bytes, ..
+                } = &mut evidence.statistics
+                {
+                    *source_read_bytes = WORKING_SET;
+                }
+                Ok(evidence)
+            }
+            fn summary_physical_dag(
+                &self,
+                snapshot: &PhysicalEvidenceSnapshot,
+                summary: &Rc<SummaryNode>,
+                target: &TargetSubDAG<'_>,
+            ) -> Result<PhysicalDag, AnalyticalCostError> {
+                self.0.summary_physical_dag(snapshot, summary, target)
+            }
+        }
+        let space = crate::replacement::search_workload_with(
+            vec![("q", query())],
+            &crate::replacement::default_strategies(),
+        );
+        let provider = AlmostResident(TestProvider::new(true, WORKING_SET));
+        let model = PhysicalPlanCostModel::new(
+            &provider,
+            ResourceCalibration {
+                cost_per_cpu_op: 0.0,
+                cost_per_scan_byte: 1.0,
+                cost_per_retained_byte: 0.0,
+                version: "disk-only-v1".into(),
+            },
+        )
+        .unwrap();
+        let selected = space.global_selection(&model);
+        assert!(
+            selected
+                .for_target(&space.roots[0].1)
+                .unwrap()
+                .chosen
+                .is_some(),
+            "one remaining build read must rank ahead of ten remaining raw reads"
+        );
+    }
+
+    // Versioned physical ranking cannot accept an anonymous calibration generation.
+    #[test]
+    fn blank_calibration_version_is_rejected_before_ranking() {
+        let provider = TestProvider::new(true, 800);
+        for version in ["", " \t\n"] {
+            let mut coefficients = calibration();
+            coefficients.version = version.into();
+            assert!(matches!(
+                PhysicalPlanCostModel::new(&provider, coefficients),
+                Err(AnalyticalCostError::MissingOrStale(
+                    "resource_calibration.version"
+                ))
+            ));
+        }
     }
 
     #[test]
