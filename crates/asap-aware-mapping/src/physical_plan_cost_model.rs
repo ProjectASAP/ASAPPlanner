@@ -712,6 +712,28 @@ mod tests {
         assert!(estimate.storage_io.is_none());
     }
 
+    // Combined objectives must identify the base calibration even when its
+    // coefficients are zero and boundaries supply the entire objective.
+    #[test]
+    fn blank_base_calibration_version_is_rejected() {
+        let provider = TestProvider::new(true, 800);
+        for version in ["", " \t\n"] {
+            for boundary_only in [false, true] {
+                let mut calibration = calibration();
+                calibration.version = version.into();
+                if boundary_only {
+                    calibration.cost_per_cpu_op = 0.0;
+                    calibration.cost_per_scan_byte = 0.0;
+                    calibration.cost_per_retained_byte = 0.0;
+                }
+                assert!(
+                    PhysicalPlanCostModel::new(&provider, calibration).is_err(),
+                    "blank base provenance accepted (boundary_only={boundary_only})"
+                );
+            }
+        }
+    }
+
     // Explicit byte pricing can rank complete plans without pricing CPU or scans.
     #[test]
     fn boundary_only_objective_ranks_complete_plans() {

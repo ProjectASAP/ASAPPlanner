@@ -365,3 +365,50 @@ fn missing_stale_and_non_finite_evidence_is_rejected() {
     assert!(estimate_boundaries(&dag, &scope, &evidence, "evidence-v1").is_err());
     assert!(estimate_boundaries(&dag, &scope, &profile(&dag), "different").is_err());
 }
+
+// Individual actions may fit while accumulation across actions or nodes overflows.
+#[test]
+fn boundary_accumulation_and_calibrated_cost_overflow_are_rejected() {
+    use asap_aware_mapping::analytical_cost::AnalyticalCostError;
+    let (mut dag, mut scope) = fixture();
+    scope.recurrence = QueryRecurrence::OneTime {
+        invocations: 1,
+        execute_at: None,
+    };
+    for node in &mut dag.nodes {
+        node.execution = ExecutionMultiplicity::Once;
+    }
+    for different_nodes in [false, true] {
+        let mut evidence = profile(&dag);
+        for (id, node) in [
+            ("first", "scan"),
+            ("second", if different_nodes { "left" } else { "scan" }),
+        ] {
+            let mut boundary = transfer(id, None);
+            boundary.copies = 1;
+            boundary.encoded_bytes = u64::MAX / 2 + 1;
+            evidence.plans[0]
+                .nodes
+                .get_mut(node)
+                .unwrap()
+                .boundaries
+                .push(boundary);
+        }
+        assert!(matches!(
+            estimate_boundaries(&dag, &scope, &evidence, "evidence-v1"),
+            Err(AnalyticalCostError::Overflow)
+        ));
+    }
+    let mut evidence = profile(&dag);
+    evidence.plans[0]
+        .nodes
+        .get_mut("scan")
+        .unwrap()
+        .boundaries
+        .push(transfer("wire", None));
+    evidence.calibration.cost_per_network_byte = f64::MAX;
+    assert!(matches!(
+        estimate_boundaries(&dag, &scope, &evidence, "evidence-v1"),
+        Err(AnalyticalCostError::Overflow)
+    ));
+}

@@ -58,6 +58,8 @@ latency, bandwidth contention, memory lifetime, or storage requests.
 Base CPU, scan, and retained-memory coefficients may all be zero when at least
 one boundary coefficient is positive. An absent boundary profile or an entirely
 zero objective remains unavailable for ranking.
+Both the base and boundary calibration versions must be nonempty, including
+when the base coefficients are all zero; combined annotations identify both.
 
 Annotations expose totals in `bytes`, plus terms named
 `physical_node:<id>:<dimension>` and `boundary:<id>:<dimension>`. The existing
