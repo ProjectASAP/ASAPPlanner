@@ -3976,6 +3976,40 @@ mod tests {
         assert_eq!(estimate.scan_bytes(), (1_u64 << 53) + 1);
     }
 
+    // A one-third miss fraction must not round five ordinary bytes up to six.
+    #[test]
+    fn partial_buffer_cache_does_not_round_an_exact_small_total_up() {
+        let (mut nodes, mut evidence) = cache_test_scan();
+        nodes[0].execution = ExecutionMultiplicity::Once;
+        let OperatorStatistics::Scan {
+            source_read_bytes, ..
+        } = evidence.get_mut("scan").unwrap()
+        else {
+            unreachable!()
+        };
+        *source_read_bytes = 15;
+        let mut profile = cache_profile(0, 0);
+        let CacheProfile::Evidence(inputs) = &mut profile else {
+            unreachable!()
+        };
+        inputs.buffer_cache = CacheCapacityEvidence {
+            working_set_bytes: 3,
+            capacity_bytes: 2,
+        };
+        assert_eq!(
+            estimate_physical_dag_with_cache(
+                &nodes,
+                "scan",
+                &comparison_scope(),
+                &evidence,
+                &profile
+            )
+            .unwrap()
+            .scan_bytes(),
+            5
+        );
+    }
+
     // Declared invalidations bound otherwise-resident results under ingestion.
     #[test]
     fn streaming_invalidation_bounds_result_hits_and_changes_physical_work() {
