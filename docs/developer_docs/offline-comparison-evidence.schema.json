@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ASAPPlanner fixed-snapshot offline comparison evidence",
+  "description": "Disjoint CPU phases while state remains alive; no runtime guarantee or live-stream extrapolation.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "timing_contract": {
+      "const": "disjoint_live_state_v1"
+    },
+    "sketch_evidence": {
+      "$ref": "offline-sketch-evidence.schema.json"
+    },
+    "query_bindings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "query": {
+            "$ref": "#/$defs/query"
+          }
+        },
+        "required": [
+          "record_id",
+          "query"
+        ]
+      }
+    },
+    "exact_records": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/exact"
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "timing_contract",
+    "sketch_evidence",
+    "query_bindings",
+    "exact_records"
+  ],
+  "$defs": {
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "value_type",
+        "probe_set"
+      ],
+      "properties": {
+        "kind": {
+          "const": "point_frequency"
+        },
+        "value_type": {
+          "const": "i64"
+        },
+        "probe_set": {
+          "const": "all_distinct_keys"
+        }
+      }
+    },
+    "exact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "distribution": {
+          "$ref": "offline-sketch-evidence.schema.json#/$defs/distribution"
+        },
+        "environment": {
+          "$ref": "offline-sketch-evidence.schema.json#/$defs/environment"
+        },
+        "query": {
+          "$ref": "#/$defs/query"
+        },
+        "measured_at_unix_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "valid_until_unix_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provenance": {
+          "$ref": "offline-sketch-evidence.schema.json#/$defs/provenance"
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "empty_build_cpu_ns": {
+              "anyOf": [
+                {
+                  "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "update_cpu_ns": {
+              "anyOf": [
+                {
+                  "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "prepare_cpu_ns": {
+              "anyOf": [
+                {
+                  "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "read_cpu_ns": {
+              "anyOf": [
+                {
+                  "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retained_bytes": {
+              "anyOf": [
+                {
+                  "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "peak_bytes": {
+              "anyOf": [
+                {
+                  "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": []
+        }
+      },
+      "required": [
+        "id",
+        "distribution",
+        "environment",
+        "query",
+        "measured_at_unix_seconds",
+        "valid_until_unix_seconds",
+        "provenance",
+        "metrics"
+      ]
+    }
+  }
+}

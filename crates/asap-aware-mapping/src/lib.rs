@@ -185,6 +185,8 @@ pub mod accuracy;
 pub mod accuracy_reconciliation;
 pub mod analytical_cost;
 pub mod cost_model;
+pub mod empirical_cost;
+pub mod empirical_comparison;
 pub mod explanation;
 pub mod grouping;
 pub mod physical_operator_statistics;
