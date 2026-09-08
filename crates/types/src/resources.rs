@@ -124,7 +124,7 @@ mod tests {
             serialized_bytes: Some(40),
             disk_bytes: Some(4096),
         };
-        let json = serde_json::to_value(&resources).unwrap();
+        let json = serde_json::to_value(resources).unwrap();
         let decoded: PhysicalResources<Option<f64>, u64> = serde_json::from_value(json).unwrap();
         assert_eq!(decoded, resources);
     }
