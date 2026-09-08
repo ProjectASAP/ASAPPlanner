@@ -1,4 +1,11 @@
-# Offline Sketch Evidence and o11y: Final Report
+# Historical Offline Sketch Evidence and o11y Report
+
+This report records the earlier offline experiment, not the backend-only
+prototype's execution results. Its synthetic exact-result cache experiment is
+out of the current prototype scope; its source tool was removed from this PR.
+Current work uses user-provided OpenMetrics data and queries entering the backend,
+followed by ASAPPlanner and actual data-plane execution. No execution speedup or
+resource reduction is established by the historical results below.
 
 Audience: developers. This report covers the offline evidence path for #322,
 without real-time error feedback. The original dirty working directory was left unchanged.
@@ -12,7 +19,7 @@ without real-time error feedback. The original dirty working directory was left 
 - o11y planner/control-plane replay and exact fixed-snapshot reference measurements cover seven explicitly supported queries.
 
 For interfaces and reproduction instructions, see the [evidence contract](developer_docs/offline-sketch-evidence.md),
-[benchmark commands](../tools/empirical-bench/README.md), and [replay guide](user-guide/o11y-replay.md).
+[backend benchmark commands](https://github.com/ProjectASAP/ASAPQuery-backend/blob/codex/empirical-o11y-322/tools/empirical-bench/README.md), and [backend-entry replay guide](user-guide/o11y-replay.md).
 
 ## Measured Results
 
@@ -38,7 +45,7 @@ a separate System allocator probe; CPU measurements use jemalloc. These memory
 figures are not process RSS. Serialized size and allocated file blocks do not
 establish disk-throughput benefits.
 
-See `results-sweep/MEASUREMENTS.md` in the [verified experiment archive](../tools/empirical-bench/ARTIFACTS.md).
+See `results-sweep/MEASUREMENTS.md` in the [verified experiment archive](https://github.com/ProjectASAP/ASAPQuery-backend/blob/codex/empirical-o11y-322/tools/empirical-bench/ARTIFACTS.md).
 Earlier frequency measurements and control-plane replay in `results/` remain
 as the initial baseline. Final frequency comparisons and control-plane results
 use `results-sweep/`; costs from the two runs must not be mixed.
@@ -47,6 +54,11 @@ use `results-sweep/`; costs from the two runs must not be mixed.
 
 The replay reuses the repository's existing 27 PromQL fixtures. It does not run
 upstream LLM-agent scoring or use real scenario data.
+
+The supported evaluation entry point is now the backend's `offline_planner_replay`:
+queries enter its parser, call ASAPPlanner, and return through its typed binder.
+The standalone planner-only replay was removed. Its candidate/lifecycle counts
+below remain historical diagnostics, not backend support coverage.
 
 | Check | Result |
 | --- | --- |

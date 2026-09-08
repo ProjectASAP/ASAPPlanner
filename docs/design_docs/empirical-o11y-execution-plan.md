@@ -18,8 +18,9 @@ do not establish formal guarantees on unseen distributions.
 3. Benchmark agent: run actual sketch-bench algorithms on uniform and Zipf
    inputs, preserve raw output, export artifacts with source and environment
    provenance, and document reproducible commands.
-4. Replay agent: run the existing o11y PromQL corpus through actual planning,
-   export candidate coverage and planning latency, and separately identify
+4. Replay agent: run the existing o11y PromQL corpus through the backend parser,
+   its ASAPPlanner call, and the backend typed binder (not a planner-only entry),
+   export binding/fallback coverage and planning latency, and separately identify
    supplemental sketch workloads.
 5. Integration owner: connect compatible evidence to the downstream control
    plane, validate dependency compatibility, review other agents' changes, run
