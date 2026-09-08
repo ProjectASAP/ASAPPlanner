@@ -109,7 +109,7 @@ Execution multiplicity has exactly two values:
 | Value | Executions in one comparison horizon | Typical use |
 |---|---:|---|
 | `Once` | `1` | Bootstrap/build work whose result is retained for later reads. |
-| `PerEvaluation` | `evaluation_count` | Raw recomputation or query-side work repeated for every invocation. |
+| `PerEvaluation` | cache-adjusted demand | Raw recomputation or query-side work repeated for cache misses. |
 
 `Once` means once **within the comparison horizon**, not once for the lifetime
 of a process or deployment. `PerEvaluation` means once per query invocation,
@@ -117,14 +117,63 @@ not once per input row, grouping key, DAG edge, or consumer. Per-row work is
 already represented by the operator's local formula; active-window fan-out and
 the number of physical summary instances are separate inputs.
 
+Every evidence snapshot carries a named, versioned `CacheProfile`. The
+`no-cache-v1` profile preserves the original formulas exactly. A modeled
+profile splits demand into distinct parameterizations and repeated-identical
+evaluations, and supplies working-set and capacity evidence independently for
+the result cache and buffer/page cache. Working sets must be nonzero; zero
+capacity explicitly disables that cache. Missing, non-finite, or inconsistent
+evidence makes the estimate unavailable. At least one distinct evaluation is
+required: the result cache is filled by evaluations in this horizon. Buffer
+residency is a steady-state capacity/working-set model; it does not model
+cold-start warming or access order.
+
+`asap_types::resources` is the single definition site for `CacheProfile`,
+`CacheEvidence`, and `CacheCapacityEvidence` (implemented in `resources/cache.rs`).
+These schemas describe cache assumptions, not additive CPU or byte consumption.
+The mapping module re-exports the same types for existing import paths, while
+`no_cache()` and `version()` remain shared metadata methods. Workload validation
+and numeric estimation stay in mapping: callers use
+`analytical_cost::cache_hit_ratios(&profile, count, arrival)` instead of the former
+inherent `profile.hit_ratios(...)` method. The exporter consumes the central type
+directly. Tagged JSON, required capacities, and optional invalidation are unchanged.
+
+Uncovered buffer bytes are subtracted before converting to floating point, so
+near-full residency cannot erase a nonzero miss. With an integral number of
+executions, buffer-adjusted scan bytes use exact integer arithmetic and round
+up only after scaling; large byte counts do not lose precision above `2^53`.
+The physical-ranking entry point also rejects blank calibration versions,
+keeping every admitted comparison bound to a named coefficient generation.
+
+Define `R = min(1, result_capacity / result_working_set)` and
+`B = min(1, buffer_capacity / buffer_working_set)`. For at-rest data the
+result invalidation ratio is zero. Continuously ingesting data must declare an
+invalidation ratio `I` in `[0, 1]`; mixed or unknown arrival fails closed.
+
+```text
+result_hit_ratio = R * (1 - I)
+cpu_executions   = distinct + repeated_identical * (1 - result_hit_ratio)
+scan_executions  = cpu_executions * (1 - B)
+```
+
+Thus a result-cache hit elides both CPU and scans, while a buffer-cache hit
+elides only storage bytes, including scans used to build a summary. `Once`
+nodes remain one CPU execution: retained summary
+state is already in memory and is not charged a per-evaluation storage read.
+Raw and candidate plans must use the same cache profile. Its version is
+exported in `CostAnnotation.cache_profile` alongside formula and evidence
+versions.
+
 For physical node `n`, define:
 
 ```text
-executions(n) = 1                         if n.execution = Once
-              = evaluation_count          if n.execution = PerEvaluation
+cpu_executions(n)  = 1                    if n.execution = Once
+                   = cache-adjusted CPU demand otherwise
+scan_executions(n) = 1 - B                if n.execution = Once
+                   = cache-adjusted scan demand otherwise
 
-total_cpu_ops  = sum(local_cpu_ops(n) * executions(n))
-total_scan     = sum(local_scan_bytes(n) * executions(n))
+total_cpu_ops  = sum(local_cpu_ops(n) * cpu_executions(n))
+total_scan     = sum(local_scan_bytes(n) * scan_executions(n))
 ```
 
 Memory is not multiplied by `executions(n)`. `peak_memory_bytes` is the maximum
@@ -1128,7 +1177,6 @@ complete deployment model may additionally require:
 
 - source and spill writes;
 - network transfer;
-- cache residency;
 - parallelism and contention;
 - allocator fragmentation;
 - wall-clock critical-path latency;
@@ -1137,3 +1185,12 @@ complete deployment model may additionally require:
 Those dimensions should extend the resource vector and calibration. They
 must not be silently represented as zero. Consumers render unavailable costs
 as `Not estimated`.
+
+## Benchmark validation
+
+Experiments used to calibrate or validate these formulas must either disable
+result and buffer caches, or vary query parameters so the workload represents
+distinct queries that a retained summary can serve but a result cache cannot.
+Repeatedly timing one identical query measures cache behavior rather than the
+relative physical-plan cost. Benchmark reports must record which cache profile
+was used.

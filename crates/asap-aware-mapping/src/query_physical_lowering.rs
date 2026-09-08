@@ -1647,6 +1647,7 @@ mod tests {
             })
         };
         let shared_scope = scope(vec![source_coverage]);
+        let no_cache = crate::analytical_cost::CacheProfile::no_cache();
         let shared_dag = lower_query_physical_dag(&root, &shared_scope, &shared_provider).unwrap();
         assert_eq!(shared_dag.nodes.len(), 2);
         assert_eq!(
@@ -1659,12 +1660,14 @@ mod tests {
                 root: &dag.root,
                 scope: &independent_scope,
                 statistics: &dag,
+                cache_profile: &no_cache,
             },
             PhysicalDagEstimateRequest {
                 nodes: &shared_dag.nodes,
                 root: &shared_dag.root,
                 scope: &shared_scope,
                 statistics: &shared_dag,
+                cache_profile: &no_cache,
             },
         )
         .unwrap();
