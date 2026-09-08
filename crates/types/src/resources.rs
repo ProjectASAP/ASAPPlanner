@@ -3,8 +3,13 @@
 //! The CPU payload establishes its unit and operation scope; CPU operations
 //! must never be interpreted as nanoseconds. Byte values can be exact integers
 //! or measurements carrying uncertainty. `None` means unavailable, not zero.
+//! Cache assumptions share this schema namespace but are not additive resource
+//! consumption; their numerical interpretation belongs to an estimator.
 
 use serde::{Deserialize, Serialize};
+
+pub mod cache;
+pub use cache::{CacheCapacityEvidence, CacheEvidence, CacheProfile};
 
 /// Modeled CPU work, never measured elapsed or process CPU time.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

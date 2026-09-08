@@ -128,6 +128,16 @@ required: the result cache is filled by evaluations in this horizon. Buffer
 residency is a steady-state capacity/working-set model; it does not model
 cold-start warming or access order.
 
+`asap_types::resources` is the single definition site for `CacheProfile`,
+`CacheEvidence`, and `CacheCapacityEvidence` (implemented in `resources/cache.rs`).
+These schemas describe cache assumptions, not additive CPU or byte consumption.
+The mapping module re-exports the same types for existing import paths, while
+`no_cache()` and `version()` remain shared metadata methods. Workload validation
+and numeric estimation stay in mapping: callers use
+`analytical_cost::cache_hit_ratios(&profile, count, arrival)` instead of the former
+inherent `profile.hit_ratios(...)` method. The exporter consumes the central type
+directly. Tagged JSON, required capacities, and optional invalidation are unchanged.
+
 Uncovered buffer bytes are subtracted before converting to floating point, so
 near-full residency cannot erase a nonzero miss. With an integral number of
 executions, buffer-adjusted scan bytes use exact integer arithmetic and round

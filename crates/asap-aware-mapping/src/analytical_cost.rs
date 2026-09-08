@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use asap_types::post_asap::{SketchAlgorithm, SketchParams};
-pub use asap_types::resources::ModeledCpu;
+pub use asap_types::resources::{CacheCapacityEvidence, CacheEvidence, CacheProfile, ModeledCpu};
 use asap_types::workload::DataArrival;
 use serde::{Deserialize, Serialize};
 
@@ -23,41 +23,6 @@ use crate::physical_operator_statistics::{
 /// implementation version.
 pub const ANALYTICAL_COST_MODEL_VERSION: &str = "analytical-cost-v2-cache-aware";
 
-/// Versioned deployment evidence describing query-result and buffer caching.
-/// `NoCache` preserves the v1 formulas exactly, while `Evidence` fails closed
-/// unless every value needed to derive a hit ratio is present and finite.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "profile", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CacheProfile {
-    NoCache { version: String },
-    Evidence(CacheEvidence),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CacheEvidence {
-    pub version: String,
-    /// Evaluations whose parameterization is not identical to a preceding
-    /// evaluation and therefore cannot use the result cache.
-    pub distinct_evaluations: u64,
-    /// Evaluations identical to a preceding evaluation and eligible for a
-    /// result-cache hit.
-    pub repeated_identical_evaluations: u64,
-    pub result_cache: CacheCapacityEvidence,
-    pub buffer_cache: CacheCapacityEvidence,
-    /// Fraction of otherwise-resident result entries invalidated by arriving
-    /// data. Required for continuously ingesting data; `AtRest` permits only
-    /// zero or omitted invalidation evidence.
-    pub result_invalidation_ratio: Option<f64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CacheCapacityEvidence {
-    pub working_set_bytes: u64,
-    pub capacity_bytes: u64,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct ResolvedCacheProfile {
     integer_executions: Option<u64>,
@@ -69,70 +34,57 @@ struct ResolvedCacheProfile {
     buffer_working_set_bytes: u64,
 }
 
-impl CacheProfile {
-    pub fn no_cache() -> Self {
-        Self::NoCache {
-            version: "no-cache-v1".into(),
-        }
+fn resolve_cache_profile(
+    profile: &CacheProfile,
+    evaluation_count: u64,
+    data_arrival: DataArrival,
+) -> Result<ResolvedCacheProfile, AnalyticalCostError> {
+    if profile.version().trim().is_empty() {
+        return Err(AnalyticalCostError::InvalidCacheEvidence(
+            "blank cache profile version",
+        ));
     }
-
-    pub fn version(&self) -> &str {
-        match self {
-            Self::NoCache { version } => version,
-            Self::Evidence(evidence) => &evidence.version,
-        }
+    let CacheProfile::Evidence(evidence) = profile else {
+        return Ok(ResolvedCacheProfile {
+            integer_executions: Some(evaluation_count),
+            cpu_execution_factor: evaluation_count as f64,
+            scan_execution_factor: evaluation_count as f64,
+            result_hit_ratio: 0.0,
+            buffer_hit_ratio: 0.0,
+            buffer_miss_bytes: 1,
+            buffer_working_set_bytes: 1,
+        });
+    };
+    let declared = evidence
+        .distinct_evaluations
+        .checked_add(evidence.repeated_identical_evaluations)
+        .ok_or(AnalyticalCostError::Overflow)?;
+    if declared != evaluation_count || evidence.distinct_evaluations == 0 {
+        return Err(AnalyticalCostError::InvalidCacheEvidence(
+            "cache demand requires an initial distinct evaluation and must sum to evaluation count",
+        ));
     }
-
-    fn resolve(
-        &self,
-        evaluation_count: u64,
-        data_arrival: DataArrival,
-    ) -> Result<ResolvedCacheProfile, AnalyticalCostError> {
-        if self.version().trim().is_empty() {
+    fn miss_fraction(value: CacheCapacityEvidence) -> Result<f64, AnalyticalCostError> {
+        if value.working_set_bytes == 0 {
             return Err(AnalyticalCostError::InvalidCacheEvidence(
-                "blank cache profile version",
+                "cache working set must be non-zero",
             ));
         }
-        let Self::Evidence(evidence) = self else {
-            return Ok(ResolvedCacheProfile {
-                integer_executions: Some(evaluation_count),
-                cpu_execution_factor: evaluation_count as f64,
-                scan_execution_factor: evaluation_count as f64,
-                result_hit_ratio: 0.0,
-                buffer_hit_ratio: 0.0,
-                buffer_miss_bytes: 1,
-                buffer_working_set_bytes: 1,
-            });
-        };
-        let declared = evidence
-            .distinct_evaluations
-            .checked_add(evidence.repeated_identical_evaluations)
-            .ok_or(AnalyticalCostError::Overflow)?;
-        if declared != evaluation_count || evidence.distinct_evaluations == 0 {
-            return Err(AnalyticalCostError::InvalidCacheEvidence(
-                "cache demand requires an initial distinct evaluation and must sum to evaluation count",
-            ));
-        }
-        fn miss_fraction(value: CacheCapacityEvidence) -> Result<f64, AnalyticalCostError> {
-            if value.working_set_bytes == 0 {
-                return Err(AnalyticalCostError::InvalidCacheEvidence(
-                    "cache working set must be non-zero",
-                ));
-            }
-            Ok(
-                value.working_set_bytes.saturating_sub(value.capacity_bytes) as f64
-                    / value.working_set_bytes as f64,
-            )
-        }
-        if evidence
-            .result_invalidation_ratio
-            .is_some_and(|ratio| !ratio.is_finite() || !(0.0..=1.0).contains(&ratio))
-        {
-            return Err(AnalyticalCostError::InvalidCacheEvidence(
-                "result-cache invalidation ratio must be finite and in [0, 1]",
-            ));
-        }
-        let invalidation = match data_arrival {
+        Ok(
+            value.working_set_bytes.saturating_sub(value.capacity_bytes) as f64
+                / value.working_set_bytes as f64,
+        )
+    }
+    if evidence
+        .result_invalidation_ratio
+        .is_some_and(|ratio| !ratio.is_finite() || !(0.0..=1.0).contains(&ratio))
+    {
+        return Err(AnalyticalCostError::InvalidCacheEvidence(
+            "result-cache invalidation ratio must be finite and in [0, 1]",
+        ));
+    }
+    let invalidation =
+        match data_arrival {
             DataArrival::AtRest => {
                 if evidence
                     .result_invalidation_ratio
@@ -155,47 +107,45 @@ impl CacheProfile {
                 ));
             }
         };
-        // Subtract integer byte counts before conversion: 1 - residency can
-        // round a nonempty uncovered working set to zero near full capacity.
-        let result_miss_ratio =
-            invalidation + miss_fraction(evidence.result_cache)? * (1.0 - invalidation);
-        let buffer_miss_ratio = miss_fraction(evidence.buffer_cache)?;
-        let result_hit_ratio = 1.0 - result_miss_ratio;
-        let buffer_hit_ratio = 1.0 - buffer_miss_ratio;
-        let cpu_execution_factor = evidence.distinct_evaluations as f64
-            + evidence.repeated_identical_evaluations as f64 * result_miss_ratio;
-        Ok(ResolvedCacheProfile {
-            integer_executions: if evidence.result_cache.capacity_bytes == 0 || invalidation == 1.0
-            {
-                Some(evaluation_count)
-            } else if evidence.result_cache.capacity_bytes
-                >= evidence.result_cache.working_set_bytes
-                && invalidation == 0.0
-            {
-                Some(evidence.distinct_evaluations)
-            } else {
-                None
-            },
-            cpu_execution_factor,
-            scan_execution_factor: cpu_execution_factor * buffer_miss_ratio,
-            result_hit_ratio,
-            buffer_hit_ratio,
-            buffer_miss_bytes: evidence
-                .buffer_cache
-                .working_set_bytes
-                .saturating_sub(evidence.buffer_cache.capacity_bytes),
-            buffer_working_set_bytes: evidence.buffer_cache.working_set_bytes,
-        })
-    }
+    // Subtract integer byte counts before conversion: 1 - residency can
+    // round a nonempty uncovered working set to zero near full capacity.
+    let result_miss_ratio =
+        invalidation + miss_fraction(evidence.result_cache)? * (1.0 - invalidation);
+    let buffer_miss_ratio = miss_fraction(evidence.buffer_cache)?;
+    let result_hit_ratio = 1.0 - result_miss_ratio;
+    let buffer_hit_ratio = 1.0 - buffer_miss_ratio;
+    let cpu_execution_factor = evidence.distinct_evaluations as f64
+        + evidence.repeated_identical_evaluations as f64 * result_miss_ratio;
+    Ok(ResolvedCacheProfile {
+        integer_executions: if evidence.result_cache.capacity_bytes == 0 || invalidation == 1.0 {
+            Some(evaluation_count)
+        } else if evidence.result_cache.capacity_bytes >= evidence.result_cache.working_set_bytes
+            && invalidation == 0.0
+        {
+            Some(evidence.distinct_evaluations)
+        } else {
+            None
+        },
+        cpu_execution_factor,
+        scan_execution_factor: cpu_execution_factor * buffer_miss_ratio,
+        result_hit_ratio,
+        buffer_hit_ratio,
+        buffer_miss_bytes: evidence
+            .buffer_cache
+            .working_set_bytes
+            .saturating_sub(evidence.buffer_cache.capacity_bytes),
+        buffer_working_set_bytes: evidence.buffer_cache.working_set_bytes,
+    })
+}
 
-    pub fn hit_ratios(
-        &self,
-        evaluation_count: u64,
-        data_arrival: DataArrival,
-    ) -> Result<(f64, f64), AnalyticalCostError> {
-        let resolved = self.resolve(evaluation_count, data_arrival)?;
-        Ok((resolved.result_hit_ratio, resolved.buffer_hit_ratio))
-    }
+/// Derive cache hit ratios from the shared assumptions for this workload.
+pub fn cache_hit_ratios(
+    profile: &CacheProfile,
+    evaluation_count: u64,
+    data_arrival: DataArrival,
+) -> Result<(f64, f64), AnalyticalCostError> {
+    let resolved = resolve_cache_profile(profile, evaluation_count, data_arrival)?;
+    Ok((resolved.result_hit_ratio, resolved.buffer_hit_ratio))
 }
 
 /// Conversion from physical dimensions to one deployment-specific objective.
@@ -576,7 +526,7 @@ pub fn estimate_physical_dag_with_cache(
     cache_profile: &CacheProfile,
 ) -> Result<ResourceEstimate, AnalyticalCostError> {
     let evaluation_count = scope.validate()?;
-    let cache = cache_profile.resolve(evaluation_count, scope.data_arrival)?;
+    let cache = resolve_cache_profile(cache_profile, evaluation_count, scope.data_arrival)?;
     let by_id: HashMap<&str, &PhysicalDagNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     if by_id.len() != nodes.len() {
         return Err(AnalyticalCostError::InvalidPhysicalDag("duplicate node id"));
@@ -3724,6 +3674,21 @@ mod tests {
         })
     }
 
+    // Legacy mapping imports are aliases of the shared schema, not a second type.
+    #[test]
+    fn shared_cache_types_work_through_legacy_mapping_imports() {
+        let central: asap_types::resources::CacheProfile = cache_profile(100, 50);
+        let legacy: CacheProfile =
+            serde_json::from_value(serde_json::to_value(&central).unwrap()).unwrap();
+        fn accepts_shared(_: &asap_types::resources::CacheProfile) {}
+        accepts_shared(&legacy);
+        assert_eq!(central, legacy);
+        assert_eq!(
+            cache_hit_ratios(&central, 6, DataArrival::AtRest).unwrap(),
+            (1.0, 0.5)
+        );
+    }
+
     #[test]
     fn no_cache_reproduces_legacy_estimate_and_cache_effects_are_distinct() {
         let (nodes, evidence) = cache_test_scan();
@@ -3810,13 +3775,13 @@ mod tests {
         };
         evidence.distinct_evaluations = 1;
         assert!(matches!(
-            profile.hit_ratios(6, DataArrival::AtRest),
+            cache_hit_ratios(&profile, 6, DataArrival::AtRest),
             Err(AnalyticalCostError::InvalidCacheEvidence(_))
         ));
 
         let profile = cache_profile(100, 100);
         assert!(matches!(
-            profile.hit_ratios(6, DataArrival::ContinuouslyIngesting),
+            cache_hit_ratios(&profile, 6, DataArrival::ContinuouslyIngesting),
             Err(AnalyticalCostError::InvalidCacheEvidence(_))
         ));
     }
@@ -3869,14 +3834,14 @@ mod tests {
         };
         inputs.distinct_evaluations = 0;
         inputs.repeated_identical_evaluations = 6;
-        assert!(cache.hit_ratios(6, DataArrival::AtRest).is_err());
+        assert!(cache_hit_ratios(&cache, 6, DataArrival::AtRest).is_err());
         for ratio in [f64::NAN, f64::INFINITY, -1.0, 0.5] {
             let mut cache = cache_profile(100, 0);
             let CacheProfile::Evidence(inputs) = &mut cache else {
                 unreachable!()
             };
             inputs.result_invalidation_ratio = Some(ratio);
-            assert!(cache.hit_ratios(6, DataArrival::AtRest).is_err());
+            assert!(cache_hit_ratios(&cache, 6, DataArrival::AtRest).is_err());
         }
     }
 
@@ -3945,8 +3910,7 @@ mod tests {
             capacity_bytes: working_set - 1,
         };
         assert_eq!(
-            profile
-                .resolve(working_set + 1, DataArrival::AtRest)
+            resolve_cache_profile(&profile, working_set + 1, DataArrival::AtRest)
                 .unwrap()
                 .cpu_execution_factor,
             2.0
@@ -4024,7 +3988,7 @@ mod tests {
         let estimate =
             estimate_physical_dag_with_cache(&nodes, "scan", &scope, &evidence, &profile).unwrap();
         assert_eq!(
-            profile.hit_ratios(6, scope.data_arrival).unwrap(),
+            cache_hit_ratios(&profile, 6, scope.data_arrival).unwrap(),
             (0.5, 0.5)
         );
         assert_eq!(estimate.cpu_ops(), 400.0);

@@ -55,7 +55,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use asap_aware_mapping::analytical_cost::{
-    AnalyticalCostError, CacheProfile, EvidenceBackedPhysicalDag as PhysicalDag,
+    cache_hit_ratios, AnalyticalCostError, EvidenceBackedPhysicalDag as PhysicalDag,
     PhysicalNodeEvidence, ResourceCalibration, ANALYTICAL_COST_MODEL_VERSION,
 };
 #[cfg(test)]
@@ -82,6 +82,7 @@ use asap_types::post_asap::{CompositionOperator, SketchQuery, SummaryFamilyType}
 use asap_types::pre_asap::cse::{structural_hash, HashCache};
 use asap_types::pre_asap::query_expr::QueryExpr;
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
+use asap_types::resources::CacheProfile;
 use asap_types::types::AccuracyTarget;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -413,10 +414,11 @@ impl ExportPlannerCostModel<'_> {
         }
         let version = format!("{}+{}", ANALYTICAL_COST_MODEL_VERSION, calibration.version);
         let scope = &provider.target.scope;
-        let Ok((result_hits, buffer_hits)) = scope
-            .cache_profile
-            .hit_ratios(scope.evaluation_count, scope.data_arrival)
-        else {
+        let Ok((result_hits, buffer_hits)) = cache_hit_ratios(
+            &scope.cache_profile,
+            scope.evaluation_count,
+            scope.data_arrival,
+        ) else {
             return winner_cost_annotations();
         };
         let input = |name: &str, value: f64, unit: &str| CostInput {

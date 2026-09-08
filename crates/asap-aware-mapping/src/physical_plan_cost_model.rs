@@ -4,9 +4,10 @@ use std::{cell::RefCell, rc::Rc};
 
 use asap_types::post_asap::{SketchAlgorithm, SummaryExpr, SummaryNode};
 use asap_types::pre_asap::{AggIntent, QueryExpr};
+use asap_types::resources::CacheProfile;
 
 use crate::analytical_cost::{
-    estimate_physical_dag_comparison, AnalyticalCostError, CacheProfile,
+    estimate_physical_dag_comparison, AnalyticalCostError,
     EvidenceBackedPhysicalDag as PhysicalDag, PhysicalDagComparisonEstimate,
     PhysicalDagEstimateRequest, PhysicalNodeEvidence, ResourceCalibration,
 };
