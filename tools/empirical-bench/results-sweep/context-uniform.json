@@ -1,0 +1,23 @@
+{
+  "distribution": {
+    "id": "uniform-n20000-c1000-seed42",
+    "family": "uniform",
+    "sample_count": 20000,
+    "distinct_count": 1000,
+    "parameters": {
+      "kind": "uniform",
+      "lower_bound": 0.0,
+      "upper_bound": 1000.0,
+      "seed": 42
+    }
+  },
+  "environment": {
+    "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+    "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+    "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+    "implementation_version": "asap_sketchlib 0.2.2",
+    "implementation": "asap_sketchlib RegularPath Vector2D",
+    "id": "c9590114bad98348"
+  },
+  "now_unix_seconds": 1788886750
+}

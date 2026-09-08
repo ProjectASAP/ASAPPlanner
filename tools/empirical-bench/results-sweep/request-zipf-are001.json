@@ -1,0 +1,55 @@
+{
+  "context": {
+    "distribution": {
+      "id": "zipf-n20000-c1000-seed42",
+      "family": "zipf",
+      "sample_count": 20000,
+      "distinct_count": 952,
+      "parameters": {
+        "kind": "zipf",
+        "skewness": 1.1,
+        "population_size": 1000,
+        "seed": 42
+      }
+    },
+    "environment": {
+      "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+      "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+      "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+      "implementation_version": "asap_sketchlib 0.2.2",
+      "implementation": "asap_sketchlib RegularPath Vector2D",
+      "id": "c9590114bad98348"
+    },
+    "now_unix_seconds": 1788886750
+  },
+  "exact_environment": {
+    "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+    "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+    "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+    "implementation_version": "polars 0.46.0",
+    "implementation": "polars group_by + std HashMap",
+    "id": "786f86a18e85df5f"
+  },
+  "query": {
+    "kind": "point_frequency",
+    "value_type": "i64",
+    "probe_set": "all_distinct_keys"
+  },
+  "accuracy": {
+    "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+    "max_observed_mean": 0.01,
+    "minimum_trials": 1
+  },
+  "workload": {
+    "input_items_per_state": 20000,
+    "reads_per_state": 1000,
+    "merges_per_state": 0,
+    "state_instances": 1,
+    "horizon_seconds": 300.0
+  },
+  "weights": {
+    "cpu_ns_weight": 1.0,
+    "retained_byte_seconds_weight": 0.0
+  },
+  "formal_minimums": null
+}

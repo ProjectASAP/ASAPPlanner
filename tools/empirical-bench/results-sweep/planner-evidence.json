@@ -1,0 +1,2194 @@
+{
+  "schema_version": 1,
+  "benchmark_version": "sketch-bench@87f619e843fd2e4da784160d4e205a0d0d55f032; adapter-v2-disjoint",
+  "model_version": "empirical-update-cpu-v1",
+  "records": [
+    {
+      "id": "cms-uniform-seed42-w272-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 272,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "uniform-n20000-c1000-seed42",
+        "family": "uniform",
+        "sample_count": 20000,
+        "distinct_count": 1000,
+        "parameters": {
+          "kind": "uniform",
+          "lower_bound": 0.0,
+          "upper_bound": 1000.0,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886308,
+      "valid_until_unix_seconds": 1791478308,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=272' --dataset uniform --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 505.475,
+          "stddev": 2.9324591056398384,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 39.18329,
+          "stddev": 1.2404534228458564,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 1540.0,
+          "stddev": 49.21381919745713,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 41.56236,
+          "stddev": 1.2531359914231197,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 5440.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 5440.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 1669,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 4096,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 1.6347221960194194,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 31.035,
+            "aae_top1": 25.0,
+            "aae_top10": 25.9,
+            "aae_top100": 30.2,
+            "aae_top1000": 31.035,
+            "accuracy_runs": 1,
+            "are_all": 1.6347221960194194,
+            "are_top1": 0.6097560975609756,
+            "are_top10": 0.7804431144999306,
+            "are_top100": 1.079453856854533,
+            "are_top1000": 1.6347221960194205,
+            "l1_err": 31035.0,
+            "l2_err": 1159.3657748959126,
+            "probes": 1000.0,
+            "probes_all": 1000.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "probes_top1000": 1000.0,
+            "relative_error_mean": 1.6347221960194194,
+            "relative_error_p99": 4.733333333333333
+          }
+        }
+      }
+    },
+    {
+      "id": "countsketch-uniform-seed42-w30000-d83",
+      "algorithm": "CountSketch",
+      "params": {
+        "CountSketch": {
+          "width": 30000,
+          "depth": 83
+        }
+      },
+      "distribution": {
+        "id": "uniform-n20000-c1000-seed42",
+        "family": "uniform",
+        "sample_count": 20000,
+        "distinct_count": 1000,
+        "parameters": {
+          "kind": "uniform",
+          "lower_bound": 0.0,
+          "upper_bound": 1000.0,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886328,
+      "valid_until_unix_seconds": 1791478328,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant countsketch-regularpath-vector2d --library lib --config 'rows=83 cols=30000' --dataset uniform --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 5313752.5,
+          "stddev": 285040.9840468121,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 958.89495,
+          "stddev": 0.37400001336898875,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 900674.8,
+          "stddev": 6828.900035876935,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 1381.6785599999998,
+          "stddev": 1.1267877186941877,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 9960000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 9960000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 2490679,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 2498560,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.0,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.0,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "aae_top1000": 0.0,
+            "accuracy_runs": 1,
+            "are_all": 0.0,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "are_top1000": 0.0,
+            "l1_err": 0.0,
+            "l2_err": 0.0,
+            "probes": 1000.0,
+            "probes_all": 1000.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "probes_top1000": 1000.0,
+            "relative_error_mean": 0.0,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-uniform-seed42-w2720-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 2720,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "uniform-n20000-c1000-seed42",
+        "family": "uniform",
+        "sample_count": 20000,
+        "distinct_count": 1000,
+        "parameters": {
+          "kind": "uniform",
+          "lower_bound": 0.0,
+          "upper_bound": 1000.0,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886379,
+      "valid_until_unix_seconds": 1791478379,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=2720' --dataset uniform --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 9061.88984375,
+          "stddev": 4977.459586428361,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 34.73418,
+          "stddev": 0.27307644442536533,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 2460.0,
+          "stddev": 107.4406813083387,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 36.6688,
+          "stddev": 0.01859623617832312,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 54400.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 54400.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 13781,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 16384,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.006335943223443224,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.104,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "aae_top1000": 0.104,
+            "accuracy_runs": 1,
+            "are_all": 0.006335943223443224,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "are_top1000": 0.006335943223443223,
+            "l1_err": 104.0,
+            "l2_err": 40.049968789001575,
+            "probes": 1000.0,
+            "probes_all": 1000.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "probes_top1000": 1000.0,
+            "relative_error_mean": 0.006335943223443224,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-uniform-seed42-w27200-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 27200,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "uniform-n20000-c1000-seed42",
+        "family": "uniform",
+        "sample_count": 20000,
+        "distinct_count": 1000,
+        "parameters": {
+          "kind": "uniform",
+          "lower_bound": 0.0,
+          "upper_bound": 1000.0,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886399,
+      "valid_until_unix_seconds": 1791478399,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=27200' --dataset uniform --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 31745.793103448275,
+          "stddev": 915.6813529123244,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 46.32539,
+          "stddev": 0.22768290833964674,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 37594.2,
+          "stddev": 2734.4467813435317,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 50.47502,
+          "stddev": 0.05519897643978545,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 544000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 544000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 136183,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 143360,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.0,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.0,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "aae_top1000": 0.0,
+            "accuracy_runs": 1,
+            "are_all": 0.0,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "are_top1000": 0.0,
+            "l1_err": 0.0,
+            "l2_err": 0.0,
+            "probes": 1000.0,
+            "probes_all": 1000.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "probes_top1000": 1000.0,
+            "relative_error_mean": 0.0,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "countsketch-uniform-seed42-w300-d83",
+      "algorithm": "CountSketch",
+      "params": {
+        "CountSketch": {
+          "width": 300,
+          "depth": 83
+        }
+      },
+      "distribution": {
+        "id": "uniform-n20000-c1000-seed42",
+        "family": "uniform",
+        "sample_count": 20000,
+        "distinct_count": 1000,
+        "parameters": {
+          "kind": "uniform",
+          "lower_bound": 0.0,
+          "upper_bound": 1000.0,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886419,
+      "valid_until_unix_seconds": 1791478419,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant countsketch-regularpath-vector2d --library lib --config 'rows=83 cols=300' --dataset uniform --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 6091.32,
+          "stddev": 99.73249556626484,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 757.95226,
+          "stddev": 0.2581798365480518,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 8584.4,
+          "stddev": 165.01908980478592,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 2104.83466,
+          "stddev": 1.6008204155995156,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 99600.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 99600.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 29755,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 32768,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.3932923866316825,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 7.446,
+            "aae_top1": 9.0,
+            "aae_top10": 8.2,
+            "aae_top100": 6.92,
+            "aae_top1000": 7.446,
+            "accuracy_runs": 1,
+            "are_all": 0.3932923866316825,
+            "are_top1": 0.2195121951219512,
+            "are_top10": 0.2434299417440008,
+            "are_top100": 0.2454991949546276,
+            "are_top1000": 0.3932923866316827,
+            "l1_err": 7446.0,
+            "l2_err": 312.3747749098829,
+            "probes": 1000.0,
+            "probes_all": 1000.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "probes_top1000": 1000.0,
+            "relative_error_mean": 0.3932923866316825,
+            "relative_error_p99": 1.3846153846153846
+          }
+        }
+      }
+    },
+    {
+      "id": "countsketch-uniform-seed42-w3000-d83",
+      "algorithm": "CountSketch",
+      "params": {
+        "CountSketch": {
+          "width": 3000,
+          "depth": 83
+        }
+      },
+      "distribution": {
+        "id": "uniform-n20000-c1000-seed42",
+        "family": "uniform",
+        "sample_count": 20000,
+        "distinct_count": 1000,
+        "parameters": {
+          "kind": "uniform",
+          "lower_bound": 0.0,
+          "upper_bound": 1000.0,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886440,
+      "valid_until_unix_seconds": 1791478440,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant countsketch-regularpath-vector2d --library lib --config 'rows=83 cols=3000' --dataset uniform --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 51035.7375,
+          "stddev": 951.9281311091058,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 774.44066,
+          "stddev": 0.6066855995901015,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 68290.8,
+          "stddev": 247.88848299184858,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 1519.04208,
+          "stddev": 7.1756951556626465,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 996000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 996000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 251754,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 258048,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.0,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.0,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "aae_top1000": 0.0,
+            "accuracy_runs": 1,
+            "are_all": 0.0,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "are_top1000": 0.0,
+            "l1_err": 0.0,
+            "l2_err": 0.0,
+            "probes": 1000.0,
+            "probes_all": 1000.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "probes_top1000": 1000.0,
+            "relative_error_mean": 0.0,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-zipf-seed42-w272-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 272,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "zipf-n20000-c1000-seed42",
+        "family": "zipf",
+        "sample_count": 20000,
+        "distinct_count": 952,
+        "parameters": {
+          "kind": "zipf",
+          "skewness": 1.1,
+          "population_size": 1000,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886460,
+      "valid_until_unix_seconds": 1791478460,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=272' --dataset zipf --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory --zipf-s 1.1",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 413.40859375,
+          "stddev": 2.7002030472877463,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 33.40953,
+          "stddev": 0.1888592286598663,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 1104.6,
+          "stddev": 114.85773809369572,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 35.77964285714286,
+          "stddev": 0.26766073908351545,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 5440.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 5440.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 1722,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 4096,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 2.3164860214890104,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 7.493697478991597,
+            "aae_top1": 4.0,
+            "aae_top10": 4.8,
+            "aae_top100": 6.49,
+            "accuracy_runs": 1,
+            "are_all": 2.3164860214890104,
+            "are_top1": 0.001122334455667789,
+            "are_top10": 0.007748825239549779,
+            "are_top100": 0.14834226869635583,
+            "l1_err": 7134.0,
+            "l2_err": 324.8969067258105,
+            "probes": 952.0,
+            "probes_all": 952.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "relative_error_mean": 2.3164860214890104,
+            "relative_error_p99": 16.0
+          }
+        }
+      }
+    },
+    {
+      "id": "countsketch-zipf-seed42-w30000-d83",
+      "algorithm": "CountSketch",
+      "params": {
+        "CountSketch": {
+          "width": 30000,
+          "depth": 83
+        }
+      },
+      "distribution": {
+        "id": "zipf-n20000-c1000-seed42",
+        "family": "zipf",
+        "sample_count": 20000,
+        "distinct_count": 952,
+        "parameters": {
+          "kind": "zipf",
+          "skewness": 1.1,
+          "population_size": 1000,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886480,
+      "valid_until_unix_seconds": 1791478480,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant countsketch-regularpath-vector2d --library lib --config 'rows=83 cols=30000' --dataset zipf --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory --zipf-s 1.1",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 4991299.4,
+          "stddev": 127408.84023557784,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 862.07043,
+          "stddev": 67.54045694576882,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 906510.0,
+          "stddev": 10240.438638066242,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 1383.6344117647059,
+          "stddev": 2.9386960922807495,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 9960000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 9960000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 2495217,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 2502656,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.0,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.0,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "accuracy_runs": 1,
+            "are_all": 0.0,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "l1_err": 0.0,
+            "l2_err": 0.0,
+            "probes": 952.0,
+            "probes_all": 952.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "relative_error_mean": 0.0,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-zipf-seed42-w2720-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 2720,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "zipf-n20000-c1000-seed42",
+        "family": "zipf",
+        "sample_count": 20000,
+        "distinct_count": 952,
+        "parameters": {
+          "kind": "zipf",
+          "skewness": 1.1,
+          "population_size": 1000,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886531,
+      "valid_until_unix_seconds": 1791478531,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=2720' --dataset zipf --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory --zipf-s 1.1",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 13362.875,
+          "stddev": 3039.657607879287,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 33.83039,
+          "stddev": 0.16780548039322382,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 2661.8,
+          "stddev": 223.53120587515292,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 37.005063025210085,
+          "stddev": 0.16744114940021262,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 54400.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 54400.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 13933,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 16384,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.007412989350329503,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.015756302521008403,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.05,
+            "accuracy_runs": 1,
+            "are_all": 0.007412989350329503,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0008494363929146537,
+            "l1_err": 15.0,
+            "l2_err": 6.557438524302,
+            "probes": 952.0,
+            "probes_all": 952.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "relative_error_mean": 0.007412989350329503,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-zipf-seed42-w27200-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 27200,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "zipf-n20000-c1000-seed42",
+        "family": "zipf",
+        "sample_count": 20000,
+        "distinct_count": 952,
+        "parameters": {
+          "kind": "zipf",
+          "skewness": 1.1,
+          "population_size": 1000,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886551,
+      "valid_until_unix_seconds": 1791478551,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=27200' --dataset zipf --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory --zipf-s 1.1",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 29308.56551724138,
+          "stddev": 325.16572706768056,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 37.90535,
+          "stddev": 0.20893840898695612,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 33239.0,
+          "stddev": 1520.0851949808603,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 42.75764705882353,
+          "stddev": 0.029966574634030334,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 544000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 544000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 136338,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 143360,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.0,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.0,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "accuracy_runs": 1,
+            "are_all": 0.0,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "l1_err": 0.0,
+            "l2_err": 0.0,
+            "probes": 952.0,
+            "probes_all": 952.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "relative_error_mean": 0.0,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "countsketch-zipf-seed42-w300-d83",
+      "algorithm": "CountSketch",
+      "params": {
+        "CountSketch": {
+          "width": 300,
+          "depth": 83
+        }
+      },
+      "distribution": {
+        "id": "zipf-n20000-c1000-seed42",
+        "family": "zipf",
+        "sample_count": 20000,
+        "distinct_count": 952,
+        "parameters": {
+          "kind": "zipf",
+          "skewness": 1.1,
+          "population_size": 1000,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886571,
+      "valid_until_unix_seconds": 1791478571,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant countsketch-regularpath-vector2d --library lib --config 'rows=83 cols=300' --dataset zipf --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory --zipf-s 1.1",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 5789.295,
+          "stddev": 50.43642858217649,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 756.83812,
+          "stddev": 0.15442492755380408,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 8532.4,
+          "stddev": 65.54998093058457,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 2100.1955042016807,
+          "stddev": 4.949446360451842,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 99600.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 99600.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 29853,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 32768,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.6369033391351014,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 2.2815126050420167,
+            "aae_top1": 1.0,
+            "aae_top10": 0.8,
+            "aae_top100": 2.01,
+            "accuracy_runs": 1,
+            "are_all": 0.6369033391351014,
+            "are_top1": 0.0002805836139169473,
+            "are_top10": 0.001555601294898813,
+            "are_top100": 0.04553785988253641,
+            "l1_err": 2172.0,
+            "l2_err": 102.52804494381036,
+            "probes": 952.0,
+            "probes_all": 952.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "relative_error_mean": 0.6369033391351014,
+            "relative_error_p99": 4.5
+          }
+        }
+      }
+    },
+    {
+      "id": "countsketch-zipf-seed42-w3000-d83",
+      "algorithm": "CountSketch",
+      "params": {
+        "CountSketch": {
+          "width": 3000,
+          "depth": 83
+        }
+      },
+      "distribution": {
+        "id": "zipf-n20000-c1000-seed42",
+        "family": "zipf",
+        "sample_count": 20000,
+        "distinct_count": 952,
+        "parameters": {
+          "kind": "zipf",
+          "skewness": 1.1,
+          "population_size": 1000,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886592,
+      "valid_until_unix_seconds": 1791478592,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant countsketch-regularpath-vector2d --library lib --config 'rows=83 cols=3000' --dataset zipf --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory --zipf-s 1.1",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 51510.1875,
+          "stddev": 1338.8413243535902,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 763.80445,
+          "stddev": 1.0832422484144655,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 68282.4,
+          "stddev": 462.2210510134734,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 1500.9115756302522,
+          "stddev": 13.696449994980448,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 996000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 996000.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 254181,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 262144,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.0,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.0,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "accuracy_runs": 1,
+            "are_all": 0.0,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "l1_err": 0.0,
+            "l2_err": 0.0,
+            "probes": 952.0,
+            "probes_all": 952.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "relative_error_mean": 0.0,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-uniform-seed42-w512-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 512,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "uniform-n20000-c1000-seed42",
+        "family": "uniform",
+        "sample_count": 20000,
+        "distinct_count": 1000,
+        "parameters": {
+          "kind": "uniform",
+          "lower_bound": 0.0,
+          "upper_bound": 1000.0,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886649,
+      "valid_until_unix_seconds": 1791478649,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=512' --dataset uniform --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 653.75078125,
+          "stddev": 14.656944769230105,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 33.62379,
+          "stddev": 0.07565315095883289,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 1184.0,
+          "stddev": 10.770329614269007,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 35.6547,
+          "stddev": 0.008609006911371453,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 10240.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 10240.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 2759,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 4096,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.4857875000848293,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 9.229,
+            "aae_top1": 0.0,
+            "aae_top10": 5.7,
+            "aae_top100": 9.32,
+            "aae_top1000": 9.229,
+            "accuracy_runs": 1,
+            "are_all": 0.4857875000848293,
+            "are_top1": 0.0,
+            "are_top10": 0.17943548387096775,
+            "are_top100": 0.3330711319229116,
+            "are_top1000": 0.485787500084829,
+            "l1_err": 9229.0,
+            "l2_err": 467.7210707248499,
+            "probes": 1000.0,
+            "probes_all": 1000.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "probes_top1000": 1000.0,
+            "relative_error_mean": 0.4857875000848293,
+            "relative_error_p99": 2.3684210526315788
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-uniform-seed42-w4096-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 4096,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "uniform-n20000-c1000-seed42",
+        "family": "uniform",
+        "sample_count": 20000,
+        "distinct_count": 1000,
+        "parameters": {
+          "kind": "uniform",
+          "lower_bound": 0.0,
+          "upper_bound": 1000.0,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886669,
+      "valid_until_unix_seconds": 1791478669,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=4096' --dataset uniform --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 4973.88,
+          "stddev": 300.623465532763,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 35.00645,
+          "stddev": 0.3773887451951894,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 5853.0,
+          "stddev": 1073.9336571688216,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 37.45286,
+          "stddev": 0.01899928946039723,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 81920.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 81920.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 20661,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 24576,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.0,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.0,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "aae_top1000": 0.0,
+            "accuracy_runs": 1,
+            "are_all": 0.0,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "are_top1000": 0.0,
+            "l1_err": 0.0,
+            "l2_err": 0.0,
+            "probes": 1000.0,
+            "probes_all": 1000.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "probes_top1000": 1000.0,
+            "relative_error_mean": 0.0,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-uniform-seed42-w32768-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 32768,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "uniform-n20000-c1000-seed42",
+        "family": "uniform",
+        "sample_count": 20000,
+        "distinct_count": 1000,
+        "parameters": {
+          "kind": "uniform",
+          "lower_bound": 0.0,
+          "upper_bound": 1000.0,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886689,
+      "valid_until_unix_seconds": 1791478689,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=32768' --dataset uniform --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 35327.308333333334,
+          "stddev": 703.0214501528393,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 42.568979999999996,
+          "stddev": 0.47701038982395344,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 42699.4,
+          "stddev": 3601.5573437056364,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 46.04674,
+          "stddev": 0.23154995789245925,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 655360.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 655360.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 164023,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 172032,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.0,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.0,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "aae_top1000": 0.0,
+            "accuracy_runs": 1,
+            "are_all": 0.0,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "are_top1000": 0.0,
+            "l1_err": 0.0,
+            "l2_err": 0.0,
+            "probes": 1000.0,
+            "probes_all": 1000.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "probes_top1000": 1000.0,
+            "relative_error_mean": 0.0,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-zipf-seed42-w512-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 512,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "zipf-n20000-c1000-seed42",
+        "family": "zipf",
+        "sample_count": 20000,
+        "distinct_count": 952,
+        "parameters": {
+          "kind": "zipf",
+          "skewness": 1.1,
+          "population_size": 1000,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886709,
+      "valid_until_unix_seconds": 1791478709,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=512' --dataset zipf --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory --zipf-s 1.1",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 739.0640625,
+          "stddev": 3.194833256007488,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 40.60954,
+          "stddev": 0.08235665121895089,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 1845.0,
+          "stddev": 327.10854467592253,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 43.60256302521008,
+          "stddev": 0.023270849185024416,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 10240.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 10240.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 2913,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 4096,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.49153700428012315,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 1.694327731092437,
+            "aae_top1": 2.0,
+            "aae_top10": 1.8,
+            "aae_top100": 1.46,
+            "accuracy_runs": 1,
+            "are_all": 0.49153700428012315,
+            "are_top1": 0.0005611672278338945,
+            "are_top10": 0.003950663328809479,
+            "are_top100": 0.03129160657746158,
+            "l1_err": 1613.0,
+            "l2_err": 107.81001808737442,
+            "probes": 952.0,
+            "probes_all": 952.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "relative_error_mean": 0.49153700428012315,
+            "relative_error_p99": 5.0
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-zipf-seed42-w4096-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 4096,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "zipf-n20000-c1000-seed42",
+        "family": "zipf",
+        "sample_count": 20000,
+        "distinct_count": 952,
+        "parameters": {
+          "kind": "zipf",
+          "skewness": 1.1,
+          "population_size": 1000,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886729,
+      "valid_until_unix_seconds": 1791478729,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=4096' --dataset zipf --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory --zipf-s 1.1",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 5492.366153846154,
+          "stddev": 110.32925778298996,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 46.86758,
+          "stddev": 0.2167893926141219,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 8647.0,
+          "stddev": 13.30413469565007,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 51.65478991596639,
+          "stddev": 0.3125781503156082,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 81920.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 81920.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 20818,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 24576,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.0,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.0,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "accuracy_runs": 1,
+            "are_all": 0.0,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "l1_err": 0.0,
+            "l2_err": 0.0,
+            "probes": 952.0,
+            "probes_all": 952.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "relative_error_mean": 0.0,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    },
+    {
+      "id": "cms-zipf-seed42-w32768-d5",
+      "algorithm": "Cms",
+      "params": {
+        "Cms": {
+          "width": 32768,
+          "depth": 5
+        }
+      },
+      "distribution": {
+        "id": "zipf-n20000-c1000-seed42",
+        "family": "zipf",
+        "sample_count": 20000,
+        "distinct_count": 952,
+        "parameters": {
+          "kind": "zipf",
+          "skewness": 1.1,
+          "population_size": 1000,
+          "seed": 42
+        }
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "id": "c9590114bad98348"
+      },
+      "measured_at_unix_seconds": 1788886750,
+      "valid_until_unix_seconds": 1791478750,
+      "provenance": {
+        "command": "/mydata/sketch-bench-empirical-322/target/release/approxbench sketchbench --variant cms-regularpath-vector2d --library lib --config 'rows=5 cols=32768' --dataset zipf --size 20000 --cardinality 1000 --dtype i64 --seed 42 --runs 5 --warmup-runs 2 --operations insert,query,merge --metrics throughput,cpu,memory --zipf-s 1.1",
+        "dataset": "deterministic synthetic i64 frequency stream, seed 42",
+        "source_revision": "87f619e843fd2e4da784160d4e205a0d0d55f032",
+        "repetitions": 5
+      },
+      "metrics": {
+        "build_cpu_ns": {
+          "value": 37349.625,
+          "stddev": 337.66657026364135,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID around empty sketch constructors in batched live objects; holder allocation and all destruction excluded; jemalloc; five runs after two warmups"
+        },
+        "update_cpu_ns": {
+          "value": 48.96084,
+          "stddev": 0.2723536519857951,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "merge_cpu_ns": {
+          "value": 48184.4,
+          "stddev": 857.3592012686398,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "read_cpu_ns": {
+          "value": 55.503865546218485,
+          "stddev": 0.030379887382542214,
+          "samples": 5,
+          "method": "CLOCK_PROCESS_CPUTIME_ID; live state with constructor/destructor excluded; five runs after two warmups; update per input item; read per all-distinct-key lookup across ten repeated fixed-snapshot probe passes; merge per binary merge; fixed rotated sorted key order"
+        },
+        "retained_bytes": {
+          "value": 655360.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "peak_bytes": {
+          "value": 655360.0,
+          "stddev": 0.0,
+          "samples": 5,
+          "method": "requested allocation bytes using counting System allocator; construction + insertion; sketch alive; dataset excluded; not allocator-resident pages"
+        },
+        "serialized_bytes": {
+          "value": 164178,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual serialize_to_bytes MsgPack length; estimate-equivalent roundtrip verified for every input key"
+        },
+        "disk_bytes": {
+          "value": 172032,
+          "stddev": null,
+          "samples": 1,
+          "method": "actual flushed single MsgPack snapshot file allocated blocks*512 on local temporary filesystem; directory/inode overhead excluded; file removed after measurement; not runtime persistence demand"
+        }
+      },
+      "error": {
+        "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+        "mean": 0.0,
+        "max": null,
+        "trials": 1,
+        "ground_truth_method": "exact offline HashMap counts; every distinct key probed",
+        "query": {
+          "kind": "point_frequency",
+          "value_type": "i64",
+          "accuracy_stddev": null,
+          "full_accuracy": {
+            "aae_all": 0.0,
+            "aae_top1": 0.0,
+            "aae_top10": 0.0,
+            "aae_top100": 0.0,
+            "accuracy_runs": 1,
+            "are_all": 0.0,
+            "are_top1": 0.0,
+            "are_top10": 0.0,
+            "are_top100": 0.0,
+            "l1_err": 0.0,
+            "l2_err": 0.0,
+            "probes": 952.0,
+            "probes_all": 952.0,
+            "probes_top1": 1.0,
+            "probes_top10": 10.0,
+            "probes_top100": 100.0,
+            "relative_error_mean": 0.0,
+            "relative_error_p99": 0.0
+          }
+        }
+      }
+    }
+  ]
+}

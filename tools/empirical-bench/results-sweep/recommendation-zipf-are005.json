@@ -1,0 +1,428 @@
+{
+  "accuracy_scope": "observed offline mean error on the exact declared probe population; not an unseen-data or realtime guarantee",
+  "benchmark_version": "sketch-bench@87f619e843fd2e4da784160d4e205a0d0d55f032; adapter-v2-disjoint",
+  "model_version": "empirical-update-cpu-v1",
+  "recommendation": {
+    "assumptions": [
+      "Fixed snapshot: construct, ingest all measured input, prepare exact index once, then read without updates or merges",
+      "Read CPU is the measured average over all distinct keys; individual key latency and error can differ",
+      "CPU sums disjoint measured construction/update/prepare/read phases while state remains alive; the comparison ends with retained state and excludes retirement",
+      "No serialization or disk-write CPU is modeled; reported disk/serialized bytes describe one optional persisted snapshot only",
+      "Offline mean-error acceptance is restricted to the measured input and probe population; it is not a formal or runtime error guarantee"
+    ],
+    "candidates": [
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 272
+            }
+          }
+        },
+        "observed_error_mean": 1.6347221960194194,
+        "record_id": "cms-uniform-seed42-w272-d5",
+        "rejection": "record belongs to another applicability context",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "CountSketch",
+          "params": {
+            "CountSketch": {
+              "depth": 83,
+              "width": 30000
+            }
+          }
+        },
+        "observed_error_mean": 0.0,
+        "record_id": "countsketch-uniform-seed42-w30000-d83",
+        "rejection": "record belongs to another applicability context",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 2720
+            }
+          }
+        },
+        "observed_error_mean": 0.006335943223443224,
+        "record_id": "cms-uniform-seed42-w2720-d5",
+        "rejection": "record belongs to another applicability context",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 27200
+            }
+          }
+        },
+        "observed_error_mean": 0.0,
+        "record_id": "cms-uniform-seed42-w27200-d5",
+        "rejection": "record belongs to another applicability context",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "CountSketch",
+          "params": {
+            "CountSketch": {
+              "depth": 83,
+              "width": 300
+            }
+          }
+        },
+        "observed_error_mean": 0.3932923866316825,
+        "record_id": "countsketch-uniform-seed42-w300-d83",
+        "rejection": "record belongs to another applicability context",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "CountSketch",
+          "params": {
+            "CountSketch": {
+              "depth": 83,
+              "width": 3000
+            }
+          }
+        },
+        "observed_error_mean": 0.0,
+        "record_id": "countsketch-uniform-seed42-w3000-d83",
+        "rejection": "record belongs to another applicability context",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 272
+            }
+          }
+        },
+        "observed_error_mean": 2.3164860214890104,
+        "record_id": "cms-zipf-seed42-w272-d5",
+        "rejection": "observed error exceeds explicit offline acceptance budget",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "CountSketch",
+          "params": {
+            "CountSketch": {
+              "depth": 83,
+              "width": 30000
+            }
+          }
+        },
+        "observed_error_mean": 0.0,
+        "record_id": "countsketch-zipf-seed42-w30000-d83",
+        "rejection": null,
+        "resources": {
+          "cpu_ns": 23616342.411764707,
+          "disk_bytes_per_state": 2502656.0,
+          "objective_cost": 23616342.411764707,
+          "peak_bytes_upper_bound": 9960000.0,
+          "retained_byte_seconds": 2988000000.0,
+          "retained_bytes": 9960000.0,
+          "serialized_bytes_per_state": 2495217.0
+        }
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 2720
+            }
+          }
+        },
+        "observed_error_mean": 0.007412989350329503,
+        "record_id": "cms-zipf-seed42-w2720-d5",
+        "rejection": null,
+        "resources": {
+          "cpu_ns": 726975.7380252101,
+          "disk_bytes_per_state": 16384.0,
+          "objective_cost": 726975.7380252101,
+          "peak_bytes_upper_bound": 54400.0,
+          "retained_byte_seconds": 16320000.0,
+          "retained_bytes": 54400.0,
+          "serialized_bytes_per_state": 13933.0
+        }
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 27200
+            }
+          }
+        },
+        "observed_error_mean": 0.0,
+        "record_id": "cms-zipf-seed42-w27200-d5",
+        "rejection": null,
+        "resources": {
+          "cpu_ns": 830173.2125760649,
+          "disk_bytes_per_state": 143360.0,
+          "objective_cost": 830173.2125760649,
+          "peak_bytes_upper_bound": 544000.0,
+          "retained_byte_seconds": 163200000.0,
+          "retained_bytes": 544000.0,
+          "serialized_bytes_per_state": 136338.0
+        }
+      },
+      {
+        "configuration": {
+          "algorithm": "CountSketch",
+          "params": {
+            "CountSketch": {
+              "depth": 83,
+              "width": 300
+            }
+          }
+        },
+        "observed_error_mean": 0.6369033391351014,
+        "record_id": "countsketch-zipf-seed42-w300-d83",
+        "rejection": "observed error exceeds explicit offline acceptance budget",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "CountSketch",
+          "params": {
+            "CountSketch": {
+              "depth": 83,
+              "width": 3000
+            }
+          }
+        },
+        "observed_error_mean": 0.0,
+        "record_id": "countsketch-zipf-seed42-w3000-d83",
+        "rejection": null,
+        "resources": {
+          "cpu_ns": 16828510.76313025,
+          "disk_bytes_per_state": 262144.0,
+          "objective_cost": 16828510.76313025,
+          "peak_bytes_upper_bound": 996000.0,
+          "retained_byte_seconds": 298800000.0,
+          "retained_bytes": 996000.0,
+          "serialized_bytes_per_state": 254181.0
+        }
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 512
+            }
+          }
+        },
+        "observed_error_mean": 0.4857875000848293,
+        "record_id": "cms-uniform-seed42-w512-d5",
+        "rejection": "record belongs to another applicability context",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 4096
+            }
+          }
+        },
+        "observed_error_mean": 0.0,
+        "record_id": "cms-uniform-seed42-w4096-d5",
+        "rejection": "record belongs to another applicability context",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 32768
+            }
+          }
+        },
+        "observed_error_mean": 0.0,
+        "record_id": "cms-uniform-seed42-w32768-d5",
+        "rejection": "record belongs to another applicability context",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 512
+            }
+          }
+        },
+        "observed_error_mean": 0.49153700428012315,
+        "record_id": "cms-zipf-seed42-w512-d5",
+        "rejection": "observed error exceeds explicit offline acceptance budget",
+        "resources": null
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 4096
+            }
+          }
+        },
+        "observed_error_mean": 0.0,
+        "record_id": "cms-zipf-seed42-w4096-d5",
+        "rejection": null,
+        "resources": {
+          "cpu_ns": 994498.7560698125,
+          "disk_bytes_per_state": 24576.0,
+          "objective_cost": 994498.7560698125,
+          "peak_bytes_upper_bound": 81920.0,
+          "retained_byte_seconds": 24576000.0,
+          "retained_bytes": 81920.0,
+          "serialized_bytes_per_state": 20818.0
+        }
+      },
+      {
+        "configuration": {
+          "algorithm": "Cms",
+          "params": {
+            "Cms": {
+              "depth": 5,
+              "width": 32768
+            }
+          }
+        },
+        "observed_error_mean": 0.0,
+        "record_id": "cms-zipf-seed42-w32768-d5",
+        "rejection": null,
+        "resources": {
+          "cpu_ns": 1072070.2905462184,
+          "disk_bytes_per_state": 172032.0,
+          "objective_cost": 1072070.2905462184,
+          "peak_bytes_upper_bound": 655360.0,
+          "retained_byte_seconds": 196608000.0,
+          "retained_bytes": 655360.0,
+          "serialized_bytes_per_state": 164178.0
+        }
+      }
+    ],
+    "checked_formal_minimums": false,
+    "estimated_cpu_savings_ns": 0.0,
+    "estimated_retained_bytes_savings": 0.0,
+    "exact_baseline": {
+      "configuration": null,
+      "observed_error_mean": 0.0,
+      "record_id": "exact-zipf-seed42-w272-d5",
+      "rejection": null,
+      "resources": {
+        "cpu_ns": 544554.9513926274,
+        "disk_bytes_per_state": null,
+        "objective_cost": 544554.9513926274,
+        "peak_bytes_upper_bound": 626584.0,
+        "retained_byte_seconds": 89092800.0,
+        "retained_bytes": 296976.0,
+        "serialized_bytes_per_state": null
+      }
+    },
+    "query": {
+      "kind": "point_frequency",
+      "probe_set": "all_distinct_keys",
+      "value_type": "i64"
+    },
+    "selected": {
+      "configuration": null,
+      "observed_error_mean": 0.0,
+      "record_id": "exact-zipf-seed42-w272-d5",
+      "rejection": null,
+      "resources": {
+        "cpu_ns": 544554.9513926274,
+        "disk_bytes_per_state": null,
+        "objective_cost": 544554.9513926274,
+        "peak_bytes_upper_bound": 626584.0,
+        "retained_byte_seconds": 89092800.0,
+        "retained_bytes": 296976.0,
+        "serialized_bytes_per_state": null
+      }
+    }
+  },
+  "request": {
+    "accuracy": {
+      "max_observed_mean": 0.05,
+      "metric": "mean_absolute_relative_frequency_error_all_distinct_keys",
+      "minimum_trials": 1
+    },
+    "context": {
+      "distribution": {
+        "distinct_count": 952,
+        "family": "zipf",
+        "id": "zipf-n20000-c1000-seed42",
+        "parameters": {
+          "kind": "zipf",
+          "population_size": 1000,
+          "seed": 42,
+          "skewness": 1.1
+        },
+        "sample_count": 20000
+      },
+      "environment": {
+        "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+        "id": "c9590114bad98348",
+        "implementation": "asap_sketchlib RegularPath Vector2D",
+        "implementation_version": "asap_sketchlib 0.2.2",
+        "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+        "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1"
+      },
+      "now_unix_seconds": 1788886750
+    },
+    "exact_environment": {
+      "cpu": "Intel(R) Xeon(R) Gold 6142 CPU @ 2.60GHz",
+      "id": "786f86a18e85df5f",
+      "implementation": "polars group_by + std HashMap",
+      "implementation_version": "polars 0.46.0",
+      "os": "Linux-5.15.0-177-generic-x86_64-with-glibc2.35",
+      "runtime": "rustc 1.97.1 (8bab26f4f 2026-07-14); release; target-cpu=native; jemalloc; POLARS_MAX_THREADS=1"
+    },
+    "formal_minimums": null,
+    "query": {
+      "kind": "point_frequency",
+      "probe_set": "all_distinct_keys",
+      "value_type": "i64"
+    },
+    "weights": {
+      "cpu_ns_weight": 1.0,
+      "retained_byte_seconds_weight": 0.0
+    },
+    "workload": {
+      "horizon_seconds": 300.0,
+      "input_items_per_state": 20000,
+      "merges_per_state": 0,
+      "reads_per_state": 1000,
+      "state_instances": 1
+    }
+  },
+  "schema_version": 1
+}
