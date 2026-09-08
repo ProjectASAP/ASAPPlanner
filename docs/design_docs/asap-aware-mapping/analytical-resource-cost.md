@@ -1169,6 +1169,11 @@ available, that candidate is unavailable rather than costed as in-memory.
 
 ## Unsupported and future dimensions
 
+The physical-plan adapter can also estimate explicitly evidenced disk/object
+request counts using the optional storage profile. See
+[storage operation estimates](../../developer_docs/storage-operation-costs.md)
+for units, formulas, evidence requirements, and calibration.
+
 An estimate is unavailable when required evidence, a physical formula, or a
 finite horizon is missing. Structural node counts are never substituted.
 

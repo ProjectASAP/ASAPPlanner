@@ -88,6 +88,8 @@ use asap_types::types::AccuracyTarget;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PlannerCostDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_io: Option<asap_aware_mapping::storage_io::StorageIoProfile>,
     /// Immutable catalog/runtime evidence generation shared by this file.
     evidence_version: String,
     calibration: ResourceCalibration,
@@ -276,6 +278,7 @@ fn plan_values_match_inner(
 }
 
 struct ExportPhysicalProvider<'a> {
+    storage_io: Option<&'a asap_aware_mapping::storage_io::StorageIoProfile>,
     evidence_version: &'a str,
     target: &'a TargetPhysicalEvidence,
     candidate: &'a CandidatePhysicalEvidence,
@@ -297,6 +300,7 @@ impl PlannerPhysicalPlanProvider for ExportPhysicalProvider<'_> {
             version: self.evidence_version.into(),
             scope: self.target.scope.resolve()?,
             cache_profile: self.target.scope.cache_profile.clone(),
+            storage_io: self.storage_io.cloned(),
         })
     }
 
@@ -385,6 +389,7 @@ impl ExportPlannerCostModel<'_> {
         }
         Some((
             ExportPhysicalProvider {
+                storage_io: self.document.storage_io.as_ref(),
                 evidence_version: &self.document.evidence_version,
                 target: target_evidence,
                 candidate: candidate_evidence,
@@ -412,7 +417,13 @@ impl ExportPlannerCostModel<'_> {
         if !provider.all_query_evidence_used() {
             return winner_cost_annotations();
         }
-        let version = format!("{}+{}", ANALYTICAL_COST_MODEL_VERSION, calibration.version);
+        let mut version = format!("{}+{}", ANALYTICAL_COST_MODEL_VERSION, calibration.version);
+        if let Some((storage, _)) = &estimate.storage_io {
+            version.push_str(&format!(
+                "+{}+{}",
+                storage.model_version, storage.calibration_version
+            ));
+        }
         let scope = &provider.target.scope;
         let Ok((result_hits, buffer_hits)) = cache_hit_ratios(
             &scope.cache_profile,
@@ -493,11 +504,44 @@ impl ExportPlannerCostModel<'_> {
             inputs.extend(cache_inputs.iter().cloned());
             inputs
         };
+        let storage_inputs = |storage: &asap_aware_mapping::storage_io::StorageEstimate| {
+            let mut terms: Vec<_> = storage
+                .total
+                .terms()
+                .into_iter()
+                .map(|(name, value)| CostInput {
+                    name: name.into(),
+                    value: value as f64,
+                    unit: Some("operations".into()),
+                })
+                .collect();
+            let mut ids: Vec<_> = storage.per_node.keys().collect();
+            ids.sort();
+            for id in ids {
+                terms.extend(
+                    storage.per_node[id]
+                        .terms()
+                        .into_iter()
+                        .map(|(name, value)| CostInput {
+                            name: format!("physical_node:{id}:{name}"),
+                            value: value as f64,
+                            unit: Some("operations".into()),
+                        }),
+                );
+            }
+            terms
+        };
+        let mut raw_inputs = inputs(estimate.resources.raw);
+        let mut candidate_inputs = inputs(estimate.resources.candidate);
+        if let Some((raw, candidate)) = &estimate.storage_io {
+            raw_inputs.extend(storage_inputs(raw));
+            candidate_inputs.extend(storage_inputs(candidate));
+        }
         let baseline = CostAnnotation::modeled(
             estimate.raw_cost.0,
             CostUnit::CostUnits,
             &version,
-            inputs(estimate.resources.raw),
+            raw_inputs,
         )
         .with_evidence_version(&self.document.evidence_version)
         .with_cache_profile(snapshot_cache_version(&provider));
@@ -505,7 +549,7 @@ impl ExportPlannerCostModel<'_> {
             estimate.candidate_cost.0,
             CostUnit::CostUnits,
             &version,
-            inputs(estimate.resources.candidate),
+            candidate_inputs,
         )
         .with_baseline(BaselineRef::PreAsapRecomputation, estimate.raw_cost.0)
         .with_evidence_version(&self.document.evidence_version)
@@ -1534,6 +1578,184 @@ mod tests {
         }
     }
 
+    fn fixture_raw_dag(
+        query: &QueryExpr,
+        candidate: &ReplacementSubDAG,
+        document: &PlannerCostDocument,
+    ) -> PhysicalDag {
+        let model = ExportPlannerCostModel { document };
+        let root = Rc::new(query.clone());
+        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
+        let (provider, _) = model.bound(candidate, &target).unwrap();
+        let snapshot = provider.capture_evidence_snapshot(&target).unwrap();
+        let evidence =
+            |request: PhysicalNodeRequest<'_>| provider.query_node_evidence(&snapshot, request);
+        lower_query_physical_dag(&root, &snapshot.scope, &evidence).unwrap()
+    }
+
+    // JSON evidence reaches calibrated ranking and structured annotation inputs.
+    #[test]
+    fn storage_requests_export_and_change_plan_selection() {
+        use asap_aware_mapping::storage_io::*;
+        let (query, candidate, mut document) = cost_fixture();
+        let raw = fixture_raw_dag(&query, &candidate, &document);
+        let candidate_dag = cheap_candidate_dag();
+        let root = Rc::new(query.clone());
+        let target = asap_aware_mapping::replacement::TargetSubDAG::new(&root);
+        assert!(ExportPlannerCostModel {
+            document: &document
+        }
+        .candidate_cost(&candidate, &target)
+        .is_some());
+        let mut profile = StorageIoProfile {
+            evidence_version: document.evidence_version.clone(),
+            observed_at_ms: 900,
+            valid_until_ms: 2000,
+            calibration: StorageCalibration {
+                version: "requests-v1".into(),
+                cost_per_disk_read: 1.0,
+                cost_per_disk_write: 1.0,
+                cost_per_object_get: 1.0,
+                cost_per_object_put: 1.0,
+            },
+            nodes: std::collections::HashMap::new(),
+        };
+        for dag in [&raw, &candidate_dag] {
+            for node in &dag.nodes {
+                let statistics = dag.evidence[&node.id].statistics.clone();
+                let accesses = match &statistics {
+                    OperatorStatistics::Scan {
+                        source_read_bytes, ..
+                    } => vec![StorageAccess {
+                        operation: StorageOperation::ObjectGet,
+                        extent_bytes: vec![*source_read_bytes],
+                        bytes_per_request: 4096,
+                    }],
+                    _ => vec![],
+                };
+                profile.nodes.insert(
+                    node.id.clone(),
+                    StorageNodeEvidence {
+                        node: node.clone(),
+                        statistics,
+                        accesses,
+                    },
+                );
+            }
+        }
+        document.storage_io = Some(profile);
+        let parsed =
+            parse_planner_cost_document(&serde_json::to_string(&document).unwrap()).unwrap();
+        let model = ExportPlannerCostModel { document: &parsed };
+        let (baseline, selected, _) = model.annotations(&candidate, &root);
+        assert_eq!(
+            baseline
+                .inputs
+                .iter()
+                .find(|term| term.name == "object_get_operations")
+                .unwrap()
+                .value,
+            160.0
+        );
+        assert_eq!(
+            selected
+                .inputs
+                .iter()
+                .find(|term| term.name == "object_get_operations")
+                .unwrap()
+                .value,
+            10.0
+        );
+        assert!(selected
+            .inputs
+            .iter()
+            .any(|term| term.name == "physical_node:summary-read:object_get_operations"));
+        assert!(selected
+            .model_version
+            .as_ref()
+            .unwrap()
+            .contains(STORAGE_IO_MODEL_VERSION));
+        assert_eq!(selected.cache_profile.as_deref(), Some("no-cache-v1"));
+        for name in ["result_cache_hit_ratio", "buffer_cache_hit_ratio"] {
+            assert_eq!(
+                selected
+                    .inputs
+                    .iter()
+                    .find(|term| term.name == name)
+                    .unwrap()
+                    .value,
+                0.0
+            );
+        }
+        assert_eq!(
+            selected.evidence_version.as_deref(),
+            Some("test-evidence-v1")
+        );
+        // JSON evidence also supports an objective priced only by requests.
+        let mut requests_only = parsed.clone();
+        requests_only.calibration.cost_per_cpu_op = 0.0;
+        requests_only.calibration.cost_per_scan_byte = 0.0;
+        requests_only.calibration.cost_per_retained_byte = 0.0;
+        let requests_only =
+            parse_planner_cost_document(&serde_json::to_string(&requests_only).unwrap()).unwrap();
+        let model = ExportPlannerCostModel {
+            document: &requests_only,
+        };
+        assert_eq!(model.candidate_cost(&candidate, &target), Some(Cost(10.0)));
+        let (baseline, selected, _) = model.annotations(&candidate, &root);
+        assert_eq!(baseline.value, Some(160.0));
+        assert_eq!(selected.value, Some(10.0));
+        // Aggregate cache hit assumptions cannot locate cached extents or
+        // reconstruct independently rounded physical storage requests.
+        let mut cached = serde_json::to_value(&requests_only).unwrap();
+        cached["targets"][0]["scope"]["cache_profile"] = serde_json::json!({
+            "profile": "evidence", "version": "cached-with-storage-v1",
+            "distinct_evaluations": 1, "repeated_identical_evaluations": 9,
+            "result_cache": {"working_set_bytes": 100, "capacity_bytes": 100},
+            "buffer_cache": {"working_set_bytes": 100, "capacity_bytes": 100},
+            "result_invalidation_ratio": null,
+        });
+        let cached = parse_planner_cost_document(&cached.to_string()).unwrap();
+        let cached_model = ExportPlannerCostModel { document: &cached };
+        assert!(cached_model.candidate_cost(&candidate, &target).is_none());
+        assert!(cached_model
+            .annotations(&candidate, &root)
+            .0
+            .value
+            .is_none());
+        document
+            .storage_io
+            .as_mut()
+            .unwrap()
+            .nodes
+            .get_mut("summary-read")
+            .unwrap()
+            .accesses
+            .push(StorageAccess {
+                operation: StorageOperation::DiskWrite,
+                extent_bytes: vec![1_000_000],
+                bytes_per_request: 1,
+            });
+        assert!(ExportPlannerCostModel {
+            document: &document
+        }
+        .candidate_cost(&candidate, &target)
+        .is_none());
+        document
+            .storage_io
+            .as_mut()
+            .unwrap()
+            .nodes
+            .remove(&raw.root);
+        assert!(ExportPlannerCostModel {
+            document: &document
+        }
+        .annotations(&candidate, &root)
+        .0
+        .value
+        .is_none());
+    }
+
     fn test_scope() -> ComparisonScopeEvidence {
         ComparisonScopeEvidence {
             data_arrival: asap_types::workload::DataArrival::AtRest,
@@ -1685,6 +1907,7 @@ mod tests {
             }
         };
         let document = PlannerCostDocument {
+            storage_io: None,
             evidence_version: "test-evidence-v1".into(),
             calibration: ResourceCalibration {
                 cost_per_cpu_op: 1.0,
@@ -1997,6 +2220,7 @@ mod tests {
         *source_read_bytes = 1_024;
         let second_dag = cheap_candidate_dag();
         let document = PlannerCostDocument {
+            storage_io: None,
             evidence_version: "test-evidence-v1".into(),
             calibration: ResourceCalibration {
                 cost_per_cpu_op: 1.0,

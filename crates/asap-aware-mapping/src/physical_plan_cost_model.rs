@@ -29,6 +29,7 @@ pub struct PhysicalEvidenceSnapshot {
     pub version: String,
     pub scope: ComparisonScope,
     pub cache_profile: CacheProfile,
+    pub storage_io: Option<crate::storage_io::StorageIoProfile>,
 }
 
 /// Deployment evidence needed to price one planner alternative.
@@ -61,11 +62,15 @@ pub trait PlannerPhysicalPlanProvider {
 }
 
 /// Dimensional comparison retained for explanations and verification.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PhysicalPlanComparison {
     pub resources: PhysicalDagComparisonEstimate,
     pub raw_cost: Cost,
     pub candidate_cost: Cost,
+    pub storage_io: Option<(
+        crate::storage_io::StorageEstimate,
+        crate::storage_io::StorageEstimate,
+    )>,
 }
 
 /// Planner cost model that admits only complete, cheaper physical plans.
@@ -92,12 +97,19 @@ impl<'a> PhysicalPlanCostModel<'a> {
         provider: &'a dyn PlannerPhysicalPlanProvider,
         calibration: ResourceCalibration,
     ) -> Result<Self, AnalyticalCostError> {
+        // Exported scores retain base calibration provenance even when the
+        // objective is priced entirely by supplementary storage operations.
         if calibration.version.trim().is_empty() {
             return Err(AnalyticalCostError::MissingOrStale(
                 "resource_calibration.version",
             ));
         }
-        calibration.validate()?;
+        // A zero base objective may be supplemented by storage coefficients;
+        // that check needs the target's immutable evidence snapshot.
+        match calibration.validate() {
+            Ok(()) | Err(AnalyticalCostError::ZeroCalibration) => {}
+            Err(error) => return Err(error),
+        }
         Ok(Self {
             provider,
             calibration,
@@ -144,6 +156,16 @@ impl<'a> PhysicalPlanCostModel<'a> {
         target: &TargetSubDAG<'_>,
     ) -> Result<PhysicalPlanComparison, AnalyticalCostError> {
         let (snapshot, raw) = self.target_evidence(target)?;
+        // Aggregate cache hit ratios do not identify which independently rounded
+        // extents issue requests. Do not mix cache-adjusted bytes/CPU with
+        // uncached request counts until cache-aware extent evidence is available.
+        if snapshot.storage_io.is_some()
+            && matches!(&snapshot.cache_profile, CacheProfile::Evidence(_))
+        {
+            return Err(AnalyticalCostError::InvalidCacheEvidence(
+                "storage operation costs require an explicit no-cache profile; cache-aware extent evidence is unavailable",
+            ));
+        }
         let scope = &snapshot.scope;
         let evidence = QueryEvidence {
             provider: self.provider,
@@ -176,12 +198,64 @@ impl<'a> PhysicalPlanCostModel<'a> {
                 cache_profile: &snapshot.cache_profile,
             },
         )?;
-        let raw_cost = Cost(resources.raw.calibrated_cost(&self.calibration)?);
-        let candidate_cost = Cost(resources.candidate.calibrated_cost(&self.calibration)?);
+        let storage_io = snapshot
+            .storage_io
+            .as_ref()
+            .map(|profile| {
+                Ok((
+                    crate::storage_io::estimate_storage_io(
+                        &raw,
+                        scope,
+                        profile,
+                        &snapshot.version,
+                    )?,
+                    crate::storage_io::estimate_storage_io(
+                        &replacement,
+                        scope,
+                        profile,
+                        &snapshot.version,
+                    )?,
+                ))
+            })
+            .transpose()?;
+        let (mut raw_cost, mut candidate_cost) = match self.calibration.validate() {
+            Ok(()) => (
+                Cost(resources.raw.calibrated_cost(&self.calibration)?),
+                Cost(resources.candidate.calibrated_cost(&self.calibration)?),
+            ),
+            Err(AnalyticalCostError::ZeroCalibration) => {
+                // Storage estimation above validates the coefficients and
+                // evidence. At least one priced dimension must remain.
+                let has_storage_objective = snapshot.storage_io.as_ref().is_some_and(|profile| {
+                    let calibration = &profile.calibration;
+                    [
+                        calibration.cost_per_disk_read,
+                        calibration.cost_per_disk_write,
+                        calibration.cost_per_object_get,
+                        calibration.cost_per_object_put,
+                    ]
+                    .into_iter()
+                    .any(|coefficient| coefficient > 0.0)
+                });
+                if !has_storage_objective {
+                    return Err(AnalyticalCostError::ZeroCalibration);
+                }
+                (Cost(0.0), Cost(0.0))
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some((raw, candidate)) = &storage_io {
+            raw_cost.0 += raw.cost;
+            candidate_cost.0 += candidate.cost;
+        }
+        if !raw_cost.0.is_finite() || !candidate_cost.0.is_finite() {
+            return Err(AnalyticalCostError::Overflow);
+        }
         Ok(PhysicalPlanComparison {
             resources,
             raw_cost,
             candidate_cost,
+            storage_io,
         })
     }
 }
@@ -328,6 +402,7 @@ mod tests {
     }
 
     struct TestProvider {
+        storage_io: Option<crate::storage_io::StorageIoProfile>,
         summary_available: bool,
         candidate_scan_bytes: u64,
         snapshot_calls: Cell<u64>,
@@ -337,6 +412,7 @@ mod tests {
     impl TestProvider {
         fn new(summary_available: bool, candidate_scan_bytes: u64) -> Self {
             Self {
+                storage_io: None,
                 summary_available,
                 candidate_scan_bytes,
                 snapshot_calls: Cell::new(0),
@@ -423,6 +499,7 @@ mod tests {
                 version: "test-snapshot-1".into(),
                 scope: scope(),
                 cache_profile: CacheProfile::no_cache(),
+                storage_io: self.storage_io.clone(),
             })
         }
 
@@ -472,6 +549,129 @@ mod tests {
             cost_per_retained_byte: 1.0,
             version: "test-v1".into(),
         }
+    }
+
+    /// Both base-priced and storage-only objectives need identifiable calibration.
+    #[test]
+    fn blank_base_calibration_version_is_rejected_before_snapshot_lookup() {
+        let provider = TestProvider::new(true, 800);
+        for version in ["", " \t\n"] {
+            for zero_base in [false, true] {
+                let mut base = calibration();
+                base.version = version.into();
+                if zero_base {
+                    base.cost_per_cpu_op = 0.0;
+                    base.cost_per_scan_byte = 0.0;
+                    base.cost_per_retained_byte = 0.0;
+                }
+                assert!(matches!(
+                    PhysicalPlanCostModel::new(&provider, base),
+                    Err(AnalyticalCostError::MissingOrStale(
+                        "resource_calibration.version"
+                    ))
+                ));
+            }
+        }
+        assert_eq!(provider.snapshot_calls.get(), 0);
+    }
+
+    // A request-only objective ranks complete evidence and rejects absent,
+    // zero, or invalid supplemental calibration.
+    #[test]
+    fn storage_only_objective_requires_positive_valid_storage_calibration() {
+        use crate::storage_io::*;
+        let root = query();
+        let target = TargetSubDAG::new(&root);
+        let mut provider = TestProvider::new(true, 800);
+        let snapshot = provider.capture_evidence_snapshot(&target).unwrap();
+        let raw = lower_query_physical_dag(
+            &root,
+            &snapshot.scope,
+            &QueryEvidence {
+                provider: &provider,
+                snapshot: &snapshot,
+            },
+        )
+        .unwrap();
+        let mut profile = StorageIoProfile {
+            evidence_version: snapshot.version,
+            observed_at_ms: 900,
+            valid_until_ms: 2000,
+            calibration: StorageCalibration {
+                version: "requests-v1".into(),
+                cost_per_disk_read: 0.0,
+                cost_per_disk_write: 0.0,
+                cost_per_object_get: 1.0,
+                cost_per_object_put: 0.0,
+            },
+            nodes: HashMap::new(),
+        };
+        for dag in [raw, provider.summary_dag(&snapshot.scope)] {
+            for node in dag.nodes {
+                let statistics = dag.evidence[&node.id].statistics.clone();
+                let accesses = match statistics {
+                    OperatorStatistics::Scan {
+                        source_read_bytes, ..
+                    } => vec![StorageAccess {
+                        operation: StorageOperation::ObjectGet,
+                        extent_bytes: vec![source_read_bytes],
+                        bytes_per_request: 400,
+                    }],
+                    _ => vec![],
+                };
+                profile.nodes.insert(
+                    node.id.clone(),
+                    StorageNodeEvidence {
+                        node,
+                        statistics,
+                        accesses,
+                    },
+                );
+            }
+        }
+        let base = ResourceCalibration {
+            cost_per_cpu_op: 0.0,
+            cost_per_scan_byte: 0.0,
+            cost_per_retained_byte: 0.0,
+            version: "unused-base-v1".into(),
+        };
+        let candidates =
+            crate::replacement::SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        provider.storage_io = Some(profile.clone());
+        let model = PhysicalPlanCostModel::new(&provider, base.clone()).unwrap();
+        let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
+        assert_eq!(estimate.raw_cost.0, 20.0);
+        assert_eq!(estimate.candidate_cost.0, 2.0);
+        assert_eq!(
+            model.candidate_cost(&candidates[0], &target),
+            Some(Cost(2.0))
+        );
+        drop(model);
+        for coefficient in [0.0, -1.0, f64::NAN] {
+            profile.calibration.cost_per_object_get = coefficient;
+            provider.storage_io = Some(profile.clone());
+            let model = PhysicalPlanCostModel::new(&provider, base.clone()).unwrap();
+            assert!(model.estimate_candidate(&candidates[0], &target).is_err());
+        }
+        provider.storage_io = None;
+        let model = PhysicalPlanCostModel::new(&provider, base).unwrap();
+        assert_eq!(
+            model.estimate_candidate(&candidates[0], &target),
+            Err(AnalyticalCostError::ZeroCalibration)
+        );
+    }
+
+    /// Shared count defaults must not turn an omitted profile into measured zero I/O.
+    #[test]
+    fn missing_storage_profile_remains_unestimated() {
+        let root = query();
+        let target = TargetSubDAG::new(&root);
+        let candidates =
+            crate::replacement::SketchAlgorithmStrategy::default_cost_model().replacements(&target);
+        let provider = TestProvider::new(true, 800);
+        let model = PhysicalPlanCostModel::new(&provider, calibration()).unwrap();
+        let estimate = model.estimate_candidate(&candidates[0], &target).unwrap();
+        assert!(estimate.storage_io.is_none());
     }
 
     #[test]
@@ -661,6 +861,7 @@ mod tests {
                     version: "  \t".into(),
                     scope: scope(),
                     cache_profile: CacheProfile::no_cache(),
+                    storage_io: None,
                 })
             }
 
