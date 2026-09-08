@@ -1,5 +1,11 @@
 # Offline evidence and o11y planning evaluation
 
+This is the historical offline-evidence milestone plan. The current prototype
+adds actual backend-only data-plane execution using the supplied OpenMetrics
+dataset, as described in the [current evaluation guide](../user-guide/o11y-replay.md).
+Benchmark production and execution tooling now belong to ASAPQuery-backend;
+planner-only coverage and synthetic cached-result timing are not its acceptance criteria.
+
 Audience: developers reproducing issue #322 and the planner/control-plane evaluation.
 
 ## Scope
