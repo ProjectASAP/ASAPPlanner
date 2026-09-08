@@ -1,5 +1,15 @@
 # Physical boundary byte estimates
 
+`asap_types::resources` owns the canonical `BoundaryResources`, `BoundaryKind`,
+and `MaterializationMedium` definitions in `resources/boundary.rs`. The mapping
+crate re-exports those same types from `boundary_cost` for import compatibility;
+all estimator and export consumers therefore use shared definitions, not copies.
+Their existing JSON format is unchanged. The shared byte counters support checked
+addition without depending on planner errors. Snapshot binding, validation,
+calibration, and ranking remain in the mapping crate. Boundary traffic/write work
+is distinct from CPU work, scanned bytes, and stored byte occupancy; it is not
+collapsed into the generic CPU/byte resource container.
+
 The physical-plan adapter accepts an optional `BoundaryProfile` in the
 immutable `PhysicalEvidenceSnapshot`. `dag_export --planner-cost-json` accepts
 the same profile in a top-level `boundaries` field. With no profile, these

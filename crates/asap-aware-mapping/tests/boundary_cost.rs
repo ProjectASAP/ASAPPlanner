@@ -138,6 +138,34 @@ fn fixture() -> (EvidenceBackedPhysicalDag, ComparisonScope) {
 
 use asap_aware_mapping::boundary_cost::*;
 
+// Legacy mapping imports and the shared resource API are the very same Rust types.
+#[test]
+fn mapping_resource_reexports_are_wire_compatible_shared_types() {
+    let shared = asap_types::resources::BoundaryResources {
+        network_bytes: 480,
+        materialization_bytes: 40,
+    };
+    let legacy: BoundaryResources = shared;
+    assert_eq!(
+        serde_json::to_value(legacy).unwrap(),
+        serde_json::json!({"network_bytes": 480, "materialization_bytes": 40})
+    );
+    let shared_kind = asap_types::resources::BoundaryKind::Materialization {
+        medium: asap_types::resources::MaterializationMedium::Disk,
+    };
+    let mut boundary = transfer("persist", None);
+    boundary.kind = shared_kind;
+    let json = serde_json::to_value(&boundary).unwrap();
+    assert_eq!(
+        json["kind"],
+        serde_json::json!({"kind": "materialization", "medium": "disk"})
+    );
+    assert_eq!(
+        serde_json::from_value::<PhysicalBoundary>(json).unwrap(),
+        boundary
+    );
+}
+
 fn profile(dag: &EvidenceBackedPhysicalDag) -> BoundaryProfile {
     BoundaryProfile {
         evidence_version: "evidence-v1".into(),

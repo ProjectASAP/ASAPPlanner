@@ -17,6 +17,8 @@ pub use storage::StorageResources;
 pub use cpu::{MeasuredCpu, ModeledCpu};
 pub use measurement::Measurement;
 pub use physical::{MeasuredResources, PhysicalResources};
+pub mod boundary;
+pub use boundary::{BoundaryKind, BoundaryResources, MaterializationMedium};
 
 #[cfg(test)]
 mod tests {

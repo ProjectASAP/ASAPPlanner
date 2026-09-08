@@ -5,30 +5,11 @@ use crate::analytical_cost::{
     PhysicalDagNode,
 };
 use crate::physical_operator_statistics::{ComparisonScope, OperatorStatistics};
+pub use asap_types::resources::{BoundaryKind, BoundaryResources, MaterializationMedium};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub const BOUNDARY_MODEL_VERSION: &str = "physical-boundary-bytes-v1";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BoundaryKind {
-    Network {
-        source_location: String,
-        destination_location: String,
-    },
-    Materialization {
-        medium: MaterializationMedium,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaterializationMedium {
-    Memory,
-    Disk,
-    ObjectStore,
-}
 
 /// A physical action on a producer output, distinct from a logical DAG edge.
 /// With `consumer = None`, one action serves all consumers. With a consumer,
@@ -81,32 +62,6 @@ pub struct BoundaryCalibration {
     pub version: String,
     pub cost_per_network_byte: f64,
     pub cost_per_materialization_byte: f64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BoundaryResources {
-    pub network_bytes: u64,
-    pub materialization_bytes: u64,
-}
-
-impl BoundaryResources {
-    pub fn terms(self) -> [(&'static str, u64); 2] {
-        [
-            ("network_bytes", self.network_bytes),
-            ("materialization_bytes", self.materialization_bytes),
-        ]
-    }
-    fn add(&mut self, other: Self) -> Result<(), AnalyticalCostError> {
-        self.network_bytes = self
-            .network_bytes
-            .checked_add(other.network_bytes)
-            .ok_or(AnalyticalCostError::Overflow)?;
-        self.materialization_bytes = self
-            .materialization_bytes
-            .checked_add(other.materialization_bytes)
-            .ok_or(AnalyticalCostError::Overflow)?;
-        Ok(())
-    }
 }
 
 impl BoundaryCalibration {
@@ -255,10 +210,14 @@ pub fn estimate_boundaries(
                 }
                 BoundaryKind::Materialization { .. } => term.materialization_bytes = bytes,
             }
-            local.add(term)?;
+            local = local
+                .checked_add(term)
+                .ok_or(AnalyticalCostError::Overflow)?;
             per_boundary.insert(boundary.id.clone(), term);
         }
-        total.add(local)?;
+        total = total
+            .checked_add(local)
+            .ok_or(AnalyticalCostError::Overflow)?;
         per_node.insert((*id).into(), local);
     }
     Ok(BoundaryEstimate {
