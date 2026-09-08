@@ -49,6 +49,9 @@ least one positive storage coefficient. With a zero base objective, missing
 storage evidence or an all-zero storage calibration makes the comparison
 unavailable. This check occurs when the target snapshot is available;
 standalone base-resource calibration still rejects an all-zero objective.
+The physical-plan adapter requires a nonblank base calibration version even
+for a request-only objective, so exported combined model provenance remains
+identifiable; a storage calibration version cannot substitute for it.
 
 `StorageEstimate` returns totals and per-node terms with model, evidence, and
 calibration versions. DAG annotations expose counts as `CostInput`s with

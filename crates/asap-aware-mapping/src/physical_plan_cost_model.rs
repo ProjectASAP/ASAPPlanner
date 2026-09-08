@@ -97,6 +97,8 @@ impl<'a> PhysicalPlanCostModel<'a> {
         provider: &'a dyn PlannerPhysicalPlanProvider,
         calibration: ResourceCalibration,
     ) -> Result<Self, AnalyticalCostError> {
+        // Exported scores retain base calibration provenance even when the
+        // objective is priced entirely by supplementary storage operations.
         if calibration.version.trim().is_empty() {
             return Err(AnalyticalCostError::MissingOrStale(
                 "resource_calibration.version",
@@ -537,6 +539,30 @@ mod tests {
             cost_per_retained_byte: 1.0,
             version: "test-v1".into(),
         }
+    }
+
+    /// Both base-priced and storage-only objectives need identifiable calibration.
+    #[test]
+    fn blank_base_calibration_version_is_rejected_before_snapshot_lookup() {
+        let provider = TestProvider::new(true, 800);
+        for version in ["", " \t\n"] {
+            for zero_base in [false, true] {
+                let mut base = calibration();
+                base.version = version.into();
+                if zero_base {
+                    base.cost_per_cpu_op = 0.0;
+                    base.cost_per_scan_byte = 0.0;
+                    base.cost_per_retained_byte = 0.0;
+                }
+                assert!(matches!(
+                    PhysicalPlanCostModel::new(&provider, base),
+                    Err(AnalyticalCostError::MissingOrStale(
+                        "resource_calibration.version"
+                    ))
+                ));
+            }
+        }
+        assert_eq!(provider.snapshot_calls.get(), 0);
     }
 
     // A request-only objective ranks complete evidence and rejects absent,

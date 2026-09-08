@@ -243,3 +243,112 @@ fn wire_evidence_is_strict() {
     json["calibration"]["cost_per_disk_read"] = serde_json::Value::Null;
     assert!(serde_json::from_value::<StorageIoProfile>(json).is_err());
 }
+
+// Zero-length payloads add no requests, without turning absent reads into zero.
+#[test]
+fn zero_extents_and_all_request_kinds_preserve_dimensions() {
+    let (dag, scope) = fixture();
+    let mut profile = profile(&dag);
+    profile.nodes.get_mut("scan").unwrap().accesses[0]
+        .extent_bytes
+        .push(0);
+    profile.nodes.get_mut("root").unwrap().accesses = [
+        StorageOperation::DiskRead,
+        StorageOperation::DiskWrite,
+        StorageOperation::ObjectGet,
+        StorageOperation::ObjectPut,
+    ]
+    .into_iter()
+    .map(|operation| StorageAccess {
+        operation,
+        extent_bytes: vec![0, 1, 9],
+        bytes_per_request: 8,
+    })
+    .collect();
+    let estimate = estimate_storage_io(&dag, &scope, &profile, "evidence-v1").unwrap();
+    assert_eq!(
+        estimate.total,
+        StorageResources {
+            disk_reads: 9,
+            disk_writes: 9,
+            object_gets: 21,
+            object_puts: 9,
+        }
+    );
+    assert_eq!(estimate.cost, 126.0);
+    profile.nodes.get_mut("scan").unwrap().accesses.clear();
+    assert!(estimate_storage_io(&dag, &scope, &profile, "evidence-v1").is_err());
+}
+
+// Valid local integer counts must not wrap when scaled or composed across nodes.
+#[test]
+fn multiplicity_and_cross_node_overflow_are_unavailable() {
+    let (dag, mut scope) = fixture();
+    let mut profile = profile(&dag);
+    let large = StorageAccess {
+        operation: StorageOperation::DiskWrite,
+        extent_bytes: vec![u64::MAX],
+        bytes_per_request: 1,
+    };
+    profile
+        .nodes
+        .get_mut("root")
+        .unwrap()
+        .accesses
+        .push(large.clone());
+    assert_eq!(
+        estimate_storage_io(&dag, &scope, &profile, "evidence-v1"),
+        Err(asap_aware_mapping::analytical_cost::AnalyticalCostError::Overflow)
+    );
+    scope.recurrence = QueryRecurrence::OneTime {
+        invocations: 1,
+        execute_at: None,
+    };
+    profile
+        .nodes
+        .get_mut("left")
+        .unwrap()
+        .accesses
+        .push(StorageAccess {
+            extent_bytes: vec![1],
+            ..large
+        });
+    assert_eq!(
+        estimate_storage_io(&dag, &scope, &profile, "evidence-v1"),
+        Err(asap_aware_mapping::analytical_cost::AnalyticalCostError::Overflow)
+    );
+}
+
+// Reusing map keys must not bind another node, source snapshot, or statistics.
+#[test]
+fn storage_node_identity_statistics_and_calibration_provenance_are_bound() {
+    let (dag, scope) = fixture();
+    let original = profile(&dag);
+    let mut bad = original.clone();
+    bad.nodes.get_mut("scan").unwrap().node.id = "another-scan".into();
+    assert!(estimate_storage_io(&dag, &scope, &bad, "evidence-v1").is_err());
+    bad = original.clone();
+    bad.nodes
+        .get_mut("scan")
+        .unwrap()
+        .node
+        .source_coverage
+        .as_mut()
+        .unwrap()
+        .source_snapshot_id = "another-source".into();
+    assert!(estimate_storage_io(&dag, &scope, &bad, "evidence-v1").is_err());
+    bad = original.clone();
+    if let OperatorStatistics::Scan {
+        source_read_bytes, ..
+    } = &mut bad.nodes.get_mut("scan").unwrap().statistics
+    {
+        *source_read_bytes = 79;
+    }
+    assert!(estimate_storage_io(&dag, &scope, &bad, "evidence-v1").is_err());
+    bad = original.clone();
+    bad.calibration.version = " \t".into();
+    assert!(estimate_storage_io(&dag, &scope, &bad, "evidence-v1").is_err());
+    let mut missing = dag.clone();
+    missing.evidence.remove("scan");
+    assert!(estimate_storage_io(&missing, &scope, &original, "evidence-v1").is_err());
+}
