@@ -1,17 +1,26 @@
 //! Physical transfer and materialization dimensions, independent of planner policy.
+//!
+//! A boundary is either a network transfer between execution locations or a
+//! materialization of an intermediate result in memory, on disk, or in an
+//! object store. This module defines their kinds, materialization media, and
+//! separate byte-work counters; it is not limited to network resources.
+//!
+//! Counters describe bytes transferred or materialized, not retained memory,
+//! allocated disk space, or storage request counts. Estimation, evidence
+//! validation, and calibration belong to the cost model, not this schema.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BoundaryKind {
+    /// Transfer encoded data between execution locations.
     Network {
         source_location: String,
         destination_location: String,
     },
-    Materialization {
-        medium: MaterializationMedium,
-    },
+    /// Write an intermediate result to the specified medium for later use.
+    Materialization { medium: MaterializationMedium },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +35,9 @@ pub enum MaterializationMedium {
 /// Network traffic and materialization writes remain separate dimensions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundaryResources {
+    /// Bytes transferred across explicitly declared network boundaries.
     pub network_bytes: u64,
+    /// Bytes written across materialization boundaries, regardless of medium.
     pub materialization_bytes: u64,
 }
 
