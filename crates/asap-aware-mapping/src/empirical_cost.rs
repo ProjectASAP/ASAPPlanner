@@ -17,31 +17,8 @@ use crate::summary_maintenance_lifecycle::SummaryMaintenanceLifecycleCostInputs;
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 pub const EVIDENCE_MODEL_VERSION: &str = "empirical-update-cpu-v1";
 
-/// Field names carry units; `None` means unmeasured, including disk and heap.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Measurement {
-    pub value: f64,
-    pub stddev: Option<f64>,
-    pub samples: u32,
-    /// Measurement procedure and scope, e.g. counter payload vs allocator heap.
-    #[serde(default)]
-    pub method: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResourceMeasurements {
-    /// Empty sketch construction; ingesting the snapshot is charged separately.
-    pub build_cpu_ns: Option<Measurement>,
-    pub update_cpu_ns: Option<Measurement>,
-    pub merge_cpu_ns: Option<Measurement>,
-    pub read_cpu_ns: Option<Measurement>,
-    pub retained_bytes: Option<Measurement>,
-    pub peak_bytes: Option<Measurement>,
-    pub serialized_bytes: Option<Measurement>,
-    pub disk_bytes: Option<Measurement>,
-}
+pub use crate::empirical_resources::ResourceMeasurements;
+pub use asap_types::resources::Measurement;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -218,6 +195,8 @@ impl EmpiricalEvidenceProvider {
                 self.lookup(algorithm, &params)
                     .ok()?
                     .metrics
+                    .resources
+                    .cpu
                     .update_cpu_ns
                     .as_ref()
                     .map(|m| (algorithm.clone(), m.value))
@@ -250,7 +229,13 @@ impl EmpiricalEvidenceProvider {
         };
         SummaryMaintenanceLifecycleCostInputs {
             build_cost: snapshot_build_cpu(row).map(Cost),
-            maintenance_cost_per_update: row.metrics.update_cpu_ns.as_ref().map(|m| Cost(m.value)),
+            maintenance_cost_per_update: row
+                .metrics
+                .resources
+                .cpu
+                .update_cpu_ns
+                .as_ref()
+                .map(|m| Cost(m.value)),
             // A point-frequency benchmark read does not price a total-count
             // or quantile read. There is no query request in this hook.
             summary_read_cost: None,
@@ -329,16 +314,18 @@ impl EvidenceArtifact {
             if !valid_params(&row.algorithm, &row.params) {
                 return invalid("invalid or mismatched sketch parameters");
             }
-            let m = &row.metrics;
+            let m = &row.metrics.resources;
             for measurement in [
-                &m.build_cpu_ns,
-                &m.update_cpu_ns,
-                &m.merge_cpu_ns,
-                &m.read_cpu_ns,
-                &m.retained_bytes,
-                &m.peak_bytes,
+                &m.cpu.build_cpu_ns,
+                &m.cpu.update_cpu_ns,
+                &m.cpu.merge_cpu_ns,
+                &m.cpu.prepare_cpu_ns,
+                &m.cpu.read_cpu_ns,
+                &m.retained_memory_bytes,
+                &m.peak_memory_bytes,
                 &m.serialized_bytes,
                 &m.disk_bytes,
+                &m.scan_bytes,
             ]
             .into_iter()
             .flatten()
@@ -375,9 +362,28 @@ fn nonnegative(value: f64) -> bool {
 }
 
 fn snapshot_build_cpu(row: &OfflineMeasurement) -> Option<f64> {
-    let cpu = row.metrics.build_cpu_ns.as_ref()?.value
-        + row.metrics.update_cpu_ns.as_ref()?.value * row.distribution.sample_count as f64;
+    let cpu = row.metrics.resources.cpu.build_cpu_ns.as_ref()?.value
+        + row.metrics.resources.cpu.update_cpu_ns.as_ref()?.value
+            * row.distribution.sample_count as f64
+        + snapshot_prepare_cpu(row)?;
     nonnegative(cpu).then_some(cpu)
+}
+
+/// The existing fixed-snapshot CMS/CountSketch contract needs no separate
+/// preparation. Other families must measure that phase, including an explicit
+/// zero when no preparation is necessary; absence is not free work.
+pub(crate) fn snapshot_prepare_cpu(row: &OfflineMeasurement) -> Option<f64> {
+    match &row.metrics.resources.cpu.prepare_cpu_ns {
+        Some(measurement) => nonnegative(measurement.value).then_some(measurement.value),
+        None if matches!(
+            row.algorithm,
+            SketchAlgorithm::Cms | SketchAlgorithm::CountSketch
+        ) =>
+        {
+            Some(0.0)
+        }
+        None => None,
+    }
 }
 
 fn validate_context(
@@ -482,15 +488,69 @@ mod tests {
     fn lifecycle_build_requires_complete_snapshot_ingestion() {
         let (mut artifact, _, _) = fixture();
         let row = &mut artifact.records[0];
-        row.metrics.build_cpu_ns = Some(Measurement {
+        row.metrics.resources.cpu.build_cpu_ns = Some(Measurement {
             value: 10.0,
             stddev: None,
             samples: 1,
             method: None,
         });
         assert_eq!(snapshot_build_cpu(row), Some(20010.0));
-        row.metrics.update_cpu_ns = None;
+        row.metrics.resources.cpu.prepare_cpu_ns = Some(Measurement {
+            value: 17.0,
+            stddev: None,
+            samples: 1,
+            method: None,
+        });
+        assert_eq!(snapshot_build_cpu(row), Some(20027.0));
+        row.metrics.resources.cpu.update_cpu_ns = None;
         assert_eq!(snapshot_build_cpu(row), None);
+    }
+
+    /// Newly shared optional dimensions receive the same numeric validation.
+    #[test]
+    fn optional_prepare_and_scan_measurements_are_validated() {
+        for prepare in [true, false] {
+            let (mut artifact, _, _) = fixture();
+            let resources = &mut artifact.records[0].metrics.resources;
+            let field = if prepare {
+                &mut resources.cpu.prepare_cpu_ns
+            } else {
+                &mut resources.scan_bytes
+            };
+            *field = Some(Measurement {
+                value: -1.0,
+                stddev: None,
+                samples: 1,
+                method: None,
+            });
+            assert!(artifact.validate().is_err());
+        }
+    }
+
+    /// Only the established frequency-sketch contract can omit preparation.
+    #[test]
+    fn unmeasured_preparation_for_other_families_keeps_build_unknown() {
+        let (mut artifact, _, _) = fixture();
+        let row = &mut artifact.records[0];
+        row.metrics.resources.cpu.build_cpu_ns = Some(Measurement {
+            value: 10.0,
+            stddev: None,
+            samples: 1,
+            method: None,
+        });
+        assert_eq!(snapshot_build_cpu(row), Some(20010.0));
+        row.algorithm = SketchAlgorithm::CountSketch;
+        assert_eq!(snapshot_prepare_cpu(row), Some(0.0));
+        row.algorithm = SketchAlgorithm::Kll;
+        row.params = SketchParams::Kll { k: 269 };
+        assert_eq!(snapshot_build_cpu(row), None);
+        row.metrics.resources.cpu.prepare_cpu_ns = Some(Measurement {
+            value: 17.0,
+            stddev: None,
+            samples: 1,
+            method: None,
+        });
+        assert_eq!(snapshot_build_cpu(row), Some(20027.0));
     }
 
     fn fixture() -> (EvidenceArtifact, EvidenceContext, AggIntent) {
@@ -535,13 +595,18 @@ mod tests {
                 repetitions: 3,
             },
             metrics: ResourceMeasurements {
-                update_cpu_ns: Some(Measurement {
-                    value: cost,
-                    stddev: Some(1.0),
-                    samples: 3,
-                    method: None,
-                }),
-                ..Default::default()
+                resources: asap_types::resources::MeasuredResources {
+                    cpu: asap_types::resources::MeasuredCpu {
+                        update_cpu_ns: Some(Measurement {
+                            value: cost,
+                            stddev: Some(1.0),
+                            samples: 3,
+                            method: None,
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
             },
             error: Some(OfflineError {
                 metric: "mean absolute relative frequency error".into(),
@@ -651,7 +716,7 @@ mod tests {
     #[test]
     fn serialization_preserves_unknown_zero_and_provenance() {
         let (mut artifact, context, _) = fixture();
-        artifact.records[0].metrics.disk_bytes = Some(Measurement {
+        artifact.records[0].metrics.resources.disk_bytes = Some(Measurement {
             value: 0.0,
             stddev: None,
             samples: 1,
@@ -663,8 +728,11 @@ mod tests {
         let row = provider
             .lookup(&artifact.records[0].algorithm, &artifact.records[0].params)
             .unwrap();
-        assert!(row.metrics.peak_bytes.is_none());
-        assert_eq!(row.metrics.disk_bytes.as_ref().unwrap().value, 0.0);
+        assert!(row.metrics.resources.peak_memory_bytes.is_none());
+        assert_eq!(
+            row.metrics.resources.disk_bytes.as_ref().unwrap().value,
+            0.0
+        );
         assert_eq!(row.provenance, artifact.records[0].provenance);
         assert_eq!(row.error.as_ref().unwrap().query["kind"], "point_frequency");
     }
@@ -678,7 +746,14 @@ mod tests {
         bad.schema_version = 2;
         assert_eq!(bad.validate(), Err(EvidenceError::UnsupportedVersion(2)));
         let mut bad = artifact.clone();
-        bad.records[0].metrics.update_cpu_ns.as_mut().unwrap().value = f64::NAN;
+        bad.records[0]
+            .metrics
+            .resources
+            .cpu
+            .update_cpu_ns
+            .as_mut()
+            .unwrap()
+            .value = f64::NAN;
         assert!(bad.validate().is_err());
         let mut bad = artifact.clone();
         bad.records[0].params = SketchParams::Hll { precision: 14 };

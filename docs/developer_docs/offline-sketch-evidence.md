@@ -12,6 +12,42 @@ wire format. `crates/asap-aware-mapping/tests/data/offline-evidence-synthetic.js
 is an explicitly fabricated format fixture, never benchmark evidence. Runtime
 validation additionally checks cross-field constraints and matching context.
 
+Resource values share the internal `asap_types::resources::PhysicalResources<Cpu,
+Bytes>` container. Its CPU payload preserves units: `ModeledCpu { cpu_ops: f64 }`
+represents modeled operations, while `MeasuredCpu` contains optional measured
+`build_cpu_ns`, `update_cpu_ns`, `merge_cpu_ns`, `prepare_cpu_ns`, and `read_cpu_ns`
+values. `Measurement` is defined in the shared types crate;
+`MeasuredResources` is `PhysicalResources<MeasuredCpu, Measurement>`. Sharing
+the container does not convert modeled CPU operations into measured nanoseconds.
+
+`ResourceMeasurements` and `ExactResourceMeasurements` retain only a public
+`resources` value of that shared measured type and provide v1 wire compatibility.
+Rust consumers access measured CPU through `metrics.resources.cpu` and byte
+dimensions through `metrics.resources`. The JSON remains flat: there is no new
+`resources` or `cpu` object inside `metrics`. These names map as follows:
+
+| Shared internal field | Sketch v1 JSON field | Exact-reference v1 JSON field |
+| --- | --- | --- |
+| `cpu.build_cpu_ns` | `build_cpu_ns` | `empty_build_cpu_ns` |
+| `cpu.update_cpu_ns` | `update_cpu_ns` | `update_cpu_ns` |
+| `cpu.merge_cpu_ns` | `merge_cpu_ns` | `merge_cpu_ns` |
+| `cpu.prepare_cpu_ns` | `prepare_cpu_ns` | `prepare_cpu_ns` |
+| `cpu.read_cpu_ns` | `read_cpu_ns` | `read_cpu_ns` |
+| `retained_memory_bytes` | `retained_bytes` | `retained_bytes` |
+| `peak_memory_bytes` | `peak_bytes` | `peak_bytes` |
+| `scan_bytes` | `scan_bytes` | `scan_bytes` |
+| `serialized_bytes` | `serialized_bytes` | `serialized_bytes` |
+| `disk_bytes` | `disk_bytes` | `disk_bytes` |
+
+Existing v1 field names and null behavior are unchanged. Sketch records can
+add optional `prepare_cpu_ns` and `scan_bytes`; exact references can add optional
+`merge_cpu_ns`, `serialized_bytes`, `disk_bytes`, and `scan_bytes`. These new
+fields are omitted when unavailable by the compatibility serializers and accept
+either a `Measurement` or null on input. They use the same numeric, sample-count,
+and uncertainty validation as existing measurements. Old artifacts need no
+rewrite or schema-version change. Representing a resource dimension does not
+by itself add a workload operation or establish its semantic applicability.
+
 Deserialize an artifact and an `EvidenceContext`, then construct an
 `EmpiricalEvidenceProvider::new(artifact, context)`. Construction validates schema
 version, configuration, provenance and numeric values. `lookup(algorithm, params)`
@@ -21,16 +57,18 @@ missing, incompatible or ambiguous measurement returns a typed error; none of
 these conditions supplies a zero cost. Select an explicit context for each
 distribution or machine; the provider does not interpolate between datasets.
 
-Each resource is an optional `Measurement` with `value`, optional `stddev`,
+Each measured resource is an optional `Measurement` with `value`, optional `stddev`,
 `samples`, and optional `method`. CPU fields are process CPU nanoseconds per
 operation; `build_cpu_ns` measures empty construction. Building an ingested
 snapshot additionally requires `sample_count × update_cpu_ns`; the lifecycle
 helper returns that sum only when both measurements exist. Memory and disk
-fields are bytes. Producer methods must state what
+fields are bytes; `scan_bytes` records bytes read by scans, not storage occupancy.
+Producer methods must state what
 was measured and how normalization was performed. `retained_bytes` is distinct
 from `peak_bytes`, `serialized_bytes`, and `disk_bytes`. Counter payload size
 does not establish allocator footprint, process RSS or on-disk storage. Absent
-measurements serialize as null. `stddev: null` means uncertainty was not measured,
+measurements preserve the v1 null behavior, except the newly optional fields
+listed above are omitted when unavailable. `stddev: null` means uncertainty was not measured,
 not that variability is zero. A zero measurement must have actual evidence.
 
 The record retains the complete command, dataset identity, implementation

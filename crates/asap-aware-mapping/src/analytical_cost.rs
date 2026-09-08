@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use asap_types::post_asap::{SketchAlgorithm, SketchParams};
+pub use asap_types::resources::ModeledCpu;
 use asap_types::workload::DataArrival;
 use serde::{Deserialize, Serialize};
 
@@ -54,11 +55,72 @@ impl ResourceCalibration {
     }
 }
 
+/// An analytical estimate requires CPU work, peak memory, and scanned bytes.
+/// The shared resource container keeps other dimensions explicitly unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(from = "ResourceEstimateWire", into = "ResourceEstimateWire")]
 pub struct ResourceEstimate {
-    pub cpu_ops: f64,
-    pub peak_memory_bytes: u64,
-    pub scan_bytes: u64,
+    resources: asap_types::resources::PhysicalResources<ModeledCpu, u64>,
+}
+
+// Keep the established three-field JSON format. Required fields make a missing
+// analytical quantity an import error instead of silently supplying zero.
+#[derive(Serialize, Deserialize)]
+struct ResourceEstimateWire {
+    cpu_ops: f64,
+    peak_memory_bytes: u64,
+    scan_bytes: u64,
+}
+
+impl From<ResourceEstimateWire> for ResourceEstimate {
+    fn from(wire: ResourceEstimateWire) -> Self {
+        Self::new(wire.cpu_ops, wire.peak_memory_bytes, wire.scan_bytes)
+    }
+}
+
+impl From<ResourceEstimate> for ResourceEstimateWire {
+    fn from(estimate: ResourceEstimate) -> Self {
+        Self {
+            cpu_ops: estimate.cpu_ops(),
+            peak_memory_bytes: estimate.peak_memory_bytes(),
+            scan_bytes: estimate.scan_bytes(),
+        }
+    }
+}
+
+impl ResourceEstimate {
+    pub const fn new(cpu_ops: f64, peak_memory_bytes: u64, scan_bytes: u64) -> Self {
+        Self {
+            resources: asap_types::resources::PhysicalResources {
+                cpu: ModeledCpu { cpu_ops },
+                peak_memory_bytes: Some(peak_memory_bytes),
+                retained_memory_bytes: None,
+                scan_bytes: Some(scan_bytes),
+                serialized_bytes: None,
+                disk_bytes: None,
+            },
+        }
+    }
+
+    pub fn cpu_ops(&self) -> f64 {
+        self.resources.cpu.cpu_ops
+    }
+
+    pub fn peak_memory_bytes(&self) -> u64 {
+        self.resources
+            .peak_memory_bytes
+            .expect("analytical peak memory is required by construction")
+    }
+
+    pub fn scan_bytes(&self) -> u64 {
+        self.resources
+            .scan_bytes
+            .expect("analytical scan bytes are required by construction")
+    }
+
+    pub fn resources(&self) -> &asap_types::resources::PhysicalResources<ModeledCpu, u64> {
+        &self.resources
+    }
 }
 
 /// Physical operator classes used to expose CPU, memory, and disk formulas
@@ -435,18 +497,18 @@ pub fn estimate_physical_dag(
             ExecutionMultiplicity::Once => 1,
             ExecutionMultiplicity::PerEvaluation => evaluation_count,
         };
-        cpu_ops += local.cpu_ops * executions as f64;
+        cpu_ops += local.cpu_ops() * executions as f64;
         scan_bytes = scan_bytes
             .checked_add(
                 local
-                    .scan_bytes
+                    .scan_bytes()
                     .checked_mul(executions)
                     .ok_or(AnalyticalCostError::Overflow)?,
             )
             .ok_or(AnalyticalCostError::Overflow)?;
         peak_memory_bytes = peak_memory_bytes.max(
             live_bytes
-                .checked_add(local.peak_memory_bytes)
+                .checked_add(local.peak_memory_bytes())
                 .and_then(|bytes| bytes.checked_add(node.output_buffer_bytes))
                 .ok_or(AnalyticalCostError::Overflow)?,
         );
@@ -481,11 +543,11 @@ pub fn estimate_physical_dag(
     if !cpu_ops.is_finite() {
         return Err(AnalyticalCostError::Overflow);
     }
-    Ok(ResourceEstimate {
+    Ok(ResourceEstimate::new(
         cpu_ops,
         peak_memory_bytes,
         scan_bytes,
-    })
+    ))
 }
 
 fn validate_operator_statistics(
@@ -746,11 +808,7 @@ fn partitioned_order_estimate(
     if !cpu_ops.is_finite() {
         return Err(AnalyticalCostError::Overflow);
     }
-    Ok(ResourceEstimate {
-        cpu_ops,
-        peak_memory_bytes,
-        scan_bytes: 0,
-    })
+    Ok(ResourceEstimate::new(cpu_ops, peak_memory_bytes, 0))
 }
 
 fn validate_partitioning(
@@ -835,11 +893,11 @@ pub fn estimate_operator(
                 "PromQL scalar leaf must emit one scalar row per evaluation step",
             ));
         }
-        return Ok(ResourceEstimate {
-            cpu_ops: output.rows as f64,
-            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-            scan_bytes: 0,
-        });
+        return Ok(ResourceEstimate::new(
+            output.rows as f64,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ));
     }
     let left = input(0)?;
     let estimate = match (operator, &statistics) {
@@ -848,36 +906,36 @@ pub fn estimate_operator(
             OperatorStatistics::Scan {
                 source_read_bytes, ..
             },
-        ) => ResourceEstimate {
-            cpu_ops: left.rows as f64,
-            peak_memory_bytes: per_row_width(left.rows, left.bytes)?,
-            scan_bytes: *source_read_bytes,
-        },
+        ) => ResourceEstimate::new(
+            left.rows as f64,
+            per_row_width(left.rows, left.bytes)?,
+            *source_read_bytes,
+        ),
         (
             PhysicalOperator::Filter {
                 predicate_operations_per_row,
             },
             _,
-        ) => ResourceEstimate {
-            cpu_ops: checked_cpu_product(left.rows, predicate_operations_per_row)?,
-            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-            scan_bytes: 0,
-        },
+        ) => ResourceEstimate::new(
+            checked_cpu_product(left.rows, predicate_operations_per_row)?,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
         (
             PhysicalOperator::Project {
                 expression_operations_per_row,
             },
             _,
-        ) => ResourceEstimate {
-            cpu_ops: checked_cpu_product(left.rows, expression_operations_per_row)?,
-            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-            scan_bytes: 0,
-        },
-        (PhysicalOperator::PassThrough, _) => ResourceEstimate {
-            cpu_ops: left.rows as f64,
-            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-            scan_bytes: 0,
-        },
+        ) => ResourceEstimate::new(
+            checked_cpu_product(left.rows, expression_operations_per_row)?,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
+        (PhysicalOperator::PassThrough, _) => ResourceEstimate::new(
+            left.rows as f64,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
         (
             PhysicalOperator::HashAggregate {
                 grouping_key_count,
@@ -889,22 +947,22 @@ pub fn estimate_operator(
                 accumulator_bytes_per_group,
                 ..
             },
-        ) => ResourceEstimate {
-            cpu_ops: checked_cpu_product(
+        ) => ResourceEstimate::new(
+            checked_cpu_product(
                 left.rows,
                 grouping_key_count
                     .checked_add(accumulator_count)
                     .ok_or(AnalyticalCostError::Overflow)?,
             )?,
-            peak_memory_bytes: checked_bytes(&[
+            checked_bytes(&[
                 *group_count,
                 key_bytes
                     .checked_add(*accumulator_bytes_per_group)
                     .and_then(|bytes| bytes.checked_add(16))
                     .ok_or(AnalyticalCostError::Overflow)?,
             ])?,
-            scan_bytes: 0,
-        },
+            0,
+        ),
         (
             PhysicalOperator::HashDeduplicate { key_count },
             OperatorStatistics::HashDeduplicate {
@@ -912,16 +970,16 @@ pub fn estimate_operator(
                 key_bytes,
                 ..
             },
-        ) => ResourceEstimate {
-            cpu_ops: checked_cpu_product(left.rows, key_count)?,
-            peak_memory_bytes: checked_bytes(&[
+        ) => ResourceEstimate::new(
+            checked_cpu_product(left.rows, key_count)?,
+            checked_bytes(&[
                 *distinct_key_count,
                 key_bytes
                     .checked_add(16)
                     .ok_or(AnalyticalCostError::Overflow)?,
             ])?,
-            scan_bytes: 0,
-        },
+            0,
+        ),
         (
             PhysicalOperator::InMemoryComparisonSort {
                 ordering_key_count, ..
@@ -958,16 +1016,13 @@ pub fn estimate_operator(
                 .checked_add(offset)
                 .ok_or(AnalyticalCostError::Overflow)?;
             let heap_rows = heap_capacity.min(left.rows);
-            ResourceEstimate {
-                cpu_ops: left.rows as f64
+            ResourceEstimate::new(
+                left.rows as f64
                     * (heap_rows.max(2) as f64).log2().ceil()
                     * ordering_key_count as f64,
-                peak_memory_bytes: checked_bytes(&[
-                    heap_rows,
-                    per_row_width(left.rows, left.bytes)?,
-                ])?,
-                scan_bytes: 0,
-            }
+                checked_bytes(&[heap_rows, per_row_width(left.rows, left.bytes)?])?,
+                0,
+            )
         }
         (
             PhysicalOperator::HashJoin {
@@ -977,14 +1032,14 @@ pub fn estimate_operator(
             _,
         ) => {
             let right = input(1)?;
-            ResourceEstimate {
-                cpu_ops: checked_cpu_product(
+            ResourceEstimate::new(
+                checked_cpu_product(
                     left.rows
                         .checked_add(right.rows)
                         .ok_or(AnalyticalCostError::Overflow)?,
                     equality_key_count,
                 )? + output.rows as f64,
-                peak_memory_bytes: match build_side {
+                match build_side {
                     HashJoinBuildSide::Left => left
                         .rows
                         .checked_mul(16)
@@ -995,14 +1050,14 @@ pub fn estimate_operator(
                         .and_then(|metadata| right.bytes.checked_add(metadata)),
                 }
                 .ok_or(AnalyticalCostError::Overflow)?,
-                scan_bytes: 0,
-            }
+                0,
+            )
         }
-        (PhysicalOperator::Concat, _) => ResourceEstimate {
-            cpu_ops: output.rows as f64,
-            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-            scan_bytes: 0,
-        },
+        (PhysicalOperator::Concat, _) => ResourceEstimate::new(
+            output.rows as f64,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
         (PhysicalOperator::Limit { limit, offset }, _) => {
             let consumed = if limit == 0 {
                 0
@@ -1013,11 +1068,11 @@ pub fn estimate_operator(
                         .ok_or(AnalyticalCostError::Overflow)?,
                 )
             };
-            ResourceEstimate {
-                cpu_ops: consumed as f64,
-                peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-                scan_bytes: 0,
-            }
+            ResourceEstimate::new(
+                consumed as f64,
+                per_row_width(output.rows, output.bytes)?,
+                0,
+            )
         }
         (
             PhysicalOperator::PromqlRange { .. },
@@ -1027,24 +1082,20 @@ pub fn estimate_operator(
             },
         ) => {
             let promql = require_promql_unary(edges)?;
-            ResourceEstimate {
-                cpu_ops: left.rows as f64,
-                peak_memory_bytes: checked_bytes(&[
+            ResourceEstimate::new(
+                left.rows as f64,
+                checked_bytes(&[
                     promql.input.series,
                     *max_window_samples_per_series,
                     per_row_width(left.rows, left.bytes)?,
                 ])?,
-                scan_bytes: 0,
-            }
+                0,
+            )
         }
         (
             PhysicalOperator::PromqlSubquery { .. },
             OperatorStatistics::PromqlSubquery { edges, .. },
-        ) => ResourceEstimate {
-            cpu_ops: left.rows as f64 + output.rows as f64,
-            peak_memory_bytes: edges.input.bytes,
-            scan_bytes: 0,
-        },
+        ) => ResourceEstimate::new(left.rows as f64 + output.rows as f64, edges.input.bytes, 0),
         (
             PhysicalOperator::PromqlBinary {
                 operand_mode,
@@ -1077,22 +1128,22 @@ pub fn estimate_operator(
                     ])?
                 }
             };
-            ResourceEstimate {
-                cpu_ops: left.rows as f64 + right.rows as f64 + output.rows as f64,
-                peak_memory_bytes: matching_bytes,
-                scan_bytes: 0,
-            }
+            ResourceEstimate::new(
+                left.rows as f64 + right.rows as f64 + output.rows as f64,
+                matching_bytes,
+                0,
+            )
         }
         (
             PhysicalOperator::PromqlRelabel {
                 expression_operations_per_row,
             },
             OperatorStatistics::PromqlRelabel { .. },
-        ) => ResourceEstimate {
-            cpu_ops: checked_cpu_product(left.rows, expression_operations_per_row)?,
-            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-            scan_bytes: 0,
-        },
+        ) => ResourceEstimate::new(
+            checked_cpu_product(left.rows, expression_operations_per_row)?,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
         (
             PhysicalOperator::PromqlInfoEnrich {
                 matcher_operations_per_info_row,
@@ -1104,19 +1155,19 @@ pub fn estimate_operator(
         ) => {
             let promql = require_promql_binary(edges)?;
             let right = input(1)?;
-            ResourceEstimate {
-                cpu_ops: left.rows as f64
+            ResourceEstimate::new(
+                left.rows as f64
                     + right.rows as f64
                     + output.rows as f64
                     + checked_cpu_product(right.rows, matcher_operations_per_info_row)?,
-                peak_memory_bytes: checked_bytes(&[
+                checked_bytes(&[
                     promql.inputs[1].series,
                     matching_key_bytes
                         .checked_add(16)
                         .ok_or(AnalyticalCostError::Overflow)?,
                 ])?,
-                scan_bytes: 0,
-            }
+                0,
+            )
         }
         (
             PhysicalOperator::PromqlSeriesSample { .. },
@@ -1125,23 +1176,23 @@ pub fn estimate_operator(
             },
         ) => {
             let promql = require_promql_unary(edges)?;
-            ResourceEstimate {
-                cpu_ops: left.rows as f64 + promql.input.series as f64,
-                peak_memory_bytes: checked_bytes(&[
+            ResourceEstimate::new(
+                left.rows as f64 + promql.input.series as f64,
+                checked_bytes(&[
                     promql.output.series,
                     key_bytes
                         .checked_add(16)
                         .ok_or(AnalyticalCostError::Overflow)?,
                 ])?,
-                scan_bytes: 0,
-            }
+                0,
+            )
         }
         (PhysicalOperator::PromqlScalarToVector | PhysicalOperator::PromqlVectorToScalar, _) => {
-            ResourceEstimate {
-                cpu_ops: left.rows as f64 + output.rows as f64,
-                peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-                scan_bytes: 0,
-            }
+            ResourceEstimate::new(
+                left.rows as f64 + output.rows as f64,
+                per_row_width(output.rows, output.bytes)?,
+                0,
+            )
         }
         (
             PhysicalOperator::PromqlPerSeries {
@@ -1153,25 +1204,22 @@ pub fn estimate_operator(
             },
         ) => {
             let promql = require_promql_unary(edges)?;
-            ResourceEstimate {
-                cpu_ops: checked_cpu_product(left.rows, operations_per_row)?,
-                peak_memory_bytes: checked_bytes(&[
-                    promql.input.series,
-                    *accumulator_bytes_per_series,
-                ])?,
-                scan_bytes: 0,
-            }
+            ResourceEstimate::new(
+                checked_cpu_product(left.rows, operations_per_row)?,
+                checked_bytes(&[promql.input.series, *accumulator_bytes_per_series])?,
+                0,
+            )
         }
         (
             PhysicalOperator::PromqlPresence {
                 operations_per_row, ..
             },
             OperatorStatistics::PromqlPresence { .. },
-        ) => ResourceEstimate {
-            cpu_ops: checked_cpu_product(left.rows, operations_per_row)? + output.rows as f64,
-            peak_memory_bytes: per_row_width(output.rows, output.bytes)?,
-            scan_bytes: 0,
-        },
+        ) => ResourceEstimate::new(
+            checked_cpu_product(left.rows, operations_per_row)? + output.rows as f64,
+            per_row_width(output.rows, output.bytes)?,
+            0,
+        ),
         (PhysicalOperator::PromqlScalarLeaf, _) => unreachable!(),
         _ => {
             return Err(AnalyticalCostError::InconsistentOperatorStatistics(
@@ -1179,7 +1227,7 @@ pub fn estimate_operator(
             ));
         }
     };
-    if estimate.cpu_ops.is_finite() {
+    if estimate.cpu_ops().is_finite() {
         Ok(estimate)
     } else {
         Err(AnalyticalCostError::Overflow)
@@ -1927,9 +1975,9 @@ impl ResourceEstimate {
         calibration: &ResourceCalibration,
     ) -> Result<f64, AnalyticalCostError> {
         calibration.validate()?;
-        let value = self.cpu_ops * calibration.cost_per_cpu_op
-            + self.scan_bytes as f64 * calibration.cost_per_scan_byte
-            + self.peak_memory_bytes as f64 * calibration.cost_per_retained_byte;
+        let value = self.cpu_ops() * calibration.cost_per_cpu_op
+            + self.scan_bytes() as f64 * calibration.cost_per_scan_byte
+            + self.peak_memory_bytes() as f64 * calibration.cost_per_retained_byte;
         if value.is_finite() {
             Ok(value)
         } else {
@@ -2015,6 +2063,42 @@ mod tests {
         OperatorStatistics, PartitionStatistics, PromqlBinaryEdgeStatistics, PromqlEdgeStatistics,
         PromqlUnaryEdgeStatistics, PromqlValueKind, SourceCoverage, UnaryEdgeStatistics,
     };
+
+    /// Analytical estimates reuse the shared dimensions while preserving exact
+    /// integer bytes and keeping unmodeled storage quantities unavailable.
+    #[test]
+    fn analytical_estimate_uses_shared_resources() {
+        let estimate = ResourceEstimate::new(12.5, u64::MAX, 0);
+        assert_eq!(estimate.cpu_ops(), 12.5);
+        assert_eq!(estimate.peak_memory_bytes(), u64::MAX);
+        assert_eq!(estimate.scan_bytes(), 0);
+        let shared: &asap_types::resources::PhysicalResources<ModeledCpu, u64> =
+            estimate.resources();
+        assert_eq!(shared.cpu.cpu_ops, 12.5);
+        assert_eq!(shared.peak_memory_bytes, Some(u64::MAX));
+        assert_eq!(shared.scan_bytes, Some(0));
+        assert_eq!(shared.retained_memory_bytes, None);
+        assert_eq!(shared.serialized_bytes, None);
+        assert_eq!(shared.disk_bytes, None);
+    }
+
+    /// Existing JSON retains its three required fields; omitted or null
+    /// analytical quantities must not silently become a zero estimate.
+    #[test]
+    fn analytical_resource_wire_format_remains_compatible() {
+        let wire = serde_json::json!({"cpu_ops": 12.5, "peak_memory_bytes": 9007199254740993_u64, "scan_bytes": 0});
+        let estimate: ResourceEstimate = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(estimate.peak_memory_bytes(), 9007199254740993);
+        assert_eq!(serde_json::to_value(estimate).unwrap(), wire);
+        for field in ["cpu_ops", "peak_memory_bytes", "scan_bytes"] {
+            let mut missing = wire.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<ResourceEstimate>(missing).is_err());
+            let mut unknown = wire.clone();
+            unknown[field] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<ResourceEstimate>(unknown).is_err());
+        }
+    }
 
     fn filter_operator() -> PhysicalOperator {
         PhysicalOperator::Filter {
@@ -2202,8 +2286,8 @@ mod tests {
         };
         let estimate = estimate_operator(PhysicalOperator::PromqlScalarLeaf, statistics).unwrap();
 
-        assert_eq!(estimate.cpu_ops, 10.0);
-        assert_eq!(estimate.peak_memory_bytes, 8);
+        assert_eq!(estimate.cpu_ops(), 10.0);
+        assert_eq!(estimate.peak_memory_bytes(), 8);
     }
 
     #[test]
@@ -2410,7 +2494,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(scan.scan_bytes, 64_000);
+        assert_eq!(scan.scan_bytes(), 64_000);
 
         let topk = estimate_operator(
             PhysicalOperator::TopK {
@@ -2433,9 +2517,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(topk.scan_bytes, 0);
-        assert_eq!(topk.cpu_ops, 4_000.0);
-        assert_eq!(topk.peak_memory_bytes, 400);
+        assert_eq!(topk.scan_bytes(), 0);
+        assert_eq!(topk.cpu_ops(), 4_000.0);
+        assert_eq!(topk.peak_memory_bytes(), 400);
 
         let mismatched_join_statistics = estimate_operator(
             PhysicalOperator::HashJoin {
@@ -2479,7 +2563,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(build_left.peak_memory_bytes, 80_000);
+        assert_eq!(build_left.peak_memory_bytes(), 80_000);
 
         let aggregate = estimate_operator(
             aggregate_operator(),
@@ -2501,7 +2585,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(aggregate.peak_memory_bytes, 5_600);
+        assert_eq!(aggregate.peak_memory_bytes(), 5_600);
 
         let oversized_topk = estimate_operator(
             PhysicalOperator::TopK {
@@ -2524,7 +2608,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(oversized_topk.cpu_ops, 8.0);
+        assert_eq!(oversized_topk.cpu_ops(), 8.0);
 
         let offset_limit = estimate_operator(
             PhysicalOperator::Limit {
@@ -2546,7 +2630,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(offset_limit.cpu_ops, 900_010.0);
+        assert_eq!(offset_limit.cpu_ops(), 900_010.0);
     }
 
     #[test]
@@ -2633,11 +2717,11 @@ mod tests {
         let mut scope = comparison_scope();
         scope.horizon.0 = 20_000;
         let estimate = estimate_physical_dag(&nodes, "root", &scope, &provided).unwrap();
-        assert_eq!(estimate.cpu_ops, 760.0);
-        assert_eq!(estimate.scan_bytes, 2_000);
+        assert_eq!(estimate.cpu_ops(), 760.0);
+        assert_eq!(estimate.scan_bytes(), 2_000);
         // This is neither the sum of every node's memory nor just the largest
         // node: it is the maximum state simultaneously live at the fan-out.
-        assert_eq!(estimate.peak_memory_bytes, 28);
+        assert_eq!(estimate.peak_memory_bytes(), 28);
     }
 
     #[test]
@@ -2707,8 +2791,8 @@ mod tests {
         let mut scope = comparison_scope();
         scope.horizon.0 = 100_000;
         let estimate = estimate_physical_dag(&nodes, "read", &scope, &provided).unwrap();
-        assert_eq!(estimate.cpu_ops, 310.0);
-        assert_eq!(estimate.scan_bytes, 1_000);
+        assert_eq!(estimate.cpu_ops(), 310.0);
+        assert_eq!(estimate.scan_bytes(), 1_000);
     }
 
     fn comparison_scope() -> ComparisonScope {
@@ -2928,8 +3012,8 @@ mod tests {
 
         let estimate =
             estimate_physical_dag(&nodes, "filter", &comparison_scope(), &provided).unwrap();
-        assert_eq!(estimate.cpu_ops, 1_200.0);
-        assert_eq!(estimate.scan_bytes, 6_000);
+        assert_eq!(estimate.cpu_ops(), 1_200.0);
+        assert_eq!(estimate.scan_bytes(), 6_000);
     }
 
     #[test]
@@ -2977,9 +3061,9 @@ mod tests {
 
         let estimate =
             estimate_physical_dag(&nodes, "filter", &comparison_scope(), &provided).unwrap();
-        assert_eq!(estimate.cpu_ops, 1_200.0);
-        assert_eq!(estimate.peak_memory_bytes, 20);
-        assert_eq!(estimate.scan_bytes, 6_000);
+        assert_eq!(estimate.cpu_ops(), 1_200.0);
+        assert_eq!(estimate.peak_memory_bytes(), 20);
+        assert_eq!(estimate.scan_bytes(), 6_000);
     }
 
     #[test]
@@ -3208,8 +3292,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(estimate.scan_bytes, 2_500);
-        assert_eq!(estimate.peak_memory_bytes, 100);
+        assert_eq!(estimate.scan_bytes(), 2_500);
+        assert_eq!(estimate.peak_memory_bytes(), 100);
     }
 
     #[test]
@@ -3225,7 +3309,7 @@ mod tests {
         assert_eq!(
             estimate_operator(filter_operator(), filter)
                 .unwrap()
-                .scan_bytes,
+                .scan_bytes(),
             0
         );
     }
@@ -3266,8 +3350,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(ungrouped.cpu_ops, 0.0);
-        assert_eq!(ungrouped.peak_memory_bytes, 24);
+        assert_eq!(ungrouped.cpu_ops(), 0.0);
+        assert_eq!(ungrouped.peak_memory_bytes(), 24);
 
         let grouped = estimate_operator(
             PhysicalOperator::HashAggregate {
@@ -3282,7 +3366,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(grouped.peak_memory_bytes, 0);
+        assert_eq!(grouped.peak_memory_bytes(), 0);
     }
 
     #[test]
@@ -3302,7 +3386,7 @@ mod tests {
                 filter,
             )
             .unwrap()
-            .cpu_ops,
+            .cpu_ops(),
             300.0
         );
 
@@ -3328,8 +3412,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(sort.cpu_ops, 600.0);
-        assert_eq!(sort.peak_memory_bytes, 400);
+        assert_eq!(sort.cpu_ops(), 600.0);
+        assert_eq!(sort.peak_memory_bytes(), 400);
     }
 
     #[test]

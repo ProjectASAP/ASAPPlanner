@@ -25,17 +25,7 @@ pub struct MeasurementQueryBinding {
     pub query: OfflineQueryDescriptor,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExactResourceMeasurements {
-    pub empty_build_cpu_ns: Option<Measurement>,
-    pub update_cpu_ns: Option<Measurement>,
-    /// One prepare pass after ingesting the complete snapshot, before any read.
-    pub prepare_cpu_ns: Option<Measurement>,
-    pub read_cpu_ns: Option<Measurement>,
-    pub retained_bytes: Option<Measurement>,
-    pub peak_bytes: Option<Measurement>,
-}
+pub use crate::empirical_resources::ExactResourceMeasurements;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -360,14 +350,18 @@ fn validate_exact(row: &OfflineExactMeasurement) -> Result<(), String> {
     {
         return Err("invalid exact baseline provenance".into());
     }
-    let m = &row.metrics;
+    let m = &row.metrics.resources;
     for measurement in [
-        &m.empty_build_cpu_ns,
-        &m.update_cpu_ns,
-        &m.prepare_cpu_ns,
-        &m.read_cpu_ns,
-        &m.retained_bytes,
-        &m.peak_bytes,
+        &m.cpu.build_cpu_ns,
+        &m.cpu.update_cpu_ns,
+        &m.cpu.merge_cpu_ns,
+        &m.cpu.prepare_cpu_ns,
+        &m.cpu.read_cpu_ns,
+        &m.retained_memory_bytes,
+        &m.peak_memory_bytes,
+        &m.serialized_bytes,
+        &m.disk_bytes,
+        &m.scan_bytes,
     ]
     .into_iter()
     .flatten()
@@ -401,24 +395,26 @@ fn estimate_sketch(
     row: &OfflineMeasurement,
     request: &OfflineComparisonRequest,
 ) -> Result<OfflineResourceEstimate, String> {
-    let m = &row.metrics;
+    let m = &row.metrics.resources;
     let w = &request.workload;
-    let cpu = charge(&m.build_cpu_ns, 1, "empty sketch construction CPU")?
+    let cpu = charge(&m.cpu.build_cpu_ns, 1, "empty sketch construction CPU")?
         + charge(
-            &m.update_cpu_ns,
+            &m.cpu.update_cpu_ns,
             w.input_items_per_state,
             "sketch update CPU",
         )?
         + charge(
-            &m.read_cpu_ns,
+            &m.cpu.read_cpu_ns,
             w.reads_per_state,
             "query-matched sketch read CPU",
         )?
-        + charge(&m.merge_cpu_ns, w.merges_per_state, "sketch merge CPU")?;
+        + charge(&m.cpu.merge_cpu_ns, w.merges_per_state, "sketch merge CPU")?
+        + crate::empirical_cost::snapshot_prepare_cpu(row)
+            .ok_or("missing or invalid sketch snapshot preparation CPU")?;
     estimate_resources(
         cpu,
-        &m.retained_bytes,
-        &m.peak_bytes,
+        &m.retained_memory_bytes,
+        &m.peak_memory_bytes,
         m.serialized_bytes.as_ref().map(|m| m.value),
         m.disk_bytes.as_ref().map(|m| m.value),
         request,
@@ -429,17 +425,24 @@ fn estimate_exact(
     row: &OfflineExactMeasurement,
     request: &OfflineComparisonRequest,
 ) -> Result<OfflineResourceEstimate, String> {
-    let m = &row.metrics;
+    let m = &row.metrics.resources;
     let w = &request.workload;
-    let cpu = charge(&m.empty_build_cpu_ns, 1, "exact empty construction CPU")?
+    let cpu = charge(&m.cpu.build_cpu_ns, 1, "exact empty construction CPU")?
         + charge(
-            &m.update_cpu_ns,
+            &m.cpu.update_cpu_ns,
             w.input_items_per_state,
             "exact update CPU",
         )?
-        + charge(&m.prepare_cpu_ns, 1, "exact snapshot preparation CPU")?
-        + charge(&m.read_cpu_ns, w.reads_per_state, "exact read CPU")?;
-    estimate_resources(cpu, &m.retained_bytes, &m.peak_bytes, None, None, request)
+        + charge(&m.cpu.prepare_cpu_ns, 1, "exact snapshot preparation CPU")?
+        + charge(&m.cpu.read_cpu_ns, w.reads_per_state, "exact read CPU")?;
+    estimate_resources(
+        cpu,
+        &m.retained_memory_bytes,
+        &m.peak_memory_bytes,
+        m.serialized_bytes.as_ref().map(|m| m.value),
+        m.disk_bytes.as_ref().map(|m| m.value),
+        request,
+    )
 }
 
 fn estimate_resources(
@@ -558,10 +561,10 @@ mod tests {
             probe_set: "all_distinct_keys".into(),
         };
         let row = &mut sketches.records[0];
-        row.metrics.build_cpu_ns = m(1.0);
-        row.metrics.update_cpu_ns = m(1.0);
-        row.metrics.read_cpu_ns = m(1.0);
-        row.metrics.retained_bytes = m(100.0);
+        row.metrics.resources.cpu.build_cpu_ns = m(1.0);
+        row.metrics.resources.cpu.update_cpu_ns = m(1.0);
+        row.metrics.resources.cpu.read_cpu_ns = m(1.0);
+        row.metrics.resources.retained_memory_bytes = m(100.0);
         row.error.as_mut().unwrap().mean = Some(0.5);
         row.error.as_mut().unwrap().query =
             serde_json::json!({"kind":"point_frequency","value_type":"i64"});
@@ -571,8 +574,8 @@ mod tests {
             width: 544,
             depth: 5,
         };
-        wide.metrics.update_cpu_ns = m(2.0);
-        wide.metrics.retained_bytes = m(200.0);
+        wide.metrics.resources.cpu.update_cpu_ns = m(2.0);
+        wide.metrics.resources.retained_memory_bytes = m(200.0);
         wide.error.as_mut().unwrap().mean = Some(0.001);
         let context = EvidenceContext {
             distribution: row.distribution.clone(),
@@ -591,12 +594,17 @@ mod tests {
             valid_until_unix_seconds: 200,
             provenance: row.provenance.clone(),
             metrics: ExactResourceMeasurements {
-                empty_build_cpu_ns: m(1.0),
-                update_cpu_ns: m(5.0),
-                prepare_cpu_ns: m(1000.0),
-                read_cpu_ns: m(5.0),
-                retained_bytes: m(1000.0),
-                peak_bytes: None,
+                resources: asap_types::resources::MeasuredResources {
+                    cpu: asap_types::resources::MeasuredCpu {
+                        build_cpu_ns: m(1.0),
+                        update_cpu_ns: m(5.0),
+                        prepare_cpu_ns: m(1000.0),
+                        read_cpu_ns: m(5.0),
+                        ..Default::default()
+                    },
+                    retained_memory_bytes: m(1000.0),
+                    ..Default::default()
+                },
             },
         };
         let metric = row.error.as_ref().unwrap().metric.clone();
@@ -676,6 +684,74 @@ mod tests {
         );
     }
 
+    /// Optional sketch preparation is charged once; exact preparation never
+    /// borrows the independent merge measurement, and snapshot bytes survive.
+    #[test]
+    fn preparation_and_exact_resource_dimensions_keep_their_meaning() {
+        let (mut evidence, request) = fixture();
+        let old = recommend_offline(&evidence, &request).unwrap();
+        evidence.sketch_evidence.records[1]
+            .metrics
+            .resources
+            .cpu
+            .prepare_cpu_ns = m(37.0);
+        let exact = &mut evidence.exact_records[0].metrics.resources;
+        exact.cpu.merge_cpu_ns = m(1e9);
+        exact.serialized_bytes = m(256.0);
+        exact.disk_bytes = m(4096.0);
+        exact.scan_bytes = m(8000.0);
+        let changed = recommend_offline(&evidence, &request).unwrap();
+        assert_eq!(
+            changed.selected.resources.as_ref().unwrap().cpu_ns,
+            old.selected.resources.as_ref().unwrap().cpu_ns + 37.0
+        );
+        let baseline = changed.exact_baseline.resources.unwrap();
+        assert_eq!(
+            baseline.cpu_ns,
+            old.exact_baseline.resources.unwrap().cpu_ns
+        );
+        assert_eq!(baseline.serialized_bytes_per_state, Some(256.0));
+        assert_eq!(baseline.disk_bytes_per_state, Some(4096.0));
+    }
+
+    /// Exact observations validate optional dimensions even when the comparison
+    /// does not execute the corresponding operation.
+    #[test]
+    fn optional_exact_dimensions_cannot_hide_invalid_measurements() {
+        let selectors: [fn(
+            &mut asap_types::resources::MeasuredResources,
+        ) -> &mut Option<Measurement>; 4] = [
+            |r| &mut r.cpu.merge_cpu_ns,
+            |r| &mut r.serialized_bytes,
+            |r| &mut r.disk_bytes,
+            |r| &mut r.scan_bytes,
+        ];
+        for select in selectors {
+            let (mut evidence, request) = fixture();
+            *select(&mut evidence.exact_records[0].metrics.resources) = m(-1.0);
+            assert!(recommend_offline(&evidence, &request).is_err());
+        }
+    }
+
+    /// A family outside the established CMS/CountSketch contract cannot gain
+    /// an apparently cheap comparison by omitting its preparation measurement.
+    #[test]
+    fn sketch_comparison_requires_unknown_preparation_phase() {
+        let (evidence, request) = fixture();
+        let mut row = evidence.sketch_evidence.records[1].clone();
+        let original_cpu = estimate_sketch(&row, &request).unwrap().cpu_ns;
+        row.algorithm = SketchAlgorithm::Kll;
+        row.params = SketchParams::Kll { k: 269 };
+        assert!(estimate_sketch(&row, &request)
+            .unwrap_err()
+            .contains("preparation CPU"));
+        row.metrics.resources.cpu.prepare_cpu_ns = m(37.0);
+        assert_eq!(
+            estimate_sketch(&row, &request).unwrap().cpu_ns,
+            original_cpu + 37.0
+        );
+    }
+
     /// Missing required measurements and failing observed-error budgets return
     /// the applicable exact baseline, never an optimistically free sketch.
     #[test]
@@ -687,7 +763,11 @@ mod tests {
             .selected_sketch()
             .is_none());
         request.accuracy.max_observed_mean = 0.01;
-        evidence.sketch_evidence.records[1].metrics.build_cpu_ns = None;
+        evidence.sketch_evidence.records[1]
+            .metrics
+            .resources
+            .cpu
+            .build_cpu_ns = None;
         let chosen = recommend_offline(&evidence, &request).unwrap();
         assert!(chosen.selected_sketch().is_none());
         assert!(chosen.candidates[1]
@@ -695,7 +775,11 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("construction"));
-        evidence.exact_records[0].metrics.prepare_cpu_ns = None;
+        evidence.exact_records[0]
+            .metrics
+            .resources
+            .cpu
+            .prepare_cpu_ns = None;
         assert!(recommend_offline(&evidence, &request)
             .unwrap_err()
             .contains("preparation"));
@@ -748,7 +832,10 @@ mod tests {
     #[test]
     fn resource_objective_and_unknown_memory_are_explicit() {
         let (mut evidence, mut request) = fixture();
-        evidence.sketch_evidence.records[1].metrics.retained_bytes = None;
+        evidence.sketch_evidence.records[1]
+            .metrics
+            .resources
+            .retained_memory_bytes = None;
         let chosen = recommend_offline(&evidence, &request).unwrap();
         assert!(chosen.selected.resources.unwrap().retained_bytes.is_none());
         request.weights.retained_byte_seconds_weight = 1.0;
@@ -756,7 +843,10 @@ mod tests {
             .unwrap()
             .selected_sketch()
             .is_none());
-        evidence.sketch_evidence.records[1].metrics.retained_bytes = m(10000.0);
+        evidence.sketch_evidence.records[1]
+            .metrics
+            .resources
+            .retained_memory_bytes = m(10000.0);
         assert!(recommend_offline(&evidence, &request)
             .unwrap()
             .selected_sketch()

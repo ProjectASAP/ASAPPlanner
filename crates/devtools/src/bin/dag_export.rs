@@ -413,17 +413,17 @@ impl ExportPlannerCostModel<'_> {
             vec![
                 CostInput {
                     name: "estimated_cpu_ops".into(),
-                    value: resources.cpu_ops,
+                    value: resources.cpu_ops(),
                     unit: Some("operations".into()),
                 },
                 CostInput {
                     name: "estimated_peak_memory".into(),
-                    value: resources.peak_memory_bytes as f64,
+                    value: resources.peak_memory_bytes() as f64,
                     unit: Some("bytes".into()),
                 },
                 CostInput {
                     name: "estimated_scan".into(),
-                    value: resources.scan_bytes as f64,
+                    value: resources.scan_bytes() as f64,
                     unit: Some("bytes".into()),
                 },
             ]

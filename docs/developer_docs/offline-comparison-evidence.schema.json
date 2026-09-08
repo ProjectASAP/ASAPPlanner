@@ -98,6 +98,7 @@
           "$ref": "offline-sketch-evidence.schema.json#/$defs/provenance"
         },
         "metrics": {
+          "description": "Flat v1 exact-reference wire representation of shared PhysicalResources<MeasuredCpu, Measurement>; empty_build_cpu_ns maps to the shared build_cpu_ns field.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -112,6 +113,17 @@
               ]
             },
             "update_cpu_ns": {
+              "anyOf": [
+                {
+                  "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "merge_cpu_ns": {
+              "description": "Optional measured merge CPU nanoseconds. Its presence alone does not establish post-merge accuracy or enable merged-state recommendations.",
               "anyOf": [
                 {
                   "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
@@ -142,6 +154,39 @@
               ]
             },
             "retained_bytes": {
+              "anyOf": [
+                {
+                  "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "serialized_bytes": {
+              "description": "Optional logical encoded snapshot size in bytes; omitted when unavailable by the compatibility serializer.",
+              "anyOf": [
+                {
+                  "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "disk_bytes": {
+              "description": "Optional allocated filesystem bytes; distinct from scan traffic and serialized length. Omitted when unavailable by the compatibility serializer.",
+              "anyOf": [
+                {
+                  "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "scan_bytes": {
+              "description": "Optional bytes read by scan operations; omitted when unavailable by the compatibility serializer.",
               "anyOf": [
                 {
                   "$ref": "offline-sketch-evidence.schema.json#/$defs/measurement"

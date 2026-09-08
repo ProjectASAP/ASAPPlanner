@@ -637,28 +637,22 @@ impl SummaryMaintenanceCostModel {
         let evidence = self.canonical_inputs(summary)?;
         let inputs = evidence.inputs;
         let insert = validated_operator_cpu("insert_cpu_ops", evidence.insert_cpu_ops).ok()?;
-        let build = self.calibrated(ResourceEstimate {
-            cpu_ops: inputs.initial_input_rows as f64
-                * inputs.bootstrap_window_count as f64
-                * insert,
-            peak_memory_bytes: 0,
-            scan_bytes: inputs.initial_source_scan_bytes,
-        })?;
-        let maintenance = self.calibrated(ResourceEstimate {
-            cpu_ops: inputs.active_window_count as f64 * insert,
-            peak_memory_bytes: 0,
-            scan_bytes: 0,
-        })?;
+        let build = self.calibrated(ResourceEstimate::new(
+            inputs.initial_input_rows as f64 * inputs.bootstrap_window_count as f64 * insert,
+            0,
+            inputs.initial_source_scan_bytes,
+        ))?;
+        let maintenance = self.calibrated(ResourceEstimate::new(
+            inputs.active_window_count as f64 * insert,
+            0,
+            0,
+        ))?;
         let retained = inputs
             .active_window_count
             .checked_add(inputs.retained_window_count)?
             .checked_mul(inputs.physical_summary_count)?
             .checked_mul(inputs.state_bytes_per_summary)?;
-        let retention_total = self.calibrated(ResourceEstimate {
-            cpu_ops: 0.0,
-            peak_memory_bytes: retained,
-            scan_bytes: 0,
-        })?;
+        let retention_total = self.calibrated(ResourceEstimate::new(0.0, retained, 0))?;
         let horizon_seconds = horizon.filter(|value| value.0 > 0.0)?.0;
         Some(SummaryMaintenanceLifecycleCostInputs {
             build_cost: Some(build),
@@ -1059,8 +1053,8 @@ mod tests {
         )
         .unwrap();
         // 10 arrivals * 2 active windows * 2 insert ops + 5 reads * 2 summaries.
-        assert_eq!(estimate.cpu_ops, 50.0);
-        assert_eq!(estimate.scan_bytes, 0);
+        assert_eq!(estimate.cpu_ops(), 50.0);
+        assert_eq!(estimate.scan_bytes(), 0);
     }
 
     #[test]
@@ -1112,7 +1106,7 @@ mod tests {
         )
         .unwrap();
         // 10 bootstrap rows * 3 windows * 2 insert ops + 5 reads * 2 summaries.
-        assert_eq!(estimate.cpu_ops, 70.0);
+        assert_eq!(estimate.cpu_ops(), 70.0);
     }
 
     #[test]
@@ -2604,9 +2598,9 @@ mod tests {
         )
         .unwrap();
         // 10 bootstrap + 10 arrivals into two active windows; two states read 5 times.
-        assert_eq!(estimate.cpu_ops, 90.0);
-        assert_eq!(estimate.peak_memory_bytes, 1_000);
-        assert_eq!(estimate.scan_bytes, 640);
+        assert_eq!(estimate.cpu_ops(), 90.0);
+        assert_eq!(estimate.peak_memory_bytes(), 1_000);
+        assert_eq!(estimate.scan_bytes(), 640);
     }
 
     #[test]
@@ -2636,9 +2630,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(estimate.cpu_ops, 21.0 + 20.0 + 30.0 + 200.0 + 70.0);
+        assert_eq!(estimate.cpu_ops(), 21.0 + 20.0 + 30.0 + 200.0 + 70.0);
         // Three persistent windows plus one transient result, for two instances.
-        assert_eq!(estimate.peak_memory_bytes, 80);
+        assert_eq!(estimate.peak_memory_bytes(), 80);
     }
 
     #[test]
@@ -2762,7 +2756,7 @@ mod tests {
         .unwrap();
         // Two pre-activation arrivals join the bootstrap; eight more are
         // maintained through the horizon; five reads are served.
-        assert_eq!(estimate.cpu_ops, 25.0);
+        assert_eq!(estimate.cpu_ops(), 25.0);
     }
 
     #[test]
@@ -2859,8 +2853,8 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(estimate.cpu_ops, 77.0);
-        assert_eq!(estimate.peak_memory_bytes, 64); // 4 persistent states + join memory.
+        assert_eq!(estimate.cpu_ops(), 77.0);
+        assert_eq!(estimate.peak_memory_bytes(), 64); // 4 persistent states + join memory.
     }
 
     fn summary_with_operations(merge: bool, subtract: bool, delete: bool) -> Rc<SummaryNode> {

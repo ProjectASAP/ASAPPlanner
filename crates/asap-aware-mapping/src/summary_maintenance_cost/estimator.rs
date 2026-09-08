@@ -545,18 +545,18 @@ pub(super) fn estimate_heterogeneous_summary(
     if !cpu_ops.is_finite() {
         return Err(AnalyticalCostError::Overflow);
     }
-    Ok(ResourceEstimate {
+    Ok(ResourceEstimate::new(
         cpu_ops,
-        peak_memory_bytes: persistent_bytes
+        persistent_bytes
             .checked_add(transient_bytes)
             .and_then(|bytes| bytes.checked_add(ephemeral_state_bytes))
             .ok_or(AnalyticalCostError::Overflow)?,
-        scan_bytes: scans
+        scans
             .values()
             .try_fold(operator_io_bytes, |sum, (_, bytes)| {
                 sum.checked_add(*bytes).ok_or(AnalyticalCostError::Overflow)
             })?,
-    })
+    ))
 }
 
 fn add_operator_io(
@@ -1070,15 +1070,15 @@ pub(super) fn estimate_incremental_summary_maintenance_with_join(
             .initial_input_bytes
             .div_ceil(inputs.initial_input_rows)
     };
-    Ok(ResourceEstimate {
+    Ok(ResourceEstimate::new(
         cpu_ops,
-        peak_memory_bytes: retained_bytes
+        retained_bytes
             .checked_add(transient_bytes)
             .and_then(|bytes| bytes.checked_add(join_bytes))
             .ok_or(AnalyticalCostError::Overflow)?
             .max(bootstrap_row_buffer),
-        scan_bytes: inputs.initial_source_scan_bytes,
-    })
+        inputs.initial_source_scan_bytes,
+    ))
 }
 
 pub(super) fn lifecycle_row_counts(
