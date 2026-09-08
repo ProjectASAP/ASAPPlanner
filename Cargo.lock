@@ -320,8 +320,6 @@ dependencies = [
  "asap-frontend-promql",
  "asap-frontend-sql",
  "asap-types",
- "libc",
- "regex",
  "serde",
  "serde_json",
  "serde_yaml",
