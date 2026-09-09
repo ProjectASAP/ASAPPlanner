@@ -191,6 +191,7 @@ pub mod empirical_cost;
 pub mod empirical_resources;
 pub mod exact_composition;
 pub mod explanation;
+mod function_rules;
 pub mod grouping;
 pub mod physical_operator_statistics;
 pub mod physical_plan_cost_model;

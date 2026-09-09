@@ -85,6 +85,74 @@ fn fine_quantile() -> Rc<QueryExpr> {
 /// mixed-execution shapes.
 struct StatsModel;
 
+/// Search, selection, and materialization must retain the caller's proven rule.
+#[test]
+fn custom_accuracy_rule_survives_root_target_and_materialization() {
+    use asap_aware_mapping::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
+    use asap_types::post_asap::{
+        AccuracyError, CompositionOperator, ExactOperation, ResultGuarantee, SketchQuery,
+    };
+    struct Model;
+    impl AccuracyModel for Model {
+        fn exact_operation_rule(&self, _: &ExactOperation) -> Option<CompositionOperator> {
+            Some(CompositionOperator::ExactExtremum)
+        }
+        fn local_guarantee(
+            &self,
+            family: &SummaryFamilyType,
+            query: &SketchQuery,
+        ) -> Option<ResultGuarantee> {
+            DefaultAccuracyModel.local_guarantee(family, query)
+        }
+        fn propagate(
+            &self,
+            _: &CompositionOperator,
+            _: &[ResultGuarantee],
+            _: Option<&ResultGuarantee>,
+            _: &PropagationStats,
+        ) -> Result<ResultGuarantee, AccuracyError> {
+            // Test-only oracle: the marker detects accidental use of the default model.
+            Ok(ResultGuarantee::exact("custom rule oracle"))
+        }
+        fn satisfies(&self, g: &ResultGuarantee, t: &AccuracyTarget) -> bool {
+            DefaultAccuracyModel.satisfies(g, t)
+        }
+    }
+    let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
+    let space = asap_aware_mapping::replacement::search_workload_with_targets(
+        vec![("q", root, Some(AccuracyTarget::Exact))],
+        &default_strategies_with(&StatsModel),
+        &Model,
+    );
+    let selection = space.global_selection(&StatsModel);
+    assert!(selection
+        .for_target(&space.roots[0].1)
+        .unwrap()
+        .composition
+        .is_some());
+    let node = selection.materialize(&space.roots[0].1).unwrap().unwrap();
+    let guarantee = node.guarantee.as_ref().unwrap();
+    assert!(guarantee.is_exact());
+    assert!(format!("{:?}", guarantee.provenance).contains("custom rule oracle"));
+}
+
+/// An exact operator must not turn an unknown approximate-input bound into exactness.
+#[test]
+fn root_target_rejects_unproven_composition() {
+    let root = agg(vec![0], AggIntent::Max { col: None }, fine_quantile());
+    let space = asap_aware_mapping::replacement::search_workload_with_targets(
+        vec![("q", root, Some(AccuracyTarget::Exact))],
+        &default_strategies_with(&StatsModel),
+        &asap_aware_mapping::DefaultAccuracyModel,
+    );
+    let selection = space.global_selection(&StatsModel);
+    assert!(selection
+        .for_target(&space.roots[0].1)
+        .unwrap()
+        .composition
+        .is_none());
+}
+
 impl CostModel for StatsModel {
     fn rank_candidates(
         &self,

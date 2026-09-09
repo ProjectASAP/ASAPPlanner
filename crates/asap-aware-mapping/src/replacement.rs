@@ -782,30 +782,16 @@ pub(crate) fn implementations_for_with(
         },
 
         // ── Exact mergeable accumulators ─────────────────────────────────────
-        AggIntent::Sum { .. } => vec![exact_accumulator(intent, ExactKind::Sum, ExactParams::Sum)],
-        AggIntent::Min { .. } | AggIntent::Max { .. } => {
-            vec![exact_accumulator(
-                intent,
-                ExactKind::MinMax,
-                ExactParams::MinMax,
-            )]
-        }
-        AggIntent::Rate => vec![exact_accumulator(
-            intent,
-            ExactKind::Rate,
-            ExactParams::Rate,
-        )],
-        AggIntent::IRate => vec![exact_accumulator(
-            intent,
-            ExactKind::IRate,
-            ExactParams::IRate,
-        )],
-        AggIntent::Increase => {
-            vec![exact_accumulator(
-                intent,
-                ExactKind::Increase,
-                ExactParams::Increase,
-            )]
+        AggIntent::Sum { .. }
+        | AggIntent::Min { .. }
+        | AggIntent::Max { .. }
+        | AggIntent::Rate
+        | AggIntent::IRate
+        | AggIntent::Increase => {
+            let (kind, params) = crate::function_rules::function_rules(intent)
+                .and_then(|rules| rules.accumulator)
+                .expect("exact accumulator intents have registered realizations");
+            vec![exact_accumulator(intent, kind, params)]
         }
 
         // ── Exact, non-mergeable reducers — richer partial state than a
@@ -2203,8 +2189,6 @@ fn compose_guarantee(
     let (op, local) = match (family, query) {
         (SummaryFamilyType::ExactAggregate(kind, _), _) => {
             let op = match kind {
-                ExactKind::Sum => CompositionOperator::ExactSum,
-                ExactKind::MinMax => CompositionOperator::ExactExtremum,
                 // A row count does not depend on the rows' values: exact
                 // regardless of the child's own error.
                 ExactKind::Count => {
@@ -2215,9 +2199,11 @@ fn compose_guarantee(
                 // Counter-reset detection over perturbed values has no finite
                 // Lipschitz constant — over an approximate child this is a
                 // deterministic transform with no registered rule.
-                ExactKind::Rate => CompositionOperator::CounterRate,
-                ExactKind::IRate => CompositionOperator::InstantCounterRate,
-                ExactKind::Increase => CompositionOperator::CounterIncrease,
+                _ => {
+                    crate::function_rules::function_rules(intent)
+                        .expect("exact accumulator intents have registered accuracy rules")
+                        .accuracy
+                }
             };
             (
                 op,
@@ -2592,6 +2578,73 @@ pub struct PlanSpace<Id> {
     /// Discovery order — stable iteration for [`PlanSpace::groups`]/
     /// [`PlanSpace::cost_sorted`], since `HashMap` iteration order isn't.
     order: Vec<*const QueryExpr>,
+    /// Composition proofs are computed with the search model, then retained
+    /// through costing and materialization so no later default can replace it.
+    composition_plans: Vec<PreparedComposition>,
+}
+
+struct PreparedComposition {
+    target: *const QueryExpr,
+    operation: ExactComposition,
+    child: Rc<SummaryNode>,
+    plan: Rc<SummaryNode>,
+}
+
+impl<Id> PlanSpace<Id> {
+    fn prepare_compositions(
+        &mut self,
+        accuracy: &dyn AccuracyModel,
+        targets: &HashMap<*const QueryExpr, Vec<AccuracyTarget>>,
+    ) {
+        self.composition_plans.clear();
+        for group in self.groups.values() {
+            for candidate in &group.candidates {
+                let Replacement::ExactComposition(operation) = &candidate.replacement else {
+                    continue;
+                };
+                let children: Vec<_> = match operation.placement {
+                    OperationPlacement::Read => self
+                        .groups
+                        .get(&Rc::as_ptr(&operation.child_target))
+                        .into_iter()
+                        .flat_map(|g| &g.candidates)
+                        .filter_map(|c| match &c.replacement {
+                            Replacement::Summary(child) if operation.accepts_child(child) => {
+                                Some(Rc::clone(child))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                    OperationPlacement::Maintenance => {
+                        keep_pre_asap(&operation.child_target).into_iter().collect()
+                    }
+                };
+                for child in children {
+                    let Ok(plan) = operation.compose_with_accuracy(Rc::clone(&child), accuracy)
+                    else {
+                        continue;
+                    };
+                    if let Some(requirements) = targets.get(&Rc::as_ptr(&group.target)) {
+                        if operation.placement == OperationPlacement::Maintenance
+                            || !requirements.iter().all(|target| {
+                                plan.guarantee
+                                    .as_ref()
+                                    .is_some_and(|g| accuracy.satisfies(g, target))
+                            })
+                        {
+                            continue;
+                        }
+                    }
+                    self.composition_plans.push(PreparedComposition {
+                        target: Rc::as_ptr(&group.target),
+                        operation: operation.clone(),
+                        child,
+                        plan,
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// Lifecycle-aware whole-subplan costs keyed by target and candidate identity.
@@ -3363,6 +3416,8 @@ pub struct SelectedGroup<'a> {
 /// cost-units-per-second comparison against the raw fallback that it won.
 #[derive(Debug)]
 pub struct CompositionDecision<'a> {
+    /// The exact child/operation pair validated by the search accuracy model.
+    pub plan: Rc<SummaryNode>,
     /// The child target the composed operator consumes.
     pub child_target: &'a Rc<QueryExpr>,
     /// For a read-time operation: the child's own candidate committed alongside
@@ -3410,8 +3465,9 @@ impl<'a> GlobalSelection<'a> {
     /// composition's child *reference* becomes an actual `Rc<SummaryNode>`
     /// edge (issue #171). `None` if `target` is not a discovered site.
     ///
-    /// Per site: a [`Replacement::ExactComposition`] composes over its
-    /// child target's own materialization; a [`Replacement::Summary`] is
+    /// Per site: a [`Replacement::ExactComposition`] uses its validated
+    /// operation/child plan, retaining the search model's guarantee;
+    /// a [`Replacement::Summary`] is
     /// re-linked so its `SummaryAgg` child is the child target's own
     /// materialization whenever that is phase-legal beneath maintenance
     /// (so a child that chose an `ValueOperationAtMaintenanceTime` actually ends up under
@@ -3442,15 +3498,13 @@ impl<'a> GlobalSelection<'a> {
             None => keep_pre_asap(target)?,
             Some(Replacement::Rewrite(rewritten)) => keep_pre_asap(rewritten)?,
             Some(Replacement::Summary(node)) => self.relink_summary(node, target)?,
-            Some(Replacement::ExactComposition(composition)) => {
-                let child = self.materialize_inner(&composition.child_target)?;
-                let child = if composition.accepts_child(&child) {
-                    child
-                } else {
-                    keep_pre_asap(&composition.child_target)?
-                };
-                composition.compose(child)?
-            }
+            Some(Replacement::ExactComposition(_)) => Rc::clone(
+                &self.groups[&ptr]
+                    .composition
+                    .as_ref()
+                    .expect("selected compositions have a validated decision")
+                    .plan,
+            ),
         };
         self.materialized.borrow_mut().insert(ptr, Rc::clone(&node));
         Ok(node)
@@ -3590,6 +3644,7 @@ fn composition_options<'a>(
     effective: usize,
     cost_model: &dyn CostModel,
     context: &CompositionContext,
+    plans: &[PreparedComposition],
 ) -> Vec<CompositionOption<'a>> {
     let mut options = Vec::new();
     for candidate in &group.candidates {
@@ -3640,6 +3695,13 @@ fn composition_options<'a>(
                     if !composition.accepts_child(summary) {
                         continue;
                     }
+                    let Some(prepared) = plans.iter().find(|p| {
+                        p.target == Rc::as_ptr(&group.target)
+                            && p.operation.same_as(composition)
+                            && Rc::ptr_eq(&p.child, summary)
+                    }) else {
+                        continue;
+                    };
                     let Some((rate, baseline, inputs)) = cost(summary, already_committed.is_some())
                     else {
                         continue;
@@ -3647,6 +3709,7 @@ fn composition_options<'a>(
                     options.push(CompositionOption {
                         candidate,
                         decision: CompositionDecision {
+                            plan: Rc::clone(&prepared.plan),
                             child_target: &composition.child_target,
                             child_candidate: Some(child_candidate),
                             cost_rate: rate,
@@ -3657,6 +3720,11 @@ fn composition_options<'a>(
                 }
             }
             OperationPlacement::Maintenance => {
+                let Some(prepared) = plans.iter().find(|p| {
+                    p.target == Rc::as_ptr(&group.target) && p.operation.same_as(composition)
+                }) else {
+                    continue;
+                };
                 // An maintenance-time operation only pays off beneath a
                 // maintained summary; with nothing above it, its output is
                 // never read and the raw fallback is the same computation.
@@ -3670,6 +3738,7 @@ fn composition_options<'a>(
                 options.push(CompositionOption {
                     candidate,
                     decision: CompositionDecision {
+                        plan: Rc::clone(&prepared.plan),
                         child_target: &composition.child_target,
                         child_candidate: None,
                         cost_rate: rate,
@@ -3755,9 +3824,16 @@ impl<Id> PlanSpace<Id> {
             let composed = if forced.is_some() {
                 None
             } else {
-                composition_options(group, &self.groups, effective, cost_model, &context)
-                    .into_iter()
-                    .min_by(|a, b| a.decision.cost_rate.0.total_cmp(&b.decision.cost_rate.0))
+                composition_options(
+                    group,
+                    &self.groups,
+                    effective,
+                    cost_model,
+                    &context,
+                    &self.composition_plans,
+                )
+                .into_iter()
+                .min_by(|a, b| a.decision.cost_rate.0.total_cmp(&b.decision.cost_rate.0))
             };
             if let Some(option) = &composed {
                 if let Some(child_candidate) = option.decision.child_candidate {
@@ -4452,7 +4528,9 @@ pub fn search_workload_with<'s, Id>(
     roots: Vec<(Id, Rc<QueryExpr>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
 ) -> PlanSpace<Id> {
-    search_cse_workload_with(cse_workload(roots), strategies)
+    let mut space = search_cse_workload_with(cse_workload(roots), strategies);
+    space.prepare_compositions(&DefaultAccuracyModel, &HashMap::new());
+    space
 }
 
 /// [`search_workload_with`] plus a per-root end-to-end `AccuracyTarget`
@@ -4484,7 +4562,7 @@ pub fn search_workload_with_targets<'s, Id>(
             (id, root)
         })
         .collect();
-    let mut space = search_workload_with(roots, strategies);
+    let mut space = search_cse_workload_with(cse_workload(roots), strategies);
     // `cse_workload` preserves root order, so targets zip by position.
     let root_ptrs: Vec<(*const QueryExpr, AccuracyTarget)> = space
         .roots
@@ -4492,7 +4570,12 @@ pub fn search_workload_with_targets<'s, Id>(
         .zip(targets)
         .filter_map(|((_, root), target)| target.map(|t| (Rc::as_ptr(root), t)))
         .collect();
+    let mut composition_targets: HashMap<_, Vec<_>> = HashMap::new();
     for (ptr, target) in root_ptrs {
+        composition_targets
+            .entry(ptr)
+            .or_default()
+            .push(target.clone());
         let Some(group) = space.groups.get_mut(&ptr) else {
             continue;
         };
@@ -4506,7 +4589,9 @@ pub fn search_workload_with_targets<'s, Id>(
                         .as_ref()
                         .is_some_and(|g| accuracy_model.satisfies(g, &target)),
                     Replacement::Rewrite(_) => true,
-                    Replacement::ExactComposition(_) => false,
+                    // A composition's guarantee depends on the concrete child;
+                    // prepare_compositions checks those pairs after all roots.
+                    Replacement::ExactComposition(_) => true,
                 });
         group.candidates = legal;
         group.rejected.extend(illegal.into_iter().map(|candidate| {
@@ -4545,6 +4630,7 @@ pub fn search_workload_with_targets<'s, Id>(
             }
         }));
     }
+    space.prepare_compositions(accuracy_model, &composition_targets);
     space
 }
 
@@ -4702,6 +4788,7 @@ fn search_cse_workload_with<'s, Id>(
         roots: cse_roots,
         groups,
         order,
+        composition_plans: Vec::new(),
     }
 }
 
@@ -6902,6 +6989,7 @@ mod tests {
             roots,
             groups,
             order: order.clone(),
+            composition_plans: Vec::new(),
         };
         let graph = reference_graph(&space);
 

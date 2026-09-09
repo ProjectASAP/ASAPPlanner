@@ -73,6 +73,7 @@ use asap_types::post_asap::{
     ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
     SummaryFamilyType,
 };
+#[cfg(test)]
 use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
 
@@ -632,14 +633,7 @@ impl AccuracyModel for DefaultAccuracyModel {
             return None;
         };
         match measures.as_slice() {
-            [AggIntent::Sum { .. }] => Some(CompositionOperator::ExactSum),
-            [AggIntent::Min { .. } | AggIntent::Max { .. }] => {
-                Some(CompositionOperator::ExactExtremum)
-            }
-            [AggIntent::Avg { .. }] => Some(CompositionOperator::ExactAverage),
-            [AggIntent::Rate] => Some(CompositionOperator::CounterRate),
-            [AggIntent::IRate] => Some(CompositionOperator::InstantCounterRate),
-            [AggIntent::Increase] => Some(CompositionOperator::CounterIncrease),
+            [intent] => crate::function_rules::function_rules(intent).map(|rules| rules.accuracy),
             // The remaining functions are exact over exact samples, but have
             // no definition-backed rule over approximate values yet.
             _ => None,
