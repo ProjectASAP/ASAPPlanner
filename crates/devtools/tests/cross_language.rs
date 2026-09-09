@@ -110,21 +110,18 @@ async fn sql_aliased_and_inline_count_topk_are_identical() {
 }
 
 #[tokio::test]
-async fn additive_sum_ranking_is_weighted_topk_but_raw_values_stay_generic() {
-    // SUM is additive and becomes an explicitly value-weighted heavy hitter.
-    // A bare PromQL value has no additive child and remains Sort + Limit.
+async fn value_ranked_sum_and_raw_values_stay_generic() {
+    // SUM and a bare PromQL value are both value rankings. Keep their explicit
+    // Sort + Limit shape rather than assigning frequency-sketch semantics.
     let s = sql(
         "SELECT service, SUM(bytes) FROM metrics GROUP BY service ORDER BY SUM(bytes) DESC LIMIT 5",
     )
     .await;
     let p = promql("topk(5, http_requests_total)");
-    assert!(matches!(
-        &s,
-        QueryExpr::Aggregate { measures, .. }
-            if matches!(measures.as_slice(), [AggIntent::TopK {
-                ..
-            }])
-    ));
+    assert!(
+        heavy_hitter(&s).is_none(),
+        "SUM ranking is value-ranked: {s:?}"
+    );
     assert!(
         heavy_hitter(&p).is_none(),
         "a raw value has no additive heavy-hitter input: {p:?}"
