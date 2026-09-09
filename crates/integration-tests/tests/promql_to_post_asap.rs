@@ -92,6 +92,57 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
 }
 
 #[test]
+fn value_ranked_topk_over_counter_reduction_preserves_summary_child() {
+    fn has_summary(node: &SummaryNode) -> bool {
+        match &node.expr {
+            SummaryExpr::SummaryAgg { .. } => true,
+            SummaryExpr::ValueOperation { child, .. }
+            | SummaryExpr::SummaryEstimate {
+                summary_input: child,
+                ..
+            } => has_summary(child),
+            SummaryExpr::BinaryOp { lhs, rhs, .. }
+            | SummaryExpr::SummarySubtract {
+                left: lhs,
+                right: rhs,
+            } => has_summary(lhs) || has_summary(rhs),
+            SummaryExpr::SummaryMerge { children } => {
+                children.iter().any(|child| has_summary(child))
+            }
+            _ => false,
+        }
+    }
+
+    for query in [
+        "topk(3, sum by(job)(rate(cpu_seconds_total[1h])))",
+        "topk(3, sum by(job)(increase(requests_total[6h])))",
+    ] {
+        let root = lower_search_and_materialize(query);
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::Limit { n: 3, offset: 0 },
+            child: sort,
+            ..
+        } = &root.expr
+        else {
+            panic!("expected query-time Limit for {query}, got {:?}", root.expr);
+        };
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::Sort { .. },
+            child,
+            ..
+        } = &sort.expr
+        else {
+            panic!("expected query-time Sort under Limit for {query}");
+        };
+        assert!(
+            has_summary(child),
+            "counter child must retain a selected summary for {query}: {:?}",
+            child.expr
+        );
+    }
+}
+
+#[test]
 fn instant_topk_and_unsupported_child_remain_local_residuals() {
     for query in ["topk(3, memory_bytes)", "topk(3, deriv(memory_bytes[5m]))"] {
         let root = lower_search_and_materialize(query);

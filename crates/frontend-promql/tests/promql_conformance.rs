@@ -827,26 +827,17 @@ fn bottomk_is_generic_sort_limit() {
 }
 
 #[test]
-fn topk_over_nested_sum_preserves_a_value_weighted_heavy_hitter() {
+fn topk_over_nested_sum_preserves_query_time_value_ranking() {
     // SEMANTICS (PromQL): `topk(3, sum by(x)(rate(...)))` is extremely common.
-    // `sum` is additive, so the canonical IR records a value-weighted Top-K
-    // over the fully-lowered inner aggregate. The physical planner can then
-    // choose a signed-update heap sketch without re-parsing PromQL syntax.
+    // The final rates are query-time values. Their ordering does not establish
+    // frequency-sketch membership semantics.
     let qe = ok("topk(3, sum by(instance) (rate(node_cpu_seconds_total[5m])))");
-    let QueryExpr::Aggregate {
-        measures,
-        child,
-        reduction,
-        ..
-    } = &qe
-    else {
-        panic!("expected outer Top-K Aggregate, got {qe:?}");
+    let QueryExpr::Limit { child, .. } = &qe else {
+        panic!("expected value-ranked Limit, got {qe:?}");
     };
-    assert!(matches!(reduction, Reduction::Reduce(keys) if keys.is_empty()));
-    assert!(matches!(
-        measures.as_slice(),
-        [AggIntent::TopK { k: 3, .. }]
-    ));
+    let QueryExpr::Sort { child, .. } = child.as_ref() else {
+        panic!("expected Sort under Limit, got {child:?}");
+    };
     // The inner `sum by (instance)` survives as a cross-series Aggregate over the
     // per-series rate — the nesting the old two-level template could not express.
     assert!(
@@ -855,6 +846,7 @@ fn topk_over_nested_sum_preserves_a_value_weighted_heavy_hitter() {
         "inner sum-over-rate preserved, got {:?}",
         intents(child)
     );
+    assert!(!has(&qe, |i| matches!(i, AggIntent::TopK { .. })));
 }
 
 #[test]
