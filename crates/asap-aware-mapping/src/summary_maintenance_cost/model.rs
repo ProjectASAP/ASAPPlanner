@@ -3291,6 +3291,20 @@ mod tests {
                         io_bytes_per_execution: Some(0),
                     })
                 }),
+                SummaryExpr::ValueOperation { .. } => cpu.readout_cpu_ops.map(|cpu_ops| {
+                    StreamingSummaryOperatorEvidence::ValueOperation(
+                        SummaryOperatorResourceEvidence {
+                            physical_id: format!("value-operation-{node:p}"),
+                            inputs: vec![test_edge()],
+                            output: test_edge(),
+                            cpu_ops,
+                            working_memory_bytes: 0,
+                            output_buffer_bytes: 0,
+                            executions_per_evaluation: 1,
+                            io_bytes_per_execution: Some(0),
+                        },
+                    )
+                }),
                 SummaryExpr::SummaryMerge { .. } => cpu.merge_cpu_ops.map(|cpu_ops| {
                     StreamingSummaryOperatorEvidence::Merge(SummaryOperatorResourceEvidence {
                         physical_id: format!("merge-{node:p}"),

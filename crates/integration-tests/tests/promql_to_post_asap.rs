@@ -21,7 +21,7 @@ use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
     CompositionOperator, EntityIdentity, ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm,
     SketchKind, SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
-    SummaryNode, SummarySchema, SummaryUpdate,
+    SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -46,6 +46,74 @@ fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
             ..
         }) => Ok(node),
         _ => keep_pre_asap(&root),
+    }
+}
+
+fn lower_search_and_materialize(query: &str) -> Rc<SummaryNode> {
+    let pre = Rc::new(lower_promql(query, AccuracyTarget::Exact).expect("lowering failed"));
+    let space = search_workload(vec![("query", pre)]);
+    let selection = space.global_selection(&DefaultCostModel);
+    selection
+        .materialize(&space.roots[0].1)
+        .expect("materialization failed")
+        .expect("root must be discovered")
+}
+
+#[test]
+fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
+    for query in [
+        "topk(3, rate(cpu_seconds_total[5m]))",
+        "topk by (job) (2, max_over_time(memory_bytes[6h]))",
+    ] {
+        let root = lower_search_and_materialize(query);
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::Limit { n, offset },
+            child: sort,
+            ..
+        } = &root.expr
+        else {
+            panic!("expected query-time Limit for {query}, got {:?}", root.expr);
+        };
+        assert!(*n > 0 && *offset == 0);
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::Sort { .. },
+            child,
+            ..
+        } = &sort.expr
+        else {
+            panic!("expected query-time Sort under Limit for {query}");
+        };
+        assert!(
+            matches!(child.expr, SummaryExpr::SummaryAgg { .. }),
+            "the materializable child must remain visible for {query}: {:?}",
+            child.expr
+        );
+    }
+}
+
+#[test]
+fn instant_topk_and_unsupported_child_remain_local_residuals() {
+    for query in ["topk(3, memory_bytes)", "topk(3, deriv(memory_bytes[5m]))"] {
+        let root = lower_search_and_materialize(query);
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::Limit { .. },
+            child: sort,
+            ..
+        } = &root.expr
+        else {
+            panic!("expected Limit for {query}");
+        };
+        let SummaryExpr::ValueOperation {
+            child, operation, ..
+        } = &sort.expr
+        else {
+            panic!("expected Sort for {query}");
+        };
+        assert!(matches!(operation, ValueOperation::Sort { .. }));
+        assert!(
+            matches!(child.expr, SummaryExpr::KeepPreAsap(_)),
+            "only the unsupported child should remain exact for {query}"
+        );
     }
 }
 
