@@ -3,7 +3,27 @@ use std::rc::Rc;
 use super::guarantee::ResultGuarantee;
 use super::schema::{SummaryFamilyType, SummarySchema};
 use super::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
+use crate::pre_asap::agg_intent::AggIntent;
+use crate::pre_asap::query_expr::Predicate;
 use crate::pre_asap::{BinaryOpKind, ColumnRef, QueryExpr, Reduction, VectorMatch};
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum ExactOperation {
+    Aggregate {
+        reduction: Reduction,
+        measures: Vec<AggIntent>,
+        output_names: Vec<String>,
+        having: Option<Predicate>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum ValueOperation {
+    Exact(ExactOperation),
+    Extension { name: String },
+}
 
 // ── Post-ASAP DAG node ───────────────────────────────────────────────────────
 
@@ -55,6 +75,14 @@ pub enum SummaryExpr {
         lhs: Rc<SummaryNode>,
         rhs: Rc<SummaryNode>,
         operator: BinaryOperator,
+    },
+
+    /// Plain-row semantics composed with a post-ASAP child. Timing is an
+    /// independent physical choice, not part of the operation's identity.
+    ValueOperation {
+        child: Rc<SummaryNode>,
+        operation: ValueOperation,
+        timing: super::execution_data_state::ExecutionTiming,
     },
 
     /// Summary aggregation. Post-ASAP binding chose `family` — which

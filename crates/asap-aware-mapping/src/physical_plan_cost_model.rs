@@ -185,6 +185,9 @@ impl<'a> PhysicalPlanCostModel<'a> {
             snapshot: &snapshot,
         };
         let replacement = match &candidate.replacement {
+            Replacement::ExactComposition(_) => {
+                return Err(AnalyticalCostError::UnsupportedCandidate)
+            }
             Replacement::Rewrite(query) => lower_query_physical_dag(query, scope, &evidence)?,
             Replacement::Summary(summary) => match &summary.expr {
                 SummaryExpr::KeepPreAsap(query) => {
