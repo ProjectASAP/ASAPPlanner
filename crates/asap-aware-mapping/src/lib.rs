@@ -189,6 +189,7 @@ pub mod cost_model;
 pub mod empirical_comparison;
 pub mod empirical_cost;
 pub mod empirical_resources;
+pub mod erp;
 pub mod exact_composition;
 pub mod explanation;
 mod function_rules;
