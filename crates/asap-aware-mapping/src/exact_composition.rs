@@ -62,9 +62,9 @@ use std::rc::Rc;
 
 use asap_types::post_asap::execution_data_state::validate_execution_data_states_at;
 use asap_types::post_asap::{
-    exact_operation_output_schema, produced_data_state, CompositionOperator, ExactOperation,
-    ExecutionDataState, ExecutionDataStateError, SummaryExpr, SummaryNode, SummarySchema,
-    ValueOperation,
+    exact_operation_output_schema, produced_data_state, AccuracyError, ExactOperation,
+    ExecutionDataState, ExecutionDataStateError, ResultGuarantee, SummaryExpr, SummaryNode,
+    SummarySchema, ValueOperation,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -172,27 +172,29 @@ impl ExactComposition {
         let schema = exact_operation_output_schema(&self.op, &child.schema)?;
         let guarantee = match &child.guarantee {
             None => None,
-            Some(input) => {
-                let operator = match &self.op {
-                    ExactOperation::Aggregate { measures, .. } => match measures.as_slice() {
-                        [AggIntent::Sum { .. }] => CompositionOperator::ExactSum,
-                        [AggIntent::Min { .. } | AggIntent::Max { .. } | AggIntent::Avg { .. }] => {
-                            CompositionOperator::ExactExtremum
-                        }
-                        // This placeholder is only used by the model's exact-input
-                        // fast path. Approximate inputs correctly fail closed.
-                        [_] => CompositionOperator::Lipschitz { constant: 1.0 },
-                        _ => CompositionOperator::Lipschitz { constant: 1.0 },
-                    },
-                    _ => CompositionOperator::Lipschitz { constant: 1.0 },
-                };
-                Some(accuracy_model.propagate(
+            Some(input) if input.is_exact() => Some(ResultGuarantee::exact(format!(
+                "exact function {:?} over exact input",
+                self.op
+            ))),
+            Some(input) => match accuracy_model.exact_operation_rule(&self.op) {
+                Some(operator) => match accuracy_model.propagate(
                     &operator,
                     std::slice::from_ref(input),
                     None,
                     &PropagationStats::default(),
-                )?)
-            }
+                ) {
+                    Ok(guarantee) => Some(guarantee),
+                    // The plan remains executable without a declared accuracy
+                    // target, but an unknown guarantee cannot satisfy a later
+                    // target check. Never replace this with an exact/default
+                    // bound.
+                    Err(AccuracyError::UnsupportedComposition { .. }) => None,
+                    Err(error) => return Err(ImplementError::Accuracy(error)),
+                },
+                // No definition-registered rule: preserve "unknown". This is
+                // the fail-closed value used by accuracy-target filtering.
+                None => None,
+            },
         };
         let timing = match self.placement {
             OperationPlacement::Read => asap_types::post_asap::ExecutionTiming::ReadTime,
@@ -372,15 +374,17 @@ impl<'a> ExactCompositionStrategy<'a> {
     }
 
     fn candidates(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
-        let capabilities = self.cost_model.value_operation_capabilities();
         let Ok(schema) = target.root.output_schema() else {
             return Vec::new();
         };
         let schema = asap_types::post_asap::execution_data_state::lift_plain(&schema);
         let mut out = Vec::new();
 
-        if capabilities.supports(OperationPlacement::Read) {
-            if let Some((op, child, intent)) = read_time_shape(target.root, self.cost_model) {
+        if let Some((op, child, intent)) = read_time_shape(target.root, self.cost_model) {
+            if self
+                .cost_model
+                .supports_value_operation(&op, OperationPlacement::Read)
+            {
                 let child_desc =
                     describe_intent(bindable_intent(&child).expect("checked by read_time_shape"));
                 out.push(ReplacementSubDAG {
@@ -405,8 +409,10 @@ impl<'a> ExactCompositionStrategy<'a> {
             }
         }
 
-        if capabilities.supports(OperationPlacement::Maintenance) {
-            if let Some((op, child, intent)) = maintenance_time_shape(target.root, self.cost_model)
+        if let Some((op, child, intent)) = maintenance_time_shape(target.root, self.cost_model) {
+            if self
+                .cost_model
+                .supports_value_operation(&op, OperationPlacement::Maintenance)
             {
                 out.push(ReplacementSubDAG {
                     strategy: "ExactCompositionStrategy",
@@ -621,6 +627,10 @@ mod tests {
         // The readout itself is accepted and composes to a plain schema.
         assert!(comp.accepts_child(&state_child));
         let composed = comp.compose(state_child).unwrap();
+        assert!(
+            composed.guarantee.is_none(),
+            "rank error has no registered conversion through max"
+        );
         assert!(matches!(
             composed.expr,
             SummaryExpr::ValueOperation {

@@ -378,8 +378,7 @@ fn anomaly_report(all: &[DumpRecord], language: &str, manual_notes: &str) -> Str
     report.push_str("- **Serialization caveat:** JSON renders non-finite floating-point values such as `NaN` and `±Inf` as `null`; use the `ir_debug` field in each per-query file when reviewing those values. Fingerprints use this lossless debug representation.\n");
     if language == "PromQL" {
         report.push_str("- **Known semantic collapse to review:** `rate(cumulative[5m])` and `");
-        report
-            .push_str("`irate(cumulative[5m])` both produce `AggIntent::Rate`. Confirm that this ");
+        report.push_str("`irate(cumulative[5m])` produces `AggIntent::IRate`. Confirm that this ");
         report.push_str(
             "abstraction is intentional; PromQL defines different sampling behavior for ",
         );

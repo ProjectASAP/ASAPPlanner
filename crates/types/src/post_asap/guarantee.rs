@@ -223,10 +223,19 @@ pub enum CompositionOperator {
     Lipschitz { constant: f64 },
     /// An exact sum over approximate inputs: `B ≤ Σ B_i`, `δ ≤ Σ δ_i`.
     ExactSum,
-    /// An exact max/min over approximate inputs — bounds the returned
+    /// An exact arithmetic mean over approximate values. For absolute-value
+    /// input guarantees, the output bound is the largest per-value bound.
+    ExactAverage,
+    /// An exact max/min over inputs carrying absolute-value guarantees — bounds the returned
     /// *value* (`max` of the input bounds) but does not identify which key
     /// is the true winner.
     ExactExtremum,
+    /// PromQL `rate`: reset correction plus range-boundary extrapolation.
+    CounterRate,
+    /// PromQL `irate`: reset-aware slope over the final two samples.
+    InstantCounterRate,
+    /// PromQL `increase`: extrapolated reset-corrected increase over a range.
+    CounterIncrease,
     /// A top-k selection over approximate inputs. Unsupported by the default
     /// model until the margin certificate of issue #172 PR 3 exists.
     TopKSelection,

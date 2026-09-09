@@ -104,6 +104,9 @@ pub enum AggIntent<C = ColumnId> {
     // The temporal range lives on the enclosing `QueryExpr::TimeRange` node,
     // not in the intent — this keeps the intent vocabulary range-agnostic.
     Rate,
+    /// PromQL `irate(v[w])` — reset-aware rate from the final two samples.
+    /// Distinct from [`Rate`](Self::Rate), which extrapolates across the range.
+    IRate,
     Increase,
 
     // ── Counter-derivative / range-vector functions (issue #44) ──────────
@@ -344,6 +347,7 @@ impl<C: Clone> AggIntent<C> {
     pub fn requires(&self) -> DataModel {
         match self {
             Self::Rate
+            | Self::IRate
             | Self::Increase
             | Self::Changes
             | Self::Delta
@@ -382,6 +386,7 @@ impl<C: Clone> AggIntent<C> {
         matches!(
             self,
             Self::Rate
+                | Self::IRate
                 | Self::Increase
                 | Self::Changes
                 | Self::Delta
@@ -457,6 +462,7 @@ impl<C: Clone> AggIntent<C> {
             AggIntent::TopK { k, .. } => col(&format!("topk_{k}"), DataType::Utf8, false),
             AggIntent::Cardinality { .. } => col("cardinality", DataType::Int64, false),
             AggIntent::Rate => col("rate", DataType::Float64, false),
+            AggIntent::IRate => col("irate", DataType::Float64, false),
             AggIntent::Increase => col("increase", DataType::Float64, false),
             // Counter-derivative range functions (issue #44) — all yield one
             // float per series (PromQL values are float64), named after the

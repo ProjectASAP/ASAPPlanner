@@ -548,6 +548,7 @@ fn resolve_agg_intent(
             accuracy: accuracy.clone(),
         },
         AggIntent::Rate => AggIntent::Rate,
+        AggIntent::IRate => AggIntent::IRate,
         AggIntent::Increase => AggIntent::Increase,
         AggIntent::Changes => AggIntent::Changes,
         AggIntent::Delta => AggIntent::Delta,

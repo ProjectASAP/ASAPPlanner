@@ -795,6 +795,11 @@ pub(crate) fn implementations_for_with(
             ExactKind::Rate,
             ExactParams::Rate,
         )],
+        AggIntent::IRate => vec![exact_accumulator(
+            intent,
+            ExactKind::IRate,
+            ExactParams::IRate,
+        )],
         AggIntent::Increase => {
             vec![exact_accumulator(
                 intent,
@@ -2210,9 +2215,9 @@ fn compose_guarantee(
                 // Counter-reset detection over perturbed values has no finite
                 // Lipschitz constant — over an approximate child this is a
                 // deterministic transform with no registered rule.
-                ExactKind::Increase | ExactKind::Rate => CompositionOperator::Lipschitz {
-                    constant: f64::INFINITY,
-                },
+                ExactKind::Rate => CompositionOperator::CounterRate,
+                ExactKind::IRate => CompositionOperator::InstantCounterRate,
+                ExactKind::Increase => CompositionOperator::CounterIncrease,
             };
             (
                 op,
@@ -4989,6 +4994,7 @@ mod tests {
             (A::Min { col: None }, Acc(E::MinMax)),
             (A::Max { col: None }, Acc(E::MinMax)),
             (A::Rate, Acc(E::Rate)),
+            (A::IRate, Acc(E::IRate)),
             (A::Increase, Acc(E::Increase)),
             // exact but non-mergeable → pass-through
             (A::Avg { col: None }, Pass),

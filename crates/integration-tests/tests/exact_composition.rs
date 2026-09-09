@@ -313,16 +313,13 @@ fn max_and_avg_over_quantile_compose_at_read_time_with_statistics() {
             );
         };
         assert!(matches!(child.expr, SummaryExpr::SummaryEstimate { .. }));
-        let child_guarantee = child.guarantee.as_ref().expect("child guarantee");
-        let composed_guarantee = composed
-            .guarantee
-            .as_ref()
-            .expect("exact read-time operation must propagate the child's guarantee");
-        assert_eq!(composed_guarantee.metric, child_guarantee.metric);
-        assert_eq!(
-            composed_guarantee.bound.evaluate(),
-            child_guarantee.bound.evaluate(),
-            "an exact max/average fold retains the modeled error magnitude"
+        assert!(
+            child.guarantee.is_some(),
+            "child has its KLL rank guarantee"
+        );
+        assert!(
+            composed.guarantee.is_none(),
+            "rank error has no definition-backed conversion through max/average"
         );
         assert!(is_plain(&composed));
         assert_eq!(

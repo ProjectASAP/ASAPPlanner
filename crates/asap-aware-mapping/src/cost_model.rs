@@ -49,8 +49,8 @@
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
-    SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
+    ExactOperation, GroupingStrategy, HydraParams, ResultGuarantee, SketchAlgorithm, SketchParams,
+    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryMaintenanceLifecycleGuarantee, SummaryNode,
     SummaryWindowFramework,
 };
 use asap_types::pre_asap::agg_intent::AggIntent;
@@ -894,6 +894,18 @@ pub trait CostModel {
     /// model. A deployment whose runtime lacks a shape narrows this.
     fn value_operation_capabilities(&self) -> ValueOperationCapabilities {
         ValueOperationCapabilities::ALL
+    }
+
+    /// Whether the runtime implements this concrete function at this
+    /// placement. Deployments override this definition-level hook when
+    /// support differs between functions; the default delegates to the
+    /// coarse placement capability for backward compatibility.
+    fn supports_value_operation(
+        &self,
+        _operation: &ExactOperation,
+        placement: OperationPlacement,
+    ) -> bool {
+        self.value_operation_capabilities().supports(placement)
     }
 
     /// The statistics the issue #171 recurring-cost formulas need for one

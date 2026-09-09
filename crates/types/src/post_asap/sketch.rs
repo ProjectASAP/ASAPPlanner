@@ -19,6 +19,8 @@ pub enum ExactKind {
     Increase,
     /// Rate accumulator (increase / time window duration).
     Rate,
+    /// Instant-rate accumulator retaining the final two timestamped samples.
+    IRate,
 }
 
 /// Parameters for an [`ExactKind`] accumulator. All exact accumulators have
@@ -32,6 +34,7 @@ pub enum ExactParams {
     MinMax,
     Increase,
     Rate,
+    IRate,
 }
 
 // ── Approximate sketches ─────────────────────────────────────────────────────

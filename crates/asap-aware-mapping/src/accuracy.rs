@@ -32,7 +32,8 @@
 //! | `ApproximateAggregate`, all `RelativeValue`, values known non-negative | multiplicative | `ε_in + ε_out + ε_in·ε_out`, `δ` by union bound |
 //! | `Lipschitz { L }`, one `AbsoluteValue` input | Lipschitz | `L·B_in + B_local`, `δ` by union bound |
 //! | `ExactSum`, value-like inputs | sum | `Σ B_i` (`AbsoluteValue`), `δ` by union bound over inputs |
-//! | `ExactExtremum`, same-metric inputs | max/min | `max B_i`, `δ` by union bound over inputs |
+//! | `ExactAverage`, `AbsoluteValue` inputs | average | `max B_i`, `δ` by union bound over inputs |
+//! | `ExactExtremum`, `AbsoluteValue` inputs | max/min | `max B_i`, `δ` by union bound over inputs |
 //! | anything else | — | [`AccuracyError::UnsupportedComposition`] |
 //!
 //! Cross-metric compositions (a `Rank` error under a value-additive rule,
@@ -68,9 +69,11 @@
 //!   (unchanged), and an approximate layer can never satisfy it.
 
 use asap_types::post_asap::{
-    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
-    ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery, SummaryFamilyType,
+    AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, ExactOperation, GuaranteeSource,
+    ProbabilityExpr, ResultGuarantee, SketchAlgorithm, SketchParams, SketchQuery,
+    SummaryFamilyType,
 };
+use asap_types::pre_asap::AggIntent;
 use asap_types::types::AccuracyTarget;
 
 /// Statistics a propagation rule may consult. Every field is optional and
@@ -85,7 +88,7 @@ pub struct PropagationStats {
     /// sign change.
     pub values_non_negative: Option<bool>,
     /// Number of input rows an exact aggregation consumes (e.g. the number
-    /// of groups a `sum` folds), for `ExactSum`/`ExactExtremum`'s union
+    /// of groups a function folds), for exact aggregate union bounds
     /// bound over per-input failures.
     pub input_row_count: Option<u64>,
     /// Fresh key-frequency distribution evidence from the data workload.
@@ -153,6 +156,13 @@ impl AccuracyEvidenceProvider for WorkloadAccuracyEvidence<'_> {
 /// this trait and passes it to
 /// [`crate::replacement::SketchAlgorithmStrategy::with_models`].
 pub trait AccuracyModel {
+    /// The definition-registered rule for applying `operation` to an
+    /// approximate input. `None` means the function is exact only over exact
+    /// inputs; callers must fail closed for approximate input.
+    fn exact_operation_rule(&self, _operation: &ExactOperation) -> Option<CompositionOperator> {
+        None
+    }
+
     /// The guarantee of reading `query` out of a summary of family `family`
     /// built over an **exact** input — derived from the family's committed
     /// parameters by inverting the same sizing formulas
@@ -454,6 +464,53 @@ impl DefaultAccuracyModel {
         })
     }
 
+    /// Exact arithmetic mean over values with absolute-error guarantees.
+    /// Averaging cannot amplify the largest absolute input error. The event
+    /// that every row respects its bound is still protected conservatively
+    /// by a union bound over the input row count.
+    fn exact_average(
+        op: &CompositionOperator,
+        inputs: &[ResultGuarantee],
+        stats: &PropagationStats,
+    ) -> Result<ResultGuarantee, AccuracyError> {
+        if inputs
+            .iter()
+            .any(|input| input.metric != ErrorMetric::AbsoluteValue)
+        {
+            return Err(AccuracyError::UnsupportedComposition {
+                operator: op.clone(),
+                input_metrics: inputs.iter().map(|g| g.metric).collect(),
+                local_metric: None,
+                reason: "exact average requires AbsoluteValue input guarantees".into(),
+            });
+        }
+        let mut provenance = Vec::new();
+        let count = row_count(stats, &mut provenance);
+        let exact_local = ResultGuarantee::exact("ExactAggregate(Average)");
+        provenance.extend(composed_provenance(
+            op,
+            inputs,
+            &exact_local,
+            "exact_average_union_bound",
+        ));
+        Ok(ResultGuarantee {
+            metric: ErrorMetric::AbsoluteValue,
+            bound: BoundExpr::Max {
+                terms: inputs.iter().map(|g| g.bound.clone()).collect(),
+            },
+            failure_probability: ProbabilityExpr::Scaled {
+                count,
+                inner: Box::new(ProbabilityExpr::UnionBound {
+                    terms: inputs
+                        .iter()
+                        .map(|g| g.failure_probability.clone())
+                        .collect(),
+                }),
+            },
+            provenance,
+        })
+    }
+
     /// Exact `max`/`min` over approximate inputs of one shared metric: the
     /// returned value's error is at most the largest input bound (order
     /// statistics are monotone under a uniform perturbation), with
@@ -465,12 +522,15 @@ impl DefaultAccuracyModel {
         stats: &PropagationStats,
     ) -> Result<ResultGuarantee, AccuracyError> {
         let metric = inputs[0].metric;
-        if inputs.iter().any(|g| g.metric != metric) || metric == ErrorMetric::TopKMembership {
+        if inputs
+            .iter()
+            .any(|g| g.metric != ErrorMetric::AbsoluteValue)
+        {
             return Err(AccuracyError::UnsupportedComposition {
                 operator: op.clone(),
                 input_metrics: inputs.iter().map(|g| g.metric).collect(),
                 local_metric: None,
-                reason: "exact max/min needs every input under one value-like metric".into(),
+                reason: "exact max/min requires AbsoluteValue input guarantees".into(),
             });
         }
         let mut provenance = Vec::new();
@@ -567,6 +627,25 @@ fn composed_provenance(
 }
 
 impl AccuracyModel for DefaultAccuracyModel {
+    fn exact_operation_rule(&self, operation: &ExactOperation) -> Option<CompositionOperator> {
+        let ExactOperation::Aggregate { measures, .. } = operation else {
+            return None;
+        };
+        match measures.as_slice() {
+            [AggIntent::Sum { .. }] => Some(CompositionOperator::ExactSum),
+            [AggIntent::Min { .. } | AggIntent::Max { .. }] => {
+                Some(CompositionOperator::ExactExtremum)
+            }
+            [AggIntent::Avg { .. }] => Some(CompositionOperator::ExactAverage),
+            [AggIntent::Rate] => Some(CompositionOperator::CounterRate),
+            [AggIntent::IRate] => Some(CompositionOperator::InstantCounterRate),
+            [AggIntent::Increase] => Some(CompositionOperator::CounterIncrease),
+            // The remaining functions are exact over exact samples, but have
+            // no definition-backed rule over approximate values yet.
+            _ => None,
+        }
+    }
+
     fn local_guarantee(
         &self,
         family: &SummaryFamilyType,
@@ -692,7 +771,15 @@ impl AccuracyModel for DefaultAccuracyModel {
                 Ok(Self::lipschitz(op, *constant, inputs, local))
             }
             CompositionOperator::ExactSum => Self::exact_sum(op, inputs, stats),
+            CompositionOperator::ExactAverage => Self::exact_average(op, inputs, stats),
             CompositionOperator::ExactExtremum => Self::exact_extremum(op, inputs, stats),
+            CompositionOperator::CounterRate
+            | CompositionOperator::InstantCounterRate
+            | CompositionOperator::CounterIncrease => Err(unsupported(
+                "counter reset detection and boundary extrapolation have no distribution-free \
+                 accuracy bound over approximate samples; exact samples remain exact"
+                    .into(),
+            )),
             CompositionOperator::TopKSelection => {
                 let (Some(selected_lower), Some(excluded_upper), Some(delta)) = (
                     stats.topk_selected_lower_bound,
@@ -1120,6 +1207,46 @@ mod tests {
             .unwrap();
         assert!((out.bound.evaluate().unwrap() - 0.3).abs() < 1e-12);
         assert!((out.failure_probability.evaluate().unwrap() - 0.04).abs() < 1e-12);
+    }
+
+    #[test]
+    fn exact_average_has_its_own_absolute_error_rule() {
+        let out = DefaultAccuracyModel
+            .propagate(
+                &CompositionOperator::ExactAverage,
+                &[abs(0.25, 0.01)],
+                None,
+                &PropagationStats {
+                    input_row_count: Some(4),
+                    ..PropagationStats::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(out.metric, ErrorMetric::AbsoluteValue);
+        assert_eq!(out.bound.evaluate(), Some(0.25));
+        assert_eq!(out.failure_probability.evaluate(), Some(0.04));
+    }
+
+    #[test]
+    fn counter_functions_have_distinct_definition_rules() {
+        let operation = |intent| ExactOperation::Aggregate {
+            reduction: asap_types::pre_asap::Reduction::PerEntity,
+            measures: vec![intent],
+            output_names: vec![],
+            having: None,
+        };
+        assert_eq!(
+            DefaultAccuracyModel.exact_operation_rule(&operation(AggIntent::Rate)),
+            Some(CompositionOperator::CounterRate)
+        );
+        assert_eq!(
+            DefaultAccuracyModel.exact_operation_rule(&operation(AggIntent::IRate)),
+            Some(CompositionOperator::InstantCounterRate)
+        );
+        assert_eq!(
+            DefaultAccuracyModel.exact_operation_rule(&operation(AggIntent::Increase)),
+            Some(CompositionOperator::CounterIncrease)
+        );
     }
 
     #[test]
