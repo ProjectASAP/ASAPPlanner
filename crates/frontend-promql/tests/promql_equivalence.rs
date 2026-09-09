@@ -120,17 +120,12 @@ fn distinct_semantics_stay_distinct() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Intentional intent-level equivalence (documented, not a bug).
+// 3. Intent-level distinctions and equivalences.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn rate_and_irate_share_the_same_intent() {
-    // The canonical tree captures *intent* ("per-second rate of a counter"),
-    // not the estimation method. `rate` (windowed average) and `irate` (last
-    // two samples) differ only in HOW the rate is estimated — a
-    // post-ASAP/execution concern — so they share one canonical intent by
-    // design.
-    assert_equiv(&["rate(m[5m])", "irate(m[5m])"]);
+fn rate_and_irate_are_distinct_functions() {
+    assert_distinct("rate(m[5m])", "irate(m[5m])");
 }
 
 #[test]

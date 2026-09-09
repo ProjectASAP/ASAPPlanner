@@ -1050,6 +1050,9 @@ fn target_replacement(
         Replacement::Rewrite(rewritten) => {
             TargetReplacementAfter::Rewrite(dag_export::export(rewritten))
         }
+        Replacement::ExactComposition(_) => {
+            unreachable!("composition candidates are materialized by GlobalSelection")
+        }
     };
     let (baseline_cost, selected_cost, benefit) = winner.costs.clone();
     // Derived from `selected_cost` so the legacy scalar field and the
@@ -1198,6 +1201,14 @@ fn run_post_asap_with_progress(
         .groups()
         .filter_map(|group| {
             let candidate = group.chosen?;
+            // A composition is a reference-bearing logical choice, not an
+            // independently exportable replacement. The CLI's default cost
+            // model has no composition statistics and therefore cannot
+            // select one; callers that provide such statistics must export
+            // `GlobalSelection::materialize` instead.
+            if matches!(candidate.replacement, Replacement::ExactComposition(_)) {
+                return None;
+            }
             if matches!(
                 &candidate.replacement,
                 Replacement::Summary(node) if matches!(node.expr, SummaryExpr::KeepPreAsap(_))
@@ -1276,6 +1287,9 @@ fn run_post_asap_with_progress(
                 replacement: Rc::clone(rc),
                 decision,
             },
+            Replacement::ExactComposition(_) => {
+                unreachable!("composition winners are excluded above")
+            }
         })
     };
     let post_graphs: Vec<(String, DagGraph)> = lowered_queries
@@ -2179,6 +2193,9 @@ mod tests {
             Replacement::Rewrite(rewrite) => {
                 serde_json::to_value(dag_export::export(rewrite)).unwrap()
             }
+            Replacement::ExactComposition(_) => {
+                unreachable!("cost fixtures select directly materialized candidates")
+            }
         }
     }
 
@@ -2209,6 +2226,9 @@ mod tests {
             Replacement::Rewrite(rewrite) => {
                 serde_json::to_value(dag_export::export(rewrite)).unwrap()
             }
+            Replacement::ExactComposition(_) => {
+                unreachable!("cost fixtures select directly materialized candidates")
+            }
         };
         let document = PlannerCostDocument {
             storage_io: None,
@@ -2233,6 +2253,9 @@ mod tests {
                         plan,
                         query_nodes: query_evidence(&query),
                     },
+                    Replacement::ExactComposition(_) => {
+                        unreachable!("cost fixtures select directly materialized candidates")
+                    }
                 }],
             }],
         };

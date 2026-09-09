@@ -28,6 +28,7 @@
 //! — see `asap_aware_mapping::grouping`'s module docs for why.
 
 pub mod cse;
+pub mod execution_data_state;
 pub mod expr;
 pub mod guarantee;
 pub mod query_time;
@@ -38,7 +39,12 @@ pub mod summary_maintenance_lifecycle;
 pub mod summary_window;
 
 pub use cse::share_common_summary_subtrees;
-pub use expr::{BinaryOperator, SummaryExpr, SummaryNode};
+pub use execution_data_state::{
+    exact_operation_output_schema, produced_data_state, validate_execution_data_states,
+    validate_execution_data_states_at, DataPrimitive, ExactOperationSchemaError,
+    ExecutionDataState, ExecutionDataStateAssignment, ExecutionDataStateError, ExecutionTiming,
+};
+pub use expr::{BinaryOperator, ExactOperation, SummaryExpr, SummaryNode, ValueOperation};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,

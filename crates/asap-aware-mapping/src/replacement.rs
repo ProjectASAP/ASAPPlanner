@@ -345,15 +345,17 @@
 //!   multi-group joint optimization beyond this per-site recurrence is left
 //!   for whenever that changes.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::post_asap::{
-    EntityIdentity, ExactKind, ExactParams, GroupingStrategy, SamplingKind, SamplingParams,
-    SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
-    StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode,
-    SummarySchema, SummaryUpdate, WaveletKind, WaveletParams,
+    validate_execution_data_states_at, EntityIdentity, ExactKind, ExactOperationSchemaError,
+    ExactParams, ExecutionDataState, ExecutionDataStateError, GroupingStrategy, SamplingKind,
+    SamplingParams, SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery,
+    StatModelKind, StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr,
+    SummaryNode, SummarySchema, SummaryUpdate, WaveletKind, WaveletParams,
 };
+use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::ColumnRef;
@@ -370,8 +372,13 @@ use crate::accuracy::{
     KLL_RANK_ERROR_EXPONENT_99,
 };
 use crate::accuracy_reconciliation::AccuracyReconciliationStrategy;
-use crate::cost_model::{Cost, CostModel, CseCandidate, DefaultCostModel, ShareDecision};
+use crate::cost_model::{
+    raw_recompute_cost_rate, Cost, CostModel, CseCandidate, DefaultCostModel,
+    ExactCompositionCostInputs, ExactCompositionCostRequest, ShareDecision,
+};
+use crate::exact_composition::{ExactComposition, ExactCompositionStrategy, OperationPlacement};
 use crate::grouping::HydraGroupingStrategy;
+use crate::recurrence::CostRate;
 use crate::recurrence::{
     evaluation_rate_of, Horizon, RecurrenceError, RecurrenceProfile, RootRecurrence, UpdateRate,
 };
@@ -402,6 +409,15 @@ pub enum ImplementError {
     /// would change its semantics.
     #[error("unsupported physical summary realization: {0}")]
     PhysicalRealization(&'static str),
+    /// A constructed plan violates the update/readout phase contract
+    /// (issue #171) — e.g. a summary readout placed beneath a maintained
+    /// `SummaryAgg`. Detected at construction, never at runtime.
+    #[error("execution-data_state violation in post-ASAP plan: {0}")]
+    ExecutionDataState(#[from] ExecutionDataStateError),
+    /// An `ExactOperator`'s output schema could not be derived over its
+    /// child — the child carries summary state the operator can't read.
+    #[error("exact operator schema derivation failed: {0}")]
+    ExactOperationSchema(#[from] ExactOperationSchemaError),
 }
 
 /// A pre-ASAP sub-DAG a [`ReplacementStrategy`] knows how to replace.
@@ -461,6 +477,15 @@ pub enum Replacement {
     /// different from the target's own `root` (e.g. sharing vs. not sharing
     /// a subtree) but semantically equivalent to it.
     Rewrite(Rc<QueryExpr>),
+    /// An exact operator composed over another target's *own* selected
+    /// decision across an explicit update/readout boundary (issue #171):
+    /// `ValueOperationAtReadTime` over a child's summary readout, or
+    /// `ValueOperationAtMaintenanceTime` feeding a maintained summary above. Carries only a
+    /// reference to the child target — [`PlanSpace::global_selection`]
+    /// commits the compatible parent/child pair and
+    /// [`GlobalSelection::materialize`] links it into one validated
+    /// `SummaryNode`. See [`crate::exact_composition`].
+    ExactComposition(ExactComposition),
 }
 
 /// One candidate replacement for a [`TargetSubDAG`], plus a human-readable
@@ -502,6 +527,12 @@ pub enum ReplacementProvenance {
     /// regardless, so pricing it like a full independent rebuild would be
     /// the wrong shape of cost, not just the wrong number.
     AccuracyReconciliation,
+    /// [`Replacement::ExactComposition`] with
+    /// [`OperationPlacement::Read`] (issue #171).
+    ValueOperationAtReadTime,
+    /// [`Replacement::ExactComposition`] with
+    /// [`OperationPlacement::Maintenance`] (issue #171).
+    ValueOperationAtMaintenanceTime,
 }
 
 /// A candidate a strategy considered for a target but refused to propose on
@@ -527,6 +558,7 @@ pub struct RejectedCandidate {
 pub struct Proposals {
     pub candidates: Vec<ReplacementSubDAG>,
     pub rejected: Vec<RejectedCandidate>,
+    domain_error: Option<ExecutionDataStateError>,
 }
 
 /// A replacement strategy: given a [`TargetSubDAG`], does this strategy have
@@ -572,6 +604,7 @@ pub trait ReplacementStrategy {
         Proposals {
             candidates: self.replacements(target),
             rejected: Vec::new(),
+            domain_error: None,
         }
     }
 }
@@ -749,25 +782,16 @@ pub(crate) fn implementations_for_with(
         },
 
         // ── Exact mergeable accumulators ─────────────────────────────────────
-        AggIntent::Sum { .. } => vec![exact_accumulator(intent, ExactKind::Sum, ExactParams::Sum)],
-        AggIntent::Min { .. } | AggIntent::Max { .. } => {
-            vec![exact_accumulator(
-                intent,
-                ExactKind::MinMax,
-                ExactParams::MinMax,
-            )]
-        }
-        AggIntent::Rate => vec![exact_accumulator(
-            intent,
-            ExactKind::Rate,
-            ExactParams::Rate,
-        )],
-        AggIntent::Increase => {
-            vec![exact_accumulator(
-                intent,
-                ExactKind::Increase,
-                ExactParams::Increase,
-            )]
+        AggIntent::Sum { .. }
+        | AggIntent::Min { .. }
+        | AggIntent::Max { .. }
+        | AggIntent::Rate
+        | AggIntent::IRate
+        | AggIntent::Increase => {
+            let (kind, params) = crate::function_rules::function_rules(intent)
+                .and_then(|rules| rules.accumulator)
+                .expect("exact accumulator intents have registered realizations");
+            vec![exact_accumulator(intent, kind, params)]
         }
 
         // ── Exact, non-mergeable reducers — richer partial state than a
@@ -1391,6 +1415,22 @@ impl<'a> SketchAlgorithmStrategy<'a> {
                 );
             }
         }
+        if proposals.candidates.is_empty() {
+            if let Some(error) = &proposals.domain_error {
+                if let Ok(node) = keep_pre_asap(root) {
+                    proposals.candidates.push(ReplacementSubDAG {
+                        strategy: "SketchAlgorithmStrategy",
+                        replacement: Replacement::Summary(node),
+                        provenance: ReplacementProvenance::SummaryImplementation,
+                        rationale: format!(
+                            "{} stays pre-ASAP because summary construction crosses an illegal \
+                             execution-data_state boundary ({error})",
+                            describe_intent(intent)
+                        ),
+                    });
+                }
+            }
+        }
         proposals
     }
 }
@@ -1412,7 +1452,14 @@ impl Proposals {
                 description: rationale,
                 error,
             }),
-            Err(ImplementError::Schema(_) | ImplementError::PhysicalRealization(_)) => {}
+            Err(ImplementError::ExecutionDataState(error)) => {
+                self.domain_error.get_or_insert(error);
+            }
+            Err(
+                ImplementError::Schema(_)
+                | ImplementError::ExactOperationSchema(_)
+                | ImplementError::PhysicalRealization(_),
+            ) => {}
         }
     }
 }
@@ -1563,10 +1610,10 @@ pub(crate) fn realize_child_with(
             ..
         }) => Ok(node),
         Some(ReplacementSubDAG {
-            replacement: Replacement::Rewrite(_),
+            replacement: Replacement::Rewrite(_) | Replacement::ExactComposition(_),
             ..
         }) => {
-            unreachable!("SketchAlgorithmStrategy never returns a Rewrite candidate")
+            unreachable!("SketchAlgorithmStrategy never returns a Rewrite/composition candidate")
         }
         // No candidate at all: `root` isn't `bindable_intent` shape (or its
         // intent has no realization `implementations_for_with` can't
@@ -2142,8 +2189,6 @@ fn compose_guarantee(
     let (op, local) = match (family, query) {
         (SummaryFamilyType::ExactAggregate(kind, _), _) => {
             let op = match kind {
-                ExactKind::Sum => CompositionOperator::ExactSum,
-                ExactKind::MinMax => CompositionOperator::ExactExtremum,
                 // A row count does not depend on the rows' values: exact
                 // regardless of the child's own error.
                 ExactKind::Count => {
@@ -2154,9 +2199,11 @@ fn compose_guarantee(
                 // Counter-reset detection over perturbed values has no finite
                 // Lipschitz constant — over an approximate child this is a
                 // deterministic transform with no registered rule.
-                ExactKind::Increase | ExactKind::Rate => CompositionOperator::Lipschitz {
-                    constant: f64::INFINITY,
-                },
+                _ => {
+                    crate::function_rules::function_rules(intent)
+                        .expect("exact accumulator intents have registered accuracy rules")
+                        .accuracy
+                }
             };
             (
                 op,
@@ -2430,10 +2477,13 @@ impl MemoGroup {
                 (Replacement::Summary(existing_node), Replacement::Summary(node)) => {
                     is_duplicate_summary(existing_node, node)
                 }
-                // A `Rewrite` and a `Summary` are never the same candidate —
-                // they're different `Replacement` variants entirely.
-                (Replacement::Rewrite(_), Replacement::Summary(_))
-                | (Replacement::Summary(_), Replacement::Rewrite(_)) => false,
+                (
+                    Replacement::ExactComposition(existing),
+                    Replacement::ExactComposition(candidate),
+                ) => existing.same_as(candidate),
+                // Different `Replacement` variants are never the same
+                // candidate.
+                _ => false,
             }
         });
         if is_duplicate {
@@ -2528,6 +2578,73 @@ pub struct PlanSpace<Id> {
     /// Discovery order — stable iteration for [`PlanSpace::groups`]/
     /// [`PlanSpace::cost_sorted`], since `HashMap` iteration order isn't.
     order: Vec<*const QueryExpr>,
+    /// Composition proofs are computed with the search model, then retained
+    /// through costing and materialization so no later default can replace it.
+    composition_plans: Vec<PreparedComposition>,
+}
+
+struct PreparedComposition {
+    target: *const QueryExpr,
+    operation: ExactComposition,
+    child: Rc<SummaryNode>,
+    plan: Rc<SummaryNode>,
+}
+
+impl<Id> PlanSpace<Id> {
+    fn prepare_compositions(
+        &mut self,
+        accuracy: &dyn AccuracyModel,
+        targets: &HashMap<*const QueryExpr, Vec<AccuracyTarget>>,
+    ) {
+        self.composition_plans.clear();
+        for group in self.groups.values() {
+            for candidate in &group.candidates {
+                let Replacement::ExactComposition(operation) = &candidate.replacement else {
+                    continue;
+                };
+                let children: Vec<_> = match operation.placement {
+                    OperationPlacement::Read => self
+                        .groups
+                        .get(&Rc::as_ptr(&operation.child_target))
+                        .into_iter()
+                        .flat_map(|g| &g.candidates)
+                        .filter_map(|c| match &c.replacement {
+                            Replacement::Summary(child) if operation.accepts_child(child) => {
+                                Some(Rc::clone(child))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                    OperationPlacement::Maintenance => {
+                        keep_pre_asap(&operation.child_target).into_iter().collect()
+                    }
+                };
+                for child in children {
+                    let Ok(plan) = operation.compose_with_accuracy(Rc::clone(&child), accuracy)
+                    else {
+                        continue;
+                    };
+                    if let Some(requirements) = targets.get(&Rc::as_ptr(&group.target)) {
+                        if operation.placement == OperationPlacement::Maintenance
+                            || !requirements.iter().all(|target| {
+                                plan.guarantee
+                                    .as_ref()
+                                    .is_some_and(|g| accuracy.satisfies(g, target))
+                            })
+                        {
+                            continue;
+                        }
+                    }
+                    self.composition_plans.push(PreparedComposition {
+                        target: Rc::as_ptr(&group.target),
+                        operation: operation.clone(),
+                        child,
+                        plan,
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// Lifecycle-aware whole-subplan costs keyed by target and candidate identity.
@@ -3151,7 +3268,7 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
             .iter()
             .map(|c| match &c.replacement {
                 Replacement::Summary(node) => sketch_kind_of(node),
-                Replacement::Rewrite(_) => None,
+                Replacement::Rewrite(_) | Replacement::ExactComposition(_) => None,
             })
             .collect();
         if let Some(kinds) = kinds {
@@ -3159,7 +3276,7 @@ fn rank_group<'a>(group: &'a MemoGroup, cost_model: &dyn CostModel) -> Vec<&'a R
             ranked.sort_by_key(|c| {
                 let kind = match &c.replacement {
                     Replacement::Summary(node) => sketch_kind_of(node),
-                    Replacement::Rewrite(_) => None,
+                    Replacement::Rewrite(_) | Replacement::ExactComposition(_) => None,
                 };
                 kind.and_then(|k| order.iter().position(|o| *o == k))
                     .unwrap_or(usize::MAX)
@@ -3287,6 +3404,34 @@ pub struct SelectedGroup<'a> {
     /// registered strategy proposed anything for (mirrors
     /// [`MemoGroup::candidates`] being possibly empty).
     pub chosen: Option<&'a ReplacementSubDAG>,
+    /// When `chosen` is a [`Replacement::ExactComposition`]: the child
+    /// decision it was committed together with, and the cost comparison
+    /// that justified it — the explicit target-to-decision provenance
+    /// chain (issue #171).
+    pub composition: Option<CompositionDecision<'a>>,
+}
+
+/// Why [`PlanSpace::global_selection`] committed an exact composition at a
+/// site: which child candidate it composes with, and the
+/// cost-units-per-second comparison against the raw fallback that it won.
+#[derive(Debug)]
+pub struct CompositionDecision<'a> {
+    /// The exact child/operation pair validated by the search accuracy model.
+    pub plan: Rc<SummaryNode>,
+    /// The child target the composed operator consumes.
+    pub child_target: &'a Rc<QueryExpr>,
+    /// For a read-time operation: the child's own candidate committed alongside
+    /// (the summary readout the operator folds). `None` for an update-path
+    /// transform, whose input is raw update data — its cost is charged to
+    /// the maintained summary *above* it instead.
+    pub child_candidate: Option<&'a ReplacementSubDAG>,
+    /// The composed plan's recurring rate — `read_operation_plan_cost_rate`
+    /// or `maintenance_operation_plan_cost_rate`.
+    pub cost_rate: CostRate,
+    /// `raw_recompute_cost_rate` — the `KeepPreAsap` baseline it beat.
+    pub baseline_rate: CostRate,
+    /// The statistics (and their provenance) both rates were computed from.
+    pub inputs: ExactCompositionCostInputs,
 }
 
 /// [`PlanSpace::global_selection`]'s result: one [`SelectedGroup`] per
@@ -3296,6 +3441,10 @@ pub struct SelectedGroup<'a> {
 pub struct GlobalSelection<'a> {
     order: Vec<*const QueryExpr>,
     groups: HashMap<*const QueryExpr, SelectedGroup<'a>>,
+    /// [`Self::materialize`]'s memo — one bound node per target for the
+    /// life of this selection, so two parents composing over one shared
+    /// child get the *same* `Rc<SummaryNode>`.
+    materialized: RefCell<HashMap<*const QueryExpr, Rc<SummaryNode>>>,
 }
 
 impl<'a> GlobalSelection<'a> {
@@ -3311,22 +3460,296 @@ impl<'a> GlobalSelection<'a> {
         self.groups.get(&Rc::as_ptr(target))
     }
 
-    /// Materialize the selected replacement at `target`. Exact operators
-    /// that remain in pre-ASAP IR are preserved by `KeepPreAsap`; logical
-    /// summary candidates are already fully bound post-ASAP nodes.
+    /// Link this selection's per-site decisions into one data_state-validated
+    /// post-ASAP DAG rooted at `target` — the one place a committed
+    /// composition's child *reference* becomes an actual `Rc<SummaryNode>`
+    /// edge (issue #171). `None` if `target` is not a discovered site.
+    ///
+    /// Per site: a [`Replacement::ExactComposition`] uses its validated
+    /// operation/child plan, retaining the search model's guarantee;
+    /// a [`Replacement::Summary`] is
+    /// re-linked so its `SummaryAgg` child is the child target's own
+    /// materialization whenever that is phase-legal beneath maintenance
+    /// (so a child that chose an `ValueOperationAtMaintenanceTime` actually ends up under
+    /// the summary); a [`Replacement::Rewrite`] or an unmatched site stays
+    /// the conservative `KeepPreAsap`. Memoized by target identity, so a
+    /// shared inner summary is one `Rc` no matter how many roots reach it.
     pub fn materialize(
         &self,
         target: &Rc<QueryExpr>,
     ) -> Result<Option<Rc<SummaryNode>>, ImplementError> {
-        let Some(selected) = self.for_target(target) else {
+        if !self.groups.contains_key(&Rc::as_ptr(target)) {
             return Ok(None);
+        }
+        self.materialize_inner(target).map(Some)
+    }
+
+    fn materialize_inner(&self, target: &Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementError> {
+        let ptr = Rc::as_ptr(target);
+        if let Some(node) = self.materialized.borrow().get(&ptr) {
+            return Ok(Rc::clone(node));
+        }
+        let node = match self
+            .groups
+            .get(&ptr)
+            .and_then(|sel| sel.chosen)
+            .map(|c| &c.replacement)
+        {
+            None => keep_pre_asap(target)?,
+            Some(Replacement::Rewrite(rewritten)) => keep_pre_asap(rewritten)?,
+            Some(Replacement::Summary(node)) => self.relink_summary(node, target)?,
+            Some(Replacement::ExactComposition(_)) => Rc::clone(
+                &self.groups[&ptr]
+                    .composition
+                    .as_ref()
+                    .expect("selected compositions have a validated decision")
+                    .plan,
+            ),
         };
-        match selected.chosen.map(|candidate| &candidate.replacement) {
-            Some(Replacement::Summary(node)) => Ok(Some(Rc::clone(node))),
-            Some(Replacement::Rewrite(rewritten)) => keep_pre_asap(rewritten).map(Some),
-            None => keep_pre_asap(target).map(Some),
+        self.materialized.borrow_mut().insert(ptr, Rc::clone(&node));
+        Ok(node)
+    }
+
+    /// Re-link a bound `Summary` candidate's `SummaryAgg` child to the
+    /// child target's own materialization when that is legal beneath
+    /// maintenance; otherwise keep the candidate exactly as constructed.
+    fn relink_summary(
+        &self,
+        node: &Rc<SummaryNode>,
+        target: &Rc<QueryExpr>,
+    ) -> Result<Rc<SummaryNode>, ImplementError> {
+        let QueryExpr::Aggregate {
+            child: pre_child, ..
+        } = target.as_ref()
+        else {
+            return Ok(Rc::clone(node));
+        };
+        let has_maintenance_operation = self
+            .groups
+            .get(&Rc::as_ptr(pre_child))
+            .and_then(|selection| selection.chosen)
+            .is_some_and(|candidate| {
+                matches!(
+                    &candidate.replacement,
+                    Replacement::ExactComposition(composition)
+                        if composition.placement == OperationPlacement::Maintenance
+                )
+            });
+        if !has_maintenance_operation {
+            return Ok(Rc::clone(node));
+        }
+        let new_child = self.materialize_inner(pre_child)?;
+        Ok(relink_agg_child(node, &new_child))
+    }
+}
+
+/// Rebuild `node` (a `SummaryAgg`, possibly under a `SummaryEstimate`) with
+/// `new_child` as the `SummaryAgg`'s child, if the result still validates
+/// as maintained state; otherwise return `node` unchanged.
+fn relink_agg_child(node: &Rc<SummaryNode>, new_child: &Rc<SummaryNode>) -> Rc<SummaryNode> {
+    match &node.expr {
+        SummaryExpr::SummaryEstimate {
+            summary_input,
+            query,
+        } => {
+            let inner = relink_agg_child(summary_input, new_child);
+            if Rc::ptr_eq(&inner, summary_input) {
+                return Rc::clone(node);
+            }
+            Rc::new(SummaryNode {
+                expr: SummaryExpr::SummaryEstimate {
+                    summary_input: inner,
+                    query: query.clone(),
+                },
+                schema: node.schema.clone(),
+                guarantee: node.guarantee.clone(),
+            })
+        }
+        SummaryExpr::SummaryAgg {
+            child,
+            family,
+            input,
+            reduction,
+            grouping,
+        } => {
+            if Rc::ptr_eq(child, new_child) {
+                return Rc::clone(node);
+            }
+            let rebuilt = Rc::new(SummaryNode {
+                expr: SummaryExpr::SummaryAgg {
+                    child: Rc::clone(new_child),
+                    family: family.clone(),
+                    input: input.clone(),
+                    reduction: reduction.clone(),
+                    grouping: grouping.clone(),
+                },
+                schema: node.schema.clone(),
+                guarantee: node.guarantee.clone(),
+            });
+            match validate_execution_data_states_at(
+                &rebuilt,
+                ExecutionDataState::MAINTENANCE_SUMMARY,
+            ) {
+                Ok(_) => rebuilt,
+                Err(_) => Rc::clone(node),
+            }
+        }
+        _ => Rc::clone(node),
+    }
+}
+
+/// The maintained `SummaryAgg` a bound `Summary` candidate builds (under
+/// its `SummaryEstimate` readout, if any) — the summary an `ValueOperationAtMaintenanceTime`
+/// beneath it feeds, for `maintenance_operation_plan_cost_rate`.
+fn maintained_summary(node: &Rc<SummaryNode>) -> Option<&Rc<SummaryNode>> {
+    match &node.expr {
+        SummaryExpr::SummaryEstimate { summary_input, .. } => maintained_summary(summary_input),
+        SummaryExpr::SummaryAgg { .. } => Some(node),
+        _ => None,
+    }
+}
+
+fn is_composition_candidate(candidate: &ReplacementSubDAG) -> bool {
+    matches!(candidate.replacement, Replacement::ExactComposition(_))
+}
+
+/// Everything [`PlanSpace::global_selection`] threads between sites for
+/// exact compositions (issue #171): child candidates already committed by
+/// an earlier parent, and the maintained summary above each site.
+#[derive(Default)]
+struct CompositionContext {
+    /// child target ptr → the child's candidate an ancestor's composition
+    /// already committed to (a later parent must compose with the *same*
+    /// one, and the child's own selection is forced to it).
+    committed_child: HashMap<*const QueryExpr, *const ReplacementSubDAG>,
+    /// site ptr → the maintained `SummaryAgg` directly above it, when its
+    /// parent chose a bound `Summary` — what an `ValueOperationAtMaintenanceTime` here feeds.
+    maintaining_parent: HashMap<*const QueryExpr, Rc<SummaryNode>>,
+}
+
+/// One eligible composed alternative at a site, before the cheapest wins.
+struct CompositionOption<'a> {
+    candidate: &'a ReplacementSubDAG,
+    decision: CompositionDecision<'a>,
+}
+
+/// Every [`Replacement::ExactComposition`] candidate of `group` whose
+/// composed-plan rate is *known* and beats the raw-recompute baseline —
+/// costed against each compatible child candidate already in `PlanSpace`
+/// (or the one an earlier parent committed). Unknown statistics yield no
+/// option at all: the conservative `KeepPreAsap` path stays.
+fn composition_options<'a>(
+    group: &'a MemoGroup,
+    groups: &'a HashMap<*const QueryExpr, MemoGroup>,
+    effective: usize,
+    cost_model: &dyn CostModel,
+    context: &CompositionContext,
+    plans: &[PreparedComposition],
+) -> Vec<CompositionOption<'a>> {
+    let mut options = Vec::new();
+    for candidate in &group.candidates {
+        let Replacement::ExactComposition(composition) = &candidate.replacement else {
+            continue;
+        };
+        let child_ptr = Rc::as_ptr(&composition.child_target);
+        let Some(child_group) = groups.get(&child_ptr) else {
+            continue;
+        };
+        let already_committed = context.committed_child.get(&child_ptr).copied();
+        let cost = |summary: &SummaryNode, shared: bool| {
+            let request = ExactCompositionCostRequest {
+                target: &group.target,
+                composition,
+                summary,
+                effective_consumer_count: effective,
+            };
+            let mut inputs = cost_model.exact_composition_cost_inputs(&request);
+            if shared {
+                // Shared state is counted once: an earlier parent already
+                // pays this child's maintenance, so the marginal cost here
+                // is zero — a *known* zero, unlike an unknown input.
+                if let Some(maintenance) = inputs.summary_maintenance_cost_per_update.as_mut() {
+                    *maintenance = 0.0;
+                }
+            }
+            let rate = inputs.composed_plan_cost_rate(composition.placement)?;
+            let baseline = raw_recompute_cost_rate(&inputs)?;
+            (rate < baseline).then_some((rate, baseline, inputs))
+        };
+        match composition.placement {
+            OperationPlacement::Read => {
+                let child_candidates: Vec<&'a ReplacementSubDAG> = match already_committed {
+                    // SAFETY-free: the pointer was taken from `groups`'s own
+                    // candidate storage, which outlives this borrow.
+                    Some(ptr) => child_group
+                        .candidates
+                        .iter()
+                        .filter(|c| std::ptr::eq(*c, ptr))
+                        .collect(),
+                    None => child_group.candidates.iter().collect(),
+                };
+                for child_candidate in child_candidates {
+                    let Replacement::Summary(summary) = &child_candidate.replacement else {
+                        continue;
+                    };
+                    if !composition.accepts_child(summary) {
+                        continue;
+                    }
+                    let Some(prepared) = plans.iter().find(|p| {
+                        p.target == Rc::as_ptr(&group.target)
+                            && p.operation.same_as(composition)
+                            && Rc::ptr_eq(&p.child, summary)
+                    }) else {
+                        continue;
+                    };
+                    let Some((rate, baseline, inputs)) = cost(summary, already_committed.is_some())
+                    else {
+                        continue;
+                    };
+                    options.push(CompositionOption {
+                        candidate,
+                        decision: CompositionDecision {
+                            plan: Rc::clone(&prepared.plan),
+                            child_target: &composition.child_target,
+                            child_candidate: Some(child_candidate),
+                            cost_rate: rate,
+                            baseline_rate: baseline,
+                            inputs,
+                        },
+                    });
+                }
+            }
+            OperationPlacement::Maintenance => {
+                let Some(prepared) = plans.iter().find(|p| {
+                    p.target == Rc::as_ptr(&group.target) && p.operation.same_as(composition)
+                }) else {
+                    continue;
+                };
+                // An maintenance-time operation only pays off beneath a
+                // maintained summary; with nothing above it, its output is
+                // never read and the raw fallback is the same computation.
+                let Some(parent) = context.maintaining_parent.get(&Rc::as_ptr(&group.target))
+                else {
+                    continue;
+                };
+                let Some((rate, baseline, inputs)) = cost(parent, false) else {
+                    continue;
+                };
+                options.push(CompositionOption {
+                    candidate,
+                    decision: CompositionDecision {
+                        plan: Rc::clone(&prepared.plan),
+                        child_target: &composition.child_target,
+                        child_candidate: None,
+                        cost_rate: rate,
+                        baseline_rate: baseline,
+                        inputs,
+                    },
+                });
+            }
         }
     }
+    options
 }
 
 impl<Id> PlanSpace<Id> {
@@ -3378,6 +3801,7 @@ impl<Id> PlanSpace<Id> {
         let mut effective_uses = graph.external_root_uses.clone();
         let mut chosen_share: HashMap<*const QueryExpr, ShareDecision> = HashMap::new();
         let mut groups: HashMap<*const QueryExpr, SelectedGroup<'_>> = HashMap::new();
+        let mut context = CompositionContext::default();
 
         for ptr in &topo {
             let group = &self.groups[ptr];
@@ -3385,38 +3809,83 @@ impl<Id> PlanSpace<Id> {
             let effective = effective_uses.get(ptr).copied().unwrap_or(0);
             effective_uses.insert(*ptr, effective);
 
+            // ── Exact compositions (issue #171) ─────────────────────────
+            // A child an earlier parent's composition committed to is
+            // forced to exactly that candidate — the parent/child pair is
+            // one decision. Otherwise, a composition here wins only when
+            // its cost-units-per-second rate is *known* and beats the raw
+            // recompute baseline; missing statistics keep the conservative
+            // path below.
+            let mut composition_decision = None;
+            let forced = context
+                .committed_child
+                .get(ptr)
+                .and_then(|&cptr| group.candidates.iter().find(|c| std::ptr::eq(*c, cptr)));
+            let composed = if forced.is_some() {
+                None
+            } else {
+                composition_options(
+                    group,
+                    &self.groups,
+                    effective,
+                    cost_model,
+                    &context,
+                    &self.composition_plans,
+                )
+                .into_iter()
+                .min_by(|a, b| a.decision.cost_rate.0.total_cmp(&b.decision.cost_rate.0))
+            };
+            if let Some(option) = &composed {
+                if let Some(child_candidate) = option.decision.child_candidate {
+                    context.committed_child.insert(
+                        Rc::as_ptr(option.decision.child_target),
+                        child_candidate as *const ReplacementSubDAG,
+                    );
+                }
+                if let Replacement::ExactComposition(composition) = &option.candidate.replacement {
+                    if composition.placement == OperationPlacement::Maintenance {
+                        // A chain of functions feeds the same summary.
+                        if let Some(parent) = context.maintaining_parent.get(ptr).cloned() {
+                            context
+                                .maintaining_parent
+                                .insert(Rc::as_ptr(&composition.child_target), parent);
+                        }
+                    }
+                }
+            }
+
             let lifecycle_choice = candidate_costs
                 .filter(|costs| costs.finalizes(&group.target))
                 .map(|costs| {
                     let summary = group
                         .candidates
                         .iter()
+                        .filter(|candidate| !is_composition_candidate(candidate))
                         .filter_map(|candidate| {
                             costs
                                 .get(&group.target, candidate)
                                 .map(|cost| (candidate, cost))
                         })
-                        .min_by(|(_, a), (_, b)| a.0.total_cmp(&b.0));
+                        .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0));
                     match (summary, costs.raw(&group.target)) {
                         (Some((_, summary_cost)), Some(raw)) if raw.0 <= summary_cost.0 => None,
                         (Some((candidate, _)), _) => Some(candidate),
-                        (None, Some(_)) => None,
-                        (None, None) => None,
+                        (None, _) => None,
                     }
                 });
-            let chosen = if let Some(lifecycle_choice) = lifecycle_choice {
-                lifecycle_choice
-            } else if cost_model.candidate_cost_covers_complete_plan() {
+
+            let complete_plan_choice = (!forced.is_some()
+                && composed.is_none()
+                && lifecycle_choice.is_none()
+                && cost_model.candidate_cost_covers_complete_plan())
+            .then(|| {
                 let effective_target = TargetSubDAG::with_consumer_count(&group.target, effective);
-                let bound_physical = group
+                let bound = group
                     .candidates
                     .iter()
-                    // A logical CSE rewrite does not encode shared retained
-                    // state or independent execution multiplicity. Until it
-                    // is bound as a complete physical DAG, it must not enter
-                    // evidence-backed ranking as though those costs were
-                    // known.
-                    .filter(|candidate| !is_cse_candidate(candidate))
+                    .filter(|candidate| {
+                        !is_cse_candidate(candidate) && !is_composition_candidate(candidate)
+                    })
                     .filter_map(|candidate| {
                         cost_model
                             .candidate_cost(candidate, &effective_target)
@@ -3424,7 +3893,7 @@ impl<Id> PlanSpace<Id> {
                     })
                     .min_by(|(_, left), (_, right)| left.0.total_cmp(&right.0))
                     .map(|(candidate, _)| candidate);
-                bound_physical.or_else(|| {
+                bound.or_else(|| {
                     (effective >= 2)
                         .then(|| {
                             decide_with_effective_count(group, effective, cost_model).and_then(
@@ -3436,6 +3905,18 @@ impl<Id> PlanSpace<Id> {
                         })
                         .flatten()
                 })
+            })
+            .flatten();
+
+            let chosen = if let Some(forced) = forced {
+                Some(forced)
+            } else if let Some(option) = composed {
+                composition_decision = Some(option.decision);
+                Some(option.candidate)
+            } else if let Some(choice) = lifecycle_choice {
+                choice
+            } else if cost_model.candidate_cost_covers_complete_plan() {
+                complete_plan_choice
             } else if effective >= 2 && cse_candidate_pair(group).is_some() {
                 let decision = if let Some(profiles) = profiles {
                     decide_group_with_recurrence(
@@ -3456,7 +3937,9 @@ impl<Id> PlanSpace<Id> {
                         let logical = group
                             .candidates
                             .iter()
-                            .filter(|candidate| !is_cse_candidate(candidate))
+                            .filter(|candidate| {
+                                !is_cse_candidate(candidate) && !is_composition_candidate(candidate)
+                            })
                             .filter_map(|candidate| {
                                 cost_model
                                     .candidate_cost(candidate, &effective_target)
@@ -3499,12 +3982,13 @@ impl<Id> PlanSpace<Id> {
                     // group also contributes no Share collapse to its own
                     // children (see `multiplier`'s `_ => effective` arm).
                     None => rank_group(group, cost_model).into_iter().find(|candidate| {
-                        cost_model
-                            .candidate_cost(
-                                candidate,
-                                &TargetSubDAG::with_consumer_count(&group.target, effective),
-                            )
-                            .is_some()
+                        !is_composition_candidate(candidate)
+                            && cost_model
+                                .candidate_cost(
+                                    candidate,
+                                    &TargetSubDAG::with_consumer_count(&group.target, effective),
+                                )
+                                .is_some()
                     }),
                 }
             } else {
@@ -3513,6 +3997,7 @@ impl<Id> PlanSpace<Id> {
                     .into_iter()
                     .find(|candidate| {
                         !is_cse_candidate(candidate)
+                            && !is_composition_candidate(candidate)
                             && cost_model
                                 .candidate_cost(candidate, &effective_target)
                                 .is_some()
@@ -3527,6 +4012,19 @@ impl<Id> PlanSpace<Id> {
                             })
                     })
             };
+
+            // Record the maintained summary this site's bound candidate
+            // builds, for a child that may compose an `ValueOperationAtMaintenanceTime`
+            // beneath it.
+            if let (Some(Replacement::Summary(node)), QueryExpr::Aggregate { child, .. }) =
+                (chosen.map(|c| &c.replacement), group.target.as_ref())
+            {
+                if let Some(summary) = maintained_summary(node) {
+                    context
+                        .maintaining_parent
+                        .insert(Rc::as_ptr(child), Rc::clone(summary));
+                }
+            }
 
             let outgoing_multiplier = multiplier(*ptr, &effective_uses, &chosen_share);
             match chosen {
@@ -3545,7 +4043,9 @@ impl<Id> PlanSpace<Id> {
                 _ => {
                     let selected_rewrite = match chosen.map(|candidate| &candidate.replacement) {
                         Some(Replacement::Rewrite(rewrite)) => rewrite,
-                        Some(Replacement::Summary(_)) | None => &group.target,
+                        Some(Replacement::Summary(_) | Replacement::ExactComposition(_)) | None => {
+                            &group.target
+                        }
                     };
                     for (child, edge_count) in direct_child_counts(selected_rewrite) {
                         *effective_uses.entry(child).or_insert(0) +=
@@ -3561,6 +4061,7 @@ impl<Id> PlanSpace<Id> {
                     consumer_count: group.consumer_count,
                     effective_consumer_count: effective,
                     chosen,
+                    composition: composition_decision,
                 },
             );
         }
@@ -3568,6 +4069,7 @@ impl<Id> PlanSpace<Id> {
         Ok(GlobalSelection {
             order: self.order.clone(),
             groups,
+            materialized: RefCell::new(HashMap::new()),
         })
     }
 }
@@ -3943,7 +4445,8 @@ pub fn default_strategies() -> Vec<Box<dyn ReplacementStrategy>> {
         Box::new(SketchAlgorithmStrategy::default_cost_model()),
         Box::new(HydraGroupingStrategy::default_cost_model()),
         Box::new(SharedSubtreeStrategy),
-        Box::new(crate::rewrite::SemanticEquivalentRewriteStrategy),
+        Box::new(crate::rewrite::AvgToSumOverCountStrategy),
+        Box::new(ExactCompositionStrategy::default_cost_model()),
     ]
 }
 
@@ -3958,6 +4461,7 @@ pub fn default_strategies_with<'a>(
         Box::new(HydraGroupingStrategy::new(cost_model)),
         Box::new(SharedSubtreeStrategy),
         Box::new(crate::rewrite::SemanticEquivalentRewriteStrategy),
+        Box::new(ExactCompositionStrategy::new(cost_model)),
     ]
 }
 
@@ -3984,6 +4488,7 @@ pub fn default_strategies_with_evidence<'a>(
         )),
         Box::new(SharedSubtreeStrategy),
         Box::new(crate::rewrite::AvgToSumOverCountStrategy),
+        Box::new(ExactCompositionStrategy::new(cost_model)),
     ]
 }
 
@@ -4023,7 +4528,9 @@ pub fn search_workload_with<'s, Id>(
     roots: Vec<(Id, Rc<QueryExpr>)>,
     strategies: &[Box<dyn ReplacementStrategy + 's>],
 ) -> PlanSpace<Id> {
-    search_cse_workload_with(cse_workload(roots), strategies)
+    let mut space = search_cse_workload_with(cse_workload(roots), strategies);
+    space.prepare_compositions(&DefaultAccuracyModel, &HashMap::new());
+    space
 }
 
 /// [`search_workload_with`] plus a per-root end-to-end `AccuracyTarget`
@@ -4055,7 +4562,7 @@ pub fn search_workload_with_targets<'s, Id>(
             (id, root)
         })
         .collect();
-    let mut space = search_workload_with(roots, strategies);
+    let mut space = search_cse_workload_with(cse_workload(roots), strategies);
     // `cse_workload` preserves root order, so targets zip by position.
     let root_ptrs: Vec<(*const QueryExpr, AccuracyTarget)> = space
         .roots
@@ -4063,7 +4570,12 @@ pub fn search_workload_with_targets<'s, Id>(
         .zip(targets)
         .filter_map(|((_, root), target)| target.map(|t| (Rc::as_ptr(root), t)))
         .collect();
+    let mut composition_targets: HashMap<_, Vec<_>> = HashMap::new();
     for (ptr, target) in root_ptrs {
+        composition_targets
+            .entry(ptr)
+            .or_default()
+            .push(target.clone());
         let Some(group) = space.groups.get_mut(&ptr) else {
             continue;
         };
@@ -4077,6 +4589,9 @@ pub fn search_workload_with_targets<'s, Id>(
                         .as_ref()
                         .is_some_and(|g| accuracy_model.satisfies(g, &target)),
                     Replacement::Rewrite(_) => true,
+                    // A composition's guarantee depends on the concrete child;
+                    // prepare_compositions checks those pairs after all roots.
+                    Replacement::ExactComposition(_) => true,
                 });
         group.candidates = legal;
         group.rejected.extend(illegal.into_iter().map(|candidate| {
@@ -4097,6 +4612,11 @@ pub fn search_workload_with_targets<'s, Id>(
                         None,
                     )),
                 Replacement::Rewrite(_) => unreachable!("rewrites are never rejected here"),
+                Replacement::ExactComposition(_) => (
+                    asap_types::post_asap::ErrorMetric::AbsoluteValue,
+                    None,
+                    None,
+                ),
             };
             RejectedCandidate {
                 strategy: candidate.strategy,
@@ -4110,6 +4630,7 @@ pub fn search_workload_with_targets<'s, Id>(
             }
         }));
     }
+    space.prepare_compositions(accuracy_model, &composition_targets);
     space
 }
 
@@ -4267,6 +4788,7 @@ fn search_cse_workload_with<'s, Id>(
         roots: cse_roots,
         groups,
         order,
+        composition_plans: Vec::new(),
     }
 }
 
@@ -4559,6 +5081,7 @@ mod tests {
             (A::Min { col: None }, Acc(E::MinMax)),
             (A::Max { col: None }, Acc(E::MinMax)),
             (A::Rate, Acc(E::Rate)),
+            (A::IRate, Acc(E::IRate)),
             (A::Increase, Acc(E::Increase)),
             // exact but non-mergeable → pass-through
             (A::Avg { col: None }, Pass),
@@ -5050,7 +5573,9 @@ mod tests {
             .iter()
             .map(|r| match &r.replacement {
                 Replacement::Summary(node) => summary_family_algorithm(node),
-                Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
+                Replacement::Rewrite(_) | Replacement::ExactComposition(_) => {
+                    panic!("expected a Summary replacement")
+                }
             })
             .collect();
         assert!(kinds.contains(&SketchAlgorithm::Kll), "{kinds:?}");
@@ -5070,7 +5595,9 @@ mod tests {
             .iter()
             .map(|r| match &r.replacement {
                 Replacement::Summary(node) => summary_family_algorithm(node),
-                Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
+                Replacement::Rewrite(_) | Replacement::ExactComposition(_) => {
+                    panic!("expected a Summary replacement")
+                }
             })
             .collect();
         assert_eq!(
@@ -5098,7 +5625,9 @@ mod tests {
             .iter()
             .map(|r| match &r.replacement {
                 Replacement::Summary(node) => summary_family_algorithm(node),
-                Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
+                Replacement::Rewrite(_) | Replacement::ExactComposition(_) => {
+                    panic!("expected a Summary replacement")
+                }
             })
             .collect();
         assert_eq!(kinds, vec![SketchAlgorithm::Theta, SketchAlgorithm::Kmv]);
@@ -5176,7 +5705,9 @@ mod tests {
             .iter()
             .map(|r| match &r.replacement {
                 Replacement::Summary(node) => summary_family_algorithm(node),
-                Replacement::Rewrite(_) => panic!("expected a Summary replacement"),
+                Replacement::Rewrite(_) | Replacement::ExactComposition(_) => {
+                    panic!("expected a Summary replacement")
+                }
             })
             .collect();
         assert!(kinds.contains(&SketchAlgorithm::Kll));
@@ -5184,13 +5715,10 @@ mod tests {
         assert_eq!(kinds.len(), 2);
     }
 
-    /// Enumerating candidates for the *target* node must only steer that
-    /// node's own decision — a nested aggregate underneath it still gets its
-    /// own independent (`cost_model`-ranked) enumeration, not whatever the
-    /// caller happened to pick for the outer target. This is the behavior
-    /// [`construct_summary`]'s recursion (via [`realize_child`])
-    /// gets for free: only the top node's `Implementation` is ever forced
-    /// from outside; the child is always re-enumerated fresh.
+    /// Constructing the outer target's candidates never leaks its algorithm
+    /// choice into the nested aggregate. Existing approximate composition
+    /// remains governed by the accuracy model, independently of #171's exact
+    /// value-operation candidates.
     #[test]
     fn enumerating_the_targets_candidates_does_not_leak_into_a_nested_aggregate() {
         // outer: quantile(0.99, ...) over inner: quantile(0.5, m) — both
@@ -5210,35 +5738,33 @@ mod tests {
         )
         .replacements(&target);
 
-        let ddsketch = replacements
+        assert_eq!(replacements.len(), 2, "{replacements:?}");
+        assert!(replacements
             .iter()
-            .find(|r| {
-                matches!(&r.replacement, Replacement::Summary(node)
-                    if summary_family_algorithm(node) == SketchAlgorithm::DDSketch)
-            })
-            .expect("the outer target's DDSketch candidate must be present");
-        let Replacement::Summary(node) = &ddsketch.replacement else {
-            unreachable!("filtered on Replacement::Summary above");
-        };
-        assert_eq!(
-            summary_family_algorithm(node),
-            SketchAlgorithm::DDSketch,
-            "the outer (target) node must be the DDSketch candidate"
+            .all(|candidate| { matches!(candidate.replacement, Replacement::Summary(_)) }));
+        // The inner target is still independently enumerated and ranked —
+        // a custom cost model that prefers DDSketch for it is honored, and
+        // nothing about the outer target's choice reaches it.
+        let space = search_workload_with(
+            vec![("q", Rc::clone(&outer))],
+            &default_strategies_with(&PreferDDSketchViaCostModel),
         );
-
-        let asap_types::post_asap::SummaryExpr::SummaryEstimate { summary_input, .. } = &node.expr
-        else {
-            panic!("expected SummaryEstimate root, got {:?}", node.expr);
+        let QueryExpr::Aggregate { child, .. } = space.roots[0].1.as_ref() else {
+            unreachable!()
         };
-        let asap_types::post_asap::SummaryExpr::SummaryAgg { child, .. } = &summary_input.expr
-        else {
-            panic!("expected SummaryAgg, got {:?}", summary_input.expr);
-        };
+        let inner_group = space.group_for(child).expect("inner quantile is a target");
+        let inner_kinds: Vec<SketchAlgorithm> = inner_group
+            .candidates
+            .iter()
+            .filter_map(|c| match &c.replacement {
+                Replacement::Summary(node) => sketch_kind_of(node),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            summary_family_algorithm(child),
-            SketchAlgorithm::Kll,
-            "the nested inner aggregate must still get the cost-model-ranked \
-             default (Kll), not inherit the outer target's DDSketch candidate"
+            inner_kinds,
+            vec![SketchAlgorithm::DDSketch, SketchAlgorithm::Kll],
+            "the nested inner aggregate keeps its own cost-model-ranked candidates"
         );
     }
 
@@ -5765,7 +6291,7 @@ mod tests {
         assert_eq!(rewrites.len(), 2);
         let first_shares_target = match &rewrites[0].replacement {
             Replacement::Rewrite(rc) => Rc::ptr_eq(rc, &group.target),
-            Replacement::Summary(_) => false,
+            Replacement::Summary(_) | Replacement::ExactComposition(_) => false,
         };
         assert!(
             first_shares_target,
@@ -5801,7 +6327,7 @@ mod tests {
         assert_eq!(agg_group.candidates.len(), 2);
         let first_kind = match &agg_group.candidates[0].replacement {
             Replacement::Summary(node) => sketch_kind_of(node),
-            Replacement::Rewrite(_) => None,
+            Replacement::Rewrite(_) | Replacement::ExactComposition(_) => None,
         };
         assert_eq!(first_kind, Some(SketchAlgorithm::DDSketch));
     }
@@ -5997,7 +6523,7 @@ mod tests {
             .unwrap();
         let kind = match &agg_group.chosen.unwrap().replacement {
             Replacement::Summary(node) => sketch_kind_of(node),
-            Replacement::Rewrite(_) => None,
+            Replacement::Rewrite(_) | Replacement::ExactComposition(_) => None,
         };
         assert_eq!(kind, Some(SketchAlgorithm::DDSketch));
     }
@@ -6463,6 +6989,7 @@ mod tests {
             roots,
             groups,
             order: order.clone(),
+            composition_plans: Vec::new(),
         };
         let graph = reference_graph(&space);
 
@@ -7673,6 +8200,7 @@ mod tests {
                 DefaultAccuracyModel.satisfies(g, &AccuracyTarget::Epsilon(0.1))
             }),
             Replacement::Rewrite(_) => false,
+            Replacement::ExactComposition(_) => false,
         }));
         let ranked = space.cost_sorted(&DefaultCostModel);
         let root_ranked = ranked.iter().find(|g| Rc::ptr_eq(g.target, root)).unwrap();
@@ -7740,6 +8268,7 @@ mod tests {
                 .as_ref()
                 .is_some_and(ResultGuarantee::is_exact),
             Replacement::Rewrite(_) => true,
+            Replacement::ExactComposition(_) => false,
         }));
     }
 

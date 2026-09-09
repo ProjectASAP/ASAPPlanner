@@ -199,6 +199,7 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
         SummaryExpr::KeepPreAsap(_) => vec![],
         SummaryExpr::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
         SummaryExpr::SummaryAgg { child, .. } => vec![child],
+        SummaryExpr::ValueOperation { child, .. } => vec![child],
         SummaryExpr::SummaryJoin { outer, inner, .. }
         | SummaryExpr::SummarySubtract {
             left: outer,

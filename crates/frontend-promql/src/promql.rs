@@ -34,7 +34,7 @@
 //! | `count_over_time(m[w])` | `Aggregate{[Count], TimeRange{w}}` |
 //! | `last/first/mad/ts_of_min/ts_of_max/ts_of_first/ts_of_last_over_time(m[w])` | `Aggregate{[Last/First/Mad/TsOf…OverTime], TimeRange{w}}` — per-series range reducers (issue #51) |
 //! | `sort`/`sort_desc(v)`, `sort_by_label[_desc](v,"l"…)` | `Sort{value \| label…}` (no `Limit`) — row-preserving reorder (issue #51); `min_of`/`max_of` scalar reducers → #89 |
-//! | `rate/irate(m[w])` | `Aggregate{[Rate], TimeRange{w}}` — `irate` shares the `rate` *intent*; the avg-vs-last-two-samples difference is a post-ASAP estimation method |
+//! | `rate(m[w])` / `irate(m[w])` | `Aggregate{[Rate/IRate], TimeRange{w}}` — distinct function identities; shared physical machinery is a later realization choice |
 //! | `increase(m[w])` | `Aggregate{[Increase], TimeRange{w}}` |
 //! | `changes`/`delta`/`idelta`/`deriv`/`resets`/`predict_linear`/`double_exponential_smoothing`(`m[w]`, …) | `Aggregate{[Changes/Delta/…], TimeRange{w}}` — per-series counter-derivative intents (issue #44) |
 //! | `absent(v)` / `absent_over_time(m[w])` / `present_over_time(m[w])` | `Aggregate{[Absent/AbsentOverTime/PresentOverTime]}` — presence intents; the empty→synthesized-sample logic is a post-ASAP concern (issue #47) |
@@ -130,6 +130,7 @@ enum InnerFunc {
     // window field either; `windowed_aggregate` reads `Inner.window`
     // uniformly for every intent, so it would be a redundant duplicate here.
     Rate,
+    IRate,
     Increase,
     // Counter-derivative range functions (issue #44). The window rides on the
     // enclosing `TimeRange` node (like `*_over_time`), so these carry only
@@ -351,10 +352,11 @@ fn range_fn_over_subquery(call: &Call) -> Result<Option<Unresolved>> {
         if subquery_range(arg_expr).is_none() {
             return Ok(None);
         }
-        let inner = if call.func.name == "increase" {
-            InnerFunc::Increase
-        } else {
-            InnerFunc::Rate
+        let inner = match call.func.name {
+            "rate" => InnerFunc::Rate,
+            "irate" => InnerFunc::IRate,
+            "increase" => InnerFunc::Increase,
+            _ => unreachable!(),
         };
         return Ok(Some(outer_aggregate(
             vec![],
@@ -1311,7 +1313,11 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
                 metric,
                 matchers,
                 window: Some(window),
-                func: Some(InnerFunc::Rate),
+                func: Some(if name == "irate" {
+                    InnerFunc::IRate
+                } else {
+                    InnerFunc::Rate
+                }),
                 shift,
             })
         }
@@ -1645,6 +1651,7 @@ fn inner_intent(f: &InnerFunc) -> AggIntent<ColumnRef> {
             accuracy: current_accuracy(),
         },
         InnerFunc::Rate => AggIntent::Rate,
+        InnerFunc::IRate => AggIntent::IRate,
         InnerFunc::Increase => AggIntent::Increase,
         InnerFunc::Changes => AggIntent::Changes,
         InnerFunc::Delta => AggIntent::Delta,

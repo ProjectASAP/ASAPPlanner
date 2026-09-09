@@ -189,7 +189,9 @@ pub mod cost_model;
 pub mod empirical_comparison;
 pub mod empirical_cost;
 pub mod empirical_resources;
+pub mod exact_composition;
 pub mod explanation;
+mod function_rules;
 pub mod grouping;
 pub mod physical_operator_statistics;
 pub mod physical_plan_cost_model;
@@ -210,7 +212,13 @@ pub use accuracy::{
     PropagationStats, WorkloadAccuracyEvidence,
 };
 pub use accuracy_reconciliation::AccuracyReconciliationStrategy;
-pub use cost_model::{CompleteSummaryCandidateEstimate, CostModel, DefaultCostModel};
+pub use cost_model::CompleteSummaryCandidateEstimate;
+pub use cost_model::{
+    maintenance_operation_plan_cost_rate, raw_recompute_cost_rate, read_operation_plan_cost_rate,
+    CostModel, CostProvenance, CostUnit, DefaultCostModel, ExactCompositionCostInputs,
+    ExactCompositionCostRequest, ValueOperationCapabilities,
+};
+pub use exact_composition::{ExactComposition, ExactCompositionStrategy, OperationPlacement};
 pub use explanation::{
     explain_replacements, explain_replacements_with, ExplanationKind, ReplacementExplanation,
 };
@@ -222,11 +230,11 @@ pub use recurrence::{
 };
 pub use replacement::{
     default_strategies, default_strategies_with, search_workload, search_workload_with,
-    search_workload_with_targets, summary_candidates, GlobalSelection, ImplementError,
-    Implementation, Matcher, MemoGroup, PlanSpace, Proposals, RankedGroup, RecurrenceProfileMap,
-    RejectedCandidate, Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG,
-    SelectedGroup, SharedSubtreeStrategy, SketchAlgorithmStrategy, TargetSubDAG,
-    MAX_SEARCH_ITERATIONS,
+    search_workload_with_targets, summary_candidates, CompositionDecision, GlobalSelection,
+    ImplementError, Implementation, Matcher, MemoGroup, PlanSpace, Proposals, RankedGroup,
+    RecurrenceProfileMap, RejectedCandidate, Replacement, ReplacementProvenance,
+    ReplacementStrategy, ReplacementSubDAG, SelectedGroup, SharedSubtreeStrategy,
+    SketchAlgorithmStrategy, TargetSubDAG, MAX_SEARCH_ITERATIONS,
 };
 pub use rewrite::{AvgToSumOverCountStrategy, SemanticEquivalentRewriteStrategy};
 pub use summary_maintenance_dag_export::{

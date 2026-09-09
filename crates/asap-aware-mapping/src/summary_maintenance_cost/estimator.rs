@@ -29,7 +29,9 @@ pub(super) fn estimate_heterogeneous_summary(
         }
         match &node.expr {
             SummaryExpr::KeepPreAsap(query) => query_source_selections(query, out)?,
-            SummaryExpr::SummaryAgg { child, .. } => summary_source_selections(child, seen, out)?,
+            SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
+                summary_source_selections(child, seen, out)?
+            }
             SummaryExpr::SummaryMerge { children } => {
                 for child in children {
                     summary_source_selections(child, seen, out)?;
@@ -290,6 +292,23 @@ pub(super) fn estimate_heterogeneous_summary(
                     io_bytes,
                 )?;
             }
+            SummaryExpr::ValueOperation { child, .. } => {
+                let operation = summary_operation_evidence(node, evidence)?.resource();
+                *cpu_ops += evaluation_count as f64
+                    * validated_operator_executions("value_operation", operation)? as f64
+                    * validated_operator_cpu("value_operation", operation.cpu_ops)?;
+                add_operator_io(io_bytes, operation, evaluation_count)?;
+                visit_ops(
+                    child,
+                    seen,
+                    by_node,
+                    evidence,
+                    scope,
+                    evaluation_count,
+                    cpu_ops,
+                    io_bytes,
+                )?;
+            }
             SummaryExpr::KeepPreAsap(_) => {
                 let retained = evidence
                     .retained_queries
@@ -391,6 +410,7 @@ pub(super) fn estimate_heterogeneous_summary(
                             out.push(node as *const _);
                             collect_aggs(child, seen, out);
                         }
+                        SummaryExpr::ValueOperation { child, .. } => collect_aggs(child, seen, out),
                         SummaryExpr::SummaryMerge { children } => {
                             children
                                 .iter()
@@ -591,7 +611,9 @@ fn validate_summary_edges_and_physical_ids(
     fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
         match &node.expr {
             SummaryExpr::KeepPreAsap(_) => vec![],
-            SummaryExpr::SummaryAgg { child, .. } => vec![child],
+            SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
+                vec![child]
+            }
             SummaryExpr::SummaryMerge { children } => {
                 children.iter().map(|child| child.as_ref()).collect()
             }
@@ -760,7 +782,9 @@ pub(super) fn estimate_transient_liveness(
     fn children(node: &SummaryNode) -> Vec<&SummaryNode> {
         match &node.expr {
             SummaryExpr::KeepPreAsap(_) => vec![],
-            SummaryExpr::SummaryAgg { child, .. } => vec![child],
+            SummaryExpr::SummaryAgg { child, .. } | SummaryExpr::ValueOperation { child, .. } => {
+                vec![child]
+            }
             SummaryExpr::SummaryMerge { children } => {
                 children.iter().map(|child| child.as_ref()).collect()
             }
@@ -816,6 +840,7 @@ pub(super) fn estimate_transient_liveness(
                 .ok_or(AnalyticalCostError::MissingOrStale("summary_join")),
             SummaryExpr::SummaryMerge { .. }
             | SummaryExpr::BinaryOp { .. }
+            | SummaryExpr::ValueOperation { .. }
             | SummaryExpr::SummarySubtract { .. }
             | SummaryExpr::SummaryDelete { .. }
             | SummaryExpr::SummaryEstimate { .. } => {
@@ -880,6 +905,7 @@ pub(super) fn evidence_nodes(root: &SummaryNode) -> (Vec<&SummaryNode>, Vec<&Sum
                 aggregations.push(node);
                 visit(child, seen, aggregations, joins);
             }
+            SummaryExpr::ValueOperation { child, .. } => visit(child, seen, aggregations, joins),
             SummaryExpr::SummaryMerge { children } => {
                 for child in children {
                     visit(child, seen, aggregations, joins);
@@ -1242,6 +1268,7 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
                 visit(lhs, seen, counts)?;
                 visit(rhs, seen, counts)?;
             }
+            SummaryExpr::ValueOperation { child, .. } => visit(child, seen, counts)?,
             SummaryExpr::SummaryDelete { summary_input, .. } => {
                 counts.deletes_per_update = counts
                     .deletes_per_update

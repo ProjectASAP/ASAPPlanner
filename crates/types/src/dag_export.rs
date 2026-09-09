@@ -475,6 +475,7 @@ macro_rules! define_summary_kind_tags {
 
 define_summary_kind_tags! {
     SummaryExpr::BinaryOp { .. } => "SummaryBinaryOp",
+    SummaryExpr::ValueOperation { .. } => "ValueOperation",
     SummaryExpr::SummaryAgg { .. } => "SummaryAgg",
     SummaryExpr::SummaryJoin { .. } => "SummaryJoin",
     SummaryExpr::SummarySubtract { .. } => "SummarySubtract",
@@ -497,6 +498,16 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
             });
             (kind, label, detail)
         }
+        SummaryExpr::ValueOperation {
+            operation, timing, ..
+        } => (
+            kind,
+            format!("ValueOperation({operation:?})"),
+            serde_json::json!({
+                "operation": format!("{operation:?}"),
+                "timing": timing.as_str(),
+            }),
+        ),
         SummaryExpr::SummaryAgg {
             family,
             input,
@@ -549,6 +560,7 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
     match expr {
         SummaryExpr::KeepPreAsap(_) => vec![],
         SummaryExpr::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
+        SummaryExpr::ValueOperation { child, .. } => vec![child],
         SummaryExpr::SummaryAgg { child, .. } => vec![child],
         SummaryExpr::SummaryJoin { outer, inner, .. } => vec![outer, inner],
         SummaryExpr::SummarySubtract { left, right } => vec![left, right],

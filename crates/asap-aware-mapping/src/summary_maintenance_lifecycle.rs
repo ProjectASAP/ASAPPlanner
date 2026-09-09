@@ -960,6 +960,7 @@ fn collect_summary_aggs(
             output.push(Rc::clone(node));
             collect_summary_aggs(child, seen, output);
         }
+        SummaryExpr::ValueOperation { child, .. } => collect_summary_aggs(child, seen, output),
         SummaryExpr::SummaryJoin { outer, inner, .. }
         | SummaryExpr::BinaryOp {
             lhs: outer,

@@ -266,11 +266,10 @@ fn rate_range_lives_in_time_range_node() {
 }
 
 #[test]
-fn irate_maps_to_rate_intent() {
-    // SEMANTICS: instant rate from the last two samples; same intent vocabulary.
+fn irate_maps_to_its_own_intent() {
     assert!(has(&ok("irate(http_requests_total[1m])"), |i| matches!(
         i,
-        AggIntent::Rate
+        AggIntent::IRate
     )));
 }
 
@@ -1504,7 +1503,7 @@ fn range_functions_over_a_subquery_reduce_per_series() {
     for (q, want) in [
         ("rate(sum(m)[5m:])", AggIntent::Rate),
         ("increase(sum(m)[5m:])", AggIntent::Increase),
-        ("irate(sum(m)[5m:])", AggIntent::Rate), // irate shares the Rate intent
+        ("irate(sum(m)[5m:])", AggIntent::IRate),
         ("changes(rate(m[5m])[1h:])", AggIntent::Changes),
         ("delta(sum(m)[5m:])", AggIntent::Delta),
         ("deriv(sum(m)[10m:])", AggIntent::Deriv),

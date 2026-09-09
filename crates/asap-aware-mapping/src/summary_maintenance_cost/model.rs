@@ -677,6 +677,7 @@ impl CostModel for SummaryMaintenanceCostModel {
         _target: &TargetSubDAG<'_>,
     ) -> Option<Cost> {
         match &candidate.replacement {
+            Replacement::ExactComposition(_) => None,
             // Lifecycle selection supplies a complete override. If it cannot,
             // the candidate remains unavailable rather than receiving this
             // trait's structural fallback.
@@ -3174,7 +3175,8 @@ mod tests {
                         },
                     );
                 }
-                SummaryExpr::SummaryAgg { child, .. } => retained(model, child, seen),
+                SummaryExpr::SummaryAgg { child, .. }
+                | SummaryExpr::ValueOperation { child, .. } => retained(model, child, seen),
                 SummaryExpr::SummaryMerge { children } => {
                     for child in children {
                         retained(model, child, seen);
@@ -3367,6 +3369,9 @@ mod tests {
                                 owners.push(node as *const _);
                                 owning_aggs(child, seen, owners);
                             }
+                            SummaryExpr::ValueOperation { child, .. } => {
+                                owning_aggs(child, seen, owners)
+                            }
                             SummaryExpr::SummaryMerge { children } => {
                                 for child in children {
                                     owning_aggs(child, seen, owners);
@@ -3406,7 +3411,10 @@ mod tests {
                 }
             }
             match &node.expr {
-                SummaryExpr::SummaryAgg { child, .. } => bind_ops(model, child, seen, inputs, cpu),
+                SummaryExpr::SummaryAgg { child, .. }
+                | SummaryExpr::ValueOperation { child, .. } => {
+                    bind_ops(model, child, seen, inputs, cpu)
+                }
                 SummaryExpr::SummaryMerge { children } => {
                     for child in children {
                         bind_ops(model, child, seen, inputs, cpu);

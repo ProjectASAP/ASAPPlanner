@@ -1,0 +1,677 @@
+//! [`ExactCompositionStrategy`] composes an exact function with a summary
+//! plan across an explicit maintenance/read-time boundary (issue #171).
+//!
+//! `construct_summary_agg` already nests accumulator realizations, such as
+//! KLL over exact `Sum` state or a quantile over `Rate` state. This strategy
+//! covers the more general cases where an exact function must consume a
+//! summary readout, or where a maintained summary consumes the values of an
+//! exact function that has no accumulator realization.
+//!
+//! Both cases use the general [`SummaryExpr::ValueOperation`] node. Its
+//! semantic [`ValueOperation`] is independent from [`ExecutionTiming`], so
+//! adding a function does not require adding a new physical node type.
+//!
+//! ## Reference, don't select
+//!
+//! A composed candidate needs a child plan to compose *with* — the inner
+//! quantile's own summary readout, say. This strategy deliberately does
+//! **not** pick that child itself (the way `construct_summary_agg`'s
+//! `realize_child` takes the head of the child's own ranking): a
+//! [`Replacement::ExactComposition`] carries only the child *target*
+//! (`ExactComposition::child_target`, the same `Rc<QueryExpr>` whose
+//! `MemoGroup` in `PlanSpace` already holds every candidate for it). It is
+//! [`PlanSpace::global_selection`](crate::replacement::PlanSpace::global_selection)
+//! that commits the compatible parent/child pair — so the child's own
+//! cost-model ranking, workload-wide effective consumer count, and shared
+//! `Rc` identity (one inner summary serving two outer folds) all stay
+//! correct, and a child that is also shared by an unrelated consumer is
+//! maintained exactly once. `GlobalSelection::materialize` then links the
+//! committed pair into one validated post-ASAP DAG.
+//!
+//! ## Proposal conditions
+//!
+//! A candidate is proposed only when all of these hold:
+//!
+//! - the target is a single-measure, `HAVING`-free exact aggregate;
+//! - read-time operation: the child is a bindable aggregate that has at least one
+//!   readout-producing summary implementation (a sketch/sample/wavelet/
+//!   model — the shapes a maintained accumulator can't sit above), and the
+//!   target's grouping keys resolve in the child's output schema;
+//!   transform: the target is a per-entity exact function with no
+//!   accumulator form (its only implementation is `PassThrough`);
+//! - the exact operator consumes only `Plain` values in its data_state — checked
+//!   again, structurally, when the pair is composed;
+//! - the plugged-in [`CostModel`] advertises the matching
+//!   [`ValueOperationCapabilities`](crate::cost_model::ValueOperationCapabilities).
+//!
+//! `avg` gets a read-time operation candidate *and* keeps
+//! [`crate::rewrite::AvgToSumOverCountStrategy`]'s rewrite in the same
+//! group; the cost model picks between them, nothing here hard-codes one.
+//!
+//! ## What this strategy never does
+//!
+//! - Propose an `ExactRead` for a position beneath a maintained
+//!   summary — data_state validation at composition rejects it as a typed
+//!   `ImplementError` regardless.
+//! - Decide whether a composition is *worth it*: that is
+//!   `global_selection`'s job, using the issue's cost-units-per-second
+//!   formulas (see `crate::cost_model::read_operation_plan_cost_rate` and
+//!   siblings). Missing statistics keep the conservative `KeepPreAsap`.
+
+use std::rc::Rc;
+
+use asap_types::post_asap::execution_data_state::validate_execution_data_states_at;
+use asap_types::post_asap::{
+    exact_operation_output_schema, produced_data_state, AccuracyError, ExactOperation,
+    ExecutionDataState, ExecutionDataStateError, ResultGuarantee, SummaryExpr, SummaryNode,
+    SummarySchema, ValueOperation,
+};
+use asap_types::pre_asap::agg_intent::AggIntent;
+use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
+use asap_types::types::AccuracyTarget;
+
+use crate::cost_model::CostModel;
+use crate::replacement::{
+    bindable_intent, describe_intent, implementations_for_with, ImplementError, Implementation,
+    Replacement, ReplacementProvenance, ReplacementStrategy, ReplacementSubDAG, TargetSubDAG,
+};
+use crate::{AccuracyModel, DefaultAccuracyModel, PropagationStats};
+
+#[cfg(test)]
+use asap_types::post_asap::ExecutionTiming;
+
+/// Which side of the maintenance/read boundary an [`ExactComposition`]'s
+/// exact function executes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OperationPlacement {
+    /// After the child's summary readout.
+    Read,
+    /// On the maintenance path, feeding
+    /// maintained state above.
+    Maintenance,
+}
+
+impl OperationPlacement {
+    /// The availability the composed operator consumes and produces.
+    pub fn data_state(self) -> ExecutionDataState {
+        match self {
+            Self::Read => ExecutionDataState::READ_ROWS,
+            Self::Maintenance => ExecutionDataState::MAINTENANCE_ROWS,
+        }
+    }
+
+    pub fn provenance(self) -> ReplacementProvenance {
+        match self {
+            Self::Read => ReplacementProvenance::ValueOperationAtReadTime,
+            Self::Maintenance => ReplacementProvenance::ValueOperationAtMaintenanceTime,
+        }
+    }
+}
+
+/// The payload of a [`Replacement::ExactComposition`] candidate: an exact
+/// operator, the placement it runs at, and a *reference* to the child target
+/// it composes over — never an already-selected child plan (see the module
+/// docs' "Reference, don't select").
+#[derive(Debug, Clone)]
+pub struct ExactComposition {
+    pub placement: OperationPlacement,
+    pub op: ExactOperation,
+    /// The pre-ASAP child the operator consumes; its `MemoGroup` holds the
+    /// candidates `global_selection` may commit this composition with.
+    pub child_target: Rc<QueryExpr>,
+    /// The composed node's output schema — the target's own pre-ASAP
+    /// output schema, lifted with every column `Plain` (an exact operator
+    /// only ever produces plain values).
+    pub schema: SummarySchema,
+}
+
+impl ExactComposition {
+    /// Can `child` legally be this composition's input? Phase legality
+    /// (the child's produced data_state — a `KeepPreAsap` leaf takes the
+    /// phase this edge assigns) plus the plain-operand rule, checked
+    /// through the same schema derivation [`Self::compose`] uses.
+    pub fn accepts_child(&self, child: &SummaryNode) -> bool {
+        let phase_ok = match produced_data_state(&child.expr) {
+            None => true,
+            Some(avail) => avail == self.placement.data_state(),
+        };
+        phase_ok && exact_operation_output_schema(&self.op, &child.schema).is_ok()
+    }
+
+    /// Build the composed, data_state-validated node over `child`. Every edge of
+    /// the result (including everything beneath `child`) is checked by
+    /// `asap_types::post_asap::validate_execution_data_states`; an illegal
+    /// placement is a typed [`ImplementError::ExecutionDataState`], never deferred to a
+    /// runtime.
+    pub fn compose(&self, child: Rc<SummaryNode>) -> Result<Rc<SummaryNode>, ImplementError> {
+        self.compose_with_accuracy(child, &DefaultAccuracyModel)
+    }
+
+    /// Compose using the caller's accuracy algebra. Exact operators do not
+    /// erase an approximate child's error: supported folds propagate it;
+    /// unsupported folds fail closed with a typed accuracy error.
+    pub fn compose_with_accuracy(
+        &self,
+        child: Rc<SummaryNode>,
+        accuracy_model: &dyn AccuracyModel,
+    ) -> Result<Rc<SummaryNode>, ImplementError> {
+        if let Some(produced) = produced_data_state(&child.expr) {
+            if produced != self.placement.data_state() {
+                let edge = match self.placement {
+                    OperationPlacement::Maintenance => "ValueOperation.child (maintenance time)",
+                    OperationPlacement::Read => "ValueOperation.child (read time)",
+                };
+                return Err(ImplementError::ExecutionDataState(
+                    ExecutionDataStateError::IllegalChildDataState {
+                        edge,
+                        child: produced,
+                    },
+                ));
+            }
+        }
+        let schema = exact_operation_output_schema(&self.op, &child.schema)?;
+        let guarantee = match &child.guarantee {
+            None => None,
+            Some(input) if input.is_exact() => Some(ResultGuarantee::exact(format!(
+                "exact function {:?} over exact input",
+                self.op
+            ))),
+            Some(input) => match accuracy_model.exact_operation_rule(&self.op) {
+                Some(operator) => match accuracy_model.propagate(
+                    &operator,
+                    std::slice::from_ref(input),
+                    None,
+                    &PropagationStats::default(),
+                ) {
+                    Ok(guarantee) => Some(guarantee),
+                    // The plan remains executable without a declared accuracy
+                    // target, but an unknown guarantee cannot satisfy a later
+                    // target check. Never replace this with an exact/default
+                    // bound.
+                    Err(AccuracyError::UnsupportedComposition { .. }) => None,
+                    Err(error) => return Err(ImplementError::Accuracy(error)),
+                },
+                // No definition-registered rule: preserve "unknown". This is
+                // the fail-closed value used by accuracy-target filtering.
+                None => None,
+            },
+        };
+        let timing = match self.placement {
+            OperationPlacement::Read => asap_types::post_asap::ExecutionTiming::ReadTime,
+            OperationPlacement::Maintenance => {
+                asap_types::post_asap::ExecutionTiming::MaintenanceTime
+            }
+        };
+        let expr = SummaryExpr::ValueOperation {
+            child,
+            operation: ValueOperation::Exact(self.op.clone()),
+            timing,
+        };
+        let node = Rc::new(SummaryNode {
+            expr,
+            schema,
+            guarantee,
+        });
+        validate_execution_data_states_at(&node, self.placement.data_state())?;
+        Ok(node)
+    }
+
+    /// Structural identity for `MemoGroup` dedup: same placement, same
+    /// operator, same child `Rc`.
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        self.placement == other.placement
+            && self.op == other.op
+            && Rc::ptr_eq(&self.child_target, &other.child_target)
+    }
+}
+
+/// Which exact reducers may run as a query-time fold over readout rows.
+/// `Count` only at `Exact` accuracy (an approximate count is a sketch
+/// target, not an exact fold).
+fn is_read_time_reducer(intent: &AggIntent) -> bool {
+    matches!(
+        intent,
+        AggIntent::Sum { .. }
+            | AggIntent::Min { .. }
+            | AggIntent::Max { .. }
+            | AggIntent::Avg { .. }
+            | AggIntent::StdDev { .. }
+            | AggIntent::Variance { .. }
+            | AggIntent::Count {
+                accuracy: AccuracyTarget::Exact
+            }
+    )
+}
+
+/// Does `implementation` need a `SummaryEstimate` readout to yield a value
+/// — i.e. is it a shape a maintained accumulator can't legally sit above?
+fn needs_readout(implementation: &Implementation) -> bool {
+    matches!(
+        implementation,
+        Implementation::Sketch(_)
+            | Implementation::Sample { .. }
+            | Implementation::Wavelet { .. }
+            | Implementation::StatModel { .. }
+    )
+}
+
+/// The `(op, child)` of a read-time operation-shaped target, or `None`.
+fn read_time_shape(
+    root: &QueryExpr,
+    cost_model: &dyn CostModel,
+) -> Option<(ExactOperation, Rc<QueryExpr>, AggIntent)> {
+    let QueryExpr::Aggregate {
+        reduction,
+        measures,
+        output_names,
+        having: None,
+        child,
+    } = root
+    else {
+        return None;
+    };
+    let Reduction::Reduce(by) = reduction else {
+        return None;
+    };
+    if by.is_without() {
+        return None;
+    }
+    let [intent] = measures.as_slice() else {
+        return None;
+    };
+    if !is_read_time_reducer(intent) {
+        return None;
+    }
+    let child_intent = bindable_intent(child)?;
+    if !implementations_for_with(child_intent, cost_model)
+        .iter()
+        .any(needs_readout)
+    {
+        return None;
+    }
+    // Grouping keys must resolve in the child's output schema — the same
+    // derivation the composed node's own schema will use.
+    root.output_schema().ok()?;
+    Some((
+        ExactOperation::Aggregate {
+            reduction: reduction.clone(),
+            measures: measures.clone(),
+            output_names: output_names.clone(),
+            having: None,
+        },
+        Rc::clone(child),
+        intent.clone(),
+    ))
+}
+
+/// The `(op, child)` of a function-shaped target — a per-entity exact
+/// transform with no accumulator form — or `None`.
+fn maintenance_time_shape(
+    root: &QueryExpr,
+    cost_model: &dyn CostModel,
+) -> Option<(ExactOperation, Rc<QueryExpr>, AggIntent)> {
+    let QueryExpr::Aggregate {
+        reduction: Reduction::PerEntity,
+        measures,
+        output_names,
+        having: None,
+        child,
+    } = root
+    else {
+        return None;
+    };
+    let [intent] = measures.as_slice() else {
+        return None;
+    };
+    if !intent.is_per_series() {
+        return None;
+    }
+    // Exact accumulators (`Rate`/`Increase`) are already directly nestable
+    // as `SummaryAgg(ExactAggregate)`; only a pass-through function needs
+    // an explicit update-path node.
+    if implementations_for_with(intent, cost_model)
+        .iter()
+        .any(|i| *i != Implementation::PassThrough)
+    {
+        return None;
+    }
+    root.output_schema().ok()?;
+    Some((
+        ExactOperation::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: measures.clone(),
+            output_names: output_names.clone(),
+            having: None,
+        },
+        Rc::clone(child),
+        intent.clone(),
+    ))
+}
+
+/// Proposes [`Replacement::ExactComposition`] candidates — see the module
+/// docs. Holds a [`CostModel`] only to ask it which mixed-execution shapes
+/// the runtime advertises and which implementations the child has; it
+/// never uses it to *rank* anything.
+pub struct ExactCompositionStrategy<'a> {
+    cost_model: &'a dyn CostModel,
+}
+
+static DEFAULT_COST_MODEL: crate::cost_model::DefaultCostModel =
+    crate::cost_model::DefaultCostModel;
+
+impl ExactCompositionStrategy<'static> {
+    /// A strategy consulting the built-in [`DefaultCostModel`](crate::cost_model::DefaultCostModel).
+    pub fn default_cost_model() -> Self {
+        Self {
+            cost_model: &DEFAULT_COST_MODEL,
+        }
+    }
+}
+
+impl<'a> ExactCompositionStrategy<'a> {
+    pub fn new(cost_model: &'a dyn CostModel) -> Self {
+        Self { cost_model }
+    }
+
+    fn candidates(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
+        let Ok(schema) = target.root.output_schema() else {
+            return Vec::new();
+        };
+        let schema = asap_types::post_asap::execution_data_state::lift_plain(&schema);
+        let mut out = Vec::new();
+
+        if let Some((op, child, intent)) = read_time_shape(target.root, self.cost_model) {
+            if self
+                .cost_model
+                .supports_value_operation(&op, OperationPlacement::Read)
+            {
+                let child_desc =
+                    describe_intent(bindable_intent(&child).expect("checked by read_time_shape"));
+                out.push(ReplacementSubDAG {
+                    strategy: "ExactCompositionStrategy",
+                    replacement: Replacement::ExactComposition(ExactComposition {
+                        placement: OperationPlacement::Read,
+                        op,
+                        child_target: child,
+                        schema: schema.clone(),
+                    }),
+                    provenance: ReplacementProvenance::ValueOperationAtReadTime,
+                    rationale: format!(
+                        "{} is an exact fold whose input is the readout of {} — a maintained \
+                         accumulator cannot consume query-time values, so instead of collapsing \
+                         the whole tree into KeepPreAsap this applies the fold as an \
+                         ExactRead over whichever summary readout global_selection \
+                         commits for the child target (asap_aware_mapping::exact_composition)",
+                        describe_intent(&intent),
+                        child_desc
+                    ),
+                });
+            }
+        }
+
+        if let Some((op, child, intent)) = maintenance_time_shape(target.root, self.cost_model) {
+            if self
+                .cost_model
+                .supports_value_operation(&op, OperationPlacement::Maintenance)
+            {
+                out.push(ReplacementSubDAG {
+                    strategy: "ExactCompositionStrategy",
+                    replacement: Replacement::ExactComposition(ExactComposition {
+                        placement: OperationPlacement::Maintenance,
+                        op,
+                        child_target: child,
+                        schema,
+                    }),
+                    provenance: ReplacementProvenance::ValueOperationAtMaintenanceTime,
+                    rationale: format!(
+                        "{} is an exact per-entity function with no accumulator form; as an \
+                         explicit ExactMaintenance on the update path its output can feed a \
+                         maintained summary above it instead of being handed over as an opaque \
+                         raw KeepPreAsap blob (asap_aware_mapping::exact_composition)",
+                        describe_intent(&intent)
+                    ),
+                });
+            }
+        }
+        out
+    }
+}
+
+impl ReplacementStrategy for ExactCompositionStrategy<'_> {
+    fn matches(&self, target: &TargetSubDAG<'_>) -> bool {
+        !self.candidates(target).is_empty()
+    }
+
+    fn replacements(&self, target: &TargetSubDAG<'_>) -> Vec<ReplacementSubDAG> {
+        self.candidates(target)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cost_model::{DefaultCostModel, ValueOperationCapabilities};
+    use crate::replacement::keep_pre_asap;
+    use asap_types::post_asap::{ExecutionDataStateError, SketchAlgorithm, SummaryFamilyType};
+    use asap_types::pre_asap::agg_intent::default_quantile;
+    use asap_types::pre_asap::query_expr::Source;
+    use asap_types::pre_asap::schema::{Column, DataType, Schema};
+
+    fn metric_scan(labels: &[&str]) -> QueryExpr {
+        let mut columns = vec![
+            Column::new("ts", DataType::Timestamp, false),
+            Column::new("value", DataType::Float64, false),
+        ];
+        columns.extend(labels.iter().map(|n| Column::new(*n, DataType::Utf8, true)));
+        QueryExpr::Scan {
+            source: Source::TimeSeries { metric: "m".into() },
+            predicates: vec![],
+            schema: Schema::with_time_index(columns, 0, vec![]),
+        }
+    }
+
+    fn agg(by: Vec<usize>, intent: AggIntent, child: QueryExpr) -> QueryExpr {
+        QueryExpr::Aggregate {
+            reduction: Reduction::by(by),
+            measures: vec![intent],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(child),
+        }
+    }
+
+    fn per_entity(intent: AggIntent, child: QueryExpr) -> QueryExpr {
+        QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![intent],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(child),
+        }
+    }
+
+    /// `max by (zone) (quantile by (zone, host) (m))`.
+    fn max_over_quantile() -> Rc<QueryExpr> {
+        let inner = agg(
+            vec![2, 3],
+            default_quantile(0.99),
+            metric_scan(&["zone", "host"]),
+        );
+        Rc::new(agg(vec![0], AggIntent::Max { col: None }, inner))
+    }
+
+    #[test]
+    fn proposes_read_time_operation_for_max_over_quantile() {
+        let root = max_over_quantile();
+        let target = TargetSubDAG::new(&root);
+        let strategy = ExactCompositionStrategy::default_cost_model();
+        assert!(strategy.matches(&target));
+        let candidates = strategy.replacements(&target);
+        assert_eq!(candidates.len(), 1);
+        let Replacement::ExactComposition(comp) = &candidates[0].replacement else {
+            panic!(
+                "expected a composition, got {:?}",
+                candidates[0].replacement
+            );
+        };
+        assert_eq!(comp.placement, OperationPlacement::Read);
+        assert_eq!(
+            candidates[0].provenance,
+            ReplacementProvenance::ValueOperationAtReadTime
+        );
+        let QueryExpr::Aggregate { child, .. } = root.as_ref() else {
+            unreachable!()
+        };
+        assert!(
+            Rc::ptr_eq(&comp.child_target, child),
+            "the candidate references the child target's own Rc — nothing selected"
+        );
+        let names: Vec<_> = comp.schema.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["zone", "max"]);
+    }
+
+    #[test]
+    fn proposes_read_time_operation_for_avg_over_quantile_alongside_the_rewrite() {
+        let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
+        let root = Rc::new(agg(vec![0], AggIntent::Avg { col: None }, inner));
+        let target = TargetSubDAG::new(&root);
+        assert_eq!(
+            ExactCompositionStrategy::default_cost_model()
+                .replacements(&target)
+                .len(),
+            1
+        );
+        // `avg` competes with AvgToSumOverCountStrategy in the same group.
+        assert!(crate::rewrite::AvgToSumOverCountStrategy.matches(&target));
+    }
+
+    #[test]
+    fn proposes_maintenance_time_operation_for_a_per_entity_pass_through_over_raw_input() {
+        let root = Rc::new(per_entity(AggIntent::Deriv, metric_scan(&["zone"])));
+        let target = TargetSubDAG::new(&root);
+        let candidates = ExactCompositionStrategy::default_cost_model().replacements(&target);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].provenance,
+            ReplacementProvenance::ValueOperationAtMaintenanceTime
+        );
+    }
+
+    #[test]
+    fn does_not_propose_for_shapes_already_covered_by_accumulators() {
+        // sum by (zone) over an exact Sum child: the child has no readout,
+        // so SummaryAgg(Sum) over SummaryAgg(Sum) is already legal.
+        let inner = agg(
+            vec![2, 3],
+            AggIntent::Sum { col: None },
+            metric_scan(&["zone", "host"]),
+        );
+        let root = Rc::new(agg(vec![0], AggIntent::Sum { col: None }, inner));
+        assert!(!ExactCompositionStrategy::default_cost_model().matches(&TargetSubDAG::new(&root)));
+        // rate is an exact accumulator — directly nestable, no separate value operation.
+        let rate = Rc::new(per_entity(AggIntent::Rate, metric_scan(&[])));
+        assert!(!ExactCompositionStrategy::default_cost_model().matches(&TargetSubDAG::new(&rate)));
+        // A sketch-capable outer intent is not an exact fold.
+        let inner = agg(vec![2], default_quantile(0.5), metric_scan(&["zone"]));
+        let root = Rc::new(agg(vec![0], default_quantile(0.99), inner));
+        assert!(!ExactCompositionStrategy::default_cost_model().matches(&TargetSubDAG::new(&root)));
+    }
+
+    struct NoMixedExecution;
+    impl CostModel for NoMixedExecution {
+        fn rank_candidates(
+            &self,
+            _intent: &AggIntent,
+            candidates: &[SketchAlgorithm],
+        ) -> Vec<SketchAlgorithm> {
+            candidates.to_vec()
+        }
+        fn value_operation_capabilities(&self) -> ValueOperationCapabilities {
+            ValueOperationCapabilities::NONE
+        }
+    }
+
+    #[test]
+    fn a_runtime_without_the_capability_gets_no_candidate() {
+        let root = max_over_quantile();
+        let target = TargetSubDAG::new(&root);
+        let strategy = ExactCompositionStrategy::new(&NoMixedExecution);
+        assert!(!strategy.matches(&target));
+        assert!(strategy.replacements(&target).is_empty());
+        let deriv = Rc::new(per_entity(AggIntent::Deriv, metric_scan(&[])));
+        assert!(!strategy.matches(&TargetSubDAG::new(&deriv)));
+    }
+
+    #[test]
+    fn compose_rejects_a_maintained_state_child_for_a_read_time_operation() {
+        let root = max_over_quantile();
+        let target = TargetSubDAG::new(&root);
+        let candidates = ExactCompositionStrategy::default_cost_model().replacements(&target);
+        let Replacement::ExactComposition(comp) = &candidates[0].replacement else {
+            unreachable!()
+        };
+        // A bare SummaryAgg (state, no readout) is not a legal read-time operation
+        // input — the operator would be consuming sketch state.
+        let state_child =
+            crate::replacement::realize_child(&comp.child_target, &DefaultCostModel).unwrap();
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &state_child.expr else {
+            panic!("expected the child to realize to a readout");
+        };
+        assert!(!comp.accepts_child(summary_input));
+        assert!(matches!(
+            comp.compose(Rc::clone(summary_input)),
+            Err(ImplementError::ExecutionDataState(
+                ExecutionDataStateError::IllegalChildDataState { .. }
+            ))
+        ));
+        // The readout itself is accepted and composes to a plain schema.
+        assert!(comp.accepts_child(&state_child));
+        let composed = comp.compose(state_child).unwrap();
+        assert!(
+            composed.guarantee.is_none(),
+            "rank error has no registered conversion through max"
+        );
+        assert!(matches!(
+            composed.expr,
+            SummaryExpr::ValueOperation {
+                timing: ExecutionTiming::ReadTime,
+                ..
+            }
+        ));
+        assert!(composed
+            .schema
+            .fields
+            .iter()
+            .all(|f| matches!(f.dtype, SummaryFamilyType::Plain(_))));
+    }
+
+    #[test]
+    fn compose_rejects_a_readout_child_for_a_maintenance_time_operation() {
+        let inner = agg(vec![2], default_quantile(0.99), metric_scan(&["zone"]));
+        let root = Rc::new(per_entity(AggIntent::Deriv, inner));
+        let candidates =
+            ExactCompositionStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+        let Replacement::ExactComposition(comp) = &candidates[0].replacement else {
+            unreachable!()
+        };
+        let readout =
+            crate::replacement::realize_child(&comp.child_target, &DefaultCostModel).unwrap();
+        assert!(!comp.accepts_child(&readout));
+        assert!(matches!(
+            comp.compose(readout),
+            Err(ImplementError::ExecutionDataState(
+                ExecutionDataStateError::IllegalChildDataState { .. }
+            ))
+        ));
+        // Raw update input is fine.
+        let raw = keep_pre_asap(&comp.child_target).unwrap();
+        assert!(comp.accepts_child(&raw));
+        assert!(matches!(
+            comp.compose(raw).unwrap().expr,
+            SummaryExpr::ValueOperation {
+                timing: ExecutionTiming::MaintenanceTime,
+                ..
+            }
+        ));
+    }
+}
