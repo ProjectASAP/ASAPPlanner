@@ -350,10 +350,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::post_asap::{
     validate_execution_data_states_at, EntityIdentity, ExactKind, ExactOperationSchemaError,
-    ExactParams, ExecutionDataState, ExecutionDataStateError, GroupingStrategy, SamplingKind,
-    SamplingParams, SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery,
-    StatModelKind, StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr,
-    SummaryNode, SummarySchema, SummaryUpdate, WaveletKind, WaveletParams,
+    ExactParams, ExecutionDataState, ExecutionDataStateError, ExecutionTiming, GroupingStrategy,
+    SamplingKind, SamplingParams, SketchAlgorithm, SketchKind, SketchParams,
+    SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
+    SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate,
+    ValueOperation, WaveletKind, WaveletParams,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
@@ -1707,6 +1708,9 @@ fn realize_binary(
         return Ok(None);
     }
 
+    lhs_node = finalize_exact_accumulator(lhs_node);
+    rhs_node = finalize_exact_accumulator(rhs_node);
+
     let guarantee = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()]
         .into_iter()
         .all(|guarantee| guarantee.is_some_and(ResultGuarantee::is_exact))
@@ -1727,6 +1731,33 @@ fn realize_binary(
         // evidence needed by multiplication/division), unknown stays unknown.
         guarantee,
     })))
+}
+
+/// Put an explicit read boundary between maintained exact state and a
+/// query-time value consumer. Approximate summaries must already carry a
+/// `SummaryEstimate`, so they deliberately do not pass this predicate.
+fn finalize_exact_accumulator(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
+    let is_exact_state = matches!(
+        node.expr,
+        SummaryExpr::SummaryAgg {
+            family: SummaryFamilyType::ExactAggregate(..),
+            ..
+        }
+    );
+    if !is_exact_state {
+        return node;
+    }
+    let schema = node.schema.clone();
+    let guarantee = node.guarantee.clone();
+    Rc::new(SummaryNode {
+        expr: SummaryExpr::ValueOperation {
+            child: node,
+            operation: ValueOperation::FinalizeExactAccumulator,
+            timing: ExecutionTiming::ReadTime,
+        },
+        schema,
+        guarantee,
+    })
 }
 
 fn is_supported_exact_binary(root: &QueryExpr) -> bool {
@@ -3495,7 +3526,7 @@ impl<'a> GlobalSelection<'a> {
             .and_then(|sel| sel.chosen)
             .map(|c| &c.replacement)
         {
-            None => keep_pre_asap(target)?,
+            None => self.materialize_residual(target)?,
             Some(Replacement::Rewrite(rewritten)) => keep_pre_asap(rewritten)?,
             Some(Replacement::Summary(node)) => self.relink_summary(node, target)?,
             Some(Replacement::ExactComposition(_)) => Rc::clone(
@@ -3507,6 +3538,51 @@ impl<'a> GlobalSelection<'a> {
             ),
         };
         self.materialized.borrow_mut().insert(ptr, Rc::clone(&node));
+        Ok(node)
+    }
+
+    /// Preserve composable query-time value operators in post-ASAP form even
+    /// when the operator itself has no summary implementation. Its child is
+    /// materialized independently, so a selected summary remains visible
+    /// beneath `Sort`/`Limit` instead of being swallowed by one opaque
+    /// `KeepPreAsap` subtree.
+    fn materialize_residual(
+        &self,
+        target: &Rc<QueryExpr>,
+    ) -> Result<Rc<SummaryNode>, ImplementError> {
+        let (child_target, operation) = match target.as_ref() {
+            QueryExpr::Sort {
+                keys,
+                partition_by,
+                child,
+            } => (
+                child,
+                ValueOperation::Sort {
+                    keys: keys.clone(),
+                    partition_by: partition_by.clone(),
+                },
+            ),
+            QueryExpr::Limit { n, offset, child } => (
+                child,
+                ValueOperation::Limit {
+                    n: *n,
+                    offset: *offset,
+                },
+            ),
+            _ => return keep_pre_asap(target),
+        };
+        let child = self.materialize_inner(child_target)?;
+        let guarantee = child.guarantee.clone();
+        let node = Rc::new(SummaryNode {
+            expr: SummaryExpr::ValueOperation {
+                child,
+                operation,
+                timing: ExecutionTiming::ReadTime,
+            },
+            schema: lift(&target.output_schema()?),
+            guarantee,
+        });
+        validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
         Ok(node)
     }
 

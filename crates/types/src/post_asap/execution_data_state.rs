@@ -389,7 +389,10 @@ fn visit(
                 ExecutionTiming::ReadTime => ExecutionDataState::READ_ROWS,
             };
             let s = produced_data_state(&child.expr).unwrap_or(required);
-            if s != required {
+            let exact_readout = *timing == ExecutionTiming::ReadTime
+                && s == ExecutionDataState::MAINTENANCE_SUMMARY
+                && is_exact_accumulator_state(&child.schema).is_ok();
+            if s != required && !exact_readout {
                 return Err(ExecutionDataStateError::IllegalChildDataState {
                     edge: ExecutionDataStateEdge::ValueOperationChild.describe(),
                     child: s,
@@ -493,6 +496,14 @@ fn check_plain_operands(
     op: &ValueOperation,
     input: &SummarySchema,
 ) -> Result<(), ExecutionDataStateError> {
+    if matches!(
+        op,
+        ValueOperation::Sort { .. }
+            | ValueOperation::Limit { .. }
+            | ValueOperation::FinalizeExactAccumulator
+    ) {
+        return check_plain_or_exact_values(input);
+    }
     let ValueOperation::Exact(op) = op else {
         return check_all_plain(input);
     };
@@ -518,6 +529,21 @@ fn check_plain_operands(
             continue;
         }
         if !matches!(field.dtype, SummaryFamilyType::Plain(_)) {
+            return Err(ExecutionDataStateError::NonPlainOperand {
+                column: field.name.clone(),
+                dtype: format!("{:?}", field.dtype),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_plain_or_exact_values(input: &SummarySchema) -> Result<(), ExecutionDataStateError> {
+    for field in &input.fields {
+        if !matches!(
+            field.dtype,
+            SummaryFamilyType::Plain(_) | SummaryFamilyType::ExactAggregate(..)
+        ) {
             return Err(ExecutionDataStateError::NonPlainOperand {
                 column: field.name.clone(),
                 dtype: format!("{:?}", field.dtype),

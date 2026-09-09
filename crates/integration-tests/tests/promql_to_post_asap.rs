@@ -21,7 +21,7 @@ use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
     CompositionOperator, EntityIdentity, ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm,
     SketchKind, SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
-    SummaryNode, SummarySchema, SummaryUpdate,
+    SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -49,6 +49,125 @@ fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     }
 }
 
+fn lower_search_and_materialize(query: &str) -> Rc<SummaryNode> {
+    let pre = Rc::new(lower_promql(query, AccuracyTarget::Exact).expect("lowering failed"));
+    let space = search_workload(vec![("query", pre)]);
+    let selection = space.global_selection(&DefaultCostModel);
+    selection
+        .materialize(&space.roots[0].1)
+        .expect("materialization failed")
+        .expect("root must be discovered")
+}
+
+#[test]
+fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
+    for query in [
+        "topk(3, rate(cpu_seconds_total[5m]))",
+        "topk by (job) (2, max_over_time(memory_bytes[6h]))",
+    ] {
+        let root = lower_search_and_materialize(query);
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::Limit { n, offset },
+            child: sort,
+            ..
+        } = &root.expr
+        else {
+            panic!("expected query-time Limit for {query}, got {:?}", root.expr);
+        };
+        assert!(*n > 0 && *offset == 0);
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::Sort { .. },
+            child,
+            ..
+        } = &sort.expr
+        else {
+            panic!("expected query-time Sort under Limit for {query}");
+        };
+        assert!(
+            matches!(child.expr, SummaryExpr::SummaryAgg { .. }),
+            "the materializable child must remain visible for {query}: {:?}",
+            child.expr
+        );
+    }
+}
+
+#[test]
+fn value_ranked_topk_over_counter_reduction_preserves_summary_child() {
+    fn has_summary(node: &SummaryNode) -> bool {
+        match &node.expr {
+            SummaryExpr::SummaryAgg { .. } => true,
+            SummaryExpr::ValueOperation { child, .. }
+            | SummaryExpr::SummaryEstimate {
+                summary_input: child,
+                ..
+            } => has_summary(child),
+            SummaryExpr::BinaryOp { lhs, rhs, .. }
+            | SummaryExpr::SummarySubtract {
+                left: lhs,
+                right: rhs,
+            } => has_summary(lhs) || has_summary(rhs),
+            SummaryExpr::SummaryMerge { children } => {
+                children.iter().any(|child| has_summary(child))
+            }
+            _ => false,
+        }
+    }
+
+    for query in [
+        "topk(3, sum by(job)(rate(cpu_seconds_total[1h])))",
+        "topk(3, sum by(job)(increase(requests_total[6h])))",
+    ] {
+        let root = lower_search_and_materialize(query);
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::Limit { n: 3, offset: 0 },
+            child: sort,
+            ..
+        } = &root.expr
+        else {
+            panic!("expected query-time Limit for {query}, got {:?}", root.expr);
+        };
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::Sort { .. },
+            child,
+            ..
+        } = &sort.expr
+        else {
+            panic!("expected query-time Sort under Limit for {query}");
+        };
+        assert!(
+            has_summary(child),
+            "counter child must retain a selected summary for {query}: {:?}",
+            child.expr
+        );
+    }
+}
+
+#[test]
+fn instant_topk_and_unsupported_child_remain_local_residuals() {
+    for query in ["topk(3, memory_bytes)", "topk(3, deriv(memory_bytes[5m]))"] {
+        let root = lower_search_and_materialize(query);
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::Limit { .. },
+            child: sort,
+            ..
+        } = &root.expr
+        else {
+            panic!("expected Limit for {query}");
+        };
+        let SummaryExpr::ValueOperation {
+            child, operation, ..
+        } = &sort.expr
+        else {
+            panic!("expected Sort for {query}");
+        };
+        assert!(matches!(operation, ValueOperation::Sort { .. }));
+        assert!(
+            matches!(child.expr, SummaryExpr::KeepPreAsap(_)),
+            "only the unsupported child should remain exact for {query}"
+        );
+    }
+}
+
 fn dtype<'a>(schema: &'a SummarySchema, name: &str) -> &'a SummaryFamilyType {
     &schema
         .fields
@@ -70,8 +189,56 @@ fn promql_binary_arithmetic_retains_two_summary_leaves() {
         let SummaryExpr::BinaryOp { lhs, rhs, .. } = &root.expr else {
             panic!("expected BinaryOp for {op}, got {:?}", root.expr);
         };
-        assert!(matches!(lhs.expr, SummaryExpr::SummaryAgg { .. }));
-        assert!(matches!(rhs.expr, SummaryExpr::SummaryAgg { .. }));
+        for operand in [lhs, rhs] {
+            let SummaryExpr::ValueOperation {
+                child,
+                operation: ValueOperation::FinalizeExactAccumulator,
+                ..
+            } = &operand.expr
+            else {
+                panic!("expected an explicit exact readout, got {:?}", operand.expr);
+            };
+            assert!(matches!(child.expr, SummaryExpr::SummaryAgg { .. }));
+        }
+    }
+}
+
+#[test]
+fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
+    let query = "topk(1, sum by(job)(increase(a[6h])) / sum by(job)(increase(b[6h])))";
+    let root = lower_search_and_materialize(query);
+    let SummaryExpr::ValueOperation {
+        operation: ValueOperation::Limit { n: 1, offset: 0 },
+        child: sort,
+        ..
+    } = &root.expr
+    else {
+        panic!("expected Limit root, got {:?}", root.expr);
+    };
+    let SummaryExpr::ValueOperation {
+        operation: ValueOperation::Sort { .. },
+        child: binary,
+        ..
+    } = &sort.expr
+    else {
+        panic!("expected Sort below Limit, got {:?}", sort.expr);
+    };
+    let SummaryExpr::BinaryOp { lhs, rhs, .. } = &binary.expr else {
+        panic!("expected BinaryOp below Sort, got {:?}", binary.expr);
+    };
+    for operand in [lhs, rhs] {
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::FinalizeExactAccumulator,
+            child,
+            ..
+        } = &operand.expr
+        else {
+            panic!(
+                "expected exact accumulator finalization, got {:?}",
+                operand.expr
+            );
+        };
+        assert!(matches!(child.expr, SummaryExpr::SummaryAgg { .. }));
     }
 }
 
@@ -97,22 +264,37 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
 
 #[test]
 fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
+    fn is_exact_readout_or_scalar(node: &SummaryNode) -> bool {
+        matches!(node.expr, SummaryExpr::KeepPreAsap(_))
+            || matches!(
+                node.expr,
+                SummaryExpr::ValueOperation {
+                    operation: ValueOperation::FinalizeExactAccumulator,
+                    ..
+                }
+            )
+    }
     for query in ["rate(a[1m]) / 2", "2 / rate(a[1m])"] {
         let root = lower_and_realize(query);
         let SummaryExpr::BinaryOp { lhs, rhs, .. } = &root.expr else {
             panic!("expected BinaryOp for {query}, got {:?}", root.expr);
         };
-        assert!(matches!(
-            lhs.expr,
-            SummaryExpr::SummaryAgg { .. } | SummaryExpr::KeepPreAsap(_)
-        ));
-        assert!(matches!(
-            rhs.expr,
-            SummaryExpr::SummaryAgg { .. } | SummaryExpr::KeepPreAsap(_)
-        ));
+        assert!(is_exact_readout_or_scalar(lhs));
+        assert!(is_exact_readout_or_scalar(rhs));
         assert!(
-            matches!(lhs.expr, SummaryExpr::SummaryAgg { .. })
-                || matches!(rhs.expr, SummaryExpr::SummaryAgg { .. })
+            matches!(
+                lhs.expr,
+                SummaryExpr::ValueOperation {
+                    operation: ValueOperation::FinalizeExactAccumulator,
+                    ..
+                }
+            ) || matches!(
+                rhs.expr,
+                SummaryExpr::ValueOperation {
+                    operation: ValueOperation::FinalizeExactAccumulator,
+                    ..
+                }
+            )
         );
     }
 }

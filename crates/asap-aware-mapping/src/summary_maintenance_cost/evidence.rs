@@ -178,6 +178,10 @@ pub struct SummaryOperatorResourceEvidence {
 pub enum StreamingSummaryOperatorEvidence {
     /// Exact query-time arithmetic over two independently realized operands.
     Binary(SummaryOperatorResourceEvidence),
+    /// Query-time or maintenance-time plain-value work. For `Sort`/`Limit`,
+    /// providers report the actual comparison/heap work and working set here;
+    /// the estimator charges it at query multiplicity.
+    ValueOperation(SummaryOperatorResourceEvidence),
     Merge(SummaryOperatorResourceEvidence),
     Subtract(SummaryOperatorResourceEvidence),
     Delete {
@@ -192,6 +196,7 @@ impl StreamingSummaryOperatorEvidence {
     pub(super) fn resource(&self) -> &SummaryOperatorResourceEvidence {
         match self {
             Self::Binary(resource)
+            | Self::ValueOperation(resource)
             | Self::Merge(resource)
             | Self::Subtract(resource)
             | Self::Delete { resource, .. }
@@ -203,6 +208,7 @@ impl StreamingSummaryOperatorEvidence {
     pub(super) fn resource_mut(&mut self) -> &mut SummaryOperatorResourceEvidence {
         match self {
             Self::Binary(resource)
+            | Self::ValueOperation(resource)
             | Self::Merge(resource)
             | Self::Subtract(resource)
             | Self::Delete { resource, .. }
@@ -296,6 +302,9 @@ pub(super) fn summary_operation_evidence<'a>(
         (
             SummaryExpr::BinaryOp { .. },
             StreamingSummaryOperatorEvidence::Binary(_)
+        ) | (
+            SummaryExpr::ValueOperation { .. },
+            StreamingSummaryOperatorEvidence::ValueOperation(_)
         ) | (
             SummaryExpr::SummaryMerge { .. },
             StreamingSummaryOperatorEvidence::Merge(_)

@@ -8,25 +8,25 @@
 //!
 //! ## Heavy-hitter promotion
 //!
-//! A count- or sum-ranked "order by the aggregate, take the top k" is an
-//! additive heavy-hitter represented by [`AggIntent::TopK`]. Front ends may
+//! A count-ranked "order by the aggregate, take the top k" is a frequency
+//! heavy-hitter represented by [`AggIntent::TopK`]. Front ends may
 //! emit it as an ordinary `Limit { Sort { … Aggregate } }`; this pass promotes
 //! that shape to the canonical
 //!
 //! ```text
 //! Aggregate { reduction: Reduce(<partition>), measures: [TopK{k}],
-//!             child: Aggregate { measures: [Count|Sum], … } }
+//!             child: Aggregate { measures: [Count], … } }
 //! ```
 //!
-//! — an outer `TopK` over the inner additive aggregate. Because the match is
-//! positional, aliases do not affect it.
+//! — an outer `TopK` over the inner count aggregate. Because the match is
+//! positional, aliases do not affect it. Sum-ranked SQL and PromQL expressions
+//! retain Sort + Limit because their values do not imply stream frequency.
 
 use std::rc::Rc;
 
 use super::agg_intent::{topk, AggIntent};
 use super::expr_ir::{CompareOpKind, ScalarValue};
 use super::query_expr::{Predicate, QueryExpr, Reduction, SortKey, WindowFuncKind};
-use crate::types::AccuracyTarget;
 
 /// Rewrite `expr` into its canonical form (bottom-up). Idempotent: a tree that
 /// is already canonical is returned unchanged.
@@ -39,7 +39,7 @@ fn canon(expr: &mut QueryExpr) {
     // A `Concat` asserting a caller-proven `discriminator_unique_key` (issue
     // #228) had that key's `ColumnId`s resolved, in `resolve.rs`, against
     // exactly the first branch's output schema *as it stood before this
-    // pass ran*. `try_promote_additive_top_ranking`/`try_rewrite_rownumber_topk`
+    // pass ran*. `try_promote_count_top_ranking`/`try_rewrite_rownumber_topk`
     // below can restructure that branch (anywhere within it — not only at
     // its own top level, since the same recursive walk can rewrite a node
     // nested under a pass-through wrapper too) into a shape with a
@@ -87,7 +87,7 @@ fn canon(expr: &mut QueryExpr) {
     // `Aggregate([TopK])`. Each rule strictly simplifies the node, so applying
     // them to a fixpoint terminates.
     while let Some(rewritten) =
-        try_rewrite_rownumber_topk(expr).or_else(|| try_promote_additive_top_ranking(expr))
+        try_rewrite_rownumber_topk(expr).or_else(|| try_promote_count_top_ranking(expr))
     {
         *expr = rewritten;
     }
@@ -163,7 +163,7 @@ fn children_mut(expr: &mut QueryExpr) -> Vec<&mut QueryExpr> {
 /// Recognise a count-ranked `Limit { Sort { [Project] Aggregate([Count]) } }`
 /// and rewrite it to the canonical heavy-hitter `Aggregate([TopK])` over the
 /// explicit inner `Count`. Returns `None` when the shape does not match.
-fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
+fn try_promote_count_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     // Limit k, no offset (an OFFSET means "not the top k").
     let QueryExpr::Limit {
         n: k,
@@ -233,13 +233,16 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
     if !topk::Ranking::from_aggregate(ranked_agg).is_supported(!ascending) {
         return None;
     }
-    let accuracy = match ranked_agg {
-        AggIntent::Count { accuracy } => accuracy.clone(),
-        // SUM carries no local approximation target. Workload-level accuracy
-        // allocation can relax this exact default when choosing a summary.
-        AggIntent::Sum { .. } => AccuracyTarget::Exact,
-        _ => return None,
+    // Only an explicit count establishes frequency semantics. A generic
+    // `Sum` can be the output of `sum(rate(...))`, `sum(increase(...))`, or
+    // another query-time value computation. Reinterpreting that value ranking
+    // as stream-frequency heavy hitters hides a summarizable child when no
+    // membership evidence exists. Weighted heavy hitters must arrive as an
+    // explicit intent from a frontend construct whose semantics establish it.
+    let AggIntent::Count { accuracy } = ranked_agg else {
+        return None;
     };
+    let accuracy = accuracy.clone();
 
     // Outer heavy-hitter `TopK`, grouped by the ranking's partition (empty for a
     // global `ORDER BY … LIMIT k`; the `by` labels for a partitioned `topk by`),
@@ -257,7 +260,7 @@ fn try_promote_additive_top_ranking(expr: &QueryExpr) -> Option<QueryExpr> {
 /// `ROW_NUMBER() OVER (PARTITION BY p ORDER BY o)` — and rewrite it to the
 /// generic partitioned top-k `Limit{k} { Sort{ o, partition_by: p } }` (issue
 /// #24). The count-ranked case is then promoted to a heavy-hitter `TopK` by
-/// [`try_promote_additive_top_ranking`], so a SQL `ROW_NUMBER` top-k and the PromQL
+/// [`try_promote_count_top_ranking`], so a SQL `ROW_NUMBER` top-k and the PromQL
 /// `topk by (…)` it mirrors converge on the same canonical shape.
 fn try_rewrite_rownumber_topk(expr: &QueryExpr) -> Option<QueryExpr> {
     // Filter { pred: `Column(rn) <= k` }.
@@ -527,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn promotes_sum_ranked_limit_sort_with_explicit_ranking_basis() {
+    fn preserves_sum_ranked_limit_sort_as_value_ranking() {
         let sum = QueryExpr::Aggregate {
             reduction: Reduction::by(vec![1]),
             measures: vec![AggIntent::Sum { col: None }],
@@ -536,11 +539,11 @@ mod tests {
             child: Rc::new(scan()),
         };
         let q = limit(5, 0, sort(desc(1), sum));
-        assert!(matches!(canonicalize(q),
-            QueryExpr::Aggregate { measures, child, .. }
-                if matches!(measures.as_slice(), [AggIntent::TopK { k: 5, .. }])
-                && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
-                    if matches!(measures.as_slice(), [AggIntent::Sum { .. }]))));
+        let out = canonicalize(q);
+        assert!(matches!(out, QueryExpr::Limit { child, .. }
+            if matches!(child.as_ref(), QueryExpr::Sort { child, .. }
+                if matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+                    if matches!(measures.as_slice(), [AggIntent::Sum { .. }])))));
     }
 
     // ── ROW_NUMBER() partitioned top-k (issue #24) ──────────────────────────

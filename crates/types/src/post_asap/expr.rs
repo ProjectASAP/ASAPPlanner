@@ -5,7 +5,9 @@ use super::schema::{SummaryFamilyType, SummarySchema};
 use super::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::query_expr::Predicate;
-use crate::pre_asap::{BinaryOpKind, ColumnRef, QueryExpr, Reduction, VectorMatch};
+use crate::pre_asap::{
+    BinaryOpKind, ColumnRef, GroupKeys, QueryExpr, Reduction, SortKey, VectorMatch,
+};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -22,7 +24,28 @@ pub enum ExactOperation {
 #[non_exhaustive]
 pub enum ValueOperation {
     Exact(ExactOperation),
-    Extension { name: String },
+    /// Read an exact accumulator's state as its finalized scalar value.
+    ///
+    /// Exact accumulators do not need an estimator, but the explicit node
+    /// marks the maintenance-to-read boundary before query-time operators
+    /// such as PromQL binary arithmetic, sorting, and limiting.
+    FinalizeExactAccumulator,
+    /// Query-time ordering of the child's value rows. This is deliberately
+    /// distinct from frequency-sketch heavy-hitter readout: PromQL `topk`
+    /// ranks the values produced by its child at the evaluation timestamp.
+    Sort {
+        keys: Vec<SortKey>,
+        partition_by: GroupKeys,
+    },
+    /// Query-time row selection, normally composed over [`Self::Sort`] for
+    /// PromQL `topk`/`bottomk` and SQL `ORDER BY … LIMIT`.
+    Limit {
+        n: usize,
+        offset: usize,
+    },
+    Extension {
+        name: String,
+    },
 }
 
 // ── Post-ASAP DAG node ───────────────────────────────────────────────────────
