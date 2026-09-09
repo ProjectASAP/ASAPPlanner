@@ -24,6 +24,12 @@ pub enum ExactOperation {
 #[non_exhaustive]
 pub enum ValueOperation {
     Exact(ExactOperation),
+    /// Read an exact accumulator's state as its finalized scalar value.
+    ///
+    /// Exact accumulators do not need an estimator, but the explicit node
+    /// marks the maintenance-to-read boundary before query-time operators
+    /// such as PromQL binary arithmetic, sorting, and limiting.
+    FinalizeExactAccumulator,
     /// Query-time ordering of the child's value rows. This is deliberately
     /// distinct from frequency-sketch heavy-hitter readout: PromQL `topk`
     /// ranks the values produced by its child at the evaluation timestamp.

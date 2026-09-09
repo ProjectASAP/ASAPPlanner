@@ -1708,6 +1708,9 @@ fn realize_binary(
         return Ok(None);
     }
 
+    lhs_node = finalize_exact_accumulator(lhs_node);
+    rhs_node = finalize_exact_accumulator(rhs_node);
+
     let guarantee = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()]
         .into_iter()
         .all(|guarantee| guarantee.is_some_and(ResultGuarantee::is_exact))
@@ -1728,6 +1731,33 @@ fn realize_binary(
         // evidence needed by multiplication/division), unknown stays unknown.
         guarantee,
     })))
+}
+
+/// Put an explicit read boundary between maintained exact state and a
+/// query-time value consumer. Approximate summaries must already carry a
+/// `SummaryEstimate`, so they deliberately do not pass this predicate.
+fn finalize_exact_accumulator(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
+    let is_exact_state = matches!(
+        node.expr,
+        SummaryExpr::SummaryAgg {
+            family: SummaryFamilyType::ExactAggregate(..),
+            ..
+        }
+    );
+    if !is_exact_state {
+        return node;
+    }
+    let schema = node.schema.clone();
+    let guarantee = node.guarantee.clone();
+    Rc::new(SummaryNode {
+        expr: SummaryExpr::ValueOperation {
+            child: node,
+            operation: ValueOperation::FinalizeExactAccumulator,
+            timing: ExecutionTiming::ReadTime,
+        },
+        schema,
+        guarantee,
+    })
 }
 
 fn is_supported_exact_binary(root: &QueryExpr) -> bool {

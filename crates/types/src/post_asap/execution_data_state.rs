@@ -498,7 +498,9 @@ fn check_plain_operands(
 ) -> Result<(), ExecutionDataStateError> {
     if matches!(
         op,
-        ValueOperation::Sort { .. } | ValueOperation::Limit { .. }
+        ValueOperation::Sort { .. }
+            | ValueOperation::Limit { .. }
+            | ValueOperation::FinalizeExactAccumulator
     ) {
         return check_plain_or_exact_values(input);
     }

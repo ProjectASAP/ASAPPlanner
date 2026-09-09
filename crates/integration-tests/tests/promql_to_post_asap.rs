@@ -138,8 +138,56 @@ fn promql_binary_arithmetic_retains_two_summary_leaves() {
         let SummaryExpr::BinaryOp { lhs, rhs, .. } = &root.expr else {
             panic!("expected BinaryOp for {op}, got {:?}", root.expr);
         };
-        assert!(matches!(lhs.expr, SummaryExpr::SummaryAgg { .. }));
-        assert!(matches!(rhs.expr, SummaryExpr::SummaryAgg { .. }));
+        for operand in [lhs, rhs] {
+            let SummaryExpr::ValueOperation {
+                child,
+                operation: ValueOperation::FinalizeExactAccumulator,
+                ..
+            } = &operand.expr
+            else {
+                panic!("expected an explicit exact readout, got {:?}", operand.expr);
+            };
+            assert!(matches!(child.expr, SummaryExpr::SummaryAgg { .. }));
+        }
+    }
+}
+
+#[test]
+fn value_ranked_topk_over_binary_ratio_finalizes_both_summary_operands() {
+    let query = "topk(1, sum by(job)(increase(a[6h])) / sum by(job)(increase(b[6h])))";
+    let root = lower_search_and_materialize(query);
+    let SummaryExpr::ValueOperation {
+        operation: ValueOperation::Limit { n: 1, offset: 0 },
+        child: sort,
+        ..
+    } = &root.expr
+    else {
+        panic!("expected Limit root, got {:?}", root.expr);
+    };
+    let SummaryExpr::ValueOperation {
+        operation: ValueOperation::Sort { .. },
+        child: binary,
+        ..
+    } = &sort.expr
+    else {
+        panic!("expected Sort below Limit, got {:?}", sort.expr);
+    };
+    let SummaryExpr::BinaryOp { lhs, rhs, .. } = &binary.expr else {
+        panic!("expected BinaryOp below Sort, got {:?}", binary.expr);
+    };
+    for operand in [lhs, rhs] {
+        let SummaryExpr::ValueOperation {
+            operation: ValueOperation::FinalizeExactAccumulator,
+            child,
+            ..
+        } = &operand.expr
+        else {
+            panic!(
+                "expected exact accumulator finalization, got {:?}",
+                operand.expr
+            );
+        };
+        assert!(matches!(child.expr, SummaryExpr::SummaryAgg { .. }));
     }
 }
 
@@ -165,22 +213,37 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
 
 #[test]
 fn promql_binary_arithmetic_preserves_both_scalar_operand_orders() {
+    fn is_exact_readout_or_scalar(node: &SummaryNode) -> bool {
+        matches!(node.expr, SummaryExpr::KeepPreAsap(_))
+            || matches!(
+                node.expr,
+                SummaryExpr::ValueOperation {
+                    operation: ValueOperation::FinalizeExactAccumulator,
+                    ..
+                }
+            )
+    }
     for query in ["rate(a[1m]) / 2", "2 / rate(a[1m])"] {
         let root = lower_and_realize(query);
         let SummaryExpr::BinaryOp { lhs, rhs, .. } = &root.expr else {
             panic!("expected BinaryOp for {query}, got {:?}", root.expr);
         };
-        assert!(matches!(
-            lhs.expr,
-            SummaryExpr::SummaryAgg { .. } | SummaryExpr::KeepPreAsap(_)
-        ));
-        assert!(matches!(
-            rhs.expr,
-            SummaryExpr::SummaryAgg { .. } | SummaryExpr::KeepPreAsap(_)
-        ));
+        assert!(is_exact_readout_or_scalar(lhs));
+        assert!(is_exact_readout_or_scalar(rhs));
         assert!(
-            matches!(lhs.expr, SummaryExpr::SummaryAgg { .. })
-                || matches!(rhs.expr, SummaryExpr::SummaryAgg { .. })
+            matches!(
+                lhs.expr,
+                SummaryExpr::ValueOperation {
+                    operation: ValueOperation::FinalizeExactAccumulator,
+                    ..
+                }
+            ) || matches!(
+                rhs.expr,
+                SummaryExpr::ValueOperation {
+                    operation: ValueOperation::FinalizeExactAccumulator,
+                    ..
+                }
+            )
         );
     }
 }
