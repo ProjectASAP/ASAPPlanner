@@ -70,14 +70,16 @@ impl ExecutionTiming {
 /// The primitive representation carried by a post-ASAP edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataPrimitive {
-    Rows,
+    /// Directly usable values, including approximate summary readouts.
+    /// This does not imply original input data or an exact guarantee.
+    Raw,
     SummaryState,
 }
 
 impl DataPrimitive {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Rows => "rows",
+            Self::Raw => "raw",
             Self::SummaryState => "summary_state",
         }
     }
@@ -94,7 +96,7 @@ pub struct ExecutionDataState {
 impl ExecutionDataState {
     pub const MAINTENANCE_ROWS: Self = Self {
         timing: ExecutionTiming::MaintenanceTime,
-        primitive: DataPrimitive::Rows,
+        primitive: DataPrimitive::Raw,
     };
     pub const MAINTENANCE_SUMMARY: Self = Self {
         timing: ExecutionTiming::MaintenanceTime,
@@ -102,7 +104,7 @@ impl ExecutionDataState {
     };
     pub const READ_ROWS: Self = Self {
         timing: ExecutionTiming::ReadTime,
-        primitive: DataPrimitive::Rows,
+        primitive: DataPrimitive::Raw,
     };
 }
 
@@ -609,6 +611,22 @@ mod tests {
     use crate::pre_asap::expr_ir::ColumnRef;
     use crate::pre_asap::query_expr::{QueryExpr, Reduction, Source};
     use crate::pre_asap::schema::DataType;
+
+    /// Both execution phases use raw values, distinct from maintained state.
+    #[test]
+    fn raw_primitive_labels() {
+        assert_eq!(
+            ExecutionDataState::MAINTENANCE_ROWS.primitive,
+            DataPrimitive::Raw
+        );
+        assert_eq!(ExecutionDataState::READ_ROWS.primitive, DataPrimitive::Raw);
+        assert_eq!(
+            ExecutionDataState::MAINTENANCE_ROWS.to_string(),
+            "maintenance_time/raw"
+        );
+        assert_eq!(ExecutionDataState::READ_ROWS.to_string(), "read_time/raw");
+        assert_eq!(DataPrimitive::SummaryState.as_str(), "summary_state");
+    }
 
     fn scan() -> Rc<QueryExpr> {
         Rc::new(QueryExpr::Scan {
