@@ -19,7 +19,8 @@
 //! ```
 //!
 //! — an outer `TopK` over the inner count aggregate. Because the match is
-//! positional, aliases do not affect it.
+//! positional, aliases do not affect it. Sum-ranked SQL and PromQL expressions
+//! retain Sort + Limit because their values do not imply stream frequency.
 
 use std::rc::Rc;
 
