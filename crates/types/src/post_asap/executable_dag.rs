@@ -52,8 +52,9 @@ pub enum GroupingEdgeCompatibility {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WindowEdgeCompatibility {
-    /// Both materializations must publish/consume at the same pane boundary.
-    SameEvaluationBoundary,
+    /// Physical lowering must prove equal pane/query phase or install an
+    /// exact boundary residual. The logical DAG alone cannot make that claim.
+    RequiresAlignedPanePhaseOrExactBoundaryResidual,
     NotApplicable,
 }
 
@@ -314,7 +315,7 @@ pub fn compile_executable_dag(
                 data_state: assigned_child_data_state(&node.expr, child),
                 grouping,
                 window: if precompute_dependency {
-                    WindowEdgeCompatibility::SameEvaluationBoundary
+                    WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactBoundaryResidual
                 } else {
                     WindowEdgeCompatibility::NotApplicable
                 },
@@ -426,7 +427,7 @@ mod tests {
         assert_eq!(dependency.grouping, GroupingEdgeCompatibility::Identical);
         assert_eq!(
             dependency.window,
-            WindowEdgeCompatibility::SameEvaluationBoundary
+            WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactBoundaryResidual
         );
         assert!(matches!(
             dependency.intermediate_schema.fields[0].dtype,

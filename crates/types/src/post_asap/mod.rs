@@ -74,4 +74,7 @@ pub use summary_maintenance_lifecycle::{
     EvaluationSchedule, OutputRepresentation, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee,
 };
-pub use summary_window::SummaryWindowFramework;
+pub use summary_window::{
+    validate_pane_coverage, BoundaryCoverage, PaneCoverageError, PanePhaseBinding,
+    SummaryWindowFramework,
+};
