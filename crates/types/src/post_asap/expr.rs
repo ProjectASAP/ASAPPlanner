@@ -6,7 +6,8 @@ use super::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::query_expr::Predicate;
 use crate::pre_asap::{
-    BinaryOpKind, ColumnRef, GroupKeys, ProjectItem, QueryExpr, Reduction, SortKey, VectorMatch,
+    BinaryOpKind, ColumnRef, GroupKeys, JoinKind, ProjectItem, QueryExpr, Reduction, SortKey,
+    VectorMatch,
 };
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -141,6 +142,16 @@ pub enum SummaryExpr {
         child: Rc<SummaryNode>,
         operation: ValueOperation,
         timing: super::execution_data_state::ExecutionTiming,
+    },
+
+    /// Read-time relational join over two row-producing children. This is
+    /// distinct from [`SummaryJoin`](Self::SummaryJoin), which combines
+    /// summary states for join estimation during maintenance.
+    RelationalJoin {
+        left: Rc<SummaryNode>,
+        right: Rc<SummaryNode>,
+        kind: JoinKind,
+        pred: Predicate,
     },
 
     /// Summary aggregation. Post-ASAP binding chose `family` — which

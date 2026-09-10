@@ -38,6 +38,7 @@ pub(super) fn estimate_heterogeneous_summary(
                 }
             }
             SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::RelationalJoin { left, right, .. }
             | SummaryExpr::BinaryOp {
                 lhs: left,
                 rhs: right,
@@ -270,7 +271,12 @@ pub(super) fn estimate_heterogeneous_summary(
             return Ok(());
         }
         match &node.expr {
-            SummaryExpr::BinaryOp { lhs, rhs, .. } => {
+            SummaryExpr::BinaryOp { lhs, rhs, .. }
+            | SummaryExpr::RelationalJoin {
+                left: lhs,
+                right: rhs,
+                ..
+            } => {
                 let operation = summary_operation_evidence(node, evidence)?.resource();
                 *cpu_ops += evaluation_count as f64
                     * validated_operator_executions("exact_binary", operation)? as f64
@@ -443,6 +449,7 @@ pub(super) fn estimate_heterogeneous_summary(
                                 .for_each(|child| collect_aggs(child, seen, out));
                         }
                         SummaryExpr::SummarySubtract { left, right }
+                        | SummaryExpr::RelationalJoin { left, right, .. }
                         | SummaryExpr::BinaryOp {
                             lhs: left,
                             rhs: right,
@@ -649,6 +656,7 @@ fn validate_summary_edges_and_physical_ids(
                 children.iter().map(|child| child.as_ref()).collect()
             }
             SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::RelationalJoin { left, right, .. }
             | SummaryExpr::BinaryOp {
                 lhs: left,
                 rhs: right,
@@ -825,6 +833,7 @@ pub(super) fn estimate_transient_liveness(
                 children.iter().map(|child| child.as_ref()).collect()
             }
             SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::RelationalJoin { left, right, .. }
             | SummaryExpr::BinaryOp {
                 lhs: left,
                 rhs: right,
@@ -881,6 +890,7 @@ pub(super) fn estimate_transient_liveness(
                 .ok_or(AnalyticalCostError::MissingOrStale("summary_join")),
             SummaryExpr::SummaryMerge { .. }
             | SummaryExpr::BinaryOp { .. }
+            | SummaryExpr::RelationalJoin { .. }
             | SummaryExpr::CandidateTopK { .. }
             | SummaryExpr::ValueOperation { .. }
             | SummaryExpr::SummarySubtract { .. }

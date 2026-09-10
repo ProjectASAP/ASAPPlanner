@@ -963,6 +963,11 @@ fn collect_summary_aggs(
         }
         SummaryExpr::ValueOperation { child, .. } => collect_summary_aggs(child, seen, output),
         SummaryExpr::SummaryJoin { outer, inner, .. }
+        | SummaryExpr::RelationalJoin {
+            left: outer,
+            right: inner,
+            ..
+        }
         | SummaryExpr::BinaryOp {
             lhs: outer,
             rhs: inner,

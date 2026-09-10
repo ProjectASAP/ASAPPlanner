@@ -223,9 +223,9 @@ impl ExecutionDataStateAssignment {
 pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
     Some(match expr {
         SummaryExpr::KeepPreAsap(_) => return None,
-        SummaryExpr::BinaryOp { .. } | SummaryExpr::CandidateTopK { .. } => {
-            ExecutionDataState::READ_ROWS
-        }
+        SummaryExpr::BinaryOp { .. }
+        | SummaryExpr::CandidateTopK { .. }
+        | SummaryExpr::RelationalJoin { .. } => ExecutionDataState::READ_ROWS,
         SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
         | SummaryExpr::SummarySubtract { .. }
@@ -342,6 +342,20 @@ fn visit(
             }
             Ok(())
         }
+        SummaryExpr::RelationalJoin { left, right, .. } => {
+            for input in [left, right] {
+                let state =
+                    produced_data_state(&input.expr).unwrap_or(ExecutionDataState::READ_ROWS);
+                if state != ExecutionDataState::READ_ROWS {
+                    return Err(ExecutionDataStateError::IllegalChildDataState {
+                        edge: "RelationalJoin input",
+                        child: state,
+                    });
+                }
+                visit(input, state, assignment)?;
+            }
+            Ok(())
+        }
         SummaryExpr::SummaryAgg { child, .. } => {
             let child_domain = child_domain(
                 child,
@@ -442,6 +456,7 @@ pub fn assigned_child_data_state(parent: &SummaryExpr, child: &SummaryNode) -> E
         SummaryExpr::KeepPreAsap(_)
         | SummaryExpr::BinaryOp { .. }
         | SummaryExpr::CandidateTopK { .. }
+        | SummaryExpr::RelationalJoin { .. }
         | SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
         | SummaryExpr::SummarySubtract { .. }
