@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use asap_types::dag_export::{self, SummaryDagGraph};
 use asap_types::post_asap::{
-    ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
+    PostAsapNodeId, ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
     SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
 };
 
@@ -30,7 +30,10 @@ pub struct SummaryMaintenanceDagExport {
     pub expected_reads: Option<f64>,
     pub selected_raw_recompute: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub selected_physical_plan_id: Option<String>,
+    /// Provider implementation key. The legacy JSON field name is retained
+    /// until the surrounding export receives its own schema-version bump.
+    #[serde(rename = "selected_physical_plan_id")]
+    pub selected_window_implementation_id: Option<String>,
     pub summary_total_cost: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_accuracy_guarantee: Option<ResultGuarantee>,
@@ -39,7 +42,7 @@ pub struct SummaryMaintenanceDagExport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryMaintenanceDeploymentExport {
-    pub summary_index: usize,
+    pub post_asap_node_id: PostAsapNodeId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_window_framework: Option<SummaryWindowFramework>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,7 +68,7 @@ pub fn export_summary_maintenance_plan(
         .deployments
         .iter()
         .map(|deployment| SummaryMaintenanceDeploymentExport {
-            summary_index: deployment.summary_index,
+            post_asap_node_id: deployment.post_asap_node_id,
             selected_window_framework: deployment.selected_window_framework.clone(),
             selected: deployment
                 .summary_maintenance_lifecycle_guarantee
@@ -106,7 +109,7 @@ pub fn export_summary_maintenance_plan(
         update_rate_per_second: plan.update_rate.map(|rate| rate.0),
         expected_reads: plan.expected_reads,
         selected_raw_recompute: plan.selected_raw_recompute,
-        selected_physical_plan_id: plan.selected_physical_plan_id.clone(),
+        selected_window_implementation_id: plan.selected_window_implementation_id.clone(),
         summary_total_cost: plan.summary_total_cost.map(|cost| cost.0),
         window_accuracy_guarantee: plan.window_accuracy_guarantee.clone(),
         raw_recompute_total_cost: plan.raw_recompute_total_cost.map(|cost| cost.0),
@@ -116,7 +119,7 @@ pub fn export_summary_maintenance_plan(
 /// Walk in the same post-order as `dag_export::export_summary` and attach a
 /// deployment directly to every flattened occurrence of its `SummaryAgg`.
 /// This makes the decision visible to graph consumers without asking them to
-/// reconstruct pointer identity from `summary_index` or graph position.
+/// reconstruct pointer identity from graph position.
 fn annotate_lifecycle_deployments(
     node: &SummaryNode,
     graph: &mut SummaryDagGraph,

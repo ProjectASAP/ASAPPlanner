@@ -20,7 +20,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use asap_types::post_asap::{
-    EvaluationSchedule, OutputRepresentation, ResultGuarantee, SummaryExpr,
+    compile_executable_dag_with_node_ids, EvaluationSchedule, ExecutionDataStateError,
+    OutputRepresentation, PostAsapNodeId, ResultGuarantee, SummaryExpr,
     SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
     SummaryNode, SummaryWindowFramework,
 };
@@ -160,9 +161,10 @@ impl SummaryMaintenanceLifecycleAlternative {
 /// One unique summary-state deployment. Shared `Rc` nodes are emitted once.
 #[derive(Debug, Clone)]
 pub struct SummaryMaintenanceDeployment {
-    /// Traversal-local ordinal used to associate this deployment with exports;
-    /// it is not a persistent identity across independently planned DAGs.
-    pub summary_index: usize,
+    /// Identity of this summary in the exported post-ASAP semantic DAG.
+    /// It is scoped to one plan version and is not a summary definition or
+    /// summary instance identity.
+    pub post_asap_node_id: PostAsapNodeId,
     /// The unique materialized `SummaryAgg` represented by this deployment.
     pub summary: Rc<SummaryNode>,
     /// Lifecycle, evaluation, and representation commitment selected for this
@@ -198,7 +200,7 @@ pub struct SummaryMaintenanceLifecyclePlan {
     pub selected_raw_recompute: bool,
     /// Provider-owned identity of the selected complete physical deployment
     /// (for example a tumbling, sliding, or exponential-histogram plan).
-    pub selected_physical_plan_id: Option<String>,
+    pub selected_window_implementation_id: Option<String>,
     /// Cost of the selected set of summary deployments, when fully known.
     pub summary_total_cost: Option<Cost>,
     /// Composed accuracy guarantee supplied by the selected physical window
@@ -244,6 +246,8 @@ pub enum SummaryMaintenanceLifecyclePlanError {
     EmptyWorkloadDemand,
     #[error("workload entry index {index} appears more than once in one demand binding")]
     DuplicateWorkloadEntry { index: usize },
+    #[error(transparent)]
+    InvalidPostAsapDag(#[from] ExecutionDataStateError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -358,11 +362,11 @@ fn plan_summary_maintenance_lifecycles_with_profile(
     }
     let mut summaries = Vec::new();
     collect_summary_aggs(&root, &mut HashSet::new(), &mut summaries);
+    let node_ids = compile_executable_dag_with_node_ids(&root)?.node_ids;
     let components = summary_state_components(&summaries);
     let mut deployments: Vec<SummaryMaintenanceDeployment> = summaries
         .into_iter()
-        .enumerate()
-        .map(|(summary_index, summary)| {
+        .map(|summary| {
             let alternatives = alternatives_for(
                 &facts,
                 horizon,
@@ -371,7 +375,9 @@ fn plan_summary_maintenance_lifecycles_with_profile(
                 cost_model.summary_maintenance_lifecycle_cost_inputs_for_horizon(&summary, horizon),
             );
             SummaryMaintenanceDeployment {
-                summary_index,
+                post_asap_node_id: node_ids
+                    .node_id(&summary)
+                    .expect("collected summary belongs to the compiled DAG"),
                 summary,
                 summary_maintenance_lifecycle_guarantee: None,
                 selected_window_framework: None,
@@ -391,7 +397,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         &facts.required_accuracy,
     );
     let summary_total_cost = complete_estimate.as_ref().map(|estimate| estimate.cost);
-    let selected_physical_plan_id = complete_estimate
+    let selected_window_implementation_id = complete_estimate
         .as_ref()
         .and_then(|estimate| estimate.physical_plan_id.clone());
     let window_accuracy_guarantee = complete_estimate
@@ -406,7 +412,7 @@ fn plan_summary_maintenance_lifecycles_with_profile(
         update_rate: facts.update_rate,
         expected_reads: facts.reads,
         selected_raw_recompute,
-        selected_physical_plan_id,
+        selected_window_implementation_id,
         summary_total_cost,
         window_accuracy_guarantee,
         raw_recompute_total_cost: None,
@@ -508,7 +514,7 @@ pub fn materialize_with_summary_maintenance_lifecycles(
                 plan.root = crate::replacement::keep_pre_asap(target)?;
                 plan.deployments.clear();
                 plan.selected_raw_recompute = true;
-                plan.selected_physical_plan_id = None;
+                plan.selected_window_implementation_id = None;
                 plan.summary_total_cost = None;
                 plan.window_accuracy_guarantee = None;
             }
@@ -2073,7 +2079,7 @@ mod tests {
     fn whole_candidate_cost_is_evaluated_before_selecting_a_lifecycle() {
         let root = summary();
         let mut deployments = vec![SummaryMaintenanceDeployment {
-            summary_index: 0,
+            post_asap_node_id: PostAsapNodeId(0),
             summary: Rc::clone(&root),
             summary_maintenance_lifecycle_guarantee: None,
             selected_window_framework: None,
@@ -2136,7 +2142,7 @@ mod tests {
         ];
         let mut deployments: Vec<_> = (0..13)
             .map(|summary_index| SummaryMaintenanceDeployment {
-                summary_index,
+                post_asap_node_id: PostAsapNodeId(summary_index as u32),
                 summary: Rc::clone(&root),
                 summary_maintenance_lifecycle_guarantee: None,
                 selected_window_framework: None,
