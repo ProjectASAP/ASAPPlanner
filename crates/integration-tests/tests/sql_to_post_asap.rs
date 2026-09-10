@@ -13,28 +13,17 @@
 //! aggregation (`sum by (job) (m)`, `quantile(0.99, …)`), so [`realize`] can
 //! bind it directly at the tree root. `lower_sql` never does: DataFusion's
 //! planner always wraps even a single, unaliased aggregate in an identity
-//! `Project` (confirmed below), so a SQL tree's *root* is always `Project {
-//! child: Aggregate { .. } }`. Construction only fires when the node
-//! `replacement.rs`'s `construct_summary` is looking at is itself a bindable
-//! `QueryExpr::Aggregate` (see `replacement.rs`'s module docs on the "logical
-//! parent subsumes bindable child" conservative fallback); a `Project` at the
-//! root is exactly such a logical parent, so feeding a raw `lower_sql` result
-//! straight into [`realize`] always yields a whole-tree
-//! `SummaryExpr::KeepPreAsap` — never a genuine sketch or accumulator
-//! binding.
-//!
-//! The tests below extract the inner `Aggregate` node the same way this
-//! crate's own `frontend-sql/tests/sql_lowering.rs` does (its
-//! `find_aggregate`/`find_aggregate_node` helpers) and hand that to
-//! [`realize`] directly, which is the shape a future Project-elision rewrite
-//! (tracked with the rest of the post-ASAP rule engine, issues #6/#33) would
-//! present to this pass in production.
+//! `Project` (confirmed below), so a SQL tree's *root* is normally `Project {
+//! child: Aggregate { .. } }`. Final materialization retains that projection
+//! as a query-time value operation and independently plans its child, keeping
+//! both SELECT-list semantics and the summary-bound aggregate visible.
 
 use std::rc::Rc;
 
 use asap_aware_mapping::replacement::{keep_pre_asap, ImplementError};
 use asap_aware_mapping::{
-    Replacement, ReplacementStrategy, ReplacementSubDAG, SketchAlgorithmStrategy, TargetSubDAG,
+    search_workload, DefaultCostModel, Replacement, ReplacementStrategy, ReplacementSubDAG,
+    SketchAlgorithmStrategy, TargetSubDAG,
 };
 use asap_frontend_sql::{lower_sql, SqlCatalog};
 use asap_types::post_asap::{
@@ -114,15 +103,12 @@ fn inner_aggregate(qe: &QueryExpr) -> &QueryExpr {
     }
 }
 
-/// Sanity + documentation: feeding a raw `lower_sql` root straight into
-/// [`realize`] never binds anything — the wrapping `Project` always subsumes
-/// the `Aggregate` beneath it into one logical passthrough. This is the
-/// "conservative fallback" `replacement.rs`'s module docs describe, hitting
-/// unconditionally for SQL because of the Project DataFusion always inserts.
+/// A complete SQL frontend result retains its projection and recursively
+/// materializes the selected aggregate beneath it.
 #[tokio::test]
-async fn sql_full_query_root_stays_logical_under_the_identity_projection() {
+async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     let pre_asap = lower(
-        "SELECT approx_percentile_cont(latency, 0.99) FROM metrics",
+        "SELECT approx_percentile_cont(latency, 0.99) AS p99 FROM metrics",
         AccuracyTarget::Epsilon(0.01),
     )
     .await;
@@ -130,11 +116,39 @@ async fn sql_full_query_root_stays_logical_under_the_identity_projection() {
         matches!(pre_asap, QueryExpr::Project { .. }),
         "sanity: a SQL root is a Project, unlike lower_promql's bare Aggregate"
     );
-    let root = realize(&pre_asap).expect("binding failed");
+    let pre_asap = Rc::new(pre_asap);
+    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]);
+    let selection = space.global_selection(&DefaultCostModel);
+    let root = selection
+        .materialize(&space.roots[0].1)
+        .expect("materialization failed")
+        .expect("root must be discovered");
+    let QueryExpr::Project {
+        cols: expected_cols,
+        qualifier: expected_qualifier,
+        ..
+    } = pre_asap.as_ref()
+    else {
+        unreachable!()
+    };
+    let SummaryExpr::ValueOperation {
+        child,
+        operation: asap_types::post_asap::ValueOperation::Project { cols, qualifier },
+        ..
+    } = &root.expr
+    else {
+        panic!("expected retained Project root, got {:?}", root.expr);
+    };
+    assert_eq!(cols, expected_cols, "projection expressions and aliases");
+    assert_eq!(qualifier, expected_qualifier, "projection qualifier");
+    assert_eq!(root.schema.fields[0].name, "p99", "project output schema");
+    assert_eq!(
+        root.schema.fields[0].dtype,
+        SummaryFamilyType::Plain(DataType::Float64)
+    );
     assert!(
-        matches!(root.expr, SummaryExpr::KeepPreAsap(ref e) if **e == pre_asap),
-        "bind does not look inside a Project to find a bindable Aggregate \
-         child, so the whole Project{{Aggregate}} tree stays logical"
+        matches!(child.expr, SummaryExpr::SummaryEstimate { .. }),
+        "the Aggregate under Project must be summary-bound"
     );
 }
 
