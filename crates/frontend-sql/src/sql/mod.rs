@@ -7,11 +7,12 @@
 //! unresolved `ColumnRef`s directly (issue #179) — the same tree shape
 //! [`resolve_root`](asap_types::pre_asap::resolve_root) binds to canonical,
 //! positional `QueryExpr<ColumnId>`. Unlike PromQL's front end, SQL's
-//! `Aggregate` nodes need no reduction-shape decision at construction time —
-//! DataFusion's `Aggregate` plan node is always `Reduction::Reduce`, never
-//! PromQL's per-series `PerEntity` (there is no windowed/subquery child
-//! concept in SQL) — so this front end always builds `Reduce` directly. It
-//! does still have to fold a `WHERE` directly over a bare table scan onto
+//! Ordinary SQL `Aggregate` nodes are `Reduction::Reduce`. The explicit
+//! `asap_rate`/`asap_increase`/`asap_last` bridge is the narrow exception: it
+//! spells a time-series range reducer with an explicit value, time-index, and
+//! window and therefore lowers to the same `TimeRange` + `PerEntity` shape as
+//! its PromQL counterpart. The front end also has to fold a `WHERE` directly
+//! over a bare table scan onto
 //! `Scan.predicates` itself (`filter_or_fold`) — canonical's invariant that a
 //! `Filter` never sits directly over a `Scan` — since front ends producing
 //! this shape are responsible for it now, not a converter.
@@ -25,6 +26,7 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use datafusion::arrow::compute::kernels::cast_utils::parse_interval_month_day_nano;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field};
@@ -57,7 +59,8 @@ use asap_types::pre_asap::query_expr::{
 };
 use asap_types::pre_asap::schema::{DataType, Schema};
 use asap_types::pre_asap::{
-    ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind, ScalarValue, WindowFuncKind,
+    resolve_column_ref, resolve_root, ColumnRef, CompareOpKind, JoinKind, RelationalSetOpKind,
+    ScalarValue, WindowFuncKind,
 };
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::SqlDialect;
@@ -645,15 +648,30 @@ impl<'a> SqlLowerer<'a> {
             return self.lower_plan(&proj.input);
         }
         let child = Rc::new(self.lower_plan(&proj.input)?);
+        let temporal_input = plan_has_temporal_aggregate(&proj.input);
         let cols = proj
             .expr
             .iter()
             .map(|e| match e {
-                Expr::Alias(a) => df_expr_to_unresolved(&a.expr).map(|expr| ProjectItem {
-                    expr,
-                    alias: Some(a.name.clone()),
-                }),
-                _ => df_expr_to_unresolved(e).map(|expr| ProjectItem { expr, alias: None }),
+                Expr::Alias(a) => {
+                    let expr = if temporal_input && is_temporal_output_column(&a.expr) {
+                        Unresolved::Column(ColumnRef::Named("value".into()))
+                    } else {
+                        df_expr_to_unresolved(&a.expr)?
+                    };
+                    Ok::<ProjectItem<ColumnRef>, LoweringError>(ProjectItem {
+                        expr,
+                        alias: Some(a.name.clone()),
+                    })
+                }
+                _ => {
+                    let expr = if temporal_input && is_temporal_output_column(e) {
+                        Unresolved::Column(ColumnRef::Named("value".into()))
+                    } else {
+                        df_expr_to_unresolved(e)?
+                    };
+                    Ok::<ProjectItem<ColumnRef>, LoweringError>(ProjectItem { expr, alias: None })
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Unresolved::Project {
@@ -665,6 +683,10 @@ impl<'a> SqlLowerer<'a> {
 
     fn lower_aggregate(&self, agg: &logical_expr::Aggregate) -> Result<Unresolved, LoweringError> {
         let input = self.lower_plan(&agg.input)?;
+
+        if agg.aggr_expr.iter().any(is_temporal_aggregate) {
+            return self.lower_temporal_aggregate(agg, input);
+        }
 
         // `GROUPING SETS`/`ROLLUP`/`CUBE` emit several grouping levels from one
         // scan. `Aggregate.by` is a single key set, so each level becomes its own
@@ -743,6 +765,110 @@ impl<'a> SqlLowerer<'a> {
             output_names,
             having: None,
             child,
+        })
+    }
+
+    fn lower_temporal_aggregate(
+        &self,
+        agg: &logical_expr::Aggregate,
+        input: Unresolved,
+    ) -> Result<Unresolved, LoweringError> {
+        if agg.aggr_expr.len() != 1 {
+            return Err(LoweringError::UnsupportedFeature(
+                "an ASAP temporal aggregate cannot share an Aggregate node with another reducer"
+                    .into(),
+            ));
+        }
+        let Expr::AggregateFunction(call) = unalias(&agg.aggr_expr[0]) else {
+            unreachable!("is_temporal_aggregate accepted a non-aggregate expression")
+        };
+        let name = call.func.name().to_lowercase();
+        let [value, timestamp, window] = call.args.as_slice() else {
+            unreachable!("ASAP temporal UDAF signatures require exactly three arguments")
+        };
+
+        let value_ref = reducer_col(&name, std::slice::from_ref(value))?;
+        let timestamp_ref = reducer_col(&name, std::slice::from_ref(timestamp))?;
+        let Expr::Literal(window) = unalias(window) else {
+            return Err(LoweringError::InvalidExpression(format!(
+                "{name} window_ms must be a positive integer literal"
+            )));
+        };
+        let window_ms = scalar_positive_u64(window).ok_or_else(|| {
+            LoweringError::InvalidExpression(format!(
+                "{name} window_ms must be a positive integer literal"
+            ))
+        })?;
+
+        let resolved_input = resolve_root(&input)?;
+        let input_schema = resolved_input.output_schema().map_err(|error| {
+            LoweringError::InvalidExpression(format!(
+                "cannot derive temporal aggregate input schema: {error}"
+            ))
+        })?;
+        let timestamp_id = resolve_column_ref(&timestamp_ref, &input_schema).map_err(|error| {
+            LoweringError::InvalidExpression(format!("{name} timestamp argument: {error}"))
+        })?;
+        if input_schema.time_index != Some(timestamp_id) {
+            return Err(LoweringError::InvalidExpression(format!(
+                "{name} timestamp argument must name the input schema's time-index column"
+            )));
+        }
+        let value_id = resolve_column_ref(&value_ref, &input_schema).map_err(|error| {
+            LoweringError::InvalidExpression(format!("{name} value argument: {error}"))
+        })?;
+        if value_id == timestamp_id
+            || !matches!(
+                input_schema.columns[value_id].dtype,
+                DataType::Int64 | DataType::Float64
+            )
+        {
+            return Err(LoweringError::InvalidExpression(format!(
+                "{name} value argument must name a numeric non-time column"
+            )));
+        }
+
+        let mut cols = vec![
+            ProjectItem {
+                alias: Some("ts".into()),
+                expr: Unresolved::Column(timestamp_ref.clone()),
+            },
+            ProjectItem {
+                alias: Some("value".into()),
+                expr: Unresolved::Column(value_ref.clone()),
+            },
+        ];
+        for group in &agg.group_expr {
+            let group_ref = expr_to_group_ref(group)?;
+            let group_name = named_ref(&group_ref).to_string();
+            if group_name != named_ref(&timestamp_ref) && group_name != named_ref(&value_ref) {
+                cols.push(ProjectItem {
+                    alias: Some(group_name),
+                    expr: Unresolved::Column(group_ref),
+                });
+            }
+        }
+        let child = Unresolved::Project {
+            cols,
+            qualifier: None,
+            child: Rc::new(input),
+        };
+        let child = Unresolved::TimeRange {
+            range: Duration::from_millis(window_ms),
+            child: Rc::new(child),
+        };
+        let intent = match name.as_str() {
+            "asap_rate" => AggIntent::Rate,
+            "asap_increase" => AggIntent::Increase,
+            "asap_last" => AggIntent::LastOverTime,
+            _ => unreachable!("is_temporal_aggregate admitted {name}"),
+        };
+        Ok(Unresolved::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures: vec![intent],
+            output_names: vec![],
+            having: None,
+            child: Rc::new(child),
         })
     }
 
@@ -1289,6 +1415,56 @@ fn lower_agg_intent(expr: &Expr) -> Result<AggIntent<ColumnRef>, LoweringError> 
         _ => Err(LoweringError::UnsupportedAggregate(format!(
             "measure is not an aggregate function call: {expr}"
         ))),
+    }
+}
+
+fn temporal_aggregate_name(expr: &Expr) -> Option<String> {
+    let Expr::AggregateFunction(call) = unalias(expr) else {
+        return None;
+    };
+    let name = call.func.name().to_lowercase();
+    matches!(name.as_str(), "asap_rate" | "asap_increase" | "asap_last").then_some(name)
+}
+
+fn is_temporal_aggregate(expr: &Expr) -> bool {
+    temporal_aggregate_name(expr).is_some()
+}
+
+fn is_temporal_output_column(expr: &Expr) -> bool {
+    let Expr::Column(col) = unalias(expr) else {
+        return false;
+    };
+    let name = col.name.to_lowercase();
+    ["asap_rate(", "asap_increase(", "asap_last("]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+fn plan_has_temporal_aggregate(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Aggregate(agg) => agg.aggr_expr.iter().any(is_temporal_aggregate),
+        LogicalPlan::Filter(filter) => plan_has_temporal_aggregate(&filter.input),
+        LogicalPlan::SubqueryAlias(alias) => plan_has_temporal_aggregate(&alias.input),
+        _ => false,
+    }
+}
+
+fn named_ref(col: &ColumnRef) -> &str {
+    match col {
+        ColumnRef::Named(name) | ColumnRef::Qualified { name, .. } => name,
+        ColumnRef::SampleValue | ColumnRef::Wildcard => {
+            unreachable!("reducer_col only returns named column references")
+        }
+    }
+}
+
+fn scalar_positive_u64(value: &DfScalarValue) -> Option<u64> {
+    match value {
+        DfScalarValue::Int64(Some(v)) if *v > 0 => Some(*v as u64),
+        DfScalarValue::Int32(Some(v)) if *v > 0 => Some(*v as u64),
+        DfScalarValue::UInt64(Some(v)) if *v > 0 => Some(*v),
+        DfScalarValue::UInt32(Some(v)) if *v > 0 => Some(*v as u64),
+        _ => None,
     }
 }
 
