@@ -3693,6 +3693,34 @@ impl<'a> GlobalSelection<'a> {
         &self,
         target: &Rc<QueryExpr>,
     ) -> Result<Rc<SummaryNode>, ImplementError> {
+        if let QueryExpr::Join {
+            left,
+            right,
+            kind,
+            pred,
+        } = target.as_ref()
+        {
+            let left = self.materialize_inner(left)?;
+            let right = self.materialize_inner(right)?;
+            let guarantee = left
+                .guarantee
+                .as_ref()
+                .zip(right.guarantee.as_ref())
+                .filter(|(left, right)| left.is_exact() && right.is_exact())
+                .map(|_| ResultGuarantee::exact("RelationalJoin over exact inputs"));
+            let node = Rc::new(SummaryNode {
+                expr: SummaryExpr::RelationalJoin {
+                    left,
+                    right,
+                    kind: kind.clone(),
+                    pred: pred.clone(),
+                },
+                schema: lift(&target.output_schema()?),
+                guarantee,
+            });
+            validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+            return Ok(node);
+        }
         let (child_target, operation) = match target.as_ref() {
             QueryExpr::Project {
                 cols,

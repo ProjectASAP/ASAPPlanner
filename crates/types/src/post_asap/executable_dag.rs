@@ -11,7 +11,7 @@ use super::{
     BinaryOperator, CandidateCompleteness, ExecutionTiming, GroupingStrategy, SketchQuery,
     SummaryFamilyType, SummaryUpdate, ValueOperation,
 };
-use crate::pre_asap::{ColumnRef, GroupKeys, QueryExpr, Reduction};
+use crate::pre_asap::{ColumnRef, GroupKeys, JoinKind, Predicate, QueryExpr, Reduction};
 use thiserror::Error;
 
 pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 1;
@@ -22,6 +22,7 @@ pub enum ExecutableOperator {
     Binary,
     CandidateTopK,
     Value,
+    RelationalJoin,
     SummaryAgg,
     SummaryJoin,
     SummarySubtract,
@@ -82,6 +83,10 @@ pub enum ExecutableOperatorPayload {
         operation: ValueOperation,
         timing: ExecutionTiming,
     },
+    RelationalJoin {
+        join_kind: JoinKind,
+        pred: Predicate,
+    },
     SummaryAgg {
         family: SummaryFamilyType,
         input: SummaryUpdate,
@@ -109,6 +114,7 @@ impl ExecutableOperatorPayload {
             Self::Binary { .. } => ExecutableOperator::Binary,
             Self::CandidateTopK { .. } => ExecutableOperator::CandidateTopK,
             Self::Value { .. } => ExecutableOperator::Value,
+            Self::RelationalJoin { .. } => ExecutableOperator::RelationalJoin,
             Self::SummaryAgg { .. } => ExecutableOperator::SummaryAgg,
             Self::SummaryJoin { .. } => ExecutableOperator::SummaryJoin,
             Self::SummarySubtract => ExecutableOperator::SummarySubtract,
@@ -409,6 +415,9 @@ pub fn compile_executable_dag_with_node_ids(
             SummaryExpr::ValueOperation { child, .. } | SummaryExpr::SummaryAgg { child, .. } => {
                 vec![(child, EdgeRole::Input)]
             }
+            SummaryExpr::RelationalJoin { left, right, .. } => {
+                vec![(left, EdgeRole::Left), (right, EdgeRole::Right)]
+            }
             SummaryExpr::SummaryJoin { outer, inner, .. } => {
                 vec![(outer, EdgeRole::Left), (inner, EdgeRole::Right)]
             }
@@ -454,6 +463,12 @@ pub fn compile_executable_dag_with_node_ids(
                 operation: operation.clone(),
                 timing: *timing,
             },
+            SummaryExpr::RelationalJoin { kind, pred, .. } => {
+                ExecutableOperatorPayload::RelationalJoin {
+                    join_kind: kind.clone(),
+                    pred: pred.clone(),
+                }
+            }
             SummaryExpr::SummaryAgg {
                 family,
                 input,

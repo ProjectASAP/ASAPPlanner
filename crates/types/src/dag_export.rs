@@ -477,6 +477,7 @@ define_summary_kind_tags! {
     SummaryExpr::BinaryOp { .. } => "SummaryBinaryOp",
     SummaryExpr::CandidateTopK { .. } => "CandidateTopK",
     SummaryExpr::ValueOperation { .. } => "ValueOperation",
+    SummaryExpr::RelationalJoin { .. } => "RelationalJoin",
     SummaryExpr::SummaryAgg { .. } => "SummaryAgg",
     SummaryExpr::SummaryJoin { .. } => "SummaryJoin",
     SummaryExpr::SummarySubtract { .. } => "SummarySubtract",
@@ -518,6 +519,15 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
                 "operation": format!("{operation:?}"),
                 "timing": timing.as_str(),
             }),
+        ),
+        SummaryExpr::RelationalJoin {
+            kind: join_kind,
+            pred,
+            ..
+        } => (
+            kind,
+            format!("RelationalJoin({join_kind:?})"),
+            serde_json::json!({ "join_kind": join_kind, "predicate": pred }),
         ),
         SummaryExpr::SummaryAgg {
             family,
@@ -575,6 +585,7 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
             candidates, values, ..
         } => vec![candidates, values],
         SummaryExpr::ValueOperation { child, .. } => vec![child],
+        SummaryExpr::RelationalJoin { left, right, .. } => vec![left, right],
         SummaryExpr::SummaryAgg { child, .. } => vec![child],
         SummaryExpr::SummaryJoin { outer, inner, .. } => vec![outer, inner],
         SummaryExpr::SummarySubtract { left, right } => vec![left, right],

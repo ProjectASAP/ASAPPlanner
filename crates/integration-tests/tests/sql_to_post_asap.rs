@@ -203,6 +203,70 @@ async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     );
 }
 
+/// A relational join remains a read-time node while both derived-table
+/// aggregates are independently selected as physical summaries.
+#[tokio::test]
+async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
+    let pre_asap = Rc::new(
+        lower_sql_dialect(
+            "SELECT a.service, a.v / b.v AS ratio FROM \
+             (SELECT service, asap_rate(latency, ts, 300000) AS v FROM metrics WHERE service='errors' GROUP BY service) a \
+             INNER JOIN \
+             (SELECT service, asap_rate(latency, ts, 300000) AS v FROM metrics WHERE service='requests' GROUP BY service) b \
+             ON a.service=b.service",
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect("two-subquery rate ratio must lower"),
+    );
+    let space = search_workload(vec![("ratio", Rc::clone(&pre_asap))]);
+    let selection = space.global_selection(&DefaultCostModel);
+    let root = selection
+        .materialize(&space.roots[0].1)
+        .expect("materialization failed")
+        .expect("root must be discovered");
+    let SummaryExpr::ValueOperation {
+        child: join,
+        operation: ValueOperation::Project { cols, .. },
+        ..
+    } = &root.expr
+    else {
+        panic!(
+            "expected Project above relational join, got {:?}",
+            root.expr
+        );
+    };
+    assert!(matches!(
+        &cols[1].expr,
+        QueryExpr::Arithmetic {
+            op: asap_types::pre_asap::ArithmeticOpKind::Div,
+            ..
+        }
+    ));
+    let SummaryExpr::RelationalJoin { left, right, .. } = &join.expr else {
+        panic!("expected read-time relational join, got {:?}", join.expr);
+    };
+    for child in [left, right] {
+        let SummaryExpr::ValueOperation {
+            child: aggregate,
+            operation: ValueOperation::Project { .. },
+            ..
+        } = &child.expr
+        else {
+            panic!("derived table Project was not retained: {:?}", child.expr);
+        };
+        assert!(matches!(
+            aggregate.expr,
+            SummaryExpr::SummaryAgg {
+                family: SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+                ..
+            }
+        ));
+    }
+}
+
 /// Relational parents emitted around a derived-table aggregate remain
 /// explicit read-time nodes while the aggregate is summary-bound.
 #[tokio::test]
