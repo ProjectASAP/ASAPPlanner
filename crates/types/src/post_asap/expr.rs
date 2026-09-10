@@ -38,6 +38,12 @@ pub enum ValueOperation {
         cols: Vec<ProjectItem>,
         qualifier: Option<String>,
     },
+    /// Query-time row filtering. The predicate remains positional against
+    /// the child's output schema and is evaluated only after any summary
+    /// state below it has been read out to rows.
+    Filter {
+        pred: Predicate,
+    },
     /// Query-time ordering of the child's value rows. This is deliberately
     /// distinct from frequency-sketch heavy-hitter readout: PromQL `topk`
     /// ranks the values produced by its child at the evaluation timestamp.
@@ -93,18 +99,19 @@ pub struct SummaryNode {
 
 // ── Post-ASAP sketch-bound IR ────────────────────────────────────────────────
 
-/// Sketch-bound IR produced by post-ASAP binding rules. Those rules
-/// selectively replace logical aggregates and joins in the pre-ASAP
-/// `QueryExpr` with their summary-bound counterparts; everything not
-/// rewritten passes through as `KeepPreAsap(Rc<QueryExpr>)`.
+/// Sketch-bound IR produced by post-ASAP binding and final selection. Binding
+/// rules selectively replace logical aggregates and joins in the pre-ASAP
+/// `QueryExpr` with summary-bound counterparts. Final selection can retain
+/// supported read-time value operations around independently planned children;
+/// other unsupported subtrees pass through as `KeepPreAsap(Rc<QueryExpr>)`.
 ///
 /// Traversing from the root node yields a DAG; shared sub-expressions appear
 /// as multiple `Rc` references to the same `SummaryNode`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SummaryExpr {
-    /// A pre-ASAP subtree kept as-is — no binding rule rewrote it into
-    /// post-ASAP form (e.g. `Filter`, `Project`, `Sort`). Output schema is
-    /// the inner node's schema, lifted to `SummarySchema` with all fields as
+    /// A pre-ASAP subtree kept as-is because it has no selected implementation
+    /// or supported residual decomposition. Output schema is the inner node's
+    /// schema, lifted to `SummarySchema` with all fields as
     /// `SummaryFamilyType::Plain`.
     KeepPreAsap(Rc<QueryExpr>),
 

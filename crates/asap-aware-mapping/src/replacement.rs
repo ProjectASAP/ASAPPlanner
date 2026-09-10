@@ -1871,7 +1871,7 @@ fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementErr
 /// `HAVING` predicate (the filter would need the estimate first), stays
 /// logical. Unsupported logical parents still conservatively become one
 /// [`SummaryExpr::KeepPreAsap`] subtree. Composable query-time value
-/// operators (`Project`, `Sort`, and `Limit`) are retained during final
+/// operators (`Project`, `Filter`, `Sort`, and `Limit`) are retained during final
 /// materialization so their independently planned children remain visible.
 pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
     if let QueryExpr::Aggregate {
@@ -3687,8 +3687,8 @@ impl<'a> GlobalSelection<'a> {
     /// Preserve composable query-time value operators in post-ASAP form even
     /// when the operator itself has no summary implementation. Its child is
     /// materialized independently, so a selected summary remains visible
-    /// beneath `Project`/`Sort`/`Limit` instead of being swallowed by one opaque
-    /// `KeepPreAsap` subtree.
+    /// beneath `Project`/`Filter`/`Sort`/`Limit` instead of being swallowed by
+    /// one opaque `KeepPreAsap` subtree.
     fn materialize_residual(
         &self,
         target: &Rc<QueryExpr>,
@@ -3705,6 +3705,9 @@ impl<'a> GlobalSelection<'a> {
                     qualifier: qualifier.clone(),
                 },
             ),
+            QueryExpr::Filter { pred, child } => {
+                (child, ValueOperation::Filter { pred: pred.clone() })
+            }
             QueryExpr::Sort {
                 keys,
                 partition_by,
