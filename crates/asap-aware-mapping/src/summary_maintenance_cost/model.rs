@@ -3192,6 +3192,11 @@ mod tests {
                     outer: left,
                     inner: right,
                     ..
+                }
+                | SummaryExpr::CandidateTopK {
+                    candidates: left,
+                    values: right,
+                    ..
                 } => {
                     retained(model, left, seen);
                     retained(model, right, seen);
@@ -3401,6 +3406,11 @@ mod tests {
                                 outer: left,
                                 inner: right,
                                 ..
+                            }
+                            | SummaryExpr::CandidateTopK {
+                                candidates: left,
+                                values: right,
+                                ..
                             } => {
                                 owning_aggs(left, seen, owners);
                                 owning_aggs(right, seen, owners);
@@ -3443,6 +3453,11 @@ mod tests {
                 | SummaryExpr::SummaryJoin {
                     outer: left,
                     inner: right,
+                    ..
+                }
+                | SummaryExpr::CandidateTopK {
+                    candidates: left,
+                    values: right,
                     ..
                 } => {
                     bind_ops(model, left, seen, inputs, cpu);

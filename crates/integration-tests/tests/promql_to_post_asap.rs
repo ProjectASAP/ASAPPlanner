@@ -19,9 +19,9 @@ use asap_aware_mapping::{
 };
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
-    CompositionOperator, EntityIdentity, ExactKind, ExactParams, GroupingStrategy, SketchAlgorithm,
-    SketchKind, SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr,
-    SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
+    CandidateCompleteness, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
+    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
+    SummaryFamilyType, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -92,52 +92,16 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
 }
 
 #[test]
-fn value_ranked_topk_over_counter_reduction_preserves_summary_child() {
-    fn has_summary(node: &SummaryNode) -> bool {
-        match &node.expr {
-            SummaryExpr::SummaryAgg { .. } => true,
-            SummaryExpr::ValueOperation { child, .. }
-            | SummaryExpr::SummaryEstimate {
-                summary_input: child,
-                ..
-            } => has_summary(child),
-            SummaryExpr::BinaryOp { lhs, rhs, .. }
-            | SummaryExpr::SummarySubtract {
-                left: lhs,
-                right: rhs,
-            } => has_summary(lhs) || has_summary(rhs),
-            SummaryExpr::SummaryMerge { children } => {
-                children.iter().any(|child| has_summary(child))
-            }
-            _ => false,
-        }
-    }
-
+fn exact_counter_weighted_topk_fails_closed_without_membership_certificate() {
     for query in [
         "topk(3, sum by(job)(rate(cpu_seconds_total[1h])))",
         "topk(3, sum by(job)(increase(requests_total[6h])))",
     ] {
         let root = lower_search_and_materialize(query);
-        let SummaryExpr::ValueOperation {
-            operation: ValueOperation::Limit { n: 3, offset: 0 },
-            child: sort,
-            ..
-        } = &root.expr
-        else {
-            panic!("expected query-time Limit for {query}, got {:?}", root.expr);
-        };
-        let SummaryExpr::ValueOperation {
-            operation: ValueOperation::Sort { .. },
-            child,
-            ..
-        } = &sort.expr
-        else {
-            panic!("expected query-time Sort under Limit for {query}");
-        };
         assert!(
-            has_summary(child),
-            "counter child must retain a selected summary for {query}: {:?}",
-            child.expr
+            matches!(root.expr, SummaryExpr::KeepPreAsap(_)),
+            "exact target must not accept an uncertified membership sidecar for {query}: {:?}",
+            root.expr
         );
     }
 }
@@ -259,6 +223,57 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
                 ..Default::default()
             })
             .unwrap_or_default()
+    }
+}
+
+#[test]
+fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_for_rerank() {
+    for query in [
+        "topk(3, sum by(job)(rate(cpu_seconds_total[1h])))",
+        "topk(3, sum by(job)(increase(requests_total[6h])))",
+    ] {
+        let root =
+            Rc::new(lower_promql(query, AccuracyTarget::Epsilon(0.01)).expect("lowering failed"));
+        let strategy = SketchAlgorithmStrategy::with_models_and_evidence(
+            &DefaultCostModel,
+            &DefaultAccuracyModel,
+            &EqualSplitAllocator,
+            &SeparatedTopK,
+        );
+        let plan = strategy
+            .replacements(&TargetSubDAG::new(&root))
+            .into_iter()
+            .find_map(|candidate| match candidate.replacement {
+                Replacement::Summary(node)
+                    if matches!(node.expr, SummaryExpr::CandidateTopK { .. }) =>
+                {
+                    Some(node)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing CandidateTopK for {query}"));
+        let SummaryExpr::CandidateTopK {
+            candidates,
+            values,
+            k: 3,
+            completeness: CandidateCompleteness::Certified { .. },
+            ..
+        } = &plan.expr
+        else {
+            panic!("unexpected candidate plan for {query}: {:?}", plan.expr)
+        };
+        assert!(matches!(
+            candidates.expr,
+            SummaryExpr::SummaryEstimate { .. }
+        ));
+        assert!(values.guarantee.as_ref().is_some_and(|g| g.is_exact()));
+        assert!(matches!(
+            values.expr,
+            SummaryExpr::ValueOperation {
+                operation: ValueOperation::FinalizeExactAccumulator,
+                ..
+            }
+        ));
     }
 }
 

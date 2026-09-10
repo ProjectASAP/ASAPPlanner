@@ -601,6 +601,26 @@ fn build_over_subtree(outer: Outer, keys: Vec<ColumnRef>, child: Unresolved) -> 
             child: Rc::new(child),
         },
         Outer::TopK { k, descending } => {
+            let weighted_counter_ranking = matches!(
+                &child,
+                Unresolved::Aggregate {
+                    measures,
+                    child: sum_child,
+                    ..
+                } if matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+                    && matches!(sum_child.as_ref(), Unresolved::Aggregate { measures, .. }
+                        if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]))
+            );
+            if descending && weighted_counter_ranking {
+                return Ok(outer_aggregate(
+                    keys,
+                    AggIntent::TopK {
+                        k: k as usize,
+                        accuracy: current_accuracy(),
+                    },
+                    child,
+                ));
+            }
             let sorted = Unresolved::Sort {
                 keys: vec![SortKey {
                     expr: Unresolved::Column(ColumnRef::SampleValue),

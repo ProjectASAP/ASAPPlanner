@@ -1315,6 +1315,12 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
                 visit(lhs, seen, counts)?;
                 visit(rhs, seen, counts)?;
             }
+            SummaryExpr::CandidateTopK {
+                candidates, values, ..
+            } => {
+                visit(candidates, seen, counts)?;
+                visit(values, seen, counts)?;
+            }
             SummaryExpr::ValueOperation { child, .. } => visit(child, seen, counts)?,
             SummaryExpr::SummaryDelete { summary_input, .. } => {
                 counts.deletes_per_update = counts
