@@ -6,7 +6,7 @@ use super::sketch::{GroupingStrategy, SketchQuery, SummaryUpdate};
 use crate::pre_asap::agg_intent::AggIntent;
 use crate::pre_asap::query_expr::Predicate;
 use crate::pre_asap::{
-    BinaryOpKind, ColumnRef, GroupKeys, QueryExpr, Reduction, SortKey, VectorMatch,
+    BinaryOpKind, ColumnRef, GroupKeys, ProjectItem, QueryExpr, Reduction, SortKey, VectorMatch,
 };
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -30,6 +30,14 @@ pub enum ValueOperation {
     /// marks the maintenance-to-read boundary before query-time operators
     /// such as PromQL binary arithmetic, sorting, and limiting.
     FinalizeExactAccumulator,
+    /// Query-time column projection. SQL lowering retains the SELECT list as
+    /// a `Project` above its aggregate, so the post-ASAP DAG must preserve
+    /// its expressions, aliases, and optional derived-table qualifier while
+    /// allowing the aggregate child to be planned independently.
+    Project {
+        cols: Vec<ProjectItem>,
+        qualifier: Option<String>,
+    },
     /// Query-time ordering of the child's value rows. This is deliberately
     /// distinct from frequency-sketch heavy-hitter readout: PromQL `topk`
     /// ranks the values produced by its child at the evaluation timestamp.

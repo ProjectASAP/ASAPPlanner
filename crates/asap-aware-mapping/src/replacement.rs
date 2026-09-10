@@ -1836,12 +1836,10 @@ fn keep_pre_asap_rc(expr: Rc<QueryExpr>) -> Result<Rc<SummaryNode>, ImplementErr
 /// The bindable shape [`SketchAlgorithmStrategy`] targets: a single intent, no
 /// `HAVING`. A multi-intent node (SQL `SELECT SUM(a), AVG(b)`), or one with a
 /// `HAVING` predicate (the filter would need the estimate first), stays
-/// logical — conservative fallbacks: [`SummaryExpr::KeepPreAsap`] boxes a
-/// whole pre-ASAP subtree with no post-ASAP children, so a *logical*
-/// operator above a bindable aggregate (`Filter`/`BinaryOp`/… over a
-/// quantile) subsumes the aggregate into the logical wrapper unbound too —
-/// rewriting through logical parents is the post-ASAP rule engine's job
-/// (#6/#33), not this pass's.
+/// logical. Unsupported logical parents still conservatively become one
+/// [`SummaryExpr::KeepPreAsap`] subtree. Composable query-time value
+/// operators (`Project`, `Sort`, and `Limit`) are retained during final
+/// materialization so their independently planned children remain visible.
 pub fn bindable_intent(node: &QueryExpr) -> Option<&AggIntent> {
     if let QueryExpr::Aggregate {
         measures, having, ..
@@ -3634,13 +3632,24 @@ impl<'a> GlobalSelection<'a> {
     /// Preserve composable query-time value operators in post-ASAP form even
     /// when the operator itself has no summary implementation. Its child is
     /// materialized independently, so a selected summary remains visible
-    /// beneath `Sort`/`Limit` instead of being swallowed by one opaque
+    /// beneath `Project`/`Sort`/`Limit` instead of being swallowed by one opaque
     /// `KeepPreAsap` subtree.
     fn materialize_residual(
         &self,
         target: &Rc<QueryExpr>,
     ) -> Result<Rc<SummaryNode>, ImplementError> {
         let (child_target, operation) = match target.as_ref() {
+            QueryExpr::Project {
+                cols,
+                qualifier,
+                child,
+            } => (
+                child,
+                ValueOperation::Project {
+                    cols: cols.clone(),
+                    qualifier: qualifier.clone(),
+                },
+            ),
             QueryExpr::Sort {
                 keys,
                 partition_by,
