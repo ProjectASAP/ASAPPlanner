@@ -2,7 +2,7 @@
 
 ## Status
 
-ERP v1 is a discrete, distribution-conditioned profile exchanged between
+ERP v1 is a discrete, shape- and distribution-conditioned profile exchanged between
 `sketch-bench` and ASAPPlanner. It is an empirical planning input, not a proof
 of a worst-case sketch guarantee. The implementation lives in
 `asap-aware-mapping::erp`; `approxbench erp` exports the producer artifact.
@@ -33,7 +33,8 @@ sketch-bench parameter/distribution sweep
     -> flat MergedRecord rows
     -> `approxbench erp`
     -> versioned ERP artifact
-    -> deployment supplies an ErpSelectionRequest
+    -> backend observes live cardinality/distribution shape
+    -> deployment supplies an exact or nearest ErpSelectionRequest
     -> ASAPPlanner filters applicable and accurate records
     -> least estimated workload cost
     -> deployment maps the selected identity to runtime configuration
@@ -56,10 +57,17 @@ Each record contains:
 - named observed error metrics; and
 - memory plus per-operation update, merge, and query CPU.
 
-The distribution is an opaque wire value to ASAPPlanner and is equality-matched
-in v1. This deliberately prevents accidental interpolation. A future schema may
-add a typed distribution signature (cardinality, entropy, skew, moments, tail
-mass, quantile density) and a conservative distance model.
+The canonical workload remains available as an opaque wire value for exact
+matching. Shape-aware records additionally carry:
+
+```text
+erp_shape = {cardinality, zipf_exponent, benchmark_events}
+```
+
+`zipf_exponent = null` means uniform; uniform and Zipf profiles are never
+interpolated. `benchmark_events` is a sufficiency gate. Once that floor is met,
+additional events from the same stationary distribution do not make a profile
+semantically farther away.
 
 ## Selection
 
@@ -82,6 +90,11 @@ cpu_weight * (
   + expected_merges * merge_cpu_seconds)
 + byte_second_weight * retention_seconds * memory_bytes
 ```
+
+For shape-aware selection, records must first satisfy the benchmark-event floor
+and distribution-family constraint. Their normalized distance is the maximum
+of log2-cardinality distance and Zipf-exponent distance. Only candidates within
+both caller-supplied bounds are eligible; cost selects among those candidates.
 
 The least-cost accepted record wins. Missing error metrics, missing contexts,
 invalid values, and insufficient trials make a record inapplicable. Cost ties
@@ -116,13 +129,32 @@ or runtime drift invalidates the context, the deployment falls back to formal
 sizing or exact execution. V1 returns `NoApplicableConfiguration`; the caller
 performs this fallback explicitly so it cannot be mistaken for a measured zero.
 
+## Window cost composition
+
+The benchmark provides atomic unit costs. Planner derives operation counts from
+the selected materialization and window model:
+
+```text
+updates = input_updates * materializations
+merges = query_executions * (panes_per_query - 1)
+queries = query_executions
+retained_sketches = retained_panes * materializations
+cpu = updates*C_update + merges*C_merge + queries*C_query
+```
+
+A tumbling window has one pane per query and no merge. A shared sliding-window
+plan has one materialization; a natural per-query deployment has one per
+distinct window. Retained memory is measured bytes per sketch multiplied by
+retained sketches, outside the CPU equation.
+
 ## Distribution drift
 
-ERP selection is valid only while the deployment's distribution descriptor
-matches the evidence context. Production integration should periodically derive
-a versioned signature, compare it with the selected profile, and trigger
-replanning on mismatch. Until typed conservative matching exists, a changed
-descriptor must fail closed.
+ERP selection is valid only while the observed shape remains inside the
+configured profile distance. The deployment periodically derives a signature
+and triggers replanning on mismatch. Insufficient benchmark volume, excessive
+shape distance, absent metrics, unsupported runtime parameters, and drift all
+fail closed. Bursts are explicit benchmark scenario provenance and are not
+silently inferred or interpolated.
 
 Recommended future signatures are family-specific:
 
@@ -164,7 +196,7 @@ selection, but must identify that as capability beyond query-local sizing.
 
 ## Future work
 
-- typed distribution signatures and conservative nearest-profile matching;
+- richer family-specific signatures beyond cardinality and Zipf exponent;
 - confidence/quantile error summaries from independent trials;
 - environment descriptors and validity intervals in the ERP wire format;
 - multi-state error composition for merged windows and query DAGs;
