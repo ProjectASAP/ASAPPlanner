@@ -302,6 +302,26 @@ impl ErpArtifact {
         if !request.selection.valid() || !request.valid() {
             return Err(ErpError::Invalid("invalid multi-fit request"));
         }
+        if let Some(selected) =
+            request
+                .observed
+                .empirical_fingerprint
+                .as_deref()
+                .and_then(|wanted| {
+                    self.records
+                        .iter()
+                        .filter(|row| benchmark_fingerprint(&row.distribution) == Some(wanted))
+                        .filter_map(|row| request.selection.evaluate(row).map(|value| (row, value)))
+                        .min_by(|(left_row, left), (right_row, right)| {
+                            left.estimated_cost
+                                .total_cmp(&right.estimated_cost)
+                                .then_with(|| left_row.id.cmp(&right_row.id))
+                        })
+                        .map(|(_, selected)| selected)
+                })
+        {
+            return Ok(selected);
+        }
         let mut fits = request
             .observed
             .fits
@@ -320,20 +340,57 @@ impl ErpArtifact {
         }) {
             return Err(ErpError::NoApplicableConfiguration);
         }
-        let nearest = ErpNearestSelectionRequest {
-            selection: request.selection.clone(),
-            observed: ErpDataShape {
-                cardinality: request.observed.cardinality,
-                family: best.family.clone(),
-                parameters: best.parameters.clone(),
-                benchmark_events: request.observed.observed_events,
-            },
-            minimum_benchmark_events: request.minimum_benchmark_events,
-            max_log2_cardinality_distance: request.max_log2_cardinality_distance,
-            max_parameter_distance: request.max_parameter_distance,
-        };
-        self.select_nearest(&nearest)
+        // Compare every plausible fit with every compatible benchmark shape.
+        // Confidence and fit quality contribute to the joint score; neither
+        // field first collapses the observation to one family.
+        self.records
+            .iter()
+            .filter_map(|row| Some((row, data_shape(&row.distribution)?)))
+            .filter(|(_, shape)| shape.benchmark_events >= request.minimum_benchmark_events)
+            .flat_map(|(row, shape)| {
+                fits.iter().filter_map(move |fit| {
+                    let nearest = ErpNearestSelectionRequest {
+                        selection: request.selection.clone(),
+                        observed: ErpDataShape {
+                            cardinality: request.observed.cardinality,
+                            family: fit.family.clone(),
+                            parameters: fit.parameters.clone(),
+                            benchmark_events: request.observed.observed_events,
+                        },
+                        minimum_benchmark_events: request.minimum_benchmark_events,
+                        max_log2_cardinality_distance: request.max_log2_cardinality_distance,
+                        max_parameter_distance: request.max_parameter_distance,
+                    };
+                    let shape_distance = nearest.distance(shape.clone())?;
+                    (shape_distance <= 1.0).then_some((row, fit, shape_distance))
+                })
+            })
+            .filter_map(|(row, fit, shape_distance)| {
+                let selected = request.selection.evaluate(row)?;
+                let fit_distance =
+                    fit.goodness_of_fit / request.max_goodness_of_fit.max(f64::EPSILON);
+                let confidence_distance = 1.0 - fit.confidence;
+                Some((
+                    shape_distance.max(fit_distance).max(confidence_distance),
+                    selected,
+                ))
+            })
+            .min_by(|(left_distance, left), (right_distance, right)| {
+                left_distance
+                    .total_cmp(right_distance)
+                    .then_with(|| left.estimated_cost.total_cmp(&right.estimated_cost))
+                    .then_with(|| left.record.id.cmp(&right.record.id))
+            })
+            .map(|(_, selected)| selected)
+            .ok_or(ErpError::NoApplicableConfiguration)
     }
+}
+
+fn benchmark_fingerprint(distribution: &serde_json::Value) -> Option<&str> {
+    distribution
+        .pointer("/erp_shape/empirical_fingerprint")
+        .or_else(|| distribution.pointer("/workload/external/fingerprint"))
+        .and_then(serde_json::Value::as_str)
 }
 
 fn data_shape(distribution: &serde_json::Value) -> Option<ErpDataShape> {
@@ -389,7 +446,7 @@ impl ErpMultiFitSelectionRequest {
     fn valid(&self) -> bool {
         self.observed.cardinality > 0
             && self.observed.observed_events > 0
-            && !self.observed.fits.is_empty()
+            && (!self.observed.fits.is_empty() || self.observed.empirical_fingerprint.is_some())
             && self.max_goodness_of_fit.is_finite()
             && self.max_goodness_of_fit >= 0.0
             && self.minimum_confidence.is_finite()
@@ -446,6 +503,26 @@ impl ErpResourceProfile {
 }
 
 impl ErpSelectionRequest {
+    fn evaluate<'a>(&self, row: &'a ErpRecord) -> Option<ErpSelection<'a>> {
+        if self
+            .implementation
+            .as_ref()
+            .is_some_and(|wanted| &row.implementation != wanted)
+            || (!self.allowed_sketches.is_empty()
+                && !self.allowed_sketches.iter().any(|name| name == &row.sketch))
+            || row.trials < self.min_trials
+        {
+            return None;
+        }
+        let observed_error = *row.error_metrics.get(&self.error_metric)?;
+        (observed_error <= self.max_error).then(|| ErpSelection {
+            record: row,
+            observed_error,
+            estimated_cost: self.cost(&row.resources),
+            accuracy_mode: self.mode,
+        })
+    }
+
     fn valid(&self) -> bool {
         !self.error_metric.trim().is_empty()
             && self.max_error.is_finite()
@@ -614,6 +691,62 @@ mod tests {
         ambiguous.observed.fits[0].goodness_of_fit = 0.5;
         assert_eq!(
             artifact.select_multi_fit(&ambiguous),
+            Err(ErpError::NoApplicableConfiguration)
+        );
+    }
+
+    #[test]
+    fn multi_fit_jointly_ranks_all_plausible_families() {
+        let mut distant_high_confidence = row("zipf-distant", 512, 0.009, 1.0);
+        distant_high_confidence.distribution = serde_json::json!({"erp_shape": {
+            "cardinality": 1000, "family": "zipf",
+            "parameters": {"exponent": 1.39}, "benchmark_events": 20000
+        }});
+        let mut close_lower_confidence = row("normal-close", 512, 0.009, 100.0);
+        close_lower_confidence.distribution = serde_json::json!({"erp_shape": {
+            "cardinality": 1000, "family": "normal",
+            "parameters": {"mean": 4.0, "stddev": 1.0}, "benchmark_events": 20000
+        }});
+        let artifact = ErpArtifact {
+            schema_version: ERP_SCHEMA_VERSION,
+            producer_version: "bench-1".into(),
+            records: vec![distant_high_confidence, close_lower_confidence],
+        };
+        let mut request = multi_fit_request();
+        request.observed.fits.push(ErpShapeFit {
+            family: "normal".into(),
+            parameters: BTreeMap::from([("mean".into(), 4.0), ("stddev".into(), 1.0)]),
+            goodness_of_fit: 0.01,
+            confidence: 0.82,
+        });
+        request.minimum_confidence_margin = 0.1;
+        assert_eq!(
+            artifact.select_multi_fit(&request).unwrap().record.id,
+            "normal-close"
+        );
+    }
+
+    #[test]
+    fn exact_empirical_fingerprint_precedes_fits_and_requires_identity() {
+        let mut exact = row("exact-trace", 512, 0.009, 100.0);
+        exact.distribution = serde_json::json!({"workload": {"external": {
+            "dataset": "trace-a", "fingerprint": "sha256:abc"
+        }}});
+        let artifact = ErpArtifact {
+            schema_version: ERP_SCHEMA_VERSION,
+            producer_version: "bench-1".into(),
+            records: vec![exact],
+        };
+        let mut request = multi_fit_request();
+        request.observed.empirical_fingerprint = Some("sha256:abc".into());
+        request.observed.fits.clear();
+        assert_eq!(
+            artifact.select_multi_fit(&request).unwrap().record.id,
+            "exact-trace"
+        );
+        request.observed.empirical_fingerprint = Some("sha256:different".into());
+        assert_eq!(
+            artifact.select_multi_fit(&request),
             Err(ErpError::NoApplicableConfiguration)
         );
     }
