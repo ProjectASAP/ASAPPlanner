@@ -84,7 +84,7 @@ fn catalog() -> SqlCatalog {
                 col("bytes", DataType::Int64),
             ],
             0,
-            vec![],
+            vec![vec![0, 1]],
         ),
     )
 }
@@ -96,40 +96,52 @@ async fn lower(sql: &str, accuracy: AccuracyTarget) -> QueryExpr {
 }
 
 #[tokio::test]
-async fn clickhouse_temporal_sql_reuses_the_rate_physical_summary() {
-    let pre_asap = lower_sql_dialect(
-        "SELECT service, asap_rate(latency, ts, 300000) AS v \
-         FROM metrics WHERE bytes > 0 GROUP BY service",
-        &catalog(),
-        SqlDialect::ClickhouseSQL,
-        AccuracyTarget::Exact,
-    )
-    .await
-    .expect("explicit temporal SQL must lower");
-    let physical = realize(inner_aggregate(&pre_asap)).expect("rate must be physically planned");
-    let SummaryExpr::SummaryAgg {
-        family,
-        reduction,
-        child,
-        ..
-    } = &physical.expr
-    else {
-        panic!("expected a shared SummaryAgg, got {:?}", physical.expr);
-    };
-    assert_eq!(
-        family,
-        &SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate)
-    );
-    assert_eq!(reduction, &Reduction::PerEntity);
-    let SummaryExpr::KeepPreAsap(raw) = &child.expr else {
-        panic!(
-            "expected a retained temporal SQL input, got {:?}",
-            child.expr
+async fn clickhouse_temporal_sql_reuses_rate_and_increase_physical_summaries() {
+    for (function, expected) in [
+        (
+            "asap_rate",
+            SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        ),
+        (
+            "asap_increase",
+            SummaryFamilyType::ExactAggregate(ExactKind::Increase, ExactParams::Increase),
+        ),
+    ] {
+        let sql = format!(
+            "SELECT service, {function}(latency, ts, 300000) AS v \
+             FROM metrics WHERE bytes > 0 GROUP BY service"
         );
-    };
-    assert!(matches!(raw.as_ref(), QueryExpr::TimeRange { range, child }
-        if *range == std::time::Duration::from_secs(300)
-            && matches!(child.as_ref(), QueryExpr::Project { .. })));
+        let pre_asap = lower_sql_dialect(
+            &sql,
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect("explicit temporal SQL must lower");
+        let physical =
+            realize(inner_aggregate(&pre_asap)).expect("temporal reducer must be planned");
+        let SummaryExpr::SummaryAgg {
+            family,
+            reduction,
+            child,
+            ..
+        } = &physical.expr
+        else {
+            panic!("expected a shared SummaryAgg, got {:?}", physical.expr);
+        };
+        assert_eq!(family, &expected);
+        assert_eq!(reduction, &Reduction::PerEntity);
+        let SummaryExpr::KeepPreAsap(raw) = &child.expr else {
+            panic!(
+                "expected a retained temporal SQL input, got {:?}",
+                child.expr
+            );
+        };
+        assert!(matches!(raw.as_ref(), QueryExpr::TimeRange { range, child }
+            if *range == std::time::Duration::from_secs(300)
+                && matches!(child.as_ref(), QueryExpr::Project { .. })));
+    }
 }
 
 /// The `Aggregate` node beneath the identity `Project` DataFusion's planner

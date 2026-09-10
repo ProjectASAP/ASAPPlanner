@@ -284,11 +284,6 @@ pub const CLICKHOUSE_BUILTINS: &[ClickHouseBuiltin] = &[
         rewrite: RewriteKind::PassThrough,
     },
     ClickHouseBuiltin {
-        name: "asap_last",
-        arity: Arity::Exact(3),
-        rewrite: RewriteKind::PassThrough,
-    },
-    ClickHouseBuiltin {
         name: "uniqexact",
         arity: Arity::Exact(1),
         rewrite: RewriteKind::CountDistinct,

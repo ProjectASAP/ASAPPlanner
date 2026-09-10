@@ -8,7 +8,7 @@
 //! [`resolve_root`](asap_types::pre_asap::resolve_root) binds to canonical,
 //! positional `QueryExpr<ColumnId>`. Unlike PromQL's front end, SQL's
 //! Ordinary SQL `Aggregate` nodes are `Reduction::Reduce`. The explicit
-//! `asap_rate`/`asap_increase`/`asap_last` bridge is the narrow exception: it
+//! `asap_rate`/`asap_increase` bridge is the narrow exception: it
 //! spells a time-series range reducer with an explicit value, time-index, and
 //! window and therefore lowers to the same `TimeRange` + `PerEntity` shape as
 //! its PromQL counterpart. The front end also has to fold a `WHERE` directly
@@ -828,6 +828,53 @@ impl<'a> SqlLowerer<'a> {
             )));
         }
 
+        let mut group_ids = Vec::with_capacity(agg.group_expr.len());
+        let mut group_refs = Vec::with_capacity(agg.group_expr.len());
+        for group in &agg.group_expr {
+            let group_ref = expr_to_group_ref(group)?;
+            let group_id = resolve_column_ref(&group_ref, &input_schema).map_err(|error| {
+                LoweringError::InvalidExpression(format!("{name} GROUP BY column: {error}"))
+            })?;
+            if group_id == timestamp_id || group_id == value_id {
+                return Err(LoweringError::InvalidExpression(format!(
+                    "{name} GROUP BY cannot contain its timestamp or value column"
+                )));
+            }
+            if group_ids.contains(&group_id) {
+                return Err(LoweringError::InvalidExpression(format!(
+                    "{name} GROUP BY contains the same resolved column more than once"
+                )));
+            }
+            group_ids.push(group_id);
+            group_refs.push(group_ref);
+        }
+        // Minimal series-identity contract without adding SQL-only metadata to
+        // the shared Schema: a declared row-unique key must contain the time
+        // index, and removing that index yields the complete series key. The
+        // GROUP BY must match that key exactly. A unique key that omits time is
+        // only row identity and proves nothing about time-series continuity.
+        let identifies_one_series = input_schema
+            .unique_keys
+            .iter()
+            .filter(|key| key.contains(&timestamp_id))
+            .any(|key| {
+                let mut series_key: Vec<_> = key
+                    .iter()
+                    .copied()
+                    .filter(|id| *id != timestamp_id)
+                    .collect();
+                series_key.sort_unstable();
+                series_key.dedup();
+                let mut grouped = group_ids.clone();
+                grouped.sort_unstable();
+                series_key == grouped
+            });
+        if !identifies_one_series {
+            return Err(LoweringError::InvalidExpression(format!(
+                "{name} GROUP BY must exactly match a declared series identity (a unique key without the time index)"
+            )));
+        }
+
         let mut cols = vec![
             ProjectItem {
                 alias: Some("ts".into()),
@@ -838,15 +885,12 @@ impl<'a> SqlLowerer<'a> {
                 expr: Unresolved::Column(value_ref.clone()),
             },
         ];
-        for group in &agg.group_expr {
-            let group_ref = expr_to_group_ref(group)?;
+        for group_ref in group_refs {
             let group_name = named_ref(&group_ref).to_string();
-            if group_name != named_ref(&timestamp_ref) && group_name != named_ref(&value_ref) {
-                cols.push(ProjectItem {
-                    alias: Some(group_name),
-                    expr: Unresolved::Column(group_ref),
-                });
-            }
+            cols.push(ProjectItem {
+                alias: Some(group_name),
+                expr: Unresolved::Column(group_ref),
+            });
         }
         let child = Unresolved::Project {
             cols,
@@ -860,7 +904,7 @@ impl<'a> SqlLowerer<'a> {
         let intent = match name.as_str() {
             "asap_rate" => AggIntent::Rate,
             "asap_increase" => AggIntent::Increase,
-            "asap_last" => AggIntent::LastOverTime,
+
             _ => unreachable!("is_temporal_aggregate admitted {name}"),
         };
         Ok(Unresolved::Aggregate {
@@ -1423,7 +1467,7 @@ fn temporal_aggregate_name(expr: &Expr) -> Option<String> {
         return None;
     };
     let name = call.func.name().to_lowercase();
-    matches!(name.as_str(), "asap_rate" | "asap_increase" | "asap_last").then_some(name)
+    matches!(name.as_str(), "asap_rate" | "asap_increase").then_some(name)
 }
 
 fn is_temporal_aggregate(expr: &Expr) -> bool {
@@ -1435,7 +1479,7 @@ fn is_temporal_output_column(expr: &Expr) -> bool {
         return false;
     };
     let name = col.name.to_lowercase();
-    ["asap_rate(", "asap_increase(", "asap_last("]
+    ["asap_rate(", "asap_increase("]
         .iter()
         .any(|prefix| name.starts_with(prefix))
 }

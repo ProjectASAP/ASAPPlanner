@@ -31,7 +31,7 @@ fn catalog() -> SqlCatalog {
                     col("bytes", DataType::Int64),
                 ],
                 0,
-                vec![],
+                vec![vec![0, 1]],
             ),
         )
         .with_table(
@@ -1563,7 +1563,6 @@ async fn explicit_temporal_aggregates_share_promql_intents_and_timerange() {
     for (function, expected) in [
         ("asap_rate", AggIntent::Rate),
         ("asap_increase", AggIntent::Increase),
-        ("asap_last", AggIntent::LastOverTime),
     ] {
         let sql = format!(
             "SELECT service, {function}(latency, ts, 300000) AS v \
@@ -1619,6 +1618,118 @@ async fn temporal_aggregate_rejects_mixed_reducers() {
     .await
     .expect_err("one child cannot carry temporal and ordinary aggregate semantics");
     assert!(format!("{err}").contains("cannot share an Aggregate node"));
+}
+
+#[tokio::test]
+async fn last_fails_closed_until_an_executable_summary_exists() {
+    let err = lower_sql_dialect(
+        "SELECT service, asap_last(latency, ts, 300000) FROM metrics GROUP BY service",
+        &catalog(),
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("last must not be advertised without an executable physical summary");
+    assert!(format!("{err}").contains("Invalid function 'asap_last'"));
+}
+
+#[tokio::test]
+async fn temporal_grouping_requires_the_complete_declared_series_identity() {
+    let multi_series = SqlCatalog::new().with_table(
+        "samples",
+        Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp),
+                col("service", DataType::Utf8),
+                col("instance", DataType::Utf8),
+                col("value", DataType::Float64),
+            ],
+            0,
+            vec![vec![0, 1, 2]],
+        ),
+    );
+    for sql in [
+        "SELECT asap_rate(value, ts, 300000) FROM samples",
+        "SELECT service, asap_rate(value, ts, 300000) FROM samples GROUP BY service",
+    ] {
+        let err = lower_sql_dialect(
+            sql,
+            &multi_series,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect_err("partial identity must not merge counter series");
+        assert!(format!("{err}").contains("declared series identity"));
+    }
+
+    lower_sql_dialect(
+        "SELECT service, instance, asap_rate(value, ts, 300000) \
+         FROM samples GROUP BY service, instance",
+        &multi_series,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect("the complete declared series identity is safe");
+
+    let row_id_only = SqlCatalog::new().with_table(
+        "samples",
+        Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp),
+                col("service", DataType::Utf8),
+                col("value", DataType::Float64),
+            ],
+            0,
+            vec![vec![1]],
+        ),
+    );
+    lower_sql_dialect(
+        "SELECT service, asap_rate(value, ts, 300000) FROM samples GROUP BY service",
+        &row_id_only,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("a row key without time does not prove a series identity");
+}
+
+#[tokio::test]
+async fn temporal_grouping_rejects_value_time_and_duplicate_resolved_columns() {
+    for sql in [
+        "SELECT asap_rate(latency, ts, 300000) FROM metrics GROUP BY ts",
+        "SELECT asap_rate(latency, ts, 300000) FROM metrics GROUP BY latency",
+        "SELECT m.service, asap_rate(m.latency, m.ts, 300000) \
+         FROM metrics m GROUP BY m.service, service",
+    ] {
+        let err = lower_sql_dialect(
+            sql,
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect_err("unsafe or duplicate resolved grouping must fail closed");
+        let message = format!("{err}");
+        assert!(
+            message.contains("timestamp or value")
+                || message.contains("same resolved column more than once"),
+            "unexpected error for {sql}: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn qualified_columns_are_validated_by_resolved_identity() {
+    let qe = lower_clickhouse(
+        "SELECT m.service, asap_increase(m.latency, m.ts, 300000) AS v \
+         FROM metrics AS m GROUP BY m.service",
+    )
+    .await;
+    let (intent, range, _) = temporal_aggregate(&qe);
+    assert_eq!(intent, &AggIntent::Increase);
+    assert_eq!(range, std::time::Duration::from_secs(300));
 }
 
 #[tokio::test]
