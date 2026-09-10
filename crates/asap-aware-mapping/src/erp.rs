@@ -80,12 +80,17 @@ pub struct ErpSelection<'a> {
 /// volume is a sufficiency gate, not a distance axis: once the benchmark has
 /// enough samples, repeating the same stationary distribution adds little
 /// information about sketch error.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ErpDataShape {
     pub cardinality: u64,
-    /// `None` represents a uniform key distribution; `Some(s)` is Zipf(s).
-    pub zipf_exponent: Option<f64>,
+    /// Stable distribution family, for example `uniform`, `zipf`,
+    /// `power_law`, or `empirical`. Different families are never interpolated.
+    pub family: String,
+    /// Family-specific numeric parameters. Zipf uses `exponent`; a continuous
+    /// power law may use `alpha` and `minimum`. Uniform has no parameters.
+    #[serde(default)]
+    pub parameters: BTreeMap<String, f64>,
     pub benchmark_events: u64,
 }
 
@@ -95,7 +100,8 @@ pub struct ErpNearestSelectionRequest {
     pub observed: ErpDataShape,
     pub minimum_benchmark_events: u64,
     pub max_log2_cardinality_distance: f64,
-    pub max_zipf_distance: f64,
+    /// Maximum normalized distance for every common distribution parameter.
+    pub max_parameter_distance: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -260,13 +266,23 @@ impl ErpNearestSelectionRequest {
             && self.observed.cardinality > 0
             && self.max_log2_cardinality_distance.is_finite()
             && self.max_log2_cardinality_distance > 0.0
-            && self.max_zipf_distance.is_finite()
-            && self.max_zipf_distance > 0.0
+            && !self.observed.family.trim().is_empty()
+            && self
+                .observed
+                .parameters
+                .values()
+                .all(|value| value.is_finite())
+            && self.max_parameter_distance.is_finite()
+            && self.max_parameter_distance > 0.0
     }
 
     fn distance(&self, candidate: ErpDataShape) -> Option<f64> {
         if candidate.cardinality == 0
-            || candidate.zipf_exponent.is_some() != self.observed.zipf_exponent.is_some()
+            || candidate.family != self.observed.family
+            || candidate
+                .parameters
+                .keys()
+                .ne(self.observed.parameters.keys())
         {
             return None;
         }
@@ -274,14 +290,18 @@ impl ErpNearestSelectionRequest {
             - (self.observed.cardinality as f64).log2())
         .abs()
             / self.max_log2_cardinality_distance;
-        let zipf = match (candidate.zipf_exponent, self.observed.zipf_exponent) {
-            (None, None) => 0.0,
-            (Some(candidate), Some(observed)) if candidate.is_finite() && observed.is_finite() => {
-                (candidate - observed).abs() / self.max_zipf_distance
-            }
-            _ => return None,
-        };
-        Some(cardinality.max(zipf))
+        let parameters = candidate
+            .parameters
+            .iter()
+            .map(|(name, value)| {
+                let observed = self.observed.parameters.get(name)?;
+                (value.is_finite() && observed.is_finite())
+                    .then_some((value - observed).abs() / self.max_parameter_distance)
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .fold(0.0_f64, f64::max);
+        Some(cardinality.max(parameters))
     }
 }
 
@@ -453,11 +473,11 @@ mod tests {
     fn nearest_shape_prefers_cardinality_and_skew_then_cost() {
         let mut close = row("close", 512, 0.009, 12_288.0);
         close.distribution = serde_json::json!({"erp_shape": {
-            "cardinality": 1000, "zipf_exponent": 1.2, "benchmark_events": 100000
+            "cardinality": 1000, "family": "zipf", "parameters": {"exponent": 1.2}, "benchmark_events": 100000
         }});
         let mut cheap_but_far = row("far", 256, 0.009, 1.0);
         cheap_but_far.distribution = serde_json::json!({"erp_shape": {
-            "cardinality": 8000, "zipf_exponent": 1.2, "benchmark_events": 100000
+            "cardinality": 8000, "family": "zipf", "parameters": {"exponent": 1.2}, "benchmark_events": 100000
         }});
         let artifact = ErpArtifact {
             schema_version: ERP_SCHEMA_VERSION,
@@ -469,12 +489,13 @@ mod tests {
                 selection: request(),
                 observed: ErpDataShape {
                     cardinality: 1200,
-                    zipf_exponent: Some(1.1),
+                    family: "zipf".into(),
+                    parameters: BTreeMap::from([("exponent".into(), 1.1)]),
                     benchmark_events: 0,
                 },
                 minimum_benchmark_events: 10_000,
                 max_log2_cardinality_distance: 4.0,
-                max_zipf_distance: 0.5,
+                max_parameter_distance: 0.5,
             })
             .unwrap();
         assert_eq!(selected.record.id, "close");
@@ -484,7 +505,7 @@ mod tests {
     fn nearest_shape_rejects_distribution_family_and_small_benchmarks() {
         let mut row = row("uniform", 512, 0.009, 12_288.0);
         row.distribution = serde_json::json!({"erp_shape": {
-            "cardinality": 1000, "zipf_exponent": null, "benchmark_events": 999
+            "cardinality": 1000, "family": "uniform", "parameters": {}, "benchmark_events": 999
         }});
         let artifact = ErpArtifact {
             schema_version: ERP_SCHEMA_VERSION,
@@ -495,12 +516,13 @@ mod tests {
             selection: request(),
             observed: ErpDataShape {
                 cardinality: 1000,
-                zipf_exponent: Some(1.0),
+                family: "zipf".into(),
+                parameters: BTreeMap::from([("exponent".into(), 1.0)]),
                 benchmark_events: 0,
             },
             minimum_benchmark_events: 1_000,
             max_log2_cardinality_distance: 1.0,
-            max_zipf_distance: 0.5,
+            max_parameter_distance: 0.5,
         };
         assert_eq!(
             artifact.select_nearest(&nearest),

@@ -61,13 +61,21 @@ The canonical workload remains available as an opaque wire value for exact
 matching. Shape-aware records additionally carry:
 
 ```text
-erp_shape = {cardinality, zipf_exponent, benchmark_events}
+erp_shape = {
+  cardinality,
+  family,              // uniform | zipf | power_law | normal | empirical | ...
+  parameters,          // family-specific numeric parameter map
+  benchmark_events
+}
 ```
 
-`zipf_exponent = null` means uniform; uniform and Zipf profiles are never
-interpolated. `benchmark_events` is a sufficiency gate. Once that floor is met,
-additional events from the same stationary distribution do not make a profile
-semantically farther away.
+The family is explicit rather than encoding uniform as a missing Zipf
+parameter. Profiles from different families are never interpolated. Parameter
+keys must match before a distance is computed; this keeps the contract open to
+Zipf exponent, continuous power-law alpha/minimum, normal mean/deviation, and
+future synthetic or fitted families. Empirical/custom traces carry a stable
+family and descriptor and normally use exact matching rather than synthetic
+interpolation. `benchmark_events` is a sufficiency gate, not a distance axis.
 
 ## Selection
 
@@ -93,8 +101,9 @@ cpu_weight * (
 
 For shape-aware selection, records must first satisfy the benchmark-event floor
 and distribution-family constraint. Their normalized distance is the maximum
-of log2-cardinality distance and Zipf-exponent distance. Only candidates within
-both caller-supplied bounds are eligible; cost selects among those candidates.
+of log2-cardinality distance and every family-specific parameter distance. Only
+candidates within all caller-supplied bounds are eligible; cost selects among
+those candidates.
 
 The least-cost accepted record wins. Missing error metrics, missing contexts,
 invalid values, and insufficient trials make a record inapplicable. Cost ties
