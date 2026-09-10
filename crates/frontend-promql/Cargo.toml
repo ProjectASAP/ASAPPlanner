@@ -8,11 +8,10 @@ edition = "2021"
 [dependencies]
 asap-types = { path = "../types" }
 
-# Public GreptimeTeam/promql-parser (Apache-2.0) from crates.io. 0.10 upstreamed
-# the experimental functions we used to carry as local patches (mad_over_time,
-# histogram_quantiles, min_of/max_of, ts_of_*_over_time, step()/range()), except
-# it also dropped the legacy `holt_winters` alias — see promql.rs.
-promql-parser = "0.10"
+# ProjectASAP's pinned parser is the shared parser contract used by the backend
+# and control plane. It carries the evaluated PromQL extensions documented in
+# `promql.rs`; syntax outside that contract must fail closed at adapters.
+promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", rev = "c51beafb361af4cc95ed62ae377862c660ceb757" }
 
 [dev-dependencies]
 asap-aware-mapping = { path = "../asap-aware-mapping" }
