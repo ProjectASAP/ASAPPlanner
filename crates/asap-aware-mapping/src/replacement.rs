@@ -909,11 +909,44 @@ fn sketch_implementations(
     );
     ranked
         .into_iter()
-        .map(|algorithm| {
+        .filter_map(|algorithm| {
             let params = cost_model.size_params(algorithm.clone(), intent, eps, delta);
-            Implementation::Sketch(SketchKind::new(algorithm, params))
+            sketch_state_bytes(&params)
+                .is_none_or(|bytes| bytes <= DEFAULT_MAX_SKETCH_STATE_BYTES)
+                .then(|| Implementation::Sketch(SketchKind::new(algorithm, params)))
         })
         .collect()
+}
+
+/// Fail-safe ceiling used when a deployment has not supplied a tighter
+/// resource model. It applies to one physical keyed state; grouped instance
+/// multiplicity must be charged separately by deployment-aware costing.
+pub const DEFAULT_MAX_SKETCH_STATE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Conservative dense-counter allocation for CMS-family states. Returning
+/// `None` leaves non-CMS families to their family-specific resource models.
+pub fn sketch_state_bytes(params: &SketchParams) -> Option<u64> {
+    let (width, depth, heap_size) = match params {
+        SketchParams::Cms { width, depth } | SketchParams::CountSketch { width, depth } => {
+            (*width, *depth, 0)
+        }
+        SketchParams::CmsWithHeap {
+            width,
+            depth,
+            heap_size,
+        }
+        | SketchParams::CountSketchWithHeap {
+            width,
+            depth,
+            heap_size,
+        } => (*width, *depth, *heap_size),
+        _ => return None,
+    };
+    // Eight-byte counters plus a conservative 64 bytes for each heap entry.
+    u64::from(width)
+        .checked_mul(u64::from(depth))?
+        .checked_mul(8)?
+        .checked_add(u64::from(heap_size).checked_mul(64)?)
 }
 
 /// `asap-plan`'s built-in `SketchParams` sizing, keyed off the resolved
@@ -2072,6 +2105,20 @@ fn construct_summary_agg(
     // The single canonical pre-ASAP derivation (per-series vs cross-series,
     // name overrides) already computes the row shape; binding only retypes
     // the summary state column.
+    let keyed_heap = input.input.item.is_some()
+        && matches!(
+            &family,
+            SummaryFamilyType::Sketch(kind, _)
+                if matches!(kind.algorithm(), SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap)
+        );
+    let physical_reduction = if keyed_heap && matches!(reduction, Reduction::PerEntity) {
+        // A heavy-hitter sidecar is one keyed state. `item` identifies the
+        // ranked series/group inside that state; retaining the logical
+        // PerEntity reduction here would allocate one full sketch per item.
+        Reduction::by(vec![])
+    } else {
+        reduction.clone()
+    };
     let per_series = matches!(reduction, Reduction::PerEntity);
     let by: Vec<usize> = reduction
         .group_keys()
@@ -2084,7 +2131,14 @@ fn construct_summary_agg(
     let query = estimate.then(|| readout(intent, &summary_input, models.cost));
 
     let mut state_schema = lift(&out_schema);
-    if let Some(field) = state_schema.fields.get_mut(state_idx) {
+    if keyed_heap {
+        let mut state = state_schema.fields[state_idx].clone();
+        state.dtype = family.clone();
+        state_schema = SummarySchema {
+            fields: vec![state],
+            time_index: None,
+        };
+    } else if let Some(field) = state_schema.fields.get_mut(state_idx) {
         field.dtype = family.clone();
     }
 
@@ -2115,7 +2169,7 @@ fn construct_summary_agg(
             child: bound_child,
             family,
             input: summary_input,
-            reduction: reduction.clone(),
+            reduction: physical_reduction,
             grouping: GroupingStrategy::default(),
         },
         schema: state_schema,
@@ -7805,7 +7859,7 @@ mod tests {
             vec![2],
             AggIntent::Count {
                 accuracy: AccuracyTarget::EpsilonDelta {
-                    epsilon: 0.0,
+                    epsilon: 0.01,
                     delta: 0.01,
                 },
             },
@@ -7816,7 +7870,7 @@ mod tests {
             AggIntent::TopK {
                 k: 5,
                 accuracy: AccuracyTarget::EpsilonDelta {
-                    epsilon: 0.0,
+                    epsilon: 0.01,
                     delta: 0.01,
                 },
             },

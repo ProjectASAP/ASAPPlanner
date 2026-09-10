@@ -274,6 +274,7 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
             child,
             family,
             input,
+            reduction,
             ..
         } = &summary_input.expr
         else {
@@ -281,6 +282,16 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
         };
         assert!(matches!(family, SummaryFamilyType::Sketch(kind, _)
             if kind.algorithm() == &SketchAlgorithm::CmsWithHeap));
+        let SummaryFamilyType::Sketch(kind, _) = family else {
+            unreachable!()
+        };
+        assert!(
+            asap_aware_mapping::replacement::sketch_state_bytes(kind.params())
+                .is_some_and(|bytes| bytes
+                    <= asap_aware_mapping::replacement::DEFAULT_MAX_SKETCH_STATE_BYTES)
+        );
+        assert!(matches!(reduction, Reduction::Reduce(keys) if keys.is_empty()));
+        assert_eq!(summary_input.schema.fields.len(), 1);
         assert_eq!(
             input.weight_domain,
             WeightDomain::NonNegative {
