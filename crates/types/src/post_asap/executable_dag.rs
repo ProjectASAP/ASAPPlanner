@@ -72,7 +72,9 @@ pub enum ExecutableOperatorPayload {
         operator: BinaryOperator,
     },
     CandidateTopK {
-        k: usize,
+        /// Fixed-width transport value; runtimes validate conversion to their
+        /// local collection index type at installation.
+        k: u64,
         grouping: GroupKeys,
         completeness: CandidateCompleteness,
     },
@@ -191,6 +193,12 @@ pub enum ExecutableDagValidationError {
     Cycle,
     #[error("post-ASAP node {0:?} is not reachable from the root")]
     UnreachableNode(PostAsapNodeId),
+    #[error("summary aggregate node {node:?} output schema does not contain its declared family")]
+    SummaryFamilySchemaMismatch { node: PostAsapNodeId },
+    #[error(
+        "summary aggregate node {node:?} declares grouping inconsistent with its sketch state"
+    )]
+    SummaryGroupingMismatch { node: PostAsapNodeId },
 }
 
 impl PostAsapDagDocument {
@@ -226,6 +234,29 @@ impl ExecutableDag {
                     declared: node.operator,
                     actual,
                 });
+            }
+            if let ExecutableOperatorPayload::SummaryAgg {
+                family, grouping, ..
+            } = &node.payload
+            {
+                let mut found_family = false;
+                for field in &node.output_schema.fields {
+                    if &field.dtype == family {
+                        found_family = true;
+                    }
+                    if let SummaryFamilyType::Sketch(_, schema_grouping) = &field.dtype {
+                        if schema_grouping != grouping {
+                            return Err(ExecutableDagValidationError::SummaryGroupingMismatch {
+                                node: node.id,
+                            });
+                        }
+                    }
+                }
+                if !found_family {
+                    return Err(ExecutableDagValidationError::SummaryFamilySchemaMismatch {
+                        node: node.id,
+                    });
+                }
             }
         }
         if !nodes.contains_key(&self.root) {
@@ -413,7 +444,7 @@ pub fn compile_executable_dag_with_node_ids(
                 completeness,
                 ..
             } => ExecutableOperatorPayload::CandidateTopK {
-                k: *k,
+                k: u64::try_from(*k).expect("usize always fits into the u64 wire count"),
                 grouping: grouping.clone(),
                 completeness: completeness.clone(),
             },
