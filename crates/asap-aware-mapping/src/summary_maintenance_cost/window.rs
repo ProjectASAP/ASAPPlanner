@@ -51,6 +51,7 @@ pub(super) fn summary_aggregation_identities(root: &SummaryNode) -> HashSet<*con
                 }
             }
             SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::RelationalJoin { left, right, .. }
             | SummaryExpr::BinaryOp {
                 lhs: left,
                 rhs: right,

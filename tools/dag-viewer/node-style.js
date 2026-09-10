@@ -22,6 +22,7 @@ const KIND_CATEGORY_JSON = `{
   "TimeShift": "window",
   "SQLWindowFunc": "window",
   "Join": "join",
+  "RelationalJoin": "join",
   "Dedup": "set",
   "SetOp": "set",
   "Concat": "combine",

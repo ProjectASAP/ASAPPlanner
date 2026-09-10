@@ -67,6 +67,20 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
             },
         ) => Rc::ptr_eq(ac, bc) && same_value(ao, bo) && at == bt,
         (
+            RelationalJoin {
+                left: al,
+                right: ar,
+                kind: ak,
+                pred: ap,
+            },
+            RelationalJoin {
+                left: bl,
+                right: br,
+                kind: bk,
+                pred: bp,
+            },
+        ) => Rc::ptr_eq(al, bl) && Rc::ptr_eq(ar, br) && ak == bk && same_value(ap, bp),
+        (
             SummaryAgg {
                 child: ac,
                 family: af,
@@ -135,6 +149,7 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
             | BinaryOp { .. }
             | CandidateTopK { .. }
             | ValueOperation { .. }
+            | RelationalJoin { .. }
             | SummaryAgg { .. }
             | SummaryJoin { .. }
             | SummarySubtract { .. }
@@ -180,6 +195,10 @@ pub fn share_common_summary_subtrees<Id>(
                 *values = visit(values, seen, pool);
             }
             SummaryExpr::ValueOperation { child, .. } => *child = visit(child, seen, pool),
+            SummaryExpr::RelationalJoin { left, right, .. } => {
+                *left = visit(left, seen, pool);
+                *right = visit(right, seen, pool);
+            }
             SummaryExpr::SummaryJoin { outer, inner, .. } => {
                 *outer = visit(outer, seen, pool);
                 *inner = visit(inner, seen, pool);
