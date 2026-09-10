@@ -1,26 +1,19 @@
-//! MetricsQL frontend: parse into a MetricsQL-owned AST, then lower directly
-//! into the canonical [`QueryExpr`](asap_types::pre_asap::QueryExpr).
-//!
-//! PromQL-compatible syntax shares the established AST-to-canonical lowering.
-//! MetricsQL-only syntax remains explicit in [`MetricsqlExpr`], so the frontend
-//! never turns a MetricsQL source string into a different PromQL source string.
+//! MetricsQL AST to canonical `QueryExpr` frontend.
 
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
-use asap_frontend_promql::PromqlLowerer;
-use asap_types::pre_asap::{resolve_root, AggIntent, QueryExpr, Reduction, UnresolvedQueryExpr};
+use asap_types::pre_asap::{
+    resolve_root, AggIntent, ArithmeticOpKind, BinaryOpKind, ColumnRef, CompareOpKind, GroupKeys,
+    Predicate, PromQLVectorSetOpKind, QueryExpr, Reduction, ScalarValue, Source,
+    UnresolvedQueryExpr as U,
+};
 use asap_types::types::AccuracyTarget;
-use promql_parser::parser::{self, Expr};
+use metricsql_parser::ast::{AggregateModifier, DurationExpr, Expr, MetricExpr, RollupExpr};
+use metricsql_parser::functions::{AggregateFunction, BuiltinFunction, RollupFunction};
+use metricsql_parser::label::{LabelFilter, LabelFilterOp, NAME_LABEL};
 use thiserror::Error;
 
-/// Parsed MetricsQL expression. Extension nodes remain distinct from the
-/// PromQL-compatible AST so their semantics cannot be silently discarded.
-#[derive(Debug)]
-pub enum MetricsqlExpr {
-    Compatible(Expr),
-    DefaultRollup(Box<MetricsqlExpr>),
-    KeepMetricNames(Box<MetricsqlExpr>),
-}
+pub use metricsql_parser::ast::Expr as MetricsqlExpr;
 
 #[derive(Debug, Error)]
 pub enum MetricsqlError {
@@ -28,145 +21,283 @@ pub enum MetricsqlError {
     Parse(String),
     #[error("unsupported MetricsQL feature: {0}")]
     UnsupportedFeature(String),
-    #[error("MetricsQL canonical lowering failed: {0}")]
-    Lower(String),
     #[error("MetricsQL column resolution failed: {0}")]
     Resolve(String),
 }
 
-/// Parse MetricsQL into its own AST.
 pub fn parse_metricsql(query: &str) -> Result<MetricsqlExpr, MetricsqlError> {
-    let query = query.trim();
-    if let Some(inner) = strip_postfix_keyword(query, "keep_metric_names") {
-        return Ok(MetricsqlExpr::KeepMetricNames(Box::new(parse_metricsql(
-            inner,
-        )?)));
-    }
-    if let Some(inner) = root_call_argument(query, "default_rollup")? {
-        return Ok(MetricsqlExpr::DefaultRollup(Box::new(parse_metricsql(
-            inner,
-        )?)));
-    }
-    parser::parse(query)
-        .map(MetricsqlExpr::Compatible)
-        .map_err(MetricsqlError::Parse)
+    metricsql_parser::parser::parse(query).map_err(|e| MetricsqlError::Parse(e.to_string()))
 }
 
-/// Parse and lower a MetricsQL query to the same canonical tree used by the
-/// PromQL and SQL frontends.
+pub fn canonical_metricsql(query: &str) -> Result<String, MetricsqlError> {
+    Ok(parse_metricsql(query)?.to_string())
+}
+
 pub fn lower_metricsql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExpr, MetricsqlError> {
-    let parsed = parse_metricsql(query)?;
-    let unresolved = lower_expr(&parsed, &accuracy)?;
+    let ast = parse_metricsql(query)?;
+    let unresolved = Lowerer { accuracy }.lower(&ast)?;
     resolve_root(&unresolved).map_err(|e| MetricsqlError::Resolve(e.to_string()))
 }
 
-/// Return a stable identity for a syntactically valid MetricsQL expression.
-///
-/// Identity is rendered from [`MetricsqlExpr`], never from source-text
-/// normalization. PromQL-compatible nodes use the parser AST's canonical
-/// display; MetricsQL extension nodes recursively render their parsed child.
-pub fn canonical_metricsql(query: &str) -> Result<String, MetricsqlError> {
-    render_canonical(&parse_metricsql(query)?)
+struct Lowerer {
+    accuracy: AccuracyTarget,
 }
 
-fn render_canonical(expr: &MetricsqlExpr) -> Result<String, MetricsqlError> {
-    Ok(match expr {
-        MetricsqlExpr::Compatible(expr) => expr.to_string(),
-        MetricsqlExpr::DefaultRollup(child) => {
-            format!("default_rollup({})", render_canonical(child)?)
+impl Lowerer {
+    fn lower(&self, expr: &Expr) -> Result<U, MetricsqlError> {
+        match expr {
+            Expr::MetricExpression(e) => self.metric(e),
+            Expr::Rollup(e) => self.rollup(e),
+            Expr::Function(e) => self.function(e),
+            Expr::Aggregation(e) => self.aggregate(e),
+            Expr::NumberLiteral(e) => Ok(U::promql_scalar(e.value)),
+            Expr::UnaryOperator(e) => Ok(U::BinaryOp {
+                op: BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+                lhs: Rc::new(self.lower(&e.expr)?),
+                rhs: Rc::new(U::promql_scalar(-1.0)),
+                vector_match: None,
+            }),
+            Expr::BinaryOperator(e) => self.binary(e),
+            Expr::Parens(e) if e.expressions.len() == 1 => self.lower(&e.expressions[0]),
+            Expr::With(e) => self.lower(&e.expr),
+            other => Err(unsupported(format!("AST node `{other}`"))),
         }
-        MetricsqlExpr::KeepMetricNames(child) => {
-            format!("{} keep_metric_names", render_canonical(child)?)
-        }
-    })
-}
+    }
 
-fn lower_expr(
-    expr: &MetricsqlExpr,
-    accuracy: &AccuracyTarget,
-) -> Result<UnresolvedQueryExpr, MetricsqlError> {
-    match expr {
-        MetricsqlExpr::Compatible(expr) => PromqlLowerer::lower_expr(expr, accuracy)
-            .map_err(|e| MetricsqlError::Lower(e.to_string())),
-        MetricsqlExpr::DefaultRollup(child) => {
-            let lowered = lower_expr(child, accuracy)?;
-            if !matches!(lowered, UnresolvedQueryExpr::TimeRange { .. }) {
-                return Err(MetricsqlError::UnsupportedFeature(
-                    "default_rollup without an explicit range requires an evaluation step"
-                        .into(),
-                ));
+    fn metric(&self, metric: &MetricExpr) -> Result<U, MetricsqlError> {
+        if metric.has_or_matchers() {
+            return Err(unsupported("or-delimited selector matchers"));
+        }
+        let name = metric
+            .metric_name()
+            .ok_or_else(|| unsupported("selector without one exact metric name"))?;
+        let mut filters: Vec<_> = metric
+            .matchers
+            .filter_iter()
+            .filter(|f| f.label != NAME_LABEL)
+            .collect();
+        filters.sort_by(|a, b| a.label.cmp(&b.label).then(a.value.cmp(&b.value)));
+        Ok(U::Scan {
+            source: Source::TimeSeries {
+                metric: name.to_owned(),
+            },
+            predicates: filters
+                .into_iter()
+                .map(|f| Predicate(Rc::new(matcher(f))))
+                .collect(),
+            schema: None,
+        })
+    }
+
+    fn rollup(&self, rollup: &RollupExpr) -> Result<U, MetricsqlError> {
+        if rollup.offset.is_some() || rollup.at.is_some() {
+            return Err(unsupported("offset and @ modifiers"));
+        }
+        if rollup.for_subquery() {
+            return Err(unsupported("subquery step or inherited step"));
+        }
+        let child = self.lower(&rollup.expr)?;
+        match &rollup.window {
+            None => Ok(child),
+            Some(window) => Ok(U::TimeRange {
+                range: duration(window)?,
+                child: Rc::new(child),
+            }),
+        }
+    }
+
+    fn function(
+        &self,
+        function: &metricsql_parser::ast::FunctionExpr,
+    ) -> Result<U, MetricsqlError> {
+        if function.keep_metric_names {
+            return Err(unsupported(
+                "keep_metric_names requires metric-name lineage",
+            ));
+        }
+        let BuiltinFunction::Rollup(rollup) = function.function else {
+            return Err(unsupported(format!("function `{}`", function.name())));
+        };
+        let child_index = usize::from(rollup == RollupFunction::QuantileOverTime);
+        let child = function
+            .args
+            .get(child_index)
+            .ok_or_else(|| unsupported(format!("missing argument for `{}`", function.name())))?;
+        let intent = match rollup {
+            RollupFunction::DefaultRollup | RollupFunction::LastOverTime => AggIntent::LastOverTime,
+            RollupFunction::FirstOverTime => AggIntent::FirstOverTime,
+            RollupFunction::AvgOverTime => AggIntent::Avg { col: None },
+            RollupFunction::MinOverTime => AggIntent::Min { col: None },
+            RollupFunction::MaxOverTime => AggIntent::Max { col: None },
+            RollupFunction::SumOverTime => AggIntent::Sum { col: None },
+            RollupFunction::CountOverTime => AggIntent::Count {
+                accuracy: self.accuracy.clone(),
+            },
+            RollupFunction::StddevOverTime => AggIntent::StdDev {
+                col: None,
+                population: true,
+            },
+            RollupFunction::StdvarOverTime => AggIntent::Variance {
+                col: None,
+                population: true,
+            },
+            RollupFunction::Rate => AggIntent::Rate,
+            RollupFunction::IRate => AggIntent::IRate,
+            RollupFunction::Increase => AggIntent::Increase,
+            RollupFunction::Changes => AggIntent::Changes,
+            RollupFunction::Delta => AggIntent::Delta,
+            RollupFunction::IDelta => AggIntent::IDelta,
+            RollupFunction::Deriv => AggIntent::Deriv,
+            RollupFunction::Resets => AggIntent::Resets,
+            RollupFunction::MadOverTime => AggIntent::MadOverTime,
+            RollupFunction::PresentOverTime => AggIntent::PresentOverTime,
+            RollupFunction::AbsentOverTime => AggIntent::AbsentOverTime,
+            RollupFunction::QuantileOverTime => AggIntent::Quantile {
+                col: None,
+                q: number_arg(&function.args, 0)?,
+                accuracy: self.accuracy.clone(),
+            },
+            _ => {
+                return Err(unsupported(format!(
+                    "rollup function `{}`",
+                    function.name()
+                )))
             }
-            Ok(UnresolvedQueryExpr::Aggregate {
-                reduction: Reduction::PerEntity,
-                measures: vec![AggIntent::LastOverTime],
-                output_names: vec![],
-                having: None,
-                child: Rc::new(lowered),
-            })
+        };
+        let child = self.lower(child)?;
+        if rollup == RollupFunction::DefaultRollup && !matches!(child, U::TimeRange { .. }) {
+            return Err(unsupported(
+                "default_rollup without an explicit range requires an evaluation step",
+            ));
         }
-        MetricsqlExpr::KeepMetricNames(_) => Err(MetricsqlError::UnsupportedFeature(
-            "keep_metric_names requires metric-name lineage, which canonical QueryExpr does not represent"
-                .into(),
-        )),
+        Ok(aggregate(Reduction::PerEntity, intent, child))
+    }
+
+    fn aggregate(
+        &self,
+        expr: &metricsql_parser::ast::AggregationExpr,
+    ) -> Result<U, MetricsqlError> {
+        if expr.limit != 0 || expr.keep_metric_names {
+            return Err(unsupported("aggregate limit or keep_metric_names"));
+        }
+        let child_index = expr
+            .arg_idx_for_optimization()
+            .ok_or_else(|| unsupported(format!("aggregate `{}` arguments", expr.name())))?;
+        let intent = match expr.function {
+            AggregateFunction::Sum => AggIntent::Sum { col: None },
+            AggregateFunction::Avg => AggIntent::Avg { col: None },
+            AggregateFunction::Min => AggIntent::Min { col: None },
+            AggregateFunction::Max => AggIntent::Max { col: None },
+            AggregateFunction::Count => AggIntent::Cardinality {
+                col: None,
+                accuracy: self.accuracy.clone(),
+            },
+            AggregateFunction::StdDev => AggIntent::StdDev {
+                col: None,
+                population: true,
+            },
+            AggregateFunction::StdVar => AggIntent::Variance {
+                col: None,
+                population: true,
+            },
+            AggregateFunction::Group => AggIntent::Group,
+            AggregateFunction::Quantile => AggIntent::Quantile {
+                col: None,
+                q: number_arg(&expr.args, 0)?,
+                accuracy: self.accuracy.clone(),
+            },
+            _ => return Err(unsupported(format!("aggregate `{}`", expr.name()))),
+        };
+        let reduction = match &expr.modifier {
+            None => Reduction::by(vec![]),
+            Some(AggregateModifier::By(v)) => Reduction::by(names(v)),
+            Some(AggregateModifier::Without(v)) => Reduction::Reduce(GroupKeys::without(names(v))),
+        };
+        let child = expr
+            .args
+            .get(child_index)
+            .ok_or_else(|| unsupported("missing aggregate input"))?;
+        Ok(aggregate(reduction, intent, self.lower(child)?))
+    }
+
+    fn binary(&self, expr: &metricsql_parser::ast::BinaryExpr) -> Result<U, MetricsqlError> {
+        if expr.modifier.is_some() {
+            return Err(unsupported("binary vector matching modifiers"));
+        }
+        use metricsql_parser::ast::Operator as O;
+        let op = match expr.op {
+            O::Add => BinaryOpKind::Arithmetic(ArithmeticOpKind::Add),
+            O::Sub => BinaryOpKind::Arithmetic(ArithmeticOpKind::Sub),
+            O::Mul => BinaryOpKind::Arithmetic(ArithmeticOpKind::Mul),
+            O::Div => BinaryOpKind::Arithmetic(ArithmeticOpKind::Div),
+            O::Mod => BinaryOpKind::Arithmetic(ArithmeticOpKind::Mod),
+            O::Pow => BinaryOpKind::Arithmetic(ArithmeticOpKind::Pow),
+            O::Atan2 => BinaryOpKind::Arithmetic(ArithmeticOpKind::Atan2),
+            O::Eql => BinaryOpKind::Compare(CompareOpKind::Eq),
+            O::NotEq => BinaryOpKind::Compare(CompareOpKind::Ne),
+            O::Lt => BinaryOpKind::Compare(CompareOpKind::Lt),
+            O::Lte => BinaryOpKind::Compare(CompareOpKind::Le),
+            O::Gt => BinaryOpKind::Compare(CompareOpKind::Gt),
+            O::Gte => BinaryOpKind::Compare(CompareOpKind::Ge),
+            O::And => BinaryOpKind::Set(PromQLVectorSetOpKind::And),
+            O::Or => BinaryOpKind::Set(PromQLVectorSetOpKind::Or),
+            O::Unless => BinaryOpKind::Set(PromQLVectorSetOpKind::Unless),
+            O::If | O::IfNot | O::Default => {
+                return Err(unsupported(format!("MetricsQL operator `{}`", expr.op)))
+            }
+        };
+        Ok(U::BinaryOp {
+            op,
+            lhs: Rc::new(self.lower(&expr.left)?),
+            rhs: Rc::new(self.lower(&expr.right)?),
+            vector_match: None,
+        })
     }
 }
 
-fn strip_postfix_keyword<'a>(query: &'a str, keyword: &str) -> Option<&'a str> {
-    let prefix = query.strip_suffix(keyword)?.trim_end();
-    (!prefix.is_empty()).then_some(prefix)
+fn names(values: &[String]) -> Vec<ColumnRef> {
+    values.iter().cloned().map(ColumnRef::Named).collect()
 }
 
-fn root_call_argument<'a>(
-    query: &'a str,
-    function: &str,
-) -> Result<Option<&'a str>, MetricsqlError> {
-    let Some(rest) = query.strip_prefix(function) else {
-        return Ok(None);
+fn aggregate(reduction: Reduction<ColumnRef>, intent: AggIntent<ColumnRef>, child: U) -> U {
+    U::Aggregate {
+        reduction,
+        measures: vec![intent],
+        output_names: vec![String::new()],
+        having: None,
+        child: Rc::new(child),
+    }
+}
+
+fn matcher(filter: &LabelFilter) -> U {
+    let op = match filter.op {
+        LabelFilterOp::Equal => CompareOpKind::Eq,
+        LabelFilterOp::NotEqual => CompareOpKind::Ne,
+        LabelFilterOp::RegexEqual => CompareOpKind::Regex,
+        LabelFilterOp::RegexNotEqual => CompareOpKind::NotRegex,
     };
-    let rest = rest.trim_start();
-    if !rest.starts_with('(') {
-        return Ok(None);
+    U::Compare {
+        left: Rc::new(U::Column(ColumnRef::Named(filter.label.clone()))),
+        op,
+        right: Rc::new(U::Literal(ScalarValue::Utf8(filter.value.clone()))),
     }
-    let mut depth = 0usize;
-    let mut quoted = false;
-    let mut escaped = false;
-    let mut close = None;
-    for (index, ch) in rest.char_indices() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => quoted = true,
-            '(' => depth += 1,
-            ')' => {
-                depth = depth.checked_sub(1).ok_or_else(|| {
-                    MetricsqlError::Parse("unbalanced default_rollup call".into())
-                })?;
-                if depth == 0 {
-                    close = Some(index);
-                    break;
-                }
-            }
-            _ => {}
-        }
+}
+
+fn duration(value: &DurationExpr) -> Result<Duration, MetricsqlError> {
+    match value {
+        DurationExpr::Millis(ms) if *ms >= 0 => Ok(Duration::from_millis(*ms as u64)),
+        DurationExpr::StepValue(_) => Err(unsupported("step-relative duration")),
+        DurationExpr::Millis(_) => Err(unsupported("negative duration")),
     }
-    let close =
-        close.ok_or_else(|| MetricsqlError::Parse("unclosed default_rollup call".into()))?;
-    if !rest[close + 1..].trim().is_empty() {
-        return Ok(None);
+}
+
+fn number_arg(args: &[Expr], index: usize) -> Result<f64, MetricsqlError> {
+    match args.get(index) {
+        Some(Expr::NumberLiteral(v)) if v.value.is_finite() => Ok(v.value),
+        _ => Err(unsupported(format!("numeric argument #{index}"))),
     }
-    let inner = rest[1..close].trim();
-    if inner.is_empty() {
-        return Err(MetricsqlError::Parse(
-            "default_rollup requires one expression".into(),
-        ));
-    }
-    Ok(Some(inner))
+}
+
+fn unsupported(message: impl Into<String>) -> MetricsqlError {
+    MetricsqlError::UnsupportedFeature(message.into())
 }

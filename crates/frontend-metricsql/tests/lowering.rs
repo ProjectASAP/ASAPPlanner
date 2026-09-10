@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use asap_frontend_metricsql::{
-    canonical_metricsql, lower_metricsql, parse_metricsql, MetricsqlError, MetricsqlExpr,
+    canonical_metricsql, lower_metricsql, parse_metricsql, MetricsqlError,
 };
 use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
 use asap_types::types::AccuracyTarget;
@@ -71,7 +71,7 @@ fn implicit_default_rollup_requires_runtime_step() {
 #[test]
 fn keep_metric_names_is_preserved_in_ast_and_rejected_without_lineage() {
     let ast = parse_metricsql("rate(requests_total[5m]) keep_metric_names").unwrap();
-    assert!(matches!(ast, MetricsqlExpr::KeepMetricNames(_)));
+    assert!(ast.keep_metric_names());
     let error = lower_metricsql(
         "rate(requests_total[5m]) keep_metric_names",
         AccuracyTarget::Exact,
@@ -80,6 +80,31 @@ fn keep_metric_names_is_preserved_in_ast_and_rejected_without_lineage() {
     assert!(
         matches!(error, MetricsqlError::UnsupportedFeature(message) if message.contains("metric-name lineage"))
     );
+}
+
+/// Representative MetricsQL-only forms from VictoriaMetrics' parser/docs
+/// corpus. Source: app/vmselect/vmui/assets/MetricsQL-*.md and
+/// app/vmselect/promql/exec_test.go in VictoriaMetrics/VictoriaMetrics.
+#[test]
+fn victoria_metrics_extension_corpus_parses_natively_and_fails_closed() {
+    let cases = [
+        r#"rate({__name__=~"foo|bar"}[5m]) keep_metric_names"#,
+        "time() ifnot time() > 1400 default -time()",
+        "rate(foo[5i])",
+        "sum(foo) by (job) limit 10",
+        r#"foo{job="a" or job="b"}"#,
+        r#"WITH (prefix="http_") {__name__=prefix+"requests_total"}"#,
+    ];
+    for query in cases {
+        let ast = parse_metricsql(query)
+            .unwrap_or_else(|error| panic!("native MetricsQL parser rejected {query:?}: {error}"));
+        assert!(!ast.to_string().is_empty());
+        let result = lower_metricsql(query, AccuracyTarget::Exact);
+        assert!(
+            result.is_err(),
+            "extension semantics must be represented or routed to exact fallback: {query}"
+        );
+    }
 }
 
 #[test]

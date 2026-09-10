@@ -2,11 +2,16 @@
 
 Audience: planner and query-engine developers integrating VictoriaMetrics.
 
-`asap-frontend-metricsql` parses MetricsQL into a language-owned AST and lowers
-supported expressions into the existing canonical `QueryExpr`. It does not add
-MetricsQL fields to `QueryExpr`, SDS descriptors, or the physical summary DAG.
-PromQL-compatible AST nodes use the same AST-to-canonical lowering so selector,
-range, aggregation, function, and accuracy behavior stays aligned.
+`asap-frontend-metricsql` uses the `metricsql_parser` crate from
+`ccollie/metricsql`, pinned to commit
+`3046709308e449a42c56bfbfd45f95af848e6768`. This Apache-2.0 Rust port is based
+on VictoriaMetrics and models MetricsQL syntax directly, including `WITH`,
+rollup expressions, step-relative durations, MetricsQL binary operators,
+aggregate limits, or-delimited matchers, and `keep_metric_names`.
+
+The frontend walks that AST directly and emits the existing canonical
+`QueryExpr`. It does not add MetricsQL fields to `QueryExpr`, SDS descriptors,
+or the physical summary DAG.
 
 ```text
 MetricsQL source
@@ -22,10 +27,16 @@ existing ASAP-aware mapping and physical Summary DAG
 
 | Syntax | Behavior |
 |---|---|
-| PromQL-compatible selectors, ranges, aggregations, calls, and binary expressions | Lower to the same canonical shapes as the PromQL frontend. |
+| Exact-name selectors and ordinary label matchers | `Scan` with canonical predicates. |
+| Fixed range selectors | `TimeRange`; step-relative ranges fail closed. |
+| `sum`, `avg`, `min`, `max`, `count`, `stddev`, `stdvar`, `group`, `quantile` | Existing canonical aggregate intents, including `by` and `without`. |
+| Common rollups: rate/increase/derivatives and statistical `*_over_time` | Existing per-entity canonical intents over the lowered range. |
+| PromQL arithmetic, comparison, and set binary operators without modifiers | Existing canonical `BinaryOp`. |
 | `default_rollup(selector[range])` | Lower to `Aggregate(LastOverTime)` over the explicit `TimeRange`. |
 | `default_rollup(selector)` | Reject for exact fallback because the implicit lookbehind window depends on the runtime evaluation step, which is not a property of canonical `QueryExpr`. |
-| `expr keep_metric_names` | Preserve as a MetricsQL AST node, then reject for exact fallback because canonical `QueryExpr` does not carry metric-name lineage. |
+| `expr keep_metric_names` | Parsed natively, then rejected for exact fallback because canonical `QueryExpr` does not carry metric-name lineage. |
+| `if`, `ifnot`, `default`, aggregate `limit`, or-delimited matchers, binary match modifiers | Parsed natively and rejected until the canonical executor has the exact semantics. |
+| `WITH` | Expanded by the native parser; the expanded expression lowers when every resulting node is supported. |
 
 Unsupported MetricsQL extensions return a typed error. The VictoriaMetrics
 query boundary is responsible for routing that error to its exact backend.
@@ -33,11 +44,20 @@ Silently dropping `keep_metric_names` or inventing a fixed implicit rollup
 window would change query results, so neither approximation is permitted.
 
 `canonical_metricsql` supplies plan-catalog identity by rendering the parsed
-`MetricsqlExpr`. Compatible syntax uses the parser AST display, while extension
-nodes recursively render their canonical child. Formatting differences do not
-create distinct identities, and unsupported extension semantics remain visible
-in the identity rather than being erased.
+native MetricsQL AST's `Display`. Formatting differences do not create distinct
+identities, and unsupported extension semantics remain visible in the identity
+rather than being erased.
 
-The parser currently recognizes MetricsQL-only nodes at the root. Nested
-MetricsQL-only calls and modifiers remain exact-fallback cases until the native
-AST grammar covers them.
+The upstream parser's `metricsql_common` workspace crate requires nightly Rust
+and AES CPU features for unrelated runtime utilities. ASAPPlanner patches that
+one transitive crate with a stable, portable subset containing exactly the APIs
+the parser imports: duration formatting, hash collection aliases, and datetime
+constant-evaluation helpers. `metricsql_parser` itself remains the pinned
+third-party source without local changes.
+
+Focused corpus tests use representative MetricsQL-only queries from
+VictoriaMetrics' `app/vmselect/promql/exec_test.go` and generated MetricsQL
+reference: `keep_metric_names`, `ifnot/default`, step-relative windows,
+aggregate limits, or-delimited matchers, and `WITH` expansion. They assert that
+the native parser accepts each form and that unsupported canonical lowering
+fails closed.

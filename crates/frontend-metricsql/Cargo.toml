@@ -5,6 +5,5 @@ edition = "2021"
 
 [dependencies]
 asap-types = { path = "../types" }
-asap-frontend-promql = { path = "../frontend-promql" }
-promql-parser = "0.10"
+metricsql_parser = { git = "https://anonymous@github.com/ccollie/metricsql.git", rev = "3046709308e449a42c56bfbfd45f95af848e6768", package = "metricsql_parser" }
 thiserror = "2"
