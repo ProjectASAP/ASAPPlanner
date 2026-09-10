@@ -1743,8 +1743,8 @@ fn realize_binary(
         return Ok(None);
     }
 
-    lhs_node = finalize_exact_accumulator(lhs_node);
-    rhs_node = finalize_exact_accumulator(rhs_node);
+    lhs_node = finalize_exact_accumulator(lhs_node, lhs)?;
+    rhs_node = finalize_exact_accumulator(rhs_node, rhs)?;
 
     let guarantee = [lhs_node.guarantee.as_ref(), rhs_node.guarantee.as_ref()]
         .into_iter()
@@ -1771,7 +1771,10 @@ fn realize_binary(
 /// Put an explicit read boundary between maintained exact state and a
 /// query-time value consumer. Approximate summaries must already carry a
 /// `SummaryEstimate`, so they deliberately do not pass this predicate.
-fn finalize_exact_accumulator(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
+fn finalize_exact_accumulator(
+    node: Rc<SummaryNode>,
+    logical_output: &QueryExpr,
+) -> Result<Rc<SummaryNode>, ImplementError> {
     let is_exact_state = matches!(
         node.expr,
         SummaryExpr::SummaryAgg {
@@ -1780,11 +1783,15 @@ fn finalize_exact_accumulator(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
         }
     );
     if !is_exact_state {
-        return node;
+        return Ok(node);
     }
-    let schema = node.schema.clone();
+    // The child edge carries accumulator state, while this explicit read
+    // boundary produces the logical operator's ordinary values. Preserve the
+    // canonical pre-ASAP output types instead of leaking ExactAggregate into
+    // query-time operators that follow this node.
+    let schema = lift(&logical_output.output_schema()?);
     let guarantee = node.guarantee.clone();
-    Rc::new(SummaryNode {
+    Ok(Rc::new(SummaryNode {
         expr: SummaryExpr::ValueOperation {
             child: node,
             operation: ValueOperation::FinalizeExactAccumulator,
@@ -1792,7 +1799,7 @@ fn finalize_exact_accumulator(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
         },
         schema,
         guarantee,
-    })
+    }))
 }
 
 fn is_supported_exact_binary(root: &QueryExpr) -> bool {
@@ -1938,11 +1945,10 @@ pub(crate) fn construct_summary_with(
                     allocation,
                 )?;
                 if is_counter_weighted_topk(intent, child) {
-                    let values = finalize_exact_accumulator(realize_child_with(
+                    let values = finalize_exact_accumulator(
+                        realize_child_with(child, models, Some(&AccuracyTarget::Exact))?,
                         child,
-                        models,
-                        Some(&AccuracyTarget::Exact),
-                    )?);
+                    )?;
                     if !values
                         .guarantee
                         .as_ref()
