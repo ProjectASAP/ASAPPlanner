@@ -20,17 +20,16 @@ fn lower(q: &str) -> QueryExpr {
 
 #[test]
 fn newly_parsed_metricsql_reducers_fail_closed_without_lowering_semantics() {
-    for query in ["entropy_over_time(cpu_usage[5m])"] {
-        promql_parser::parser::parse(query)
-            .unwrap_or_else(|error| panic!("pinned parser must accept {query:?}: {error}"));
-        assert!(
-            matches!(
-                lower_promql(query, AccuracyTarget::Exact),
-                Err(LoweringError::UnsupportedFunction(_))
-            ),
-            "{query:?} must remain exact-only until the lowerer defines its semantics"
-        );
-    }
+    let query = "entropy_over_time(cpu_usage[5m])";
+    promql_parser::parser::parse(query)
+        .unwrap_or_else(|error| panic!("pinned parser must accept {query:?}: {error}"));
+    assert!(
+        matches!(
+            lower_promql(query, AccuracyTarget::Exact),
+            Err(LoweringError::UnsupportedFunction(_))
+        ),
+        "{query:?} must remain exact-only until the lowerer defines its semantics"
+    );
 }
 
 #[test]
