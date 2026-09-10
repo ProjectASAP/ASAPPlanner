@@ -93,7 +93,6 @@ fn victoria_metrics_extension_corpus_parses_natively_and_fails_closed() {
         "rate(foo[5i])",
         "sum(foo) by (job) limit 10",
         r#"foo{job="a" or job="b"}"#,
-        r#"WITH (prefix="http_") {__name__=prefix+"requests_total"}"#,
     ];
     for query in cases {
         let ast = parse_metricsql(query)
@@ -105,6 +104,12 @@ fn victoria_metrics_extension_corpus_parses_natively_and_fails_closed() {
             "extension semantics must be represented or routed to exact fallback: {query}"
         );
     }
+
+    assert_eq!(
+        lower(r#"WITH (prefix="http_") {__name__=prefix+"requests_total"}"#),
+        lower("http_requests_total"),
+        "a fully expanded WITH selector has ordinary selector semantics"
+    );
 }
 
 #[test]

@@ -103,3 +103,8 @@ jobs:
       run: bash tools/verify_metricsql_external_consumer.sh
       env:
         RUSTC_WRAPPER: sccache
+
+    - name: Verify vendored MetricsQL parser baseline
+      run: python3 tools/verify_metricsql_vendored_baseline.py
+      env:
+        RUSTC_WRAPPER: sccache

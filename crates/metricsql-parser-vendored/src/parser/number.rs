@@ -2,7 +2,8 @@ use crate::parser::ParseError::InvalidNumber;
 use crate::parser::{ParseError, ParseResult};
 
 fn from_str_radix(str: &str, radix: u32) -> Result<f64, ParseError> {
-    match u64::from_str_radix(str, radix) {
+    let normalized = str.replace('_', "");
+    match u64::from_str_radix(&normalized, radix) {
         Ok(value) => Ok(value as f64),
         Err(_) => Err(InvalidNumber(str.to_string())),
     }
@@ -15,7 +16,8 @@ fn parse_basic(str: &str) -> ParseResult<f64> {
         str = &str[0..str.len() - ending.len()];
         multiplier = *mult;
     }
-    match str.parse::<f64>() {
+    let normalized = str.replace('_', "");
+    match normalized.parse::<f64>() {
         Ok(value) => Ok(if multiplier > 1 {
             value * multiplier as f64
         } else {

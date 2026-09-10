@@ -2091,12 +2091,22 @@ impl Expr {
     }
 
     pub fn new_vector_selector<S: Into<String>>(name: Option<S>, matchers: Matchers) -> Expr {
-        let mut selector = if let Some(name) = name {
-            MetricExpr::new(name)
-        } else {
-            MetricExpr::default()
+        let mut matchers = matchers;
+        if let Some(name) = name {
+            let metric_name = LabelFilter::equal(NAME_LABEL, name.into().as_str());
+            if matchers.or_matchers.is_empty() {
+                matchers.matchers.push(metric_name);
+            } else {
+                for branch in &mut matchers.or_matchers {
+                    branch.push(metric_name.clone());
+                }
+            }
+            matchers.sort_filters();
+        }
+        let selector = MetricExpr {
+            name: None,
+            matchers,
         };
-        selector.matchers = matchers;
         Expr::MetricExpression(selector)
     }
 

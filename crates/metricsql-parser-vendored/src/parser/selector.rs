@@ -19,7 +19,7 @@ pub fn parse_metric_expr(p: &mut Parser) -> ParseResult<Expr> {
         name: Option<String>,
         filters: Vec<Vec<LabelFilterExpr>>,
     ) -> ParseResult<Expr> {
-        let mut me = if let Some(name) = name {
+        let mut me = if let Some(name) = &name {
             MetricExpr::new(name)
         } else {
             MetricExpr::default()
@@ -46,13 +46,20 @@ pub fn parse_metric_expr(p: &mut Parser) -> ParseResult<Expr> {
 
         let mut or_matchers = vec![];
         for filter in filters {
-            let converted = filter
+            let mut converted = filter
                 .iter()
                 .map(|x| x.to_label_filter())
                 .collect::<ParseResult<Vec<_>>>()?;
+            if let Some(name) = &name {
+                converted.push(crate::label::LabelFilter::equal(
+                    crate::label::NAME_LABEL,
+                    name.as_str(),
+                ));
+            }
             or_matchers.push(converted);
         }
 
+        me.matchers.matchers.clear();
         me.matchers.or_matchers = or_matchers;
         me.sort_filters();
         Ok(Expr::MetricExpression(me))

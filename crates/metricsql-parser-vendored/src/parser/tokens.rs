@@ -90,6 +90,10 @@ pub enum Token {
 
     #[regex("-?[Nn][Aa][Nn]")]
     #[regex("-?[Ii][Nn][Ff]")]
+    #[regex(
+        r"-?[0-9]+(?:_[0-9]+)+(?:\.[0-9](?:_?[0-9])*)?(?:[eE][+-]?[0-9](?:_?[0-9])*)?",
+        priority = 6
+    )]
     #[regex("(?&binary)")]
     #[regex("(?&hex)")]
     #[regex("(?&octal)")]

@@ -166,7 +166,11 @@ fn expand_with_selector_expression(
     // Populate me.LabelFilters
     for lfes in &me.matchers {
         for lfe in lfes {
-            let label = lfe.name();
+            let label = if lfe.is_variable() {
+                lfe.name()
+            } else {
+                lfe.label.clone()
+            };
 
             if lfe.value.is_empty() || lfe.is_variable() {
                 // Expand lfe.Label into vec<LabelFilter>.
@@ -336,7 +340,7 @@ fn get_expr_as_string(expr: &Expr) -> ParseResult<String> {
                 let msg = format!("BUG: string expression segments must be empty; got {}", se);
                 return Err(ParseError::General(msg));
             }
-            Ok(se.to_string())
+            Ok(se.get_literal()?.cloned().unwrap_or_default())
         }
         Expr::StringLiteral(s) => Ok(s.to_string()),
         _ => {
