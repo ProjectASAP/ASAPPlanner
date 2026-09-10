@@ -33,8 +33,8 @@ sketch-bench parameter/distribution sweep
     -> flat MergedRecord rows
     -> `approxbench erp`
     -> versioned ERP artifact
-    -> backend observes live cardinality/distribution shape
-    -> deployment supplies an exact or nearest ErpSelectionRequest
+    -> backend extracts empirical features and several candidate distribution fits
+    -> exact dataset-digest lookup or bounded matching against catalog shapes
     -> ASAPPlanner filters applicable and accurate records
     -> least estimated workload cost
     -> deployment maps the selected identity to runtime configuration
@@ -58,13 +58,14 @@ Each record contains:
 - memory plus per-operation update, merge, and query CPU.
 
 The canonical workload remains available as an opaque wire value for exact
-matching. Shape-aware records additionally carry:
+matching. Shape-aware benchmark records additionally carry:
 
 ```text
 erp_shape = {
   cardinality,
   family,              // uniform | zipf | power_law | normal | empirical | ...
   parameters,          // family-specific numeric parameter map
+  features,            // entropy, gini, head/tail mass, rank slope, burst ratio
   benchmark_events
 }
 ```
@@ -73,9 +74,21 @@ The family is explicit rather than encoding uniform as a missing Zipf
 parameter. Profiles from different families are never interpolated. Parameter
 keys must match before a distance is computed; this keeps the contract open to
 Zipf exponent, continuous power-law alpha/minimum, normal mean/deviation, and
-future synthetic or fitted families. Empirical/custom traces carry a stable
-family and descriptor and normally use exact matching rather than synthetic
-interpolation. `benchmark_events` is a sufficiency gate, not a distance axis.
+future synthetic or fitted families. An online observation does not assert that
+production data belongs to one known family. It retains empirical features, an
+empirical fingerprint, and zero or more candidate fits with parameters,
+goodness-of-fit, and confidence. `benchmark_events` is a sufficiency gate, not a
+distance axis.
+
+```text
+observed_shape = {
+  cardinality, event_count,
+  features: {entropy, gini, top_1_mass, top_10_mass, tail_mass,
+             rank_frequency_slope, temporal_burst_ratio},
+  fits: [{family, parameters, goodness_of_fit, confidence}, ...],
+  empirical_fingerprint
+}
+```
 
 ## Selection
 
@@ -99,11 +112,15 @@ cpu_weight * (
 + byte_second_weight * retention_seconds * memory_bytes
 ```
 
-For shape-aware selection, records must first satisfy the benchmark-event floor
-and distribution-family constraint. Their normalized distance is the maximum
-of log2-cardinality distance and every family-specific parameter distance. Only
-candidates within all caller-supplied bounds are eligible; cost selects among
-those candidates.
+Selection first attempts an exact dataset digest plus window/field descriptor
+match. Without a hit, every acceptable candidate fit participates in bounded
+catalog matching; the observer does not choose a single family first. The match
+score combines log-cardinality, family parameters, canonical features, temporal
+shape, and an evidence/confidence penalty. Hard gates reject poor fits, low
+confidence, excessive distance, insufficient benchmark volume, and an
+insufficient margin between the best and second-best matches. Ambiguous and
+out-of-distribution observations are misses, not permission to use the nearest
+row. Hybrid then falls back to theoretical sizing and exact execution.
 
 The least-cost accepted record wins. Missing error metrics, missing contexts,
 invalid values, and insufficient trials make a record inapplicable. Cost ties
@@ -158,12 +175,12 @@ retained sketches, outside the CPU equation.
 
 ## Distribution drift
 
-ERP selection is valid only while the observed shape remains inside the
-configured profile distance. The deployment periodically derives a signature
-and triggers replanning on mismatch. Insufficient benchmark volume, excessive
-shape distance, absent metrics, unsupported runtime parameters, and drift all
-fail closed. Bursts are explicit benchmark scenario provenance and are not
-silently inferred or interpolated.
+ERP selection is valid only while the observed features and retained fits remain
+inside the configured profile distance. A custom dataset without a digest hit
+may still match known benchmark shapes approximately. If all fits are poor or
+ambiguous, it fails closed; sketch-bench may later create a new immutable ERP
+row for that dataset. Insufficient evidence, unsupported parameters, and drift
+also fail closed.
 
 Recommended future signatures are family-specific:
 
@@ -202,6 +219,19 @@ hardware, and error metric. Report selected bytes, accuracy violation rate,
 optimality gap, planning time, total profiling cost, and behavior under
 distribution shift. A second experiment may add ASAPPlanner recurrence/window
 selection, but must identify that as capability beyond query-local sizing.
+
+## Versioning and implementation status
+
+Current v1 is narrower: it estimates cardinality and one rank-frequency slope,
+hard-classifies uniform versus Zipf, and matches equal families. This is a
+compatibility stage, not the final semantics above. Multi-fit observations,
+feature vectors, fit confidence, ambiguity margins, and OOD handling require a
+schema-version bump coordinated across sketch-bench, ASAPPlanner, and backend.
+
+Acceptance tests must cover mixed distributions, nonstandard/truncated long
+tails, hotspot-plus-background traffic, ambiguous fits, unseen/OOD inputs,
+temporal drift, exact custom-dataset hits, approximate custom-data matches, and
+Hybrid theoretical/exact fallback.
 
 ## Future work
 
