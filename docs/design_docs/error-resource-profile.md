@@ -137,27 +137,49 @@ the second-best confidence by the configured margin; otherwise the observation
 is ambiguous and selection fails. This prevents a nearly tied uniform/Zipf fit,
 for example, from being treated as a reliable classification.
 
-For the selected unambiguous fit, benchmark records must satisfy the
-benchmark-event floor and have the same family and parameter-key schema. Their
-normalized distance is the maximum of log2-cardinality distance and every
-family-specific parameter distance. Only candidates within all caller-supplied
-bounds are eligible. The current selector chooses the highest-confidence
-unambiguous fit, then ranks its ERP records by shape distance, estimated
-workload cost, and stable record ID. Goodness-of-fit is an eligibility gate. It
+Before statistical matching, an immutable empirical fingerprint may select a
+record measured from the exact same custom dataset. A fingerprint is never a
+similarity key: a missing or different fingerprint cannot select that record.
+The exact record must still satisfy the requested sketch, implementation,
+trial, accuracy, and cost contract. If no exact record exists, the planner
+continues with the fitted hypotheses.
+
+Every remaining plausible fit is compared with every compatible benchmark
+shape. Benchmark records must satisfy the benchmark-event floor and have the
+same family and parameter-key schema as that fit. Shape distance is the maximum
+of normalized log2-cardinality distance and every normalized family-specific
+parameter distance. Pairs outside any caller-supplied bound are discarded.
+
+For each eligible fit-record pair, the joint distance is:
+
+```text
+max(
+  normalized_shape_distance,
+  goodness_of_fit / max_goodness_of_fit,
+  1 - confidence
+)
+```
+
+The minimum joint distance wins. Estimated workload cost and stable record ID
+break equal-distance ties. Thus a slightly lower-confidence normal fit can beat
+a high-confidence Zipf fit when the normal benchmark shape is substantially
+closer; the planner does not first collapse the observation to one family. It
 never interpolates measured error or resource values between ERP records.
 
 ```text
 empirical observation
     -> multiple fitted hypotheses
     -> confidence / goodness / ambiguity gates
-    -> bounded nearest measured ERP records
+    -> exact fingerprint match, when available
+       otherwise all plausible fit x ERP-record pairs
+    -> bounded joint fit / shape ranking
     -> accuracy and runtime-capability gates
-    -> least estimated workload cost
+    -> cost and stable-ID tie breaking
 ```
 
-The least-cost accepted record wins. Missing error metrics, missing contexts,
-invalid values, and insufficient trials make a record inapplicable. Cost ties
-are broken by record ID; producers should avoid duplicate physical points.
+Missing error metrics, missing contexts, invalid values, insufficient trials,
+poor fits, ambiguous fits, and excessive shape distance make a record
+inapplicable. Producers should avoid duplicate physical points.
 
 This is a bounded discrete search over measured points. Unlike AutoSketch, ERP
 does not run LHS and neighbor benchmarks during query planning. Profiling cost
