@@ -60,6 +60,11 @@ pub(super) fn summary_aggregation_identities(root: &SummaryNode) -> HashSet<*con
                 outer: left,
                 inner: right,
                 ..
+            }
+            | SummaryExpr::CandidateTopK {
+                candidates: left,
+                values: right,
+                ..
             } => {
                 visit(left, seen, out);
                 visit(right, seen, out);

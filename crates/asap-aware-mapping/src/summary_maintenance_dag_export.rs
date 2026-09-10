@@ -204,6 +204,11 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
         | SummaryExpr::SummarySubtract {
             left: outer,
             right: inner,
+        }
+        | SummaryExpr::CandidateTopK {
+            candidates: outer,
+            values: inner,
+            ..
         } => vec![outer, inner],
         SummaryExpr::SummaryDelete { summary_input, .. }
         | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],

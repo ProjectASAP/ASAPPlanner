@@ -223,7 +223,9 @@ impl ExecutionDataStateAssignment {
 pub fn produced_data_state(expr: &SummaryExpr) -> Option<ExecutionDataState> {
     Some(match expr {
         SummaryExpr::KeepPreAsap(_) => return None,
-        SummaryExpr::BinaryOp { .. } => ExecutionDataState::READ_ROWS,
+        SummaryExpr::BinaryOp { .. } | SummaryExpr::CandidateTopK { .. } => {
+            ExecutionDataState::READ_ROWS
+        }
         SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
         | SummaryExpr::SummarySubtract { .. }
@@ -317,6 +319,22 @@ fn visit(
                 if state != ExecutionDataState::READ_ROWS {
                     return Err(ExecutionDataStateError::IllegalChildDataState {
                         edge: "BinaryOp operand",
+                        child: state,
+                    });
+                }
+                visit(input, state, assignment)?;
+            }
+            Ok(())
+        }
+        SummaryExpr::CandidateTopK {
+            candidates, values, ..
+        } => {
+            for input in [candidates, values] {
+                let state =
+                    produced_data_state(&input.expr).unwrap_or(ExecutionDataState::READ_ROWS);
+                if state != ExecutionDataState::READ_ROWS {
+                    return Err(ExecutionDataStateError::IllegalChildDataState {
+                        edge: "CandidateTopK input",
                         child: state,
                     });
                 }
@@ -423,6 +441,7 @@ pub fn assigned_child_data_state(parent: &SummaryExpr, child: &SummaryNode) -> E
         } => ExecutionDataState::READ_ROWS,
         SummaryExpr::KeepPreAsap(_)
         | SummaryExpr::BinaryOp { .. }
+        | SummaryExpr::CandidateTopK { .. }
         | SummaryExpr::SummaryAgg { .. }
         | SummaryExpr::SummaryJoin { .. }
         | SummaryExpr::SummarySubtract { .. }

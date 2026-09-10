@@ -39,6 +39,22 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
             },
         ) => Rc::ptr_eq(al, bl) && Rc::ptr_eq(ar, br) && ao == bo,
         (
+            CandidateTopK {
+                candidates: ac,
+                values: av,
+                k: ak,
+                grouping: ag,
+                completeness: ax,
+            },
+            CandidateTopK {
+                candidates: bc,
+                values: bv,
+                k: bk,
+                grouping: bg,
+                completeness: bx,
+            },
+        ) => Rc::ptr_eq(ac, bc) && Rc::ptr_eq(av, bv) && ak == bk && ag == bg && same_value(ax, bx),
+        (
             ValueOperation {
                 child: ac,
                 operation: ao,
@@ -117,6 +133,7 @@ fn same_node(left: &SummaryNode, right: &SummaryNode) -> bool {
         (
             KeepPreAsap(_)
             | BinaryOp { .. }
+            | CandidateTopK { .. }
             | ValueOperation { .. }
             | SummaryAgg { .. }
             | SummaryJoin { .. }
@@ -155,6 +172,12 @@ pub fn share_common_summary_subtrees<Id>(
             SummaryExpr::BinaryOp { lhs, rhs, .. } => {
                 *lhs = visit(lhs, seen, pool);
                 *rhs = visit(rhs, seen, pool);
+            }
+            SummaryExpr::CandidateTopK {
+                candidates, values, ..
+            } => {
+                *candidates = visit(candidates, seen, pool);
+                *values = visit(values, seen, pool);
             }
             SummaryExpr::ValueOperation { child, .. } => *child = visit(child, seen, pool),
             SummaryExpr::SummaryJoin { outer, inner, .. } => {

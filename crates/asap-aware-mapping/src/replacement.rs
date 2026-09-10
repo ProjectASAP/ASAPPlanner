@@ -349,10 +349,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::post_asap::{
-    validate_execution_data_states_at, EntityIdentity, ExactKind, ExactOperationSchemaError,
-    ExactParams, ExecutionDataState, ExecutionDataStateError, ExecutionTiming, GroupingStrategy,
-    SamplingKind, SamplingParams, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
+    validate_execution_data_states_at, CandidateCompleteness, EntityIdentity, ErrorMetric,
+    ExactKind, ExactOperationSchemaError, ExactParams, ExecutionDataState, ExecutionDataStateError,
+    ExecutionTiming, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm, SketchKind,
+    SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
     SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate,
     ValueOperation, WaveletKind, WaveletParams,
 };
@@ -1893,7 +1893,7 @@ pub(crate) fn construct_summary_with(
         if bindable_intent(expr).is_some() {
             if let Some((family, estimate)) = summary_family(implementation) {
                 let input = realize_physical_summary_input(intent, &family, reduction, child)?;
-                return construct_summary_agg(
+                let candidate = construct_summary_agg(
                     expr,
                     reduction,
                     intent,
@@ -1903,11 +1903,74 @@ pub(crate) fn construct_summary_with(
                     models,
                     child_target,
                     allocation,
-                );
+                )?;
+                if is_counter_weighted_topk(intent, child) {
+                    let values = finalize_exact_accumulator(realize_child_with(
+                        child,
+                        models,
+                        Some(&AccuracyTarget::Exact),
+                    )?);
+                    if !values
+                        .guarantee
+                        .as_ref()
+                        .is_some_and(ResultGuarantee::is_exact)
+                    {
+                        return Err(ImplementError::PhysicalRealization(
+                            "CandidateTopK exact rerank input is not exact",
+                        ));
+                    }
+                    let completeness = match candidate.guarantee.clone() {
+                        Some(guarantee) if guarantee.metric == ErrorMetric::TopKMembership => {
+                            CandidateCompleteness::Certified { guarantee }
+                        }
+                        guarantee => CandidateCompleteness::BestEffort { guarantee },
+                    };
+                    let AggIntent::TopK { k, accuracy } = intent else {
+                        unreachable!()
+                    };
+                    if matches!(accuracy, AccuracyTarget::Exact)
+                        && !matches!(completeness, CandidateCompleteness::Certified { .. })
+                    {
+                        return Err(ImplementError::PhysicalRealization(
+                            "exact CandidateTopK requires certified candidate completeness",
+                        ));
+                    }
+                    let grouping = reduction.group_keys().cloned().unwrap_or_default();
+                    let guarantee = match &completeness {
+                        CandidateCompleteness::Certified { guarantee }
+                        | CandidateCompleteness::BestEffort {
+                            guarantee: Some(guarantee),
+                        } => Some(guarantee.clone()),
+                        CandidateCompleteness::BestEffort { guarantee: None } => None,
+                    };
+                    let node = Rc::new(SummaryNode {
+                        expr: SummaryExpr::CandidateTopK {
+                            candidates: candidate,
+                            values,
+                            k: *k,
+                            grouping,
+                            completeness,
+                        },
+                        schema: lift(&expr.output_schema()?),
+                        guarantee,
+                    });
+                    validate_execution_data_states_at(&node, ExecutionDataState::READ_ROWS)?;
+                    return Ok(node);
+                }
+                return Ok(candidate);
             }
         }
     }
     keep_pre_asap_rc(Rc::new(expr.clone()))
+}
+
+fn is_counter_weighted_topk(intent: &AggIntent, child: &QueryExpr) -> bool {
+    matches!(intent, AggIntent::TopK { .. })
+        && matches!(child,
+            QueryExpr::Aggregate { measures, child, .. }
+                if matches!(measures.as_slice(), [AggIntent::Sum { .. }])
+                    && matches!(child.as_ref(), QueryExpr::Aggregate { measures, .. }
+                        if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase])))
 }
 
 /// Translate an [`Implementation`] into the `(family, needs a
