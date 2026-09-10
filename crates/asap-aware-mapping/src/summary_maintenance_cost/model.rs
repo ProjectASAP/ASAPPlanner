@@ -1282,12 +1282,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            plan.selected_physical_plan_id.as_deref(),
+            plan.selected_window_implementation_id.as_deref(),
             Some("low-retention-layout")
         );
         assert_eq!(
             crate::summary_maintenance_dag_export::export_summary_maintenance_plan(&plan)
-                .selected_physical_plan_id
+                .selected_window_implementation_id
                 .as_deref(),
             Some("low-retention-layout")
         );
@@ -2137,7 +2137,10 @@ mod tests {
             plan.deployments[0].selected_window_framework,
             Some(SummaryWindowFramework::ExponentialHistogram)
         );
-        assert_eq!(plan.selected_physical_plan_id.as_deref(), Some("eh-v1"));
+        assert_eq!(
+            plan.selected_window_implementation_id.as_deref(),
+            Some("eh-v1")
+        );
         let guarantee = plan.window_accuracy_guarantee.as_ref().unwrap();
         assert_eq!(guarantee.metric, ErrorMetric::RelativeValue);
         assert!((guarantee.bound.evaluate().unwrap() - 0.05).abs() < f64::EPSILON);
@@ -2147,7 +2150,10 @@ mod tests {
             exported.deployments[0].selected_window_framework,
             Some(SummaryWindowFramework::ExponentialHistogram)
         );
-        assert_eq!(exported.selected_physical_plan_id.as_deref(), Some("eh-v1"));
+        assert_eq!(
+            exported.selected_window_implementation_id.as_deref(),
+            Some("eh-v1")
+        );
         assert_eq!(
             exported.window_accuracy_guarantee.unwrap().metric,
             ErrorMetric::RelativeValue
@@ -2519,7 +2525,15 @@ mod tests {
         .unwrap();
         assert!(state_plan.summary_total_cost.is_some());
 
-        let child = summary_with_operations(true, false, false);
+        let child_readout = summary_with_operations(true, false, false);
+        let SummaryExpr::SummaryEstimate {
+            summary_input: child,
+            ..
+        } = &child_readout.expr
+        else {
+            unreachable!();
+        };
+        let child = Rc::clone(child);
         let nested = Rc::new(SummaryNode {
             expr: SummaryExpr::SummaryAgg {
                 child,
