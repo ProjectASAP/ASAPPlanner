@@ -350,11 +350,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use asap_types::post_asap::{
     validate_execution_data_states_at, CandidateCompleteness, EntityIdentity, ErrorMetric,
-    ExactKind, ExactOperationSchemaError, ExactParams, ExecutionDataState, ExecutionDataStateError,
-    ExecutionTiming, GroupingStrategy, NonNegativeWeightProof, SamplingKind, SamplingParams,
-    SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
-    StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode,
-    SummarySchema, SummaryUpdate, ValueOperation, WaveletKind, WaveletParams, WeightDomain,
+    ExactKind, ExactOperation, ExactOperationSchemaError, ExactParams, ExecutionDataState,
+    ExecutionDataStateError, ExecutionTiming, GroupingStrategy, NonNegativeWeightProof,
+    SamplingKind, SamplingParams, SketchAlgorithm, SketchKind, SketchParams,
+    SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
+    SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate,
+    ValueOperation, WaveletKind, WaveletParams, WeightDomain,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
@@ -3713,22 +3714,26 @@ impl<'a> GlobalSelection<'a> {
         if let Some(node) = self.materialized.borrow().get(&ptr) {
             return Ok(Rc::clone(node));
         }
-        let node = match self
-            .groups
-            .get(&ptr)
-            .and_then(|sel| sel.chosen)
-            .map(|c| &c.replacement)
-        {
-            None => self.materialize_residual(target)?,
-            Some(Replacement::Rewrite(rewritten)) => keep_pre_asap(rewritten)?,
-            Some(Replacement::Summary(node)) => self.relink_summary(node, target)?,
-            Some(Replacement::ExactComposition(_)) => Rc::clone(
-                &self.groups[&ptr]
-                    .composition
-                    .as_ref()
-                    .expect("selected compositions have a validated decision")
-                    .plan,
-            ),
+        let node = if read_time_nested_sum(target) {
+            self.materialize_residual(target)?
+        } else {
+            match self
+                .groups
+                .get(&ptr)
+                .and_then(|sel| sel.chosen)
+                .map(|c| &c.replacement)
+            {
+                None => self.materialize_residual(target)?,
+                Some(Replacement::Rewrite(rewritten)) => keep_pre_asap(rewritten)?,
+                Some(Replacement::Summary(node)) => self.relink_summary(node, target)?,
+                Some(Replacement::ExactComposition(_)) => Rc::clone(
+                    &self.groups[&ptr]
+                        .composition
+                        .as_ref()
+                        .expect("selected compositions have a validated decision")
+                        .plan,
+                ),
+            }
         };
         self.materialized.borrow_mut().insert(ptr, Rc::clone(&node));
         Ok(node)
@@ -3808,6 +3813,21 @@ impl<'a> GlobalSelection<'a> {
                     offset: *offset,
                 },
             ),
+            QueryExpr::Aggregate {
+                reduction,
+                measures,
+                output_names,
+                having,
+                child,
+            } if read_time_nested_sum(target) => (
+                child,
+                ValueOperation::Exact(ExactOperation::Aggregate {
+                    reduction: reduction.clone(),
+                    measures: measures.clone(),
+                    output_names: output_names.clone(),
+                    having: having.clone(),
+                }),
+            ),
             _ => return keep_pre_asap(target),
         };
         let child = self.materialize_inner(child_target)?;
@@ -3855,6 +3875,34 @@ impl<'a> GlobalSelection<'a> {
         }
         let new_child = self.materialize_inner(pre_child)?;
         Ok(relink_agg_child(node, &new_child))
+    }
+}
+
+/// A mergeable outer SUM over a relationally wrapped aggregate is a read-time
+/// reduction of the inner summary values. Maintaining the outer SUM directly
+/// would hide that inner temporal aggregate inside `KeepPreAsap` and lose its
+/// independently selected summary.
+fn read_time_nested_sum(target: &QueryExpr) -> bool {
+    let QueryExpr::Aggregate {
+        measures,
+        having: None,
+        child,
+        ..
+    } = target
+    else {
+        return false;
+    };
+    matches!(measures.as_slice(), [AggIntent::Sum { .. }]) && contains_aggregate(child)
+}
+
+fn contains_aggregate(expr: &QueryExpr) -> bool {
+    match expr {
+        QueryExpr::Aggregate { .. } => true,
+        QueryExpr::Project { child, .. }
+        | QueryExpr::Filter { child, .. }
+        | QueryExpr::Sort { child, .. }
+        | QueryExpr::Limit { child, .. } => contains_aggregate(child),
+        _ => false,
     }
 }
 

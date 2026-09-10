@@ -144,6 +144,65 @@ async fn clickhouse_temporal_sql_reuses_rate_and_increase_physical_summaries() {
     }
 }
 
+#[tokio::test]
+async fn clickhouse_outer_sum_recursively_binds_inner_temporal_aggregate() {
+    for (function, window_ms) in [
+        ("asap_rate", 300_000),
+        ("asap_rate", 3_600_000),
+        ("asap_increase", 300_000),
+    ] {
+        let sql = format!(
+            "SELECT sum(v) AS value FROM (\
+             SELECT service, {function}(latency, ts, {window_ms}) AS v \
+             FROM metrics GROUP BY service)"
+        );
+        let pre_asap = Rc::new(
+            lower_sql_dialect(
+                &sql,
+                &catalog(),
+                SqlDialect::ClickhouseSQL,
+                AccuracyTarget::Exact,
+            )
+            .await
+            .expect("nested temporal SQL must lower"),
+        );
+        let space = search_workload(vec![("nested", Rc::clone(&pre_asap))]);
+        let selection = space.global_selection(&DefaultCostModel);
+        let root = selection
+            .materialize(&space.roots[0].1)
+            .expect("materialization failed")
+            .expect("root must be discovered");
+
+        fn has_temporal_summary(node: &SummaryNode) -> bool {
+            match &node.expr {
+                SummaryExpr::SummaryAgg {
+                    family:
+                        SummaryFamilyType::ExactAggregate(ExactKind::Rate | ExactKind::Increase, _),
+                    ..
+                } => true,
+                SummaryExpr::ValueOperation { child, .. }
+                | SummaryExpr::SummaryEstimate {
+                    summary_input: child,
+                    ..
+                } => has_temporal_summary(child),
+                _ => false,
+            }
+        }
+        assert!(
+            has_temporal_summary(&root),
+            "inner {function} was hidden: {root:?}"
+        );
+        let executable = compile_executable_dag(&root).expect("nested SQL DAG must be executable");
+        assert!(executable.nodes.iter().any(|node| matches!(
+            node.payload,
+            ExecutableOperatorPayload::Value {
+                operation: ValueOperation::Exact(_),
+                ..
+            }
+        )));
+    }
+}
+
 /// The `Aggregate` node beneath the identity `Project` DataFusion's planner
 /// always wraps a top-level aggregate in — see the module docs above.
 fn inner_aggregate(qe: &QueryExpr) -> &QueryExpr {
