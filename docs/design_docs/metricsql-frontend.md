@@ -2,8 +2,8 @@
 
 Audience: planner and query-engine developers integrating VictoriaMetrics.
 
-`asap-frontend-metricsql` uses the `metricsql_parser` crate from
-`ccollie/metricsql`, pinned to commit
+`asap-frontend-metricsql` vendors the `metricsql_parser` crate from
+`ccollie/metricsql` commit
 `3046709308e449a42c56bfbfd45f95af848e6768`. This Apache-2.0 Rust port is based
 on VictoriaMetrics and models MetricsQL syntax directly, including `WITH`,
 rollup expressions, step-relative durations, MetricsQL binary operators,
@@ -49,11 +49,13 @@ identities, and unsupported extension semantics remain visible in the identity
 rather than being erased.
 
 The upstream parser's `metricsql_common` workspace crate requires nightly Rust
-and AES CPU features for unrelated runtime utilities. ASAPPlanner patches that
-one transitive crate with a stable, portable subset containing exactly the APIs
-the parser imports: duration formatting, hash collection aliases, and datetime
-constant-evaluation helpers. `metricsql_parser` itself remains the pinned
-third-party source without local changes.
+and AES CPU features for unrelated runtime utilities. ASAPPlanner vendors the
+parser with a direct dependency on a stable, portable support crate containing
+exactly the APIs it imports: duration formatting, hash collection aliases, and
+datetime constant-evaluation helpers. The parser remains the pinned third-party
+source with formatting-only changes. Vendoring both path crates
+makes the stable parser dependency self-contained for downstream consumers;
+Cargo does not propagate a workspace root `[patch]` into dependent projects.
 
 Focused corpus tests use representative MetricsQL-only queries from
 VictoriaMetrics' `app/vmselect/promql/exec_test.go` and generated MetricsQL

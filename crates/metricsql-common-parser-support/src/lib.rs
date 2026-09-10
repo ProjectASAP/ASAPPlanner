@@ -80,3 +80,73 @@ mod time {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{duration::fmt_duration_ms, time};
+    use chrono::{TimeZone, Utc};
+    use std::fmt;
+
+    struct Millis(i64);
+
+    impl fmt::Display for Millis {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            super::duration::fmt_duration_ms(formatter, self.0)
+        }
+    }
+
+    #[test]
+    fn duration_format_matches_upstream_parser_support_cases() {
+        let cases = [
+            (0, "0ms"),
+            (1, "1ms"),
+            (1_001, "1s1ms"),
+            (90_061, "1m30s61ms"),
+            (31_626_061_001, "1y1d1h1m1s1ms"),
+            (-1_001, "-1s-1ms"),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(Millis(value).to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn datetime_helpers_match_upstream_parser_support_cases() {
+        let epoch = time::timestamp_secs_to_utc_datetime(0).unwrap();
+        assert_eq!(
+            time::datetime_part(epoch, time::DateTimePart::Year),
+            Some(1970)
+        );
+        let leap = Utc.with_ymd_and_hms(2024, 2, 29, 23, 58, 57).unwrap();
+        assert_eq!(
+            time::datetime_part(leap, time::DateTimePart::DaysInMonth),
+            Some(29)
+        );
+        assert_eq!(
+            time::datetime_part(leap, time::DateTimePart::DayOfWeek),
+            Some(4)
+        );
+        let negative_year = Utc.with_ymd_and_hms(-1, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(
+            time::datetime_part(negative_year, time::DateTimePart::Year),
+            None
+        );
+    }
+
+    #[test]
+    fn hash_aliases_preserve_map_and_set_behavior() {
+        let mut map = super::hash::FastHashMap::default();
+        map.insert("a", 1);
+        assert_eq!(map.get("a"), Some(&1));
+        let mut set = super::hash::FastHashSet::default();
+        set.insert("a");
+        assert!(set.contains("a"));
+    }
+
+    #[allow(dead_code)]
+    fn formatter_signature_is_the_upstream_signature(
+        formatter: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        fmt_duration_ms(formatter, 1)
+    }
+}

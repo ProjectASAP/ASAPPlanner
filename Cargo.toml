@@ -10,10 +10,5 @@ members = [
     "crates/devtools",
     "crates/integration-tests",
 ]
+exclude = ["crates/metricsql-parser-vendored"]
 resolver = "2"
-
-[patch."https://anonymous@github.com/ccollie/metricsql.git"]
-# The upstream parser's shared workspace crate requires nightly and AES CPU
-# features for utilities unrelated to parsing. This stable, portable subset
-# implements exactly the APIs imported by metricsql_parser.
-metricsql_common = { path = "crates/metricsql-common-parser-support" }

@@ -1,0 +1,43 @@
+[package]
+name = "metricsql_parser"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Vendored MetricsQL parser from ccollie/metricsql"
+
+[dependencies]
+ahash = { version = "0.8", features = ["std", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+enquote = "1.1"
+logos = "0.14"
+logos-derive = "0.14"
+metricsql_common = { path = "../metricsql-common-parser-support" }
+num-traits = "0.2"
+phf = { version = "0.11", features = ["macros"] }
+regex = "1.10"
+scopeguard = "1.2"
+serde = { version = "1", features = ["derive"] }
+strum = { version = "0.26", features = ["derive"] }
+strum_macros = "0.26"
+thiserror = "1"
+tinyvec = { version = "1.8", features = ["alloc", "rustc_1_61"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+test-case = "3"
+
+[lib]
+name = "metricsql_parser"
+
+[lints.rust]
+unused_imports = "allow"
+mismatched_lifetime_syntaxes = "allow"
+dead_code = "allow"
+
+[lints.clippy]
+all = "allow"
+
+# Keep this vendored dependency self-contained when the repository lives in a
+# nested Git worktree and Cargo searches ancestor directories for a workspace.
+[workspace]

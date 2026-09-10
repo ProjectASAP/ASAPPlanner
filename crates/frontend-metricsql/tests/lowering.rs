@@ -126,3 +126,23 @@ fn canonical_identity_recursively_formats_metricsql_extensions() {
         "default_rollup(requests_total[5m]) keep_metric_names"
     );
 }
+
+#[test]
+fn metricsql_multi_argument_aggregates_fail_closed() {
+    for query in ["sum(foo, bar)", "avg(foo, bar)", "count(foo, bar)"] {
+        parse_metricsql(query).expect("MetricsQL accepts multi-argument aggregates");
+        let error = lower_metricsql(query, AccuracyTarget::Exact).unwrap_err();
+        assert!(
+            matches!(error, MetricsqlError::UnsupportedFeature(message) if message.contains("requires exactly 1")),
+            "{query} must not silently discard an aggregate input"
+        );
+    }
+}
+
+#[test]
+fn supported_parameterized_functions_require_their_exact_arity() {
+    let quantile = lower("quantile(0.9, requests_total)");
+    assert!(matches!(quantile, QueryExpr::Aggregate { .. }));
+    let rollup = lower("quantile_over_time(0.9, requests_total[5m])");
+    assert!(matches!(rollup, QueryExpr::Aggregate { .. }));
+}

@@ -98,3 +98,8 @@ jobs:
       run: cargo test --workspace --locked
       env:
         RUSTC_WRAPPER: sccache
+
+    - name: Verify MetricsQL frontend as a stable external dependency
+      run: bash tools/verify_metricsql_external_consumer.sh
+      env:
+        RUSTC_WRAPPER: sccache

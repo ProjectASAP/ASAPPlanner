@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 asap-types = { path = "../types" }
-metricsql_parser = { git = "https://anonymous@github.com/ccollie/metricsql.git", rev = "3046709308e449a42c56bfbfd45f95af848e6768", package = "metricsql_parser" }
+metricsql_parser = { path = "../metricsql-parser-vendored" }
 thiserror = "2"

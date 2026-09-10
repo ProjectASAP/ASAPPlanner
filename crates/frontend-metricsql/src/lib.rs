@@ -118,6 +118,12 @@ impl Lowerer {
         let BuiltinFunction::Rollup(rollup) = function.function else {
             return Err(unsupported(format!("function `{}`", function.name())));
         };
+        let expected_args = if rollup == RollupFunction::QuantileOverTime {
+            2
+        } else {
+            1
+        };
+        require_arity(function.name(), function.args.len(), expected_args)?;
         let child_index = usize::from(rollup == RollupFunction::QuantileOverTime);
         let child = function
             .args
@@ -180,6 +186,12 @@ impl Lowerer {
         if expr.limit != 0 || expr.keep_metric_names {
             return Err(unsupported("aggregate limit or keep_metric_names"));
         }
+        let expected_args = if expr.function == AggregateFunction::Quantile {
+            2
+        } else {
+            1
+        };
+        require_arity(expr.name(), expr.args.len(), expected_args)?;
         let child_index = expr
             .arg_idx_for_optimization()
             .ok_or_else(|| unsupported(format!("aggregate `{}` arguments", expr.name())))?;
@@ -295,6 +307,16 @@ fn number_arg(args: &[Expr], index: usize) -> Result<f64, MetricsqlError> {
     match args.get(index) {
         Some(Expr::NumberLiteral(v)) if v.value.is_finite() => Ok(v.value),
         _ => Err(unsupported(format!("numeric argument #{index}"))),
+    }
+}
+
+fn require_arity(name: &str, actual: usize, expected: usize) -> Result<(), MetricsqlError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(unsupported(format!(
+            "`{name}` with {actual} arguments; canonical lowering requires exactly {expected}"
+        )))
     }
 }
 

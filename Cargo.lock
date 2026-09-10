@@ -559,7 +559,6 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
 [[package]]
 name = "cactus"
 version = "1.0.7"
@@ -1936,7 +1935,6 @@ dependencies = [
 [[package]]
 name = "metricsql_parser"
 version = "0.1.0"
-source = "git+https://anonymous@github.com/ccollie/metricsql.git?rev=3046709308e449a42c56bfbfd45f95af848e6768#3046709308e449a42c56bfbfd45f95af848e6768"
 dependencies = [
  "ahash",
  "chrono",
