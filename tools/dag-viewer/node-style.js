@@ -32,6 +32,7 @@ const KIND_CATEGORY_JSON = `{
   "SummaryJoin": "summary",
   "SummarySubtract": "summary",
   "SummaryBinaryOp": "summary",
+  "CandidateTopK": "summary",
   "ValueOperation": "summary",
   "SummaryDelete": "summary",
   "SummaryEstimate": "summary",
@@ -104,7 +105,7 @@ const CATEGORIES = {
   // Post-ASAP nodes use a neutral palette; KeepPreAsap has a muted override.
   summary: {
     label: 'Summary',
-    description: 'KeepPreAsap, SummaryBinaryOp, ValueOperation, SummaryAgg, SummaryJoin, SummarySubtract, SummaryDelete, SummaryEstimate, SummaryMerge — post-ASAP materialized structures',
+    description: 'KeepPreAsap, SummaryBinaryOp, CandidateTopK, ValueOperation, SummaryAgg, SummaryJoin, SummarySubtract, SummaryDelete, SummaryEstimate, SummaryMerge — post-ASAP materialized structures',
     light: { bg: '#f1f2f4', border: '#4b5563' },
     dark: { bg: '#20242b', border: '#9ca3af' },
   },
