@@ -100,6 +100,38 @@ async fn planning_histogram_bridge_reuses_classic_bucket_intent() {
     assert!(matches!(child.as_ref(), QueryExpr::Project { .. }));
 }
 
+#[tokio::test]
+async fn planning_relation_bridges_reject_ambiguous_shapes() {
+    let missing_alias = lower_sql(
+        "SELECT asap_promql_subquery(300000, 60000) FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(missing_alias.to_string().contains("must have an alias"));
+
+    let histogram_with_extra_column = lower_sql(
+        "SELECT service, asap_histogram_quantile(0.95) AS value FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(histogram_with_extra_column
+        .to_string()
+        .contains("only expression"));
+
+    let invalid_q = lower_sql(
+        "SELECT asap_histogram_quantile(1.5) AS value FROM metrics",
+        &catalog(),
+        AccuracyTarget::Exact,
+    )
+    .await
+    .unwrap_err();
+    assert!(invalid_q.to_string().contains("finite and in [0,1]"));
+}
+
 /// Find the first `Aggregate` node along the single-child spine.
 fn find_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {

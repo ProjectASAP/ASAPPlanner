@@ -655,9 +655,10 @@ impl<'a> SqlLowerer<'a> {
         proj: &logical_expr::Projection,
     ) -> Result<Unresolved, LoweringError> {
         if let Some(bridge) = planning_bridge(proj)? {
-            let child = Rc::new(self.lower_plan(&proj.input)?);
+            let input = self.lower_plan(&proj.input)?;
             return Ok(match bridge {
                 PlanningBridge::PromqlSubquery { range, resolution } => {
+                    let child = Rc::new(temporal_bridge_projection(proj, input)?);
                     Unresolved::PromqlSubquery {
                         range,
                         resolution: Some(resolution),
@@ -669,7 +670,7 @@ impl<'a> SqlLowerer<'a> {
                     measures: vec![AggIntent::HistogramQuantile { q }],
                     output_names: vec!["value".into()],
                     having: None,
-                    child,
+                    child: Rc::new(input),
                 },
             });
         }
@@ -1173,7 +1174,63 @@ fn planning_bridge(
         }
         found = Some(bridge);
     }
+    if matches!(found, Some(PlanningBridge::HistogramQuantile { .. })) && projection.expr.len() != 1
+    {
+        return Err(LoweringError::InvalidExpression(
+            "asap_histogram_quantile must be the projection's only expression".into(),
+        ));
+    }
     Ok(found)
+}
+
+/// Rebuild the SQL projection around the relation sampled by the temporal
+/// marker. The marker's alias names the existing child column that occupies
+/// its output slot (`... asap_promql_subquery(...) AS value ...`). This makes
+/// the bridge schema-preserving without silently retaining columns that SQL
+/// projected away.
+fn temporal_bridge_projection(
+    projection: &logical_expr::Projection,
+    child: Unresolved,
+) -> Result<Unresolved, LoweringError> {
+    let cols = projection
+        .expr
+        .iter()
+        .map(|expr| {
+            if let Expr::ScalarFunction(call) = unalias(expr) {
+                if call
+                    .func
+                    .name()
+                    .eq_ignore_ascii_case("asap_promql_subquery")
+                {
+                    let Expr::Alias(alias) = expr else {
+                        return Err(LoweringError::InvalidExpression(
+                            "asap_promql_subquery must have an alias naming its child value column"
+                                .into(),
+                        ));
+                    };
+                    return Ok(ProjectItem {
+                        expr: Unresolved::Column(ColumnRef::Named(alias.name.clone())),
+                        alias: Some(alias.name.clone()),
+                    });
+                }
+            }
+            match expr {
+                Expr::Alias(alias) => Ok(ProjectItem {
+                    expr: df_expr_to_unresolved(&alias.expr)?,
+                    alias: Some(alias.name.clone()),
+                }),
+                other => Ok(ProjectItem {
+                    expr: df_expr_to_unresolved(other)?,
+                    alias: None,
+                }),
+            }
+        })
+        .collect::<Result<Vec<_>, LoweringError>>()?;
+    Ok(Unresolved::Project {
+        cols,
+        qualifier: None,
+        child: Rc::new(child),
+    })
 }
 
 fn positive_millis_literal(expr: &Expr, argument: &str) -> Result<Duration, LoweringError> {
