@@ -245,9 +245,31 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
             ..
         }
     ));
-    let SummaryExpr::RelationalJoin { left, right, .. } = &join.expr else {
+    let SummaryExpr::RelationalJoin {
+        left,
+        right,
+        kind,
+        pred,
+    } = &join.expr
+    else {
         panic!("expected read-time relational join, got {:?}", join.expr);
     };
+    assert_eq!(kind, &asap_types::pre_asap::JoinKind::Inner);
+    assert!(matches!(
+        pred.0.as_ref(),
+        QueryExpr::Compare {
+            op: asap_types::pre_asap::CompareOpKind::Eq,
+            ..
+        }
+    ));
+    assert_eq!(
+        join.schema
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["service", "v", "service", "v"]
+    );
     for child in [left, right] {
         let SummaryExpr::ValueOperation {
             child: aggregate,
@@ -264,6 +286,39 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
                 ..
             }
         ));
+    }
+}
+
+#[tokio::test]
+async fn unsupported_sql_join_shapes_remain_fail_closed() {
+    for sql in [
+        "SELECT a.service FROM (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) a LEFT JOIN (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) b ON a.service=b.service",
+        "SELECT a.service FROM (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) a INNER JOIN (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) b ON a.v>b.v",
+    ] {
+        let pre_asap = Rc::new(
+            lower_sql_dialect(
+                sql,
+                &catalog(),
+                SqlDialect::ClickhouseSQL,
+                AccuracyTarget::Exact,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("join must lower before fail-closed mapping: {error}")),
+        );
+        let space = search_workload(vec![("unsupported-join", Rc::clone(&pre_asap))]);
+        let selection = space.global_selection(&DefaultCostModel);
+        let root = selection
+            .materialize(&space.roots[0].1)
+            .expect("materialization failed")
+            .expect("root must be discovered");
+        let SummaryExpr::ValueOperation { child, .. } = &root.expr else {
+            panic!("SQL projection must remain explicit: {:?}", root.expr);
+        };
+        assert!(
+            matches!(child.expr, SummaryExpr::KeepPreAsap(_)),
+            "unsupported join was partially accelerated: {:?}",
+            child.expr
+        );
     }
 }
 

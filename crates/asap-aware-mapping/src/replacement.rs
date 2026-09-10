@@ -3700,6 +3700,19 @@ impl<'a> GlobalSelection<'a> {
             pred,
         } = target.as_ref()
         {
+            let supported = matches!(kind, asap_types::pre_asap::JoinKind::Inner)
+                && matches!(
+                    pred.0.as_ref(),
+                    QueryExpr::Compare {
+                        left,
+                        op: asap_types::pre_asap::CompareOpKind::Eq,
+                        right,
+                    } if matches!(left.as_ref(), QueryExpr::Column(_))
+                        && matches!(right.as_ref(), QueryExpr::Column(_))
+                );
+            if !supported {
+                return keep_pre_asap(target);
+            }
             let left = self.materialize_inner(left)?;
             let right = self.materialize_inner(right)?;
             let guarantee = left
