@@ -49,6 +49,57 @@ async fn lower(sql: &str) -> QueryExpr {
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
 }
 
+#[tokio::test]
+async fn planning_subquery_bridge_reuses_canonical_promql_subquery() {
+    let query = lower(
+        "SELECT max(value) FROM (\
+           SELECT asap_promql_subquery(21600000, 60000) AS value FROM (\
+             SELECT sum(bytes) AS value FROM metrics))",
+    )
+    .await;
+    let QueryExpr::Project { child, .. } = query else {
+        panic!("expected outer SQL projection");
+    };
+    let QueryExpr::Aggregate { child, .. } = child.as_ref() else {
+        panic!("expected outer max aggregate, got {child:?}");
+    };
+    let QueryExpr::PromqlSubquery {
+        range,
+        resolution,
+        child,
+    } = child.as_ref()
+    else {
+        panic!("expected canonical subquery bridge, got {child:?}");
+    };
+    assert_eq!(*range, std::time::Duration::from_secs(6 * 60 * 60));
+    assert_eq!(*resolution, Some(std::time::Duration::from_secs(60)));
+    assert!(matches!(child.as_ref(), QueryExpr::Project { .. }));
+}
+
+#[tokio::test]
+async fn planning_histogram_bridge_reuses_classic_bucket_intent() {
+    let query = lower(
+        "SELECT asap_histogram_quantile(0.95) AS value FROM (\
+           SELECT service AS le, sum(bytes) AS value FROM metrics GROUP BY service)",
+    )
+    .await;
+    let QueryExpr::Aggregate {
+        reduction,
+        measures,
+        child,
+        ..
+    } = query
+    else {
+        panic!("expected canonical histogram aggregate");
+    };
+    assert!(reduction.expect_reduce().keys().is_empty());
+    assert!(matches!(
+        measures.as_slice(),
+        [AggIntent::HistogramQuantile { q }] if (*q - 0.95).abs() < 1e-12
+    ));
+    assert!(matches!(child.as_ref(), QueryExpr::Project { .. }));
+}
+
 /// Find the first `Aggregate` node along the single-child spine.
 fn find_aggregate(qe: &QueryExpr) -> Option<(&GroupKeys, &Vec<AggIntent>)> {
     match qe {
