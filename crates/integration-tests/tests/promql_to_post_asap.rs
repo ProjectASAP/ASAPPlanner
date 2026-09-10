@@ -50,6 +50,28 @@ fn realize(expr: &QueryExpr) -> Result<Rc<SummaryNode>, ImplementError> {
     }
 }
 
+#[test]
+fn distinct_over_time_offers_hll_cardinality_readout() {
+    // The real frontend must reach an existing HLL candidate without a
+    // function-specific post-ASAP node or a sample-count rewrite.
+    let root = Rc::new(
+        lower_promql(
+            "distinct_over_time(cpu_usage{job=\"worker\"}[5m])",
+            AccuracyTarget::Epsilon(0.02),
+        )
+        .unwrap(),
+    );
+    let candidates =
+        SketchAlgorithmStrategy::default_cost_model().replacements(&TargetSubDAG::new(&root));
+    assert!(candidates.iter().any(|candidate| {
+        let Replacement::Summary(node) = &candidate.replacement else { return false };
+        let SummaryExpr::SummaryEstimate { summary_input, query, .. } = &node.expr else { return false };
+        matches!(query, SketchQuery::Cardinality)
+            && matches!(&summary_input.expr, SummaryExpr::SummaryAgg { family: SummaryFamilyType::Sketch(kind, _), .. }
+                if kind.algorithm() == &SketchAlgorithm::Hll)
+    }), "no HLL cardinality candidate: {candidates:?}");
+}
+
 fn lower_search_and_materialize(query: &str) -> Rc<SummaryNode> {
     let pre = Rc::new(lower_promql(query, AccuracyTarget::Exact).expect("lowering failed"));
     let space = search_workload(vec![("query", pre)]);
