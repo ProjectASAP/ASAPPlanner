@@ -583,7 +583,8 @@ fn workload_facts(
                 };
                 prepared_eligible &= covered;
             }
-            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
+            QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval))
+            | QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt { interval, .. }) => {
                 prepared_eligible = false;
                 let rate = 1000.0 / f64::from(interval.0);
                 evaluation_rate += rate;

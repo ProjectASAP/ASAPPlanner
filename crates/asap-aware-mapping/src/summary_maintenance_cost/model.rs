@@ -387,7 +387,8 @@ pub(super) fn evaluation_offsets_ms(
                 .saturating_sub(scope.planning_time.0));
             *invocations as usize
         ]),
-        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
+        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval))
+        | QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt { interval, .. }) => {
             Ok((1..=count).map(|n| n * u64::from(interval.0)).collect())
         }
         QueryRecurrence::Repeated(RepeatedDemand::Scheduled(schedule)) => Ok(schedule

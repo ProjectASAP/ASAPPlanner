@@ -261,6 +261,12 @@ pub struct DemandEstimate {
 #[serde(rename_all = "snake_case")]
 pub enum RepeatedDemand {
     FixedInterval(RepetitionInterval),
+    /// Fixed cadence with a known evaluation phase. The timestamp is any
+    /// evaluation endpoint on that cadence, not necessarily its first run.
+    FixedIntervalAt {
+        interval: RepetitionInterval,
+        evaluation_phase: TimestampMs,
+    },
     Scheduled(Vec<TimestampMs>),
     EstimatedRate(DemandEstimate),
 }
@@ -594,9 +600,11 @@ fn validate_entry(entry: &QueryWorkloadEntry) -> Result<(), WorkloadError> {
         QueryRecurrence::OneTime { invocations: 0, .. } => {
             return Err(WorkloadError::ZeroInvocations)
         }
-        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(0))) => {
-            return Err(WorkloadError::ZeroRepetitionInterval)
-        }
+        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(RepetitionInterval(0)))
+        | QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt {
+            interval: RepetitionInterval(0),
+            ..
+        }) => return Err(WorkloadError::ZeroRepetitionInterval),
         QueryRecurrence::Repeated(RepeatedDemand::Scheduled(schedule)) if schedule.is_empty() => {
             return Err(WorkloadError::EmptySchedule)
         }
