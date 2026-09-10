@@ -19,10 +19,10 @@ use asap_aware_mapping::{
 };
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
-    CandidateCompleteness, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
-    GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode, SummarySchema,
-    SummaryUpdate, ValueOperation, WeightDomain,
+    compile_executable_dag, CandidateCompleteness, CompositionOperator, EdgeRole, EntityIdentity,
+    ExactKind, ExactParams, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm, SketchKind,
+    SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode,
+    SummarySchema, SummaryUpdate, ValueOperation, WeightDomain,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -291,6 +291,15 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
                 series: EntityIdentity::PromqlLabelSet { .. },
             }
         ));
+        let executable = compile_executable_dag(&plan).expect("typed executable DAG");
+        assert!(executable
+            .edges
+            .iter()
+            .any(|edge| edge.role == EdgeRole::CandidateMembership));
+        assert!(executable
+            .edges
+            .iter()
+            .any(|edge| edge.role == EdgeRole::AuthoritativeValues));
         assert!(
             !matches!(child.expr, SummaryExpr::SummaryAgg { .. }),
             "membership materialization must bind ingest rows, not another summary"
