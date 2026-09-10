@@ -12,6 +12,9 @@ use super::{
     SummaryFamilyType, SummaryUpdate, ValueOperation,
 };
 use crate::pre_asap::{ColumnRef, GroupKeys, QueryExpr, Reduction};
+use thiserror::Error;
+
+pub const POST_ASAP_DAG_WIRE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExecutableOperator {
@@ -115,6 +118,7 @@ impl ExecutableOperatorPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutableDagNode {
     pub id: PostAsapNodeId,
     pub operator: ExecutableOperator,
@@ -125,6 +129,7 @@ pub struct ExecutableDagNode {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutableDagEdge {
     pub producer: PostAsapNodeId,
     pub consumer: PostAsapNodeId,
@@ -136,12 +141,174 @@ pub struct ExecutableDagEdge {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutableDag {
     pub nodes: Vec<ExecutableDagNode>,
     pub edges: Vec<ExecutableDagEdge>,
     /// Semantic workload root. Physical query/precompute sinks are selected
     /// downstream by the control plane.
     pub root: PostAsapNodeId,
+}
+
+/// Versioned transport envelope for a post-ASAP semantic DAG.
+///
+/// `ExecutableDag` remains serializable as a legacy in-process adapter. New
+/// process boundaries should exchange this envelope and call [`Self::validate`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostAsapDagDocument {
+    pub schema_version: u32,
+    pub dag: ExecutableDag,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ExecutableDagValidationError {
+    #[error("unsupported post-ASAP DAG schema version {0}")]
+    UnsupportedVersion(u32),
+    #[error("duplicate post-ASAP node id {0:?}")]
+    DuplicateNodeId(PostAsapNodeId),
+    #[error("post-ASAP DAG root {0:?} does not name a node")]
+    MissingRoot(PostAsapNodeId),
+    #[error("edge endpoint {0:?} does not name a node")]
+    MissingEdgeEndpoint(PostAsapNodeId),
+    #[error("node {node:?} declares {declared:?} but its payload is {actual:?}")]
+    OperatorPayloadMismatch {
+        node: PostAsapNodeId,
+        declared: ExecutableOperator,
+        actual: ExecutableOperator,
+    },
+    #[error("edge {producer:?}->{consumer:?} schema differs from producer output")]
+    EdgeSchemaMismatch {
+        producer: PostAsapNodeId,
+        consumer: PostAsapNodeId,
+    },
+    #[error("edge {producer:?}->{consumer:?} data state differs from producer output")]
+    EdgeDataStateMismatch {
+        producer: PostAsapNodeId,
+        consumer: PostAsapNodeId,
+    },
+    #[error("post-ASAP DAG contains a cycle")]
+    Cycle,
+    #[error("post-ASAP node {0:?} is not reachable from the root")]
+    UnreachableNode(PostAsapNodeId),
+}
+
+impl PostAsapDagDocument {
+    pub fn new(dag: ExecutableDag) -> Self {
+        Self {
+            schema_version: POST_ASAP_DAG_WIRE_VERSION,
+            dag,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ExecutableDagValidationError> {
+        if self.schema_version != POST_ASAP_DAG_WIRE_VERSION {
+            return Err(ExecutableDagValidationError::UnsupportedVersion(
+                self.schema_version,
+            ));
+        }
+        self.dag.validate()
+    }
+}
+
+impl ExecutableDag {
+    pub fn validate(&self) -> Result<(), ExecutableDagValidationError> {
+        use std::collections::{HashMap, HashSet};
+        let mut nodes = HashMap::new();
+        for node in &self.nodes {
+            if nodes.insert(node.id, node).is_some() {
+                return Err(ExecutableDagValidationError::DuplicateNodeId(node.id));
+            }
+            let actual = node.payload.operator();
+            if node.operator != actual {
+                return Err(ExecutableDagValidationError::OperatorPayloadMismatch {
+                    node: node.id,
+                    declared: node.operator,
+                    actual,
+                });
+            }
+        }
+        if !nodes.contains_key(&self.root) {
+            return Err(ExecutableDagValidationError::MissingRoot(self.root));
+        }
+        let mut children: HashMap<PostAsapNodeId, Vec<PostAsapNodeId>> = HashMap::new();
+        for edge in &self.edges {
+            let producer = nodes.get(&edge.producer).ok_or(
+                ExecutableDagValidationError::MissingEdgeEndpoint(edge.producer),
+            )?;
+            if !nodes.contains_key(&edge.consumer) {
+                return Err(ExecutableDagValidationError::MissingEdgeEndpoint(
+                    edge.consumer,
+                ));
+            }
+            if edge.intermediate_schema != producer.output_schema {
+                return Err(ExecutableDagValidationError::EdgeSchemaMismatch {
+                    producer: edge.producer,
+                    consumer: edge.consumer,
+                });
+            }
+            if edge.data_state != producer.output_state {
+                return Err(ExecutableDagValidationError::EdgeDataStateMismatch {
+                    producer: edge.producer,
+                    consumer: edge.consumer,
+                });
+            }
+            children
+                .entry(edge.consumer)
+                .or_default()
+                .push(edge.producer);
+        }
+        fn visit(
+            id: PostAsapNodeId,
+            children: &HashMap<PostAsapNodeId, Vec<PostAsapNodeId>>,
+            visiting: &mut HashSet<PostAsapNodeId>,
+            visited: &mut HashSet<PostAsapNodeId>,
+        ) -> bool {
+            if visited.contains(&id) {
+                return true;
+            }
+            if !visiting.insert(id) {
+                return false;
+            }
+            if children
+                .get(&id)
+                .into_iter()
+                .flatten()
+                .any(|child| !visit(*child, children, visiting, visited))
+            {
+                return false;
+            }
+            visiting.remove(&id);
+            visited.insert(id);
+            true
+        }
+        if !visit(
+            self.root,
+            &children,
+            &mut HashSet::new(),
+            &mut HashSet::new(),
+        ) {
+            return Err(ExecutableDagValidationError::Cycle);
+        }
+        let mut reachable = HashSet::new();
+        fn mark(
+            id: PostAsapNodeId,
+            children: &HashMap<PostAsapNodeId, Vec<PostAsapNodeId>>,
+            reachable: &mut HashSet<PostAsapNodeId>,
+        ) {
+            if !reachable.insert(id) {
+                return;
+            }
+            for child in children.get(&id).into_iter().flatten() {
+                mark(*child, children, reachable);
+            }
+        }
+        mark(self.root, &children, &mut reachable);
+        if let Some(id) = nodes.keys().find(|id| !reachable.contains(id)) {
+            return Err(ExecutableDagValidationError::UnreachableNode(*id));
+        }
+        Ok(())
+    }
 }
 
 /// Compiler-local identity assignment. It deliberately retains `Rc` handles
@@ -366,8 +533,11 @@ pub fn compile_executable_dag_with_node_ids(
         &mut edges,
         &mut nodes_by_id,
     );
+    let dag = ExecutableDag { nodes, edges, root };
+    dag.validate()
+        .expect("compiler emits a valid post-ASAP DAG");
     Ok(ExecutableDagCompilation {
-        dag: ExecutableDag { nodes, edges, root },
+        dag,
         node_ids: ExecutableNodeIdentityMap { nodes_by_id },
     })
 }
@@ -480,6 +650,18 @@ mod tests {
         let decoded: ExecutableDag =
             serde_json::from_str(&encoded).expect("deserialize executable contract");
         assert_eq!(decoded, dag);
+        let document = PostAsapDagDocument::new(decoded);
+        document.validate().unwrap();
+        let mut invalid = serde_json::to_value(&document).unwrap();
+        invalid["dag"]["nodes"][0]["operator"] = serde_json::json!("Binary");
+        let invalid: PostAsapDagDocument = serde_json::from_value(invalid).unwrap();
+        assert!(matches!(
+            invalid.validate(),
+            Err(ExecutableDagValidationError::OperatorPayloadMismatch { .. })
+        ));
+        let mut unknown = serde_json::to_value(&document).unwrap();
+        unknown["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<PostAsapDagDocument>(unknown).is_err());
         assert!(matches!(
             dag.nodes[2].payload,
             ExecutableOperatorPayload::SummaryAgg {

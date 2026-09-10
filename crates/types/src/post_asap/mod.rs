@@ -42,9 +42,10 @@ pub mod summary_window;
 pub use cse::share_common_summary_subtrees;
 pub use executable_dag::{
     compile_executable_dag, compile_executable_dag_with_node_ids, EdgeRole, ExecutableDag,
-    ExecutableDagCompilation, ExecutableDagEdge, ExecutableDagNode, ExecutableNodeIdentityMap,
-    ExecutableOperator, ExecutableOperatorPayload, GroupingEdgeCompatibility, PostAsapNodeId,
-    WindowEdgeCompatibility,
+    ExecutableDagCompilation, ExecutableDagEdge, ExecutableDagNode, ExecutableDagValidationError,
+    ExecutableNodeIdentityMap, ExecutableOperator, ExecutableOperatorPayload,
+    GroupingEdgeCompatibility, PostAsapDagDocument, PostAsapNodeId, WindowEdgeCompatibility,
+    POST_ASAP_DAG_WIRE_VERSION,
 };
 pub use execution_data_state::{
     assigned_child_data_state, exact_operation_output_schema, produced_data_state,
