@@ -18,6 +18,24 @@ fn lower(q: &str) -> QueryExpr {
     lower_promql(q, AccuracyTarget::Exact).unwrap_or_else(|e| panic!("lower failed for {q:?}: {e}"))
 }
 
+#[test]
+fn newly_parsed_metricsql_reducers_fail_closed_without_lowering_semantics() {
+    for query in [
+        "distinct_over_time(cpu_usage[5m])",
+        "entropy_over_time(cpu_usage[5m])",
+    ] {
+        promql_parser::parser::parse(query)
+            .unwrap_or_else(|error| panic!("pinned parser must accept {query:?}: {error}"));
+        assert!(
+            matches!(
+                lower_promql(query, AccuracyTarget::Exact),
+                Err(LoweringError::UnsupportedFunction(_))
+            ),
+            "{query:?} must remain exact-only until the lowerer defines its semantics"
+        );
+    }
+}
+
 // ── Bare selectors & label matchers (folded onto Scan.predicates) ───────────────
 
 #[test]
