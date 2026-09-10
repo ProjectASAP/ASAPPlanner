@@ -94,6 +94,42 @@ pub struct ErpDataShape {
     pub benchmark_events: u64,
 }
 
+/// One hypothesis fitted to the same bounded runtime observation. Lower
+/// goodness-of-fit is better; confidence is in [0, 1]. Keeping all plausible
+/// fits avoids prematurely classifying unknown data as one named family.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErpShapeFit {
+    pub family: String,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, f64>,
+    pub goodness_of_fit: f64,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErpShapeObservation {
+    pub cardinality: u64,
+    pub observed_events: u64,
+    pub fits: Vec<ErpShapeFit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empirical_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ErpMultiFitSelectionRequest {
+    pub selection: ErpSelectionRequest,
+    pub observed: ErpShapeObservation,
+    pub minimum_benchmark_events: u64,
+    pub max_log2_cardinality_distance: f64,
+    pub max_parameter_distance: f64,
+    pub max_goodness_of_fit: f64,
+    pub minimum_confidence: f64,
+    /// Required confidence separation between the best and second-best fit.
+    pub minimum_confidence_margin: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ErpNearestSelectionRequest {
     pub selection: ErpSelectionRequest,
@@ -254,6 +290,50 @@ impl ErpArtifact {
             .map(|(_, selection)| selection)
             .ok_or(ErpError::NoApplicableConfiguration)
     }
+
+    /// Select using every statistically plausible fit for one observation.
+    /// Ambiguous and poor fits fail closed so callers can use their
+    /// theoretical-then-exact fallback policy.
+    pub fn select_multi_fit(
+        &self,
+        request: &ErpMultiFitSelectionRequest,
+    ) -> Result<ErpSelection<'_>, ErpError> {
+        self.validate()?;
+        if !request.selection.valid() || !request.valid() {
+            return Err(ErpError::Invalid("invalid multi-fit request"));
+        }
+        let mut fits = request
+            .observed
+            .fits
+            .iter()
+            .filter(|fit| {
+                fit.confidence >= request.minimum_confidence
+                    && fit.goodness_of_fit <= request.max_goodness_of_fit
+            })
+            .collect::<Vec<_>>();
+        fits.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
+        let Some(best) = fits.first() else {
+            return Err(ErpError::NoApplicableConfiguration);
+        };
+        if fits.get(1).is_some_and(|second| {
+            best.confidence - second.confidence < request.minimum_confidence_margin
+        }) {
+            return Err(ErpError::NoApplicableConfiguration);
+        }
+        let nearest = ErpNearestSelectionRequest {
+            selection: request.selection.clone(),
+            observed: ErpDataShape {
+                cardinality: request.observed.cardinality,
+                family: best.family.clone(),
+                parameters: best.parameters.clone(),
+                benchmark_events: request.observed.observed_events,
+            },
+            minimum_benchmark_events: request.minimum_benchmark_events,
+            max_log2_cardinality_distance: request.max_log2_cardinality_distance,
+            max_parameter_distance: request.max_parameter_distance,
+        };
+        self.select_nearest(&nearest)
+    }
 }
 
 fn data_shape(distribution: &serde_json::Value) -> Option<ErpDataShape> {
@@ -302,6 +382,28 @@ impl ErpNearestSelectionRequest {
             .into_iter()
             .fold(0.0_f64, f64::max);
         Some(cardinality.max(parameters))
+    }
+}
+
+impl ErpMultiFitSelectionRequest {
+    fn valid(&self) -> bool {
+        self.observed.cardinality > 0
+            && self.observed.observed_events > 0
+            && !self.observed.fits.is_empty()
+            && self.max_goodness_of_fit.is_finite()
+            && self.max_goodness_of_fit >= 0.0
+            && self.minimum_confidence.is_finite()
+            && (0.0..=1.0).contains(&self.minimum_confidence)
+            && self.minimum_confidence_margin.is_finite()
+            && (0.0..=1.0).contains(&self.minimum_confidence_margin)
+            && self.observed.fits.iter().all(|fit| {
+                !fit.family.trim().is_empty()
+                    && fit.goodness_of_fit.is_finite()
+                    && fit.goodness_of_fit >= 0.0
+                    && fit.confidence.is_finite()
+                    && (0.0..=1.0).contains(&fit.confidence)
+                    && fit.parameters.values().all(|value| value.is_finite())
+            })
     }
 }
 
@@ -436,6 +538,82 @@ mod tests {
         request.distribution = serde_json::json!({"external":{"dataset":"production"}});
         assert_eq!(
             artifact.select(&request),
+            Err(ErpError::NoApplicableConfiguration)
+        );
+    }
+
+    fn multi_fit_request() -> ErpMultiFitSelectionRequest {
+        ErpMultiFitSelectionRequest {
+            selection: request(),
+            observed: ErpShapeObservation {
+                cardinality: 1_000,
+                observed_events: 20_000,
+                fits: vec![ErpShapeFit {
+                    family: "zipf".into(),
+                    parameters: BTreeMap::from([("exponent".into(), 1.2)]),
+                    goodness_of_fit: 0.03,
+                    confidence: 0.95,
+                }],
+                empirical_fingerprint: None,
+            },
+            minimum_benchmark_events: 10_000,
+            max_log2_cardinality_distance: 1.0,
+            max_parameter_distance: 0.2,
+            max_goodness_of_fit: 0.1,
+            minimum_confidence: 0.8,
+            minimum_confidence_margin: 0.1,
+        }
+    }
+
+    #[test]
+    fn multi_fit_selects_only_confident_well_fitting_family() {
+        let mut measured = row("zipf", 512, 0.009, 12_288.0);
+        measured.distribution = serde_json::json!({"erp_shape": {
+            "cardinality": 1000, "family": "zipf",
+            "parameters": {"exponent": 1.22}, "benchmark_events": 20000
+        }});
+        let artifact = ErpArtifact {
+            schema_version: ERP_SCHEMA_VERSION,
+            producer_version: "bench-1".into(),
+            records: vec![measured],
+        };
+        assert_eq!(
+            artifact
+                .select_multi_fit(&multi_fit_request())
+                .unwrap()
+                .record
+                .id,
+            "zipf"
+        );
+    }
+
+    #[test]
+    fn multi_fit_rejects_ambiguous_or_poor_observations() {
+        let mut measured = row("zipf", 512, 0.009, 12_288.0);
+        measured.distribution = serde_json::json!({"erp_shape": {
+            "cardinality": 1000, "family": "zipf",
+            "parameters": {"exponent": 1.2}, "benchmark_events": 20000
+        }});
+        let artifact = ErpArtifact {
+            schema_version: ERP_SCHEMA_VERSION,
+            producer_version: "bench-1".into(),
+            records: vec![measured],
+        };
+        let mut ambiguous = multi_fit_request();
+        ambiguous.observed.fits.push(ErpShapeFit {
+            family: "normal".into(),
+            parameters: BTreeMap::from([("mean".into(), 0.0), ("stddev".into(), 1.0)]),
+            goodness_of_fit: 0.04,
+            confidence: 0.90,
+        });
+        assert_eq!(
+            artifact.select_multi_fit(&ambiguous),
+            Err(ErpError::NoApplicableConfiguration)
+        );
+        ambiguous.observed.fits.truncate(1);
+        ambiguous.observed.fits[0].goodness_of_fit = 0.5;
+        assert_eq!(
+            artifact.select_multi_fit(&ambiguous),
             Err(ErpError::NoApplicableConfiguration)
         );
     }
