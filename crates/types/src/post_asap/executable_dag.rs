@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::{
-    assigned_child_data_state, validate_execution_data_states, ExecutionDataState,
-    ExecutionDataStateError, ResultGuarantee, SummaryExpr, SummaryNode, SummarySchema,
+    validate_execution_data_states, ExecutionDataState, ExecutionDataStateError, ResultGuarantee,
+    SummaryExpr, SummaryNode, SummarySchema,
 };
 use super::{
     BinaryOperator, CandidateCompleteness, ExecutionTiming, GroupingStrategy, SketchQuery,
@@ -559,7 +559,13 @@ pub fn compile_executable_dag_with_node_ids(
                 consumer: id,
                 role,
                 intermediate_schema: child.schema.clone(),
-                data_state: assigned_child_data_state(&node.expr, child),
+                // The whole-graph validator owns contextual state assignment,
+                // especially for shared KeepPreAsap leaves. Export that
+                // authoritative result instead of independently deriving the
+                // edge state a second time.
+                data_state: assignment
+                    .data_state_of(child)
+                    .expect("validated child has data state"),
                 grouping,
                 window: if maintenance_dependency {
                     WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactBoundaryResidual
