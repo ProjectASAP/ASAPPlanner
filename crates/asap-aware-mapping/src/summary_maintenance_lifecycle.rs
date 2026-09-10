@@ -119,7 +119,8 @@ pub struct SummaryMaintenanceLifecycleCostInputs {
     pub retirement_cost: Option<Cost>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SummaryMaintenanceLifecycleRejection {
     UnsupportedByRuntime,
     RequiresPredictableOneTimeQuery,

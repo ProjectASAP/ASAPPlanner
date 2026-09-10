@@ -12,7 +12,8 @@ use crate::workload::{DurationMs, TimestampMs};
 
 /// When an operator is evaluated. This is independent of whether it owns
 /// state and how long that state is retained.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EvaluationSchedule {
     OneShot,
     PerUpdate,
@@ -24,7 +25,8 @@ pub enum EvaluationSchedule {
 /// summary's output; for example, `Estimate` is the consumer in
 /// `SummaryAgg -> Estimate`. The exposed result is ordinary rows, reusable
 /// summary state, or a finalized value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OutputRepresentation {
     PlainRows,
     SummaryState,
@@ -38,14 +40,18 @@ pub enum OutputRepresentation {
 /// provides the expected number and timing of reads; data arrival provides the
 /// expected state-update demand. The planner combines those quantities with
 /// costs and runtime capabilities to compare these policies.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SummaryMaintenanceLifecycle {
     Ephemeral,
     Prepared {
+        #[serde(rename = "activate_at_ms")]
         activate_at: TimestampMs,
+        #[serde(rename = "retire_at_ms")]
         retire_at: TimestampMs,
     },
     Shared {
+        #[serde(rename = "retention_ms")]
         retention: DurationMs,
     },
     ContinuouslyMaintained,
@@ -56,9 +62,12 @@ pub enum SummaryMaintenanceLifecycle {
 /// This names the summary-maintenance promise explicitly so consumers do not
 /// confuse it with guarantees about the broader data lifecycle. Accuracy is a
 /// separate [`super::ResultGuarantee`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SummaryMaintenanceLifecycleGuarantee {
+    #[serde(rename = "lifecycle")]
     pub summary_maintenance_lifecycle: SummaryMaintenanceLifecycle,
+    #[serde(rename = "maintenance_mode")]
     pub summary_maintenance_mode: SummaryMaintenanceMode,
     pub evaluation_schedule: EvaluationSchedule,
     pub output_representation: OutputRepresentation,
