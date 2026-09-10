@@ -18,7 +18,7 @@ use crate::pre_asap::DataType;
 /// `Sketch(Kll, …)` and `Sketch(Cms, …)` inputs is a plan-time error, and a
 /// `Sketch(…)` can never be confused for a `Sample(…)` even though both are
 /// "opaque summary state" at a glance.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SummaryFamilyType {
     /// An ordinary, readable value — the same closed vocabulary as the
     /// pre-ASAP `DataType` (`Int64`/`Float64`/`Utf8`/`Bool`/`Timestamp`),
@@ -43,7 +43,7 @@ pub enum SummaryFamilyType {
 
 // ── Post-ASAP schema ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SummaryField {
     pub name: String,
     pub dtype: SummaryFamilyType,
@@ -55,7 +55,7 @@ pub struct SummaryField {
 /// separate types so a pre-ASAP node structurally cannot carry a
 /// summary-state-typed column — any attempt to do so is a compile-time type
 /// error.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SummarySchema {
     pub fields: Vec<SummaryField>,
     /// Index into `fields` for the time axis, if any (same semantics as the

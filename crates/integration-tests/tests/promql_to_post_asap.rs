@@ -95,6 +95,7 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
 #[test]
 fn exact_counter_weighted_topk_fails_closed_without_membership_certificate() {
     for query in [
+        "topk(2, sum by(job)(rate(m[1m])))",
         "topk(3, sum by(job)(rate(cpu_seconds_total[1h])))",
         "topk(3, sum by(job)(increase(requests_total[6h])))",
     ] {
@@ -229,9 +230,10 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
 
 #[test]
 fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_for_rerank() {
-    for query in [
-        "topk(3, sum by(job)(rate(cpu_seconds_total[1h])))",
-        "topk(3, sum by(job)(increase(requests_total[6h])))",
+    for (query, expected_k) in [
+        ("topk(2, sum by(job)(rate(m[1m])))", 2),
+        ("topk(3, sum by(job)(rate(cpu_seconds_total[1h])))", 3),
+        ("topk(3, sum by(job)(increase(requests_total[6h])))", 3),
     ] {
         let root =
             Rc::new(lower_promql(query, AccuracyTarget::Epsilon(0.01)).expect("lowering failed"));
@@ -257,13 +259,14 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
         let SummaryExpr::CandidateTopK {
             candidates,
             values,
-            k: 3,
+            k,
             completeness: CandidateCompleteness::Certified { .. },
             ..
         } = &plan.expr
         else {
             panic!("unexpected candidate plan for {query}: {:?}", plan.expr)
         };
+        assert_eq!(*k, expected_k);
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &candidates.expr else {
             panic!("candidate membership must be a summary readout")
         };
@@ -292,6 +295,30 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
             }
         ));
         let executable = compile_executable_dag(&plan).expect("typed executable DAG");
+        assert!(executable.nodes.iter().any(|node| matches!(
+            &node.payload,
+            asap_types::post_asap::ExecutableOperatorPayload::CandidateTopK {
+                k,
+                grouping,
+                completeness: CandidateCompleteness::Certified { .. },
+            } if *k == expected_k && grouping.is_empty() && !grouping.is_without()
+        )));
+        assert!(executable.nodes.iter().any(|node| matches!(
+            &node.payload,
+            asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg {
+                input: SummaryUpdate {
+                    weight: SummaryInputExpr::ResetAwareCounterDelta { .. },
+                    ..
+                },
+                ..
+            }
+        )));
+        assert!(
+            executable.edges.iter().all(|edge| edge.grouping
+                != asap_types::post_asap::GroupingEdgeCompatibility::Incompatible),
+            "unexpected incompatible edge: {:#?}",
+            executable.edges
+        );
         assert!(executable
             .edges
             .iter()

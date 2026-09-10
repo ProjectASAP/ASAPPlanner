@@ -5,16 +5,21 @@ use std::rc::Rc;
 
 use super::{
     assigned_child_data_state, validate_execution_data_states, ExecutionDataState,
-    ExecutionDataStateError, SummaryExpr, SummaryNode, SummarySchema,
+    ExecutionDataStateError, ResultGuarantee, SummaryExpr, SummaryNode, SummarySchema,
 };
+use super::{
+    BinaryOperator, CandidateCompleteness, ExecutionTiming, GroupingStrategy, SketchQuery,
+    SummaryFamilyType, SummaryUpdate, ValueOperation,
+};
+use crate::pre_asap::{ColumnRef, GroupKeys, QueryExpr, Reduction};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExecutionMode {
     Precompute,
     Query,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExecutableOperator {
     Fallback,
     Binary,
@@ -28,7 +33,7 @@ pub enum ExecutableOperator {
     SummaryMerge,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EdgeRole {
     Input,
     Left,
@@ -37,7 +42,7 @@ pub enum EdgeRole {
     AuthoritativeValues,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum GroupingEdgeCompatibility {
     Identical,
     ConsumerCoarsensProducer,
@@ -45,22 +50,79 @@ pub enum GroupingEdgeCompatibility {
     NotApplicable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WindowEdgeCompatibility {
     /// Both materializations must publish/consume at the same pane boundary.
     SameEvaluationBoundary,
     NotApplicable,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExecutableOperatorPayload {
+    Fallback {
+        expression: QueryExpr,
+    },
+    Binary {
+        operator: BinaryOperator,
+    },
+    CandidateTopK {
+        k: usize,
+        grouping: GroupKeys,
+        completeness: CandidateCompleteness,
+    },
+    Value {
+        operation: ValueOperation,
+        timing: ExecutionTiming,
+    },
+    SummaryAgg {
+        family: SummaryFamilyType,
+        input: SummaryUpdate,
+        reduction: Reduction,
+        grouping: GroupingStrategy,
+    },
+    SummaryJoin {
+        key: ColumnRef,
+        family: SummaryFamilyType,
+    },
+    SummarySubtract,
+    SummaryDelete {
+        key: ColumnRef,
+    },
+    SummaryEstimate {
+        query: SketchQuery,
+    },
+    SummaryMerge,
+}
+
+impl ExecutableOperatorPayload {
+    pub fn operator(&self) -> ExecutableOperator {
+        match self {
+            Self::Fallback { .. } => ExecutableOperator::Fallback,
+            Self::Binary { .. } => ExecutableOperator::Binary,
+            Self::CandidateTopK { .. } => ExecutableOperator::CandidateTopK,
+            Self::Value { .. } => ExecutableOperator::Value,
+            Self::SummaryAgg { .. } => ExecutableOperator::SummaryAgg,
+            Self::SummaryJoin { .. } => ExecutableOperator::SummaryJoin,
+            Self::SummarySubtract => ExecutableOperator::SummarySubtract,
+            Self::SummaryDelete { .. } => ExecutableOperator::SummaryDelete,
+            Self::SummaryEstimate { .. } => ExecutableOperator::SummaryEstimate,
+            Self::SummaryMerge => ExecutableOperator::SummaryMerge,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutableDagNode {
     pub id: u32,
     pub operator: ExecutableOperator,
+    pub payload: ExecutableOperatorPayload,
     pub mode: ExecutionMode,
     pub output_schema: SummarySchema,
+    pub guarantee: Option<ResultGuarantee>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutableDagEdge {
     pub producer: u32,
     pub consumer: u32,
@@ -71,7 +133,7 @@ pub struct ExecutableDagEdge {
     pub window: WindowEdgeCompatibility,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutableDag {
     pub nodes: Vec<ExecutableDagNode>,
     pub edges: Vec<ExecutableDagEdge>,
@@ -138,23 +200,66 @@ pub fn compile_executable_dag(
         } else {
             ExecutionMode::Precompute
         };
-        let operator = match &node.expr {
-            SummaryExpr::KeepPreAsap(_) => ExecutableOperator::Fallback,
-            SummaryExpr::BinaryOp { .. } => ExecutableOperator::Binary,
-            SummaryExpr::CandidateTopK { .. } => ExecutableOperator::CandidateTopK,
-            SummaryExpr::ValueOperation { .. } => ExecutableOperator::Value,
-            SummaryExpr::SummaryAgg { .. } => ExecutableOperator::SummaryAgg,
-            SummaryExpr::SummaryJoin { .. } => ExecutableOperator::SummaryJoin,
-            SummaryExpr::SummarySubtract { .. } => ExecutableOperator::SummarySubtract,
-            SummaryExpr::SummaryDelete { .. } => ExecutableOperator::SummaryDelete,
-            SummaryExpr::SummaryEstimate { .. } => ExecutableOperator::SummaryEstimate,
-            SummaryExpr::SummaryMerge { .. } => ExecutableOperator::SummaryMerge,
+        let payload = match &node.expr {
+            SummaryExpr::KeepPreAsap(expression) => ExecutableOperatorPayload::Fallback {
+                expression: (**expression).clone(),
+            },
+            SummaryExpr::BinaryOp { operator, .. } => ExecutableOperatorPayload::Binary {
+                operator: operator.clone(),
+            },
+            SummaryExpr::CandidateTopK {
+                k,
+                grouping,
+                completeness,
+                ..
+            } => ExecutableOperatorPayload::CandidateTopK {
+                k: *k,
+                grouping: grouping.clone(),
+                completeness: completeness.clone(),
+            },
+            SummaryExpr::ValueOperation {
+                operation, timing, ..
+            } => ExecutableOperatorPayload::Value {
+                operation: operation.clone(),
+                timing: *timing,
+            },
+            SummaryExpr::SummaryAgg {
+                family,
+                input,
+                reduction,
+                grouping,
+                ..
+            } => ExecutableOperatorPayload::SummaryAgg {
+                family: family.clone(),
+                input: input.clone(),
+                reduction: reduction.clone(),
+                grouping: grouping.clone(),
+            },
+            SummaryExpr::SummaryJoin { key, family, .. } => {
+                ExecutableOperatorPayload::SummaryJoin {
+                    key: key.clone(),
+                    family: family.clone(),
+                }
+            }
+            SummaryExpr::SummarySubtract { .. } => ExecutableOperatorPayload::SummarySubtract,
+            SummaryExpr::SummaryDelete { key, .. } => {
+                ExecutableOperatorPayload::SummaryDelete { key: key.clone() }
+            }
+            SummaryExpr::SummaryEstimate { query, .. } => {
+                ExecutableOperatorPayload::SummaryEstimate {
+                    query: query.clone(),
+                }
+            }
+            SummaryExpr::SummaryMerge { .. } => ExecutableOperatorPayload::SummaryMerge,
         };
+        let operator = payload.operator();
         nodes.push(ExecutableDagNode {
             id,
             operator,
+            payload,
             mode,
             output_schema: node.schema.clone(),
+            guarantee: node.guarantee.clone(),
         });
         ids.insert(Rc::as_ptr(node), id);
         for (producer, child, role) in child_ids {
@@ -171,6 +276,16 @@ pub fn compile_executable_dag(
                         ..
                     },
                 ) if producer == consumer => GroupingEdgeCompatibility::Identical,
+                (
+                    SummaryExpr::SummaryAgg {
+                        reduction: crate::pre_asap::Reduction::PerEntity,
+                        ..
+                    },
+                    SummaryExpr::SummaryAgg {
+                        reduction: crate::pre_asap::Reduction::Reduce(_),
+                        ..
+                    },
+                ) => GroupingEdgeCompatibility::ConsumerCoarsensProducer,
                 (
                     SummaryExpr::SummaryAgg {
                         reduction: crate::pre_asap::Reduction::Reduce(producer),
@@ -316,6 +431,18 @@ mod tests {
         assert!(matches!(
             dependency.intermediate_schema.fields[0].dtype,
             SummaryFamilyType::ExactAggregate(ExactKind::Sum, _)
+        ));
+        let encoded = serde_json::to_string(&dag).expect("serialize executable contract");
+        let decoded: ExecutableDag =
+            serde_json::from_str(&encoded).expect("deserialize executable contract");
+        assert_eq!(decoded, dag);
+        assert!(matches!(
+            dag.nodes[2].payload,
+            ExecutableOperatorPayload::SummaryAgg {
+                family: SummaryFamilyType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+                reduction: Reduction::Reduce(_),
+                ..
+            }
         ));
     }
 }

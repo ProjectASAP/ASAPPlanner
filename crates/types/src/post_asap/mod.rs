@@ -42,7 +42,8 @@ pub mod summary_window;
 pub use cse::share_common_summary_subtrees;
 pub use executable_dag::{
     compile_executable_dag, EdgeRole, ExecutableDag, ExecutableDagEdge, ExecutableDagNode,
-    ExecutableOperator, ExecutionMode, GroupingEdgeCompatibility, WindowEdgeCompatibility,
+    ExecutableOperator, ExecutableOperatorPayload, ExecutionMode, GroupingEdgeCompatibility,
+    WindowEdgeCompatibility,
 };
 pub use execution_data_state::{
     assigned_child_data_state, exact_operation_output_schema, produced_data_state,
