@@ -284,13 +284,7 @@ impl ExecutableDag {
                     consumer: edge.consumer,
                 });
             }
-            // A raw fallback leaf has no intrinsic execution state: the direct
-            // consumer assigns maintenance rows or read rows. A shared leaf can
-            // therefore legally have edges with different states even though
-            // the transport node retains one representative output_state.
-            if edge.data_state != producer.output_state
-                && !matches!(producer.payload, ExecutableOperatorPayload::Fallback { .. })
-            {
+            if edge.data_state != producer.output_state {
                 return Err(ExecutableDagValidationError::EdgeDataStateMismatch {
                     producer: edge.producer,
                     consumer: edge.consumer,
