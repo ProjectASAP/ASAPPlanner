@@ -14,12 +14,6 @@ use super::{
 use crate::pre_asap::{ColumnRef, GroupKeys, QueryExpr, Reduction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ExecutionMode {
-    Precompute,
-    Query,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExecutableOperator {
     Fallback,
     Binary,
@@ -57,6 +51,13 @@ pub enum WindowEdgeCompatibility {
     RequiresAlignedPanePhaseOrExactBoundaryResidual,
     NotApplicable,
 }
+
+/// Stable identity of a node within one exported post-ASAP semantic DAG.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct PostAsapNodeId(pub u32);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -115,18 +116,18 @@ impl ExecutableOperatorPayload {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutableDagNode {
-    pub id: u32,
+    pub id: PostAsapNodeId,
     pub operator: ExecutableOperator,
     pub payload: ExecutableOperatorPayload,
-    pub mode: ExecutionMode,
+    pub output_state: ExecutionDataState,
     pub output_schema: SummarySchema,
     pub guarantee: Option<ResultGuarantee>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutableDagEdge {
-    pub producer: u32,
-    pub consumer: u32,
+    pub producer: PostAsapNodeId,
+    pub consumer: PostAsapNodeId,
     pub role: EdgeRole,
     pub intermediate_schema: SummarySchema,
     pub data_state: ExecutionDataState,
@@ -138,25 +139,61 @@ pub struct ExecutableDagEdge {
 pub struct ExecutableDag {
     pub nodes: Vec<ExecutableDagNode>,
     pub edges: Vec<ExecutableDagEdge>,
-    pub query_sink: u32,
-    pub precompute_sinks: Vec<u32>,
+    /// Semantic workload root. Physical query/precompute sinks are selected
+    /// downstream by the control plane.
+    pub root: PostAsapNodeId,
+}
+
+/// Compiler-local identity assignment. It deliberately retains `Rc` handles
+/// and is not serialized; deployed artifacts persist the executable node ID
+/// together with their physical materialization/query IDs.
+#[derive(Debug, Clone)]
+pub struct ExecutableNodeIdentityMap {
+    nodes_by_id: Vec<Rc<SummaryNode>>,
+}
+
+impl ExecutableNodeIdentityMap {
+    pub fn node_id(&self, node: &Rc<SummaryNode>) -> Option<PostAsapNodeId> {
+        self.nodes_by_id
+            .iter()
+            .position(|candidate| Rc::ptr_eq(candidate, node))
+            .map(|id| PostAsapNodeId(id as u32))
+    }
+
+    pub fn summary_node(&self, id: PostAsapNodeId) -> Option<&Rc<SummaryNode>> {
+        self.nodes_by_id.get(id.0 as usize)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutableDagCompilation {
+    pub dag: ExecutableDag,
+    pub node_ids: ExecutableNodeIdentityMap,
 }
 
 pub fn compile_executable_dag(
     root: &Rc<SummaryNode>,
 ) -> Result<ExecutableDag, ExecutionDataStateError> {
+    Ok(compile_executable_dag_with_node_ids(root)?.dag)
+}
+
+pub fn compile_executable_dag_with_node_ids(
+    root: &Rc<SummaryNode>,
+) -> Result<ExecutableDagCompilation, ExecutionDataStateError> {
     let assignment = validate_execution_data_states(root)?;
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut ids = HashMap::new();
+    let mut nodes_by_id = Vec::new();
 
     fn visit(
         node: &Rc<SummaryNode>,
         assignment: &super::ExecutionDataStateAssignment,
-        ids: &mut HashMap<*const SummaryNode, u32>,
+        ids: &mut HashMap<*const SummaryNode, PostAsapNodeId>,
         nodes: &mut Vec<ExecutableDagNode>,
         edges: &mut Vec<ExecutableDagEdge>,
-    ) -> u32 {
+        nodes_by_id: &mut Vec<Rc<SummaryNode>>,
+    ) -> PostAsapNodeId {
         if let Some(id) = ids.get(&Rc::as_ptr(node)) {
             return *id;
         }
@@ -190,17 +227,12 @@ pub fn compile_executable_dag(
         };
         let child_ids: Vec<_> = children
             .iter()
-            .map(|(c, r)| (visit(c, assignment, ids, nodes, edges), *c, *r))
+            .map(|(c, r)| (visit(c, assignment, ids, nodes, edges, nodes_by_id), *c, *r))
             .collect();
-        let id = nodes.len() as u32;
+        let id = PostAsapNodeId(nodes.len() as u32);
         let state = assignment
             .data_state_of(node)
             .expect("validated node has state");
-        let mode = if state == ExecutionDataState::READ_ROWS {
-            ExecutionMode::Query
-        } else {
-            ExecutionMode::Precompute
-        };
         let payload = match &node.expr {
             SummaryExpr::KeepPreAsap(expression) => ExecutableOperatorPayload::Fallback {
                 expression: (**expression).clone(),
@@ -258,14 +290,16 @@ pub fn compile_executable_dag(
             id,
             operator,
             payload,
-            mode,
+            output_state: state,
             output_schema: node.schema.clone(),
             guarantee: node.guarantee.clone(),
         });
+        nodes_by_id.push(Rc::clone(node));
         ids.insert(Rc::as_ptr(node), id);
         for (producer, child, role) in child_ids {
-            let precompute_dependency = nodes[producer as usize].mode == ExecutionMode::Precompute
-                && nodes[id as usize].mode == ExecutionMode::Precompute;
+            let maintenance_dependency = nodes[producer.0 as usize].output_state.timing
+                == ExecutionTiming::MaintenanceTime
+                && nodes[id.0 as usize].output_state.timing == ExecutionTiming::MaintenanceTime;
             let grouping = match (&child.expr, &node.expr) {
                 (
                     SummaryExpr::SummaryAgg {
@@ -314,7 +348,7 @@ pub fn compile_executable_dag(
                 intermediate_schema: child.schema.clone(),
                 data_state: assigned_child_data_state(&node.expr, child),
                 grouping,
-                window: if precompute_dependency {
+                window: if maintenance_dependency {
                     WindowEdgeCompatibility::RequiresAlignedPanePhaseOrExactBoundaryResidual
                 } else {
                     WindowEdgeCompatibility::NotApplicable
@@ -324,21 +358,17 @@ pub fn compile_executable_dag(
         id
     }
 
-    let query_sink = visit(root, &assignment, &mut ids, &mut nodes, &mut edges);
-    let mut consumed_precompute = std::collections::HashSet::new();
-    for edge in &edges {
-        if nodes[edge.producer as usize].mode == ExecutionMode::Precompute
-            && nodes[edge.consumer as usize].mode == ExecutionMode::Query
-        {
-            consumed_precompute.insert(edge.producer);
-        }
-    }
-    let precompute_sinks = consumed_precompute.into_iter().collect();
-    Ok(ExecutableDag {
-        nodes,
-        edges,
-        query_sink,
-        precompute_sinks,
+    let root = visit(
+        root,
+        &assignment,
+        &mut ids,
+        &mut nodes,
+        &mut edges,
+        &mut nodes_by_id,
+    );
+    Ok(ExecutableDagCompilation {
+        dag: ExecutableDag { nodes, edges, root },
+        node_ids: ExecutableNodeIdentityMap { nodes_by_id },
     })
 }
 
@@ -351,6 +381,7 @@ mod tests {
     };
     use crate::pre_asap::schema::{Column, Schema};
     use crate::pre_asap::{ColumnRef, DataType, QueryExpr, Reduction, Source};
+    use std::collections::BTreeMap;
 
     #[test]
     fn exports_summary_over_summary_as_typed_precompute_edges() {
@@ -411,14 +442,26 @@ mod tests {
             guarantee: None,
         });
 
-        let dag = compile_executable_dag(&root).unwrap();
-        assert_eq!(dag.query_sink, 3);
-        assert_eq!(dag.nodes[1].mode, ExecutionMode::Precompute);
-        assert_eq!(dag.nodes[2].mode, ExecutionMode::Precompute);
+        let compiled = compile_executable_dag_with_node_ids(&root).unwrap();
+        assert_eq!(compiled.node_ids.node_id(&root), Some(PostAsapNodeId(3)));
+        assert!(Rc::ptr_eq(
+            compiled.node_ids.summary_node(PostAsapNodeId(1)).unwrap(),
+            &inner
+        ));
+        let dag = compiled.dag;
+        assert_eq!(dag.root, PostAsapNodeId(3));
+        assert_eq!(
+            dag.nodes[1].output_state,
+            ExecutionDataState::MAINTENANCE_SUMMARY
+        );
+        assert_eq!(
+            dag.nodes[2].output_state,
+            ExecutionDataState::MAINTENANCE_SUMMARY
+        );
         let dependency = dag
             .edges
             .iter()
-            .find(|e| e.producer == 1 && e.consumer == 2)
+            .find(|e| e.producer == PostAsapNodeId(1) && e.consumer == PostAsapNodeId(2))
             .unwrap();
         assert_eq!(
             dependency.data_state,
@@ -445,5 +488,16 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn post_asap_node_ids_serialize_in_deterministic_binding_order() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(PostAsapNodeId(10), "materialization-10");
+        bindings.insert(PostAsapNodeId(2), "query-2");
+        assert_eq!(
+            serde_json::to_string(&bindings).unwrap(),
+            r#"{"2":"query-2","10":"materialization-10"}"#
+        );
     }
 }

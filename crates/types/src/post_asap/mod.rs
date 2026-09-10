@@ -41,8 +41,9 @@ pub mod summary_window;
 
 pub use cse::share_common_summary_subtrees;
 pub use executable_dag::{
-    compile_executable_dag, EdgeRole, ExecutableDag, ExecutableDagEdge, ExecutableDagNode,
-    ExecutableOperator, ExecutableOperatorPayload, ExecutionMode, GroupingEdgeCompatibility,
+    compile_executable_dag, compile_executable_dag_with_node_ids, EdgeRole, ExecutableDag,
+    ExecutableDagCompilation, ExecutableDagEdge, ExecutableDagNode, ExecutableNodeIdentityMap,
+    ExecutableOperator, ExecutableOperatorPayload, GroupingEdgeCompatibility, PostAsapNodeId,
     WindowEdgeCompatibility,
 };
 pub use execution_data_state::{
@@ -75,6 +76,6 @@ pub use summary_maintenance_lifecycle::{
     SummaryMaintenanceLifecycleGuarantee,
 };
 pub use summary_window::{
-    validate_pane_coverage, BoundaryCoverage, PaneCoverageError, PanePhaseBinding,
+    plan_pane_phase, validate_pane_coverage, BoundaryCoverage, PaneCoverageError, PanePhaseBinding,
     SummaryWindowFramework,
 };

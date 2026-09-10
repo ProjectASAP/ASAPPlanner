@@ -5,6 +5,7 @@
 //! placement, shard layout, storage backend, or deployment instance; those
 //! choices belong to downstream physical compilation.
 
+use crate::workload::RepeatedDemand;
 use serde::{Deserialize, Serialize};
 
 /// Abstract framework used to organize incrementally maintained summary
@@ -86,6 +87,33 @@ pub fn validate_pane_coverage(
     }
 }
 
+/// Select a query-aligned pane origin from workload recurrence. A plain fixed
+/// interval has cadence but no phase, so it remains unknown. Every timestamp
+/// in an explicit schedule must have the same phase for one pane layout to
+/// serve all occurrences.
+pub fn plan_pane_phase(
+    demand: &RepeatedDemand,
+    pane_width_ms: u64,
+) -> Result<PanePhaseBinding, PaneCoverageError> {
+    if pane_width_ms == 0 {
+        return Err(PaneCoverageError::ZeroPaneWidth);
+    }
+    let phase = match demand {
+        RepeatedDemand::FixedIntervalAt {
+            evaluation_phase, ..
+        } => Some(evaluation_phase.0),
+        RepeatedDemand::Scheduled(times) => {
+            let first = times.first().map(|t| t.0 % pane_width_ms);
+            first.filter(|phase| times.iter().all(|t| t.0 % pane_width_ms == *phase))
+        }
+        RepeatedDemand::FixedInterval(_) | RepeatedDemand::EstimatedRate(_) => None,
+    };
+    Ok(PanePhaseBinding {
+        pane_width_ms,
+        pane_origin_ms: phase.and_then(|value| i64::try_from(value).ok()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +156,29 @@ mod tests {
             },
         )
         .is_ok());
+    }
+
+    #[test]
+    fn repeated_dashboard_phase_selects_query_aligned_origin() {
+        let demand = RepeatedDemand::FixedIntervalAt {
+            interval: crate::workload::RepetitionInterval(60_000),
+            evaluation_phase: crate::workload::TimestampMs(56_000),
+        };
+        assert_eq!(
+            plan_pane_phase(&demand, 60_000).unwrap(),
+            PanePhaseBinding {
+                pane_width_ms: 60_000,
+                pane_origin_ms: Some(56_000),
+            }
+        );
+        assert_eq!(
+            plan_pane_phase(
+                &RepeatedDemand::FixedInterval(crate::workload::RepetitionInterval(60_000)),
+                60_000,
+            )
+            .unwrap()
+            .pane_origin_ms,
+            None
+        );
     }
 }
