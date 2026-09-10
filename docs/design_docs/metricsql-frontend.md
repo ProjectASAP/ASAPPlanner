@@ -32,6 +32,12 @@ query boundary is responsible for routing that error to its exact backend.
 Silently dropping `keep_metric_names` or inventing a fixed implicit rollup
 window would change query results, so neither approximation is permitted.
 
+`canonical_metricsql` supplies plan-catalog identity by rendering the parsed
+`MetricsqlExpr`. Compatible syntax uses the parser AST display, while extension
+nodes recursively render their canonical child. Formatting differences do not
+create distinct identities, and unsupported extension semantics remain visible
+in the identity rather than being erased.
+
 The parser currently recognizes MetricsQL-only nodes at the root. Nested
 MetricsQL-only calls and modifiers remain exact-fallback cases until the native
 AST grammar covers them.

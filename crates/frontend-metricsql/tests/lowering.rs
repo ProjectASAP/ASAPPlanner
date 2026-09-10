@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use asap_frontend_metricsql::{lower_metricsql, parse_metricsql, MetricsqlError, MetricsqlExpr};
+use asap_frontend_metricsql::{
+    canonical_metricsql, lower_metricsql, parse_metricsql, MetricsqlError, MetricsqlExpr,
+};
 use asap_types::pre_asap::{AggIntent, QueryExpr, Reduction, Source};
 use asap_types::types::AccuracyTarget;
 
@@ -77,5 +79,25 @@ fn keep_metric_names_is_preserved_in_ast_and_rejected_without_lineage() {
     .unwrap_err();
     assert!(
         matches!(error, MetricsqlError::UnsupportedFeature(message) if message.contains("metric-name lineage"))
+    );
+}
+
+#[test]
+fn canonical_identity_ignores_compatible_formatting() {
+    let compact = canonical_metricsql("sum by(job)(rate(requests_total[5m]))").unwrap();
+    let spaced = canonical_metricsql("  sum by ( job ) ( rate( requests_total[5m] ) )  ").unwrap();
+    assert_eq!(compact, spaced);
+}
+
+#[test]
+fn canonical_identity_recursively_formats_metricsql_extensions() {
+    let compact =
+        canonical_metricsql("default_rollup(requests_total[5m]) keep_metric_names").unwrap();
+    let spaced =
+        canonical_metricsql(" default_rollup( requests_total[5m] )   keep_metric_names ").unwrap();
+    assert_eq!(compact, spaced);
+    assert_eq!(
+        compact,
+        "default_rollup(requests_total[5m]) keep_metric_names"
     );
 }

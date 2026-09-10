@@ -60,6 +60,27 @@ pub fn lower_metricsql(query: &str, accuracy: AccuracyTarget) -> Result<QueryExp
     resolve_root(&unresolved).map_err(|e| MetricsqlError::Resolve(e.to_string()))
 }
 
+/// Return a stable identity for a syntactically valid MetricsQL expression.
+///
+/// Identity is rendered from [`MetricsqlExpr`], never from source-text
+/// normalization. PromQL-compatible nodes use the parser AST's canonical
+/// display; MetricsQL extension nodes recursively render their parsed child.
+pub fn canonical_metricsql(query: &str) -> Result<String, MetricsqlError> {
+    render_canonical(&parse_metricsql(query)?)
+}
+
+fn render_canonical(expr: &MetricsqlExpr) -> Result<String, MetricsqlError> {
+    Ok(match expr {
+        MetricsqlExpr::Compatible(expr) => expr.to_string(),
+        MetricsqlExpr::DefaultRollup(child) => {
+            format!("default_rollup({})", render_canonical(child)?)
+        }
+        MetricsqlExpr::KeepMetricNames(child) => {
+            format!("{} keep_metric_names", render_canonical(child)?)
+        }
+    })
+}
+
 fn lower_expr(
     expr: &MetricsqlExpr,
     accuracy: &AccuracyTarget,
