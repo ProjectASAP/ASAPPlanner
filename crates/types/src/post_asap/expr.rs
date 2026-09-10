@@ -227,7 +227,7 @@ pub enum SummaryExpr {
 }
 
 /// All semantics owned by a post-ASAP binary operator.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BinaryOperator {
     pub kind: BinaryOpKind,
     /// `None` is the only currently supported vector/vector matching mode.

@@ -52,7 +52,7 @@ use crate::pre_asap::query_expr::{aggregate_output_schema, QueryExprError};
 use crate::pre_asap::schema::{Column, Schema};
 
 /// When a post-ASAP value is produced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ExecutionTiming {
     MaintenanceTime,
     ReadTime,
@@ -68,7 +68,7 @@ impl ExecutionTiming {
 }
 
 /// The primitive representation carried by a post-ASAP edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DataPrimitive {
     /// Directly usable values, including approximate summary readouts.
     /// This does not imply original input data or an exact guarantee.
@@ -87,7 +87,7 @@ impl DataPrimitive {
 
 /// The two-dimensional edge contract: when a value exists and which data
 /// primitive it carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionDataState {
     pub timing: ExecutionTiming,
     pub primitive: DataPrimitive,

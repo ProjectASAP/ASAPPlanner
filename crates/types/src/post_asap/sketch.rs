@@ -7,7 +7,7 @@ use crate::pre_asap::ColumnRef;
 /// An exact, mergeable accumulator family — zero approximation error. The
 /// partial state built for one of these *is* the answer; no
 /// `SummaryEstimate` readout is needed to get a value out of it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ExactKind {
     /// Exact sum accumulator (mergeable by addition).
     Sum,
@@ -27,7 +27,7 @@ pub enum ExactKind {
 /// fixed semantics — no tuning parameters — so each variant carries none;
 /// kept as a per-kind enum (mirroring [`SketchParams`]) so a mismatched
 /// `(kind, params)` pair is still a type error, not a runtime check.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExactParams {
     Sum,
     Count,
@@ -110,7 +110,7 @@ pub enum SketchParams {
 }
 
 /// The query category served by a committed sketch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SketchCategory {
     Quantile,
     Cardinality,
@@ -133,7 +133,7 @@ pub enum SketchCategory {
 /// naming a variant directly, so a new algorithm can't drift out of sync
 /// with its category. See `asap_aware_mapping::summary_candidates` for the
 /// `AggIntent -> [SketchAlgorithm]` candidate list this ultimately groups.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SketchKind {
     category: SketchCategory,
     algorithm: SketchAlgorithm,
@@ -209,7 +209,7 @@ impl SketchKind {
 /// A sampling-based summary family — retains an actual (weighted) subset of
 /// rows rather than a compressed sketch. Minimal starting vocabulary: one
 /// family, extend as a deployment needs another (stratified, weighted, …).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SamplingKind {
     /// Reservoir sampling (mergeable via weighted reservoir merge;
     /// uniform-random retained subset of a fixed size).
@@ -217,7 +217,7 @@ pub enum SamplingKind {
 }
 
 /// Parameters for a [`SamplingKind`] instance.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SamplingParams {
     Reservoir {
         /// Reservoir capacity — the number of retained rows.
@@ -230,14 +230,14 @@ pub enum SamplingParams {
 /// A wavelet-transform-based summary family — a compressed coefficient
 /// vector supporting approximate range-sum / histogram queries. Minimal
 /// starting vocabulary: one basis, extend as a deployment needs another.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum WaveletKind {
     /// Haar wavelet synopsis — the simplest, most common streaming basis.
     Haar,
 }
 
 /// Parameters for a [`WaveletKind`] instance.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WaveletParams {
     Haar {
         /// Number of retained coefficients — the compression / accuracy knob.
@@ -253,7 +253,7 @@ pub enum WaveletParams {
 /// family and is interpreted by whatever deployment builds/reads it, the
 /// same "core doesn't enumerate every deployment shape" stance
 /// `AggIntent::Extension` already takes for pre-ASAP intents.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum StatModelKind {
     /// A parametric model fit to the data (e.g. a fitted distribution or
     /// regression). `family` (in [`StatModelParams::Parametric`]) names
@@ -262,7 +262,7 @@ pub enum StatModelKind {
 }
 
 /// Parameters for a [`StatModelKind`] instance.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StatModelParams {
     Parametric {
         /// Deployment-interpreted model family name (e.g.
@@ -334,7 +334,7 @@ pub enum StatModelParams {
 /// `AggIntent`/category vocabulary this crate doesn't have yet (no
 /// `Entropy`/`L1Norm`/`L2Norm` intents) and is deliberately out of scope
 /// here — see issue #256's follow-up.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum HydraKind {
     /// Hydra over a KLL-family quantile sketch. See this type's own doc:
     /// **not** an instance of the paper's proven construction — the paper
@@ -363,7 +363,7 @@ pub enum HydraKind {
 /// sketch's own parameter shape — a `HydraCms` instance is sized in
 /// (`width`, `depth`), a `HydraKll` instance in `k`; there is no single knob
 /// set general enough to cover every inner sketch type.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HydraParams {
     /// See [`HydraKind::HydraKll`]: kept for legality, **no accuracy bound
     /// is modeled for this variant**. `k`/`shared_buckets` give a bound
@@ -490,7 +490,7 @@ pub fn default_hydra_params(
 /// and on sketch-valued `SummaryFamilyType` edges (where it prevents
 /// incompatible shared and independent physical states from type-checking
 /// as merge-compatible).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GroupingStrategy {
     /// One independent summary instance per distinct `by` key — today's
     /// only (implicit) behavior, and this type's `Default` (below), so

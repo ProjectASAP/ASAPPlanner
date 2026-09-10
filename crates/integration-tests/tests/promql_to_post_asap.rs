@@ -19,10 +19,10 @@ use asap_aware_mapping::{
 };
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
-    CandidateCompleteness, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
-    GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchParams,
-    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode, SummarySchema,
-    SummaryUpdate, ValueOperation, WeightDomain,
+    compile_executable_dag, CandidateCompleteness, CompositionOperator, EdgeRole, EntityIdentity,
+    ExactKind, ExactParams, GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm, SketchKind,
+    SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode,
+    SummarySchema, SummaryUpdate, ValueOperation, WeightDomain,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -95,6 +95,7 @@ fn value_ranked_topk_preserves_summary_children_in_post_asap_dag() {
 #[test]
 fn exact_counter_weighted_topk_fails_closed_without_membership_certificate() {
     for query in [
+        "topk(2, sum by(job)(rate(m[1m])))",
         "topk(3, sum by(job)(rate(cpu_seconds_total[1h])))",
         "topk(3, sum by(job)(increase(requests_total[6h])))",
     ] {
@@ -229,9 +230,10 @@ impl AccuracyEvidenceProvider for SeparatedTopK {
 
 #[test]
 fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_for_rerank() {
-    for query in [
-        "topk(3, sum by(job)(rate(cpu_seconds_total[1h])))",
-        "topk(3, sum by(job)(increase(requests_total[6h])))",
+    for (query, expected_k) in [
+        ("topk(2, sum by(job)(rate(m[1m])))", 2),
+        ("topk(3, sum by(job)(rate(cpu_seconds_total[1h])))", 3),
+        ("topk(3, sum by(job)(increase(requests_total[6h])))", 3),
     ] {
         let root =
             Rc::new(lower_promql(query, AccuracyTarget::Epsilon(0.01)).expect("lowering failed"));
@@ -257,13 +259,14 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
         let SummaryExpr::CandidateTopK {
             candidates,
             values,
-            k: 3,
+            k,
             completeness: CandidateCompleteness::Certified { .. },
             ..
         } = &plan.expr
         else {
             panic!("unexpected candidate plan for {query}: {:?}", plan.expr)
         };
+        assert_eq!(*k, expected_k);
         let SummaryExpr::SummaryEstimate { summary_input, .. } = &candidates.expr else {
             panic!("candidate membership must be a summary readout")
         };
@@ -271,6 +274,7 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
             child,
             family,
             input,
+            reduction,
             ..
         } = &summary_input.expr
         else {
@@ -278,6 +282,16 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
         };
         assert!(matches!(family, SummaryFamilyType::Sketch(kind, _)
             if kind.algorithm() == &SketchAlgorithm::CmsWithHeap));
+        let SummaryFamilyType::Sketch(kind, _) = family else {
+            unreachable!()
+        };
+        assert!(
+            asap_aware_mapping::replacement::sketch_state_bytes(kind.params())
+                .is_some_and(|bytes| bytes
+                    <= asap_aware_mapping::replacement::DEFAULT_MAX_SKETCH_STATE_BYTES)
+        );
+        assert!(matches!(reduction, Reduction::Reduce(keys) if keys.is_empty()));
+        assert_eq!(summary_input.schema.fields.len(), 1);
         assert_eq!(
             input.weight_domain,
             WeightDomain::NonNegative {
@@ -291,6 +305,39 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
                 series: EntityIdentity::PromqlLabelSet { .. },
             }
         ));
+        let executable = compile_executable_dag(&plan).expect("typed executable DAG");
+        assert!(executable.nodes.iter().any(|node| matches!(
+            &node.payload,
+            asap_types::post_asap::ExecutableOperatorPayload::CandidateTopK {
+                k,
+                grouping,
+                completeness: CandidateCompleteness::Certified { .. },
+            } if *k == expected_k && grouping.is_empty() && !grouping.is_without()
+        )));
+        assert!(executable.nodes.iter().any(|node| matches!(
+            &node.payload,
+            asap_types::post_asap::ExecutableOperatorPayload::SummaryAgg {
+                input: SummaryUpdate {
+                    weight: SummaryInputExpr::ResetAwareCounterDelta { .. },
+                    ..
+                },
+                ..
+            }
+        )));
+        assert!(
+            executable.edges.iter().all(|edge| edge.grouping
+                != asap_types::post_asap::GroupingEdgeCompatibility::Incompatible),
+            "unexpected incompatible edge: {:#?}",
+            executable.edges
+        );
+        assert!(executable
+            .edges
+            .iter()
+            .any(|edge| edge.role == EdgeRole::CandidateMembership));
+        assert!(executable
+            .edges
+            .iter()
+            .any(|edge| edge.role == EdgeRole::AuthoritativeValues));
         assert!(
             !matches!(child.expr, SummaryExpr::SummaryAgg { .. }),
             "membership materialization must bind ingest rows, not another summary"
