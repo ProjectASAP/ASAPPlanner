@@ -1,0 +1,9 @@
+[package]
+name = "asap-frontend-metricsql"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+asap-types = { path = "../types" }
+metricsql_parser = { path = "../metricsql-parser-vendored" }
+thiserror = "2"

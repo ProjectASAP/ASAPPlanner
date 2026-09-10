@@ -4,8 +4,11 @@ members = [
     "crates/sql-function-catalog",
     "crates/asap-aware-mapping",
     "crates/frontend-promql",
+    "crates/frontend-metricsql",
+    "crates/metricsql-common-parser-support",
     "crates/frontend-sql",
     "crates/devtools",
     "crates/integration-tests",
 ]
+exclude = ["crates/metricsql-parser-vendored"]
 resolver = "2"
