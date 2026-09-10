@@ -8,10 +8,10 @@ edition = "2021"
 [dependencies]
 asap-types = { path = "../types" }
 
-# ProjectASAP's pinned parser is the shared parser contract used by the backend
-# and control plane. It carries the evaluated PromQL extensions documented in
-# `promql.rs`; syntax outside that contract must fail closed at adapters.
-promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", rev = "c51beafb361af4cc95ed62ae377862c660ceb757" }
+# Shared ProjectASAP parser contract. Keep this immutable revision aligned
+# with backend parsing and treat newly parsed functions as unsupported until
+# the frontend lowerer gives them an explicit semantic mapping.
+promql-parser = { git = "https://github.com/ProjectASAP/promql-parser", rev = "d7606436bde05efe19c5398fe2122faa49062f7d" }
 
 [dev-dependencies]
 asap-aware-mapping = { path = "../asap-aware-mapping" }
