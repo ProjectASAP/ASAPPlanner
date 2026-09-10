@@ -160,7 +160,8 @@ pub(crate) fn evaluations_in_horizon(
                 0
             }
         }
-        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
+        QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval))
+        | QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt { interval, .. }) => {
             if interval.0 == 0 {
                 return Err(AnalyticalCostError::InvalidRecurrence);
             }

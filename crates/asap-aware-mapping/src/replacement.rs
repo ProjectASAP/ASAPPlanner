@@ -3236,7 +3236,8 @@ impl<Id> PlanSpace<Id> {
                 QueryRecurrence::OneTime { invocations, .. } => RootRecurrence::OneShotCount(
                     usize::try_from(*invocations).unwrap_or(usize::MAX),
                 ),
-                QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval)) => {
+                QueryRecurrence::Repeated(RepeatedDemand::FixedInterval(interval))
+                | QueryRecurrence::Repeated(RepeatedDemand::FixedIntervalAt { interval, .. }) => {
                     RootRecurrence::Repeating(evaluation_rate_of([*interval])?.unwrap())
                 }
                 QueryRecurrence::Repeated(RepeatedDemand::Scheduled(schedule)) => {
