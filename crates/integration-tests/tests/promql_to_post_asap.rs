@@ -20,8 +20,9 @@ use asap_aware_mapping::{
 use asap_frontend_promql::lower_promql;
 use asap_types::post_asap::{
     CandidateCompleteness, CompositionOperator, EntityIdentity, ExactKind, ExactParams,
-    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
-    SummaryFamilyType, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
+    GroupingStrategy, NonNegativeWeightProof, SketchAlgorithm, SketchKind, SketchParams,
+    SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode, SummarySchema,
+    SummaryUpdate, ValueOperation, WeightDomain,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -245,7 +246,8 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
             .into_iter()
             .find_map(|candidate| match candidate.replacement {
                 Replacement::Summary(node)
-                    if matches!(node.expr, SummaryExpr::CandidateTopK { .. }) =>
+                    if candidate.rationale.contains("CmsWithHeap")
+                        && matches!(node.expr, SummaryExpr::CandidateTopK { .. }) =>
                 {
                     Some(node)
                 }
@@ -262,10 +264,37 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
         else {
             panic!("unexpected candidate plan for {query}: {:?}", plan.expr)
         };
+        let SummaryExpr::SummaryEstimate { summary_input, .. } = &candidates.expr else {
+            panic!("candidate membership must be a summary readout")
+        };
+        let SummaryExpr::SummaryAgg {
+            child,
+            family,
+            input,
+            ..
+        } = &summary_input.expr
+        else {
+            panic!("candidate membership must read a summary aggregate")
+        };
+        assert!(matches!(family, SummaryFamilyType::Sketch(kind, _)
+            if kind.algorithm() == &SketchAlgorithm::CmsWithHeap));
+        assert_eq!(
+            input.weight_domain,
+            WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
+            }
+        );
         assert!(matches!(
-            candidates.expr,
-            SummaryExpr::SummaryEstimate { .. }
+            input.weight,
+            SummaryInputExpr::ResetAwareCounterDelta {
+                value: ColumnRef::SampleValue,
+                series: EntityIdentity::PromqlLabelSet { .. },
+            }
         ));
+        assert!(
+            !matches!(child.expr, SummaryExpr::SummaryAgg { .. }),
+            "membership materialization must bind ingest rows, not another summary"
+        );
         assert!(values.guarantee.as_ref().is_some_and(|g| g.is_exact()));
         assert!(matches!(
             values.expr,

@@ -58,9 +58,9 @@ pub use query_time::{
 pub use schema::{SummaryFamilyType, SummaryField, SummarySchema};
 pub use sketch::{
     default_hydra_params, hydra_kind_for, EntityIdentity, ExactKind, ExactParams, GroupingStrategy,
-    HydraKind, HydraParams, SamplingKind, SamplingParams, SketchAlgorithm, SketchCategory,
-    SketchKind, SketchParams, SketchQuery, StatModelKind, StatModelParams, SummaryInputExpr,
-    SummaryUpdate, WaveletKind, WaveletParams,
+    HydraKind, HydraParams, NonNegativeWeightProof, SamplingKind, SamplingParams, SketchAlgorithm,
+    SketchCategory, SketchKind, SketchParams, SketchQuery, StatModelKind, StatModelParams,
+    SummaryInputExpr, SummaryUpdate, WaveletKind, WaveletParams, WeightDomain,
 };
 pub use summary_maintenance::SummaryMaintenanceMode;
 pub use summary_maintenance_lifecycle::{
