@@ -3831,6 +3831,11 @@ impl<'a> GlobalSelection<'a> {
             _ => return keep_pre_asap(target),
         };
         let child = self.materialize_inner(child_target)?;
+        let child = if matches!(operation, ValueOperation::Exact(_)) {
+            finalize_exact_accumulator(child, child_target)?
+        } else {
+            child
+        };
         let guarantee = child.guarantee.clone();
         let node = Rc::new(SummaryNode {
             expr: SummaryExpr::ValueOperation {
