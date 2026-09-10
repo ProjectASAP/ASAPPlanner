@@ -25,7 +25,7 @@ use asap_aware_mapping::{
     search_workload, DefaultCostModel, Replacement, ReplacementStrategy, ReplacementSubDAG,
     SketchAlgorithmStrategy, TargetSubDAG,
 };
-use asap_frontend_sql::{lower_sql, SqlCatalog};
+use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_types::post_asap::{
     compile_executable_dag, ExactKind, ExactParams, ExecutableOperatorPayload, GroupingStrategy,
     SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType,
@@ -35,6 +35,7 @@ use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
 use asap_types::pre_asap::schema::{Column, DataType, Schema};
 use asap_types::types::AccuracyTarget;
+use asap_types::workload::SqlDialect;
 
 /// This crate has no "bind me one tree" public API any more —
 /// `SketchAlgorithmStrategy::replacements` always returns every candidate, and
@@ -83,7 +84,7 @@ fn catalog() -> SqlCatalog {
                 col("bytes", DataType::Int64),
             ],
             0,
-            vec![],
+            vec![vec![0, 1]],
         ),
     )
 }
@@ -92,6 +93,55 @@ async fn lower(sql: &str, accuracy: AccuracyTarget) -> QueryExpr {
     lower_sql(sql, &catalog(), accuracy)
         .await
         .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
+}
+
+#[tokio::test]
+async fn clickhouse_temporal_sql_reuses_rate_and_increase_physical_summaries() {
+    for (function, expected) in [
+        (
+            "asap_rate",
+            SummaryFamilyType::ExactAggregate(ExactKind::Rate, ExactParams::Rate),
+        ),
+        (
+            "asap_increase",
+            SummaryFamilyType::ExactAggregate(ExactKind::Increase, ExactParams::Increase),
+        ),
+    ] {
+        let sql = format!(
+            "SELECT service, {function}(latency, ts, 300000) AS v \
+             FROM metrics WHERE bytes > 0 GROUP BY service"
+        );
+        let pre_asap = lower_sql_dialect(
+            &sql,
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect("explicit temporal SQL must lower");
+        let physical =
+            realize(inner_aggregate(&pre_asap)).expect("temporal reducer must be planned");
+        let SummaryExpr::SummaryAgg {
+            family,
+            reduction,
+            child,
+            ..
+        } = &physical.expr
+        else {
+            panic!("expected a shared SummaryAgg, got {:?}", physical.expr);
+        };
+        assert_eq!(family, &expected);
+        assert_eq!(reduction, &Reduction::PerEntity);
+        let SummaryExpr::KeepPreAsap(raw) = &child.expr else {
+            panic!(
+                "expected a retained temporal SQL input, got {:?}",
+                child.expr
+            );
+        };
+        assert!(matches!(raw.as_ref(), QueryExpr::TimeRange { range, child }
+            if *range == std::time::Duration::from_secs(300)
+                && matches!(child.as_ref(), QueryExpr::Project { .. })));
+    }
 }
 
 /// The `Aggregate` node beneath the identity `Project` DataFusion's planner

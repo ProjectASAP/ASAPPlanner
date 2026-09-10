@@ -31,7 +31,7 @@ fn catalog() -> SqlCatalog {
                     col("bytes", DataType::Int64),
                 ],
                 0,
-                vec![],
+                vec![vec![0, 1]],
             ),
         )
         .with_table(
@@ -1536,6 +1536,230 @@ async fn lower_clickhouse(sql: &str) -> QueryExpr {
     )
     .await
     .unwrap_or_else(|e| panic!("lower failed for {sql:?}: {e}"))
+}
+
+fn temporal_aggregate(qe: &QueryExpr) -> (&AggIntent, std::time::Duration, &QueryExpr) {
+    match qe {
+        QueryExpr::Aggregate {
+            reduction: Reduction::PerEntity,
+            measures,
+            child,
+            ..
+        } => {
+            let QueryExpr::TimeRange { range, child } = child.as_ref() else {
+                panic!("temporal Aggregate must directly wrap TimeRange, got {child:?}");
+            };
+            (&measures[0], *range, child)
+        }
+        QueryExpr::Project { child, .. } | QueryExpr::Filter { child, .. } => {
+            temporal_aggregate(child)
+        }
+        other => panic!("expected temporal Aggregate, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn explicit_temporal_aggregates_share_promql_intents_and_timerange() {
+    for (function, expected) in [
+        ("asap_rate", AggIntent::Rate),
+        ("asap_increase", AggIntent::Increase),
+    ] {
+        let sql = format!(
+            "SELECT service, {function}(latency, ts, 300000) AS v \
+             FROM metrics WHERE service = 'api' GROUP BY service"
+        );
+        let qe = lower_clickhouse(&sql).await;
+        let (intent, range, child) = temporal_aggregate(&qe);
+        assert_eq!(intent, &expected);
+        assert_eq!(range, std::time::Duration::from_secs(300));
+        assert!(matches!(child, QueryExpr::Project { child, .. }
+            if matches!(child.as_ref(), QueryExpr::Scan { predicates, .. } if predicates.len() == 1)));
+
+        let QueryExpr::Project { cols, .. } = &qe else {
+            panic!("SELECT list must remain a Project, got {qe:?}");
+        };
+        assert!(matches!(cols[0].expr, QueryExpr::Column(2)));
+        assert_eq!(cols[1].alias.as_deref(), Some("v"));
+        assert!(matches!(cols[1].expr, QueryExpr::Column(1)));
+    }
+}
+
+#[tokio::test]
+async fn temporal_aggregate_rejects_non_timestamp_and_non_positive_window() {
+    for sql in [
+        "SELECT asap_rate(latency, bytes, 300000) FROM metrics",
+        "SELECT asap_rate(latency, ts, 0) FROM metrics",
+        "SELECT asap_rate(latency, ts, bytes) FROM metrics",
+    ] {
+        let err = lower_sql_dialect(
+            sql,
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect_err("invalid temporal arguments must fail closed");
+        assert!(
+            format!("{err}").contains("timestamp argument")
+                || format!("{err}").contains("window_ms"),
+            "unexpected error for {sql}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn temporal_aggregate_rejects_mixed_reducers() {
+    let err = lower_sql_dialect(
+        "SELECT asap_rate(latency, ts, 300000), sum(bytes) FROM metrics",
+        &catalog(),
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("one child cannot carry temporal and ordinary aggregate semantics");
+    assert!(format!("{err}").contains("cannot share an Aggregate node"));
+}
+
+#[tokio::test]
+async fn last_fails_closed_until_an_executable_summary_exists() {
+    let err = lower_sql_dialect(
+        "SELECT service, asap_last(latency, ts, 300000) FROM metrics GROUP BY service",
+        &catalog(),
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("last must not be advertised without an executable physical summary");
+    assert!(format!("{err}").contains("Invalid function 'asap_last'"));
+}
+
+#[tokio::test]
+async fn temporal_grouping_requires_the_complete_declared_series_identity() {
+    let multi_series = SqlCatalog::new().with_table(
+        "samples",
+        Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp),
+                col("service", DataType::Utf8),
+                col("instance", DataType::Utf8),
+                col("value", DataType::Float64),
+            ],
+            0,
+            vec![vec![0, 1, 2]],
+        ),
+    );
+    for sql in [
+        "SELECT asap_rate(value, ts, 300000) FROM samples",
+        "SELECT service, asap_rate(value, ts, 300000) FROM samples GROUP BY service",
+    ] {
+        let err = lower_sql_dialect(
+            sql,
+            &multi_series,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect_err("partial identity must not merge counter series");
+        assert!(format!("{err}").contains("declared series identity"));
+    }
+
+    lower_sql_dialect(
+        "SELECT service, instance, asap_rate(value, ts, 300000) \
+         FROM samples GROUP BY service, instance",
+        &multi_series,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect("the complete declared series identity is safe");
+
+    let row_id_only = SqlCatalog::new().with_table(
+        "samples",
+        Schema::with_time_index(
+            vec![
+                col("ts", DataType::Timestamp),
+                col("service", DataType::Utf8),
+                col("value", DataType::Float64),
+            ],
+            0,
+            vec![vec![1]],
+        ),
+    );
+    lower_sql_dialect(
+        "SELECT service, asap_rate(value, ts, 300000) FROM samples GROUP BY service",
+        &row_id_only,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .expect_err("a row key without time does not prove a series identity");
+}
+
+#[tokio::test]
+async fn temporal_grouping_rejects_value_time_and_duplicate_resolved_columns() {
+    for sql in [
+        "SELECT asap_rate(latency, ts, 300000) FROM metrics GROUP BY ts",
+        "SELECT asap_rate(latency, ts, 300000) FROM metrics GROUP BY latency",
+        "SELECT m.service, asap_rate(m.latency, m.ts, 300000) \
+         FROM metrics m GROUP BY m.service, service",
+    ] {
+        let err = lower_sql_dialect(
+            sql,
+            &catalog(),
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .expect_err("unsafe or duplicate resolved grouping must fail closed");
+        let message = format!("{err}");
+        assert!(
+            message.contains("timestamp or value")
+                || message.contains("same resolved column more than once"),
+            "unexpected error for {sql}: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn qualified_columns_are_validated_by_resolved_identity() {
+    let qe = lower_clickhouse(
+        "SELECT m.service, asap_increase(m.latency, m.ts, 300000) AS v \
+         FROM metrics AS m GROUP BY m.service",
+    )
+    .await;
+    let (intent, range, _) = temporal_aggregate(&qe);
+    assert_eq!(intent, &AggIntent::Increase);
+    assert_eq!(range, std::time::Duration::from_secs(300));
+}
+
+#[tokio::test]
+async fn project_filter_and_outer_aggregate_preserve_temporal_child() {
+    let qe = lower_clickhouse(
+        "SELECT max(v) FROM (\
+           SELECT service, asap_rate(latency, ts, 300000) AS v \
+           FROM metrics WHERE bytes > 0 GROUP BY service\
+         ) r WHERE v >= 0",
+    )
+    .await;
+    let QueryExpr::Project { child, .. } = &qe else {
+        panic!("expected outer SELECT Project, got {qe:?}");
+    };
+    let QueryExpr::Aggregate {
+        reduction: Reduction::Reduce(_),
+        measures,
+        child,
+        ..
+    } = child.as_ref()
+    else {
+        panic!("expected outer Aggregate, got {child:?}");
+    };
+    assert!(matches!(measures.as_slice(), [AggIntent::Max { .. }]));
+    let QueryExpr::Filter { child, .. } = child.as_ref() else {
+        panic!("derived-table WHERE must remain above the inner query, got {child:?}");
+    };
+    let (intent, range, _) = temporal_aggregate(child);
+    assert_eq!(intent, &AggIntent::Rate);
+    assert_eq!(range, std::time::Duration::from_secs(300));
 }
 
 #[tokio::test]

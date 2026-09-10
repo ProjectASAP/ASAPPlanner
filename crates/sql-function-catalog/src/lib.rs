@@ -269,6 +269,20 @@ pub struct ClickHouseBuiltin {
 /// natively understands before physical planning). See the module doc and
 /// `asap-frontend-sql::sql::ClickHouseBuiltinRewrite`.
 pub const CLICKHOUSE_BUILTINS: &[ClickHouseBuiltin] = &[
+    // Explicit time-series reducers. These deliberately survive under their
+    // own names: the SQL frontend validates (value, timestamp, window_ms) and
+    // lowers the window to QueryExpr::TimeRange rather than pretending these
+    // are ordinary tabular aggregates.
+    ClickHouseBuiltin {
+        name: "asap_rate",
+        arity: Arity::Exact(3),
+        rewrite: RewriteKind::PassThrough,
+    },
+    ClickHouseBuiltin {
+        name: "asap_increase",
+        arity: Arity::Exact(3),
+        rewrite: RewriteKind::PassThrough,
+    },
     ClickHouseBuiltin {
         name: "uniqexact",
         arity: Arity::Exact(1),
