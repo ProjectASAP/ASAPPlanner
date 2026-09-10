@@ -48,6 +48,15 @@ pub enum ValueOperation {
     },
 }
 
+/// Whether a candidate-membership sidecar is proven to contain every true
+/// top-k key or is an explicitly approximate optimization.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CandidateCompleteness {
+    Certified { guarantee: ResultGuarantee },
+    BestEffort { guarantee: Option<ResultGuarantee> },
+}
+
 // ── Post-ASAP DAG node ───────────────────────────────────────────────────────
 
 /// A node in the post-ASAP DAG: wraps the expression and its derived output
@@ -98,6 +107,17 @@ pub enum SummaryExpr {
         lhs: Rc<SummaryNode>,
         rhs: Rc<SummaryNode>,
         operator: BinaryOperator,
+    },
+
+    /// Use an approximate keyed summary only to propose members, then rank
+    /// those members by authoritative exact values. `candidates` never
+    /// supplies caller-visible values.
+    CandidateTopK {
+        candidates: Rc<SummaryNode>,
+        values: Rc<SummaryNode>,
+        k: usize,
+        grouping: GroupKeys,
+        completeness: CandidateCompleteness,
     },
 
     /// Plain-row semantics composed with a post-ASAP child. Timing is an

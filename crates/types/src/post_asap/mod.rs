@@ -44,7 +44,9 @@ pub use execution_data_state::{
     validate_execution_data_states_at, DataPrimitive, ExactOperationSchemaError,
     ExecutionDataState, ExecutionDataStateAssignment, ExecutionDataStateError, ExecutionTiming,
 };
-pub use expr::{BinaryOperator, ExactOperation, SummaryExpr, SummaryNode, ValueOperation};
+pub use expr::{
+    BinaryOperator, CandidateCompleteness, ExactOperation, SummaryExpr, SummaryNode, ValueOperation,
+};
 pub use guarantee::{
     AccuracyError, BoundExpr, CompositionOperator, ErrorMetric, GuaranteeSource, ProbabilityExpr,
     ResultGuarantee,

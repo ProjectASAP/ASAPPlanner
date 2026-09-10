@@ -475,6 +475,7 @@ macro_rules! define_summary_kind_tags {
 
 define_summary_kind_tags! {
     SummaryExpr::BinaryOp { .. } => "SummaryBinaryOp",
+    SummaryExpr::CandidateTopK { .. } => "CandidateTopK",
     SummaryExpr::ValueOperation { .. } => "ValueOperation",
     SummaryExpr::SummaryAgg { .. } => "SummaryAgg",
     SummaryExpr::SummaryJoin { .. } => "SummaryJoin",
@@ -498,6 +499,16 @@ fn summary_shape(expr: &SummaryExpr) -> (&'static str, String, serde_json::Value
             });
             (kind, label, detail)
         }
+        SummaryExpr::CandidateTopK {
+            k,
+            grouping,
+            completeness,
+            ..
+        } => (
+            kind,
+            format!("CandidateTopK(k={k})"),
+            serde_json::json!({ "k": k, "grouping": grouping, "completeness": completeness }),
+        ),
         SummaryExpr::ValueOperation {
             operation, timing, ..
         } => (
@@ -560,6 +571,9 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
     match expr {
         SummaryExpr::KeepPreAsap(_) => vec![],
         SummaryExpr::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
+        SummaryExpr::CandidateTopK {
+            candidates, values, ..
+        } => vec![candidates, values],
         SummaryExpr::ValueOperation { child, .. } => vec![child],
         SummaryExpr::SummaryAgg { child, .. } => vec![child],
         SummaryExpr::SummaryJoin { outer, inner, .. } => vec![outer, inner],
