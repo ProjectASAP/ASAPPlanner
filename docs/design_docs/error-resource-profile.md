@@ -137,14 +137,14 @@ the second-best confidence by the configured margin; otherwise the observation
 is ambiguous and selection fails. This prevents a nearly tied uniform/Zipf fit,
 for example, from being treated as a reliable classification.
 
-For every surviving fit, benchmark records must satisfy the benchmark-event
-floor and have the same family and parameter-key schema. Their normalized
-distance is the maximum of log2-cardinality distance and every family-specific
-parameter distance. Only candidates within all caller-supplied bounds are
-eligible. The current selector chooses the highest-confidence unambiguous fit,
-then ranks its ERP records by shape distance, estimated workload cost, and
-stable record ID. Goodness-of-fit is an eligibility gate. It never interpolates
-measured error or resource values between ERP records.
+For the selected unambiguous fit, benchmark records must satisfy the
+benchmark-event floor and have the same family and parameter-key schema. Their
+normalized distance is the maximum of log2-cardinality distance and every
+family-specific parameter distance. Only candidates within all caller-supplied
+bounds are eligible. The current selector chooses the highest-confidence
+unambiguous fit, then ranks its ERP records by shape distance, estimated
+workload cost, and stable record ID. Goodness-of-fit is an eligibility gate. It
+never interpolates measured error or resource values between ERP records.
 
 ```text
 empirical observation
