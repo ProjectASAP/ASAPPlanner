@@ -418,6 +418,15 @@ fn validate_context(
 
 fn valid_params(algorithm: &SketchAlgorithm, params: &SketchParams) -> bool {
     match (algorithm, params) {
+        (
+            SketchAlgorithm::UnivMon,
+            SketchParams::UnivMon {
+                heap_size,
+                sketch_rows,
+                sketch_cols,
+                layers,
+            },
+        ) => *heap_size > 0 && *sketch_rows > 0 && *sketch_cols > 0 && (1..=64).contains(layers),
         (SketchAlgorithm::Kll, SketchParams::Kll { k })
         | (SketchAlgorithm::Kmv, SketchParams::Kmv { k })
         | (SketchAlgorithm::Theta, SketchParams::Theta { k }) => *k > 0,
@@ -578,6 +587,7 @@ mod tests {
         let records = [
             (SketchAlgorithm::Cms, 20.0),
             (SketchAlgorithm::CountSketch, 10.0),
+            (SketchAlgorithm::UnivMon, 100.0),
         ]
         .into_iter()
         .map(|(algorithm, cost)| OfflineMeasurement {

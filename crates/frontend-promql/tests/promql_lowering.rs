@@ -19,17 +19,28 @@ fn lower(q: &str) -> QueryExpr {
 }
 
 #[test]
-fn newly_parsed_metricsql_reducers_fail_closed_without_lowering_semantics() {
-    for query in ["entropy_over_time(cpu_usage[5m])"] {
-        promql_parser::parser::parse(query)
-            .unwrap_or_else(|error| panic!("pinned parser must accept {query:?}: {error}"));
-        assert!(
-            matches!(
-                lower_promql(query, AccuracyTarget::Exact),
-                Err(LoweringError::UnsupportedFunction(_))
-            ),
-            "{query:?} must remain exact-only until the lowerer defines its semantics"
-        );
+fn frequency_extensions_lower_to_explicit_frequency_statistics() {
+    // ProjectASAP extensions reduce a frequency vector; numeric sample norms
+    // have different semantics and must never be silently aliased here.
+    for (query, expected) in [
+        (
+            "entropy_over_time(cpu_usage[5m])",
+            AggIntent::FrequencyEntropy {
+                col: None,
+                accuracy: AccuracyTarget::Exact,
+            },
+        ),
+        (
+            "l2_over_time(cpu_usage[5m])",
+            AggIntent::FrequencyL2 {
+                col: None,
+                accuracy: AccuracyTarget::Exact,
+            },
+        ),
+    ] {
+        assert!(all_intents(&lower(query))
+            .iter()
+            .any(|intent| std::mem::discriminant(intent) == std::mem::discriminant(&expected)));
     }
 }
 

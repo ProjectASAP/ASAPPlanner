@@ -726,14 +726,22 @@ pub fn summary_candidates(intent: &AggIntent) -> &'static [SketchAlgorithm] {
             SketchAlgorithm::Hll,
             SketchAlgorithm::Theta,
             SketchAlgorithm::Kmv,
+            SketchAlgorithm::UnivMon,
         ],
+        AggIntent::FrequencyL2 { .. } | AggIntent::FrequencyEntropy { .. } => {
+            &[SketchAlgorithm::UnivMon]
+        }
         // Count-Sketch-with-heap is CMS-with-heap's balanced/zero-mean-error
         // alternative for the same heavy-hitter shape.
         AggIntent::TopK { .. } => &[
             SketchAlgorithm::CmsWithHeap,
             SketchAlgorithm::CountSketchWithHeap,
         ],
-        AggIntent::Count { .. } => &[SketchAlgorithm::Cms, SketchAlgorithm::CountSketch],
+        AggIntent::Count { .. } => &[
+            SketchAlgorithm::Cms,
+            SketchAlgorithm::CountSketch,
+            SketchAlgorithm::UnivMon,
+        ],
         _ => &[],
     }
 }
@@ -748,6 +756,8 @@ pub fn accuracy_target(intent: &AggIntent) -> Option<&AccuracyTarget> {
     match intent {
         AggIntent::Quantile { accuracy, .. }
         | AggIntent::Cardinality { accuracy, .. }
+        | AggIntent::FrequencyL2 { accuracy, .. }
+        | AggIntent::FrequencyEntropy { accuracy, .. }
         | AggIntent::Count { accuracy }
         | AggIntent::TopK { accuracy, .. } => Some(accuracy),
         _ => None,
@@ -779,8 +789,17 @@ pub(crate) fn implementations_for_with(
         // ── Approximate-capable intents — the AccuracyTarget decides ────────
         AggIntent::Quantile { accuracy, .. }
         | AggIntent::Cardinality { accuracy, .. }
+        | AggIntent::FrequencyL2 { accuracy, .. }
+        | AggIntent::FrequencyEntropy { accuracy, .. }
         | AggIntent::Count { accuracy }
         | AggIntent::TopK { accuracy, .. } => match accuracy {
+            AccuracyTarget::Exact if matches!(intent, AggIntent::Count { .. }) => vec![
+                exact_realization(intent),
+                Implementation::Sketch(SketchKind::new(
+                    SketchAlgorithm::UnivMon,
+                    default_size_params(SketchAlgorithm::UnivMon, intent, 0.0, DEFAULT_DELTA),
+                )),
+            ],
             AccuracyTarget::Exact => vec![exact_realization(intent)],
             _ => sketch_implementations(intent, accuracy, cost_model),
         },
@@ -929,6 +948,19 @@ pub const DEFAULT_MAX_SKETCH_STATE_BYTES: u64 = 512 * 1024 * 1024;
 /// Conservative dense-counter allocation for CMS-family states. Returning
 /// `None` leaves non-CMS families to their family-specific resource models.
 pub fn sketch_state_bytes(params: &SketchParams) -> Option<u64> {
+    if let SketchParams::UnivMon {
+        heap_size,
+        sketch_rows,
+        sketch_cols,
+        layers,
+    } = params
+    {
+        return u64::from(*sketch_rows)
+            .checked_mul(u64::from(*sketch_cols))?
+            .checked_mul(8)?
+            .checked_add(u64::from(*heap_size).checked_mul(64)?)?
+            .checked_mul(u64::from(*layers));
+    }
     let (width, depth, heap_size) = match params {
         SketchParams::Cms { width, depth } | SketchParams::CountSketch { width, depth } => {
             (*width, *depth, 0)
@@ -969,6 +1001,14 @@ pub fn default_size_params(
     delta: f64,
 ) -> SketchParams {
     match kind {
+        // Baseline dimensions are candidates, not an inverted error bound.
+        // Empirical models may size these; no theoretical guarantee is claimed.
+        SketchAlgorithm::UnivMon => SketchParams::UnivMon {
+            heap_size: 256,
+            sketch_rows: 5,
+            sketch_cols: 1024,
+            layers: 16,
+        },
         SketchAlgorithm::Kll => SketchParams::Kll { k: kll_k(eps) },
         SketchAlgorithm::Cms => SketchParams::Cms {
             width: cms_width(eps),
@@ -1126,7 +1166,9 @@ pub fn posterior_aware_size_params(
         SketchAlgorithm::Hll => default_size_params(kind, intent, eps, delta),
         SketchAlgorithm::DDSketch => default_size_params(kind, intent, eps, delta),
         SketchAlgorithm::Theta => default_size_params(kind, intent, eps, delta),
-        SketchAlgorithm::Kmv => default_size_params(kind, intent, eps, delta),
+        SketchAlgorithm::Kmv | SketchAlgorithm::UnivMon => {
+            default_size_params(kind, intent, eps, delta)
+        }
     }
 }
 
@@ -2066,8 +2108,37 @@ type PhysicalSummaryInputRule = fn(
 /// than the immediate logical input. New composite primitives add a rule here
 /// instead of adding query- or algorithm-specific branches to
 /// `construct_summary_agg`.
-const PHYSICAL_SUMMARY_INPUT_RULES: &[PhysicalSummaryInputRule] =
-    &[realize_keyed_additive_summary_input];
+const PHYSICAL_SUMMARY_INPUT_RULES: &[PhysicalSummaryInputRule] = &[
+    realize_value_frequency_summary_input,
+    realize_keyed_additive_summary_input,
+];
+
+fn realize_value_frequency_summary_input(
+    intent: &AggIntent,
+    family: &SummaryFamilyType,
+    _reduction: &Reduction,
+    child: &Rc<QueryExpr>,
+) -> PhysicalSummaryInputRuleResult {
+    if !matches!(family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
+    {
+        return PhysicalSummaryInputRuleResult::NotApplicable;
+    }
+    let Ok(schema) = child.output_schema() else {
+        return PhysicalSummaryInputRuleResult::Unsupported(
+            "value frequency input needs a valid schema",
+        );
+    };
+    PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
+        child: Rc::clone(child),
+        input: SummaryUpdate {
+            item: Some(SummaryInputExpr::Column(summarised_column(intent, &schema))),
+            weight: SummaryInputExpr::Constant(1.0),
+            weight_domain: WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::UnitCount,
+            },
+        },
+    })
+}
 
 fn realize_physical_summary_input(
     intent: &AggIntent,
@@ -2149,6 +2220,11 @@ fn construct_summary_agg(
         };
     } else if let Some(field) = state_schema.fields.get_mut(state_idx) {
         field.dtype = family.clone();
+        if matches!(&family, SummaryFamilyType::Sketch(kind, _) if kind.algorithm() == &SketchAlgorithm::UnivMon)
+        {
+            // State identity is independent of which statistic reads it.
+            field.name = "univmon".into();
+        }
     }
 
     let bound_child = realize_child_with(&input.child, models, child_target)?;
@@ -2416,6 +2492,14 @@ fn compose_guarantee(
         };
     };
     if local.is_none() && input.is_exact() {
+        if accuracy_target(intent).is_some() {
+            return Err(AccuracyError::UnsupportedComposition {
+                operator: op,
+                input_metrics: vec![input.metric],
+                local_metric: None,
+                reason: "summary readout has no accuracy evidence for the requested target".into(),
+            });
+        }
         return Ok(None);
     }
     let stats = evidence.propagation_stats(&op, family, query);
@@ -2487,10 +2571,13 @@ fn readout(
     match intent {
         AggIntent::Quantile { q, .. } => PostAsapSketchQuery::Quantile { q: *q },
         AggIntent::Cardinality { .. } => PostAsapSketchQuery::Cardinality,
+        AggIntent::FrequencyL2 { .. } => PostAsapSketchQuery::FrequencyL2,
+        AggIntent::FrequencyEntropy { .. } => PostAsapSketchQuery::FrequencyEntropy,
         AggIntent::TopK { k, .. } => PostAsapSketchQuery::TopK { k: *k },
         AggIntent::Count { .. } => PostAsapSketchQuery::PointCount {
             key: match &input.weight {
                 SummaryInputExpr::Column(col) => col.clone(),
+                SummaryInputExpr::Constant(1.0) => ColumnRef::SampleValue,
                 _ => unreachable!("point count requires one column"),
             },
             value: None,
@@ -5673,7 +5760,8 @@ mod tests {
             &[
                 SketchAlgorithm::Hll,
                 SketchAlgorithm::Theta,
-                SketchAlgorithm::Kmv
+                SketchAlgorithm::Kmv,
+                SketchAlgorithm::UnivMon
             ]
         );
         assert_eq!(
@@ -5690,7 +5778,11 @@ mod tests {
             summary_candidates(&AggIntent::Count {
                 accuracy: eps(0.01)
             }),
-            &[SketchAlgorithm::Cms, SketchAlgorithm::CountSketch]
+            &[
+                SketchAlgorithm::Cms,
+                SketchAlgorithm::CountSketch,
+                SketchAlgorithm::UnivMon
+            ]
         );
         assert!(summary_candidates(&AggIntent::Rate).is_empty());
     }
@@ -6373,8 +6465,8 @@ mod tests {
         assert_eq!(agg_group.consumer_count, 1);
         assert_eq!(
             agg_group.candidates.len(),
-            2,
-            "only independent CMS/CountSketch candidates have modeled guarantees: {:?}",
+            3,
+            "CMS/CountSketch and exact UnivMon total have modeled guarantees: {:?}",
             agg_group.candidates
         );
         assert!(agg_group

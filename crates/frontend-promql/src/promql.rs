@@ -117,6 +117,8 @@ enum OuterIntent {
 
 #[derive(Debug, Clone)]
 enum InnerFunc {
+    FrequencyL2,
+    FrequencyEntropy,
     Cardinality,
     Quantile(f64),
     Avg,
@@ -378,6 +380,8 @@ fn range_fn_over_subquery(call: &Call) -> Result<Option<Unresolved>> {
         "stdvar_over_time" => (InnerFunc::Variance, 0),
         "count_over_time" => (InnerFunc::Count, 0),
         "distinct_over_time" => (InnerFunc::Cardinality, 0),
+        "entropy_over_time" => (InnerFunc::FrequencyEntropy, 0),
+        "l2_over_time" => (InnerFunc::FrequencyL2, 0),
         "quantile_over_time" => (InnerFunc::Quantile(quantile_param(num_arg(call, 0)?)?), 1),
         "changes" => (InnerFunc::Changes, 0),
         "delta" => (InnerFunc::Delta, 0),
@@ -1372,6 +1376,8 @@ fn lower_inner_call(call: &Call) -> Result<Inner> {
         "stdvar_over_time" => at0(InnerFunc::Variance),
         "count_over_time" => at0(InnerFunc::Count),
         "distinct_over_time" => at0(InnerFunc::Cardinality),
+        "entropy_over_time" => at0(InnerFunc::FrequencyEntropy),
+        "l2_over_time" => at0(InnerFunc::FrequencyL2),
         // Counter-derivative range functions (issue #44). Each has its own
         // intent — `changes` (value-change count) and `resets` (counter-reset
         // count) are NOT sample counts, so they are not aliased to
@@ -1653,6 +1659,14 @@ fn cardinality() -> AggIntent<ColumnRef> {
 
 fn inner_intent(f: &InnerFunc) -> AggIntent<ColumnRef> {
     match f {
+        InnerFunc::FrequencyL2 => AggIntent::FrequencyL2 {
+            col: None,
+            accuracy: current_accuracy(),
+        },
+        InnerFunc::FrequencyEntropy => AggIntent::FrequencyEntropy {
+            col: None,
+            accuracy: current_accuracy(),
+        },
         InnerFunc::Cardinality => AggIntent::Cardinality {
             col: None,
             accuracy: current_accuracy(),

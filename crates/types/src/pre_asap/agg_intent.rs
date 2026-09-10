@@ -98,6 +98,18 @@ pub enum AggIntent<C = ColumnId> {
         col: Option<C>,
         accuracy: AccuracyTarget,
     },
+    /// L2 norm of the frequency vector of distinct input values.
+    FrequencyL2 {
+        #[serde(default)]
+        col: Option<C>,
+        accuracy: AccuracyTarget,
+    },
+    /// Shannon entropy in bits of the frequency distribution of input values.
+    FrequencyEntropy {
+        #[serde(default)]
+        col: Option<C>,
+        accuracy: AccuracyTarget,
+    },
 
     // ── Time-series streaming derivatives ────────────────────────────────
     // Counter-reset adjustment; not equivalent to Sum/Count over a window.
@@ -431,6 +443,8 @@ impl<C: Clone> AggIntent<C> {
             | AggIntent::Avg { col }
             | AggIntent::Quantile { col, .. }
             | AggIntent::Cardinality { col, .. }
+            | AggIntent::FrequencyL2 { col, .. }
+            | AggIntent::FrequencyEntropy { col, .. }
             | AggIntent::StdDev { col, .. }
             | AggIntent::Variance { col, .. } => col.clone(),
             _ => None,
@@ -461,6 +475,10 @@ impl<C: Clone> AggIntent<C> {
             // (the post-ASAP sketch-bound IR upgrades the dtype).
             AggIntent::TopK { k, .. } => col(&format!("topk_{k}"), DataType::Utf8, false),
             AggIntent::Cardinality { .. } => col("cardinality", DataType::Int64, false),
+            AggIntent::FrequencyL2 { .. } => col("frequency_l2", DataType::Float64, false),
+            AggIntent::FrequencyEntropy { .. } => {
+                col("frequency_entropy", DataType::Float64, false)
+            }
             AggIntent::Rate => col("rate", DataType::Float64, false),
             AggIntent::IRate => col("irate", DataType::Float64, false),
             AggIntent::Increase => col("increase", DataType::Float64, false),
@@ -601,6 +619,8 @@ pub fn agg_accuracy(op: &AggIntent) -> f64 {
     match op {
         AggIntent::Quantile { accuracy, .. }
         | AggIntent::Cardinality { accuracy, .. }
+        | AggIntent::FrequencyL2 { accuracy, .. }
+        | AggIntent::FrequencyEntropy { accuracy, .. }
         | AggIntent::Count { accuracy }
         | AggIntent::TopK { accuracy, .. } => accuracy_target_to_f64(accuracy),
         _ => 0.0,
