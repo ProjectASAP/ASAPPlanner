@@ -312,7 +312,7 @@ fn counter_weighted_topk_uses_candidates_only_for_membership_and_exact_values_fo
                 k,
                 grouping,
                 completeness: CandidateCompleteness::Certified { .. },
-            } if *k == expected_k && grouping.is_empty() && !grouping.is_without()
+            } if *k == expected_k as u64 && grouping.is_empty() && !grouping.is_without()
         )));
         assert!(executable.nodes.iter().any(|node| matches!(
             &node.payload,
