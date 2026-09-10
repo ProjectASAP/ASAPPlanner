@@ -12,9 +12,8 @@ use serde::Serialize;
 
 use asap_types::dag_export::{self, SummaryDagGraph};
 use asap_types::post_asap::{
-    EvaluationSchedule, OutputRepresentation, ResultGuarantee, SummaryExpr,
-    SummaryMaintenanceLifecycle, SummaryMaintenanceLifecycleGuarantee, SummaryMaintenanceMode,
-    SummaryNode, SummaryWindowFramework,
+    ResultGuarantee, SummaryExpr, SummaryMaintenanceLifecycle,
+    SummaryMaintenanceLifecycleGuarantee, SummaryNode, SummaryWindowFramework,
 };
 
 use crate::summary_maintenance_lifecycle::{
@@ -50,71 +49,14 @@ pub struct SummaryMaintenanceDeploymentExport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SummaryMaintenanceLifecycleAlternativeExport {
-    pub lifecycle: SummaryMaintenanceLifecycleExport,
+    pub lifecycle: SummaryMaintenanceLifecycle,
     pub total_cost: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rejection: Option<SummaryMaintenanceLifecycleRejectionExport>,
+    pub rejection: Option<SummaryMaintenanceLifecycleRejection>,
     pub assumptions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SummaryMaintenanceLifecycleGuaranteeExport {
-    pub lifecycle: SummaryMaintenanceLifecycleExport,
-    pub maintenance_mode: SummaryMaintenanceModeExport,
-    pub evaluation_schedule: EvaluationScheduleExport,
-    pub output_representation: OutputRepresentationExport,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SummaryMaintenanceModeExport {
-    DirectBuild,
-    Incremental,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SummaryMaintenanceLifecycleExport {
-    Ephemeral,
-    Prepared {
-        activate_at_ms: u64,
-        retire_at_ms: u64,
-    },
-    Shared {
-        retention_ms: u64,
-    },
-    ContinuouslyMaintained,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvaluationScheduleExport {
-    OneShot,
-    PerUpdate,
-    OnRead,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutputRepresentationExport {
-    PlainRows,
-    SummaryState,
-    FinalizedValue,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SummaryMaintenanceLifecycleRejectionExport {
-    UnsupportedByRuntime,
-    RequiresPredictableOneTimeQuery,
-    RequiresMultipleReads,
-    RequiresHorizon,
-    RequiresContinuousData,
-    MissingOrStaleIngestionRate,
-    SummaryDoesNotSupportIncrementalUpdates,
-    SummaryDoesNotSupportDeletion,
-    MissingCostEvidence,
-}
+pub type SummaryMaintenanceLifecycleGuaranteeExport = SummaryMaintenanceLifecycleGuarantee;
 
 pub fn export_summary_maintenance_plan(
     plan: &SummaryMaintenanceLifecyclePlan,
@@ -128,14 +70,14 @@ pub fn export_summary_maintenance_plan(
             selected: deployment
                 .summary_maintenance_lifecycle_guarantee
                 .as_ref()
-                .map(export_guarantee),
+                .cloned(),
             alternatives: deployment
                 .alternatives
                 .iter()
                 .map(|alternative| SummaryMaintenanceLifecycleAlternativeExport {
-                    lifecycle: export_lifecycle(&alternative.summary_maintenance_lifecycle),
+                    lifecycle: alternative.summary_maintenance_lifecycle.clone(),
                     total_cost: alternative.total_cost.map(|cost| cost.0),
-                    rejection: alternative.rejection.as_ref().map(export_rejection),
+                    rejection: alternative.rejection.clone(),
                     assumptions: alternative.assumptions.clone(),
                 })
                 .collect(),
@@ -213,82 +155,5 @@ fn summary_children(expr: &SummaryExpr) -> Vec<&Rc<SummaryNode>> {
         SummaryExpr::SummaryDelete { summary_input, .. }
         | SummaryExpr::SummaryEstimate { summary_input, .. } => vec![summary_input],
         SummaryExpr::SummaryMerge { children } => children.iter().collect(),
-    }
-}
-
-fn export_guarantee(
-    guarantee: &SummaryMaintenanceLifecycleGuarantee,
-) -> SummaryMaintenanceLifecycleGuaranteeExport {
-    SummaryMaintenanceLifecycleGuaranteeExport {
-        lifecycle: export_lifecycle(&guarantee.summary_maintenance_lifecycle),
-        maintenance_mode: match guarantee.summary_maintenance_mode {
-            SummaryMaintenanceMode::DirectBuild => SummaryMaintenanceModeExport::DirectBuild,
-            SummaryMaintenanceMode::Incremental => SummaryMaintenanceModeExport::Incremental,
-        },
-        evaluation_schedule: match guarantee.evaluation_schedule {
-            EvaluationSchedule::OneShot => EvaluationScheduleExport::OneShot,
-            EvaluationSchedule::PerUpdate => EvaluationScheduleExport::PerUpdate,
-            EvaluationSchedule::OnRead => EvaluationScheduleExport::OnRead,
-        },
-        output_representation: match guarantee.output_representation {
-            OutputRepresentation::PlainRows => OutputRepresentationExport::PlainRows,
-            OutputRepresentation::SummaryState => OutputRepresentationExport::SummaryState,
-            OutputRepresentation::FinalizedValue => OutputRepresentationExport::FinalizedValue,
-        },
-    }
-}
-
-fn export_lifecycle(lifecycle: &SummaryMaintenanceLifecycle) -> SummaryMaintenanceLifecycleExport {
-    match lifecycle {
-        SummaryMaintenanceLifecycle::Ephemeral => SummaryMaintenanceLifecycleExport::Ephemeral,
-        SummaryMaintenanceLifecycle::Prepared {
-            activate_at,
-            retire_at,
-        } => SummaryMaintenanceLifecycleExport::Prepared {
-            activate_at_ms: activate_at.0,
-            retire_at_ms: retire_at.0,
-        },
-        SummaryMaintenanceLifecycle::Shared { retention } => {
-            SummaryMaintenanceLifecycleExport::Shared {
-                retention_ms: retention.0,
-            }
-        }
-        SummaryMaintenanceLifecycle::ContinuouslyMaintained => {
-            SummaryMaintenanceLifecycleExport::ContinuouslyMaintained
-        }
-    }
-}
-
-fn export_rejection(
-    rejection: &SummaryMaintenanceLifecycleRejection,
-) -> SummaryMaintenanceLifecycleRejectionExport {
-    match rejection {
-        SummaryMaintenanceLifecycleRejection::UnsupportedByRuntime => {
-            SummaryMaintenanceLifecycleRejectionExport::UnsupportedByRuntime
-        }
-        SummaryMaintenanceLifecycleRejection::RequiresPredictableOneTimeQuery => {
-            SummaryMaintenanceLifecycleRejectionExport::RequiresPredictableOneTimeQuery
-        }
-        SummaryMaintenanceLifecycleRejection::RequiresMultipleReads => {
-            SummaryMaintenanceLifecycleRejectionExport::RequiresMultipleReads
-        }
-        SummaryMaintenanceLifecycleRejection::RequiresHorizon => {
-            SummaryMaintenanceLifecycleRejectionExport::RequiresHorizon
-        }
-        SummaryMaintenanceLifecycleRejection::RequiresContinuousData => {
-            SummaryMaintenanceLifecycleRejectionExport::RequiresContinuousData
-        }
-        SummaryMaintenanceLifecycleRejection::MissingOrStaleIngestionRate => {
-            SummaryMaintenanceLifecycleRejectionExport::MissingOrStaleIngestionRate
-        }
-        SummaryMaintenanceLifecycleRejection::SummaryDoesNotSupportIncrementalUpdates => {
-            SummaryMaintenanceLifecycleRejectionExport::SummaryDoesNotSupportIncrementalUpdates
-        }
-        SummaryMaintenanceLifecycleRejection::SummaryDoesNotSupportDeletion => {
-            SummaryMaintenanceLifecycleRejectionExport::SummaryDoesNotSupportDeletion
-        }
-        SummaryMaintenanceLifecycleRejection::MissingCostEvidence => {
-            SummaryMaintenanceLifecycleRejectionExport::MissingCostEvidence
-        }
     }
 }

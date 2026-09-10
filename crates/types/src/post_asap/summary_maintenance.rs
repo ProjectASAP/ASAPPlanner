@@ -7,7 +7,8 @@
 //! compilation chooses its concrete implementation.
 
 /// How a summary deployment obtains its state, independent of implementation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SummaryMaintenanceMode {
     /// Rebuild the summary from its complete input when the deployment needs
     /// a value. No update stream is required.
