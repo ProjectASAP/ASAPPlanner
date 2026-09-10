@@ -327,6 +327,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "asap-frontend-metricsql"
+version = "0.1.0"
+dependencies = [
+ "asap-frontend-promql",
+ "asap-types",
+ "promql-parser",
+ "thiserror",
+]
+
+[[package]]
 name = "asap-frontend-promql"
 version = "0.1.0"
 dependencies = [

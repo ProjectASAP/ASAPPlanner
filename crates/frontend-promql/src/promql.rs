@@ -188,6 +188,16 @@ impl PromqlLowerer {
         check_depth(&ast, MAX_DEPTH)?;
         walk(&ast)
     }
+
+    /// Lower an already parsed PromQL-compatible AST into the canonical,
+    /// unresolved query tree. Language frontends for strict PromQL supersets
+    /// use this entry point after preserving their extension nodes in their own
+    /// AST; it does not parse or rewrite source text.
+    pub fn lower_expr(expr: &Expr, accuracy: &AccuracyTarget) -> Result<Unresolved> {
+        let _guard = AccuracyGuard::install(accuracy.clone());
+        check_depth(expr, MAX_DEPTH)?;
+        walk(expr)
+    }
 }
 
 std::thread_local! {
