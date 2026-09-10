@@ -229,6 +229,17 @@ impl<'a> SqlLowerer<'a> {
                 builtin.arity,
             ));
         }
+        // Planning-only relation markers.  They let a workload author state
+        // the PromQL temporal/classic-histogram semantics of an equivalent SQL
+        // rewrite without teaching the canonical IR a second, SQL-specific
+        // spelling of either operation.  `lower_projection` consumes these
+        // calls; they can never survive as executable scalar functions.
+        for (name, arity) in [
+            ("asap_promql_subquery", Arity::Exact(2)),
+            ("asap_histogram_quantile", Arity::Exact(1)),
+        ] {
+            ctx.register_udf(clickhouse_scalar_builtin_stub_udf(name, arity));
+        }
         // Register a stub `WindowUDF` for every catalog-listed ClickHouse-only
         // *window* builtin — same reason as the two loops above, but with no
         // rewrite step to follow: `lower_window_func_kind` already maps each
@@ -643,6 +654,26 @@ impl<'a> SqlLowerer<'a> {
         &self,
         proj: &logical_expr::Projection,
     ) -> Result<Unresolved, LoweringError> {
+        if let Some(bridge) = planning_bridge(proj)? {
+            let input = self.lower_plan(&proj.input)?;
+            return Ok(match bridge {
+                PlanningBridge::PromqlSubquery { range, resolution } => {
+                    let child = Rc::new(temporal_bridge_projection(proj, input)?);
+                    Unresolved::PromqlSubquery {
+                        range,
+                        resolution: Some(resolution),
+                        child,
+                    }
+                }
+                PlanningBridge::HistogramQuantile { q } => Unresolved::Aggregate {
+                    reduction: Reduction::Reduce(GroupKeys::none()),
+                    measures: vec![AggIntent::HistogramQuantile { q }],
+                    output_names: vec!["value".into()],
+                    having: None,
+                    child: Rc::new(input),
+                },
+            });
+        }
         // SELECT * — no column constraint; pass through without a Project.
         if proj.expr.iter().any(|e| matches!(e, Expr::Wildcard { .. })) {
             return self.lower_plan(&proj.input);
@@ -1083,6 +1114,150 @@ impl<'a> SqlLowerer<'a> {
     }
 }
 
+/// A deliberately explicit marker accepted only in a projection of planning
+/// SQL. The marker describes a relation operator, so it is removed rather than
+/// lowered to the ordinary scalar `FunctionCall` variant.
+enum PlanningBridge {
+    PromqlSubquery {
+        range: Duration,
+        resolution: Duration,
+    },
+    HistogramQuantile {
+        q: f64,
+    },
+}
+
+fn planning_bridge(
+    projection: &logical_expr::Projection,
+) -> Result<Option<PlanningBridge>, LoweringError> {
+    let mut found = None;
+    for expr in &projection.expr {
+        let Expr::ScalarFunction(call) = unalias(expr) else {
+            continue;
+        };
+        let name = call.func.name().to_ascii_lowercase();
+        let bridge = match name.as_str() {
+            "asap_promql_subquery" => {
+                let [range, resolution] = call.args.as_slice() else {
+                    return Err(LoweringError::InvalidExpression(
+                        "asap_promql_subquery requires (range_ms, resolution_ms)".into(),
+                    ));
+                };
+                let range = positive_millis_literal(range, "range_ms")?;
+                let resolution = positive_millis_literal(resolution, "resolution_ms")?;
+                PlanningBridge::PromqlSubquery { range, resolution }
+            }
+            "asap_histogram_quantile" => {
+                let [q] = call.args.as_slice() else {
+                    return Err(LoweringError::InvalidExpression(
+                        "asap_histogram_quantile requires one literal quantile".into(),
+                    ));
+                };
+                let q = float_literal(q).ok_or_else(|| {
+                    LoweringError::InvalidExpression(
+                        "asap_histogram_quantile quantile must be a numeric literal".into(),
+                    )
+                })?;
+                if !q.is_finite() || !(0.0..=1.0).contains(&q) {
+                    return Err(LoweringError::InvalidExpression(format!(
+                        "asap_histogram_quantile quantile must be finite and in [0,1], got {q}"
+                    )));
+                }
+                PlanningBridge::HistogramQuantile { q }
+            }
+            _ => continue,
+        };
+        if found.is_some() {
+            return Err(LoweringError::InvalidExpression(
+                "a planning projection may contain only one asap_* relation marker".into(),
+            ));
+        }
+        found = Some(bridge);
+    }
+    if matches!(found, Some(PlanningBridge::HistogramQuantile { .. })) && projection.expr.len() != 1
+    {
+        return Err(LoweringError::InvalidExpression(
+            "asap_histogram_quantile must be the projection's only expression".into(),
+        ));
+    }
+    Ok(found)
+}
+
+/// Rebuild the SQL projection around the relation sampled by the temporal
+/// marker. The marker's alias names the existing child column that occupies
+/// its output slot (`... asap_promql_subquery(...) AS value ...`). This makes
+/// the bridge schema-preserving without silently retaining columns that SQL
+/// projected away.
+fn temporal_bridge_projection(
+    projection: &logical_expr::Projection,
+    child: Unresolved,
+) -> Result<Unresolved, LoweringError> {
+    let cols = projection
+        .expr
+        .iter()
+        .map(|expr| {
+            if let Expr::ScalarFunction(call) = unalias(expr) {
+                if call
+                    .func
+                    .name()
+                    .eq_ignore_ascii_case("asap_promql_subquery")
+                {
+                    let Expr::Alias(alias) = expr else {
+                        return Err(LoweringError::InvalidExpression(
+                            "asap_promql_subquery must have an alias naming its child value column"
+                                .into(),
+                        ));
+                    };
+                    return Ok(ProjectItem {
+                        expr: Unresolved::Column(ColumnRef::Named(alias.name.clone())),
+                        alias: Some(alias.name.clone()),
+                    });
+                }
+            }
+            match expr {
+                Expr::Alias(alias) => Ok(ProjectItem {
+                    expr: df_expr_to_unresolved(&alias.expr)?,
+                    alias: Some(alias.name.clone()),
+                }),
+                other => Ok(ProjectItem {
+                    expr: df_expr_to_unresolved(other)?,
+                    alias: None,
+                }),
+            }
+        })
+        .collect::<Result<Vec<_>, LoweringError>>()?;
+    Ok(Unresolved::Project {
+        cols,
+        qualifier: None,
+        child: Rc::new(child),
+    })
+}
+
+fn positive_millis_literal(expr: &Expr, argument: &str) -> Result<Duration, LoweringError> {
+    let millis = match unalias(expr) {
+        Expr::Literal(DfScalarValue::Int64(Some(value))) if *value > 0 => *value as u64,
+        Expr::Literal(DfScalarValue::UInt64(Some(value))) if *value > 0 => *value,
+        Expr::Literal(DfScalarValue::Int32(Some(value))) if *value > 0 => *value as u64,
+        other => {
+            return Err(LoweringError::InvalidExpression(format!(
+                "{argument} must be a positive integer millisecond literal, got {other}"
+            )))
+        }
+    };
+    Ok(Duration::from_millis(millis))
+}
+
+fn float_literal(expr: &Expr) -> Option<f64> {
+    match unalias(expr) {
+        Expr::Literal(DfScalarValue::Float64(Some(value))) => Some(*value),
+        Expr::Literal(DfScalarValue::Float32(Some(value))) => Some(*value as f64),
+        Expr::Literal(DfScalarValue::Int64(Some(value))) => Some(*value as f64),
+        Expr::Literal(DfScalarValue::UInt64(Some(value))) => Some(*value as f64),
+        Expr::Literal(DfScalarValue::Int32(Some(value))) => Some(*value as f64),
+        _ => None,
+    }
+}
+
 // ── ClickHouse-builtin compatibility, taught to DataFusion itself ──────────────
 //
 // Generalized over `asap_sql_function_catalog::CLICKHOUSE_BUILTINS` (issue
@@ -1191,6 +1366,9 @@ fn clickhouse_scalar_builtin_return_type(name: &str) -> ArrowDataType {
         }
         // 1-based match position, 0 if not found.
         "positioncaseinsensitive" => ArrowDataType::UInt64,
+        // Relation markers are removed by `lower_projection`; Float64 merely
+        // lets DataFusion type the temporary SELECT list.
+        "asap_promql_subquery" | "asap_histogram_quantile" => ArrowDataType::Float64,
         other => unreachable!(
             "{other}: every CLICKHOUSE_SCALAR_BUILTINS entry must have a return type listed here"
         ),
