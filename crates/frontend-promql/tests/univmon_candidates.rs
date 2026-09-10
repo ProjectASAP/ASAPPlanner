@@ -11,7 +11,6 @@ use asap_types::post_asap::{
     CompositionOperator, ErrorMetric, ProbabilityExpr, ResultGuarantee, SketchAlgorithm,
     SketchQuery, SummaryExpr, SummaryFamilyType, SummaryInputExpr, SummaryNode,
 };
-use asap_types::pre_asap::{AggIntent, QueryExpr};
 use asap_types::types::AccuracyTarget;
 
 // Synthetic evidence exercises structural sharing, never runtime accuracy.
@@ -48,13 +47,8 @@ impl AccuracyModel for TestEvidence {
     }
 }
 
-fn candidate(intent: AggIntent) -> Rc<SummaryNode> {
-    let mut root =
-        lower_promql("distinct_over_time(m[5m])", AccuracyTarget::Epsilon(0.02)).unwrap();
-    let QueryExpr::Aggregate { measures, .. } = &mut root else {
-        panic!("expected aggregate")
-    };
-    *measures = vec![intent];
+fn candidate(query: &str, accuracy: AccuracyTarget) -> Rc<SummaryNode> {
+    let root = lower_promql(query, accuracy).unwrap();
     SketchAlgorithmStrategy::with_models(&DefaultCostModel, &TestEvidence, &EqualSplitAllocator)
         .replacements(&TargetSubDAG::new(&Rc::new(root)))
         .into_iter()
@@ -71,25 +65,14 @@ fn four_readouts_share_one_value_frequency_state_and_keep_honest_guarantees() {
     // Equal data, grouping and window produce one state independently of readout.
     let accuracy = AccuracyTarget::Epsilon(0.02);
     let roots: Vec<_> = [
-        AggIntent::Cardinality {
-            col: None,
-            accuracy: accuracy.clone(),
-        },
-        AggIntent::Count {
-            accuracy: AccuracyTarget::Exact,
-        },
-        AggIntent::FrequencyL2 {
-            col: None,
-            accuracy: accuracy.clone(),
-        },
-        AggIntent::FrequencyEntropy {
-            col: None,
-            accuracy,
-        },
+        ("distinct_over_time(m[5m])", accuracy.clone()),
+        ("count_over_time(m[5m])", AccuracyTarget::Exact),
+        ("l2_over_time(m[5m])", accuracy.clone()),
+        ("entropy_over_time(m[5m])", accuracy),
     ]
     .into_iter()
     .enumerate()
-    .map(|(id, intent)| (id, candidate(intent)))
+    .map(|(id, (query, accuracy))| (id, candidate(query, accuracy)))
     .collect();
     let roots = share_common_summary_subtrees(roots);
     let mut first_state = None;
