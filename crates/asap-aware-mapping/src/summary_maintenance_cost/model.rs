@@ -3184,6 +3184,7 @@ mod tests {
                     }
                 }
                 SummaryExpr::SummarySubtract { left, right }
+                | SummaryExpr::RelationalJoin { left, right, .. }
                 | SummaryExpr::BinaryOp {
                     lhs: left,
                     rhs: right,
@@ -3398,6 +3399,7 @@ mod tests {
                                 }
                             }
                             SummaryExpr::SummarySubtract { left, right }
+                            | SummaryExpr::RelationalJoin { left, right, .. }
                             | SummaryExpr::BinaryOp {
                                 lhs: left,
                                 rhs: right,
@@ -3446,6 +3448,7 @@ mod tests {
                     }
                 }
                 SummaryExpr::SummarySubtract { left, right }
+                | SummaryExpr::RelationalJoin { left, right, .. }
                 | SummaryExpr::BinaryOp {
                     lhs: left,
                     rhs: right,

@@ -360,8 +360,10 @@ use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource,
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
 use asap_types::pre_asap::cse::{share_common_subtrees, structural_hash, HashCache};
 use asap_types::pre_asap::expr_ir::ColumnRef;
-use asap_types::pre_asap::query_expr::{BinaryOpKind, QueryExpr, QueryExprError, Reduction};
-use asap_types::pre_asap::schema::Schema;
+use asap_types::pre_asap::query_expr::{
+    BinaryOpKind, Predicate, QueryExpr, QueryExprError, Reduction,
+};
+use asap_types::pre_asap::schema::{ColumnId, Schema};
 use asap_types::types::AccuracyTarget;
 use asap_types::workload::{QueryRecurrence, QueryWorkload, RepeatedDemand};
 use std::rc::Rc;
@@ -3621,6 +3623,48 @@ pub struct GlobalSelection<'a> {
     materialized: RefCell<HashMap<*const QueryExpr, Rc<SummaryNode>>>,
 }
 
+fn normalize_cross_input_equi_predicate(
+    pred: &Predicate,
+    left_width: usize,
+    total_width: usize,
+) -> Option<Predicate> {
+    let QueryExpr::Compare {
+        left,
+        op: asap_types::pre_asap::CompareOpKind::Eq,
+        right,
+    } = pred.0.as_ref()
+    else {
+        return None;
+    };
+    let (QueryExpr::Column(left_id), QueryExpr::Column(right_id)) = (left.as_ref(), right.as_ref())
+    else {
+        return None;
+    };
+    let is_left = |id: ColumnId| id < left_width;
+    let is_right = |id: ColumnId| left_width <= id && id < total_width;
+    let (left_id, right_id) = if is_left(*left_id) && is_right(*right_id) {
+        (*left_id, *right_id)
+    } else if is_right(*left_id) && is_left(*right_id) {
+        (*right_id, *left_id)
+    } else {
+        return None;
+    };
+    Some(Predicate(Rc::new(QueryExpr::Compare {
+        left: Rc::new(QueryExpr::Column(left_id)),
+        op: asap_types::pre_asap::CompareOpKind::Eq,
+        right: Rc::new(QueryExpr::Column(right_id)),
+    })))
+}
+
+fn relational_join_guarantee(
+    left: Option<&ResultGuarantee>,
+    right: Option<&ResultGuarantee>,
+) -> Option<ResultGuarantee> {
+    left.zip(right)
+        .filter(|(left, right)| left.is_exact() && right.is_exact())
+        .map(|_| ResultGuarantee::exact("RelationalJoin over exact inputs"))
+}
+
 impl<'a> GlobalSelection<'a> {
     /// Every selected group, in discovery order.
     pub fn groups(&self) -> impl Iterator<Item = &SelectedGroup<'a>> {
@@ -3700,33 +3744,24 @@ impl<'a> GlobalSelection<'a> {
             pred,
         } = target.as_ref()
         {
-            let supported = matches!(kind, asap_types::pre_asap::JoinKind::Inner)
-                && matches!(
-                    pred.0.as_ref(),
-                    QueryExpr::Compare {
-                        left,
-                        op: asap_types::pre_asap::CompareOpKind::Eq,
-                        right,
-                    } if matches!(left.as_ref(), QueryExpr::Column(_))
-                        && matches!(right.as_ref(), QueryExpr::Column(_))
-                );
-            if !supported {
+            let left_width = left.output_schema()?.columns.len();
+            let total_width = left_width + right.output_schema()?.columns.len();
+            let normalized_pred = matches!(kind, asap_types::pre_asap::JoinKind::Inner)
+                .then(|| normalize_cross_input_equi_predicate(pred, left_width, total_width))
+                .flatten();
+            let Some(pred) = normalized_pred else {
                 return keep_pre_asap(target);
-            }
+            };
             let left = self.materialize_inner(left)?;
             let right = self.materialize_inner(right)?;
-            let guarantee = left
-                .guarantee
-                .as_ref()
-                .zip(right.guarantee.as_ref())
-                .filter(|(left, right)| left.is_exact() && right.is_exact())
-                .map(|_| ResultGuarantee::exact("RelationalJoin over exact inputs"));
+            let guarantee =
+                relational_join_guarantee(left.guarantee.as_ref(), right.guarantee.as_ref());
             let node = Rc::new(SummaryNode {
                 expr: SummaryExpr::RelationalJoin {
                     left,
                     right,
                     kind: kind.clone(),
-                    pred: pred.clone(),
+                    pred,
                 },
                 schema: lift(&target.output_schema()?),
                 guarantee,
@@ -5257,6 +5292,34 @@ mod tests {
     use asap_types::pre_asap::schema::{Column, DataType, Schema as SchemaTy};
     use asap_types::types::AccuracyTarget;
     use std::collections::HashMap;
+
+    fn equi_pred(left: ColumnId, right: ColumnId) -> Predicate {
+        Predicate(Rc::new(QueryExpr::Compare {
+            left: Rc::new(QueryExpr::Column(left)),
+            op: asap_types::pre_asap::CompareOpKind::Eq,
+            right: Rc::new(QueryExpr::Column(right)),
+        }))
+    }
+
+    #[test]
+    fn relational_join_predicate_requires_and_normalizes_cross_input_columns() {
+        let forward = normalize_cross_input_equi_predicate(&equi_pred(1, 3), 2, 4)
+            .expect("left-to-right equality");
+        let reverse = normalize_cross_input_equi_predicate(&equi_pred(3, 1), 2, 4)
+            .expect("right-to-left equality");
+        assert_eq!(forward, reverse, "reverse equality must be canonicalized");
+        assert!(normalize_cross_input_equi_predicate(&equi_pred(0, 1), 2, 4).is_none());
+        assert!(normalize_cross_input_equi_predicate(&equi_pred(0, 4), 2, 4).is_none());
+    }
+
+    #[test]
+    fn relational_join_is_exact_only_when_both_inputs_are_exact() {
+        let exact = ResultGuarantee::exact("test exact input");
+        assert!(relational_join_guarantee(Some(&exact), Some(&exact))
+            .is_some_and(|guarantee| guarantee.is_exact()));
+        assert!(relational_join_guarantee(Some(&exact), None).is_none());
+        assert!(relational_join_guarantee(None, Some(&exact)).is_none());
+    }
 
     fn eps(e: f64) -> AccuracyTarget {
         AccuracyTarget::Epsilon(e)
