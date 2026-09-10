@@ -351,10 +351,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use asap_types::post_asap::{
     validate_execution_data_states_at, CandidateCompleteness, EntityIdentity, ErrorMetric,
     ExactKind, ExactOperationSchemaError, ExactParams, ExecutionDataState, ExecutionDataStateError,
-    ExecutionTiming, GroupingStrategy, SamplingKind, SamplingParams, SketchAlgorithm, SketchKind,
-    SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind, StatModelParams, SummaryExpr,
-    SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode, SummarySchema, SummaryUpdate,
-    ValueOperation, WaveletKind, WaveletParams,
+    ExecutionTiming, GroupingStrategy, NonNegativeWeightProof, SamplingKind, SamplingParams,
+    SketchAlgorithm, SketchKind, SketchParams, SketchQuery as PostAsapSketchQuery, StatModelKind,
+    StatModelParams, SummaryExpr, SummaryFamilyType, SummaryField, SummaryInputExpr, SummaryNode,
+    SummarySchema, SummaryUpdate, ValueOperation, WaveletKind, WaveletParams, WeightDomain,
 };
 use asap_types::post_asap::{AccuracyError, CompositionOperator, GuaranteeSource, ResultGuarantee};
 use asap_types::pre_asap::agg_intent::{agg_is_mergeable, AggIntent};
@@ -2173,8 +2173,25 @@ fn realize_keyed_additive_summary_input(
     else {
         return PhysicalSummaryInputRuleResult::NotApplicable;
     };
+    let counter_input = match measures.as_slice() {
+        [AggIntent::Sum { .. }] => match raw_child.as_ref() {
+            QueryExpr::Aggregate {
+                measures, child, ..
+            } if matches!(measures.as_slice(), [AggIntent::Rate | AggIntent::Increase]) => {
+                Some(Rc::clone(child))
+            }
+            _ => None,
+        },
+        _ => None,
+    };
     let weight = match measures.as_slice() {
         [AggIntent::Count { .. }] => SummaryInputExpr::Constant(1.0),
+        [AggIntent::Sum { .. }] if counter_input.is_some() => {
+            SummaryInputExpr::ResetAwareCounterDelta {
+                value: ColumnRef::SampleValue,
+                series: EntityIdentity::PromqlLabelSet { excluding: vec![] },
+            }
+        }
         [AggIntent::Sum { col }] => SummaryInputExpr::Column(match col {
             None => ColumnRef::SampleValue,
             Some(index) => match schema_column_ref(raw_child, *index) {
@@ -2188,8 +2205,17 @@ fn realize_keyed_additive_summary_input(
         }),
         _ => return PhysicalSummaryInputRuleResult::NotApplicable,
     };
-    if matches!(weight, SummaryInputExpr::Column(_))
-        && matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
+    let weight_domain = match measures.as_slice() {
+        [AggIntent::Count { .. }] => WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::UnitCount,
+        },
+        [AggIntent::Sum { .. }] if counter_input.is_some() => WeightDomain::NonNegative {
+            proof: NonNegativeWeightProof::ResetAwareCounterDerivative,
+        },
+        _ => WeightDomain::UnknownOrSigned,
+    };
+    if matches!(heap_algorithm, SketchAlgorithm::CmsWithHeap)
+        && !matches!(weight_domain, WeightDomain::NonNegative { .. })
     {
         return PhysicalSummaryInputRuleResult::Unsupported(
             "value-weighted CMS requires non-negative update evidence; use CountSketch for arbitrary values",
@@ -2242,10 +2268,11 @@ fn realize_keyed_additive_summary_input(
         }
     };
     PhysicalSummaryInputRuleResult::Realized(PhysicalSummaryInput {
-        child: Rc::clone(raw_child),
+        child: counter_input.unwrap_or_else(|| Rc::clone(raw_child)),
         input: SummaryUpdate {
             item: Some(item),
             weight,
+            weight_domain,
         },
     })
 }
@@ -7858,6 +7885,12 @@ mod tests {
             Some(SummaryInputExpr::Column(ColumnRef::Named(name))) if name == "service"
         ));
         assert_eq!(input.weight, SummaryInputExpr::Constant(1.0));
+        assert_eq!(
+            input.weight_domain,
+            WeightDomain::NonNegative {
+                proof: NonNegativeWeightProof::UnitCount,
+            }
+        );
         assert!(matches!(
             family,
             SummaryFamilyType::Sketch(kind, _)
@@ -7888,6 +7921,13 @@ mod tests {
             &SeparatedTopKEvidence,
         );
         let candidates = strategy.replacements(&TargetSubDAG::new(&outer));
+        assert!(
+            candidates.iter().all(|candidate| {
+                !candidate.rationale.contains("CmsWithHeap")
+                    || candidate.rationale.contains("CountSketchWithHeap")
+            }),
+            "generic weighted Sum has no non-negative proof and must reject CMS"
+        );
         let node = candidates
             .iter()
             .find_map(|candidate| match &candidate.replacement {

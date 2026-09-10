@@ -527,6 +527,11 @@ impl Default for GroupingStrategy {
 pub struct SummaryUpdate {
     pub item: Option<SummaryInputExpr>,
     pub weight: SummaryInputExpr,
+    /// Planner proof for algorithms whose error/update semantics require a
+    /// non-negative stream. Absence of proof is never interpreted as zero or
+    /// non-negative.
+    #[serde(default)]
+    pub weight_domain: WeightDomain,
 }
 
 impl SummaryUpdate {
@@ -534,8 +539,28 @@ impl SummaryUpdate {
         Self {
             item: None,
             weight: SummaryInputExpr::Column(column),
+            weight_domain: WeightDomain::UnknownOrSigned,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WeightDomain {
+    #[default]
+    UnknownOrSigned,
+    NonNegative {
+        proof: NonNegativeWeightProof,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NonNegativeWeightProof {
+    UnitCount,
+    /// PromQL counter reset correction produces a non-negative increase; rate
+    /// divides that increase by a positive duration.
+    ResetAwareCounterDerivative,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -549,6 +574,14 @@ pub enum SummaryInputExpr {
     Column(ColumnRef),
     Tuple(Vec<SummaryInputExpr>),
     EntityIdentity(EntityIdentity),
+    /// Reset-aware non-negative increment derived at ingest from the current
+    /// counter sample and the previous sample for the same series. This is an
+    /// update expression, not a query-time rate estimate; CandidateTopK uses
+    /// it only for membership and reranks against an exact counter SDS.
+    ResetAwareCounterDelta {
+        value: ColumnRef,
+        series: EntityIdentity,
+    },
 }
 
 /// What to extract from a built summary. Carried by `SummaryEstimate`.
@@ -586,12 +619,16 @@ mod tests {
                     EntityIdentity::PromqlLabelSet { excluding: vec![] },
                 )),
                 weight: SummaryInputExpr::Constant(1.0),
+                weight_domain: WeightDomain::NonNegative {
+                    proof: NonNegativeWeightProof::UnitCount,
+                },
             },
             SummaryUpdate {
                 item: Some(SummaryInputExpr::Tuple(vec![SummaryInputExpr::Column(
                     ColumnRef::Named("service".into()),
                 )])),
                 weight: SummaryInputExpr::Column(ColumnRef::SampleValue),
+                weight_domain: WeightDomain::UnknownOrSigned,
             },
         ] {
             let input_json = serde_json::to_string(&input).unwrap();
