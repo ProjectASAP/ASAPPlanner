@@ -38,6 +38,12 @@ pub enum ValueOperation {
         cols: Vec<ProjectItem>,
         qualifier: Option<String>,
     },
+    /// Query-time row filtering. The predicate remains positional against
+    /// the child's output schema and is evaluated only after any summary
+    /// state below it has been read out to rows.
+    Filter {
+        pred: Predicate,
+    },
     /// Query-time ordering of the child's value rows. This is deliberately
     /// distinct from frequency-sketch heavy-hitter readout: PromQL `topk`
     /// ranks the values produced by its child at the evaluation timestamp.

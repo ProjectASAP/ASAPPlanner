@@ -520,6 +520,7 @@ fn check_plain_operands(
         ValueOperation::Sort { .. }
             | ValueOperation::Limit { .. }
             | ValueOperation::Project { .. }
+            | ValueOperation::Filter { .. }
             | ValueOperation::FinalizeExactAccumulator
     ) {
         return check_plain_or_exact_values(input);

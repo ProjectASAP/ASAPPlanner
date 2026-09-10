@@ -152,6 +152,59 @@ async fn sql_full_query_retains_project_and_binds_inner_aggregate() {
     );
 }
 
+/// Relational parents emitted around a derived-table aggregate remain
+/// explicit read-time nodes while the aggregate is summary-bound.
+#[tokio::test]
+async fn sql_relational_parents_retain_summary_bound_aggregate() {
+    let pre_asap = Rc::new(
+        lower(
+            "SELECT t.service, t.p FROM \
+             (SELECT service, approx_percentile_cont(latency, 0.9) AS p \
+              FROM metrics GROUP BY service) t \
+             WHERE t.p > 100 ORDER BY t.p DESC LIMIT 5",
+            AccuracyTarget::Epsilon(0.01),
+        )
+        .await,
+    );
+    let space = search_workload(vec![("query", Rc::clone(&pre_asap))]);
+    let selection = space.global_selection(&DefaultCostModel);
+    let root = selection
+        .materialize(&space.roots[0].1)
+        .expect("materialization failed")
+        .expect("root must be discovered");
+
+    let mut node = root.as_ref();
+    let mut saw_project = false;
+    let mut saw_filter = false;
+    let mut saw_sort = false;
+    let mut saw_limit = false;
+    loop {
+        match &node.expr {
+            SummaryExpr::ValueOperation {
+                child, operation, ..
+            } => {
+                match operation {
+                    asap_types::post_asap::ValueOperation::Project { .. } => saw_project = true,
+                    asap_types::post_asap::ValueOperation::Filter { .. } => saw_filter = true,
+                    asap_types::post_asap::ValueOperation::Sort { .. } => saw_sort = true,
+                    asap_types::post_asap::ValueOperation::Limit { n, offset } => {
+                        assert_eq!((*n, *offset), (5, 0));
+                        saw_limit = true;
+                    }
+                    _ => {}
+                }
+                node = child;
+            }
+            SummaryExpr::SummaryEstimate { summary_input, .. } => {
+                assert!(matches!(summary_input.expr, SummaryExpr::SummaryAgg { .. }));
+                break;
+            }
+            other => panic!("expected relational parents over SummaryEstimate, got {other:?}"),
+        }
+    }
+    assert!(saw_project && saw_filter && saw_sort && saw_limit);
+}
+
 /// `SELECT approx_percentile_cont(latency, 0.99) FROM metrics` at ε = 0.01,
 /// with the wrapping `Project` stripped (see module docs):
 ///
