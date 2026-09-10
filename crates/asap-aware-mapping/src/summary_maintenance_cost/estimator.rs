@@ -964,6 +964,7 @@ pub(super) fn evidence_nodes(root: &SummaryNode) -> (Vec<&SummaryNode>, Vec<&Sum
                 }
             }
             SummaryExpr::SummarySubtract { left, right }
+            | SummaryExpr::RelationalJoin { left, right, .. }
             | SummaryExpr::BinaryOp {
                 lhs: left,
                 rhs: right,
@@ -1324,6 +1325,10 @@ fn count_operations(root: &SummaryNode) -> Result<SummaryOperationCounts, Analyt
             SummaryExpr::BinaryOp { lhs, rhs, .. } => {
                 visit(lhs, seen, counts)?;
                 visit(rhs, seen, counts)?;
+            }
+            SummaryExpr::RelationalJoin { left, right, .. } => {
+                visit(left, seen, counts)?;
+                visit(right, seen, counts)?;
             }
             SummaryExpr::CandidateTopK {
                 candidates, values, ..

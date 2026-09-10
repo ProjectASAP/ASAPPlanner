@@ -27,9 +27,9 @@ use asap_aware_mapping::{
 };
 use asap_frontend_sql::{lower_sql, lower_sql_dialect, SqlCatalog};
 use asap_types::post_asap::{
-    compile_executable_dag, ExactKind, ExactParams, ExecutableOperatorPayload, GroupingStrategy,
-    SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr, SummaryFamilyType,
-    SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
+    compile_executable_dag, EdgeRole, ExactKind, ExactParams, ExecutableOperatorPayload,
+    GroupingStrategy, SketchAlgorithm, SketchKind, SketchParams, SketchQuery, SummaryExpr,
+    SummaryFamilyType, SummaryNode, SummarySchema, SummaryUpdate, ValueOperation,
 };
 use asap_types::pre_asap::expr_ir::ColumnRef;
 use asap_types::pre_asap::query_expr::{QueryExpr, Reduction};
@@ -213,7 +213,7 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
              (SELECT service, asap_rate(latency, ts, 300000) AS v FROM metrics WHERE service='errors' GROUP BY service) a \
              INNER JOIN \
              (SELECT service, asap_rate(latency, ts, 300000) AS v FROM metrics WHERE service='requests' GROUP BY service) b \
-             ON a.service=b.service",
+             ON b.service=a.service",
             &catalog(),
             SqlDialect::ClickhouseSQL,
             AccuracyTarget::Exact,
@@ -258,9 +258,11 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
     assert!(matches!(
         pred.0.as_ref(),
         QueryExpr::Compare {
+            left,
             op: asap_types::pre_asap::CompareOpKind::Eq,
-            ..
-        }
+            right,
+        } if matches!(left.as_ref(), QueryExpr::Column(0))
+            && matches!(right.as_ref(), QueryExpr::Column(2))
     ));
     assert_eq!(
         join.schema
@@ -287,6 +289,29 @@ async fn sql_join_recursively_binds_both_temporal_aggregate_children() {
             }
         ));
     }
+    assert!(join
+        .guarantee
+        .as_ref()
+        .is_some_and(|value| value.is_exact()));
+    let executable = compile_executable_dag(&root).expect("join DAG must compile");
+    let join_id = executable
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.payload,
+                ExecutableOperatorPayload::RelationalJoin { .. }
+            )
+        })
+        .expect("relational join node")
+        .id;
+    let roles = executable
+        .edges
+        .iter()
+        .filter(|edge| edge.consumer == join_id)
+        .map(|edge| edge.role)
+        .collect::<Vec<_>>();
+    assert_eq!(roles, vec![EdgeRole::Left, EdgeRole::Right]);
 }
 
 #[tokio::test]
@@ -294,6 +319,7 @@ async fn unsupported_sql_join_shapes_remain_fail_closed() {
     for sql in [
         "SELECT a.service FROM (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) a LEFT JOIN (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) b ON a.service=b.service",
         "SELECT a.service FROM (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) a INNER JOIN (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) b ON a.v>b.v",
+        "SELECT a.service FROM (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) a INNER JOIN (SELECT service, asap_rate(latency, ts, 300000) v FROM metrics GROUP BY service) b ON a.service=a.service",
     ] {
         let pre_asap = Rc::new(
             lower_sql_dialect(
