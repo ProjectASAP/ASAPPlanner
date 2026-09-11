@@ -1745,19 +1745,13 @@ fn scalar_positive_u64(value: &DfScalarValue) -> Option<u64> {
 /// same "no expression arguments" rule, issue #115) — they are **not** run
 /// through `resolve_agg_intent`'s positional `ColumnRef` -> `ColumnId`
 /// binding the way a real reducer's `col` is, since `Extension` carries no
-/// typed column field for core to resolve. A deployment model that wants to
-/// actually bind/execute `argMax`/`argMin` is expected to re-derive that
-/// itself from `payload`, per `AggIntent::Extension`'s own doc.
+/// typed column field for core to resolve. Shared `arg_selector_columns` validates
+/// and resolves those names during aggregate schema derivation, preserving the
+/// selected argument's type and nullability for downstream exact execution.
 ///
-/// Known scope gap, not chased down here (matching issue #230's precedent
-/// for other structural-only gaps like `splitByChar` array-indexing):
-/// `DerivedCols::rewrite_agg` (this module) only materializes/passes through
-/// an aggregate's *first* argument when deriving columns beneath the
-/// `Aggregate` node, so `val` here would be silently dropped from a `Project`
-/// DataFusion's planner inserts for some *other* reason in the same query
-/// (e.g. a sibling `SUM(a * b)`). Every corpus `argMax` use has both
-/// arguments as bare columns of the scanned table and no such `Project` is
-/// inserted, so this does not affect `bgp_jan2024_workload` today.
+/// DerivedCols preserves both bare-column arguments when grouping expressions
+/// introduce an intermediate Project. Shared aggregate schema derivation resolves
+/// the payload and preserves the selected argument's type and nullability.
 fn lower_arg_selector(
     name: &str,
     args: &[Expr],
@@ -2035,6 +2029,12 @@ impl DerivedCols {
         };
         if counts_rows {
             return Ok(expr.clone());
+        }
+        // Preserve every additional column dependency (e.g. argMax's ordering
+        // column) when an unrelated grouping expression creates a Project.
+        // Literal parameters need no source column and remain untouched.
+        for argument in agg_fn.args.iter().skip(1) {
+            self.passthrough(argument)?;
         }
         match agg_col_name(&agg_fn.args) {
             Some(name) => {

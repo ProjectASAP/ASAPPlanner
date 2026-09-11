@@ -1558,6 +1558,13 @@ pub fn aggregate_output_schema(
             .and_then(|id| in_schema.columns.get(id))
             .unwrap_or(&probe);
         let mut out = intent.output_column(in_col);
+        if let Some((arg, _)) = intent
+            .arg_selector_columns(in_schema)
+            .map_err(QueryExprError::InvalidScalarSignature)?
+        {
+            out.dtype = in_schema.columns[arg].dtype.clone();
+            out.nullable = in_schema.columns[arg].nullable;
+        }
         if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
             out.name = name.clone();
         }
@@ -1623,6 +1630,13 @@ fn without_output_schema(
             .and_then(|id| in_schema.columns.get(id))
             .unwrap_or(&probe);
         let mut out = intent.output_column(in_col);
+        if let Some((arg, _)) = intent
+            .arg_selector_columns(in_schema)
+            .map_err(QueryExprError::InvalidScalarSignature)?
+        {
+            out.dtype = in_schema.columns[arg].dtype.clone();
+            out.nullable = in_schema.columns[arg].nullable;
+        }
         if let Some(name) = output_names.get(i).filter(|s| !s.is_empty()) {
             out.name = name.clone();
         }

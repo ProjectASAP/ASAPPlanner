@@ -2308,3 +2308,39 @@ async fn clickhouse_map_access_keeps_generated_names_and_rejects_variant_coercio
     .await
     .is_err());
 }
+
+#[tokio::test]
+async fn arg_selector_result_schema_tracks_selected_argument() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Column::new("v", DataType::Float64, false),
+            Column::new("text", DataType::Utf8, true),
+            Column::new("ts", DataType::Int64, true),
+        ]),
+    );
+    for (sql, dtype, nullable) in [
+        (
+            "SELECT argMax(v, ts) AS value FROM t",
+            DataType::Float64,
+            false,
+        ),
+        (
+            "SELECT argMin(text, ts) AS value FROM t",
+            DataType::Utf8,
+            true,
+        ),
+    ] {
+        let query = lower_sql_dialect(
+            sql,
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        let schema = query.output_schema().unwrap();
+        assert_eq!(schema.columns[0].dtype, dtype);
+        assert_eq!(schema.columns[0].nullable, nullable);
+    }
+}

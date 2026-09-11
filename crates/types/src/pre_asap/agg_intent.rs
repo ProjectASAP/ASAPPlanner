@@ -263,7 +263,9 @@ pub enum AggIntent<C = ColumnId> {
     /// [`AggIntent::output_column`] names the output column after `kind`
     /// with an unconstrained `Utf8` type — a deployment model that binds
     /// `Extension` intents is expected to override/re-derive the schema
-    /// itself rather than rely on core's generic guess.
+    /// itself rather than rely on core's generic guess. SQL arg selectors are
+    /// recognized by `arg_selector_columns`; aggregate schema derivation uses
+    /// their selected argument type instead of this generic fallback.
     Extension {
         /// Deployment-model-chosen tag, e.g. `"frequency"`. No registry —
         /// collisions across deployment models are the deployment models'
@@ -352,6 +354,42 @@ pub enum MathFunc {
 // the `PerEntity`/`Reduce` reduction shape right at construction time (see
 // `asap_frontend_promql::promql::reduction_for`) — so they stay generic
 // alongside `input_col`, in one `impl<C>` block.
+impl AggIntent<ColumnId> {
+    /// Resolve the existing SQL arg-selector extension using its child schema.
+    /// The tuple is (selected value column, ordering column).
+    /// Unknown extensions remain owned by their deployment model. Recognized
+    /// malformed selectors fail instead of acquiring a fabricated output type.
+    pub fn arg_selector_columns(
+        &self,
+        schema: &super::schema::Schema,
+    ) -> Result<Option<(ColumnId, ColumnId)>, String> {
+        let Self::Extension { ext_kind, payload } = self else {
+            return Ok(None);
+        };
+        if !matches!(ext_kind.as_str(), "arg_max" | "arg_min") {
+            return Ok(None);
+        }
+        let fields = payload
+            .as_object()
+            .ok_or("arg selector payload must be an object")?;
+        if fields.len() != 2 {
+            return Err("arg selector requires arg_col and val_col only".into());
+        }
+        let resolve = |field: &str| -> Result<ColumnId, String> {
+            let reference: super::expr_ir::ColumnRef = serde_json::from_value(
+                fields
+                    .get(field)
+                    .ok_or_else(|| format!("missing arg selector {field}"))?
+                    .clone(),
+            )
+            .map_err(|e| e.to_string())?;
+            super::column_resolution::resolve_column_ref(&reference, schema)
+                .map_err(|e| e.to_string())
+        };
+        Ok(Some((resolve("arg_col")?, resolve("val_col")?)))
+    }
+}
+
 impl<C: Clone> AggIntent<C> {
     /// Which data model this intent semantically requires. Post-ASAP binding
     /// rules consult this to skip non-applicable intents (e.g. `Rate` over a
@@ -827,5 +865,25 @@ mod tests {
                 accuracy: AccuracyTarget::Exact
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod arg_selector_contract_tests {
+    use super::*;
+    use crate::pre_asap::{ColumnRef, Schema};
+    #[test]
+    fn arg_selector_rejects_missing_or_unresolved_arguments() {
+        let schema = Schema::new(vec![Column::new("value", DataType::Float64, false)]);
+        for payload in [
+            serde_json::json!({"arg_col": ColumnRef::Named("value".into())}),
+            serde_json::json!({"arg_col": ColumnRef::Named("value".into()), "val_col": ColumnRef::Named("missing".into())}),
+        ] {
+            let intent = AggIntent::Extension {
+                ext_kind: "arg_max".into(),
+                payload,
+            };
+            assert!(intent.arg_selector_columns(&schema).is_err());
+        }
     }
 }
