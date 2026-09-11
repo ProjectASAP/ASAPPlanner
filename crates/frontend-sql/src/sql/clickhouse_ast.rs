@@ -30,7 +30,11 @@ pub(super) fn normalize(statement: &mut Statement) {
                                                     .value
                                                     .to_ascii_lowercase()
                                                     .as_str(),
-                                                "modulo" | "map" | "mapconcat" | "arrayelement"
+                                                "modulo"
+                                                    | "map"
+                                                    | "mapconcat"
+                                                    | "arrayelement"
+                                                    | "tupleelement"
                                             );
                                     }
                                     ControlFlow::Continue(())
