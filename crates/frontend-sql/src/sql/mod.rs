@@ -1745,9 +1745,9 @@ fn scalar_positive_u64(value: &DfScalarValue) -> Option<u64> {
 /// same "no expression arguments" rule, issue #115) — they are **not** run
 /// through `resolve_agg_intent`'s positional `ColumnRef` -> `ColumnId`
 /// binding the way a real reducer's `col` is, since `Extension` carries no
-/// typed column field for core to resolve. A deployment model that wants to
-/// actually bind/execute `argMax`/`argMin` is expected to re-derive that
-/// itself from `payload`, per `AggIntent::Extension`'s own doc.
+/// typed column field for core to resolve. Shared `arg_selector_columns` validates
+/// and resolves those names during aggregate schema derivation, preserving the
+/// selected argument's type and nullability for downstream exact execution.
 ///
 /// DerivedCols preserves both bare-column arguments when grouping expressions
 /// introduce an intermediate Project. Shared aggregate schema derivation resolves

@@ -356,6 +356,7 @@ pub enum MathFunc {
 // alongside `input_col`, in one `impl<C>` block.
 impl AggIntent<ColumnId> {
     /// Resolve the existing SQL arg-selector extension using its child schema.
+    /// The tuple is (selected value column, ordering column).
     /// Unknown extensions remain owned by their deployment model. Recognized
     /// malformed selectors fail instead of acquiring a fabricated output type.
     pub fn arg_selector_columns(
