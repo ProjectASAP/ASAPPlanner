@@ -2179,7 +2179,6 @@ fn realize_physical_summary_input(
 
 /// Emit `SummaryAgg` (recursively binding the child), plus the
 /// `SummaryEstimate` readout when `estimate` is set.
-#[allow(clippy::too_many_arguments)]
 // Retain the exact expression and schema while placing its value production
 // on the update path. Read-time consumers keep their original shared nodes.
 fn maintenance_exact_values(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
@@ -2230,6 +2229,7 @@ fn maintenance_exact_values(node: Rc<SummaryNode>) -> Rc<SummaryNode> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn construct_summary_agg(
     node: &QueryExpr,
     reduction: &Reduction,
