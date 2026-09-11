@@ -23,13 +23,14 @@ impl MapScalarFunction {
     pub fn output_type(self, args: &[(DataType, bool)]) -> Result<(DataType, bool), String> {
         match self {
             Self::Construct => {
-                if args.len() % 2 != 0 {
+                let (pairs, remainder) = args.as_chunks::<2>();
+                if !remainder.is_empty() {
                     return Err("map construction requires key/value pairs".into());
                 }
                 let mut key = DataType::Null;
                 let mut value = DataType::Null;
                 let mut value_nullable = false;
-                for pair in args.chunks_exact(2) {
+                for pair in pairs {
                     if pair[0].1 || pair[0].0 == DataType::Null {
                         return Err("map keys must be non-null".into());
                     }
