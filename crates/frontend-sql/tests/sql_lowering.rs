@@ -2393,3 +2393,64 @@ async fn clickhouse_list_element_uses_canonical_typed_access() {
         );
     }
 }
+
+#[tokio::test]
+async fn clickhouse_tuple_element_preserves_declared_field_metadata() {
+    let catalog = SqlCatalog::new().with_table(
+        "t",
+        Schema::new(vec![
+            Column::new(
+                "sample",
+                DataType::Struct {
+                    fields: vec![
+                        Column::new("time", DataType::Int64, false),
+                        Column::new("value", DataType::Float64, true),
+                    ],
+                },
+                false,
+            ),
+            Column::new("index", DataType::Int64, false),
+        ]),
+    );
+    for (sql, dtype, nullable) in [
+        (
+            "SELECT tupleElement(sample, 1) AS chosen FROM t",
+            DataType::Int64,
+            false,
+        ),
+        (
+            "SELECT tupleElement(sample, 'value') AS chosen FROM t",
+            DataType::Float64,
+            true,
+        ),
+    ] {
+        let query = lower_sql_dialect(
+            sql,
+            &catalog,
+            SqlDialect::ClickhouseSQL,
+            AccuracyTarget::Exact,
+        )
+        .await
+        .unwrap();
+        let output = query.output_schema().unwrap();
+        assert_eq!(output.columns[0].dtype, dtype);
+        assert_eq!(output.columns[0].nullable, nullable);
+        assert!(serde_json::to_string(&query)
+            .unwrap()
+            .contains("asap_struct_field"));
+    }
+    for selector in ["0", "-1", "3", "'missing'", "index"] {
+        let sql = format!("SELECT tupleElement(sample, {selector}) FROM t");
+        assert!(
+            lower_sql_dialect(
+                &sql,
+                &catalog,
+                SqlDialect::ClickhouseSQL,
+                AccuracyTarget::Exact
+            )
+            .await
+            .is_err(),
+            "{sql}"
+        );
+    }
+}

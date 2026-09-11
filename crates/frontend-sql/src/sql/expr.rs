@@ -204,6 +204,8 @@ pub(super) fn df_expr_to_unresolved(expr: &Expr) -> Result<Unresolved, LoweringE
             Ok(Unresolved::FunctionCall {
                 name: if sf.func.name().eq_ignore_ascii_case("arrayelement") {
                     "asap_element_access".into()
+                } else if sf.func.name().eq_ignore_ascii_case("tupleelement") {
+                    "asap_struct_field".into()
                 } else {
                     sf.func.name().to_string()
                 },
