@@ -2292,6 +2292,14 @@ async fn clickhouse_map_access_keeps_generated_names_and_rejects_variant_coercio
     assert_eq!(output.columns[0].dtype, DataType::Utf8);
     assert!(!output.columns[0].nullable);
     assert!(lower_sql_dialect(
+        "SELECT map()['a'] FROM t",
+        &catalog,
+        SqlDialect::ClickhouseSQL,
+        AccuracyTarget::Exact,
+    )
+    .await
+    .is_err());
+    assert!(lower_sql_dialect(
         "SELECT map('a', integer, 'b', floating) FROM t",
         &catalog,
         SqlDialect::ClickhouseSQL,
