@@ -94,10 +94,10 @@ impl MapScalarFunction {
                 else {
                     return Err("map access requires a map".into());
                 };
-                if **key != DataType::Null
-                    && *index != DataType::Null
-                    && common_type(key, index)? != **key
-                {
+                if **key == DataType::Null {
+                    return Err("map lookup requires a concrete map key type".into());
+                }
+                if *index != DataType::Null && common_type(key, index)? != **key {
                     return Err("map lookup key requires a lossy or unsupported coercion".into());
                 }
                 Ok((
@@ -140,6 +140,9 @@ mod tests {
                 false
             )
         );
+        assert!(MapScalarFunction::Access
+            .output_type(&[empty.clone(), (DataType::Utf8, false)])
+            .is_err());
         let concrete = MapScalarFunction::Construct
             .output_type(&[(DataType::Utf8, false), (DataType::Int64, false)])
             .unwrap();
@@ -147,7 +150,13 @@ mod tests {
             MapScalarFunction::Concat
                 .output_type(&[empty, concrete.clone()])
                 .unwrap(),
-            concrete
+            concrete.clone()
+        );
+        assert_eq!(
+            MapScalarFunction::Access
+                .output_type(&[concrete, (DataType::Utf8, false)])
+                .unwrap(),
+            (DataType::Int64, false)
         );
     }
     #[test]
