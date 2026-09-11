@@ -1698,7 +1698,10 @@ fn infer_expr_type(
             (to.clone(), *try_cast || nullable)
         }
         QueryExpr::FunctionCall { name, args } => {
-            if name == "asap_struct_field" {
+            if name == "asap_element_access" {
+                super::scalar_signature::element_access_type(args, schema)
+                    .map_err(QueryExprError::InvalidScalarSignature)?
+            } else if name == "asap_struct_field" {
                 super::scalar_signature::struct_field_type(args, schema)
                     .map_err(QueryExprError::InvalidScalarSignature)?
             } else if let Some(function) =
